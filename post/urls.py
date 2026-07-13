@@ -6,6 +6,7 @@ urlpatterns = [
     path('create/', PostCreateAPIView.as_view(), name='post-create'),
     path('list/', PostListAPIView.as_view(), name='post-list'), # GET list
     path('details/<uuid:id>/', PostDetailAPIView.as_view(), name='post-detail'),
+    path('feed/', HomeFeedView.as_view(), name='home-feed'),
 ]
 if settings.DEBUG:
     urlpatterns += [
