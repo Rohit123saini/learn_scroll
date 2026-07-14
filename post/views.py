@@ -870,85 +870,162 @@ class PostDetailAPIView(generics.RetrieveAPIView):
         })
 
 # ===================== MEDIA SERVE WITH RANGE =====================
+# def serve_media_with_range(request, path):
+#     """
+#     Production-ready media server
+#     Supports: Video seeking, PDF preview, Image cache, Doc download
+#     URL: /media/<path>
+#     """
+#     file_path = os.path.join(settings.MEDIA_ROOT, path)
+#     print(f"Requested path: {path}")
+#     print(f"Full file_path: {file_path}")
+#     print(f"File exists: {os.path.exists(file_path)}")
+#     if not os.path.exists(file_path) or not os.path.isfile(file_path):
+#         raise Http404("Media file not found")
+#
+#     # Security: prevent directory traversal
+#     if '..' in path or path.startswith('/'):
+#         raise Http404("Invalid path")
+#
+#     content_type, encoding = mimetypes.guess_type(file_path)
+#     content_type = content_type or 'application/octet-stream'
+#     file_size = os.path.getsize(file_path)
+#
+#     range_header = request.META.get('HTTP_RANGE', '').strip()
+#     range_match = re.match(r'bytes=(\d+)-(\d*)', range_header) if range_header else None
+#
+#     # Video/Audio streaming with Range support
+#     if range_match and (content_type.startswith('video/') or content_type.startswith('audio/')):
+#         first_byte, last_byte = range_match.groups()
+#         first_byte = int(first_byte)
+#         last_byte = int(last_byte) if last_byte else file_size - 1
+#
+#         if first_byte >= file_size:
+#             return StreamingHttpResponse(status=416)
+#
+#         chunk_size = (last_byte - first_byte) + 1
+#
+#         def file_iterator(offset, length):
+#             with open(file_path, 'rb') as f:
+#                 f.seek(offset)
+#                 remaining = length
+#                 while remaining > 0:
+#                     chunk = f.read(min(remaining, 8192 * 8)) # 64KB chunks for video
+#                     if not chunk:
+#                         break
+#                     yield chunk
+#                     remaining -= len(chunk)
+#
+#         response = StreamingHttpResponse(
+#             file_iterator(first_byte, chunk_size),
+#             status=206,
+#             content_type=content_type
+#         )
+#         response['Content-Range'] = f'bytes {first_byte}-{last_byte}/{file_size}'
+#         response['Accept-Ranges'] = 'bytes'
+#         response['Content-Length'] = str(chunk_size)
+#         response['Cache-Control'] = 'public, max-age=31536000' # 1 year cache
+#
+#     # Normal files - PDF, Images, Docs
+#     else:
+#         def simple_iterator():
+#             with open(file_path, 'rb') as f:
+#                 while True:
+#                     chunk = f.read(8192)
+#                     if not chunk:
+#                         break
+#                     yield chunk
+#
+#         response = StreamingHttpResponse(simple_iterator(), content_type=content_type)
+#         response['Content-Length'] = str(file_size)
+#         response['Accept-Ranges'] = 'bytes'
+#
+#         # PDF inline preview
+#         if content_type == 'application/pdf':
+#             response['Content-Disposition'] = 'inline; filename="{}"'.format(os.path.basename(file_path))
+#         # Docs force download
+#         elif not content_type.startswith(('image/', 'video/', 'audio/')):
+#             file_name = os.path.basename(file_path)
+#             response['Content-Disposition'] = f'attachment; filename="{file_name}"'
+#         # Images cache
+#         else:
+#             response['Cache-Control'] = 'public, max-age=31536000'
+#
+#     # Security headers
+#     response['X-Content-Type-Options'] = 'nosniff'
+#     return response
+
+
+import os
+import re
+import mimetypes
+from django.http import StreamingHttpResponse, Http404
+from django.conf import settings
+
+
 def serve_media_with_range(request, path):
-    """
-    Production-ready media server
-    Supports: Video seeking, PDF preview, Image cache, Doc download
-    URL: /media/<path>
-    """
     file_path = os.path.join(settings.MEDIA_ROOT, path)
 
-    if not os.path.exists(file_path) or not os.path.isfile(file_path):
-        raise Http404("Media file not found")
+    print(f"Looking for: {file_path}")  # Debug
 
-    # Security: prevent directory traversal
-    if '..' in path or path.startswith('/'):
+    if not os.path.exists(file_path):
+        print(f"NOT FOUND: {file_path}")  # Debug
+        raise Http404("File not found")
+
+    # Security
+    if '..' in path:
         raise Http404("Invalid path")
 
-    content_type, encoding = mimetypes.guess_type(file_path)
+    content_type, _ = mimetypes.guess_type(file_path)
     content_type = content_type or 'application/octet-stream'
     file_size = os.path.getsize(file_path)
 
-    range_header = request.META.get('HTTP_RANGE', '').strip()
-    range_match = re.match(r'bytes=(\d+)-(\d*)', range_header) if range_header else None
+    # Video range support
+    range_header = request.META.get('HTTP_RANGE', '')
+    if range_header:
+        range_match = re.match(r'bytes=(\d+)-(\d*)', range_header)
+        if range_match:
+            first_byte = int(range_match.group(1))
+            last_byte = int(range_match.group(2)) if range_match.group(2) else file_size - 1
 
-    # Video/Audio streaming with Range support
-    if range_match and (content_type.startswith('video/') or content_type.startswith('audio/')):
-        first_byte, last_byte = range_match.groups()
-        first_byte = int(first_byte)
-        last_byte = int(last_byte) if last_byte else file_size - 1
+            if first_byte >= file_size:
+                return StreamingHttpResponse(status=416)
 
-        if first_byte >= file_size:
-            return StreamingHttpResponse(status=416)
+            length = last_byte - first_byte + 1
 
-        chunk_size = (last_byte - first_byte) + 1
+            def file_gen():
+                with open(file_path, 'rb') as f:
+                    f.seek(first_byte)
+                    remaining = length
+                    while remaining > 0:
+                        chunk = f.read(min(remaining, 65536))
+                        if not chunk:
+                            break
+                        yield chunk
+                        remaining -= len(chunk)
 
-        def file_iterator(offset, length):
-            with open(file_path, 'rb') as f:
-                f.seek(offset)
-                remaining = length
-                while remaining > 0:
-                    chunk = f.read(min(remaining, 8192 * 8)) # 64KB chunks for video
-                    if not chunk:
-                        break
-                    yield chunk
-                    remaining -= len(chunk)
+            response = StreamingHttpResponse(file_gen(), status=206, content_type=content_type)
+            response['Content-Range'] = f'bytes {first_byte}-{last_byte}/{file_size}'
+            response['Content-Length'] = str(length)
+            response['Accept-Ranges'] = 'bytes'
+            return response
 
-        response = StreamingHttpResponse(
-            file_iterator(first_byte, chunk_size),
-            status=206,
-            content_type=content_type
-        )
-        response['Content-Range'] = f'bytes {first_byte}-{last_byte}/{file_size}'
-        response['Accept-Ranges'] = 'bytes'
-        response['Content-Length'] = str(chunk_size)
-        response['Cache-Control'] = 'public, max-age=31536000' # 1 year cache
+    # Normal serve
+    def file_gen():
+        with open(file_path, 'rb') as f:
+            while True:
+                chunk = f.read(8192)
+                if not chunk:
+                    break
+                yield chunk
 
-    # Normal files - PDF, Images, Docs
-    else:
-        def simple_iterator():
-            with open(file_path, 'rb') as f:
-                while True:
-                    chunk = f.read(8192)
-                    if not chunk:
-                        break
-                    yield chunk
+    response = StreamingHttpResponse(file_gen(), content_type=content_type)
+    response['Content-Length'] = str(file_size)
 
-        response = StreamingHttpResponse(simple_iterator(), content_type=content_type)
-        response['Content-Length'] = str(file_size)
-        response['Accept-Ranges'] = 'bytes'
+    # PDF inline, DOC download
+    if content_type == 'application/pdf':
+        response['Content-Disposition'] = f'inline; filename="{os.path.basename(file_path)}"'
+    elif not content_type.startswith(('image/', 'video/', 'audio/')):
+        response['Content-Disposition'] = f'attachment; filename="{os.path.basename(file_path)}"'
 
-        # PDF inline preview
-        if content_type == 'application/pdf':
-            response['Content-Disposition'] = 'inline; filename="{}"'.format(os.path.basename(file_path))
-        # Docs force download
-        elif not content_type.startswith(('image/', 'video/', 'audio/')):
-            file_name = os.path.basename(file_path)
-            response['Content-Disposition'] = f'attachment; filename="{file_name}"'
-        # Images cache
-        else:
-            response['Cache-Control'] = 'public, max-age=31536000'
-
-    # Security headers
-    response['X-Content-Type-Options'] = 'nosniff'
     return response

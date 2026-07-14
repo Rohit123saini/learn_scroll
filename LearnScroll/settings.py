@@ -184,7 +184,7 @@ AUTH_USER_MODEL = "login.User"
 CORS_ALLOW_ALL_ORIGINS = True
 MEDIA_URL = '/media/'
 MEDIA_ROOT = BASE_DIR / 'media'
-
+os.makedirs(MEDIA_ROOT, exist_ok=True)
 
 SPECTACULAR_SETTINGS = {
     'TITLE': 'LearnScroll API',
