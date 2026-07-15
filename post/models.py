@@ -65,6 +65,11 @@ class Post(models.Model):
     views_count = models.BigIntegerField(default=0)
     saves_count = models.PositiveIntegerField(default=0)
 
+    like_count = models.PositiveIntegerField(default=0)
+    confuse_count = models.PositiveIntegerField(default=0)
+    wrong_count = models.PositiveIntegerField(default=0)
+    imp_count = models.PositiveIntegerField(default=0)
+    explain_count = models.PositiveIntegerField(default=0)
     # Flags
     is_edited = models.BooleanField(default=False)
     is_deleted = models.BooleanField(default=False, db_index=True)
@@ -163,12 +168,11 @@ class PostMedia(models.Model):
 
 class PostLike(models.Model):
     REACTION_CHOICES = [
-        ('like', 'Like'),
-        ('love', 'Love'),
-        ('celebrate', 'Celebrate'),
-        ('support', 'Support'),
-        ('insightful', 'Insightful'),
-        ('funny', 'Funny'),
+        ('like', 'like'),  # 👍
+        ('confuse', 'confuse'),  # 🤔
+        ('wrong', 'wrong'),  # ❗
+        ('imp', 'imp'),  # ⭐
+        ('explain', 'explain'),  # 💡
     ]
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
@@ -355,3 +359,32 @@ def auto_generate_video_thumbnail(sender, instance, created, **kwargs):
             print("FFmpeg Error stderr:", e.stderr.decode('utf8') if e.stderr else "")
         except Exception as e:
             print(f"Thumbnail Extraction Error: {e}")
+
+
+from django.db.models import Count
+from django.dispatch import receiver
+from django.db.models.signals import post_save, post_delete
+
+@receiver(post_save, sender=PostLike)
+@receiver(post_delete, sender=PostLike)
+def update_reaction_counts(sender, instance, **kwargs):
+    post_id = instance.post_id
+
+    # 1. Sab reaction ka count ek sath nikalo
+    reactions = PostLike.objects.filter(post_id=post_id).values('reaction_type').annotate(c=Count('id'))
+    counts = {r['reaction_type']: r['c'] for r in reactions}
+
+    # 2. Pehle sirf counts update karo - ye hamesha chalega
+    Post.objects.filter(id=post_id).update(
+        likes_count=sum(counts.values()),
+        like_count=counts.get('like', 0),
+        confuse_count=counts.get('confuse', 0),
+        wrong_count=counts.get('wrong', 0),
+        imp_count=counts.get('imp', 0),
+        explain_count=counts.get('explain', 0),
+    )
+
+    # 3. Alag se flag check karo - isse upar wala fail nahi hoga
+    wrong = counts.get('wrong', 0)
+    if wrong >= 5:
+        Post.objects.filter(id=post_id).update(moderation_status='flagged')

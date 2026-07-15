@@ -218,13 +218,50 @@ class PostDetailSerializer(PostListSerializer):
 
     def get_comments(self, obj):
         comments = obj.comments.filter(parent=None, is_deleted=False)[:10]
-        
-        
 
 
 
 
 
 
+class ReactionRequestSerializer(serializers.Serializer):
+    reaction = serializers.ChoiceField(
+        choices=['like', 'confuse', 'wrong', 'imp', 'explain'],
+        help_text="Reaction type: like, confuse, wrong, imp, explain"
+    )
+
+class ReactionResponseSerializer(serializers.Serializer):
+    status = serializers.CharField()
+    reaction = serializers.CharField(allow_null=True)
+    counts = serializers.DictField()
+    my_reaction = serializers.CharField(allow_null=True)
 
 
+class PostSerializer(serializers.ModelSerializer):
+    # User ne khud kya reaction diya hai wo bhi dikhana hai
+    my_reaction = serializers.SerializerMethodField()
+
+    class Meta:
+        model = Post
+        fields = [
+            'id', 'user', 'content', 'title', 'category',
+            'post_type', 'created_at',
+            # Tera purana wala total count
+            'likes_count', 'comments_count',
+            # Ye naye wale 5 counts jo frontend pe dikhenge
+            'like_count', 'confuse_count', 'wrong_count',
+            'imp_count', 'explain_count',
+            'my_reaction',
+            'media'
+        ]
+
+    def get_my_reaction(self, obj):
+        # request user ne is post pe kya reaction diya hai
+        request = self.context.get('request')
+        if request and request.user.is_authenticated:
+            # reactions ko prefetch karne se fast hoga
+            # warna har post pe query jayegi
+            reaction = obj.reactions.filter(user=request.user).first()
+            if reaction:
+                return reaction.reaction_type
+        return None

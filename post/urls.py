@@ -7,6 +7,7 @@ urlpatterns = [
     path('list/', PostListAPIView.as_view(), name='post-list'), # GET list
     path('details/<uuid:id>/', PostDetailAPIView.as_view(), name='post-detail'),
     path('feed/', HomeFeedView.as_view(), name='home-feed'),
+    path('like/<uuid:post_id>/reaction/', PostReactionAPIView.as_view(), name='post-reaction'),
 ]
 if settings.DEBUG:
     urlpatterns += [
