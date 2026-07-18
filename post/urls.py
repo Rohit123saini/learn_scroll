@@ -2,6 +2,7 @@ from django.urls import path,re_path
 from .views import *
 from django.conf import settings
 from .comment_view import *
+from. import comment_view
 from django.conf.urls.static import static
 urlpatterns = [
     path('create/', PostCreateAPIView.as_view(), name='post-create'),
@@ -16,6 +17,9 @@ urlpatterns = [
     path('comment/post/<uuid:post_id>/', CommentListAPIView.as_view(), name='comment-list'),
     path('comment/<uuid:comment_id>/hide/', CommentHideAPIView.as_view(), name='comment-hide'),
     path('comment/<uuid:comment_id>/replies/', CommentRepliesAPIView.as_view(), name='comment-replies'),
+    path('comment/chunked/init/', comment_view.chunked_upload_init, name='chunked-init'),
+    path('comment/chunked/chunk/', comment_view.chunked_upload_chunk, name='chunked-chunk'),
+    path('comment/chunked/complete/', comment_view.chunked_upload_complete, name='chunked-complete'),
 ]
 if settings.DEBUG:
     urlpatterns += [

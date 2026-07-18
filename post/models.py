@@ -475,4 +475,21 @@ def update_reaction_counts(sender, instance, **kwargs):
 
 
 
+import uuid
+from django.conf import settings
 
+class ChunkedUpload(models.Model):
+    upload_id = models.CharField(max_length=100, unique=True)
+    file_name = models.CharField(max_length=500)
+    total_chunks = models.IntegerField()
+    total_size = models.BigIntegerField()
+    post_id = models.CharField(max_length=100)
+    parent_id = models.CharField(max_length=100, null=True, blank=True)
+    content = models.TextField(blank=True)
+    # FIX: Yaha kabhi bhi 'authapp.User' mat likho, ye use karo
+    user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE)
+    created_at = models.DateTimeField(auto_now_add=True)
+    is_completed = models.BooleanField(default=False)
+
+    def __str__(self):
+        return f"{self.upload_id} - {self.file_name}"
