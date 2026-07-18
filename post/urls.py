@@ -14,6 +14,7 @@ urlpatterns = [
     path('comment/<uuid:comment_id>/edit/', CommentUpdateAPIView.as_view(), name='comment-edit'),  # PATCH multipart
     path('comment/<uuid:comment_id>/delete/', CommentDeleteAPIView.as_view(), name='comment-delete'),  # DELETE
     path('comment/post/<uuid:post_id>/', CommentListAPIView.as_view(), name='comment-list'),
+    path('comment/<uuid:comment_id>/hide/', CommentHideAPIView.as_view(), name='comment-hide'),
     path('comment/<uuid:comment_id>/replies/', CommentRepliesAPIView.as_view(), name='comment-replies'),
 ]
 if settings.DEBUG:
