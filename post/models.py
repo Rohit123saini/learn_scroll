@@ -4,6 +4,7 @@ from django.contrib.auth import get_user_model
 from django.core.validators import FileExtensionValidator
 from django.db.models.signals import post_save, post_delete
 from django.dispatch import receiver
+from django.conf import settings
 User = get_user_model()
 
 
@@ -190,19 +191,77 @@ class PostLike(models.Model):
         ]
 
 
+# class PostComment(models.Model):
+#     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+#     post = models.ForeignKey(Post, on_delete=models.CASCADE, related_name='comments')
+#     user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name='post_comments')
+#     parent = models.ForeignKey('self', on_delete=models.CASCADE, null=True, blank=True, related_name='replies')
+#
+#     content = models.TextField(blank=True)
+#     likes_count = models.PositiveIntegerField(default=0)
+#     replies_count = models.PositiveIntegerField(default=0)
+#
+#     is_edited = models.BooleanField(default=False)
+#     is_deleted = models.BooleanField(default=False)
+#     is_pinned = models.BooleanField(default=False)
+#
+#     created_at = models.DateTimeField(auto_now_add=True)
+#     updated_at = models.DateTimeField(auto_now=True)
+#     deleted_at = models.DateTimeField(blank=True, null=True)
+#
+#     class Meta:
+#         db_table = 'post_comments'
+#         ordering = ['-created_at']
+#         indexes = [
+#             models.Index(fields=['post', '-created_at']),
+#             models.Index(fields=['parent', '-created_at']),
+#         ]
+#
+#     def __str__(self):
+#         return f"{self.user} - {self.content[:30]}"
+#
+#
+# class CommentMedia(models.Model):
+#     MEDIA_TYPES = (
+#         ('image', 'Image'),
+#         ('video', 'Video'),
+#         ('document', 'Document'),
+#     )
+#     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+#     comment = models.ForeignKey(PostComment, on_delete=models.CASCADE, related_name='media')
+#     media_type = models.CharField(max_length=20, choices=MEDIA_TYPES)
+#     file = models.FileField(upload_to='comment_media/%Y/%m/%d/')
+#     file_name = models.CharField(max_length=255, blank=True)
+#     file_size = models.PositiveIntegerField(default=0)  # bytes
+#
+#     created_at = models.DateTimeField(auto_now_add=True)
+#
+#     class Meta:
+#         db_table = 'comment_media'
+#
+#     def save(self, *args, **kwargs):
+#         if self.file and not self.file_name:
+#             self.file_name = self.file.name
+#         super().save(*args, **kwargs)
+
+
 class PostComment(models.Model):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     post = models.ForeignKey(Post, on_delete=models.CASCADE, related_name='comments')
-    user = models.ForeignKey(User, on_delete=models.CASCADE)
+    user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name='post_comments')
     parent = models.ForeignKey('self', on_delete=models.CASCADE, null=True, blank=True, related_name='replies')
 
-    content = models.TextField()
+    content = models.TextField(blank=True)
     likes_count = models.PositiveIntegerField(default=0)
     replies_count = models.PositiveIntegerField(default=0)
 
     is_edited = models.BooleanField(default=False)
-    is_deleted = models.BooleanField(default=False)
+    is_deleted = models.BooleanField(default=False, db_index=True)
     is_pinned = models.BooleanField(default=False)
+    # 🔥 NEW FIELD FOR HIDE
+    is_hidden = models.BooleanField(default=False, db_index=True)
+    hidden_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True, related_name='hidden_comments')
+    hidden_at = models.DateTimeField(null=True, blank=True)
 
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
@@ -212,10 +271,35 @@ class PostComment(models.Model):
         db_table = 'post_comments'
         ordering = ['-created_at']
         indexes = [
-            models.Index(fields=['post', '-created_at']),
+            models.Index(fields=['post', '-created_at', 'is_hidden', 'is_deleted']),
             models.Index(fields=['parent', '-created_at']),
         ]
 
+class CommentMedia(models.Model):
+    MEDIA_TYPES = (
+        ('image', 'Image'),
+        ('video', 'Video'),
+        ('audio', 'Audio'),  # 🔥 voice, mp3
+        ('document', 'Document'),
+        ('other', 'Other'), # 🔥 koi bhi file
+    )
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    comment = models.ForeignKey(PostComment, on_delete=models.CASCADE, related_name='media')
+    media_type = models.CharField(max_length=20, choices=MEDIA_TYPES)
+    file = models.FileField(upload_to='comment_media/%Y/%m/%d/') # 🔥 No validator = sab kuch acceptable
+    file_name = models.CharField(max_length=500, blank=True)
+    file_size = models.BigIntegerField(default=0)
+    mime_type = models.CharField(max_length=150, blank=True) # 🔥 add kar diya
+
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = 'comment_media'
+
+    def save(self, *args, **kwargs):
+        if self.file and not self.file_name:
+            self.file_name = self.file.name
+        super().save(*args, **kwargs)
 
 class PostShare(models.Model):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
@@ -388,3 +472,7 @@ def update_reaction_counts(sender, instance, **kwargs):
     wrong = counts.get('wrong', 0)
     if wrong >= 5:
         Post.objects.filter(id=post_id).update(moderation_status='flagged')
+
+
+
+
