@@ -191,59 +191,6 @@ class PostLike(models.Model):
         ]
 
 
-# class PostComment(models.Model):
-#     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
-#     post = models.ForeignKey(Post, on_delete=models.CASCADE, related_name='comments')
-#     user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name='post_comments')
-#     parent = models.ForeignKey('self', on_delete=models.CASCADE, null=True, blank=True, related_name='replies')
-#
-#     content = models.TextField(blank=True)
-#     likes_count = models.PositiveIntegerField(default=0)
-#     replies_count = models.PositiveIntegerField(default=0)
-#
-#     is_edited = models.BooleanField(default=False)
-#     is_deleted = models.BooleanField(default=False)
-#     is_pinned = models.BooleanField(default=False)
-#
-#     created_at = models.DateTimeField(auto_now_add=True)
-#     updated_at = models.DateTimeField(auto_now=True)
-#     deleted_at = models.DateTimeField(blank=True, null=True)
-#
-#     class Meta:
-#         db_table = 'post_comments'
-#         ordering = ['-created_at']
-#         indexes = [
-#             models.Index(fields=['post', '-created_at']),
-#             models.Index(fields=['parent', '-created_at']),
-#         ]
-#
-#     def __str__(self):
-#         return f"{self.user} - {self.content[:30]}"
-#
-#
-# class CommentMedia(models.Model):
-#     MEDIA_TYPES = (
-#         ('image', 'Image'),
-#         ('video', 'Video'),
-#         ('document', 'Document'),
-#     )
-#     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
-#     comment = models.ForeignKey(PostComment, on_delete=models.CASCADE, related_name='media')
-#     media_type = models.CharField(max_length=20, choices=MEDIA_TYPES)
-#     file = models.FileField(upload_to='comment_media/%Y/%m/%d/')
-#     file_name = models.CharField(max_length=255, blank=True)
-#     file_size = models.PositiveIntegerField(default=0)  # bytes
-#
-#     created_at = models.DateTimeField(auto_now_add=True)
-#
-#     class Meta:
-#         db_table = 'comment_media'
-#
-#     def save(self, *args, **kwargs):
-#         if self.file and not self.file_name:
-#             self.file_name = self.file.name
-#         super().save(*args, **kwargs)
-
 
 class PostComment(models.Model):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
@@ -493,3 +440,34 @@ class ChunkedUpload(models.Model):
 
     def __str__(self):
         return f"{self.upload_id} - {self.file_name}"
+
+
+
+class CommentLike(models.Model):
+    REACTION_CHOICES = [
+        ('like', 'like'),
+        ('confuse', 'confuse'),
+        ('wrong', 'wrong'),
+        ('imp', 'imp'),
+        ('explain', 'explain'),
+    ]
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    comment = models.ForeignKey(PostComment, on_delete=models.CASCADE, related_name='likes')
+    user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name='comment_likes')
+    reaction_type = models.CharField(max_length=20, choices=REACTION_CHOICES, default='like')
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = 'comment_likes'
+        unique_together = ['comment', 'user']
+        indexes = [
+            models.Index(fields=['comment', '-created_at']),
+        ]
+
+@receiver(post_save, sender=CommentLike)
+@receiver(post_delete, sender=CommentLike)
+def update_comment_reaction_counts(sender, instance, **kwargs):
+    from django.db.models import Count
+    comment_id = instance.comment_id
+    total = CommentLike.objects.filter(comment_id=comment_id).count()
+    PostComment.objects.filter(id=comment_id).update(likes_count=total)

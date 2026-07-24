@@ -38,6 +38,7 @@ ALLOWED_HOSTS = ['*','10.93.221.189', 'localhost', '127.0.0.1']
 # Application definition
 
 INSTALLED_APPS = [
+    'daphne',
     'django.contrib.admin',
     'django.contrib.auth',
     'django.contrib.contenttypes',
@@ -51,6 +52,7 @@ INSTALLED_APPS = [
     'login',
     'user_profile',
     'post',
+    "message",
 ]
 
 MIDDLEWARE = [
@@ -83,7 +85,7 @@ TEMPLATES = [
 ]
 
 WSGI_APPLICATION = 'LearnScroll.wsgi.application'
-
+ASGI_APPLICATION = 'LearnScroll.asgi.application'
 
 # Database
 # https://docs.djangoproject.com/en/6.0/ref/settings/#databases
@@ -111,6 +113,26 @@ url = urlparse(os.getenv("DATABASE_URL"))
 # Password validation
 # https://docs.djangoproject.com/en/6.0/ref/settings/#auth-password-validators
 
+
+
+
+
+
+
+
+
+
+
+CHANNEL_LAYERS = {
+    "default": {
+        "BACKEND": "channels_redis.core.RedisChannelLayer",
+        "CONFIG": {
+            "hosts": [("127.0.0.1", 6379)],
+        },
+    },
+}
+
+
 AUTH_PASSWORD_VALIDATORS = [
     {
         'NAME': 'django.contrib.auth.password_validation.UserAttributeSimilarityValidator',
@@ -132,7 +154,7 @@ AUTH_PASSWORD_VALIDATORS = [
 
 LANGUAGE_CODE = 'en-us'
 
-TIME_ZONE = 'UTC'
+TIME_ZONE = 'Asia/Kolkata'
 
 USE_I18N = True
 
@@ -188,15 +210,15 @@ os.makedirs(MEDIA_ROOT, exist_ok=True)
 
 SPECTACULAR_SETTINGS = {
     'TITLE': 'LearnScroll API',
-    'DESCRIPTION': 'Post create API',
+    'DESCRIPTION': 'LearnScroll Production API',
     'VERSION': '1.0.0',
     'SERVE_INCLUDE_SCHEMA': False,
     'COMPONENT_SPLIT_REQUEST': True,
 }
 
+#
 
-
-DATA_UPLOAD_MAX_MEMORY_SIZE = 500 * 1024
+DATA_UPLOAD_MAX_MEMORY_SIZE = 500 * 1024 * 1024
 FILE_UPLOAD_MAX_MEMORY_SIZE = 500 * 1024 * 1024
 FILE_UPLOAD_PERMISSIONS = 0o644
 

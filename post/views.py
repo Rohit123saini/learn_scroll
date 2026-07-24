@@ -27,6 +27,7 @@ from.serializers import (
     PostListSerializer,
     PostDetailSerializer,
     PostMediaSerializer,
+    PostSaveSerializer,
 )
 from user_profile.models import Follow
 
@@ -349,3 +350,73 @@ class PostReactionAPIView(APIView):
             },
             "my_reaction": my_reaction
         })
+
+from django.shortcuts import get_object_or_404
+
+# ===================== POST SAVE / UNSAVE TOGGLE =====================
+class PostSaveToggleAPIView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    @extend_schema(
+        summary="Save / Unsave Post - Toggle",
+        description="Pehli baar call -> Saved, Dubara call -> Unsaved",
+        request=OpenApiTypes.OBJECT,
+        tags=["Post Save"]
+    )
+    def post(self, request, post_id):
+        post = get_object_or_404(Post, id=post_id, is_deleted=False)
+        collection_name = request.data.get('collection_name', 'default')
+
+        # Check pehle se saved hai kya?
+        saved_obj = PostSave.objects.filter(post=post, user=request.user).first()
+
+        if saved_obj:
+            # Already saved hai -> ab unsave karo
+            saved_obj.delete()
+            post.refresh_from_db()
+            return Response({
+                "status": "unsaved",
+                "is_saved": False,
+                "saves_count": post.saves_count
+            }, status=status.HTTP_200_OK)
+        else:
+            # Save karo
+            PostSave.objects.create(
+                post=post,
+                user=request.user,
+                collection_name=collection_name
+            )
+            post.refresh_from_db()
+            return Response({
+                "status": "saved",
+                "is_saved": True,
+                "saves_count": post.saves_count
+            }, status=status.HTTP_201_CREATED)
+
+# ===================== SAVED POSTS LIST =====================
+class SavedPostsListAPIView(generics.ListAPIView):
+    permission_classes = [IsAuthenticated]
+    serializer_class = PostListSerializer
+    pagination_class = StandardResultsSetPagination
+
+    def get_serializer_context(self):
+        return {'request': self.request}
+
+    @extend_schema(
+        summary="Mere Saved Posts ki List",
+        parameters=[
+            OpenApiParameter(name='collection_name', type=str, required=False, description='Filter by collection'),
+        ],
+        tags=["Post Save"]
+    )
+    def get_queryset(self):
+        user = self.request.user
+        qs = Post.objects.select_related('user').prefetch_related('media').filter(
+            saved_by__user=user,
+            is_deleted=False
+        ).order_by('-saved_by__created_at')
+
+        collection = self.request.query_params.get('collection_name')
+        if collection:
+            qs = qs.filter(saved_by__collection_name=collection)
+        return qs
