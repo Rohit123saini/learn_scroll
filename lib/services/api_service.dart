@@ -9,38 +9,38 @@ import '../utils/api.dart';
 
 class ApiService {
 
-  // ================= LOGIN =================
-  Future<LoginResponse> login(
-    String username,
-    String password,
-  ) async {
-    final response = await http.post(
-      Uri.parse("${Api.baseUrl}/login/"),
-      headers: {
-        "Content-Type": "application/json",
-      },
-      body: jsonEncode({
-        "username": username,
-        "password": password,
-      }),
-    );
+Future<LoginResponse> login(String username, String password) async {
+  final response = await http.post(
+    Uri.parse("${Api.baseUrl}/login/"),
+    headers: {"Content-Type": "application/json"},
+    body: jsonEncode({"username": username, "password": password}),
+  );
+  final data = jsonDecode(response.body);
+  if (response.statusCode == 200) {
+    SharedPreferences pref = await SharedPreferences.getInstance();
+    await pref.setString("access", data["token"]["access"]);
+    await pref.setString("refresh", data["token"]["refresh"]);
+    await pref.setString("access_token", data["token"]["access"]); // double save
 
-    final data = jsonDecode(response.body);
-
-    if (response.statusCode == 200) {
-      SharedPreferences pref = await SharedPreferences.getInstance();
-      await pref.setString(
-        "access",
-        data["token"]["access"],
-      );
-      await pref.setString(
-        "refresh",
-        data["token"]["refresh"],
-      );
-      return LoginResponse.fromJson(data);
+    // FIX - user_id save
+    try {
+      String uid = "";
+      if (data["user"] != null && data["user"]["id"] != null) uid = data["user"]["id"].toString();
+      else if (data["user"] != null && data["user"]["user_id"] != null) uid = data["user"]["user_id"].toString();
+      else if (data["id"] != null) uid = data["id"].toString();
+      if (uid.isNotEmpty) {
+        await pref.setString("user_id", uid);
+      }
+    } catch (e) {
+      print("user_id save error: $e");
     }
-    throw Exception(data["message"]);
+
+    return LoginResponse.fromJson(data);
   }
+  throw Exception(data["message"]);
+  }
+
+
 
   // ================= SEND OTP =================
   Future<void> sendOtp(String emailOrPhone) async {

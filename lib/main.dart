@@ -293,28 +293,32 @@
 
 
 
-
-
-
 import 'package:flutter/material.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:background_downloader/background_downloader.dart';
 import 'login/login_screen.dart';
-import 'home.dart'; // ✅ Direct lib/home.dart se import hai
+import 'home.dart';
 
-void main() {
+void main() async {
   WidgetsFlutterBinding.ensureInitialized();
+  await FileDownloader().start();
+  await FileDownloader().configureNotification(
+    running: TaskNotification('Downloading {filename}', '{progress}'),
+    complete: TaskNotification('Download complete', '{filename}'),
+    error: TaskNotification('Download failed', '{filename}'),
+    progressBar: true,
+    tapOpensFile: true,
+  );
   runApp(const MyApp());
 }
 
 class MyApp extends StatelessWidget {
   const MyApp({super.key});
-
   Future<bool> _checkAuth() async {
     final prefs = await SharedPreferences.getInstance();
     final String? token = prefs.getString('access_token');
-    return token != null && token.isNotEmpty;
+    return token!= null && token.isNotEmpty;
   }
-
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
@@ -324,13 +328,10 @@ class MyApp extends StatelessWidget {
         future: _checkAuth(),
         builder: (context, snapshot) {
           if (snapshot.connectionState == ConnectionState.waiting) {
-            return const Scaffold(
-              body: Center(child: CircularProgressIndicator()),
-            );
+            return const Scaffold(body: Center(child: CircularProgressIndicator()));
           }
-
           if (snapshot.hasData && snapshot.data == true) {
-            return const HomeScreen(); 
+            return const HomeScreen();
           } else {
             return const LoginScreen();
           }
@@ -339,8 +340,3 @@ class MyApp extends StatelessWidget {
     );
   }
 }
-
-
-
-
-
