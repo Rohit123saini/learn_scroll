@@ -5,6 +5,24 @@
 // GroupSerializer, etc.) — taaki JSON parsing me kabhi mismatch na ho.
 
 // ======================================================================
+// MESSAGE TYPE CONSTANTS — backend `MessageType` choices se match
+// ======================================================================
+class MessageType {
+  static const text = 'text';
+  static const image = 'image';
+  static const video = 'video';
+  static const audio = 'audio';
+  static const file = 'file';
+  static const presentation = 'presentation';
+  static const location = 'location';
+  static const system = 'system';
+  // 🔥 NAYA — chat me ek clickable "Study Room" invite card bhejne ke
+  // liye. Backend me is naye MessageType choice ko allow karna hoga
+  // (Django `MessageType` choices me 'study_room' add karo).
+  static const studyRoom = 'study_room';
+}
+
+// ======================================================================
 // USER (MINI)
 // ======================================================================
 class UserMini {
@@ -79,10 +97,10 @@ class ConversationModel {
   final String type; // "private" | "group"
   final UserMini? otherParticipant; // private chat ke liye
   final GroupMini? group; // group chat ke liye
-  final String? lastMessageText;
-  final DateTime? lastMessageAt;
-  final UserMini? lastMessageSender;
-  final String? lastMessageType;
+  String? lastMessageText;
+  DateTime? lastMessageAt;
+  UserMini? lastMessageSender;
+  String? lastMessageType;
   int unreadCount;
   ConversationSettings mySettings;
   final DateTime createdAt;
@@ -196,12 +214,12 @@ class MessageModel {
   final String id;
   final String conversationId;
   final UserMini? sender;
-  final String type; // text/image/video/audio/file/presentation/location/system
+  String type; // text/image/video/audio/file/presentation/location/system
   String? text;
-  final String? fileUrl;
-  final List<dynamic>? fileUrls;
-  final String? thumbnailUrl;
-  final Map<String, dynamic>? meta;
+  String? fileUrl;
+  List<dynamic>? fileUrls;
+  String? thumbnailUrl;
+  Map<String, dynamic>? meta;
   final String? replyTo;
   final ReplyPreviewModel? replyToDetail;
   bool isEdited;
@@ -215,9 +233,13 @@ class MessageModel {
   final DateTime createdAt;
   DateTime? updatedAt;
 
-  // Local-only UI state (offline retry ke liye) — server se nahi aata
+  // Local-only UI state (offline retry / upload progress ke liye) — server
+  // se nahi aata, sirf frontend ke andar use hota hai.
   bool isSending;
   bool sendFailed;
+  double? uploadProgress; // 0.0 - 1.0, media upload ke dauraan
+  String? localFilePath; // upload complete hone tak local preview ke liye
+  List<String>? localFilePaths; // 🔥 NAYA — ek saath bheje gaye multiple images ka local preview (fileUrls[] complete hone tak)
 
   MessageModel({
     required this.id,
@@ -243,7 +265,19 @@ class MessageModel {
     this.updatedAt,
     this.isSending = false,
     this.sendFailed = false,
+    this.uploadProgress,
+    this.localFilePath,
+    this.localFilePaths,
   }) : reactions = reactions ?? [];
+
+  /// Mera hi reaction (agar hai to) nikaalne ke liye — reaction picker me
+  /// currently selected emoji highlight karna ho to kaam aata hai.
+  String? myReaction(String myUserId) {
+    for (final r in reactions) {
+      if (r.user.id == myUserId) return r.emoji;
+    }
+    return null;
+  }
 
   factory MessageModel.fromJson(Map<String, dynamic> json) {
     return MessageModel(
@@ -278,8 +312,10 @@ class MessageModel {
     );
   }
 
-  // 🔥 WebSocket "chat_message" event ka payload thoda alag shape ka hota
-  // hai (flat, sender_name string) — isliye alag factory.
+  // 🔥 WebSocket "chat_message" event ka payload — ab text ke alawa media
+  // fields (file_url/file_urls/thumbnail_url/meta) bhi carry karta hai,
+  // kyunki backend `messages` REST action ab isi shape me broadcast karta
+  // hai jab media message bheja jaata hai (dekho PATCH_views_realtime_broadcast.md).
   factory MessageModel.fromSocketEvent(Map<String, dynamic> json) {
     return MessageModel(
       id: json['id']?.toString() ?? '',
@@ -290,6 +326,10 @@ class MessageModel {
       ),
       type: json['message_type']?.toString() ?? 'text',
       text: json['text']?.toString(),
+      fileUrl: json['file_url']?.toString(),
+      fileUrls: json['file_urls'],
+      thumbnailUrl: json['thumbnail_url']?.toString(),
+      meta: json['meta'] is Map<String, dynamic> ? json['meta'] : null,
       replyTo: json['reply_to']?.toString(),
       clientId: json['client_id']?.toString(),
       createdAt: DateTime.tryParse(json['created_at']?.toString() ?? '') ??

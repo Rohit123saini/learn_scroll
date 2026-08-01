@@ -4,11 +4,13 @@
 // Pattern wahi hai jo tera `ProfileApi.ApiService` use karta hai:
 // Api.baseUrl + AuthService.getToken() -> Bearer header.
 //
-// pubspec.yaml me ye dependency chahiye (agar already nahi hai):
+// pubspec.yaml me ye dependencies chahiye:
 //   http: ^1.2.0
 
 import 'dart:convert';
+import 'dart:io';
 import 'package:http/http.dart' as http;
+import 'package:dio/dio.dart'; // 🔥 NAYA — real upload progress ke liye
 
 import '../../utils/api.dart';
 import '../../services/auth_service.dart';
@@ -20,6 +22,35 @@ class MessageApiException implements Exception {
   MessageApiException(this.message, {this.statusCode});
   @override
   String toString() => message;
+}
+
+/// Upload ka result — attachment message bhejne ke liye zaroori sab kuch.
+class UploadedFileResult {
+  final String fileUrl;
+  final String fileType; // image/video/audio/presentation/file
+  final int fileSize;
+  final String fileName;
+  final String mimeType;
+
+  UploadedFileResult({
+    required this.fileUrl,
+    required this.fileType,
+    required this.fileSize,
+    required this.fileName,
+    required this.mimeType,
+  });
+
+  factory UploadedFileResult.fromJson(Map<String, dynamic> json) {
+    return UploadedFileResult(
+      fileUrl: json['file_url']?.toString() ?? '',
+      fileType: json['file_type']?.toString() ?? 'file',
+      fileSize: json['file_size'] is int
+          ? json['file_size']
+          : int.tryParse(json['file_size']?.toString() ?? '') ?? 0,
+      fileName: json['file_name']?.toString() ?? '',
+      mimeType: json['mime_type']?.toString() ?? '',
+    );
+  }
 }
 
 class MessageApiService {
@@ -49,6 +80,52 @@ class MessageApiService {
       }
     } catch (_) {}
     throw MessageApiException(msg, statusCode: res.statusCode);
+  }
+
+  // ==================================================================
+  // CHAT MEDIA UPLOAD
+  // ==================================================================
+
+  /// POST /message/upload/  (multipart "file")
+  ///
+  /// File pehle yahan upload karo, jo `file_url` milta hai wahi phir
+  /// `sendMessageRest(...)` me pass karo taaki image/video/audio/file
+  /// message ban jaaye. `onProgress` upload % dikhane ke liye use karo
+  /// (0.0 - 1.0).
+  ///
+  /// 🔥 FIX: pehle ye `http.MultipartRequest` use karta tha, jiske paas
+  /// upload-progress report karne ka koi tarika hi nahi hai — isliye
+  /// `onProgress` parameter accept toh hota tha lekin KABHI call nahi
+  /// hota tha (dead code), aur UI me "kitna upload hua" kabhi dikhta hi
+  /// nahi tha. Ab `Dio` ke `onSendProgress` se real byte-level progress
+  /// milta hai.
+  static Future<UploadedFileResult> uploadFile(
+    File file, {
+    void Function(double progress)? onProgress,
+  }) async {
+    final token = await AuthService.getToken();
+    final dio = Dio();
+
+    final formData = FormData.fromMap({
+      'file': await MultipartFile.fromFile(file.path, filename: file.path.split('/').last),
+    });
+
+    final response = await dio.post(
+      "$_base/upload/",
+      data: formData,
+      options: Options(headers: {
+        if (token != null && token.isNotEmpty) "Authorization": "Bearer $token",
+      }),
+      onSendProgress: (sent, total) {
+        if (total > 0) onProgress?.call(sent / total);
+      },
+    );
+
+    if (response.statusCode == null || response.statusCode! < 200 || response.statusCode! >= 300) {
+      throw MessageApiException("Upload failed (${response.statusCode})", statusCode: response.statusCode);
+    }
+    final data = response.data is String ? jsonDecode(response.data) : response.data;
+    return UploadedFileResult.fromJson(data);
   }
 
   // ==================================================================
@@ -118,9 +195,13 @@ class MessageApiService {
     return list.map((e) => MessageModel.fromJson(e)).toList();
   }
 
-  /// POST /message/conversations/<id>/messages/  (REST fallback send —
-  /// normally realtime send WebSocket se hoti hai, ye sirf backup hai jab
-  /// socket connect na ho paye)
+  /// POST /message/conversations/<id>/messages/
+  ///
+  /// Text message REST fallback ke liye (jab socket down ho) AUR har media
+  /// message (image/video/audio/file/presentation/location) yahi se jaata
+  /// hai, kyunki websocket ka `message` event sirf plain text handle karta
+  /// hai. Backend patch (PATCH_views_realtime_broadcast.md) ke baad ye
+  /// dusre participant tak bhi realtime deliver ho jaata hai.
   static Future<MessageModel> sendMessageRest(
     String conversationId, {
     required String type,
@@ -358,5 +439,89 @@ class MessageApiService {
     final res = await http.get(Uri.parse("$_base/calls/$callId/"),
         headers: await _headers());
     return _decode(res);
+  }
+
+  // ==================================================================
+  // STUDY ROOM — ADD PARTICIPANT
+  // ==================================================================
+
+  /// POST /message/conversations/<id>/participants/  {"user_id"}
+  ///
+  /// 🔥 NAYA — Study Room me "Add User" button ke liye. Abhi tumhare
+  /// Django backend me ye endpoint maujood NAHI hai — pehle wahan bhi
+  /// banana hoga. Idea: private (1-to-1) conversation me jab teesra
+  /// participant add ho, backend usko internally group me convert kar de
+  /// (ya seedha ek `participants` M2M list me user add kar de) aur naye
+  /// user ko usi conversation ke WebSocket group me bhi join kara de,
+  /// taaki wo study room ke realtime events (draw_point, update_window,
+  /// waghera) turant receive karne lage.
+  static Future<void> addParticipantToConversation(
+    String conversationId,
+    String userId,
+  ) async {
+    final res = await http.post(
+      Uri.parse("$_base/conversations/$conversationId/participants/"),
+      headers: await _headers(),
+      body: jsonEncode({"user_id": userId}),
+    );
+    _decode(res);
+  }
+
+  // ==================================================================
+  // STUDY ROOM — WHITEBOARD AUTO-SAVE
+  // ==================================================================
+
+  /// PUT /message/conversations/<id>/study-room-state/  {"pages": [...]}
+  ///
+  /// 🔥 NAYA — poora whiteboard (saari pages: strokes/shapes/text/sticky
+  /// notes) periodically yahan save hota hai taaki app band karke wapas
+  /// aane par board wahi se dikhe jahan chhoda tha. Backend me abhi ye
+  /// endpoint maujood NAHI hai — banana hoga (ek simple JSONField wala
+  /// model jo conversation se linked ho, poora board JSON store kare).
+  static Future<void> saveStudyRoomState(
+    String conversationId,
+    Map<String, dynamic> state,
+  ) async {
+    final res = await http.put(
+      Uri.parse("$_base/conversations/$conversationId/study-room-state/"),
+      headers: await _headers(),
+      body: jsonEncode(state),
+    );
+    _decode(res);
+  }
+
+  /// GET /message/conversations/<id>/study-room-state/
+  ///
+  /// 🔥 NAYA — study room khulte hi last-saved board wapas load karne ke
+  /// liye. Endpoint na milne (404) ya koi bhi error case me caller
+  /// (StudyRoomScreen) gracefully khali board se hi shuru kar deta hai.
+  static Future<Map<String, dynamic>?> getStudyRoomState(String conversationId) async {
+    final res = await http.get(
+      Uri.parse("$_base/conversations/$conversationId/study-room-state/"),
+      headers: await _headers(),
+    );
+    final data = _decode(res);
+    return data is Map<String, dynamic> ? data : null;
+  }
+
+  static Future<ConversationModel> getOrCreateConversation(
+      String targetUserId) async {
+    final token = await AuthService.getToken();
+    final url = Uri.parse("${Api.baseUrl}/message/conversations/start_private/");
+
+    final response = await http.post(
+      url,
+      headers: {
+        "Authorization": "Bearer $token",
+        "Content-Type": "application/json",
+      },
+      body: jsonEncode({"user_id": targetUserId}),
+    );
+
+    if (response.statusCode == 200 || response.statusCode == 201) {
+      return ConversationModel.fromJson(jsonDecode(response.body));
+    } else {
+      throw Exception('Failed to start conversation: ${response.body}');
+    }
   }
 }
