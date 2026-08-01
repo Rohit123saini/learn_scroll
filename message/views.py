@@ -1,7 +1,5 @@
-from django.shortcuts import render
-
-# Create your views here.
-# message/views.py
+import uuid
+import os
 from django.contrib.auth import get_user_model
 from django.db import transaction
 from django.db.models import F, Q
@@ -13,19 +11,28 @@ from rest_framework.exceptions import PermissionDenied, ValidationError
 from rest_framework.pagination import PageNumberPagination
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
+from rest_framework.views import APIView
+
+from channels.layers import get_channel_layer
+from asgiref.sync import async_to_sync
 
 from .models import (
     BlockedUser,
     CallSession,
+    CallParticipant,
+    CallStatus,
+    CallType,
     Conversation,
     ConversationParticipant,
     ConversationType,
+    DeviceToken,
     Group,
     GroupMember,
     Message,
     MessageReaction,
     MessageStatus,
     MessageType,
+    StudyRoomState,
 )
 from .permissions import IsConversationParticipant, IsGroupAdminOrModerator, IsMessageSender
 from .serializers import (
@@ -42,12 +49,16 @@ from .serializers import (
     MessageSerializer,
     UserPresenceSerializer,
 )
+from .push_utils import send_push_to_users, send_chat_message_push, send_incoming_call_push
+from .livekit_utils import generate_livekit_token
+
+# LiveKit URL env se lo, nahi to default
+LIVEKIT_WS_URL = os.getenv("LIVEKIT_WS_URL", "ws://10.93.221.189:7880")
 
 User = get_user_model()
 
 
 class MessagePagination(PageNumberPagination):
-    """Chat history ke liye — 30 messages per page (newest-first, model Meta ordering se)."""
     page_size = 30
     page_size_query_param = 'page_size'
     max_page_size = 100
@@ -60,18 +71,9 @@ class StandardPagination(PageNumberPagination):
 
 
 # ======================================================================
-# CONVERSATIONS  (chat list + messages sub-resource)
+# CONVERSATIONS
 # ======================================================================
 class ConversationViewSet(viewsets.ReadOnlyModelViewSet):
-    """
-    GET   /api/conversations/                    -> mera chat list
-    GET   /api/conversations/{id}/                -> ek conversation detail
-    POST  /api/conversations/start_private/       -> {"user_id": "..."} 1-1 chat start/open
-    PATCH /api/conversations/{id}/settings/       -> {"is_muted"/"is_archived"/"is_pinned": true}
-    GET   /api/conversations/{id}/messages/       -> is chat ke messages (paginated)
-    POST  /api/conversations/{id}/messages/       -> naya message bhejo (REST fallback)
-    POST  /api/conversations/{id}/read_all/       -> saare unread messages read mark karo
-    """
     serializer_class = ConversationListSerializer
     permission_classes = [IsAuthenticated]
     pagination_class = StandardPagination
@@ -117,7 +119,7 @@ class ConversationViewSet(viewsets.ReadOnlyModelViewSet):
 
     @action(detail=True, methods=['get', 'post'], url_path='messages')
     def messages(self, request, pk=None):
-        conversation = self.get_object()  # get_queryset() already scopes to my conversations
+        conversation = self.get_object()
 
         if request.method == 'GET':
             qs = conversation.all_messages.select_related(
@@ -128,8 +130,6 @@ class ConversationViewSet(viewsets.ReadOnlyModelViewSet):
             serializer = MessageSerializer(page, many=True, context={'request': request})
             return paginator.get_paginated_response(serializer.data)
 
-        # POST -> naya message (real-time ke liye websocket /ws/chat/ preferred hai,
-        # ye REST endpoint fallback / bots / server-to-server ke liye hai)
         serializer = MessageCreateSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
 
@@ -154,38 +154,108 @@ class ConversationViewSet(viewsets.ReadOnlyModelViewSet):
                 user=request.user
             ).update(unread_count=F('unread_count') + 1)
 
+        channel_layer = get_channel_layer()
+        async_to_sync(channel_layer.group_send)(
+            f'chat_{conversation.id}',
+            {
+                'type': 'chat_message',
+                'event': 'message',
+                'id': str(message.id),
+                'conversation_id': str(conversation.id),
+                'sender_id': str(request.user.id),
+                'message_type': message.type,
+                'text': message.text,
+                'file_url': message.file_url,
+                'file_urls': message.file_urls,
+                'thumbnail_url': message.thumbnail_url,
+                'meta': message.meta,
+                'reply_to': str(message.reply_to.id) if message.reply_to else None,
+                'client_id': client_id,
+                'created_at': message.created_at.isoformat(),
+            }
+        )
+
+        other_recipients = list(
+            ConversationParticipant.objects.filter(conversation=conversation)
+            .exclude(user=request.user)
+            .values_list('user_id', flat=True)
+        )
+        if other_recipients:
+            sender_name = request.user.get_username() if hasattr(request.user, 'get_username') else str(request.user)
+            send_chat_message_push(
+                recipient_ids=other_recipients,
+                sender_name=sender_name,
+                message_text=message.text,
+                message_type=message.type,
+                conversation_id=conversation.id,
+                message_id=message.id
+            )
+
         return Response(MessageSerializer(message, context={'request': request}).data, status=status.HTTP_201_CREATED)
 
     @action(detail=True, methods=['post'], url_path='read_all')
     def read_all(self, request, pk=None):
+        """
+        FIXED: pehle for loop me update_or_create se database locked ho rha tha.
+        Ab bulk_update + bulk_create + ignore_conflicts use kiya hai.
+        """
         conversation = self.get_object()
         now = timezone.now()
 
-        for message in conversation.all_messages.exclude(sender=request.user):
-            MessageStatus.objects.update_or_create(
-                message=message, user=request.user,
-                defaults={'is_read': True, 'read_at': now, 'is_delivered': True},
+        try:
+            # Sirf 500 tak limit rakho taaki ek sath lock na lage
+            unread_ids = list(
+                conversation.all_messages.exclude(sender=request.user)
+                .values_list('id', flat=True)[:500]
             )
 
-        ConversationParticipant.objects.filter(conversation=conversation, user=request.user).update(
-            unread_count=0, last_read_at=now,
-        )
+            if unread_ids:
+                existing_ids = set(
+                    MessageStatus.objects.filter(
+                        message_id__in=unread_ids, user=request.user
+                    ).values_list('message_id', flat=True)
+                )
+
+                if existing_ids:
+                    MessageStatus.objects.filter(
+                        message_id__in=existing_ids, user=request.user
+                    ).update(is_read=True, read_at=now, is_delivered=True, delivered_at=now)
+
+                new_ids = set(unread_ids) - existing_ids
+                if new_ids:
+                    MessageStatus.objects.bulk_create([
+                        MessageStatus(
+                            message_id=mid,
+                            user=request.user,
+                            is_read=True,
+                            read_at=now,
+                            is_delivered=True,
+                            delivered_at=now
+                        ) for mid in new_ids
+                    ], ignore_conflicts=True)
+
+            ConversationParticipant.objects.filter(
+                conversation=conversation,
+                user=request.user
+            ).update(
+                unread_count=0,
+                last_read_at=now
+            )
+        except Exception:
+            # Agar bhi lock ho jaye to kam se kam unread 0 kar do, 500 error mat do
+            ConversationParticipant.objects.filter(
+                conversation=conversation,
+                user=request.user
+            ).update(unread_count=0, last_read_at=now)
+
         return Response({'detail': 'Saare messages read mark ho gaye.'})
 
 
 # ======================================================================
-# MESSAGES  (edit / delete / react / read on a single message)
+# MESSAGES
 # ======================================================================
 class MessageViewSet(mixins.RetrieveModelMixin, mixins.UpdateModelMixin,
                       mixins.DestroyModelMixin, viewsets.GenericViewSet):
-    """
-    GET    /api/messages/{id}/                    -> ek message
-    PATCH  /api/messages/{id}/                     -> {"text": "..."} edit (sirf sender)
-    DELETE /api/messages/{id}/?for_everyone=true   -> delete for everyone / for me
-    POST   /api/messages/{id}/react/               -> {"emoji": "🔥"} reaction add/update
-    DELETE /api/messages/{id}/react/               -> apni reaction hatao
-    POST   /api/messages/{id}/read/                -> read receipt mark karo
-    """
     queryset = Message.objects.select_related('conversation', 'sender')
     serializer_class = MessageSerializer
 
@@ -267,15 +337,6 @@ class MessageViewSet(mixins.RetrieveModelMixin, mixins.UpdateModelMixin,
 # GROUPS
 # ======================================================================
 class GroupViewSet(viewsets.ModelViewSet):
-    """
-    POST   /api/groups/                          -> naya group banao
-    GET    /api/groups/{id}/                      -> group detail
-    PATCH  /api/groups/{id}/                      -> group info update (admin/mod)
-    POST   /api/groups/{id}/members/              -> {"user_ids": [...]} members add karo
-    PATCH  /api/groups/{id}/members/{user_id}/    -> {"role"/"is_muted"/"is_banned"} (admin/mod)
-    DELETE /api/groups/{id}/members/{user_id}/    -> remove member (admin/mod) ya khud leave
-    GET    /api/groups/{id}/media/                -> group gallery (photos/videos/files)
-    """
     permission_classes = [IsAuthenticated]
 
     def get_serializer_class(self):
@@ -365,7 +426,6 @@ class GroupViewSet(viewsets.ModelViewSet):
             )
             return Response(status=status.HTTP_204_NO_CONTENT)
 
-        # PATCH -> role / mute / ban update, sirf admin/moderator
         self._require_admin(group.id, request.user)
         for field in ('role', 'is_muted', 'is_banned'):
             if field in request.data:
@@ -400,11 +460,6 @@ class GroupViewSet(viewsets.ModelViewSet):
 # ======================================================================
 class BlockedUserViewSet(mixins.ListModelMixin, mixins.CreateModelMixin,
                           mixins.DestroyModelMixin, viewsets.GenericViewSet):
-    """
-    GET    /api/blocked-users/       -> maine kise block kiya hai
-    POST   /api/blocked-users/       -> {"blocked": "<user_id>"}
-    DELETE /api/blocked-users/{id}/  -> unblock
-    """
     serializer_class = BlockedUserSerializer
     permission_classes = [IsAuthenticated]
 
@@ -422,7 +477,6 @@ class BlockedUserViewSet(mixins.ListModelMixin, mixins.CreateModelMixin,
 # PRESENCE
 # ======================================================================
 class UserPresenceView(generics.RetrieveAPIView):
-    """GET /api/users/<uuid:user_id>/presence/ -> online status / last seen"""
     serializer_class = UserPresenceSerializer
     permission_classes = [IsAuthenticated]
 
@@ -433,10 +487,149 @@ class UserPresenceView(generics.RetrieveAPIView):
 
 
 # ======================================================================
-# CALL HISTORY
+# CALLS
 # ======================================================================
+class CallInitiateView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        conversation_id = request.data.get('conversation_id')
+        call_type = request.data.get('type', 'audio')
+        if not conversation_id:
+            return Response({"detail": "conversation_id required"}, status=400)
+
+        conversation = Conversation.objects.filter(id=conversation_id, memberships__user=request.user).first()
+        if not conversation:
+            return Response({"detail": "Conversation not found"}, status=404)
+
+        CallSession.objects.filter(
+            conversation_id=conversation_id,
+            caller=request.user,
+            status__in=[CallStatus.INITIATED, CallStatus.RINGING]
+        ).update(status=CallStatus.ENDED, ended_at=timezone.now())
+
+        call = CallSession.objects.create(
+            type=call_type,
+            status=CallStatus.RINGING,
+            conversation=conversation,
+            group=getattr(conversation, 'group_detail', None),
+            is_group_call=conversation.type == 'group',
+            caller=request.user,
+            channel_name=f"call_{uuid.uuid4().hex}",
+            started_at=timezone.now()
+        )
+        CallParticipant.objects.create(call=call, user=request.user, status=CallStatus.ONGOING)
+
+        other_members = list(conversation.memberships.exclude(user=request.user).values_list('user_id', flat=True))
+        for uid in other_members:
+            CallParticipant.objects.create(call=call, user_id=uid, status=CallStatus.RINGING)
+
+        caller_name = request.user.get_username() if hasattr(request.user, 'get_username') else str(request.user)
+
+        channel_layer = get_channel_layer()
+        async_to_sync(channel_layer.group_send)(
+            f'chat_{conversation_id}',
+            {
+                'type': 'call_event',
+                'event': 'incoming_call',
+                'call_id': str(call.id),
+                'call_type': call_type,
+                'caller_id': str(request.user.id),
+                'caller_name': caller_name,
+                'conversation_id': str(conversation_id),
+                'channel_name': call.channel_name,
+            }
+        )
+
+        if other_members:
+            send_incoming_call_push(
+                recipient_ids=other_members,
+                caller_name=caller_name,
+                call_type=call_type,
+                call_id=call.id,
+                conversation_id=conversation_id,
+                channel_name=call.channel_name
+            )
+
+        caller_token = generate_livekit_token(
+            room_name=call.channel_name,
+            user_id=request.user.id,
+            user_name=caller_name,
+        )
+
+        return Response({
+            "call_id": str(call.id),
+            "channel_name": call.channel_name,
+            "type": call_type,
+            "status": call.status,
+            "livekit_url": LIVEKIT_WS_URL,
+            "livekit_token": caller_token,
+        })
+
+
+class CallActionView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, call_id):
+        action = request.data.get('action')
+        call = CallSession.objects.filter(id=call_id).first()
+        if not call:
+            return Response({"detail": "Call not found"}, status=404)
+
+        livekit_token = None
+
+        if action == 'accept':
+            CallParticipant.objects.filter(call=call, user=request.user).update(status=CallStatus.ONGOING)
+            call.status = CallStatus.ONGOING
+            call.connected_at = call.connected_at or timezone.now()
+            call.save(update_fields=['status', 'connected_at'])
+
+            user_name = request.user.get_username() if hasattr(request.user, 'get_username') else str(request.user)
+            livekit_token = generate_livekit_token(
+                room_name=call.channel_name,
+                user_id=request.user.id,
+                user_name=user_name,
+            )
+        elif action == 'reject':
+            CallParticipant.objects.filter(call=call, user=request.user).update(status=CallStatus.REJECTED, left_at=timezone.now())
+            if not call.is_group_call:
+                call.status = CallStatus.REJECTED
+                call.ended_at = timezone.now()
+                call.save(update_fields=['status', 'ended_at'])
+        elif action == 'end':
+            CallParticipant.objects.filter(call=call, user=request.user).update(left_at=timezone.now(), status=CallStatus.ENDED)
+            if not CallParticipant.objects.filter(call=call, left_at__isnull=True).exists():
+                call.status = CallStatus.ENDED
+                call.ended_at = timezone.now()
+                if call.connected_at:
+                    call.duration_seconds = int((call.ended_at - call.connected_at).total_seconds())
+                call.save(update_fields=['status', 'ended_at', 'duration_seconds'])
+
+        channel_layer = get_channel_layer()
+        async_to_sync(channel_layer.group_send)(
+            f'call_{call_id}',
+            {
+                'type': 'call_signal',
+                'data': {'event': f'call_{action}', 'user_id': str(request.user.id), 'call_id': str(call_id)}
+            }
+        )
+        async_to_sync(channel_layer.group_send)(
+            f'chat_{call.conversation_id}',
+            {
+                'type': 'call_event',
+                'event': f'call_{action}',
+                'call_id': str(call_id),
+                'user_id': str(request.user.id),
+            }
+        )
+        return Response({
+            "detail": f"call {action} done",
+            "livekit_url": LIVEKIT_WS_URL if livekit_token else None,
+            "livekit_token": livekit_token,
+        })
+
+
 class CallHistoryViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, viewsets.GenericViewSet):
-    """GET /api/calls/  ->  GET /api/calls/{id}/  -> meri call history (1-1 + group)"""
     serializer_class = CallSessionSerializer
     permission_classes = [IsAuthenticated]
     pagination_class = StandardPagination
@@ -446,3 +639,100 @@ class CallHistoryViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, views
         return CallSession.objects.filter(
             Q(caller=user) | Q(call_participants__user=user) | Q(group__group_members__user=user)
         ).distinct().select_related('caller').order_by('-created_at')
+
+
+# ======================================================================
+# STUDY ROOM
+# ------------------------------------------------------------
+# 🔥 NAYA — Google Meet-style persistent room. `CallInitiateView`/
+# `CallActionView` se ALAG hai: koi `CallSession` nahi banta, koi
+# ringing/accept-reject nahi, koi push notification nahi. Room-name
+# seedha `conversation_id` se derive hota hai (`study_<conversation_id>`)
+# taaki jo bhi study room khole wo sabke saath ek hi persistent LiveKit
+# room me mile — jaise Meet link kholte hi ho jaata hai.
+# ======================================================================
+class StudyRoomJoinView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, conversation_id):
+        conversation = Conversation.objects.filter(
+            id=conversation_id, memberships__user=request.user
+        ).first()
+        if not conversation:
+            return Response({"detail": "Conversation not found"}, status=404)
+
+        room_name = f"study_{conversation_id}"
+        user_name = request.user.get_username() if hasattr(request.user, 'get_username') else str(request.user)
+        token = generate_livekit_token(
+            room_name=room_name,
+            user_id=request.user.id,
+            user_name=user_name,
+        )
+
+        return Response({
+            "livekit_url": LIVEKIT_WS_URL,
+            "livekit_token": token,
+            "room_name": room_name,
+        })
+
+
+class StudyRoomStateView(APIView):
+    """
+    GET  -> poora saved whiteboard (`{"pages": [...]}`) wapas deta hai —
+            state kabhi save hi nahi hui to khali `{"pages": []}` (404 nahi,
+            taaki frontend har naye room ke liye error-log spam na kare).
+    PUT  -> poora whiteboard state overwrite karta hai (frontend periodic
+            auto-save `{"pages": [...]}` yahi bhejta hai).
+    """
+    permission_classes = [IsAuthenticated]
+
+    def _get_conversation(self, request, conversation_id):
+        return Conversation.objects.filter(
+            id=conversation_id, memberships__user=request.user
+        ).first()
+
+    def get(self, request, conversation_id):
+        conversation = self._get_conversation(request, conversation_id)
+        if not conversation:
+            return Response({"detail": "Conversation not found"}, status=404)
+
+        room_state = StudyRoomState.objects.filter(conversation=conversation).first()
+        if not room_state:
+            return Response({"pages": []})
+        return Response(room_state.state or {"pages": []})
+
+    def put(self, request, conversation_id):
+        conversation = self._get_conversation(request, conversation_id)
+        if not conversation:
+            return Response({"detail": "Conversation not found"}, status=404)
+
+        StudyRoomState.objects.update_or_create(
+            conversation=conversation,
+            defaults={"state": request.data, "updated_by": request.user},
+        )
+        return Response({"detail": "saved"})
+
+
+# ======================================================================
+# DEVICE TOKENS
+# ======================================================================
+class DeviceTokenView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        token = request.data.get('token')
+        platform = request.data.get('platform', 'android')
+        if not token:
+            return Response({'detail': "'token' required hai"}, status=400)
+
+        DeviceToken.objects.update_or_create(
+            token=token,
+            defaults={'user': request.user, 'platform': platform},
+        )
+        return Response({'detail': 'Device registered'})
+
+    def delete(self, request):
+        token = request.data.get('token')
+        if token:
+            DeviceToken.objects.filter(token=token, user=request.user).delete()
+        return Response({'detail': 'Device unregistered'})

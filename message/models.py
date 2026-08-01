@@ -408,3 +408,49 @@ class BlockedUser(BaseModel):
     class Meta(BaseModel.Meta):
         unique_together = ('blocker', 'blocked')
         indexes = [models.Index(fields=['blocker', 'blocked'])]
+
+
+
+# ======================================================================
+# ADD THIS TO models.py (kahi bhi, e.g. UserPresence ke aas paas)
+# ======================================================================
+class DeviceToken(BaseModel):
+    """
+    Har device ka FCM token yaha store hota hai. Ek user ke multiple
+    devices ho sakte hain (phone + tablet), isliye ForeignKey — OneToOne
+    nahi.
+    """
+    user = models.ForeignKey(User, on_delete=models.CASCADE, related_name='device_tokens')
+    token = models.CharField(max_length=255, unique=True)
+    platform = models.CharField(
+        max_length=10,
+        choices=[('android', 'Android'), ('ios', 'iOS'), ('web', 'Web')],
+        default='android',
+    )
+
+    class Meta:
+        indexes = [models.Index(fields=['user'])]
+
+
+# ======================================================================
+# STUDY ROOM — WHITEBOARD STATE
+# ------------------------------------------------------------
+# 🔥 NAYA — poora whiteboard (saari pages: strokes/shapes/text/sticky
+# notes, aur ab shared PDF/image ka `fileUrl`) yahan ek hi JSONField me
+# store hota hai. Frontend periodically (`saveStudyRoomState`) poora
+# `{"pages": [...]}` yahan PUT karta hai, aur room khulte hi
+# (`getStudyRoomState`) wahi wapas mil jaata hai — isse room reopen
+# karne wale ya baad me join karne wale ko bhi wahi board + shared file
+# dikhta hai jahan chhoda gaya tha.
+# ======================================================================
+class StudyRoomState(BaseModel):
+    conversation = models.OneToOneField(
+        Conversation, on_delete=models.CASCADE, related_name='study_room_state'
+    )
+    state = models.JSONField(default=dict, blank=True)
+    updated_by = models.ForeignKey(
+        User, null=True, blank=True, on_delete=models.SET_NULL, related_name='+'
+    )
+
+    class Meta:
+        indexes = [models.Index(fields=['conversation'])]
