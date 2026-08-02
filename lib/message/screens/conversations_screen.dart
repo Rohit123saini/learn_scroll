@@ -5,6 +5,7 @@ import 'package:timeago/timeago.dart' as timeago;
 
 import '../models/message_models.dart';
 import '../services/message_api_service.dart';
+import '../services/message_cache_service.dart';
 import 'chat_screen.dart';
 
 class ConversationsScreen extends StatefulWidget {
@@ -21,7 +22,21 @@ class _ConversationsScreenState extends State<ConversationsScreen> {
   @override
   void initState() {
     super.initState();
-    _loadConversations();
+    _loadFromCacheThenNetwork();
+  }
+
+  // Pehle cache se turant list dikhao (agar hai) — app khulte hi khaali
+  // spinner ki jagah purani list dikhti hai. Fresh data network se aate
+  // hi neeche se overwrite ho jaata hai aur naya cache save ho jaata hai.
+  Future<void> _loadFromCacheThenNetwork() async {
+    final cached = await MessageCacheService.getCachedConversations();
+    if (cached.isNotEmpty && mounted) {
+      setState(() {
+        _conversations = cached;
+        _isLoading = false;
+      });
+    }
+    _loadConversations(silent: cached.isNotEmpty);
   }
 
   Future<void> _loadConversations({bool silent = false}) async {
@@ -29,8 +44,16 @@ class _ConversationsScreenState extends State<ConversationsScreen> {
     try {
       final data = await MessageApiService.getConversations();
       if (mounted) setState(() { _conversations = data; _isLoading = false; });
+      MessageCacheService.saveConversations(data); // fire-and-forget, latest 30
     } catch (e) {
-      if (mounted) setState(() { _error = e.toString(); _isLoading = false; });
+      if (mounted) {
+        setState(() {
+          _isLoading = false;
+          // Cache se list already dikh rahi ho to error banner se use mat
+          // dabao — sirf tab dikhao jab list bilkul khaali ho.
+          if (_conversations.isEmpty) _error = e.toString();
+        });
+      }
     }
   }
 

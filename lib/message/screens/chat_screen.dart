@@ -28,6 +28,7 @@ import 'package:audioplayers/audioplayers.dart'; // 🔥 NAYA — audio ab inlin
 
 import '../models/message_models.dart';
 import '../services/message_api_service.dart';
+import '../services/message_cache_service.dart'; // 🔥 NAYA — 1-week local message cache
 import '../services/chat_socket_service.dart';
 import '../services/call_api_service.dart';
 import '../services/media_download_service.dart'; // 🔥 NAYA — media download
@@ -38,6 +39,7 @@ import '../../services/auth_service.dart';
 import 'call_screen.dart';
 import 'incoming_call_screen.dart'; // 🔥 NAYA — full-screen incoming call UI (outgoing call jaisa look)
 import 'study_room_screen.dart';
+import '../../widgets/sticker_picker_sheet.dart'; // 🔥 NAYA — animated Rive stickers (Emotions + Funny), chat & comments dono me reusable
 
 const _kEmojis = ['👍', '❤', '😂', '😮', '😢', '🙏'];
 
@@ -139,6 +141,17 @@ class _ChatScreenState extends State<ChatScreen> {
   }
 
   Future<void> _loadHistory() async {
+    // Pehle cache se turant dikhao (agar hai, 1 week ke andar ka) — chat
+    // kholte hi purane messages dikh jaate hain, network slow ho ya na ho.
+    final cached = await MessageCacheService.getCachedMessages(widget.conversation.id);
+    if (cached.isNotEmpty && mounted) {
+      setState(() {
+        _messages = cached.reversed.toList();
+        _isLoading = false;
+      });
+      _scrollToBottom();
+      _scanAlreadyDownloaded();
+    }
     try {
       final data = await MessageApiService.getMessages(widget.conversation.id, page: 1);
       if (mounted) {
@@ -149,12 +162,16 @@ class _ChatScreenState extends State<ChatScreen> {
         _scrollToBottom();
         _scanAlreadyDownloaded(); // 🔥 NAYA — WhatsApp jaisa: purane downloaded files pe "Open" dikhao
       }
+      MessageCacheService.saveMessages(widget.conversation.id, data); // fire-and-forget, 1 week tak valid
     } catch (e) {
       if (mounted) {
         setState(() => _isLoading = false);
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text("Failed to load messages: $e")),
-        );
+        // Cache se messages already dikh rahe hon to error se use mat dabao.
+        if (cached.isEmpty) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(content: Text("Failed to load messages: $e")),
+          );
+        }
       }
     }
   }
@@ -821,7 +838,10 @@ class _ChatScreenState extends State<ChatScreen> {
 
   void _showReactionPicker(MessageModel msg) {
     final myCurrent = msg.myReaction(_myUserId ?? '');
-    showModalBottomSheet(context: context, backgroundColor: Colors.white, shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(18))), builder: (_) => SafeArea(child: Padding(padding: const EdgeInsets.symmetric(vertical: 18), child: Row(mainAxisAlignment: MainAxisAlignment.spaceEvenly, children: _kEmojis.map((emoji) { final selected = emoji == myCurrent; return GestureDetector(onTap: () { Navigator.pop(context); _toggleReaction(msg, emoji); }, child: Container(padding: const EdgeInsets.all(8), decoration: BoxDecoration(color: selected ? const Color(0xFFEEF1FF) : null, shape: BoxShape.circle), child: Text(emoji, style: const TextStyle(fontSize: 26)))); }).toList()))));
+    // 🔥 NAYA — plain emoji ki jagah ab animated Rive sticker dikhta hai
+    // (stickerForEmoji helper se), lekin backend me wahi purana emoji
+    // string save/bheja jaata hai — koi data-format change nahi hua.
+    showModalBottomSheet(context: context, backgroundColor: Colors.white, shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(18))), builder: (_) => SafeArea(child: Padding(padding: const EdgeInsets.symmetric(vertical: 18), child: Row(mainAxisAlignment: MainAxisAlignment.spaceEvenly, children: _kEmojis.map((emoji) { final selected = emoji == myCurrent; return GestureDetector(onTap: () { Navigator.pop(context); _toggleReaction(msg, emoji); }, child: Container(padding: const EdgeInsets.all(6), decoration: BoxDecoration(color: selected ? const Color(0xFFEEF1FF) : null, shape: BoxShape.circle), child: stickerForEmoji(emoji, size: 40))); }).toList()))));
   }
 
   void _toggleReaction(MessageModel msg, String emoji) async {
@@ -1164,6 +1184,18 @@ class _ChatScreenState extends State<ChatScreen> {
 
     return SafeArea(child: Padding(padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8), child: Row(children: [
       IconButton(icon: const Icon(Icons.attach_file, color: Color(0xFF030F27)), onPressed: _showAttachmentSheet),
+      // 🔥 NAYA — animated sticker picker (Emotions + Funny). Tap karte hi
+      // chosen sticker ka emoji seedha message ki tarah bhej diya jaata hai.
+      IconButton(
+        icon: const Icon(Icons.emoji_emotions_outlined, color: Color(0xFF030F27)),
+        onPressed: () => showStickerPicker(
+          context,
+          onSelected: (emoji) {
+            setState(() => _textController.text = emoji);
+            _sendMessage();
+          },
+        ),
+      ),
       Expanded(child: TextField(controller: _textController, onChanged: _onTypingChanged, minLines: 1, maxLines: 4, decoration: InputDecoration(hintText: "Message...", filled: true, fillColor: Colors.white, contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10), border: OutlineInputBorder(borderRadius: BorderRadius.circular(25), borderSide: BorderSide.none)))),
       const SizedBox(width: 8),
       // 🔥 NAYA — WhatsApp jaisa hi: text khaali ho to "mic" (voice note),
@@ -1539,7 +1571,19 @@ class _MessageBubble extends StatelessWidget {
       return _multiImageGrid(context, urls, localPaths);
     }
 
-    final localPath = message.localFilePath; final url = message.fileUrl; Widget image;
+    final localPath = message.localFilePath;
+    // 🔧 FIX — ROOT CAUSE of the white/blank thumbnail box: gallery se
+    // (chahe EK hi photo kyun na ho) `_pickAndSendMultipleMedia()` se
+    // hokar jaata hai, jo sirf `fileUrls` (list) set karta hai, singular
+    // `fileUrl` kabhi nahi. Neeche wala single-image path pehle sirf
+    // `message.fileUrl` dekhta tha — list-only message ke liye wo hamesha
+    // null milta tha, isliye URL hi nahi milta tha aur placeholder icon
+    // (safed box) dikh jaata tha. Ab agar singular `fileUrl` na ho to
+    // `fileUrls` ke pehle item pe fallback karte hain.
+    final url = (message.fileUrl != null && message.fileUrl!.isNotEmpty)
+        ? message.fileUrl
+        : (urls.isNotEmpty ? urls.first : null);
+    Widget image;
     if (localPath != null && message.isSending) { image = Image.file(File(localPath), width: 200, height: 200, fit: BoxFit.cover); }
     else if (url != null && url.isNotEmpty) { image = CachedNetworkImage(imageUrl: url, width: 200, height: 200, fit: BoxFit.cover, placeholder: (_, __) => const SizedBox(width: 200, height: 200, child: Center(child: CircularProgressIndicator(strokeWidth: 2))), errorWidget: (_, __, ___) => const SizedBox(width: 200, height: 200, child: Icon(Icons.broken_image, color: Colors.grey))); }
     else { image = const SizedBox(width: 200, height: 200, child: Icon(Icons.image, color: Colors.grey)); }
@@ -1858,7 +1902,10 @@ class _MediaPreviewScreenState extends State<_MediaPreviewScreen> {
                 return InteractiveViewer(
                   minScale: 1,
                   maxScale: 4,
-                  child: Center(child: Image.file(File(f.path), fit: BoxFit.contain)),
+                  // 🔧 FIX: SizedBox.expand — same reason as fullscreen
+                  // viewers, taaki image poore available space me contain
+                  // ho, chota block na dikhe.
+                  child: SizedBox.expand(child: Image.file(File(f.path), fit: BoxFit.contain)),
                 );
               },
             ),
@@ -2022,57 +2069,68 @@ class _ImageViewerScreenState extends State<_ImageViewerScreen> {
     return Scaffold(
       backgroundColor: Colors.black.withOpacity(_bgOpacity),
       body: Stack(children: [
+        // 🔧 FIX — ROOT CAUSE of "image chhoti si upar dikhti hai, baaki
+        // black": pehle Positioned.fill > GestureDetector > Transform.translate
+        // > InteractiveViewer > SizedBox.expand chain me size constraints
+        // reliably poori screen tak nahi pahunch rahe the — InteractiveViewer
+        // apne chhote/"natural" size par hi render ho raha tha. LayoutBuilder
+        // se ab explicitly screen ke poore available width/height ko ek
+        // tight SizedBox me le kar seedha InteractiveViewer ko diya jaata
+        // hai — ab size ambiguity ki koi gunjaish nahi.
         Positioned.fill(
-          // 🔥 NAYA: neeche/upar drag karte hi image screen ke saath fade
-          // hoke dismiss ho jaata hai — pinch-zoomed state me disabled
-          // rehta hai taaki accidental swipe se galti se band na ho.
-          child: GestureDetector(
-            onVerticalDragUpdate: _zoomed
-                ? null
-                : (details) {
-                    setState(() {
-                      _dragOffset += details.delta.dy;
-                      _bgOpacity = (1 - (_dragOffset.abs() / 300)).clamp(0.15, 1.0);
-                    });
-                  },
-            onVerticalDragEnd: _zoomed
-                ? null
-                : (details) {
-                    if (_dragOffset.abs() > 120) {
-                      Navigator.pop(context);
-                    } else {
-                      setState(() {
-                        _dragOffset = 0;
-                        _bgOpacity = 1;
-                      });
-                    }
-                  },
-            onDoubleTapDown: (d) => _onDoubleTapDown(d, context),
-            onDoubleTap: () => setState(() {}),
-            child: Transform.translate(
-              offset: Offset(0, _dragOffset),
-              child: InteractiveViewer(
-                transformationController: _transform,
-                minScale: 1,
-                maxScale: 6,
-                // 🔧 FIX: boundaryMargin default (zero) zoom hone ke baad
-                // panning ko bahut tightly clamp kar deta tha, jisse image
-                // "snap" karke ajeeb jagah chali jaati thi. Infinity margin
-                // se ab zoom-in karke image ko screen ke kisi bhi hisse
-                // tak free-form pan/zoom kar sakte ho, WhatsApp/Instagram
-                // jaisa hi proper full-screen zoom feel.
-                boundaryMargin: const EdgeInsets.all(double.infinity),
-                onInteractionEnd: (_) => setState(() => _zoomed = _transform.value.getMaxScaleOnAxis() > 1.01),
-                child: Center(
-                  child: CachedNetworkImage(
-                    imageUrl: widget.url,
-                    fit: BoxFit.contain,
-                    placeholder: (_, __) => const CircularProgressIndicator(color: Colors.white),
-                    errorWidget: (_, __, ___) => const Icon(Icons.broken_image, color: Colors.white38, size: 60),
+          child: LayoutBuilder(
+            builder: (context, constraints) {
+              return GestureDetector(
+                onVerticalDragUpdate: _zoomed
+                    ? null
+                    : (details) {
+                        setState(() {
+                          _dragOffset += details.delta.dy;
+                          _bgOpacity = (1 - (_dragOffset.abs() / 300)).clamp(0.15, 1.0);
+                        });
+                      },
+                onVerticalDragEnd: _zoomed
+                    ? null
+                    : (details) {
+                        if (_dragOffset.abs() > 120) {
+                          Navigator.pop(context);
+                        } else {
+                          setState(() {
+                            _dragOffset = 0;
+                            _bgOpacity = 1;
+                          });
+                        }
+                      },
+                onDoubleTapDown: (d) => _onDoubleTapDown(d, context),
+                onDoubleTap: () => setState(() {}),
+                child: Transform.translate(
+                  offset: Offset(0, _dragOffset),
+                  child: SizedBox(
+                    width: constraints.maxWidth,
+                    height: constraints.maxHeight,
+                    child: InteractiveViewer(
+                      transformationController: _transform,
+                      minScale: 1,
+                      maxScale: 6,
+                      boundaryMargin: const EdgeInsets.all(double.infinity),
+                      onInteractionEnd: (_) => setState(() => _zoomed = _transform.value.getMaxScaleOnAxis() > 1.01),
+                      child: SizedBox(
+                        width: constraints.maxWidth,
+                        height: constraints.maxHeight,
+                        child: CachedNetworkImage(
+                          imageUrl: widget.url,
+                          fit: BoxFit.contain,
+                          width: constraints.maxWidth,
+                          height: constraints.maxHeight,
+                          placeholder: (_, __) => const Center(child: CircularProgressIndicator(color: Colors.white)),
+                          errorWidget: (_, __, ___) => const Center(child: Icon(Icons.broken_image, color: Colors.white38, size: 60)),
+                        ),
+                      ),
+                    ),
                   ),
                 ),
-              ),
-            ),
+              );
+            },
           ),
         ),
         SafeArea(
@@ -2191,23 +2249,35 @@ class _ZoomableImageState extends State<_ZoomableImage> {
 
   @override
   Widget build(BuildContext context) {
-    return GestureDetector(
-      onDoubleTapDown: _onDoubleTapDown,
-      onDoubleTap: () => setState(() {}),
-      child: InteractiveViewer(
-        transformationController: _transform,
-        minScale: 1,
-        maxScale: 6,
-        boundaryMargin: const EdgeInsets.all(double.infinity),
-        child: Center(
-          child: CachedNetworkImage(
-            imageUrl: widget.url,
-            fit: BoxFit.contain,
-            placeholder: (_, __) => const CircularProgressIndicator(color: Colors.white),
-            errorWidget: (_, __, ___) => const Icon(Icons.broken_image, color: Colors.white38, size: 60),
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        return GestureDetector(
+          onDoubleTapDown: _onDoubleTapDown,
+          onDoubleTap: () => setState(() {}),
+          child: SizedBox(
+            width: constraints.maxWidth,
+            height: constraints.maxHeight,
+            child: InteractiveViewer(
+              transformationController: _transform,
+              minScale: 1,
+              maxScale: 6,
+              boundaryMargin: const EdgeInsets.all(double.infinity),
+              child: SizedBox(
+                width: constraints.maxWidth,
+                height: constraints.maxHeight,
+                child: CachedNetworkImage(
+                  imageUrl: widget.url,
+                  fit: BoxFit.contain,
+                  width: constraints.maxWidth,
+                  height: constraints.maxHeight,
+                  placeholder: (_, __) => const Center(child: CircularProgressIndicator(color: Colors.white)),
+                  errorWidget: (_, __, ___) => const Center(child: Icon(Icons.broken_image, color: Colors.white38, size: 60)),
+                ),
+              ),
+            ),
           ),
-        ),
-      ),
+        );
+      },
     );
   }
 }
@@ -2235,6 +2305,29 @@ class _AudioBubbleState extends State<_AudioBubble> {
   @override
   void initState() {
     super.initState();
+    // 🔥 NAYA — FIX: audio hamesha LOUDSPEAKER (media/speaker) se play ho,
+    // call/earpiece speaker se nahi. Bina isko set kiye, Android kabhi-kabhi
+    // audio route ko earpiece pe bhej deta hai (khaaskar jab pehle koi call
+    // ya WebRTC session chal chuki ho aur audio focus/route already earpiece
+    // pe set ho). Ye explicitly speakerphone + media usage force karta hai.
+    _player.setAudioContext(AudioContext(
+      android: const AudioContextAndroid(
+        isSpeakerphoneOn: true,
+        stayAwake: false,
+        contentType: AndroidContentType.music,
+        usageType: AndroidUsageType.media,
+        audioFocus: AndroidAudioFocus.gain,
+      ),
+      iOS: AudioContextIOS(
+        // 🔧 FIX: `defaultToSpeaker` option sirf `playAndRecord` category
+        // ke saath allowed hai — `playback` ke saath ye assertion fail
+        // karke red error chat me dikha raha tha. `playback` category
+        // already default speaker se play karta hai (earpiece se nahi),
+        // isliye option ki zaroorat hi nahi thi.
+        category: AVAudioSessionCategory.playback,
+        options: const {},
+      ),
+    ));
     _player.onPlayerStateChanged.listen((s) {
       if (mounted) setState(() => _state = s);
     });

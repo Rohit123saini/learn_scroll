@@ -11,6 +11,7 @@ import 'package:file_selector/file_selector.dart';
 import 'package:image_picker/image_picker.dart'; // 🔥 NAYA — camera se seedha photo capture karne ke liye
 import 'package:path_provider/path_provider.dart';
 import 'package:syncfusion_flutter_pdfviewer/pdfviewer.dart';
+import 'package:printing/printing.dart'; // 🔥 NAYA — PDF ke har page ko image me rasterize karke multi-page split karne ke liye (pubspec.yaml: printing: ^5.12.0)
 import 'package:livekit_client/livekit_client.dart';
 import 'package:uuid/uuid.dart';
 import 'package:permission_handler/permission_handler.dart';
@@ -148,6 +149,11 @@ class StudyRoomScreen extends StatefulWidget {
   // button aur AppBar title ke liye.
   final String? peerName;
   final String? peerAvatar;
+  // 🔥 NAYA — khud (current user) ka naam/photo. Isse study room khud
+  // apna video/avatar window bana sakta hai, chahe caller
+  // `initialParticipants` me self ko shaamil na kare.
+  final String? currentUserName;
+  final String? currentUserAvatar;
 
   const StudyRoomScreen({
     super.key,
@@ -157,6 +163,8 @@ class StudyRoomScreen extends StatefulWidget {
     this.livekitRoom,
     this.peerName,
     this.peerAvatar,
+    this.currentUserName,
+    this.currentUserAvatar,
   });
 
   @override
@@ -181,6 +189,11 @@ class _StudyRoomScreenState extends State<StudyRoomScreen> {
   List<WhiteboardPage> _pages = [WhiteboardPage(id: 'page_1')];
   int _currentPageIndex = 0;
   WhiteboardPage get _page => _pages[_currentPageIndex];
+  // 🔥 NAYA — jo pages abhi banaye/receive hue hain lekin user ne khud
+  // navigate karke dekhe nahi hain (PDF-split ke extra pages, ya koi
+  // doosra participant jo naya page add kare) — inpe blue "unread" dot
+  // dikhta hai, jab tak user tab pe tap na kare.
+  final Set<String> _unvisitedPageIds = {};
 
   // Drawing Config State
   ToolType _activeTool = ToolType.marker;
@@ -321,6 +334,14 @@ class _StudyRoomScreenState extends State<StudyRoomScreen> {
   void initState() {
     super.initState();
     _windows = List.from(widget.initialParticipants);
+    // 🔥 FIX — pehle agar caller `initialParticipants` me current user ko
+    // shaamil nahi karta tha (jaise ab tak chat_screen se hamesha `[]`
+    // pass ho raha tha), to apna khud ka video/avatar block KABHI nahi
+    // banta tha, aur `_announceSelfJoined()` bhi silently kuch nahi karta
+    // tha (self hi `_windows` me nahi milta tha) — isliye doosre
+    // participants ko bhi ye user room me hai ye pata hi nahi chalta tha.
+    // Ab yahan defensively apna window guaranteed bana dete hain.
+    _ensureSelfWindow();
     _timerRemaining = _timer.totalDuration;
     _restoreBoardState();
     _connectSocket();
@@ -351,6 +372,25 @@ class _StudyRoomScreenState extends State<StudyRoomScreen> {
     setState(() {
       _windows.removeWhere((w) => w.userId == identity);
     });
+  }
+
+  // 🔥 NAYA — apna window guaranteed banata hai agar pehle se `_windows`
+  // me nahi hai (e.g. caller ne `initialParticipants` me self shaamil
+  // nahi kiya). Bina isske apna video/avatar block kabhi visible nahi
+  // hota, aur discovery handshake (`_announceSelfJoined`) bhi chal nahi
+  // paata.
+  void _ensureSelfWindow() {
+    final alreadyThere = _windows.any((w) => w.userId == widget.currentUserId);
+    if (alreadyThere) return;
+    final name = widget.currentUserName?.trim();
+    _windows.add(UserProfileWindowModel(
+      userId: widget.currentUserId,
+      displayName: (name != null && name.isNotEmpty) ? name : 'Participant',
+      avatarUrl: widget.currentUserAvatar,
+      position: const Offset(16, 90),
+      size: const Size(120, 160),
+      zIndex: ++_topZIndex,
+    ));
   }
 
   // 🔥 NAYA — apna profile window (agar `initialParticipants` me pehle se
@@ -587,7 +627,13 @@ class _StudyRoomScreenState extends State<StudyRoomScreen> {
         case 'add_page':
           {
             final newPage = WhiteboardPage.fromJson(data['page']);
-            if (!_pages.any((p) => p.id == newPage.id)) _pages.add(newPage);
+            if (!_pages.any((p) => p.id == newPage.id)) {
+              _pages.add(newPage);
+              // 🔥 NAYA — koi doosra participant (ya PDF-split) naya page
+              // laaya — jab tak main khud us page pe navigate nahi karta,
+              // blue dot dikhana hai.
+              _unvisitedPageIds.add(newPage.id);
+            }
             if ((newPage.fileUrl ?? '').isNotEmpty) {
               _pendingFileLoads.add({
                 'pageId': newPage.id,
@@ -654,6 +700,7 @@ class _StudyRoomScreenState extends State<StudyRoomScreen> {
               _pageImagePaths.remove(removedId);
               _myActionsByPage.remove(removedId);
               _pageFileSourceUrl.remove(removedId);
+              _unvisitedPageIds.remove(removedId);
             }
             break;
           }
@@ -1027,6 +1074,7 @@ class _StudyRoomScreenState extends State<StudyRoomScreen> {
       _pagePdfPaths.remove(removedId);
       _pageImagePaths.remove(removedId);
       _pageFileSourceUrl.remove(removedId);
+      _unvisitedPageIds.remove(removedId);
       _isDirty = true;
     });
     _sendRoomEvent('remove_page', {'pageId': removedId});
@@ -1465,7 +1513,6 @@ class _StudyRoomScreenState extends State<StudyRoomScreen> {
   // karni pade.
   Future<void> _loadPickedOrCapturedFile(File pickedFile) async {
     final path = pickedFile.path;
-    final pageId = _page.id;
     final lowerPath = path.toLowerCase();
     final isPdf = lowerPath.endsWith('.pdf');
     final isPpt = lowerPath.endsWith('.ppt') || lowerPath.endsWith('.pptx');
@@ -1485,20 +1532,26 @@ class _StudyRoomScreenState extends State<StudyRoomScreen> {
       return;
     }
 
-    final fileType = isPdf ? 'pdf' : 'image';
+    // 🔧 FIX — pehle poori PDF ek hi whiteboard page ke andar SfPdfViewer
+    // me (scrollable) daal di jaati thi, jisse poora document properly
+    // padhna mushkil ho jaata tha. Ab har PDF page ko rasterize karke
+    // apna khud ka WhiteboardPage banate hain — existing multi-page
+    // system (page tabs) se hi user ek-ek page karke poora, clearly
+    // padh sakta hai, jaise normal image pages me hota hai.
+    if (isPdf) {
+      await _loadPdfAsPages(pickedFile);
+      return;
+    }
+
+    final pageId = _page.id;
 
     // Apne liye turant local preview (upload ka wait nahi karna) + Pan/Zoom
     // on, taaki poori file/document turant scroll ho sake. Annotate karne
     // ke liye user ab toolbar wale seedhe "hand" button se draw mode me
     // aa sakta hai.
     setState(() {
-      if (isPdf) {
-        _pagePdfPaths[pageId] = path;
-        _pageImagePaths.remove(pageId);
-      } else {
-        _pageImagePaths[pageId] = path;
-        _pagePdfPaths.remove(pageId);
-      }
+      _pageImagePaths[pageId] = path;
+      _pagePdfPaths.remove(pageId);
       _panZoomMode = true;
     });
 
@@ -1519,7 +1572,7 @@ class _StudyRoomScreenState extends State<StudyRoomScreen> {
       final page = _findPage(pageId);
       if (page != null) {
         page.fileUrl = uploaded.fileUrl;
-        page.fileType = fileType;
+        page.fileType = 'image';
       }
       // Apna khud ka upload hai — dobara download karke overwrite karne ki
       // zaroorat nahi, already best-quality local copy maujood hai.
@@ -1529,7 +1582,7 @@ class _StudyRoomScreenState extends State<StudyRoomScreen> {
       _sendRoomEvent('load_page_file', {
         'pageId': pageId,
         'fileUrl': uploaded.fileUrl,
-        'fileType': fileType,
+        'fileType': 'image',
       });
 
       if (mounted) {
@@ -1549,6 +1602,110 @@ class _StudyRoomScreenState extends State<StudyRoomScreen> {
       }
     }
   }
+
+  // 🔥 NAYA — PDF ke har page ko ek image me rasterize karke, har page ko
+  // apna khud ka WhiteboardPage bana dete hain. Pehla PDF page currently
+  // khuli hui page me hi load hota hai; baaki har page ke liye naya page
+  // banta hai (jaise "+" button se manually banate ho), taaki page-tabs
+  // se navigate karke har page poora, screen-fit clearly padha ja sake —
+  // ek hi lambi scrollable file me nahi.
+  Future<void> _loadPdfAsPages(File pdfFile) async {
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Splitting PDF into pages...'), duration: Duration(seconds: 2)),
+      );
+    }
+
+    List<int> pdfBytes;
+    try {
+      pdfBytes = await pdfFile.readAsBytes();
+    } catch (e) {
+      developer.log('Study room PDF read failed: $e');
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Could not read the PDF: $e')),
+        );
+      }
+      return;
+    }
+
+    final tempDir = await getTemporaryDirectory();
+    final WhiteboardPage firstPage = _page;
+    int pageNumber = 0;
+
+    try {
+      await for (final rasterPage in Printing.raster(Uint8List.fromList(pdfBytes), dpi: 150)) {
+        pageNumber++;
+        final pngBytes = await rasterPage.toPng();
+        final imgPath =
+            "${tempDir.path}/pdfpage_${DateTime.now().microsecondsSinceEpoch}_$pageNumber.png";
+        await File(imgPath).writeAsBytes(pngBytes);
+
+        final bool isFirst = pageNumber == 1;
+        final WhiteboardPage targetPage =
+            isFirst ? firstPage : WhiteboardPage(id: '${firstPage.id}_pdf_$pageNumber');
+
+        setState(() {
+          _pageImagePaths[targetPage.id] = imgPath;
+          _pagePdfPaths.remove(targetPage.id);
+          if (!isFirst && !_pages.any((p) => p.id == targetPage.id)) {
+            _pages.add(targetPage);
+            // Sirf jis page pe user abhi hai wahi "visited" mana jaata
+            // hai — baaki naye bane PDF pages "unvisited" rehte hain jab
+            // tak user khud unke tab pe tap na kare (blue dot dikhega).
+            _unvisitedPageIds.add(targetPage.id);
+          }
+          _panZoomMode = true;
+        });
+
+        // Har page ka apna alag image upload + sync karo, taaki baaki sab
+        // participants (aur baad me join karne wale) ko bhi poora
+        // multi-page split dikhe, sirf ek hi device pe nahi.
+        try {
+          final uploaded = await MessageApiService.uploadFile(File(imgPath));
+          setState(() {
+            targetPage.fileUrl = uploaded.fileUrl;
+            targetPage.fileType = 'image';
+          });
+          _pageFileSourceUrl[targetPage.id] = uploaded.fileUrl;
+          if (isFirst) {
+            _sendRoomEvent('load_page_file', {
+              'pageId': targetPage.id,
+              'fileUrl': uploaded.fileUrl,
+              'fileType': 'image',
+            });
+          } else {
+            _sendRoomEvent('add_page', {'page': targetPage.toJson()});
+          }
+        } catch (e) {
+          developer.log('Study room PDF page $pageNumber upload failed: $e');
+        }
+      }
+    } catch (e) {
+      developer.log('Study room PDF rasterize failed: $e');
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Could not split the PDF: $e')),
+        );
+      }
+      return;
+    }
+
+    _isDirty = true;
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            pageNumber > 1
+                ? 'PDF split into $pageNumber pages — use the page tabs above to read each one fully.'
+                : 'PDF shared — everyone can see it now. Tap the hand icon to draw on it.',
+          ),
+          duration: const Duration(seconds: 3),
+        ),
+      );
+    }
+  }
+
 
   // 🔥 NAYA — koi doosra participant (ya restore-on-reopen) ke through
   // mila file URL yahan poora download hota hai aur local disk pe save
@@ -2070,6 +2227,7 @@ class _StudyRoomScreenState extends State<StudyRoomScreen> {
 
   // --- PAGE TABS ---
   Widget _buildPageTabs() {
+    final hasUnvisitedPages = _unvisitedPageIds.isNotEmpty;
     return Container(
       height: 44,
       color: const Color(0xFF0D0D15),
@@ -2081,32 +2239,85 @@ class _StudyRoomScreenState extends State<StudyRoomScreen> {
               itemCount: _pages.length,
               itemBuilder: (context, index) {
                 final selected = index == _currentPageIndex;
+                final isUnvisited = _unvisitedPageIds.contains(_pages[index].id);
                 return GestureDetector(
-                  onTap: () => setState(() => _currentPageIndex = index),
+                  onTap: () => setState(() {
+                    _currentPageIndex = index;
+                    // 🔥 NAYA — tap karte hi ye page "visited" ho jaata hai,
+                    // uska blue dot hat jaata hai.
+                    _unvisitedPageIds.remove(_pages[index].id);
+                  }),
                   child: Container(
                     margin: const EdgeInsets.symmetric(horizontal: 4, vertical: 6),
-                    padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 6),
-                    decoration: BoxDecoration(
-                      color: selected ? Colors.blueAccent : Colors.white10,
-                      borderRadius: BorderRadius.circular(16),
-                    ),
-                    child: Text(
-                      'Page ${index + 1}',
-                      style: TextStyle(
-                        color: Colors.white,
-                        fontWeight: selected ? FontWeight.bold : FontWeight.normal,
-                        fontSize: 12,
-                      ),
+                    child: Stack(
+                      clipBehavior: Clip.none,
+                      children: [
+                        Container(
+                          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 6),
+                          decoration: BoxDecoration(
+                            color: selected ? Colors.blueAccent : Colors.white10,
+                            borderRadius: BorderRadius.circular(16),
+                          ),
+                          child: Text(
+                            'Page ${index + 1}',
+                            style: TextStyle(
+                              color: Colors.white,
+                              fontWeight: selected ? FontWeight.bold : FontWeight.normal,
+                              fontSize: 12,
+                            ),
+                          ),
+                        ),
+                        // 🔥 NAYA — is page pe abhi tak navigate nahi kiya —
+                        // WhatsApp jaisa hi unread blue dot.
+                        if (isUnvisited)
+                          Positioned(
+                            top: -2,
+                            right: -2,
+                            child: Container(
+                              width: 9,
+                              height: 9,
+                              decoration: BoxDecoration(
+                                color: Colors.blueAccent,
+                                shape: BoxShape.circle,
+                                border: Border.all(color: const Color(0xFF0D0D15), width: 1.5),
+                              ),
+                            ),
+                          ),
+                      ],
                     ),
                   ),
                 );
               },
             ),
           ),
-          IconButton(
-            icon: const Icon(Icons.add_box_outlined, color: Colors.white),
-            tooltip: 'Add Page',
-            onPressed: _addPage,
+          // 🔥 NAYA — jis icon se page add hota hai usi pe blue dot: batata
+          // hai ki koi naya page bana hai jo abhi tak dekha nahi gaya
+          // (jaise chat list me unread message ka blue dot).
+          Stack(
+            clipBehavior: Clip.none,
+            children: [
+              IconButton(
+                icon: const Icon(Icons.add_box_outlined, color: Colors.white),
+                tooltip: 'Add Page',
+                onPressed: _addPage,
+              ),
+              if (hasUnvisitedPages)
+                Positioned(
+                  top: 6,
+                  right: 6,
+                  child: IgnorePointer(
+                    child: Container(
+                      width: 10,
+                      height: 10,
+                      decoration: BoxDecoration(
+                        color: Colors.blueAccent,
+                        shape: BoxShape.circle,
+                        border: Border.all(color: const Color(0xFF0D0D15), width: 1.5),
+                      ),
+                    ),
+                  ),
+                ),
+            ],
           ),
           IconButton(
             icon: const Icon(Icons.delete_outline, color: Colors.redAccent),
@@ -2340,14 +2551,27 @@ class _StudyRoomScreenState extends State<StudyRoomScreen> {
                         for (int i = 0; i < preview.length; i++)
                           Positioned(
                             left: i * 14.0,
-                            child: CircleAvatar(
-                              radius: 13,
-                              backgroundColor: Colors.white24,
-                              backgroundImage:
-                                  preview[i].avatarUrl != null ? NetworkImage(preview[i].avatarUrl!) : null,
-                              child: preview[i].avatarUrl == null
-                                  ? const Icon(Icons.person, size: 14, color: Colors.white)
-                                  : null,
+                            child: Stack(
+                              clipBehavior: Clip.none,
+                              children: [
+                                CircleAvatar(
+                                  radius: 13,
+                                  backgroundColor: Colors.white24,
+                                  backgroundImage:
+                                      preview[i].avatarUrl != null ? NetworkImage(preview[i].avatarUrl!) : null,
+                                  child: preview[i].avatarUrl == null
+                                      ? const Icon(Icons.person, size: 14, color: Colors.white)
+                                      : null,
+                                ),
+                                // 🔥 NAYA — chota active-status dot, taaki
+                                // collapsed pill se hi pata chale ki ye
+                                // participant abhi room me active hai.
+                                Positioned(
+                                  right: -1,
+                                  bottom: -1,
+                                  child: _buildActiveDot(isSelf: preview[i].userId == widget.currentUserId),
+                                ),
+                              ],
                             ),
                           ),
                       ],
@@ -2507,7 +2731,40 @@ class _StudyRoomScreenState extends State<StudyRoomScreen> {
               ),
             ),
           ),
+          // 🔥 NAYA — top-right green dot: ye participant is waqt room me
+          // actively joined/connected hai (self ke liye _roomCall ki real
+          // connection state, doosron ke liye unka window tabhi tak yahan
+          // rehta hai jab tak wo LiveKit room me hain).
+          Positioned(top: 6, right: 6, child: _buildActiveDot(isSelf: isSelf)),
         ],
+      ),
+    );
+  }
+
+  // 🔥 NAYA — chota "active in room" status dot. Self ke liye asli connection
+  // state (connecting = amber, connected = green, error/disconnected = grey)
+  // dikhata hai; doosre participants ke liye green — kyunki unka window
+  // sirf tab tak `_windows` me rehta hai jab tak wo LiveKit room me
+  // actively joined hain (leave hote hi `_onRemoteParticipantLeft` window
+  // hata deta hai).
+  Widget _buildActiveDot({required bool isSelf}) {
+    Color color;
+    if (isSelf) {
+      color = _roomCall.isConnected
+          ? Colors.greenAccent
+          : _roomCall.isConnecting
+              ? Colors.amber
+              : Colors.white38;
+    } else {
+      color = Colors.greenAccent;
+    }
+    return Container(
+      width: 12,
+      height: 12,
+      decoration: BoxDecoration(
+        color: color,
+        shape: BoxShape.circle,
+        border: Border.all(color: const Color(0xFF2A2A3C), width: 2),
       ),
     );
   }
@@ -2603,6 +2860,8 @@ class _StudyRoomScreenState extends State<StudyRoomScreen> {
                     child: Icon(micIsOn ? Icons.mic : Icons.mic_off,
                         size: 14, color: micIsOn ? Colors.white70 : Colors.redAccent),
                   ),
+                // 🔥 NAYA — active-in-room green/amber dot, jaisa grid tile me.
+                Positioned(top: 6, right: 6, child: _buildActiveDot(isSelf: isSelf)),
                 Positioned(
                   right: 0,
                   bottom: 0,

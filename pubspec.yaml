@@ -76,8 +76,12 @@ dependencies:
   printing: ^5.15.0
   flutter_portal: ^1.1.4
   connectivity_plus: ^7.3.1
+  lottie: ^3.5.1
+  rive: ^0.14.10
+  flutter_callkit_incoming: ^2.5.0 
 dependency_overrides:
-  flutter_callkit_incoming: 2.0.4+2
+  # flutter_callkit_incoming: 2.0.4+2
+  flutter_callkit_incoming: ^2.5.0
 dev_dependencies:
   flutter_test:
     sdk: flutter
@@ -101,8 +105,9 @@ flutter:
   # the material Icons class.
   uses-material-design: true
   assets:
-    - assets/sounds/outgoing_ring.mp3
-    - assets/sounds/incoming_ring.mp3
+    - assets/sounds/outgoing_ring.wav
+    - assets/sounds/incoming_ring.wav
+    - assets/sounds/call_waiting.wav
   # To add assets to your application, add an assets section, like this:
   # assets:
   #   - images/a_dot_burr.jpeg

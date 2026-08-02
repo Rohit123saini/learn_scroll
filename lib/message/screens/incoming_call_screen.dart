@@ -14,7 +14,7 @@
 // pubspec.yaml me ringtone asset declare karna zaroori hai:
 //   flutter:
 //     assets:
-//       - assets/sounds/ringtone.wav
+//       - assets/sounds/incoming_ring.wav
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart' show HapticFeedback;
@@ -120,7 +120,7 @@ class _IncomingCallScreenState extends State<IncomingCallScreen>
     } catch (_) {}
     try {
       await _ringtonePlayer.setReleaseMode(ReleaseMode.loop);
-      await _ringtonePlayer.play(AssetSource('sounds/ringtone.wav'));
+      await _ringtonePlayer.play(AssetSource('sounds/incoming_ring.wav'));
     } catch (_) {
       // Ringtone asset na mile ya audio init fail ho to bhi call popup
       // normally kaam karta rahe — silent fail.

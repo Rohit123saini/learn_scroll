@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 import 'package:cached_network_image/cached_network_image.dart';
 import 'package:livekit_client/livekit_client.dart';
 import 'package:permission_handler/permission_handler.dart';
+import 'package:audioplayers/audioplayers.dart'; // 🔥 NAYA — outgoing ring + call-waiting tone
 import '../services/call_manager.dart';
 import '../services/call_api_service.dart'; // 🔥 NAYA — call waiting accept ke liye
 
@@ -45,6 +46,15 @@ class _CallScreenState extends State<CallScreen> with SingleTickerProviderStateM
   // connecting/ringing (band ho jaata hai jaise hi call connect hoti hai) ----------
   late final AnimationController _pulseController;
 
+  // ---------- Outgoing ring (jab hum call kar rahe hain aur doosri taraf
+  // abhi accept nahi hui) + call-waiting tone (jab isi call ke dauraan
+  // koi doosri call aa jaaye) — dono AssetSource se play hote hain, incoming
+  // call ka ringtone/vibration IncomingCallScreen khud handle karta hai. ----------
+  final AudioPlayer _outgoingRingPlayer = AudioPlayer();
+  final AudioPlayer _waitingTonePlayer = AudioPlayer();
+  bool _outgoingRingPlaying = false;
+  bool _waitingTonePlaying = false;
+
   // 🔥 NAYA — control bar (mute/speaker/etc icons) 3 second baad apne aap
   // fade ho jaata hai; screen pe kahin bhi tap karne se wapas dikh jaata
   // hai aur timer reset ho jaata hai.
@@ -85,10 +95,49 @@ class _CallScreenState extends State<CallScreen> with SingleTickerProviderStateM
       peerName: widget.peerName,
       peerAvatar: widget.peerAvatar,
     );
+    _syncRingSounds();
   }
 
   void _onManagerChanged() {
     if (mounted) setState(() {});
+    _syncRingSounds();
+  }
+
+  // Manager ki current state dekh kar outgoing-ring / call-waiting tone
+  // start/stop karta hai — jitni baar bhi _cm change ho, ye dobara call
+  // hota hai isliye dono sounds hamesha sahi state me rehte hain.
+  Future<void> _syncRingSounds() async {
+    // Outgoing ring — sirf caller ke liye, jab tak doosri taraf connect
+    // (ya reconnect) na ho jaaye.
+    final shouldRing = widget.isCaller && !_cm.remoteConnected && !_cm.isReconnecting;
+    if (shouldRing && !_outgoingRingPlaying) {
+      _outgoingRingPlaying = true;
+      try {
+        await _outgoingRingPlayer.setReleaseMode(ReleaseMode.loop);
+        await _outgoingRingPlayer.play(AssetSource('sounds/outgoing_ring.wav'));
+      } catch (_) {}
+    } else if (!shouldRing && _outgoingRingPlaying) {
+      _outgoingRingPlaying = false;
+      try {
+        await _outgoingRingPlayer.stop();
+      } catch (_) {}
+    }
+
+    // Call-waiting tone — jab isi call ke dauraan koi doosri incoming call
+    // aa jaaye (banner dikhne tak).
+    final shouldWaitTone = _cm.waitingCallId != null;
+    if (shouldWaitTone && !_waitingTonePlaying) {
+      _waitingTonePlaying = true;
+      try {
+        await _waitingTonePlayer.setReleaseMode(ReleaseMode.loop);
+        await _waitingTonePlayer.play(AssetSource('sounds/call_waiting.wav'));
+      } catch (_) {}
+    } else if (!shouldWaitTone && _waitingTonePlaying) {
+      _waitingTonePlaying = false;
+      try {
+        await _waitingTonePlayer.stop();
+      } catch (_) {}
+    }
   }
 
   @override
@@ -96,6 +145,10 @@ class _CallScreenState extends State<CallScreen> with SingleTickerProviderStateM
     _cm.removeListener(_onManagerChanged);
     _pulseController.dispose();
     _hideControlsTimer?.cancel();
+    _outgoingRingPlayer.stop();
+    _outgoingRingPlayer.dispose();
+    _waitingTonePlayer.stop();
+    _waitingTonePlayer.dispose();
     super.dispose();
   }
 

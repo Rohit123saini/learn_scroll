@@ -37,6 +37,14 @@ class UserMini {
       displayName: json['display_name']?.toString() ?? 'Unknown',
     );
   }
+
+  // 🔥 NAYA — cache me save karne ke liye (SharedPreferences me sirf
+  // JSON string ja sakti hai, isliye har model ko wapas Map me todna
+  // padta hai; fromJson isi shape ko expect karta hai).
+  Map<String, dynamic> toJson() => {
+        'id': id,
+        'display_name': displayName,
+      };
 }
 
 // ======================================================================
@@ -61,6 +69,12 @@ class ConversationSettings {
       isPinned: json['is_pinned'] ?? false,
     );
   }
+
+  Map<String, dynamic> toJson() => {
+        'is_archived': isArchived,
+        'is_muted': isMuted,
+        'is_pinned': isPinned,
+      };
 }
 
 // ======================================================================
@@ -87,6 +101,13 @@ class GroupMini {
       membersCount: json['members_count'] ?? 0,
     );
   }
+
+  Map<String, dynamic> toJson() => {
+        'id': id,
+        'name': name,
+        'photo_url': photoUrl,
+        'members_count': membersCount,
+      };
 }
 
 // ======================================================================
@@ -152,6 +173,20 @@ class ConversationModel {
           DateTime.now(),
     );
   }
+
+  Map<String, dynamic> toJson() => {
+        'id': id,
+        'type': type,
+        'other_participant': otherParticipant?.toJson(),
+        'group': group?.toJson(),
+        'last_message_text': lastMessageText,
+        'last_message_at': lastMessageAt?.toIso8601String(),
+        'last_message_sender': lastMessageSender?.toJson(),
+        'last_message_type': lastMessageType,
+        'unread_count': unreadCount,
+        'my_settings': mySettings.toJson(),
+        'created_at': createdAt.toIso8601String(),
+      };
 }
 
 // ======================================================================
@@ -179,6 +214,13 @@ class MessageReactionModel {
           DateTime.now(),
     );
   }
+
+  Map<String, dynamic> toJson() => {
+        'id': id,
+        'user': user.toJson(),
+        'emoji': emoji,
+        'created_at': createdAt.toIso8601String(),
+      };
 }
 
 // ======================================================================
@@ -205,6 +247,13 @@ class ReplyPreviewModel {
       sender: UserMini.fromJson(json['sender'] ?? {}),
     );
   }
+
+  Map<String, dynamic> toJson() => {
+        'id': id,
+        'type': type,
+        'text': text,
+        'sender': sender.toJson(),
+      };
 }
 
 // ======================================================================
@@ -336,4 +385,33 @@ class MessageModel {
           DateTime.now(),
     );
   }
+
+  // 🔥 NAYA — cache me save karne ke liye. Sirf server-confirmed fields
+  // save karte hain; local-only UI state (isSending/sendFailed/
+  // uploadProgress/localFilePath*) jaan-bujh kar SKIP kiya hai — cache se
+  // reload hone par purana "sending..." ya "failed" spinner dobara nahi
+  // dikhna chahiye, wo sirf current session ke liye valid hota hai.
+  Map<String, dynamic> toJson() => {
+        'id': id,
+        'conversation': conversationId,
+        'sender': sender?.toJson(),
+        'type': type,
+        'text': text,
+        'file_url': fileUrl,
+        'file_urls': fileUrls,
+        'thumbnail_url': thumbnailUrl,
+        'meta': meta,
+        'reply_to': replyTo,
+        'reply_to_detail': replyToDetail?.toJson(),
+        'is_edited': isEdited,
+        'is_forwarded': isForwarded,
+        'is_system_message': isSystemMessage,
+        'deleted_for_everyone': deletedForEveryone,
+        'deleted_for_me': deletedForMe,
+        'client_id': clientId,
+        'reactions': reactions.map((r) => r.toJson()).toList(),
+        'is_read_by_me': isReadByMe,
+        'created_at': createdAt.toIso8601String(),
+        'updated_at': updatedAt?.toIso8601String(),
+      };
 }

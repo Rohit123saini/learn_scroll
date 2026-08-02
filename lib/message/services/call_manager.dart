@@ -184,7 +184,7 @@ class CallManager extends ChangeNotifier {
   bool isScreenSharing = false;
 
   Duration connectedDuration = Duration.zero;
-  int reconnectSecondsLeft = 4;
+  int reconnectSecondsLeft = 2;
 
   String status = "Connecting...";
   String? error;
@@ -193,12 +193,6 @@ class CallManager extends ChangeNotifier {
   Timer? _callTimer;
   Timer? _reconnectTimer;
   DateTime? _connectedAt;
-
-  // 🔥 NAYA — call connect hote hi 35 second ka hard cap: itni der baad
-  // call apne aap khatam ho jaati hai (jaise 30s no-answer timer, bas ye
-  // "connected" state se start hota hai, ringing se nahi).
-  Timer? _callDurationLimitTimer;
-  static const Duration _maxCallDuration = Duration(seconds: 35);
 
   // 🔥 NAYA — agar caller ki call 30 second tak koi answer na kare (ring
   // bajti rahe, remoteConnected kabhi true na ho), to call apne aap cut
@@ -643,25 +637,16 @@ class CallManager extends ChangeNotifier {
         notifyListeners();
       }
     });
-
-    // 🔥 NAYA — 35 second baad call ko force-end karo.
-    _callDurationLimitTimer?.cancel();
-    _callDurationLimitTimer = Timer(_maxCallDuration, () {
-      developer.log("Call hit ${_maxCallDuration.inSeconds}s cap — auto-ending $callId");
-      endCall();
-    });
   }
 
   void _stopCallTimer() {
     _callTimer?.cancel();
     _callTimer = null;
-    _callDurationLimitTimer?.cancel();
-    _callDurationLimitTimer = null;
   }
 
   void _startReconnectCountdown() {
     if (_reconnectTimer?.isActive == true) return;
-    reconnectSecondsLeft = 4;
+    reconnectSecondsLeft = 2;
     isReconnecting = true;
     notifyListeners();
 
@@ -936,8 +921,6 @@ class CallManager extends ChangeNotifier {
     _micPendingForCaller = false;
     _noAnswerTimer?.cancel();
     _noAnswerTimer = null;
-    _callDurationLimitTimer?.cancel();
-    _callDurationLimitTimer = null;
 
     WakelockPlus.disable();
     await _disableBackgroundExecution();

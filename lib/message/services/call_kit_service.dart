@@ -66,11 +66,25 @@ class CallKitService {
       developer.log("CallKit notification permission error: $e");
     }
 
-    // NOTE: `canUseFullScreenIntent()` / `requestFullIntentPermission()`
-    // (Android 14+ full-screen intent permission) is NOT available in
-    // flutter_callkit_incoming 2.0.4+2 — ye method baad ke version me add
-    // hua tha. `isShowFullLockedScreen: true` (neeche AndroidParams me) is
-    // version me lock-screen ke upar call UI dikhane ke liye kaafi hai.
+    // 🔥 FIX — ROOT CAUSE of "popup aata hai par chhota/normal notification
+    // hota hai, full-screen nahi": Android 14 (API 34)+ pe USE_FULL_SCREEN_INTENT
+    // manifest permission akele kaafi nahi hai — user ko Settings me jaake
+    // ise EXPLICITLY allow karna padta hai, warna Android khud call ko
+    // chhote heads-up notification me downgrade kar deta hai (koi
+    // accept/decline full-screen UI nahi). Ye check + request ab package
+    // upgrade (2.0.4+2 -> 2.5.0+, jahan ye methods add hue) ke baad kaam
+    // karega — pubspec.yaml update karna zaroori hai.
+    try {
+      final canFullScreen = await FlutterCallkitIncoming.canUseFullScreenIntent();
+      if (canFullScreen != true) {
+        // Ye seedha system Settings screen kholta hai — user ko manually
+        // "Allow full screen notifications" ON karna hoga is app ke liye.
+        // Koi bhi code se ise auto-grant nahi kiya ja sakta (Android policy).
+        await FlutterCallkitIncoming.requestFullIntentPermission();
+      }
+    } catch (e) {
+      developer.log("Full screen intent permission check/request error: $e");
+    }
 
     await _eventSub?.cancel();
     _eventSub = FlutterCallkitIncoming.onEvent.listen(_onCallKitEvent);
