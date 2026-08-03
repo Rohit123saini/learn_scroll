@@ -112,6 +112,112 @@ class UserSearchView(ListAPIView):
             "data": response.data
         })
 
+
+class MessageContactSearchView(ListAPIView):
+    """
+    GET /profile/chat-search/?search=<query>
+
+    🔥 Message/group ke "add members" step ke liye — `UserSearchView` se
+    ALAG hai: yahan poore app ke users nahi, sirf wahi log aate hain
+    jinko maine follow kiya hua hai YA jinhone mujhe follow kiya hua hai
+    (dono me se ek bhi kaafi hai, pura mutual hona zaroori nahi — warna
+    list bahut chhoti reh jaati). Response me profile_photo/bio waghera
+    nahi, sirf id/username/first_name/last_name/mutual_friends.
+    """
+    permission_classes = [IsAuthenticated]
+    serializer_class = MessageContactSearchSerializer
+    filter_backends = [filters.SearchFilter]
+    search_fields = ['username', 'first_name', 'last_name']
+
+    def get_queryset(self):
+        connected_ids = accepted_connection_ids(self.request.user)
+        connected_ids.discard(self.request.user.id)
+        return User.objects.filter(id__in=connected_ids)
+
+    def get_serializer_context(self):
+        return {'request': self.request}
+
+    @extend_schema(
+        parameters=[
+            OpenApiParameter(
+                name='search',
+                type=OpenApiTypes.STR,
+                location=OpenApiParameter.QUERY,
+                description='Search query'
+            )
+        ],
+        description="Search only within users who follow you or whom you follow (for chat/group member picking)"
+    )
+    def list(self, request, *args, **kwargs):
+        response = super().list(request, *args, **kwargs)
+        return Response({
+            "status": True,
+            "message": "Contacts fetched successfully.",
+            "data": response.data
+        })
+
+
+class FollowersListView(ListAPIView):
+    """
+    GET /profile/profile/<username>/followers/
+
+    Target user (URL me diye gaye username) ke saare ACCEPTED followers —
+    same `MessageContactSearchSerializer` reuse kiya hai isliye response
+    me id/username/first_name/last_name ke saath tumhare (request.user)
+    sath unka mutual_friends count bhi milta hai.
+    """
+    permission_classes = [IsAuthenticated]
+    serializer_class = MessageContactSearchSerializer
+
+    def get_queryset(self):
+        target_user = get_object_or_404(User, username=self.kwargs['username'])
+        follower_ids = Follow.objects.filter(
+            following=target_user, status=Follow.Status.ACCEPTED
+        ).values_list('follower_id', flat=True)
+        return User.objects.filter(id__in=follower_ids)
+
+    def get_serializer_context(self):
+        return {'request': self.request}
+
+    @extend_schema(description="List of a user's followers, with mutual_friends relative to you")
+    def list(self, request, *args, **kwargs):
+        response = super().list(request, *args, **kwargs)
+        return Response({
+            "status": True,
+            "message": "Followers fetched successfully.",
+            "data": response.data
+        })
+
+
+class FollowingListView(ListAPIView):
+    """
+    GET /profile/profile/<username>/following/
+
+    Target user (URL me diye gaye username) jinhe follow karta hai unki
+    list — same shape/serializer jaisa `FollowersListView`.
+    """
+    permission_classes = [IsAuthenticated]
+    serializer_class = MessageContactSearchSerializer
+
+    def get_queryset(self):
+        target_user = get_object_or_404(User, username=self.kwargs['username'])
+        following_ids = Follow.objects.filter(
+            follower=target_user, status=Follow.Status.ACCEPTED
+        ).values_list('following_id', flat=True)
+        return User.objects.filter(id__in=following_ids)
+
+    def get_serializer_context(self):
+        return {'request': self.request}
+
+    @extend_schema(description="List of who a user is following, with mutual_friends relative to you")
+    def list(self, request, *args, **kwargs):
+        response = super().list(request, *args, **kwargs)
+        return Response({
+            "status": True,
+            "message": "Following fetched successfully.",
+            "data": response.data
+        })
+
 from rest_framework.views import APIView
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response

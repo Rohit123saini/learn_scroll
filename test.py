@@ -3,40 +3,39 @@ from scipy.io import wavfile
 
 # Audio settings
 sample_rate = 44100  # Standard audio sampling rate
-file_name = "incoming_ring.mp3"
+file_name = "call_waiting.wav"
 
-# Frequencies for Classic Landline Ring
-carrier_freq1 = 400  # Hz
-carrier_freq2 = 450  # Hz
-ring_burst_freq = 20 # Hz (Trrr... trrr... vibrate effect)
+# Frequency for Call Waiting Tone (Standard 440 Hz tone)
+carrier_freq = 440  # Hz
 
 # Timings (in seconds)
-ring_duration = 1.0   # Sound duration (1 second)
-pause_duration = 2.0  # Silence duration (2 seconds)
-total_cycles = 5     # Ring repeat cycles
+beep_duration = 0.15  # Duration of each beep (150 ms)
+beep_gap = 0.15  # Short gap between the double-beeps (150 ms)
+pause_duration = 3.0  # Silence duration before repeating double-beep (3 seconds)
+total_cycles = 6  # Total repeat cycles
 
-# Generate 1 second modulated ring sound
-t_ring = np.linspace(0, ring_duration, int(sample_rate * ring_duration), False)
 
-# Dual tone combination
-base_tone = 0.5 * (np.sin(2 * np.pi * carrier_freq1 * t_ring) + np.sin(2 * np.pi * carrier_freq2 * t_ring))
+# Helper function to generate a smooth single beep
+def generate_beep(duration):
+    t = np.linspace(0, duration, int(sample_rate * duration), False)
+    tone = np.sin(2 * np.pi * carrier_freq * t)
 
-# Amplitude Modulation (creates the rapid 'trrr' pulsing sound)
-modulation = 0.5 * (1 + np.sin(2 * np.pi * ring_burst_freq * t_ring))
-ring_sound = base_tone * modulation
+    # 10ms fade-in & fade-out to prevent popping sound
+    fade_samples = int(sample_rate * 0.01)
+    envelope = np.ones_like(tone)
+    envelope[:fade_samples] = np.linspace(0, 1, fade_samples)
+    envelope[-fade_samples:] = np.linspace(1, 0, fade_samples)
 
-# Smooth envelope (fade-in & fade-out to prevent popping audio)
-fade_samples = int(sample_rate * 0.02)  # 20ms fade
-envelope = np.ones_like(ring_sound)
-envelope[:fade_samples] = np.linspace(0, 1, fade_samples)
-envelope[-fade_samples:] = np.linspace(1, 0, fade_samples)
-ring_sound = ring_sound * envelope
+    return tone * envelope
 
-# Generate 2 seconds silence
-pause_sound = np.zeros(int(sample_rate * pause_duration))
 
-# Combine Ring + Silence into 1 cycle
-one_cycle = np.concatenate((ring_sound, pause_sound))
+# Generate the components
+beep = generate_beep(beep_duration)
+short_pause = np.zeros(int(sample_rate * beep_gap))
+long_pause = np.zeros(int(sample_rate * pause_duration))
+
+# Combine into a double-beep cycle: [Beep] + [Short Pause] + [Beep] + [Long Pause]
+one_cycle = np.concatenate((beep, short_pause, beep, long_pause))
 
 # Repeat cycles
 full_audio = np.tile(one_cycle, total_cycles)
@@ -47,4 +46,4 @@ full_audio = np.int16(full_audio / np.max(np.abs(full_audio)) * 32767)
 # Save .wav audio file
 wavfile.write(file_name, sample_rate, full_audio)
 
-print(f"Incoming Ringtone ready! Saved as '{file_name}'")
+print(f"Call Waiting Tone ready! Saved as '{file_name}'")

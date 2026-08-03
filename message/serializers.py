@@ -18,6 +18,7 @@ from .models import (
     Presentation,
     UserPresence,
 )
+from .user_display import get_display_name, get_profile_photo_url
 
 User = get_user_model()
 
@@ -27,23 +28,34 @@ User = get_user_model()
 # ======================================================================
 class UserMiniSerializer(serializers.ModelSerializer):
     """
-    Chat ke andar dikhne wala minimal user info.
-    NOTE: apne actual AUTH_USER_MODEL (login.User) ke fields ke hisaab se
-    `get_display_name` me field names adjust kar lena (e.g. 'full_name',
-    'avatar_url' waghera).
+    Chat/call/study-room ke andar dikhne wala minimal user info — sabki
+    profile photo aur naam yahin se aata hai (Conversation list, message
+    sender, group members, reactions, call history — sab isi serializer
+    ko reuse karte hain, taaki data shape har jagah consistent rahe).
+
+    `first_name` / `last_name` / `profile_photo` seedhe custom User model
+    (login.User) ke columns hain — koi alag Profile app/table nahi, isliye
+    jahan bhi queryset me `select_related('sender' / 'user' / 'caller')`
+    lagi hai, ye fields BINA kisi extra query ke already load ho chuke
+    hote hain (naya N+1 nahi banta).
     """
     display_name = serializers.SerializerMethodField()
+    profile_photo = serializers.SerializerMethodField()
 
     class Meta:
         model = User
-        fields = ['id', 'display_name']
+        fields = ['id', 'username', 'first_name', 'last_name', 'display_name', 'profile_photo']
 
     def get_display_name(self, obj):
-        for field in ('full_name', 'name', 'username', 'email'):
-            value = getattr(obj, field, None)
-            if value:
-                return value
-        return str(obj)
+        return get_display_name(obj)
+
+    def get_profile_photo(self, obj):
+        # `request` context se absolute URL banta hai (scheme+host sahi
+        # milta hai); nested/manual instantiation me context mis jaaye to
+        # bhi `get_profile_photo_url` khud settings-based fallback deta
+        # hai — crash ya blank URL kabhi nahi hota.
+        request = self.context.get('request')
+        return get_profile_photo_url(obj, request=request)
 
 
 # ======================================================================
@@ -89,7 +101,7 @@ class ConversationListSerializer(serializers.ModelSerializer):
             return None
         request = self.context.get('request')
         membership = obj.memberships.exclude(user=request.user).select_related('user').first()
-        return UserMiniSerializer(membership.user).data if membership else None
+        return UserMiniSerializer(membership.user, context=self.context).data if membership else None
 
     def get_group(self, obj):
         if obj.type != ConversationType.GROUP:
@@ -214,7 +226,7 @@ class GroupSerializer(serializers.ModelSerializer):
 
     def get_members(self, obj):
         qs = obj.group_members.filter(is_banned=False).select_related('user')
-        return GroupMemberSerializer(qs, many=True).data
+        return GroupMemberSerializer(qs, many=True, context=self.context).data
 
 
 class GroupCreateSerializer(serializers.Serializer):

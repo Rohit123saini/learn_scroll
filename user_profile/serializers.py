@@ -35,6 +35,50 @@ class UserSearchSerializer(serializers.ModelSerializer):
         fields = ['id', 'username', 'first_name', 'last_name', 'profile_photo']
 
 
+def accepted_connection_ids(user):
+    """
+    Jinke saath is user ka "real" (accepted) follow-relation hai — chahe
+    is user ne unhe follow kiya ho ya unhone is user ko — dono taraf se.
+    Mutual-friends count isi set ke overlap se nikalta hai.
+
+    ⚠️ Naam me leading underscore JAANBUJH KAR nahi rakha — views.py
+    `from .serializers import *` karta hai, aur wildcard import
+    underscore-prefixed names ko skip kar deta hai.
+    """
+    following_ids = set(
+        Follow.objects.filter(follower=user, status=Follow.Status.ACCEPTED)
+        .values_list('following_id', flat=True)
+    )
+    follower_ids = set(
+        Follow.objects.filter(following=user, status=Follow.Status.ACCEPTED)
+        .values_list('follower_id', flat=True)
+    )
+    return following_ids | follower_ids
+
+
+class MessageContactSearchSerializer(serializers.ModelSerializer):
+    """
+    Message/group "add members" search ke response ke liye — sirf ye 5
+    fields, koi profile_photo/bio waghera nahi.
+    """
+    mutual_friends = serializers.SerializerMethodField()
+
+    class Meta:
+        model = User
+        fields = ['id', 'username', 'first_name', 'last_name', 'mutual_friends']
+
+    def get_mutual_friends(self, obj):
+        request = self.context.get('request')
+        if not request or not request.user.is_authenticated:
+            return 0
+        my_connections = self.context.get('_my_connections')
+        if my_connections is None:
+            my_connections = accepted_connection_ids(request.user)
+            self.context['_my_connections'] = my_connections
+        their_connections = accepted_connection_ids(obj)
+        return len(my_connections & their_connections)
+
+
 class TargetUserProfileSerializer(serializers.ModelSerializer):
     followers_count = serializers.IntegerField(read_only=True)
     following_count = serializers.IntegerField(read_only=True)

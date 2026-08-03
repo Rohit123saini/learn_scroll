@@ -51,6 +51,7 @@ from .serializers import (
 )
 from .push_utils import send_push_to_users, send_chat_message_push, send_incoming_call_push
 from .livekit_utils import generate_livekit_token
+from .user_display import get_display_name, get_profile_photo_url
 
 # LiveKit URL env se lo, nahi to default
 LIVEKIT_WS_URL = os.getenv("LIVEKIT_WS_URL", "ws://10.93.221.189:7880")
@@ -181,7 +182,7 @@ class ConversationViewSet(viewsets.ReadOnlyModelViewSet):
             .values_list('user_id', flat=True)
         )
         if other_recipients:
-            sender_name = request.user.get_username() if hasattr(request.user, 'get_username') else str(request.user)
+            sender_name = get_display_name(request.user)
             send_chat_message_push(
                 recipient_ids=other_recipients,
                 sender_name=sender_name,
@@ -385,7 +386,7 @@ class GroupViewSet(viewsets.ModelViewSet):
             Group.objects.filter(id=group.id).update(members_count=len(group_members))
             group.refresh_from_db()
 
-        return Response(GroupSerializer(group).data, status=status.HTTP_201_CREATED)
+        return Response(GroupSerializer(group, context={'request': request}).data, status=status.HTTP_201_CREATED)
 
     @action(detail=True, methods=['post'], url_path='members')
     def add_members(self, request, pk=None):
@@ -406,7 +407,7 @@ class GroupViewSet(viewsets.ModelViewSet):
                 members_count=group.group_members.filter(is_banned=False).count()
             )
 
-        return Response(GroupSerializer(group).data)
+        return Response(GroupSerializer(group, context={'request': request}).data)
 
     @action(detail=True, methods=['patch', 'delete'], url_path=r'members/(?P<user_id>[^/.]+)')
     def update_member(self, request, pk=None, user_id=None):
@@ -431,7 +432,7 @@ class GroupViewSet(viewsets.ModelViewSet):
             if field in request.data:
                 setattr(membership, field, request.data[field])
         membership.save()
-        return Response(GroupMemberSerializer(membership).data)
+        return Response(GroupMemberSerializer(membership, context={'request': request}).data)
 
     @staticmethod
     def _require_admin(group_id, user):
@@ -451,7 +452,7 @@ class GroupViewSet(viewsets.ModelViewSet):
 
         paginator = StandardPagination()
         page = paginator.paginate_queryset(qs, request, view=self)
-        serializer = GroupMediaSerializer(page, many=True)
+        serializer = GroupMediaSerializer(page, many=True, context={'request': request})
         return paginator.get_paginated_response(serializer.data)
 
 
@@ -524,7 +525,8 @@ class CallInitiateView(APIView):
         for uid in other_members:
             CallParticipant.objects.create(call=call, user_id=uid, status=CallStatus.RINGING)
 
-        caller_name = request.user.get_username() if hasattr(request.user, 'get_username') else str(request.user)
+        caller_name = get_display_name(request.user)
+        caller_photo = get_profile_photo_url(request.user, request=request)
 
         channel_layer = get_channel_layer()
         async_to_sync(channel_layer.group_send)(
@@ -536,6 +538,7 @@ class CallInitiateView(APIView):
                 'call_type': call_type,
                 'caller_id': str(request.user.id),
                 'caller_name': caller_name,
+                'caller_photo': caller_photo,
                 'conversation_id': str(conversation_id),
                 'channel_name': call.channel_name,
             }
@@ -584,7 +587,7 @@ class CallActionView(APIView):
             call.connected_at = call.connected_at or timezone.now()
             call.save(update_fields=['status', 'connected_at'])
 
-            user_name = request.user.get_username() if hasattr(request.user, 'get_username') else str(request.user)
+            user_name = get_display_name(request.user)
             livekit_token = generate_livekit_token(
                 room_name=call.channel_name,
                 user_id=request.user.id,
@@ -662,7 +665,7 @@ class StudyRoomJoinView(APIView):
             return Response({"detail": "Conversation not found"}, status=404)
 
         room_name = f"study_{conversation_id}"
-        user_name = request.user.get_username() if hasattr(request.user, 'get_username') else str(request.user)
+        user_name = get_display_name(request.user)
         token = generate_livekit_token(
             room_name=room_name,
             user_id=request.user.id,
