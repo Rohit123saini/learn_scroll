@@ -12,4 +12,6 @@ urlpatterns = [
     path('accept-request/<int:follow_id>/', AcceptFollowRequestView.as_view(), name='accept-request'),
     path('reject-request/<int:follow_id>/', RejectFollowRequestView.as_view(), name='reject-request'),
     path('update/', UpdateProfileView.as_view(), name='update-profile'),
+    path('blocked-users/', BlockedUsersView.as_view(), name='blocked-users'),  # 🔥 NAYA — list + block
+    path('blocked-users/<str:id>/', UnblockUserView.as_view(), name='unblock-user'),  # 🔥 NAYA — unblock
 ]

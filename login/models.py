@@ -1,4 +1,5 @@
 from django.contrib.auth.models import AbstractUser
+from django.contrib.auth.hashers import make_password, check_password
 from django.db import models
 import os
 
@@ -33,22 +34,23 @@ class User(AbstractUser):
 
     def save(self, *args, **kwargs):
 
-        try:
-            old = User.objects.get(pk=self.pk)
+        if self.pk:
+            try:
+                old = User.objects.get(pk=self.pk)
 
-            if old.profile_photo and old.profile_photo != self.profile_photo:
-                if os.path.isfile(old.profile_photo.path):
-                    os.remove(old.profile_photo.path)
+                if old.profile_photo and old.profile_photo != self.profile_photo:
+                    if old.profile_photo.name and os.path.isfile(old.profile_photo.path):
+                        os.remove(old.profile_photo.path)
 
-        except User.DoesNotExist:
-            pass
+            except User.DoesNotExist:
+                pass
 
         super().save(*args, **kwargs)
 
     # Delete image when user deleted
     def delete(self, *args, **kwargs):
 
-        if self.profile_photo:
+        if self.profile_photo and self.profile_photo.name:
             if os.path.isfile(self.profile_photo.path):
                 os.remove(self.profile_photo.path)
 
@@ -59,12 +61,38 @@ from django.utils import timezone
 from datetime import timedelta
 
 class OTPVerification(models.Model):
+    # ✅ SECURITY: OTP ab plaintext me store nahi hota, sirf hash store hota hai
+    # (Django's PBKDF2 hasher) — DB leak/backup access se bhi asli code nahi milega.
     target = models.CharField(max_length=100, unique=True)
-    otp = models.CharField(max_length=6)
+    otp_hash = models.CharField(max_length=128)
+
+    # ✅ SECURITY: brute-force guessing (6-digit OTP sirf 10 lakh combinations
+    # hain) rokne ke liye failed-attempt counter — max attempts ke baad OTP
+    # lock ho jayega, naya OTP mangwana padega.
+    attempts = models.PositiveSmallIntegerField(default=0)
+
     created_at = models.DateTimeField(auto_now_add=True)
 
-    def is_expired(self):
-        return timezone.now() > self.created_at + timedelta(minutes=2)
+    MAX_ATTEMPTS = 5
+    EXPIRY_MINUTES = 5  # 2 min bohot tight tha real-world email/SMS delay ke liye
+
+    def set_otp(self, raw_otp: str) -> None:
+        """Hash karke store karo, raw OTP kabhi DB me nahi jaata."""
+        self.otp_hash = make_password(raw_otp)
+        self.attempts = 0
+
+    def check_otp(self, raw_otp: str) -> bool:
+        return check_password(raw_otp, self.otp_hash)
+
+    def is_expired(self) -> bool:
+        return timezone.now() > self.created_at + timedelta(minutes=self.EXPIRY_MINUTES)
+
+    def is_locked(self) -> bool:
+        return self.attempts >= self.MAX_ATTEMPTS
+
+    def register_failed_attempt(self) -> None:
+        self.attempts += 1
+        self.save(update_fields=["attempts"])
 
     def __str__(self):
-        return f"{self.target} - {self.otp}"
+        return f"{self.target} - OTP (hashed, attempts={self.attempts})"

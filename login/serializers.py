@@ -3,6 +3,44 @@ from .models import User
 import re
 
 
+def validate_strong_password(value):
+    """
+    Shared password-strength rule used by both signup and change-password,
+    so the two never silently drift apart.
+    """
+    if value != value.strip():
+        raise serializers.ValidationError(
+            "Password cannot start or end with spaces."
+        )
+
+    if len(value) < 8:
+        raise serializers.ValidationError(
+            "Password must be at least 8 characters."
+        )
+
+    if not re.search(r"[A-Z]", value):
+        raise serializers.ValidationError(
+            "Password must contain one uppercase letter."
+        )
+
+    if not re.search(r"[a-z]", value):
+        raise serializers.ValidationError(
+            "Password must contain one lowercase letter."
+        )
+
+    if not re.search(r"[0-9]", value):
+        raise serializers.ValidationError(
+            "Password must contain one number."
+        )
+
+    if not re.search(r"[!@#$%^&*(),.?\":{}|<>]", value):
+        raise serializers.ValidationError(
+            "Password must contain one special character."
+        )
+
+    return value
+
+
 #--------------    login -------------------------------------------
 class LoginSerializer(serializers.Serializer):
     username = serializers.CharField()
@@ -76,7 +114,7 @@ class SignupSerializer(serializers.ModelSerializer):
 
         if len(value) > 15:
             raise serializers.ValidationError(
-                "Phone number must be check."
+                "Phone number is too long."
             )
 
         if User.objects.filter(phone=value).exists():
@@ -87,38 +125,7 @@ class SignupSerializer(serializers.ModelSerializer):
         return value
 
     def validate_password(self, value):
-
-        if value != value.strip():
-            raise serializers.ValidationError(
-                "Password cannot start or end with spaces."
-            )
-
-        if len(value) < 8:
-            raise serializers.ValidationError(
-                "Password must be at least 8 characters."
-            )
-
-        if not re.search(r"[A-Z]", value):
-            raise serializers.ValidationError(
-                "Password must contain one uppercase letter."
-            )
-
-        if not re.search(r"[a-z]", value):
-            raise serializers.ValidationError(
-                "Password must contain one lowercase letter."
-            )
-
-        if not re.search(r"[0-9]", value):
-            raise serializers.ValidationError(
-                "Password must contain one number."
-            )
-
-        if not re.search(r"[!@#$%^&*(),.?\":{}|<>]", value):
-            raise serializers.ValidationError(
-                "Password must contain one special character."
-            )
-
-        return value
+        return validate_strong_password(value)
 
     def validate(self, attrs):
 
@@ -145,6 +152,9 @@ class SignupSerializer(serializers.ModelSerializer):
             last_name=validated_data["last_name"],
             phone=validated_data["phone"],
             password=validated_data["password"],
+            # ✅ email OTP verify-otp step se pehle hi ho chuka hota hai
+            # (signup flow me), isliye account ko verified mark kar rahe hain.
+            is_verified=True,
 
         )
 
@@ -179,38 +189,7 @@ class ChangePasswordSerializer(serializers.Serializer):
     )
 
     def validate_new_password(self, value):
-
-        if value != value.strip():
-            raise serializers.ValidationError(
-                "Password cannot start or end with spaces."
-            )
-
-        if len(value) < 8:
-            raise serializers.ValidationError(
-                "Password must be at least 8 characters."
-            )
-
-        if not re.search(r"[A-Z]", value):
-            raise serializers.ValidationError(
-                "Password must contain one uppercase letter."
-            )
-
-        if not re.search(r"[a-z]", value):
-            raise serializers.ValidationError(
-                "Password must contain one lowercase letter."
-            )
-
-        if not re.search(r"[0-9]", value):
-            raise serializers.ValidationError(
-                "Password must contain one number."
-            )
-
-        if not re.search(r"[!@#$%^&*(),.?\":{}|<>]", value):
-            raise serializers.ValidationError(
-                "Password must contain one special character."
-            )
-
-        return value
+        return validate_strong_password(value)
 
     def validate(self, attrs):
 
@@ -221,3 +200,30 @@ class ChangePasswordSerializer(serializers.Serializer):
             })
 
         return attrs
+
+
+
+
+class CompleteProfileSerializer(serializers.Serializer):
+    phone = serializers.CharField(required=True)
+
+    def validate_phone(self, value):
+        value = value.strip()
+
+        if not value.isdigit():
+            raise serializers.ValidationError(
+                "Phone number must contain digits only."
+            )
+        if len(value) > 15:
+            raise serializers.ValidationError(
+                "Phone number must be valid."
+            )
+        if User.objects.filter(phone=value).exists():
+            raise serializers.ValidationError(
+                "Phone number already exists."
+            )
+        return value
+
+
+class GoogleLoginSerializer(serializers.Serializer):
+    id_token = serializers.CharField(required=True)

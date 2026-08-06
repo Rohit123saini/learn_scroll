@@ -423,13 +423,18 @@ REST_FRAMEWORK = {
     "DEFAULT_AUTHENTICATION_CLASSES": (
         "rest_framework_simplejwt.authentication.JWTAuthentication",
     ),
-    "DEFAULT_THROTTLE_CLASSES": [
+      "DEFAULT_THROTTLE_CLASSES": [
         "rest_framework.throttling.UserRateThrottle",
+        "rest_framework.throttling.AnonRateThrottle",
     ],
+
     "DEFAULT_THROTTLE_RATES": {
         "user": "100/min",
+        "anon": "20/min",
         "ai_study": "20/min",
-    }
+        "send_otp": "5/min",
+        "verify_otp": "10/min",
+    },
 }
 
 SIMPLE_JWT = {
@@ -460,3 +465,12 @@ FILE_UPLOAD_PERMISSIONS = 0o644
 DATA_UPLOAD_MAX_NUMBER_FIELDS = 10000
 
 FCM_SERVICE_ACCOUNT_JSON_PATH = BASE_DIR / "firebase-service-account.json"
+GOOGLE_CLIENT_ID = os.environ.get("GOOGLE_CLIENT_ID", "")
+
+EMAIL_BACKEND = "django.core.mail.backends.smtp.EmailBackend"
+EMAIL_HOST = os.environ.get("EMAIL_HOST")
+EMAIL_PORT = int(os.environ.get("EMAIL_PORT", 587))
+EMAIL_USE_TLS = os.environ.get("EMAIL_USE_TLS", "True") == "True"
+EMAIL_HOST_USER = os.environ.get("EMAIL_HOST_USER")
+EMAIL_HOST_PASSWORD = os.environ.get("EMAIL_HOST_PASSWORD")
+DEFAULT_FROM_EMAIL = os.environ.get("DEFAULT_FROM_EMAIL")

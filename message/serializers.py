@@ -9,6 +9,7 @@ from .models import (
     ConversationParticipant,
     ConversationType,
     Group,
+    GroupJoinRequest,
     GroupMedia,
     GroupMember,
     Message,
@@ -207,6 +208,18 @@ class GroupMemberSerializer(serializers.ModelSerializer):
         read_only_fields = ['id', 'created_at']
 
 
+# 🔥 NAYA — private group ke "join request" ke liye. Admin/moderator ki
+# pending-requests list yahi serializer use karti hai.
+class GroupJoinRequestSerializer(serializers.ModelSerializer):
+    user = UserMiniSerializer(read_only=True)
+    responded_by = UserMiniSerializer(read_only=True)
+
+    class Meta:
+        model = GroupJoinRequest
+        fields = ['id', 'group', 'user', 'status', 'responded_by', 'responded_at', 'created_at']
+        read_only_fields = fields
+
+
 class GroupSerializer(serializers.ModelSerializer):
     members = serializers.SerializerMethodField()
     conversation_id = serializers.UUIDField(source='conversation.id', read_only=True)
@@ -230,13 +243,24 @@ class GroupSerializer(serializers.ModelSerializer):
 
 
 class GroupCreateSerializer(serializers.Serializer):
-    """Naya group banane ke liye input serializer."""
+    """
+    Naya group banane ke liye input serializer.
+
+    🔥 FIX: `member_ids` pehle `serializers.UUIDField()` list tha, jabki
+    tumhara custom `User` model ka primary key UUID nahi hai — integer
+    hai (profile app ke `urls.py` me `<int:user_id>` / `<int:follow_id>`
+    converters se aur `serializers.py` ke `IntegerField()` based
+    my_id/target_user_id/follow_id fields se confirm hota hai). Isi
+    mismatch ki wajah se frontend se aane wale valid integer IDs bhi
+    "Must be a valid UUID." keh ke reject ho rahe the. Ab `IntegerField()`
+    use kiya hai taaki actual User pk type se match ho.
+    """
     name = serializers.CharField(max_length=100)
     description = serializers.CharField(required=False, allow_blank=True, default='')
     photo_url = serializers.URLField(required=False, allow_null=True)
     is_private = serializers.BooleanField(required=False, default=False)
     member_ids = serializers.ListField(
-        child=serializers.UUIDField(), allow_empty=True, required=False, default=list
+        child=serializers.IntegerField(), allow_empty=True, required=False, default=list
     )
 
 

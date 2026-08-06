@@ -1,6 +1,6 @@
 from django.contrib.auth import get_user_model
 from rest_framework import serializers
-from .models import Follow
+from .models import Follow, BlockUser
 
 User = get_user_model()
 
@@ -158,4 +158,24 @@ class ProfileUpdateSerializer(serializers.ModelSerializer):
         user = self.context['request'].user
         if User.objects.filter(username=value).exclude(pk=user.pk).exists():
             raise serializers.ValidationError("Ye username already taken hai.")
+        return value
+
+
+# 🔥 NAYA — Block / Unblock user
+# Model (BlockUser) profile app me hi hai, isliye API bhi yahin banai
+# hai — message app ise sirf consume karega (chat screen "blocked?"
+# check waghera ke liye).
+class BlockUserSerializer(serializers.ModelSerializer):
+    # Flutter POST body me sirf {"blocked": "<user_id>"} bhejta hai.
+    blocked_detail = UserSearchSerializer(source='blocked', read_only=True)
+
+    class Meta:
+        model = BlockUser
+        fields = ['id', 'blocked', 'blocked_detail', 'created_at']
+        read_only_fields = ['id', 'created_at']
+
+    def validate_blocked(self, value):
+        request = self.context['request']
+        if value == request.user:
+            raise serializers.ValidationError("Aap khud ko block nahi kar sakte.")
         return value

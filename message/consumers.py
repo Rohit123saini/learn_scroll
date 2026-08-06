@@ -4,6 +4,7 @@ import logging
 
 from channels.db import database_sync_to_async
 from channels.generic.websocket import AsyncWebsocketConsumer
+from django.db.models import Q
 from django.utils import timezone
 
 from .models import (
@@ -12,6 +13,7 @@ from .models import (
     CallSession,
     CallStatus,
     ConversationParticipant,
+    ConversationType,
     Message,
     MessageStatus,
     UserPresence,
@@ -164,6 +166,17 @@ class ChatConsumer(AsyncWebsocketConsumer):
         if not text and message_type == 'text':
             return await self.send_error("empty_message", "Empty message bhej nahi sakte")
 
+        # 🔥 NAYA — REST `messages` action jaisa hi block-check yahan bhi
+        # zaroori tha: `BlockedUser` import to top pe already tha lekin
+        # kahin use hi nahi ho raha tha, isliye block karne ke baad bhi
+        # dusra user is (primary, REST se zyada use hone waala) socket path
+        # se normally message bhej pa raha tha. Group conversations me block
+        # ka concept hi nahi hai, isliye skip.
+        if await self.is_blocked_in_conversation(self.conversation_id, self.user.id):
+            return await self.send_error(
+                "blocked", "Block hone ki wajah se message nahi bheja ja sakta"
+            )
+
         message = await self.save_message(
             conversation_id=self.conversation_id,
             sender_id=self.user.id,
@@ -199,6 +212,16 @@ class ChatConsumer(AsyncWebsocketConsumer):
             'created_at': message['created_at'],
         }
         await self.channel_layer.group_send(self.room_group_name, payload)
+
+        # 🔥 NAYA — ConversationsScreen (list) turant update ho, chahe
+        # user is specific chat ke andar na ho. `chat_{conversation_id}`
+        # group sirf unhi ko milta hai jo abhi ISI chat ke andar hain;
+        # yahan har participant ke apne global `user_<id>` group ko ek
+        # halka event bhejte hain — InboxConsumer se connected socket
+        # (jo ConversationsScreen khulte hi connect hota hai) isko sunke
+        # list ka relevant item locally update kar deta hai, bina full
+        # API refetch ke.
+        await self.broadcast_inbox_update(message, sender, text, message_type)
 
         # 🔥 NAYA: doosre participants ko push notification (agar wo app
         # band karke baithe hain to unhe pata chale)
@@ -337,6 +360,29 @@ class ChatConsumer(AsyncWebsocketConsumer):
             conversation_id=conversation_id, user_id=user_id, left_at__isnull=True
         ).exists()
 
+    # 🔥 NAYA — is 1-1 conversation ke doosre participant ke saath sender
+    # (`user_id`) ka koi bhi direction ka block hai ya nahi, ye check karta
+    # hai. Group conversation ho to hamesha `False` (block sirf 1-1 me
+    # applicable hai).
+    @database_sync_to_async
+    def is_blocked_in_conversation(self, conversation_id, user_id):
+        from .models import Conversation
+
+        conversation = Conversation.objects.filter(id=conversation_id).first()
+        if conversation is None or conversation.type == ConversationType.GROUP:
+            return False
+
+        other_id = ConversationParticipant.objects.filter(
+            conversation_id=conversation_id, left_at__isnull=True
+        ).exclude(user_id=user_id).values_list('user_id', flat=True).first()
+        if other_id is None:
+            return False
+
+        return BlockedUser.objects.filter(
+            Q(blocker_id=user_id, blocked_id=other_id) |
+            Q(blocker_id=other_id, blocked_id=user_id)
+        ).exists()
+
     @database_sync_to_async
     def save_message(self, conversation_id, sender_id, text, message_type, client_id, reply_to_id):
         from django.db import IntegrityError
@@ -380,6 +426,22 @@ class ChatConsumer(AsyncWebsocketConsumer):
         MessageStatus.objects.filter(
             message__conversation_id=conversation_id, user_id=user_id, is_delivered=False
         ).update(is_delivered=True, delivered_at=timezone.now())
+
+    # ---------------- INBOX BROADCAST (global list update) ----------------
+    async def broadcast_inbox_update(self, message, sender, text, message_type):
+        participant_ids = await self._other_participant_ids(self.conversation_id, self.user.id)
+        payload = {
+            'type': 'inbox_update',
+            'conversation_id': str(self.conversation_id),
+            'message_id': str(message['id']),
+            'sender_id': str(self.user.id),
+            'sender_name': sender['display_name'],
+            'last_message_text': text,
+            'last_message_type': message_type,
+            'created_at': message['created_at'],
+        }
+        for uid in participant_ids:
+            await self.channel_layer.group_send(f'user_{uid}', payload)
 
     # ---------------- PUSH NOTIFICATION ----------------
     @database_sync_to_async
@@ -475,6 +537,66 @@ class ChatConsumer(AsyncWebsocketConsumer):
 def models_f_increment():
     from django.db.models import F
     return F('unread_count') + 1
+
+
+# ======================================================================
+# INBOX CONSUMER — global, app-wide (🔥 NAYA)
+# ------------------------------------------------------------
+# /ws/inbox/?token=<jwt>
+#
+# `ChatConsumer` se ALAG hai: koi `conversation_id` URL me nahi chahiye,
+# koi membership check nahi — bas user authenticated hona chahiye. App
+# login hote hi (ya app start hote hi) EK BAAR connect ho jaata hai aur
+# poori session me connected rehta hai, chahe user kisi bhi screen pe ho.
+#
+# Ye sirf apne `user_<user_id>` group me join karta hai. Jab bhi koi
+# message kisi conversation me aata hai (chahe REST se ho ya
+# `ChatConsumer` ke websocket se), har participant ke isi group ko ek
+# halka `inbox_update` event bheja jaata hai — Flutter side
+# `ConversationsScreen` isko sunke list turant update kar deti hai, bina
+# kisi chat ke andar gaye.
+#
+# Client -> Server: kuch nahi (read-only channel, koi `receive` handling
+# nahi chahiye).
+# Server -> Client: {"type": "inbox_update", "conversation_id": ...,
+#                     "message_id": ..., "sender_id": ..., "sender_name": ...,
+#                     "last_message_text": ..., "last_message_type": ...,
+#                     "created_at": ...}
+# ======================================================================
+class InboxConsumer(AsyncWebsocketConsumer):
+    async def connect(self):
+        self.user = self.scope.get('user')
+        if self.user is None or not self.user.is_authenticated:
+            await self.close(code=4001)  # unauthorized
+            return
+
+        self.group_name = f'user_{self.user.id}'
+        await self.channel_layer.group_add(self.group_name, self.channel_name)
+        await self.accept()
+
+    async def disconnect(self, close_code):
+        if not hasattr(self, 'group_name'):
+            return
+        try:
+            await asyncio.wait_for(
+                self.channel_layer.group_discard(self.group_name, self.channel_name),
+                timeout=3,
+            )
+        except asyncio.TimeoutError:
+            logger.warning(
+                "InboxConsumer.disconnect: group_discard timed out user=%s",
+                getattr(self, 'user', None) and self.user.id,
+            )
+        except Exception:
+            logger.exception("InboxConsumer.disconnect: group_discard failed")
+
+    async def receive(self, text_data=None, bytes_data=None):
+        # Read-only channel hai — client se koi event process nahi karna.
+        pass
+
+    # ---------------- GROUP EVENT HANDLER (server -> socket) ----------------
+    async def inbox_update(self, event):
+        await self.send(text_data=json.dumps(event))
 
 
 # ======================================================================

@@ -226,7 +226,7 @@ from rest_framework.generics import ListAPIView, GenericAPIView
 from django.contrib.auth import get_user_model
 from django.shortcuts import get_object_or_404
 from django.db import transaction
-from django.db.models import F
+from django.db.models import F, Q
 from drf_spectacular.utils import extend_schema, OpenApiParameter
 from drf_spectacular.types import OpenApiTypes
 
@@ -491,3 +491,105 @@ class UpdateProfileView(GenericAPIView):
             "message": "Validation failed.",
             "errors": serializer.errors
         }, status=status.HTTP_400_BAD_REQUEST)
+
+
+# 🔥 NAYA — Block / Unblock user
+# Model (BlockUser) profile app me hai isliye API bhi yahin — message
+# app sirf inhe consume karega (chat screen "is-blocked?" check).
+class BlockedUsersView(GenericAPIView):
+    """
+    GET  /profile/blocked-users/          -> maine jinko block kiya hai unki list
+    POST /profile/blocked-users/  {"blocked": <user_id>} -> block karo
+    """
+    permission_classes = [IsAuthenticated]
+    serializer_class = BlockUserSerializer
+
+    @extend_schema(
+        responses={200: BlockUserSerializer(many=True)},
+        description="List of users blocked by the current user"
+    )
+    def get(self, request):
+        qs = BlockUser.objects.filter(blocker=request.user).select_related('blocked')
+        serializer = self.get_serializer(qs, many=True)
+        return Response({
+            "status": True,
+            "message": "Blocked users fetched successfully.",
+            "data": serializer.data,
+        }, status=status.HTTP_200_OK)
+
+    @extend_schema(
+        request=BlockUserSerializer,
+        responses={201: BlockUserSerializer, 200: BlockUserSerializer},
+        description="Block a user"
+    )
+    @transaction.atomic
+    def post(self, request):
+        serializer = self.get_serializer(data=request.data, context={'request': request})
+        if not serializer.is_valid():
+            return Response({
+                "status": False,
+                "message": "Validation failed.",
+                "errors": serializer.errors,
+            }, status=status.HTTP_400_BAD_REQUEST)
+
+        blocked_user = serializer.validated_data['blocked']
+
+        block_obj, created = BlockUser.objects.get_or_create(
+            blocker=request.user,
+            blocked=blocked_user,
+        )
+
+        if created:
+            # 🔥 Block hote hi dono taraf ka follow-relation khatam karo,
+            # aur jo ACCEPTED tha uska count bhi ghata do (FollowAPIView
+            # ke unfollow wale logic jaisa hi).
+            follow_qs = Follow.objects.filter(
+                Q(follower=request.user, following=blocked_user) |
+                Q(follower=blocked_user, following=request.user)
+            )
+            for f in follow_qs:
+                if f.status == Follow.Status.ACCEPTED:
+                    User.objects.filter(id=f.follower_id).update(
+                        following_count=F('following_count') - 1
+                    )
+                    User.objects.filter(id=f.following_id).update(
+                        followers_count=F('followers_count') - 1
+                    )
+            follow_qs.delete()
+
+        return Response({
+            "status": True,
+            "message": "User blocked successfully." if created else "User already blocked.",
+            "data": self.get_serializer(block_obj).data,
+        }, status=status.HTTP_201_CREATED if created else status.HTTP_200_OK)
+
+
+class UnblockUserView(GenericAPIView):
+    """
+    DELETE /profile/blocked-users/<id>/
+
+    `<id>` ya to BlockUser record ki apni id ho sakti hai, ya seedha
+    target USER ki id — dono support karte hain (chat screen seedha
+    otherParticipant.id pass karta hai, alag se record-id track nahi karta).
+    """
+    permission_classes = [IsAuthenticated]
+    serializer_class = BlockUserSerializer
+
+    @extend_schema(description="Unblock a user (accepts BlockUser id or target user id)")
+    def delete(self, request, id):
+        block_obj = BlockUser.objects.filter(
+            Q(pk=id) | Q(blocked_id=id),
+            blocker=request.user,
+        ).first()
+
+        if not block_obj:
+            return Response({
+                "status": False,
+                "message": "Block record not found.",
+            }, status=status.HTTP_404_NOT_FOUND)
+
+        block_obj.delete()
+        return Response({
+            "status": True,
+            "message": "User unblocked successfully.",
+        }, status=status.HTTP_200_OK)

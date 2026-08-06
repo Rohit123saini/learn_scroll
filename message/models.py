@@ -1,6 +1,7 @@
 # chat/models.py - PRODUCTION LEVEL (Insta/FB scale)
 import hashlib
 import uuid
+from datetime import timedelta
 
 from django.conf import settings
 from django.contrib.auth import get_user_model
@@ -42,6 +43,25 @@ class MessageType(models.TextChoices):
 class ConversationType(models.TextChoices):
     PRIVATE = 'private', 'Private Chat'
     GROUP = 'group', 'Group Chat'
+
+
+# 🔥 NAYA — Temporary / Disappearing messages (WhatsApp jaisa). Ye poori
+# conversation ki setting hai (dono/sabhi participants ke liye same), isliye
+# `Conversation` model pe hai, per-user `ConversationParticipant` pe nahi.
+class DisappearingDuration(models.TextChoices):
+    NONE = 'none', 'Off'
+    ONE_MONTH = '1_month', '1 Month'
+    SIX_MONTHS = '6_months', '6 Months'
+    ONE_YEAR = '1_year', '1 Year'
+
+
+# duration string -> timedelta. `NONE` -> None (matlab disappearing off hai).
+DISAPPEARING_DURATION_TIMEDELTA = {
+    DisappearingDuration.NONE: None,
+    DisappearingDuration.ONE_MONTH: timedelta(days=30),
+    DisappearingDuration.SIX_MONTHS: timedelta(days=182),
+    DisappearingDuration.ONE_YEAR: timedelta(days=365),
+}
 
 
 class CallType(models.TextChoices):
@@ -89,11 +109,25 @@ class Conversation(BaseModel):
     last_message_sender = models.ForeignKey(User, null=True, blank=True, on_delete=models.SET_NULL, related_name='+')
     last_message_type = models.CharField(max_length=20, choices=MessageType.choices, blank=True, null=True)
 
+    # 🔥 NAYA — Temporary chat / disappearing messages setting. Poori
+    # conversation ke liye ek hi value hoti hai (WhatsApp jaisa — dono/sabhi
+    # participants ko same duration dikhta hai). Default 6 months rakha hai.
+    disappearing_messages_duration = models.CharField(
+        max_length=10,
+        choices=DisappearingDuration.choices,
+        default=DisappearingDuration.SIX_MONTHS,
+        db_index=True,
+    )
+
     class Meta(BaseModel.Meta):
         indexes = [
             models.Index(fields=['-last_message_at']),
             models.Index(fields=['type']),
         ]
+
+    def get_disappearing_timedelta(self):
+        """Current duration setting ka `timedelta` — `None` matlab off hai."""
+        return DISAPPEARING_DURATION_TIMEDELTA.get(self.disappearing_messages_duration)
 
     def __str__(self):
         return f"{self.type} - {self.id}"
@@ -134,6 +168,13 @@ class ConversationParticipant(BaseModel):
     is_archived = models.BooleanField(default=False)
     is_muted = models.BooleanField(default=False)
     is_pinned = models.BooleanField(default=False)
+
+    # 🔥 NAYA — Is chat ko apna custom naam/nickname dene ke liye (sirf
+    # is user ko dikhega, dusre participant/group members ko nahi — isliye
+    # `Conversation` pe nahi, per-user `ConversationParticipant` pe hai,
+    # jaisa mute/pin/archive hai). NULL/blank matlab koi custom label nahi,
+    # default naam (participant ka naam ya group ka naam) hi dikhega.
+    label = models.CharField(max_length=100, blank=True, null=True)
 
     unread_count = models.PositiveIntegerField(default=0)
     last_read_message = models.ForeignKey(
@@ -197,6 +238,34 @@ class GroupMember(BaseModel):
         ]
 
 
+# 🔥 NAYA — Private group me "seedha add" nahi, "request bhejo -> admin/
+# moderator approve/reject kare" wala flow. Public group me ye table use
+# hi nahi hota (public join instant hai, GroupMember seedha ban jaata hai).
+# `unique_together` isliye taaki ek user same group ke liye ek hi row
+# rakhe — reject hone ke baad dobara request kare to naya row banane ke
+# bajaye wahi row `PENDING` pe reset ho jaati hai (history bhi preserve
+# rehti hai ki pehle reject hua tha).
+class GroupJoinRequest(BaseModel):
+    class Status(models.TextChoices):
+        PENDING = 'pending', 'Pending'
+        APPROVED = 'approved', 'Approved'
+        REJECTED = 'rejected', 'Rejected'
+
+    group = models.ForeignKey(Group, on_delete=models.CASCADE, related_name='join_requests')
+    user = models.ForeignKey(User, on_delete=models.CASCADE, related_name='group_join_requests')
+    status = models.CharField(max_length=10, choices=Status.choices, default=Status.PENDING, db_index=True)
+
+    responded_by = models.ForeignKey(User, null=True, blank=True, on_delete=models.SET_NULL, related_name='+')
+    responded_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta(BaseModel.Meta):
+        unique_together = ('group', 'user')
+        indexes = [
+            models.Index(fields=['group', 'status']),
+            models.Index(fields=['user', 'status']),
+        ]
+
+
 # ================= 3. MESSAGE - Sabse Important =================
 class Message(BaseModel):
     """
@@ -233,12 +302,21 @@ class Message(BaseModel):
     # aane pe retry hota hai to same message duplicate na bane (idempotency)
     client_id = models.CharField(max_length=64, blank=True, null=True, db_index=True)
 
+    # 🔥 NAYA — Temporary chat / disappearing messages. Message create hote
+    # waqt hi conversation ki current `disappearing_messages_duration` se
+    # calculate karke yahan fix kar dete hain (send-time snapshot — WhatsApp
+    # jaisa: baad me setting badle to purane messages ki expiry nahi badalti,
+    # sirf naye messages nayi duration follow karte hain). `null` = kabhi
+    # expire nahi hoga (duration "none" thi jab bheja gaya tha).
+    expires_at = models.DateTimeField(null=True, blank=True, db_index=True)
+
     class Meta(BaseModel.Meta):
         indexes = [
             models.Index(fields=['conversation', '-created_at']),
             models.Index(fields=['sender', '-created_at']),
             models.Index(fields=['type']),
             models.Index(fields=['reply_to']),
+            models.Index(fields=['expires_at']),
         ]
         constraints = [
             # same sender ek hi client_id do baar submit kare to DB level pe hi block
