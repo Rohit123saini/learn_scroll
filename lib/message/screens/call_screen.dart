@@ -7,6 +7,7 @@ import 'package:permission_handler/permission_handler.dart';
 import 'package:audioplayers/audioplayers.dart'; // 🔥 NAYA — outgoing ring + call-waiting tone
 import '../services/call_manager.dart';
 import '../services/call_api_service.dart'; // 🔥 NAYA — call waiting accept ke liye
+import '../services/push_notification_service.dart'; // 🔥 FIX — call end hote hi "ongoing call" notification hatane ke liye
 
 class CallScreen extends StatefulWidget {
   final String callId;
@@ -61,11 +62,32 @@ class _CallScreenState extends State<CallScreen> with SingleTickerProviderStateM
   bool _controlsVisible = true;
   Timer? _hideControlsTimer;
 
+  // 🔥 NAYA — agar HUM caller hain aur 35 sec tak doosri taraf se koi
+  // response (accept/connect) nahi aata, to call khud-ba-khud cut ho
+  // jaani chahiye (no-answer timeout) — jaise normal phone call.
+  Timer? _noAnswerTimer;
+
+  void _startNoAnswerTimer() {
+    if (!widget.isCaller) return; // sirf outgoing call pe apply hota hai
+    _noAnswerTimer?.cancel();
+    _noAnswerTimer = Timer(const Duration(seconds: 35), () {
+      if (!mounted) return;
+      if (!_cm.remoteConnected) {
+        _endCall(); // 35 sec me answer nahi aaya — call khud cut kar do
+      }
+    });
+  }
+
   void _resetHideControlsTimer() {
     _hideControlsTimer?.cancel();
     if (!_controlsVisible) {
       setState(() => _controlsVisible = true);
     }
+    // 🔥 FIX — icons sirf VIDEO call me auto-hide honi chahiye (taaki video
+    // dekhne me controls beech me na aayein). VOICE call me dikhane ke
+    // liye koi video hoti hi nahi, isliye wahan controls hamesha visible
+    // rehni chahiye — timer start hi mat karo.
+    if (!widget.isVideo) return;
     _hideControlsTimer = Timer(const Duration(seconds: 3), () {
       if (mounted) setState(() => _controlsVisible = false);
     });
@@ -96,11 +118,16 @@ class _CallScreenState extends State<CallScreen> with SingleTickerProviderStateM
       peerAvatar: widget.peerAvatar,
     );
     _syncRingSounds();
+    _startNoAnswerTimer();
   }
 
   void _onManagerChanged() {
     if (mounted) setState(() {});
     _syncRingSounds();
+    // Doosri taraf connect ho gayi to no-answer timeout cancel kar do —
+    // warna jaise hi call receive hoti, 35th second pe khud hi cut ho
+    // jaati.
+    if (_cm.remoteConnected) _noAnswerTimer?.cancel();
   }
 
   // Manager ki current state dekh kar outgoing-ring / call-waiting tone
@@ -145,6 +172,7 @@ class _CallScreenState extends State<CallScreen> with SingleTickerProviderStateM
     _cm.removeListener(_onManagerChanged);
     _pulseController.dispose();
     _hideControlsTimer?.cancel();
+    _noAnswerTimer?.cancel();
     _outgoingRingPlayer.stop();
     _outgoingRingPlayer.dispose();
     _waitingTonePlayer.stop();
@@ -169,6 +197,12 @@ class _CallScreenState extends State<CallScreen> with SingleTickerProviderStateM
 
   Future<void> _endCall() async {
     await _cm.endCall();
+    // 🔥 FIX — pehle ye call CallManager ke andar reh gayi thi (ya kabhi
+    // miss ho jaati thi), isliye call app ke andar se end karne ke baad
+    // bhi "call in progress" wali system notification pinned reh jaati
+    // thi. Ab yahin se explicitly cancel karte hain taaki UI aur
+    // notification dono hamesha sync me rahein.
+    await PushNotificationService.instance.cancelOngoingCallNotification();
     if (mounted && Navigator.canPop(context)) Navigator.pop(context);
   }
 
@@ -205,6 +239,10 @@ class _CallScreenState extends State<CallScreen> with SingleTickerProviderStateM
     // khud band ho jaaye.
     if (!_cm.isActive) {
       WidgetsBinding.instance.addPostFrameCallback((_) {
+        // 🔥 FIX — call kisi bhi wajah se khatam ho (khud end ki, doosri
+        // taraf se end hui, ya error se), notification hamesha saath me
+        // clear ho.
+        PushNotificationService.instance.cancelOngoingCallNotification();
         if (mounted && Navigator.canPop(context)) Navigator.pop(context);
       });
     }

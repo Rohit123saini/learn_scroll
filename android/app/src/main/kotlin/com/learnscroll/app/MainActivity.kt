@@ -1,4 +1,4 @@
-package com.example.learnscroll
+package com.learnscroll.app
 
 import io.flutter.embedding.android.FlutterActivity
 

@@ -12,9 +12,11 @@
 //   firebase_core, firebase_messaging, flutter_local_notifications (push_notification_service.dart)
 
 import 'dart:async';
+import 'dart:convert'; // 🔥 NAYA — JWT se username decode karne ke liye (profile navigation)
 import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart'; // 🔥 NAYA — video fullscreen (landscape) rotation ke liye
+import 'package:flutter/gestures.dart'; // 🔥 NAYA — chat text ke andar clickable links ke liye (TapGestureRecognizer)
 import 'package:cached_network_image/cached_network_image.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:file_selector/file_selector.dart';
@@ -36,12 +38,94 @@ import '../services/push_notification_service.dart'; // 🔥 NAYA — notificati
 import '../services/call_kit_service.dart'; // 🔥 NAYA — native call popup dismiss
 import '../services/call_manager.dart'; // 🔥 NAYA — call waiting check ke liye
 import '../../services/auth_service.dart';
+import '../../profile/screens/target_profile.dart'; // 🔥 NAYA — user profile pe navigate karne ke liye
+import '../../profile/api_service.dart' as ProfileApi; // 🔥 NAYA
+import '../../home.dart'; // 🔥 NAYA — apni khud ki profile pe tap karne par Home ke Profile tab pe bhejne ke liye
 import 'call_screen.dart';
 import 'incoming_call_screen.dart'; // 🔥 NAYA — full-screen incoming call UI (outgoing call jaisa look)
 import 'study_room_screen.dart';
-import '../../widgets/sticker_picker_sheet.dart'; // 🔥 NAYA — animated Rive stickers (Emotions + Funny), chat & comments dono me reusable
+import 'forward_message_screen.dart'; // NEW — pick chat(s) to forward selected message(s) to
+import 'group_profile_screen.dart'; // 🔥 NAYA — Group info screen (public/private, members, admin roles, invite link)
+import 'media_viewer_screen.dart'; // 🔥 NAYA — fullscreen swipeable image viewer (zoom + auto-hide thumbnail strip)
+import '../../widgets/sticker_picker_sheet.dart'; // 🔥 NAYA — apne PNG stickers ka picker (assets/stickers/), chat & comments dono me reusable
 
 const _kEmojis = ['👍', '❤', '😂', '😮', '😢', '🙏'];
+
+// 🔥 NAYA — chat text ke andar URL (http://, https://, ya www. se shuru)
+// detect karne ke liye regex. `_LinkifiedText` widget isse use karta hai.
+final RegExp _urlRegex = RegExp(
+  r'((https?:\/\/)|(www\.))[^\s]+',
+  caseSensitive: false,
+);
+
+// 🔥 NAYA — WhatsApp/Telegram jaisa hi: message text ke andar jahan bhi
+// koi URL mile, use blue + underline dikhata hai aur tap karne par
+// device ke default browser (ya us link ko handle karne wali app) me
+// khol deta hai. Agar text me koi URL nahi hai to normal plain Text
+// jaisa hi render hota hai (koi extra cost/behaviour change nahi).
+class _LinkifiedText extends StatelessWidget {
+  final String text;
+  final Color color;
+  final double fontSize;
+  const _LinkifiedText({required this.text, required this.color, this.fontSize = 14.5});
+
+  Future<void> _openLink(String raw) async {
+    var url = raw.trim();
+    // Sentence ke end me aane wala trailing punctuation (., ,, )) etc.)
+    // link ka hissa nahi hota — usse hata dete hain taaki galat URL na khule.
+    url = url.replaceAll(RegExp(r'[\.,\)\]]+$'), '');
+    if (!url.startsWith('http://') && !url.startsWith('https://')) {
+      url = 'https://$url';
+    }
+    final uri = Uri.tryParse(url);
+    if (uri == null) return;
+    try {
+      await launchUrl(uri, mode: LaunchMode.externalApplication);
+    } catch (_) {
+      // link open nahi ho paaya (invalid URL, ya koi app handle nahi kar
+      // paayi) — silently ignore, chat UI break nahi hona chahiye.
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final matches = _urlRegex.allMatches(text);
+    if (matches.isEmpty) {
+      // Koi URL nahi mila — plain Text hi kaafi hai, RichText ki zaroorat nahi.
+      return Text(text, style: TextStyle(color: color, fontSize: fontSize));
+    }
+
+    final spans = <InlineSpan>[];
+    int last = 0;
+    for (final m in matches) {
+      if (m.start > last) {
+        spans.add(TextSpan(text: text.substring(last, m.start)));
+      }
+      final linkText = text.substring(m.start, m.end);
+      spans.add(TextSpan(
+        text: linkText,
+        style: TextStyle(
+          // Sent (dark) bubble pe halka light-blue, received (white)
+          // bubble pe standard link-blue — dono jagah readable rahega.
+          color: color == Colors.white ? const Color(0xFFB3E5FC) : const Color(0xFF039BE5),
+          decoration: TextDecoration.underline,
+        ),
+        recognizer: TapGestureRecognizer()..onTap = () => _openLink(linkText),
+      ));
+      last = m.end;
+    }
+    if (last < text.length) {
+      spans.add(TextSpan(text: text.substring(last)));
+    }
+
+    return RichText(
+      text: TextSpan(
+        style: TextStyle(color: color, fontSize: fontSize),
+        children: spans,
+      ),
+    );
+  }
+}
 
 // 🔥 NAYA — FIX: gallery se pick kiya gaya media hamesha ek normal file
 // path nahi hota. Kuch sources — jaise DOOSRE app ka media (misaal:
@@ -96,9 +180,18 @@ class _ChatScreenState extends State<ChatScreen> {
 
   List<MessageModel> _messages = []; // index 0 = sabse purana (chat bottom pe latest)
   bool _isLoading = true;
+
+  // 🔥 NAYA — pagination: initially sirf pehla page (20 messages) load hota
+  // hai, baaki purane messages tab load hote hain jab user list ke top tak
+  // scroll karta hai (WhatsApp/Telegram jaisa "load more on scroll up").
+  static const int _kPageSize = 20; // ek page me kitne messages
+  int _currentPage = 1;
+  bool _hasMoreMessages = true; // false ho jaata hai jab backend se koi purana message na aaye
+  bool _isLoadingMore = false; // top pe "loading older messages" spinner ke liye
   bool _isSocketConnected = false;
   bool _otherTyping = false;
   String? _myUserId;
+  String? _myUsername; // 🔥 NAYA — profile navigation ke liye (isMe check)
   int _clientIdCounter = 0;
   // (call-in-progress guard ab IncomingCallScreen ke andar callId-based
   // hai — IncomingCallScreen._activeCallIds — isliye ye local flag hata di.)
@@ -123,6 +216,101 @@ class _ChatScreenState extends State<ChatScreen> {
   Timer? _recordTimer;
   String? _recordPath;
 
+  // 🔥 NAYA — appbar ke 3-dot menu me mute/unmute notification toggle.
+  // Private chat ho ya group, dono ke liye same hi flag hai (per-user
+  // ConversationParticipant.is_muted), isliye alag logic nahi chahiye.
+  bool _isMuted = false;
+
+  // 🔥 NAYA — private chat me doosre user ko block/unblock karne ke liye.
+  // Sirf 1-to-1 chat me relevant hai (group me nahi dikhta).
+  bool _isBlocked = false;
+
+  // 🔥 NAYA — chat filter (3-dot menu se): 'all' | 'text' | 'media' | 'docs' | 'links'
+  // 'all' matlab koi filter nahi, poori chat normal dikhti hai.
+  String _chatFilter = 'all';
+
+  // 🔥 NAYA — Temporary chat (disappearing messages) ka current duration:
+  // 'none' | '1_month' | '6_months' | '1_year'. Backend default '6_months'
+  // rakhta hai, isliye yahan bhi wahi default rakha hai jab tak asli value
+  // load na ho jaaye (taaki menu me galat "Off" na flash ho ek pal ke liye).
+  String _disappearingDuration = '6_months';
+
+  // 🔥 NAYA — "Delete group" option sirf group ke ADMIN (moderator/member
+  // nahi) ko dikhane ke liye — apni role group detail se load karte hain.
+  bool _isGroupAdmin = false;
+
+  // NEW — multi-select mode for forwarding messages. When active, the
+  // normal AppBar is swapped for a selection bar (count + forward icon),
+  // tapping a message toggles it in/out of `_selectedMessageIds` instead
+  // of opening it, and long-press/media-tap gestures are absorbed.
+  bool _selectionMode = false;
+  final Set<String> _selectedMessageIds = {};
+
+  // 🔥 NAYA — ek message diye gaye filter category me aata hai ya nahi, ye check karta hai.
+  //  text  -> sirf plain text message (jisme koi URL na ho)
+  //  media -> image ya video
+  //  docs  -> file ya presentation (document type attachments)
+  //  links -> text message jiske andar koi http(s)/www link ho
+  bool _matchesFilter(MessageModel msg) {
+    switch (_chatFilter) {
+      case 'text':
+        return msg.type == MessageType.text && !_urlRegex.hasMatch(msg.text ?? '');
+      case 'media':
+        return msg.type == MessageType.image || msg.type == MessageType.video;
+      case 'docs':
+        return msg.type == MessageType.file || msg.type == MessageType.presentation;
+      case 'links':
+        return msg.type == MessageType.text && _urlRegex.hasMatch(msg.text ?? '');
+      case 'all':
+      default:
+        return true;
+    }
+  }
+
+  String _filterLabel(String value) {
+    switch (value) {
+      case 'text': return "Text";
+      case 'media': return "Media";
+      case 'docs': return "Docs";
+      case 'links': return "Links";
+      default: return "All";
+    }
+  }
+
+  // 🔥 NAYA — 3-dot menu ke "Filter messages" tap hone par ye bottom sheet
+  // khulti hai jisme 5 options hote hain: All, Text, Media, Docs, Links.
+  void _showFilterSheet() {
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: Colors.white,
+      shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(18))),
+      builder: (_) => SafeArea(
+        child: Column(mainAxisSize: MainAxisSize.min, children: [
+          const Padding(
+            padding: EdgeInsets.fromLTRB(16, 14, 16, 4),
+            child: Align(alignment: Alignment.centerLeft, child: Text("Filter messages", style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16))),
+          ),
+          for (final entry in const [
+            {'value': 'all', 'label': 'All messages', 'icon': Icons.forum_outlined},
+            {'value': 'text', 'label': 'Text', 'icon': Icons.short_text},
+            {'value': 'media', 'label': 'Image / Video', 'icon': Icons.perm_media_outlined},
+            {'value': 'docs', 'label': 'Docs / Files', 'icon': Icons.insert_drive_file_outlined},
+            {'value': 'links', 'label': 'URL / Links', 'icon': Icons.link},
+          ])
+            ListTile(
+              leading: Icon(entry['icon'] as IconData, color: _chatFilter == entry['value'] ? const Color(0xFF3D7EFF) : Colors.black87),
+              title: Text(entry['label'] as String, style: TextStyle(color: _chatFilter == entry['value'] ? const Color(0xFF3D7EFF) : Colors.black87, fontWeight: _chatFilter == entry['value'] ? FontWeight.bold : FontWeight.normal)),
+              trailing: _chatFilter == entry['value'] ? const Icon(Icons.check, color: Color(0xFF3D7EFF)) : null,
+              onTap: () {
+                Navigator.pop(context);
+                setState(() => _chatFilter = entry['value'] as String);
+              },
+            ),
+        ]),
+      ),
+    );
+  }
+
   @override
   void initState() {
     super.initState();
@@ -130,14 +318,405 @@ class _ChatScreenState extends State<ChatScreen> {
     // ka naya message aane par duplicate push notification popup na dikhe
     // (PushNotificationService.init() me ye check hota hai).
     PushNotificationService.currentOpenConversationId = widget.conversation.id;
+    _scrollController.addListener(_onScroll); // 🔥 NAYA — top tak scroll hone par purane messages load karne ke liye
     _init();
+    _loadMuteStatus(); // 🔥 NAYA
+    _loadBlockStatus(); // 🔥 NAYA
+    _loadDisappearingStatus(); // 🔥 NAYA
+  }
+
+  // 🔥 NAYA — jab user list ko top ke paas scroll kare (chat me sabse
+  // upar, list ka index 0 = sabse purana message), to agla page (aur
+  // purane messages) load karo. Bottom (naye messages) se koi lena-dena
+  // nahi — waha to naye realtime messages seedha add ho jaate hain.
+  void _onScroll() {
+    if (!_scrollController.hasClients) return;
+    if (_isLoadingMore || !_hasMoreMessages || _isLoading) return;
+    // 300px ka buffer rakha hai taaki user ke top pe pahochne se THODA
+    // pehle hi loading shuru ho jaaye — list "jump" hote hue nahi dikhega.
+    if (_scrollController.offset <= 300) {
+      _loadMoreMessages();
+    }
   }
 
   Future<void> _init() async {
     _myUserId = await AuthService.getUserId();
+    _loadMyUsername(); // 🔥 NAYA — fire-and-forget, profile tap se pehle usually ready ho jaayega
     await _loadHistory();
     await _connectSocket();
     await MessageApiService.readAll(widget.conversation.id);
+    _loadGroupRole(); // 🔥 NAYA — "Delete group" ke liye apni admin-status pata karo
+  }
+
+  // 🔥 NAYA — bilkul home.dart ke _loadMyUsername jaisa: pehle profile API
+  // try karo, fail ho to JWT access token decode karke username nikaal lo.
+  Future<void> _loadMyUsername() async {
+    try {
+      final d = await ProfileApi.ApiService.getProfile();
+      _myUsername = d.username;
+    } catch (_) {
+      try {
+        final t = await AuthService.getToken();
+        if (t != null) {
+          String p = base64.normalize(t.split('.')[1]);
+          _myUsername = jsonDecode(utf8.decode(base64Url.decode(p)))['username']?.toString();
+        }
+      } catch (_) {}
+    }
+  }
+
+  // 🔥 NAYA — bilkul home.dart ke _goToProfile jaisa hi logic: apni khud ki
+  // profile pe tap kiya to Home ke Profile tab pe bhej do, kisi aur ki
+  // profile pe tap kiya to seedha TargetProfilePage khol do.
+  Future<void> _goToProfile(String username) async {
+    if (username.trim().isEmpty) return;
+    if (_myUsername == null) await _loadMyUsername();
+    if (!mounted) return;
+    final isMe = _myUsername != null &&
+        _myUsername!.toLowerCase().trim() == username.toLowerCase().trim();
+    if (isMe) {
+      Navigator.of(context).pushAndRemoveUntil(
+        MaterialPageRoute(builder: (_) => const HomeScreen(initialIndex: 2)),
+        (route) => false,
+      );
+    } else {
+      Navigator.push(
+        context,
+        MaterialPageRoute(builder: (_) => TargetProfilePage(username: username)),
+      );
+    }
+  }
+
+  // 🔥 NAYA — group chat me apni role (admin/moderator/member) group
+  // detail se nikaal ke check karte hain ki "Delete group" (admin-only)
+  // option dikhana hai ya nahi. Private chat me ye no-op hi rehta hai.
+  // Backend response ka exact shape pata nahi (serializers.py yahan
+  // nahi hai) isliye members list ke liye common possible key-names
+  // (`members` / `group_members`) aur har member ke andar
+  // (`user.id` / `user_id`) dono format defensively handle kiye hain —
+  // kuch bhi match na ho to chup-chaap admin=false hi maan lo (worst
+  // case sirf button nahi dikhega, backend to permission already
+  // enforce karta hi hai).
+  Future<void> _loadGroupRole() async {
+    if (!widget.conversation.isGroup) return;
+    final groupId = widget.conversation.group?.id;
+    if (groupId == null || groupId.isEmpty || _myUserId == null) return;
+    try {
+      final data = await MessageApiService.getGroup(groupId);
+      final membersRaw = data['members'] ?? data['group_members'] ?? [];
+      if (membersRaw is List) {
+        for (final m in membersRaw) {
+          if (m is Map) {
+            final userField = m['user'];
+            final memberUserId = (userField is Map ? userField['id'] : (m['user_id'] ?? m['id']))?.toString();
+            if (memberUserId == _myUserId) {
+              final role = m['role']?.toString();
+              if (mounted) setState(() => _isGroupAdmin = role == 'admin');
+              break;
+            }
+          }
+        }
+      }
+    } catch (_) {}
+  }
+
+  // 🔥 NAYA — abhi ka mute status backend se le aao taaki menu me sahi
+  // label ("Mute" ya "Unmute") dikhe. Fail ho jaaye to chup-chaap
+  // default false (unmuted) maan lo — koi crash/blocking error nahi.
+  Future<void> _loadMuteStatus() async {
+    try {
+      final muted =
+          await MessageApiService.isConversationMuted(widget.conversation.id);
+      if (mounted) setState(() => _isMuted = muted);
+    } catch (_) {}
+  }
+
+  // 🔥 NAYA — optimistic toggle: pehle UI turant update, phir backend
+  // call; fail ho jaaye to purani value pe wapas revert kar do.
+  Future<void> _toggleMuteNotifications() async {
+    final newValue = !_isMuted;
+    setState(() => _isMuted = newValue);
+    try {
+      await MessageApiService.updateSettings(widget.conversation.id,
+          isMuted: newValue);
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+          content:
+              Text(newValue ? "Notifications muted" : "Notifications unmuted"),
+        ));
+      }
+    } catch (e) {
+      if (mounted) setState(() => _isMuted = !newValue); // revert
+      if (mounted) {
+        ScaffoldMessenger.of(context)
+            .showSnackBar(SnackBar(content: Text("Failed to update: $e")));
+      }
+    }
+  }
+
+  // 🔥 NAYA — block/unblock ke liye current status backend se le aao.
+  // Group chat me ye sawal hi nahi uthta, aur agar `otherParticipant`
+  // kisi wajah se null ho (data abhi load nahi hua) to bhi silently
+  // skip kar do — koi crash nahi.
+  Future<void> _loadBlockStatus() async {
+    if (widget.conversation.isGroup) return;
+    final otherId = widget.conversation.otherParticipant?.id;
+    if (otherId == null || otherId.isEmpty) return;
+    try {
+      final blocked = await MessageApiService.isUserBlocked(otherId);
+      if (mounted) setState(() => _isBlocked = blocked);
+    } catch (_) {}
+  }
+
+  // 🔥 NAYA — block karne se pehle confirm dialog dikhata hai (WhatsApp
+  // jaisa), unblock seedha ho jaata hai (koi confirm ki zaroorat nahi).
+  // Success/fail dono cases me user ko snackbar se pata chal jaata hai.
+  Future<void> _toggleBlockUser() async {
+    final otherId = widget.conversation.otherParticipant?.id;
+    if (otherId == null || otherId.isEmpty) return;
+
+    if (!_isBlocked) {
+      final otherName = widget.conversation.otherParticipant?.displayName ?? 'this user';
+      final confirmed = await showDialog<bool>(
+        context: context,
+        builder: (ctx) => AlertDialog(
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+          title: const Text("Block user?"),
+          content: Text(
+              "$otherName won't be able to call or message you, and you won't see their messages either."),
+          actions: [
+            TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text("Cancel")),
+            TextButton(
+              onPressed: () => Navigator.pop(ctx, true),
+              child: const Text("Block", style: TextStyle(color: Colors.red)),
+            ),
+          ],
+        ),
+      );
+      if (confirmed != true) return;
+
+      try {
+        await MessageApiService.blockUser(otherId);
+        if (!mounted) return;
+        setState(() => _isBlocked = true);
+        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("User blocked.")));
+      } catch (e) {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text("Block failed: $e")));
+        }
+      }
+    } else {
+      try {
+        await MessageApiService.unblockUser(otherId);
+        if (!mounted) return;
+        setState(() => _isBlocked = false);
+        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("User unblocked.")));
+      } catch (e) {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text("Unblock failed: $e")));
+        }
+      }
+    }
+  }
+
+  // 🔥 NAYA — chat khulte hi current disappearing-messages duration
+  // backend se le aao (menu me sahi option pe checkmark dikhane ke liye).
+  Future<void> _loadDisappearingStatus() async {
+    try {
+      final duration =
+          await MessageApiService.getDisappearingDuration(widget.conversation.id);
+      if (mounted) setState(() => _disappearingDuration = duration);
+    } catch (_) {}
+  }
+
+  String _disappearingLabel(String value) {
+    switch (value) {
+      case '1_month': return "1 Month";
+      case '6_months': return "6 Months";
+      case '1_year': return "1 Year";
+      case 'none':
+      default: return "Off";
+    }
+  }
+
+  // 🔥 NAYA — optimistic update: pehle UI turant naya duration dikhata hai,
+  // phir backend call; fail ho jaaye (e.g. group me non-admin) to purani
+  // value pe wapas revert kar do aur error dikhao.
+  Future<void> _setDisappearingDuration(String duration) async {
+    final previous = _disappearingDuration;
+    if (duration == previous) return;
+    setState(() => _disappearingDuration = duration);
+    try {
+      await MessageApiService.setDisappearingMessages(widget.conversation.id, duration);
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+          content: Text(duration == 'none'
+              ? "Disappearing messages turned off"
+              : "New messages will disappear after ${_disappearingLabel(duration)}"),
+        ));
+      }
+    } catch (e) {
+      if (mounted) setState(() => _disappearingDuration = previous); // revert
+      if (mounted) {
+        ScaffoldMessenger.of(context)
+            .showSnackBar(SnackBar(content: Text("Failed to update: $e")));
+      }
+    }
+  }
+
+  // 🔥 NAYA — 3-dot menu ke "Disappearing messages" tap hone par ye bottom
+  // sheet khulti hai — WhatsApp jaisa hi 4 options: Off, 1 Month, 6 Months, 1 Year.
+  void _showDisappearingMessagesSheet() {
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: Colors.white,
+      shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(18))),
+      builder: (_) => SafeArea(
+        child: Column(mainAxisSize: MainAxisSize.min, children: [
+          const Padding(
+            padding: EdgeInsets.fromLTRB(16, 14, 16, 4),
+            child: Align(alignment: Alignment.centerLeft, child: Text("Disappearing messages", style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16))),
+          ),
+          const Padding(
+            padding: EdgeInsets.fromLTRB(16, 0, 16, 8),
+            child: Align(
+              alignment: Alignment.centerLeft,
+              child: Text(
+                "Naye messages chune gaye time ke baad chat se apne aap gayab ho jaayenge.",
+                style: TextStyle(fontSize: 12.5, color: Colors.black54),
+              ),
+            ),
+          ),
+          for (final entry in const [
+            {'value': 'none', 'label': 'Off'},
+            {'value': '1_month', 'label': '1 Month'},
+            {'value': '6_months', 'label': '6 Months'},
+            {'value': '1_year', 'label': '1 Year'},
+          ])
+            ListTile(
+              leading: Icon(
+                entry['value'] == 'none' ? Icons.timer_off_outlined : Icons.timer_outlined,
+                color: _disappearingDuration == entry['value'] ? const Color(0xFF3D7EFF) : Colors.black87,
+              ),
+              title: Text(
+                entry['label']!,
+                style: TextStyle(
+                  color: _disappearingDuration == entry['value'] ? const Color(0xFF3D7EFF) : Colors.black87,
+                  fontWeight: _disappearingDuration == entry['value'] ? FontWeight.bold : FontWeight.normal,
+                ),
+              ),
+              trailing: _disappearingDuration == entry['value'] ? const Icon(Icons.check, color: Color(0xFF3D7EFF)) : null,
+              onTap: () {
+                Navigator.pop(context);
+                _setDisappearingDuration(entry['value']!);
+              },
+            ),
+        ]),
+      ),
+    );
+  }
+
+  // 🔥 NAYA — group chat se khud nikalne ke liye. Backend ka
+  // `GroupViewSet.update_member` (DELETE) already self-leave allow karta
+  // hai (admin check sirf tab lagta hai jab koi AUR member ko remove kiya
+  // ja raha ho) — isliye yahan seedha apni hi `_myUserId` bhej dete hain.
+  // Group ka id `widget.conversation.group?.id` se aata hai — ye
+  // `Conversation.id` se ALAG hota hai (Group aur uski Conversation dono
+  // ke apne-apne UUID hote hain).
+  // 🔥 NAYA — "Group info" screen (naam/photo edit, members list, admin
+  // role management, invite link, public/private) khud group ke saare
+  // members-related actions khud handle karti hai. Wahan se "Leave group"
+  // ya "Delete group" hone par `true` return hota hai — us case me ye
+  // chat screen bhi khud ko band kar leti hai (jaisa `_deleteGroup` /
+  // `_leaveGroup` already niche karte hain), taaki user wapas ek aisi
+  // chat me na reh jaaye jiska ab wo member hi nahi hai.
+  Future<void> _openGroupProfile() async {
+    final groupId = widget.conversation.group?.id;
+    if (groupId == null || groupId.isEmpty) return;
+    final result = await Navigator.push<bool>(
+      context,
+      MaterialPageRoute(builder: (_) => GroupProfileScreen(groupId: groupId)),
+    );
+    if (result == true && mounted) {
+      Navigator.of(context).pop(true);
+    }
+  }
+
+  Future<void> _leaveGroup() async {
+    final groupId = widget.conversation.group?.id;
+    if (groupId == null || groupId.isEmpty || _myUserId == null) return;
+
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+        title: const Text("Leave group?"),
+        content: Text(
+            "You'll no longer receive messages from \"${widget.conversation.displayTitle}\"."),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text("Cancel")),
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            child: const Text("Leave", style: TextStyle(color: Colors.red)),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true) return;
+
+    try {
+      await MessageApiService.removeGroupMember(groupId, _myUserId!);
+      if (!mounted) return;
+      // Chat screen se conversations list pe wapas — `true` return karte
+      // hain taaki caller (conversations screen) chahe to list refresh
+      // kar le (ye group ab uski list me nahi dikhna chahiye).
+      Navigator.of(context).pop(true);
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text("Leave failed: $e")));
+      }
+    }
+  }
+
+  // 🔥 NAYA — poora group permanently delete karne ke liye — SIRF ADMIN
+  // (backend `GroupViewSet.destroy` me strictly `role == 'admin'` check
+  // karta hai, moderator ko bhi allow nahi). `_leaveGroup` se ALAG hai:
+  // wahan sirf khud nikalte ho, yahan poora group sabke liye (saare
+  // members, messages, media sab) hamesha ke liye delete ho jaata hai.
+  Future<void> _deleteGroup() async {
+    final groupId = widget.conversation.group?.id;
+    if (groupId == null || groupId.isEmpty) return;
+
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+        title: const Text("Delete group?"),
+        content: Text(
+            "\"${widget.conversation.displayTitle}\" hamesha ke liye delete ho jaayega — saare members ke liye, saare messages/media ke saath. Ye undo nahi ho sakta."),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text("Cancel")),
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            child: const Text("Delete", style: TextStyle(color: Colors.red)),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true) return;
+
+    try {
+      await MessageApiService.deleteGroup(groupId);
+      if (!mounted) return;
+      // Baaki members ko is delete ka pata `group_deleted` socket event se
+      // chal jaata hai (backend delete se PEHLE hi broadcast kar deta hai)
+      // — humein khud yahan seedha conversations list pe wapas jaana hai.
+      Navigator.of(context).pop(true);
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text("Delete failed: $e")));
+      }
+    }
   }
 
   Future<void> _loadHistory() async {
@@ -153,11 +732,22 @@ class _ChatScreenState extends State<ChatScreen> {
       _scanAlreadyDownloaded();
     }
     try {
-      final data = await MessageApiService.getMessages(widget.conversation.id, page: 1);
+      // 🔥 NAYA — pehli baar sirf `_kPageSize` (20) messages mangwao, poori
+      // history nahi. Baaki purane messages user ke top tak scroll karne
+      // par `_loadMoreMessages()` se load honge.
+      final data = await MessageApiService.getMessages(
+        widget.conversation.id,
+        page: 1,
+        pageSize: _kPageSize,
+      );
       if (mounted) {
         setState(() {
           _messages = data.reversed.toList();
           _isLoading = false;
+          _currentPage = 1;
+          // Agar backend se ek page se kam messages aaye, matlab aur purane
+          // messages hain hi nahi — "load more" trigger karne ki zaroorat nahi.
+          _hasMoreMessages = data.length >= _kPageSize;
         });
         _scrollToBottom();
         _scanAlreadyDownloaded(); // 🔥 NAYA — WhatsApp jaisa: purane downloaded files pe "Open" dikhao
@@ -172,6 +762,65 @@ class _ChatScreenState extends State<ChatScreen> {
             SnackBar(content: Text("Failed to load messages: $e")),
           );
         }
+      }
+    }
+  }
+
+  // 🔥 NAYA — user list ke top ke paas pahochte hi agla (purana) page
+  // fetch karke `_messages` list ke SHURU me insert karta hai. Scroll
+  // position ko manually adjust karte hain taaki naye messages upar add
+  // hone ke baad bhi user ki current screen "jump" na kare — bilkul
+  // WhatsApp/Telegram jaisa smooth "load older messages" feel.
+  Future<void> _loadMoreMessages() async {
+    if (_isLoadingMore || !_hasMoreMessages) return;
+    setState(() => _isLoadingMore = true);
+
+    final nextPage = _currentPage + 1;
+    try {
+      final older = await MessageApiService.getMessages(
+        widget.conversation.id,
+        page: nextPage,
+        pageSize: _kPageSize,
+      );
+      if (!mounted) return;
+
+      if (older.isEmpty) {
+        setState(() {
+          _hasMoreMessages = false;
+          _isLoadingMore = false;
+        });
+        return;
+      }
+
+      // Insertion se PEHLE ka scroll offset/extent yaad rakho — insertion ke
+      // baad isi diff se jumpTo() karenge taaki user jahan dekh raha tha
+      // wahi content usi jagah dikhta rahe (visual jump na ho).
+      final prevMaxExtent =
+          _scrollController.hasClients ? _scrollController.position.maxScrollExtent : 0.0;
+      final prevOffset = _scrollController.hasClients ? _scrollController.offset : 0.0;
+
+      setState(() {
+        _messages.insertAll(0, older.reversed.toList());
+        _currentPage = nextPage;
+        _isLoadingMore = false;
+        if (older.length < _kPageSize) _hasMoreMessages = false;
+      });
+      _scanAlreadyDownloaded(); // 🔥 NAYA — abhi load hue purane messages ke media pe bhi "Open" status dikhao
+
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!mounted || !_scrollController.hasClients) return;
+        final newMaxExtent = _scrollController.position.maxScrollExtent;
+        final diff = newMaxExtent - prevMaxExtent;
+        if (diff > 0) {
+          _scrollController.jumpTo(prevOffset + diff);
+        }
+      });
+    } catch (e) {
+      if (mounted) {
+        setState(() => _isLoadingMore = false);
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text("Failed to load older messages: $e")),
+        );
       }
     }
   }
@@ -210,6 +859,33 @@ class _ChatScreenState extends State<ChatScreen> {
         // 🔥 NAYA: online/last-seen status ab AppBar me dikhega
         _onPresenceEvent(event);
         break;
+      // 🔥 NAYA — Temporary chat: dusre participant/admin ne disappearing
+      // messages ki setting change ki to yahan bhi turant sync ho jaaye.
+      case 'disappearing_messages_updated':
+        final duration = event['duration']?.toString();
+        if (duration != null && mounted) {
+          setState(() => _disappearingDuration = duration);
+          if (event['updated_by']?.toString() != _myUserId) {
+            ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+              content: Text(duration == 'none'
+                  ? "Disappearing messages turned off"
+                  : "Disappearing messages set to ${_disappearingLabel(duration)}"),
+            ));
+          }
+        }
+        break;
+      // 🔥 NAYA — admin ne poora group delete kar diya — sabhi (khud
+      // delete karne wale admin ko chhod ke, uski app pehle hi
+      // `_deleteGroup()` ke andar seedha pop kar chuki hoti hai) members
+      // ki chat screen turant band karke conversations list pe bhej do.
+      case 'group_deleted':
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text("This group was deleted by the admin.")),
+          );
+          Navigator.of(context).pop(true);
+        }
+        break;
       // 🔥 CALL EVENTS — backend se call_event type me aate hain
       case 'call_event':
       case 'incoming_call':
@@ -236,12 +912,16 @@ class _ChatScreenState extends State<ChatScreen> {
   // ============================================================
   void _handleCallEvent(Map<String, dynamic> event) {
     // backend 2 format bhej sakta hai:
-    // 1) {type: call_event, event: incoming_call, call_id:..., call_type:..., caller_name:...}
+    // 1) {type: call_event, event: incoming_call, call_id:..., call_type:..., caller_name:..., caller_photo:...}
     // 2) {type: incoming_call, call_id:...,...}
     final eventName = (event['event'] ?? event['type']).toString();
     final callId = (event['call_id'] ?? event['id'])?.toString();
     final callType = (event['call_type'] ?? event['type'] ?? 'audio').toString();
     final callerName = (event['caller_name'] ?? 'Someone').toString();
+    // 🔥 NAYA — backend ab `caller_photo` bhi bhejta hai (CallInitiateView),
+    // taaki incoming-call popup me caller ki asli photo dikhe, sirf
+    // initials wala fallback avatar nahi.
+    final callerPhoto = event['caller_photo']?.toString();
     final convId = (event['conversation_id'] ?? widget.conversation.id).toString();
 
     if (convId != widget.conversation.id) return; // dusri chat ka call ignore
@@ -272,6 +952,7 @@ class _ChatScreenState extends State<ChatScreen> {
         callId: callId,
         callType: callType,
         callerName: callerName,
+        callerAvatar: callerPhoto,
         conversationId: convId,
         isGroup: widget.conversation.isGroup,
         groupTitle: widget.conversation.isGroup ? widget.conversation.displayTitle : null,
@@ -292,7 +973,7 @@ class _ChatScreenState extends State<ChatScreen> {
   Future<void> _startCall(String type) async {
     try {
       // loader
-      showDialog(context: context, barrierDismissible: false, builder: (_) => Center(child: CircularProgressIndicator()));
+      showDialog(context: context, barrierDismissible: false, builder: (_) => const Center(child: CircularProgressIndicator(color: Color(0xFF030F27))));
       final data = await CallApiService.initiateCall(widget.conversation.id, type);
       if (!mounted) return;
       Navigator.pop(context); // loader close
@@ -337,13 +1018,21 @@ class _ChatScreenState extends State<ChatScreen> {
     // bhejte hain) — usko tap karke wo seedha isi room me enter ho
     // jaayega, bina alag se link poochhe.
     _sendStudyRoomInvite();
-    _enterStudyRoom();
+    // 🔥 FIX — pehle yahan bhi normal `_enterStudyRoom()` hi call hota tha,
+    // isliye har baar icon tap karne par purani persistent room/whiteboard
+    // hi reuse hoti thi. Ab icon se start karna hamesha ek BILKUL NAYI
+    // session banata hai (`startNewSession: true`) — invite card pe tap
+    // karke JOIN karne wala flow (neeche `onJoinStudyRoom: _enterStudyRoom`)
+    // isse alag hai aur wahi purani/active session me le jaata hai.
+    _enterStudyRoom(startNewSession: true);
   }
 
   // Card pe tap karke (khud bheja ho ya doosre ka receive kiya ho) —
   // dono jagah se yehi ek function room me le jaata hai, taaki tap karne
-  // par dobara invite na bhej jaaye.
-  void _enterStudyRoom() {
+  // par dobara invite na bhej jaaye. `startNewSession` sirf `_openStudyRoom`
+  // (icon se fresh start) se true aata hai — card tap se JOIN karne me
+  // hamesha false rehta hai taaki chal rahi session me hi entry ho.
+  void _enterStudyRoom({bool startNewSession = false}) {
     Navigator.push(
       context,
       MaterialPageRoute(
@@ -358,6 +1047,7 @@ class _ChatScreenState extends State<ChatScreen> {
               ? widget.conversation.displayTitle
               : widget.conversation.otherParticipant?.displayName,
           peerAvatar: widget.conversation.displayPhoto,
+          startNewSession: startNewSession,
         ),
       ),
     );
@@ -616,6 +1306,29 @@ class _ChatScreenState extends State<ChatScreen> {
     }
   }
 
+  // 🔥 NAYA — apna PNG sticker bhejna: sticker_picker_sheet se ek
+  // asset path milta hai (jaise "assets/stickers/hi_frog.png"). Usko
+  // app bundle se bytes ki tarah padh ke ek real temp file bana dete
+  // hain, phir wahi normal `_uploadAndSendFile` pipeline use karte
+  // hain jo photo bhejne me use hota hai — isliye upload %, read-tick,
+  // download, sab already-existing image logic apne aap kaam karta
+  // hai. `is_sticker: true` meta se bubble ko pata chal jaata hai ki
+  // ye ek sticker hai (normal colored chat-bubble nahi, WhatsApp
+  // jaisa transparent bada sticker dikhana hai).
+  Future<void> _sendSticker(String assetPath) async {
+    try {
+      final data = await rootBundle.load(assetPath);
+      final bytes = data.buffer.asUint8List();
+      final tempDir = await getTemporaryDirectory();
+      final fileName = assetPath.split('/').last;
+      final tempPath = "${tempDir.path}/sticker_${DateTime.now().microsecondsSinceEpoch}_$fileName";
+      final file = await File(tempPath).writeAsBytes(bytes);
+      await _uploadAndSendFile(file, MessageType.image, fileName, extraMeta: {'is_sticker': true});
+    } catch (e) {
+      if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text("Sticker bhejne me error: $e")));
+    }
+  }
+
   // ============================================================
   // 🔥 NAYA: VOICE NOTE RECORDING — seedha chat input bar ke mic se
   // ============================================================
@@ -683,8 +1396,13 @@ class _ChatScreenState extends State<ChatScreen> {
     showModalBottomSheet(context: context, backgroundColor: Colors.white, shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(18))), builder: (_) => SafeArea(child: Wrap(children: [
       // 🔥 NAYA — seedha camera se photo/video khinch ke bhejo
       _attachmentTile(Icons.camera_alt, "Camera", const Color(0xFF00BCD4), _showCameraChooser),
-      // 🔥 NAYA — gallery se ek saath MULTIPLE photos/videos select karke bhejo (WhatsApp jaisa)
-      _attachmentTile(Icons.photo_library, "Gallery", const Color(0xFF9C27B0), _pickAndSendMultipleMedia),
+      // 🔥 NAYA — Photo aur Video gallery ab do ALAG buttons hain — Photo
+      // Gallery sirf images ka native picker kholta hai, Video Gallery
+      // sirf videos ka. Pehle ek hi "Gallery" button tha jo pehle mixed
+      // picker try karta, na mile to images-only, na mile to ek video —
+      // isliye kabhi photo aati thi kabhi video, mixed/unpredictable tha.
+      _attachmentTile(Icons.photo_library, "Photo Gallery", const Color(0xFF9C27B0), _pickAndSendPhotoGallery),
+      _attachmentTile(Icons.video_library, "Video Gallery", const Color(0xFFE53935), _pickAndSendVideoGallery),
       _attachmentTile(Icons.mic, "Audio", const Color(0xFFFF9800), () => _pickAndSendAttachment(MessageType.audio)),
       _attachmentTile(Icons.insert_drive_file, "File", const Color(0xFF3F51B5), () => _pickAndSendAttachment(MessageType.file)),
       _attachmentTile(Icons.slideshow, "Presentation", const Color(0xFF00897B), () => _pickAndSendAttachment(MessageType.presentation)),
@@ -692,28 +1410,23 @@ class _ChatScreenState extends State<ChatScreen> {
     ])));
   }
 
-  // 🔥 NAYA — WhatsApp jaisa "album": gallery kholte hi user ek saath kai
-  // photos select kar sakta hai, aur wo sab EK HI message ke andar
-  // (file_urls[]) bandle hoke jaate hain — pehle har photo ka apna alag
-  // message ban jaata tha, ab ek hi bubble me sab dikhte hain.
-  // Videos abhi bhi apne-apne alag message me jaate hain (ek message = ek
-  // video — WhatsApp bhi isi tarah karta hai jab video ho).
-  // NOTE: `pickMultipleMedia()` image_picker >= 1.0.0 me available hai.
-  // Agar tumhara image_picker version purana hai to pubspec.yaml me
-  // `image_picker: ^1.1.2` kar ke `flutter pub get` chala lena.
-  Future<void> _pickAndSendMultipleMedia() async {
-    final List<XFile> rawPicked = await ImagePicker().pickMultipleMedia(imageQuality: 85);
+  // 🔥 NAYA — shared helper: kahin se bhi (Photo Gallery ya Video Gallery
+  // button se) raw XFiles aa jaayein, ye unhe real files banata hai
+  // (_ensureRealFile — content:// URI wale sources ke liye), WhatsApp
+  // jaisa review/preview screen dikhata hai (caption, item remove/add),
+  // aur "send" hone par images/videos ko split karke correct pipeline
+  // (_uploadAndSendMultipleImages / _uploadAndSendFile) se bhejta hai.
+  Future<void> _pickAndSendMedia(List<XFile> rawPicked) async {
     if (rawPicked.isEmpty) return;
-    // 🔥 FIX — WhatsApp/doosre app ke media folder se pick kiya gaya
-    // item content:// URI ke roop me aa sakta hai; yahin sabse pehle
-    // real file bana lete hain taaki preview screen aur upload dono
-    // sahi se kaam karein (_ensureRealFile ka comment dekho).
+    // 🔥 WhatsApp/doosre app ke media folder se pick kiya gaya item
+    // content:// URI ke roop me aa sakta hai; yahin sabse pehle real
+    // file bana lete hain taaki preview screen aur upload dono sahi se
+    // kaam karein (_ensureRealFile ka comment upar dekho).
     final picked = await _ensureRealFiles(rawPicked);
 
-    // 🔥 NAYA: seedha upload karne ke bajaye pehle WhatsApp jaisa
-    // review/preview screen dikhao — user yahan se koi item hata sakta
-    // hai, "+" se aur media add kar sakta hai, aur caption likh sakta hai.
-    // Tap-to-send hone se pehle poora album dekh sakte ho.
+    // 🔥 Seedha upload karne ke bajaye pehle WhatsApp jaisa review/preview
+    // screen dikhao — user yahan se koi item hata sakta hai, "+" se aur
+    // media add kar sakta hai, aur caption likh sakta hai.
     final result = await Navigator.push<_MediaPreviewResult>(
       context,
       MaterialPageRoute(builder: (_) => _MediaPreviewScreen(files: picked)),
@@ -744,6 +1457,32 @@ class _ChatScreenState extends State<ChatScreen> {
         text: (i == 0 && images.isEmpty) ? caption : null,
       );
     }
+  }
+
+  // 🔥 NAYA — "Photo Gallery" button: sirf-images multi-select picker.
+  // `pickMultiImage()` bahut purana, stable, sirf-images API hai jo
+  // hamesha device ki asli Photos/Gallery app kholta hai, kabhi generic
+  // Downloads/file-manager par fallback nahi karta — isliye ab koi
+  // "Word/Excel/PDF bhi dikhne lagte hain" wala confusion nahi rahega,
+  // aur na hi koi video is grid me dikhegi.
+  Future<void> _pickAndSendPhotoGallery() async {
+    final rawPicked = await ImagePicker().pickMultiImage(imageQuality: 85);
+    await _pickAndSendMedia(rawPicked);
+  }
+
+  // 🔥 NAYA — "Video Gallery" button: sirf-videos multi-select picker.
+  // image_picker me multiple videos ek saath select karne ka koi
+  // built-in tarika nahi hai, isliye file_selector ka `openFiles`
+  // video-extensions ke saath use karte hain — OS ka video-filtered
+  // picker khulta hai (generic "any file" browser nahi), aur user ek
+  // saath kai videos select kar sakta hai.
+  Future<void> _pickAndSendVideoGallery() async {
+    const videoGroup = XTypeGroup(
+      label: 'video',
+      extensions: ['mp4', 'mov', 'mkv', '3gp', 'webm', 'avi', 'm4v'],
+    );
+    final rawPicked = await openFiles(acceptedTypeGroups: [videoGroup]);
+    await _pickAndSendMedia(rawPicked);
   }
 
   /// 🔥 NAYA: multiple images ko ek hi message me bhejta hai — sab files
@@ -838,10 +1577,9 @@ class _ChatScreenState extends State<ChatScreen> {
 
   void _showReactionPicker(MessageModel msg) {
     final myCurrent = msg.myReaction(_myUserId ?? '');
-    // 🔥 NAYA — plain emoji ki jagah ab animated Rive sticker dikhta hai
-    // (stickerForEmoji helper se), lekin backend me wahi purana emoji
-    // string save/bheja jaata hai — koi data-format change nahi hua.
-    showModalBottomSheet(context: context, backgroundColor: Colors.white, shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(18))), builder: (_) => SafeArea(child: Padding(padding: const EdgeInsets.symmetric(vertical: 18), child: Row(mainAxisAlignment: MainAxisAlignment.spaceEvenly, children: _kEmojis.map((emoji) { final selected = emoji == myCurrent; return GestureDetector(onTap: () { Navigator.pop(context); _toggleReaction(msg, emoji); }, child: Container(padding: const EdgeInsets.all(6), decoration: BoxDecoration(color: selected ? const Color(0xFFEEF1FF) : null, shape: BoxShape.circle), child: stickerForEmoji(emoji, size: 40))); }).toList()))));
+    // Reaction bar plain emoji dikhata hai (WhatsApp jaisa asli reaction
+    // bar) — backend me wahi purana emoji string save/bheja jaata hai.
+    showModalBottomSheet(context: context, backgroundColor: Colors.white, shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(18))), builder: (_) => SafeArea(child: Padding(padding: const EdgeInsets.symmetric(vertical: 18), child: Row(mainAxisAlignment: MainAxisAlignment.spaceEvenly, children: _kEmojis.map((emoji) { final selected = emoji == myCurrent; return GestureDetector(onTap: () { Navigator.pop(context); _toggleReaction(msg, emoji); }, child: Container(padding: const EdgeInsets.all(6), decoration: BoxDecoration(color: selected ? const Color(0xFFEEF1FF) : null, shape: BoxShape.circle), child: Text(emoji, style: const TextStyle(fontSize: 30)))); }).toList()))));
   }
 
   void _toggleReaction(MessageModel msg, String emoji) async {
@@ -854,7 +1592,12 @@ class _ChatScreenState extends State<ChatScreen> {
     if (msg.deletedForEveryone || msg.deletedForMe) return;
     showModalBottomSheet(context: context, backgroundColor: Colors.white, shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(18))), builder: (_) => SafeArea(child: Column(mainAxisSize: MainAxisSize.min, children: [
       ListTile(leading: const Icon(Icons.reply), title: const Text("Reply"), onTap: () { Navigator.pop(context); _startReply(msg); }),
+      // NEW — forward just this one message straight to a picker.
+      ListTile(leading: const Icon(Icons.forward), title: const Text("Forward"), onTap: () { Navigator.pop(context); _forwardOne(msg); }),
       ListTile(leading: const Icon(Icons.emoji_emotions_outlined), title: const Text("React"), onTap: () { Navigator.pop(context); _showReactionPicker(msg); }),
+      // NEW — enter multi-select mode (starting with this message already
+      // checked) so several messages can be picked and forwarded together.
+      ListTile(leading: const Icon(Icons.check_circle_outline), title: const Text("Select"), onTap: () { Navigator.pop(context); _enterSelectionMode(msg); }),
       if (isMe && msg.type == MessageType.text) ListTile(leading: const Icon(Icons.edit_outlined), title: const Text("Edit"), onTap: () { Navigator.pop(context); _showEditDialog(msg); }),
       // 🔥 NAYA: media messages ke liye "Save to device" action bhi —
       // multi-image (album) message ho to sab photos ek-ek karke save hoti hain.
@@ -869,14 +1612,103 @@ class _ChatScreenState extends State<ChatScreen> {
             _downloadMedia(context, msg);
           }
         }),
-      ListTile(leading: const Icon(Icons.delete_outline, color: Colors.red), title: const Text("Delete for me", style: TextStyle(color: Colors.red)), onTap: () { Navigator.pop(context); _socket.sendDelete(msg.id, forEveryone: false); }),
-      if (isMe) ListTile(leading: const Icon(Icons.delete_forever_outlined, color: Colors.red), title: const Text("Delete for everyone", style: TextStyle(color: Colors.red)), onTap: () { Navigator.pop(context); _socket.sendDelete(msg.id, forEveryone: true); }),
+      ListTile(leading: const Icon(Icons.delete_outline, color: Colors.red), title: const Text("Delete for me", style: TextStyle(color: Colors.red)), onTap: () { Navigator.pop(context); _deleteMessage(msg, forEveryone: false); }),
+      if (isMe) ListTile(leading: const Icon(Icons.delete_forever_outlined, color: Colors.red), title: const Text("Delete for everyone", style: TextStyle(color: Colors.red)), onTap: () { Navigator.pop(context); _deleteMessage(msg, forEveryone: true); }),
     ])));
+  }
+
+  // ============================================================
+  // NEW — FORWARD (single message, or multi-select forward)
+  // ============================================================
+
+  void _enterSelectionMode(MessageModel msg) {
+    setState(() {
+      _selectionMode = true;
+      _selectedMessageIds
+        ..clear()
+        ..add(msg.id);
+    });
+  }
+
+  void _exitSelectionMode() {
+    setState(() {
+      _selectionMode = false;
+      _selectedMessageIds.clear();
+    });
+  }
+
+  void _toggleMessageSelected(MessageModel msg) {
+    setState(() {
+      if (_selectedMessageIds.contains(msg.id)) {
+        _selectedMessageIds.remove(msg.id);
+        if (_selectedMessageIds.isEmpty) _selectionMode = false;
+      } else {
+        _selectedMessageIds.add(msg.id);
+      }
+    });
+  }
+
+  Future<void> _forwardOne(MessageModel msg) => _openForwardPicker([msg.id]);
+
+  Future<void> _forwardSelected() async {
+    final ids = _selectedMessageIds.toList();
+    _exitSelectionMode();
+    await _openForwardPicker(ids);
+  }
+
+  Future<void> _openForwardPicker(List<String> messageIds) async {
+    if (messageIds.isEmpty) return;
+    final ok = await Navigator.of(context).push<bool>(
+      MaterialPageRoute(builder: (_) => ForwardMessageScreen(messageIds: messageIds)),
+    );
+    if (ok == true && mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+        content: Text(messageIds.length == 1 ? "Message forwarded" : "${messageIds.length} messages forwarded"),
+      ));
+    }
+  }
+
+  // 🔧 FIX — delete pehle SIRF socket ke bharose tha; socket disconnect
+  // hote hi silently kuch nahi hota tha. Ab turant local UI update
+  // (optimistic) + reliable REST call (`MessageApiService.deleteMessage`)
+  // — socket ki state pe depend nahi karta. Fail hone par revert + error.
+  Future<void> _deleteMessage(MessageModel msg, {required bool forEveryone}) async {
+    final idx = _messages.indexWhere((m) => m.id == msg.id);
+    if (idx == -1) return;
+
+    final prevDeletedForMe = _messages[idx].deletedForMe;
+    final prevDeletedForEveryone = _messages[idx].deletedForEveryone;
+    final prevText = _messages[idx].text;
+
+    setState(() {
+      if (forEveryone) {
+        _messages[idx].deletedForEveryone = true;
+        _messages[idx].text = '';
+      } else {
+        _messages[idx].deletedForMe = true;
+      }
+    });
+
+    _socket.sendDelete(msg.id, forEveryone: forEveryone);
+
+    try {
+      await MessageApiService.deleteMessage(msg.id, forEveryone: forEveryone);
+    } catch (e) {
+      if (mounted) {
+        setState(() {
+          _messages[idx].deletedForMe = prevDeletedForMe;
+          _messages[idx].deletedForEveryone = prevDeletedForEveryone;
+          _messages[idx].text = prevText;
+        });
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text("Delete failed: $e")));
+      }
+    }
   }
 
   void _showEditDialog(MessageModel msg) {
     final controller = TextEditingController(text: msg.text ?? '');
-    showDialog(context: context, builder: (_) => AlertDialog(title: const Text("Edit message"), content: TextField(controller: controller, maxLines: 4, autofocus: true), actions: [
+    showDialog(context: context, builder: (_) => AlertDialog(
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),title: const Text("Edit message"), content: TextField(controller: controller, maxLines: 4, autofocus: true), actions: [
       TextButton(onPressed: () => Navigator.pop(context), child: const Text("Cancel")),
       TextButton(onPressed: () async { final newText = controller.text.trim(); Navigator.pop(context); if (newText.isEmpty || newText == msg.text) return; try { final updated = await MessageApiService.editMessage(msg.id, newText); if (mounted) setState(() { final idx = _messages.indexWhere((m) => m.id == msg.id); if (idx != -1) _messages[idx] = updated; }); } catch (e) { if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text("Edit failed: $e"))); } }, child: const Text("Save")),
     ]));
@@ -963,6 +1795,7 @@ class _ChatScreenState extends State<ChatScreen> {
       context: context,
       barrierDismissible: false,
       builder: (_) => AlertDialog(
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
         content: ValueListenableBuilder<double>(
           valueListenable: progressNotifier,
           builder: (_, value, __) => Row(children: [
@@ -1028,36 +1861,216 @@ class _ChatScreenState extends State<ChatScreen> {
   Widget build(BuildContext context) {
     final subtitle = _presenceSubtitle();
     return Scaffold(
-      backgroundColor: const Color(0xFFECE5DD), // 🔥 NAYA — WhatsApp jaisa warm chat background base
-      appBar: AppBar(
+      backgroundColor: const Color(0xFFF3F5FA), // 🔥 NAYA — soft, professional cool-grey chat background (WhatsApp-beige ki jagah)
+      appBar: _selectionMode ? _buildSelectionAppBar() : AppBar(
         backgroundColor: const Color(0xFF030F27),
+        elevation: 3, // 🔥 NAYA — subtle depth, flat/dated na lage
+        shadowColor: Colors.black45,
         iconTheme: const IconThemeData(color: Colors.white),
         titleSpacing: 0,
-        title: Row(children: [
+        title: InkWell(
+          // 🔥 NAYA — header (avatar + naam) pe tap karke: private chat me
+          // seedha otherParticipant.username se profile khulti hai; group
+          // chat me ab "Group info" screen khulti hai (members, roles,
+          // invite link — jaisa WhatsApp/Telegram me hota hai).
+          onTap: widget.conversation.isGroup
+              ? _openGroupProfile
+              : () => _goToProfile(widget.conversation.otherParticipant?.username ?? ''),
+          borderRadius: BorderRadius.circular(8),
+          child: Row(children: [
           Stack(clipBehavior: Clip.none, children: [
-            CircleAvatar(radius: 18, backgroundColor: Colors.grey[300], backgroundImage: widget.conversation.displayPhoto != null && widget.conversation.displayPhoto!.isNotEmpty ? CachedNetworkImageProvider(widget.conversation.displayPhoto!) : null, child: widget.conversation.displayPhoto == null || widget.conversation.displayPhoto!.isEmpty ? Icon(widget.conversation.isGroup ? Icons.group : Icons.person, color: Colors.grey[600], size: 18) : null),
-            // 🔥 NAYA — online hone par avatar pe green dot
+            CircleAvatar(
+              radius: 19,
+              backgroundColor: Colors.white24, // 🔥 NAYA — halka ring jaisa fallback background
+              child: CircleAvatar(radius: 18, backgroundColor: Colors.grey[300], backgroundImage: widget.conversation.displayPhoto != null && widget.conversation.displayPhoto!.isNotEmpty ? CachedNetworkImageProvider(widget.conversation.displayPhoto!) : null, child: widget.conversation.displayPhoto == null || widget.conversation.displayPhoto!.isEmpty ? Icon(widget.conversation.isGroup ? Icons.group : Icons.person, color: Colors.grey[600], size: 18) : null),
+            ),
+            // 🔥 NAYA — online hone par avatar pe accent-blue dot
             if (!widget.conversation.isGroup && _otherOnline)
-              Positioned(right: -1, bottom: -1, child: Container(width: 11, height: 11, decoration: BoxDecoration(color: const Color(0xFF25D366), shape: BoxShape.circle, border: Border.all(color: const Color(0xFF030F27), width: 2)))),
+              Positioned(right: -1, bottom: -1, child: Container(width: 11, height: 11, decoration: BoxDecoration(color: const Color(0xFF3D7EFF), shape: BoxShape.circle, border: Border.all(color: const Color(0xFF030F27), width: 2)))),
           ]),
-          const SizedBox(width: 10),
+          const SizedBox(width: 12),
           Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, mainAxisSize: MainAxisSize.min, children: [
-            Text(widget.conversation.displayTitle, style: const TextStyle(color: Colors.white, fontSize: 15, fontWeight: FontWeight.bold)),
-            if (subtitle != null) Text(subtitle, style: TextStyle(color: _otherTyping ? const Color(0xFF25D366) : Colors.white70, fontSize: 11.5)),
+            Text(widget.conversation.displayTitle, style: const TextStyle(color: Colors.white, fontSize: 15.5, fontWeight: FontWeight.w600, letterSpacing: 0.1)),
+            if (subtitle != null) Padding(padding: const EdgeInsets.only(top: 1), child: Text(subtitle, style: TextStyle(color: _otherTyping ? const Color(0xFF3D7EFF) : Colors.white60, fontSize: 11.5))),
           ])),
         ]),
+        ),
         actions: [
           IconButton(icon: const Icon(Icons.cast_for_education, color: Colors.white), tooltip: "Study Room", onPressed: _openStudyRoom),
           IconButton(icon: const Icon(Icons.call, color: Colors.white), tooltip: "Audio Call", onPressed: () => _startCall('audio')),
           IconButton(icon: const Icon(Icons.videocam, color: Colors.white), tooltip: "Video Call", onPressed: () => _startCall('video')),
+          // 🔥 NAYA — 3-dot overflow menu: mute/unmute notification
+          // (private chat ho ya group, dono ke liye kaam karta hai).
+          PopupMenuButton<String>(
+            icon: const Icon(Icons.more_vert, color: Colors.white),
+            onSelected: (value) {
+              if (value == 'toggle_mute') _toggleMuteNotifications();
+              if (value == 'filter') _showFilterSheet();
+              if (value == 'toggle_block') _toggleBlockUser();
+              if (value == 'disappearing_messages') _showDisappearingMessagesSheet();
+              if (value == 'group_info') _openGroupProfile();
+              if (value == 'leave_group') _leaveGroup();
+              if (value == 'delete_group') _deleteGroup();
+            },
+            itemBuilder: (context) => [
+              PopupMenuItem<String>(
+                value: 'toggle_mute',
+                child: Row(children: [
+                  Icon(
+                    _isMuted ? Icons.notifications_active_outlined : Icons.notifications_off_outlined,
+                    color: Colors.black87,
+                    size: 20,
+                  ),
+                  const SizedBox(width: 10),
+                  Text(_isMuted
+                      ? (widget.conversation.isGroup ? "Unmute group" : "Unmute notifications")
+                      : (widget.conversation.isGroup ? "Mute group" : "Mute notifications")),
+                ]),
+              ),
+              // 🔥 NAYA — Filter messages: Text / Media / Docs / Links
+              PopupMenuItem<String>(
+                value: 'filter',
+                child: Row(children: [
+                  Icon(Icons.filter_list, color: _chatFilter != 'all' ? const Color(0xFF3D7EFF) : Colors.black87, size: 20),
+                  const SizedBox(width: 10),
+                  Text(_chatFilter == 'all' ? "Filter messages" : "Filter: ${_filterLabel(_chatFilter)}"),
+                ]),
+              ),
+              // 🔥 NAYA — Block / Unblock user (sirf 1-to-1 chat me dikhta
+              // hai, group me user-level block ka concept hi nahi hai).
+              if (!widget.conversation.isGroup && widget.conversation.otherParticipant != null)
+                PopupMenuItem<String>(
+                  value: 'toggle_block',
+                  child: Row(children: [
+                    Icon(
+                      _isBlocked ? Icons.person_add_alt_1_outlined : Icons.block,
+                      color: _isBlocked ? Colors.black87 : Colors.red,
+                      size: 20,
+                    ),
+                    const SizedBox(width: 10),
+                    Text(
+                      _isBlocked ? "Unblock user" : "Block user",
+                      style: TextStyle(color: _isBlocked ? Colors.black87 : Colors.red),
+                    ),
+                  ]),
+                ),
+              // 🔥 NAYA — Temporary chat: disappearing messages on/off ya
+              // duration change karne ke liye. Private + group dono chat
+              // me dikhta hai (group me backend admin/moderator check
+              // karega, yahan sirf UI hai).
+              PopupMenuItem<String>(
+                value: 'disappearing_messages',
+                child: Row(children: [
+                  Icon(
+                    _disappearingDuration == 'none' ? Icons.timer_off_outlined : Icons.timer_outlined,
+                    color: _disappearingDuration != 'none' ? const Color(0xFF3D7EFF) : Colors.black87,
+                    size: 20,
+                  ),
+                  const SizedBox(width: 10),
+                  Text(_disappearingDuration == 'none'
+                      ? "Disappearing messages"
+                      : "Disappearing: ${_disappearingLabel(_disappearingDuration)}"),
+                ]),
+              ),
+              // 🔥 NAYA — Group info: members, roles (admin/moderator),
+              // invite link, public/private, add/remove members — sab
+              // ek jagah (sirf group chat me dikhta hai).
+              if (widget.conversation.isGroup)
+                const PopupMenuItem<String>(
+                  value: 'group_info',
+                  child: Row(children: [
+                    Icon(Icons.info_outline_rounded, color: Colors.black87, size: 20),
+                    SizedBox(width: 10),
+                    Text("Group info"),
+                  ]),
+                ),
+              // 🔥 NAYA — Leave group (sirf group chat me dikhta hai).
+              if (widget.conversation.isGroup)
+                const PopupMenuItem<String>(
+                  value: 'leave_group',
+                  child: Row(children: [
+                    Icon(Icons.exit_to_app, color: Colors.red, size: 20),
+                    SizedBox(width: 10),
+                    Text("Leave group", style: TextStyle(color: Colors.red)),
+                  ]),
+                ),
+              // 🔥 NAYA — Delete group (ADMIN ONLY — moderator ko bhi
+              // nahi dikhta, backend bhi strictly admin role hi allow
+              // karta hai).
+              if (widget.conversation.isGroup && _isGroupAdmin)
+                const PopupMenuItem<String>(
+                  value: 'delete_group',
+                  child: Row(children: [
+                    Icon(Icons.delete_forever, color: Colors.red, size: 20),
+                    SizedBox(width: 10),
+                    Text("Delete group", style: TextStyle(color: Colors.red)),
+                  ]),
+                ),
+            ],
+          ),
           const SizedBox(width: 6),
         ],
       ),
       // 🔥 NAYA — halka doodle-pattern wallpaper, WhatsApp jaisa flat rang nahi
       body: Stack(children: [
         Positioned.fill(child: CustomPaint(painter: _ChatWallpaperPainter())),
-        Column(children: [Expanded(child: _buildMessageList()), _buildReplyPreview(), _buildInputBar()]),
+        Column(children: [
+          Expanded(child: _buildMessageList()),
+          _buildReplyPreview(),
+          _isBlocked ? _buildBlockedBanner() : _buildInputBar(),
+        ]),
       ]),
+    );
+  }
+
+  // NEW — replaces the normal AppBar while multi-select is active:
+  // close (X) to cancel, live count, and a forward icon that opens the
+  // conversation picker for every currently-checked message.
+  PreferredSizeWidget _buildSelectionAppBar() {
+    return AppBar(
+      backgroundColor: const Color(0xFF030F27),
+      elevation: 3,
+      iconTheme: const IconThemeData(color: Colors.white),
+      leading: IconButton(icon: const Icon(Icons.close), onPressed: _exitSelectionMode),
+      title: Text(
+        "${_selectedMessageIds.length} selected",
+        style: const TextStyle(color: Colors.white, fontSize: 16, fontWeight: FontWeight.w600),
+      ),
+      actions: [
+        IconButton(
+          icon: const Icon(Icons.forward),
+          tooltip: "Forward",
+          onPressed: _selectedMessageIds.isEmpty ? null : _forwardSelected,
+        ),
+        const SizedBox(width: 4),
+      ],
+    );
+  }
+
+  // 🔥 NAYA — jab humne is user ko block kiya hua hai, to normal input
+  // bar ki jagah ye banner dikhta hai — na message bheja ja sakta hai,
+  // na attachment/mic — sirf ek tap se seedha unblock karne ka option.
+  Widget _buildBlockedBanner() {
+    return SafeArea(
+      top: false,
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+        decoration: BoxDecoration(
+          color: Colors.white,
+          border: Border(top: BorderSide(color: Colors.grey[300]!)),
+        ),
+        child: Row(children: [
+          const Icon(Icons.block, color: Colors.red, size: 18),
+          const SizedBox(width: 8),
+          const Expanded(
+            child: Text(
+              "You've blocked this user. Unblock to send messages.",
+              style: TextStyle(fontSize: 13, color: Colors.black54),
+            ),
+          ),
+          TextButton(onPressed: _toggleBlockUser, child: const Text("Unblock")),
+        ]),
+      ),
     );
   }
 
@@ -1069,10 +2082,10 @@ class _ChatScreenState extends State<ChatScreen> {
     return Container(
       margin: const EdgeInsets.fromLTRB(10, 6, 10, 0),
       padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
-      decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(8), border: const Border(left: BorderSide(color: Color(0xFF25D366), width: 4))),
+      decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(8), border: const Border(left: BorderSide(color: Color(0xFF3D7EFF), width: 4))),
       child: Row(children: [
         Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, mainAxisSize: MainAxisSize.min, children: [
-          Text(isMe ? "You" : (msg.sender?.displayName ?? ''), style: const TextStyle(color: Color(0xFF25D366), fontWeight: FontWeight.bold, fontSize: 12.5)),
+          Text(isMe ? "You" : (msg.sender?.displayName ?? ''), style: const TextStyle(color: Color(0xFF3D7EFF), fontWeight: FontWeight.bold, fontSize: 12.5)),
           Text(_replyPreviewText(msg), maxLines: 1, overflow: TextOverflow.ellipsis, style: const TextStyle(color: Colors.black54, fontSize: 12.5)),
         ])),
         IconButton(icon: const Icon(Icons.close, size: 18, color: Colors.black45), onPressed: _cancelReply, padding: EdgeInsets.zero, constraints: const BoxConstraints()),
@@ -1094,56 +2107,172 @@ class _ChatScreenState extends State<ChatScreen> {
   }
 
   Widget _buildMessageList() {
-    if (_isLoading) return const Center(child: CircularProgressIndicator());
-    if (_messages.isEmpty) return const Center(child: Text("Say hi 👋", style: TextStyle(color: Colors.black45)));
-    // typing indicator ko list ke end me ek extra "item" ki tarah treat karte hain
-    final itemCount = _messages.length + (_otherTyping ? 1 : 0);
-    return ListView.builder(
-      controller: _scrollController,
-      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 12),
-      itemCount: itemCount,
-      itemBuilder: (context, index) {
-        if (_otherTyping && index == _messages.length) {
-          return const _TypingBubble(); // 🔥 NAYA — animated 3-dot bubble
-        }
-        final msg = _messages[index];
-        final isMe = msg.sender?.id == _myUserId;
-
-        // 🔥 NAYA — date separator: pichle message se din badal gaya to divider dikhao
-        final prev = index > 0 ? _messages[index - 1] : null;
-        final showDateSeparator = prev == null || !_isSameDay(prev.createdAt, msg.createdAt);
-
-        // 🔥 NAYA — consecutive grouping (bubble tail sirf group ke last message pe)
-        final next = index < _messages.length - 1 ? _messages[index + 1] : null;
-        final isLastInGroup = next == null || next.sender?.id != msg.sender?.id || !_isSameDay(next.createdAt, msg.createdAt);
-        final isFirstInGroup = prev == null || prev.sender?.id != msg.sender?.id || showDateSeparator;
-
-        final replyPreview = _findMessageById(msg.replyTo);
-
-        return Column(children: [
-          if (showDateSeparator) _DateSeparator(date: msg.createdAt),
-          _SwipeToReply(
-            isMe: isMe,
-            onReply: () => _startReply(msg),
-            child: _MessageBubble(
-              message: msg,
-              isMe: isMe,
-              isLastInGroup: isLastInGroup,
-              isFirstInGroup: isFirstInGroup,
-              replyPreview: replyPreview,
-              isReadByOther: _readByOtherIds.contains(msg.id),
-              isDownloaded: _isDownloaded(msg), // 🔥 NAYA
-              onLongPress: () => _showMessageActions(msg, isMe),
-              onReactionTap: () => _showReactionPicker(msg),
-              onDownload: () => _downloadMedia(context, msg),
-              onDownloadUrl: (url) => _downloadMediaUrl(context, msg, url), // 🔥 NAYA — multi-image grid ke ek specific photo ke liye
-              isUrlDownloaded: (url) => _downloadedIds.contains('${msg.id}::$url'), // 🔥 NAYA
-              onReplyTap: replyPreview != null ? () => _scrollToMessage(replyPreview.id) : null,
-              onJoinStudyRoom: _enterStudyRoom, // 🔥 NAYA — card pe tap = seedha room me entry, dobara invite nahi
-            ),
+    if (_isLoading) return const Center(child: CircularProgressIndicator(color: Color(0xFF030F27)));
+    // 🔥 POLISH — plain "Say hi" text ki jagah ab ek proper empty-state
+    // card hai (icon + heading + subtext), baaki screens ke empty states
+    // jaisa consistent look.
+    if (_messages.isEmpty) {
+      return Center(
+        child: Column(mainAxisSize: MainAxisSize.min, children: [
+          Container(
+            width: 84, height: 84,
+            decoration: BoxDecoration(color: const Color(0xFF030F27).withOpacity(0.06), shape: BoxShape.circle),
+            child: const Icon(Icons.waving_hand_rounded, size: 36, color: Color(0xFF030F27)),
           ),
-        ]);
-      },
+          const SizedBox(height: 14),
+          const Text("Say hi 👋", style: TextStyle(fontSize: 15, fontWeight: FontWeight.w600, color: Colors.black87)),
+          const SizedBox(height: 4),
+          Text("Send a message to start the conversation", style: TextStyle(fontSize: 12.5, color: Colors.grey[500])),
+        ]),
+      );
+    }
+
+    // 🔥 NAYA — active filter ke hisaab se sirf matching messages dikhao.
+    // Date-separator/grouping logic isi filtered list ke andar-andar chalta
+    // hai (poore _messages list se nahi), taaki filtered view khud ek
+    // consistent chat jaisi dikhe.
+    final filtered = _chatFilter == 'all' ? _messages : _messages.where(_matchesFilter).toList();
+
+    return Column(children: [
+      if (_chatFilter != 'all') _buildFilterBanner(filtered.length),
+      Expanded(
+        child: filtered.isEmpty
+            ? Center(
+                child: Text(
+                  "No ${_filterLabel(_chatFilter).toLowerCase()} messages in this chat",
+                  style: const TextStyle(color: Colors.black45),
+                ),
+              )
+            : Builder(builder: (context) {
+                // typing indicator ko list ke end me ek extra "item" ki tarah treat karte hain
+                // (sirf tab jab koi filter active na ho, warna filtered view me ajeeb lagega)
+                final showTyping = _otherTyping && _chatFilter == 'all';
+                // 🔥 NAYA — "load more" spinner ko list ke SHURU me ek extra
+                // "item" ki tarah treat karte hain (sirf jab hum purane
+                // messages fetch kar rahe hon). Filter active hone par bhi
+                // dikhana theek hai kyunki pagination poori `_messages` list
+                // par chalta hai, filtered view par nahi.
+                final showLoadingMore = _isLoadingMore;
+                final itemCount = filtered.length + (showTyping ? 1 : 0) + (showLoadingMore ? 1 : 0);
+                return ListView.builder(
+                  controller: _scrollController,
+                  padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 12),
+                  itemCount: itemCount,
+                  itemBuilder: (context, index) {
+                    if (showLoadingMore && index == 0) {
+                      // 🔥 NAYA — top pe chhota spinner: "purane messages load ho rahe hain"
+                      return const Padding(
+                        padding: EdgeInsets.symmetric(vertical: 14),
+                        child: Center(
+                          child: SizedBox(
+                            width: 22,
+                            height: 22,
+                            child: CircularProgressIndicator(strokeWidth: 2.2, color: Color(0xFF030F27)),
+                          ),
+                        ),
+                      );
+                    }
+                    final adjustedIndex = showLoadingMore ? index - 1 : index;
+                    if (showTyping && adjustedIndex == filtered.length) {
+                      return const _TypingBubble(); // 🔥 NAYA — animated 3-dot bubble
+                    }
+                    final msg = filtered[adjustedIndex];
+                    final isMe = msg.sender?.id == _myUserId;
+
+                    // 🔥 NAYA — date separator: pichle message se din badal gaya to divider dikhao
+                    final prev = adjustedIndex > 0 ? filtered[adjustedIndex - 1] : null;
+                    final showDateSeparator = prev == null || !_isSameDay(prev.createdAt, msg.createdAt);
+
+                    // 🔥 NAYA — consecutive grouping (bubble tail sirf group ke last message pe)
+                    final next = adjustedIndex < filtered.length - 1 ? filtered[adjustedIndex + 1] : null;
+                    final isLastInGroup = next == null || next.sender?.id != msg.sender?.id || !_isSameDay(next.createdAt, msg.createdAt);
+                    final isFirstInGroup = prev == null || prev.sender?.id != msg.sender?.id || showDateSeparator;
+
+                    final replyPreview = _findMessageById(msg.replyTo);
+
+                    final isSelected = _selectedMessageIds.contains(msg.id);
+                    final bubble = _SwipeToReply(
+                      isMe: isMe,
+                      onReply: () => _startReply(msg),
+                      child: _MessageBubble(
+                        message: msg,
+                        isMe: isMe,
+                        isGroup: widget.conversation.isGroup, // 🔥 NAYA — group me sender ka naam bubble ke upar dikhane ke liye
+                        isLastInGroup: isLastInGroup,
+                        isFirstInGroup: isFirstInGroup,
+                        replyPreview: replyPreview,
+                        isReadByOther: _readByOtherIds.contains(msg.id),
+                        isDownloaded: _isDownloaded(msg), // 🔥 NAYA
+                        onLongPress: () => _showMessageActions(msg, isMe),
+                        onReactionTap: () => _showReactionPicker(msg),
+                        onDownload: () => _downloadMedia(context, msg),
+                        onDownloadUrl: (url) => _downloadMediaUrl(context, msg, url), // 🔥 NAYA — multi-image grid ke ek specific photo ke liye
+                        isUrlDownloaded: (url) => _downloadedIds.contains('${msg.id}::$url'), // 🔥 NAYA
+                        onReplyTap: replyPreview != null ? () => _scrollToMessage(replyPreview.id) : null,
+                        onJoinStudyRoom: _enterStudyRoom, // 🔥 NAYA — card pe tap = seedha room me entry, dobara invite nahi
+                      ),
+                    );
+
+                    return Column(children: [
+                      if (showDateSeparator) _DateSeparator(date: msg.createdAt),
+                      // NEW — during multi-select, tapping anywhere on the
+                      // row toggles the checkbox instead of the message's
+                      // normal tap behaviour (media viewer, link open,
+                      // etc.), which is why the bubble itself is wrapped
+                      // in AbsorbPointer while selection mode is active.
+                      GestureDetector(
+                        behavior: HitTestBehavior.translucent,
+                        onTap: _selectionMode ? () => _toggleMessageSelected(msg) : null,
+                        child: Container(
+                          color: isSelected ? const Color(0xFF3D7EFF).withOpacity(0.12) : null,
+                          child: Row(crossAxisAlignment: CrossAxisAlignment.center, children: [
+                            if (_selectionMode)
+                              Padding(
+                                padding: const EdgeInsets.only(left: 6, right: 2),
+                                child: Icon(
+                                  isSelected ? Icons.check_circle : Icons.radio_button_unchecked,
+                                  size: 20,
+                                  color: isSelected ? const Color(0xFF3D7EFF) : Colors.grey,
+                                ),
+                              ),
+                            Expanded(
+                              child: AbsorbPointer(absorbing: _selectionMode, child: bubble),
+                            ),
+                          ]),
+                        ),
+                      ),
+                    ]);
+                  },
+                );
+              }),
+      ),
+    ]);
+  }
+
+  // 🔥 NAYA — filter active hone par top pe ek chhota banner: kaunsa
+  // filter laga hai + kitne messages mile + ek tap me clear karne ka option.
+  Widget _buildFilterBanner(int count) {
+    return Container(
+      width: double.infinity,
+      color: const Color(0xFFE7EEFC),
+      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+      child: Row(children: [
+        const Icon(Icons.filter_list, size: 16, color: Color(0xFF2457C5)),
+        const SizedBox(width: 6),
+        Expanded(
+          child: Text(
+            "${_filterLabel(_chatFilter)} • $count message${count == 1 ? '' : 's'}",
+            style: const TextStyle(color: Color(0xFF2457C5), fontSize: 12.5, fontWeight: FontWeight.w600),
+          ),
+        ),
+        GestureDetector(
+          onTap: () => setState(() => _chatFilter = 'all'),
+          child: const Padding(
+            padding: EdgeInsets.symmetric(horizontal: 4, vertical: 2),
+            child: Text("Clear", style: TextStyle(color: Color(0xFF2457C5), fontSize: 12.5, fontWeight: FontWeight.bold)),
+          ),
+        ),
+      ]),
     );
   }
 
@@ -1168,35 +2297,60 @@ class _ChatScreenState extends State<ChatScreen> {
     // 🔥 NAYA — recording chal rahi ho to poora bar ek "Slide to cancel"
     // jaisa recording indicator ban jaata hai (WhatsApp jaisa).
     if (_isRecording) {
-      return SafeArea(child: Padding(padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8), child: Row(children: [
-        IconButton(icon: const Icon(Icons.delete_outline, color: Colors.red), onPressed: _cancelRecording),
-        Expanded(child: Row(children: [
-          const Icon(Icons.fiber_manual_record, color: Colors.red, size: 14),
+      return SafeArea(child: Padding(padding: const EdgeInsets.fromLTRB(10, 6, 10, 10), child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+        decoration: BoxDecoration(
+          color: Colors.white,
+          borderRadius: BorderRadius.circular(28),
+          boxShadow: [BoxShadow(color: Colors.black.withOpacity(0.08), blurRadius: 10, offset: const Offset(0, 3))],
+        ),
+        child: Row(children: [
+          IconButton(icon: const Icon(Icons.delete_outline, color: Colors.red), onPressed: _cancelRecording),
+          Expanded(child: Row(children: [
+            const Icon(Icons.fiber_manual_record, color: Colors.red, size: 14),
+            const SizedBox(width: 8),
+            Text(_fmtRecordDuration(_recordDuration), style: const TextStyle(fontSize: 15, color: Color(0xFF030F27), fontWeight: FontWeight.w600)),
+            const SizedBox(width: 8),
+            const Text("Recording...", style: TextStyle(color: Colors.black45, fontSize: 13)),
+          ])),
           const SizedBox(width: 8),
-          Text(_fmtRecordDuration(_recordDuration), style: const TextStyle(fontSize: 15, color: Color(0xFF030F27))),
-          const SizedBox(width: 8),
-          const Text("Recording...", style: TextStyle(color: Colors.black45, fontSize: 13)),
-        ])),
-        const SizedBox(width: 8),
-        CircleAvatar(backgroundColor: const Color(0xFF030F27), child: IconButton(icon: const Icon(Icons.send, color: Colors.white), onPressed: _stopRecordingAndSend)),
-      ])));
+          Container(
+            decoration: BoxDecoration(shape: BoxShape.circle, boxShadow: [BoxShadow(color: const Color(0xFF030F27).withOpacity(0.35), blurRadius: 8, offset: const Offset(0, 2))]),
+            child: CircleAvatar(backgroundColor: const Color(0xFF030F27), child: IconButton(icon: const Icon(Icons.send, color: Colors.white), onPressed: _stopRecordingAndSend)),
+          ),
+        ]),
+      )));
     }
 
-    return SafeArea(child: Padding(padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8), child: Row(children: [
-      IconButton(icon: const Icon(Icons.attach_file, color: Color(0xFF030F27)), onPressed: _showAttachmentSheet),
-      // 🔥 NAYA — animated sticker picker (Emotions + Funny). Tap karte hi
-      // chosen sticker ka emoji seedha message ki tarah bhej diya jaata hai.
-      IconButton(
-        icon: const Icon(Icons.emoji_emotions_outlined, color: Color(0xFF030F27)),
-        onPressed: () => showStickerPicker(
-          context,
-          onSelected: (emoji) {
-            setState(() => _textController.text = emoji);
-            _sendMessage();
-          },
+    // 🔥 NAYA — attach + emoji + text field ab ek hi floating white "card"
+    // ke andar hain (subtle shadow, fully rounded) — flat/dated bar ki
+    // jagah modern messaging-app jaisa look. Send/mic button bahar,
+    // apna elevated circle, taaki primary action visually stand-out kare.
+    return SafeArea(child: Padding(padding: const EdgeInsets.fromLTRB(10, 6, 10, 10), child: Row(crossAxisAlignment: CrossAxisAlignment.end, children: [
+      Expanded(
+        child: Container(
+          decoration: BoxDecoration(
+            color: Colors.white,
+            borderRadius: BorderRadius.circular(26),
+            boxShadow: [BoxShadow(color: Colors.black.withOpacity(0.06), blurRadius: 8, offset: const Offset(0, 2))],
+          ),
+          child: Row(crossAxisAlignment: CrossAxisAlignment.end, children: [
+            IconButton(icon: const Icon(Icons.attach_file, color: Color(0xFF030F27)), onPressed: _showAttachmentSheet),
+            // 🔥 NAYA — apna sticker picker (assets/stickers/). Tap karte hi
+            // chosen sticker seedha ek image message ki tarah bhej diya jaata
+            // hai (WhatsApp jaisa — koi text nahi banta).
+            IconButton(
+              icon: const Icon(Icons.emoji_emotions_outlined, color: Color(0xFF030F27)),
+              onPressed: () => showStickerPicker(
+                context,
+                onSelected: (assetPath) => _sendSticker(assetPath),
+              ),
+            ),
+            Expanded(child: TextField(controller: _textController, onChanged: _onTypingChanged, minLines: 1, maxLines: 4, style: const TextStyle(fontSize: 14.5), decoration: const InputDecoration(hintText: "Message...", hintStyle: TextStyle(color: Colors.black38), filled: false, contentPadding: EdgeInsets.symmetric(horizontal: 4, vertical: 12), border: InputBorder.none))),
+            const SizedBox(width: 4),
+          ]),
         ),
       ),
-      Expanded(child: TextField(controller: _textController, onChanged: _onTypingChanged, minLines: 1, maxLines: 4, decoration: InputDecoration(hintText: "Message...", filled: true, fillColor: Colors.white, contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10), border: OutlineInputBorder(borderRadius: BorderRadius.circular(25), borderSide: BorderSide.none)))),
       const SizedBox(width: 8),
       // 🔥 NAYA — WhatsApp jaisa hi: text khaali ho to "mic" (voice note),
       // kuch type kiya ho to "send" — ValueListenableBuilder se text
@@ -1205,11 +2359,15 @@ class _ChatScreenState extends State<ChatScreen> {
         valueListenable: _textController,
         builder: (_, value, __) {
           final hasText = value.text.trim().isNotEmpty;
-          return CircleAvatar(
-            backgroundColor: const Color(0xFF030F27),
-            child: IconButton(
-              icon: Icon(hasText ? Icons.send : Icons.mic, color: Colors.white),
-              onPressed: hasText ? _sendMessage : _startRecording,
+          return Container(
+            decoration: BoxDecoration(shape: BoxShape.circle, boxShadow: [BoxShadow(color: const Color(0xFF030F27).withOpacity(0.32), blurRadius: 8, offset: const Offset(0, 2))]),
+            child: CircleAvatar(
+              radius: 23,
+              backgroundColor: const Color(0xFF030F27),
+              child: IconButton(
+                icon: Icon(hasText ? Icons.send : Icons.mic, color: Colors.white),
+                onPressed: hasText ? _sendMessage : _startRecording,
+              ),
             ),
           );
         },
@@ -1324,7 +2482,7 @@ class _TypingBubbleState extends State<_TypingBubble> with SingleTickerProviderS
       child: Container(
         margin: const EdgeInsets.only(top: 4, bottom: 4),
         padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
-        decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(14), boxShadow: [BoxShadow(color: Colors.black.withOpacity(0.06), blurRadius: 1.5, offset: const Offset(0, 1))]),
+        decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(14), boxShadow: [BoxShadow(color: Colors.black.withOpacity(0.07), blurRadius: 6, offset: const Offset(0, 2))]),
         child: AnimatedBuilder(
           animation: _controller,
           builder: (_, __) => Row(mainAxisSize: MainAxisSize.min, children: List.generate(3, (i) {
@@ -1342,7 +2500,7 @@ class _TypingBubbleState extends State<_TypingBubble> with SingleTickerProviderS
 class _ChatWallpaperPainter extends CustomPainter {
   @override
   void paint(Canvas canvas, Size size) {
-    final paint = Paint()..color = const Color(0xFFD9D0C7).withOpacity(0.35)..style = PaintingStyle.fill;
+    final paint = Paint()..color = const Color(0xFFDCE3F0).withOpacity(0.35)..style = PaintingStyle.fill;
     const step = 44.0;
     for (double y = 0; y < size.height; y += step) {
       for (double x = 0; x < size.width; x += step) {
@@ -1359,6 +2517,7 @@ class _ChatWallpaperPainter extends CustomPainter {
 class _MessageBubble extends StatelessWidget {
   final MessageModel message;
   final bool isMe;
+  final bool isGroup; // 🔥 NAYA — group chat me sender ka naam bubble ke upar dikhane ke liye
   final bool isLastInGroup; // 🔥 NAYA — tail sirf group ke aakhri bubble pe
   final bool isFirstInGroup; // 🔥 NAYA — group ke pehle bubble pe thoda zyada top margin
   final MessageModel? replyPreview; // 🔥 NAYA — jis message ka reply hai, uska data
@@ -1374,6 +2533,7 @@ class _MessageBubble extends StatelessWidget {
   const _MessageBubble({
     required this.message,
     required this.isMe,
+    this.isGroup = false,
     this.isLastInGroup = true,
     this.isFirstInGroup = true,
     this.replyPreview,
@@ -1391,7 +2551,15 @@ class _MessageBubble extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     if (message.deletedForMe) return const SizedBox.shrink();
-    final bubbleColor = isMe ? const Color(0xFF075E54) : Colors.white; // 🔥 WhatsApp jaisa dark-teal sent bubble
+
+    // 🔥 NAYA — STICKER message: WhatsApp/Telegram jaisa hi, koi colored
+    // chat-bubble background nahi — bada transparent sticker + chhota
+    // timestamp overlay uske bottom-right corner pe.
+    if (message.type == MessageType.image && message.meta?['is_sticker'] == true) {
+      return _buildStickerMessage(context);
+    }
+
+    final bubbleColor = isMe ? const Color(0xFF16325C) : Colors.white; // 🔥 WhatsApp jaisa dark-teal sent bubble
     final textColor = isMe ? Colors.white : Colors.black87;
 
     // 🔥 NAYA — bubble tail: last-in-group bubble ka ek corner chhota
@@ -1412,8 +2580,19 @@ class _MessageBubble extends StatelessWidget {
             margin: EdgeInsets.only(top: isFirstInGroup ? 6 : 2),
             padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 7),
             constraints: BoxConstraints(maxWidth: MediaQuery.of(context).size.width * 0.75),
-            decoration: BoxDecoration(color: bubbleColor, borderRadius: radius, boxShadow: [BoxShadow(color: Colors.black.withOpacity(0.06), blurRadius: 1.5, offset: const Offset(0, 1))]),
+            decoration: BoxDecoration(color: bubbleColor, borderRadius: radius, boxShadow: [BoxShadow(color: Colors.black.withOpacity(0.07), blurRadius: 6, offset: const Offset(0, 2))]),
             child: Column(crossAxisAlignment: CrossAxisAlignment.start, mainAxisSize: MainAxisSize.min, children: [
+              // 🔥 NAYA — group chat me, apne khud ke message ko chhod ke,
+              // har naye sender-block ke pehle bubble ke upar naam dikhao
+              // (WhatsApp jaisa) — taaki pata chale kisne msg bheja.
+              if (isGroup && !isMe && isFirstInGroup)
+                Padding(
+                  padding: const EdgeInsets.only(left: 4, bottom: 2),
+                  child: Text(
+                    message.sender?.displayName ?? 'Unknown',
+                    style: TextStyle(color: _senderColor(message.sender?.id), fontWeight: FontWeight.bold, fontSize: 12.5),
+                  ),
+                ),
               // 🔥 NAYA — quoted reply preview, tap karke original tak jump
               if (replyPreview != null) _buildReplyQuote(context, textColor),
               Padding(padding: const EdgeInsets.symmetric(horizontal: 4), child: _buildContent(context, textColor)),
@@ -1432,6 +2611,101 @@ class _MessageBubble extends StatelessWidget {
         ]),
       ),
     );
+  }
+
+  // 🔥 NAYA — STICKER bubble: normal image message pipeline (upload,
+  // download, tick, fullscreen-view) hi reuse karta hai, bas dikhta hai
+  // WhatsApp jaisa — koi colored container/background nahi, sirf bada
+  // sticker + niche-right corner me chhota semi-transparent timestamp.
+  Widget _buildStickerMessage(BuildContext context) {
+    const double size = 128;
+    final url = (message.fileUrl != null && message.fileUrl!.isNotEmpty)
+        ? message.fileUrl
+        : ((message.fileUrls != null && message.fileUrls!.isNotEmpty) ? message.fileUrls!.first.toString() : null);
+    final localPath = message.localFilePath;
+
+    Widget image;
+    if (localPath != null && message.isSending) {
+      image = Image.file(File(localPath), width: size, height: size, fit: BoxFit.contain);
+    } else if (url != null && url.isNotEmpty) {
+      image = CachedNetworkImage(
+        imageUrl: url,
+        width: size,
+        height: size,
+        fit: BoxFit.contain,
+        placeholder: (_, __) => const SizedBox(width: size, height: size, child: Center(child: CircularProgressIndicator(strokeWidth: 2))),
+        errorWidget: (_, __, ___) => const SizedBox(width: size, height: size, child: Icon(Icons.broken_image, color: Colors.grey)),
+      );
+    } else {
+      image = const SizedBox(width: size, height: size, child: Icon(Icons.image, color: Colors.grey));
+    }
+
+    return GestureDetector(
+      onLongPress: message.deletedForEveryone ? null : onLongPress,
+      child: Align(
+        alignment: isMe ? Alignment.centerRight : Alignment.centerLeft,
+        child: Column(crossAxisAlignment: isMe ? CrossAxisAlignment.end : CrossAxisAlignment.start, children: [
+          if (isGroup && !isMe && isFirstInGroup)
+            Padding(
+              padding: const EdgeInsets.only(left: 4, bottom: 2),
+              child: Text(
+                message.sender?.displayName ?? 'Unknown',
+                style: TextStyle(color: _senderColor(message.sender?.id), fontWeight: FontWeight.bold, fontSize: 12.5),
+              ),
+            ),
+          Container(
+            margin: EdgeInsets.only(top: isFirstInGroup ? 6 : 2),
+            child: SizedBox(
+              width: size,
+              height: size,
+              child: Stack(alignment: Alignment.bottomRight, children: [
+                image,
+                if (message.isSending)
+                  SizedBox(
+                    width: size,
+                    height: size,
+                    child: Center(
+                      child: CircularProgressIndicator(
+                        strokeWidth: 2,
+                        value: (message.uploadProgress != null && message.uploadProgress! > 0) ? message.uploadProgress : null,
+                      ),
+                    ),
+                  ),
+                Padding(
+                  padding: const EdgeInsets.only(right: 4, bottom: 3),
+                  child: Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 1.5),
+                    decoration: BoxDecoration(color: Colors.black.withOpacity(0.35), borderRadius: BorderRadius.circular(8)),
+                    child: Row(mainAxisSize: MainAxisSize.min, children: [
+                      Text(
+                        "${message.createdAt.hour.toString().padLeft(2, '0')}:${message.createdAt.minute.toString().padLeft(2, '0')}",
+                        style: const TextStyle(fontSize: 10, color: Colors.white),
+                      ),
+                      if (isMe) ...[const SizedBox(width: 3), _buildTick()],
+                    ]),
+                  ),
+                ),
+              ]),
+            ),
+          ),
+          if (message.reactions.isNotEmpty) _buildReactionRow(),
+        ]),
+      ),
+    );
+  }
+
+  // 🔥 NAYA — group chat me har sender ko ek consistent (fixed) color
+  // milta hai — jaise WhatsApp me har member ka naam alag color me
+  // dikhta hai. userId ka hash use karte hain taaki wahi user hamesha
+  // wahi color paaye (chahe list kitni bhi baar rebuild ho).
+  static const List<Color> _senderPalette = [
+    Color(0xFFE53935), Color(0xFF00897B), Color(0xFF3D7EFF), Color(0xFF8E24AA),
+    Color(0xFFF4511E), Color(0xFF43A047), Color(0xFF6D4C41), Color(0xFFD81B60),
+  ];
+  Color _senderColor(String? userId) {
+    if (userId == null || userId.isEmpty) return _senderPalette[0];
+    final hash = userId.codeUnits.fold<int>(0, (acc, c) => acc + c);
+    return _senderPalette[hash % _senderPalette.length];
   }
 
   // 🔥 NAYA — WhatsApp jaisa tick logic: clock = sending, ek grey tick =
@@ -1462,9 +2736,9 @@ class _MessageBubble extends StatelessWidget {
       child: Container(
         margin: const EdgeInsets.only(bottom: 5),
         padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
-        decoration: BoxDecoration(color: textColor == Colors.white ? Colors.white.withOpacity(0.12) : Colors.black.withOpacity(0.05), borderRadius: BorderRadius.circular(6), border: const Border(left: BorderSide(color: Color(0xFF25D366), width: 3))),
+        decoration: BoxDecoration(color: textColor == Colors.white ? Colors.white.withOpacity(0.12) : Colors.black.withOpacity(0.05), borderRadius: BorderRadius.circular(6), border: const Border(left: BorderSide(color: Color(0xFF3D7EFF), width: 3))),
         child: Column(crossAxisAlignment: CrossAxisAlignment.start, mainAxisSize: MainAxisSize.min, children: [
-          Text(r.sender?.displayName ?? '', style: const TextStyle(color: Color(0xFF25D366), fontWeight: FontWeight.bold, fontSize: 11.5)),
+          Text(r.sender?.displayName ?? '', style: const TextStyle(color: Color(0xFF3D7EFF), fontWeight: FontWeight.bold, fontSize: 11.5)),
           Text(preview, maxLines: 1, overflow: TextOverflow.ellipsis, style: TextStyle(color: textColor.withOpacity(0.75), fontSize: 12)),
         ]),
       ),
@@ -1485,18 +2759,23 @@ class _MessageBubble extends StatelessWidget {
       case MessageType.file: media = _fileLikeContent(context, textColor, Icons.insert_drive_file, "File"); break;
       case MessageType.location: return _locationContent(context, textColor);
       case MessageType.studyRoom: return _studyRoomCard(context); // 🔥 NAYA
-      default: return Text(message.text ?? '', style: TextStyle(color: textColor, fontSize: 14.5));
+      // 🔥 NAYA — plain text ab _LinkifiedText se render hota hai, taaki
+      // agar message me koi URL (http/https/www.) ho to wo clickable
+      // link ki tarah dikhe (blue + underline) aur tap karne par khul
+      // jaaye. URL na ho to ye bilkul normal Text jaisa hi behave karta hai.
+      default: return _LinkifiedText(text: message.text ?? '', color: textColor);
     }
 
     // 🔥 NAYA: media ke saath caption ho (gallery-preview screen se) to
-    // WhatsApp jaisa hi media ke neeche caption text dikhta hai.
+    // WhatsApp jaisa hi media ke neeche caption text dikhta hai — caption
+    // me bhi URL ho to clickable link banega.
     final caption = message.text?.trim();
     if (caption == null || caption.isEmpty) return media;
     return Column(crossAxisAlignment: CrossAxisAlignment.start, mainAxisSize: MainAxisSize.min, children: [
       media,
       Padding(
         padding: const EdgeInsets.only(top: 5, left: 2, right: 2),
-        child: Text(caption, style: TextStyle(color: textColor, fontSize: 14.5)),
+        child: _LinkifiedText(text: caption, color: textColor),
       ),
     ]);
   }
@@ -1591,16 +2870,23 @@ class _MessageBubble extends StatelessWidget {
       borderRadius: BorderRadius.circular(10),
       child: Stack(alignment: Alignment.center, children: [
         GestureDetector(
-          // 🔧 FIX: pehle yahan Hero(tag: url) tha jo chat ke scrolling
-          // ListView ke andar tha — jab source thumbnail off-screen ho
-          // jaata (list scroll hone se lazily dispose ho jaata) ya same
-          // url do jagah dikhta, Hero flight ka koi valid start point
-          // nahi milta aur Flutter ise chhota karke screen ke top-left
-          // corner se animate kar deta tha (wahi "chhoti hoke upar bhaag
-          // jaana" wala bug). Ab Hero hata ke ek reliable fade+scale
-          // transition use kar rahe hain jo hamesha sahi dikhta hai.
-          onTap: url != null && !message.isSending ? () => Navigator.push(context, _fadeScaleRoute(_ImageViewerScreen(url: url, onDownload: onDownload))) : null,
-          onLongPress: url != null && !message.isSending ? onDownload : null, // 🔥 NAYA
+          // 🔥 NAYA: tap se ab poori screen pe swipeable + zoomable
+          // MediaViewerScreen khulti hai (single image ho to bhi ek-item
+          // wali list bhej dete hain — viewer khud handle karta hai).
+          onTap: url != null && !message.isSending
+              ? () => Navigator.push(
+                    context,
+                    MaterialPageRoute(
+                      builder: (_) => MediaViewerScreen(
+                        urls: [url],
+                        initialIndex: 0,
+                        onDownload: (u) => onDownloadUrl != null ? onDownloadUrl!(u) : onDownload(),
+                        isDownloaded: (u) => isUrlDownloaded != null ? isUrlDownloaded!(u) : isDownloaded,
+                      ),
+                    ),
+                  )
+              : null,
+          onLongPress: url != null && !message.isSending ? onDownload : null,
           child: image,
         ),
         // 🔥 FIX: pehle sirf indeterminate spinner dikhta tha — ab actual
@@ -1630,7 +2916,8 @@ class _MessageBubble extends StatelessWidget {
   // 🔥 NAYA: ek message ke andar bandled multiple photos — WhatsApp jaisa
   // 2x2 grid, 4 se zyada hone par 4th tile pe "+N" overlay. Tap karne pe
   // us photo se shuru hoke poore album ka fullscreen swipeable viewer
-  // khulta hai; long-press us specific photo ko download karta hai.
+  // khulta hai (thumbnail strip ke saath); long-press us specific photo
+  // ko download karta hai.
   Widget _multiImageGrid(BuildContext context, List<String> urls, List<String> localPaths) {
     final count = urls.isNotEmpty ? urls.length : localPaths.length;
     const size = 200.0;
@@ -1656,13 +2943,21 @@ class _MessageBubble extends StatelessWidget {
       final canInteract = !message.isSending && urls.isNotEmpty;
 
       return GestureDetector(
+        // 🔥 NAYA: is photo se shuru hoke poore album ka fullscreen
+        // swipeable viewer khulta hai — MediaViewerScreen ko poori
+        // urls list + initialIndex (yahi tap ki hui photo) pass karte hain.
         onTap: canInteract
-            ? () => Navigator.push(context, _fadeScaleRoute(_MultiImageViewerScreen(
-                  urls: urls,
-                  initialIndex: i,
-                  isDownloaded: isUrlDownloaded,
-                  onDownload: onDownloadUrl,
-                )))
+            ? () => Navigator.push(
+                  context,
+                  MaterialPageRoute(
+                    builder: (_) => MediaViewerScreen(
+                      urls: urls,
+                      initialIndex: i,
+                      onDownload: (u) => onDownloadUrl?.call(u),
+                      isDownloaded: (u) => isUrlDownloaded?.call(u) ?? false,
+                    ),
+                  ),
+                )
             : null,
         onLongPress: canInteract && i < urls.length ? () => onDownloadUrl?.call(urls[i]) : null,
         child: Stack(fit: StackFit.expand, children: [
@@ -1848,7 +3143,28 @@ class _MediaPreviewScreenState extends State<_MediaPreviewScreen> {
   }
 
   Future<void> _addMore() async {
-    final raw = await ImagePicker().pickMultipleMedia(imageQuality: 85);
+    // 🔥 NAYA: preview screen ke andar "+" se add karne ke liye — agar
+    // ismein already sirf-images hain to images-only picker, agar
+    // videos hain to sirf-videos picker; agar mixed hain (kabhi purana
+    // album ho) to dono allow karne wala mixed picker try karte hain.
+    final hasVideo = _files.any(_isVideo);
+    final hasImage = _files.any((f) => !_isVideo(f));
+    List<XFile> raw;
+    if (hasVideo && !hasImage) {
+      const videoGroup = XTypeGroup(
+        label: 'video',
+        extensions: ['mp4', 'mov', 'mkv', '3gp', 'webm', 'avi', 'm4v'],
+      );
+      raw = await openFiles(acceptedTypeGroups: [videoGroup]);
+    } else if (hasImage && !hasVideo) {
+      raw = await ImagePicker().pickMultiImage(imageQuality: 85);
+    } else {
+      try {
+        raw = await ImagePicker().pickMultipleMedia(imageQuality: 85);
+      } catch (_) {
+        raw = await ImagePicker().pickMultiImage(imageQuality: 85);
+      }
+    }
     if (raw.isEmpty || !mounted) return;
     final more = await _ensureRealFiles(raw);
     if (!mounted) return;
@@ -2031,257 +3347,6 @@ Route<T> _fadeScaleRoute<T>(Widget page) {
   );
 }
 
-class _ImageViewerScreen extends StatefulWidget {
-  final String url;
-  final VoidCallback onDownload;
-  const _ImageViewerScreen({required this.url, required this.onDownload});
-
-  @override
-  State<_ImageViewerScreen> createState() => _ImageViewerScreenState();
-}
-
-class _ImageViewerScreenState extends State<_ImageViewerScreen> {
-  final TransformationController _transform = TransformationController();
-  double _dragOffset = 0;
-  double _bgOpacity = 1;
-  bool _zoomed = false;
-
-  // 🔥 NAYA: double-tap se WhatsApp/Instagram jaisa zoom-in/zoom-out.
-  void _onDoubleTapDown(TapDownDetails details, BuildContext ctx) {
-    final tapPos = details.localPosition;
-    if (_transform.value != Matrix4.identity()) {
-      _transform.value = Matrix4.identity();
-    } else {
-      _transform.value = Matrix4.identity()
-        ..translate(-tapPos.dx * 2, -tapPos.dy * 2)
-        ..scale(3.0);
-    }
-  }
-
-  @override
-  void dispose() {
-    _transform.dispose();
-    super.dispose();
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    return Scaffold(
-      backgroundColor: Colors.black.withOpacity(_bgOpacity),
-      body: Stack(children: [
-        // 🔧 FIX — ROOT CAUSE of "image chhoti si upar dikhti hai, baaki
-        // black": pehle Positioned.fill > GestureDetector > Transform.translate
-        // > InteractiveViewer > SizedBox.expand chain me size constraints
-        // reliably poori screen tak nahi pahunch rahe the — InteractiveViewer
-        // apne chhote/"natural" size par hi render ho raha tha. LayoutBuilder
-        // se ab explicitly screen ke poore available width/height ko ek
-        // tight SizedBox me le kar seedha InteractiveViewer ko diya jaata
-        // hai — ab size ambiguity ki koi gunjaish nahi.
-        Positioned.fill(
-          child: LayoutBuilder(
-            builder: (context, constraints) {
-              return GestureDetector(
-                onVerticalDragUpdate: _zoomed
-                    ? null
-                    : (details) {
-                        setState(() {
-                          _dragOffset += details.delta.dy;
-                          _bgOpacity = (1 - (_dragOffset.abs() / 300)).clamp(0.15, 1.0);
-                        });
-                      },
-                onVerticalDragEnd: _zoomed
-                    ? null
-                    : (details) {
-                        if (_dragOffset.abs() > 120) {
-                          Navigator.pop(context);
-                        } else {
-                          setState(() {
-                            _dragOffset = 0;
-                            _bgOpacity = 1;
-                          });
-                        }
-                      },
-                onDoubleTapDown: (d) => _onDoubleTapDown(d, context),
-                onDoubleTap: () => setState(() {}),
-                child: Transform.translate(
-                  offset: Offset(0, _dragOffset),
-                  child: SizedBox(
-                    width: constraints.maxWidth,
-                    height: constraints.maxHeight,
-                    child: InteractiveViewer(
-                      transformationController: _transform,
-                      minScale: 1,
-                      maxScale: 6,
-                      boundaryMargin: const EdgeInsets.all(double.infinity),
-                      onInteractionEnd: (_) => setState(() => _zoomed = _transform.value.getMaxScaleOnAxis() > 1.01),
-                      child: SizedBox(
-                        width: constraints.maxWidth,
-                        height: constraints.maxHeight,
-                        child: CachedNetworkImage(
-                          imageUrl: widget.url,
-                          fit: BoxFit.contain,
-                          width: constraints.maxWidth,
-                          height: constraints.maxHeight,
-                          placeholder: (_, __) => const Center(child: CircularProgressIndicator(color: Colors.white)),
-                          errorWidget: (_, __, ___) => const Center(child: Icon(Icons.broken_image, color: Colors.white38, size: 60)),
-                        ),
-                      ),
-                    ),
-                  ),
-                ),
-              );
-            },
-          ),
-        ),
-        SafeArea(
-          child: Row(
-            mainAxisAlignment: MainAxisAlignment.spaceBetween,
-            children: [
-              IconButton(icon: const Icon(Icons.close, color: Colors.white, size: 28), onPressed: () => Navigator.pop(context)),
-              IconButton(icon: const Icon(Icons.download, color: Colors.white, size: 24), onPressed: widget.onDownload),
-            ],
-          ),
-        ),
-      ]),
-    );
-  }
-}
-
-// 🔥 NAYA: ek message me bandled multiple photos ke liye fullscreen
-// swipeable viewer — WhatsApp jaisa hi "1/5" counter, pinch-to-zoom, aur
-// har photo ka apna download button (kyunki poore album ka ek hi URL
-// nahi hota, har photo alag download hoti hai).
-class _MultiImageViewerScreen extends StatefulWidget {
-  final List<String> urls;
-  final int initialIndex;
-  final void Function(String url)? onDownload;
-  final bool Function(String url)? isDownloaded;
-  const _MultiImageViewerScreen({
-    required this.urls,
-    required this.initialIndex,
-    this.onDownload,
-    this.isDownloaded,
-  });
-
-  @override
-  State<_MultiImageViewerScreen> createState() => _MultiImageViewerScreenState();
-}
-
-class _MultiImageViewerScreenState extends State<_MultiImageViewerScreen> {
-  late final PageController _controller;
-  late int _index;
-
-  @override
-  void initState() {
-    super.initState();
-    _index = widget.initialIndex;
-    _controller = PageController(initialPage: widget.initialIndex);
-  }
-
-  @override
-  void dispose() {
-    _controller.dispose();
-    super.dispose();
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    final currentUrl = widget.urls[_index];
-    final downloaded = widget.isDownloaded?.call(currentUrl) ?? false;
-    return Scaffold(
-      backgroundColor: Colors.black,
-      body: Stack(children: [
-        Positioned.fill(
-          child: PageView.builder(
-            controller: _controller,
-            itemCount: widget.urls.length,
-            onPageChanged: (i) => setState(() => _index = i),
-            itemBuilder: (_, i) => _ZoomableImage(url: widget.urls[i]),
-          ),
-        ),
-        SafeArea(
-          child: Row(
-            mainAxisAlignment: MainAxisAlignment.spaceBetween,
-            children: [
-              IconButton(icon: const Icon(Icons.close, color: Colors.white, size: 28), onPressed: () => Navigator.pop(context)),
-              Text("${_index + 1} / ${widget.urls.length}", style: const TextStyle(color: Colors.white, fontSize: 15)),
-              IconButton(
-                icon: Icon(downloaded ? Icons.check : Icons.download, color: Colors.white, size: 24),
-                onPressed: downloaded ? null : () => widget.onDownload?.call(currentUrl),
-              ),
-            ],
-          ),
-        ),
-      ]),
-    );
-  }
-}
-
-// 🔥 NAYA: album-viewer ke har page ke liye — double-tap se zoom-in/out
-// (Instagram/WhatsApp jaisa), pinch-zoom bhi supported.
-class _ZoomableImage extends StatefulWidget {
-  final String url;
-  const _ZoomableImage({required this.url});
-
-  @override
-  State<_ZoomableImage> createState() => _ZoomableImageState();
-}
-
-class _ZoomableImageState extends State<_ZoomableImage> {
-  final TransformationController _transform = TransformationController();
-
-  void _onDoubleTapDown(TapDownDetails details) {
-    final tapPos = details.localPosition;
-    if (_transform.value != Matrix4.identity()) {
-      _transform.value = Matrix4.identity();
-    } else {
-      _transform.value = Matrix4.identity()
-        ..translate(-tapPos.dx * 2, -tapPos.dy * 2)
-        ..scale(3.0);
-    }
-  }
-
-  @override
-  void dispose() {
-    _transform.dispose();
-    super.dispose();
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    return LayoutBuilder(
-      builder: (context, constraints) {
-        return GestureDetector(
-          onDoubleTapDown: _onDoubleTapDown,
-          onDoubleTap: () => setState(() {}),
-          child: SizedBox(
-            width: constraints.maxWidth,
-            height: constraints.maxHeight,
-            child: InteractiveViewer(
-              transformationController: _transform,
-              minScale: 1,
-              maxScale: 6,
-              boundaryMargin: const EdgeInsets.all(double.infinity),
-              child: SizedBox(
-                width: constraints.maxWidth,
-                height: constraints.maxHeight,
-                child: CachedNetworkImage(
-                  imageUrl: widget.url,
-                  fit: BoxFit.contain,
-                  width: constraints.maxWidth,
-                  height: constraints.maxHeight,
-                  placeholder: (_, __) => const Center(child: CircularProgressIndicator(color: Colors.white)),
-                  errorWidget: (_, __, ___) => const Center(child: Icon(Icons.broken_image, color: Colors.white38, size: 60)),
-                ),
-              ),
-            ),
-          ),
-        );
-      },
-    );
-  }
-}
-
 // 🔥 NAYA: WhatsApp jaisa inline voice-note player — play/pause button,
 // seekable progress bar, aur live time. Seedha URL se stream karta hai,
 // download ka wait nahi karna padta. Sending state me upload % dikhta hai.
@@ -2305,11 +3370,6 @@ class _AudioBubbleState extends State<_AudioBubble> {
   @override
   void initState() {
     super.initState();
-    // 🔥 NAYA — FIX: audio hamesha LOUDSPEAKER (media/speaker) se play ho,
-    // call/earpiece speaker se nahi. Bina isko set kiye, Android kabhi-kabhi
-    // audio route ko earpiece pe bhej deta hai (khaaskar jab pehle koi call
-    // ya WebRTC session chal chuki ho aur audio focus/route already earpiece
-    // pe set ho). Ye explicitly speakerphone + media usage force karta hai.
     _player.setAudioContext(AudioContext(
       android: const AudioContextAndroid(
         isSpeakerphoneOn: true,
@@ -2319,11 +3379,6 @@ class _AudioBubbleState extends State<_AudioBubble> {
         audioFocus: AndroidAudioFocus.gain,
       ),
       iOS: AudioContextIOS(
-        // 🔧 FIX: `defaultToSpeaker` option sirf `playAndRecord` category
-        // ke saath allowed hai — `playback` ke saath ye assertion fail
-        // karke red error chat me dikha raha tha. `playback` category
-        // already default speaker se play karta hai (earpiece se nahi),
-        // isliye option ki zaroorat hi nahi thi.
         category: AVAudioSessionCategory.playback,
         options: const {},
       ),
@@ -2440,15 +3495,6 @@ class _AudioBubbleState extends State<_AudioBubble> {
 
 // ============================================================
 // 🔥 NAYA: MX Player jaisa full-screen video player.
-// Pehle ye sirf ek basic play/pause tha (tap se toggle, progress bar).
-// Ab production-level controls hain:
-//   • center play/pause + ⏪10s / ⏩10s buttons
-//   • bottom pe seekbar with live current/total time
-//   • left/right screen pe double-tap karke bhi 10s seek (MX Player jaisa)
-//     — saath me ek chhota "-10s"/"+10s" flash overlay
-//   • single tap se controls show/hide, 3 second baad auto-hide
-//   • buffering spinner
-//   • rotate icon se landscape fullscreen toggle
 // ============================================================
 class _VideoPlayerScreen extends StatefulWidget {
   final String url;
@@ -2466,7 +3512,6 @@ class _VideoPlayerScreenState extends State<_VideoPlayerScreen> {
   bool _isLandscape = false;
   Timer? _hideTimer;
 
-  // Double-tap seek flash feedback (left = rewind, right = forward)
   String? _seekFlashSide; // 'left' | 'right' | null
   Timer? _seekFlashTimer;
 
@@ -2524,7 +3569,6 @@ class _VideoPlayerScreenState extends State<_VideoPlayerScreen> {
     if (_controller.value.isPlaying) _restartHideTimer();
   }
 
-  // MX Player jaisa: screen ke left/right hisse pe double-tap se -10/+10
   void _onDoubleTapSeek(bool forward) {
     _seekBy(forward ? 10 : -10);
     setState(() => _seekFlashSide = forward ? 'right' : 'left');
@@ -2558,7 +3602,6 @@ class _VideoPlayerScreenState extends State<_VideoPlayerScreen> {
     _seekFlashTimer?.cancel();
     _controller.removeListener(_onTick);
     _controller.dispose();
-    // Video screen se nikalte hi orientation/system UI wapas normal.
     SystemChrome.setPreferredOrientations([DeviceOrientation.portraitUp, DeviceOrientation.portraitDown]);
     SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
     super.dispose();
@@ -2582,8 +3625,6 @@ class _VideoPlayerScreenState extends State<_VideoPlayerScreen> {
                         child: VideoPlayer(_controller),
                       ),
                     ),
-
-                    // ---- Double-tap seek zones (left = -10s, right = +10s) ----
                     Positioned.fill(
                       child: Row(children: [
                         Expanded(
@@ -2600,8 +3641,6 @@ class _VideoPlayerScreenState extends State<_VideoPlayerScreen> {
                         ),
                       ]),
                     ),
-
-                    // ---- Seek flash feedback ----
                     if (_seekFlashSide != null)
                       Align(
                         alignment: _seekFlashSide == 'left' ? Alignment.centerLeft : Alignment.centerRight,
@@ -2616,12 +3655,8 @@ class _VideoPlayerScreenState extends State<_VideoPlayerScreen> {
                           ),
                         ),
                       ),
-
-                    // ---- Buffering ----
                     if (_controller.value.isBuffering)
                       const Center(child: CircularProgressIndicator(color: Colors.white)),
-
-                    // ---- Controls overlay ----
                     AnimatedOpacity(
                       opacity: _controlsVisible ? 1 : 0,
                       duration: const Duration(milliseconds: 200),
@@ -2638,7 +3673,6 @@ class _VideoPlayerScreenState extends State<_VideoPlayerScreen> {
                           ),
                           child: SafeArea(
                             child: Column(children: [
-                              // Top bar: back + rotate
                               Padding(
                                 padding: const EdgeInsets.symmetric(horizontal: 4),
                                 child: Row(children: [
@@ -2651,7 +3685,6 @@ class _VideoPlayerScreenState extends State<_VideoPlayerScreen> {
                                 ]),
                               ),
                               const Spacer(),
-                              // Center: -10s | play/pause | +10s
                               Row(mainAxisAlignment: MainAxisAlignment.center, children: [
                                 IconButton(iconSize: 32, icon: const Icon(Icons.replay_10, color: Colors.white), onPressed: () => _seekBy(-10)),
                                 const SizedBox(width: 26),
@@ -2667,7 +3700,6 @@ class _VideoPlayerScreenState extends State<_VideoPlayerScreen> {
                                 IconButton(iconSize: 32, icon: const Icon(Icons.forward_10, color: Colors.white), onPressed: () => _seekBy(10)),
                               ]),
                               const Spacer(),
-                              // Bottom: seekbar + times
                               Padding(
                                 padding: const EdgeInsets.symmetric(horizontal: 14),
                                 child: Row(children: [

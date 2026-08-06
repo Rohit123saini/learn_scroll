@@ -1,26 +1,51 @@
 {
   "project_info": {
-    "project_number": "362717733057",
-    "project_id": "learnscroll-db342",
-    "storage_bucket": "learnscroll-db342.firebasestorage.app"
+    "project_number": "384486121301",
+    "project_id": "learnscroll-app-new",
+    "storage_bucket": "learnscroll-app-new.firebasestorage.app"
   },
   "client": [
     {
       "client_info": {
-        "mobilesdk_app_id": "1:362717733057:android:dd18dc08cb0f6afe7a7440",
+        "mobilesdk_app_id": "1:384486121301:android:1e786b64d2620ebd6899dc",
         "android_client_info": {
-          "package_name": "com.example.learnscroll"
+          "package_name": "com.learnscroll.app"
         }
       },
-      "oauth_client": [],
+      "oauth_client": [
+        {
+          "client_id": "384486121301-2tffkbv0jva41m1a8asbe7p8vobt4tl0.apps.googleusercontent.com",
+          "client_type": 1,
+          "android_info": {
+            "package_name": "com.learnscroll.app",
+            "certificate_hash": "0fd6fc1e0e6ee3192961edfdeedf1efe45653723"
+          }
+        },
+        {
+          "client_id": "384486121301-ls1m94qdskoh3d3jig6fso9mk9q3v9ll.apps.googleusercontent.com",
+          "client_type": 3
+        }
+      ],
       "api_key": [
         {
-          "current_key": "AIzaSyDKc0nQ7qgocVPAP2O0wo1rbtmcWrheXe4"
+          "current_key": "AIzaSyAafaSDNSYUSKwO9097Ec7Uli542q2o3Xg"
         }
       ],
       "services": {
         "appinvite_service": {
-          "other_platform_oauth_client": []
+          "other_platform_oauth_client": [
+            {
+              "client_id": "384486121301-ls1m94qdskoh3d3jig6fso9mk9q3v9ll.apps.googleusercontent.com",
+              "client_type": 3
+            },
+            {
+              "client_id": "384486121301-5jevuupgbk7rvlae8oc6u8hbbe894p28.apps.googleusercontent.com",
+              "client_type": 2,
+              "ios_info": {
+                "bundle_id": "com.example.learnscroll"
+              }
+            }
+          ]
         }
       }
     }

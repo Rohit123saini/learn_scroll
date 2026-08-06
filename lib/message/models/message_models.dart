@@ -27,14 +27,33 @@ class MessageType {
 // ======================================================================
 class UserMini {
   final String id;
+  final String username;
+  final String firstName;
+  final String lastName;
   final String displayName;
+  // 🔥 NAYA — backend `UserMiniSerializer` ab `profile_photo` bhejta hai
+  // (absolute URL, ya null agar photo set hi nahi hai). Jahan bhi is
+  // user ka avatar dikhana ho (conversation list, message sender, group
+  // members, reactions, call history) sab yahin se milega.
+  final String? profilePhoto;
 
-  UserMini({required this.id, required this.displayName});
+  UserMini({
+    required this.id,
+    this.username = '',
+    this.firstName = '',
+    this.lastName = '',
+    required this.displayName,
+    this.profilePhoto,
+  });
 
   factory UserMini.fromJson(Map<String, dynamic> json) {
     return UserMini(
       id: json['id']?.toString() ?? '',
+      username: json['username']?.toString() ?? '',
+      firstName: json['first_name']?.toString() ?? '',
+      lastName: json['last_name']?.toString() ?? '',
       displayName: json['display_name']?.toString() ?? 'Unknown',
+      profilePhoto: json['profile_photo']?.toString(),
     );
   }
 
@@ -43,7 +62,11 @@ class UserMini {
   // padta hai; fromJson isi shape ko expect karta hai).
   Map<String, dynamic> toJson() => {
         'id': id,
+        'username': username,
+        'first_name': firstName,
+        'last_name': lastName,
         'display_name': displayName,
+        'profile_photo': profilePhoto,
       };
 }
 
@@ -149,7 +172,12 @@ class ConversationModel {
     return otherParticipant?.displayName ?? 'Unknown';
   }
 
-  String? get displayPhoto => isGroup ? group?.photoUrl : null;
+  // 🔥 FIX — pehle private chat ke liye hamesha `null` return hota tha
+  // (sirf group photo dikhta tha). Ab backend `other_participant` ke
+  // andar `profile_photo` bhejta hai, isliye private chat list me bhi
+  // us insaan ki asli photo dikhegi (na milne par UI apne aap fallback
+  // icon/initials dikha deti hai).
+  String? get displayPhoto => isGroup ? group?.photoUrl : otherParticipant?.profilePhoto;
 
   factory ConversationModel.fromJson(Map<String, dynamic> json) {
     return ConversationModel(
@@ -371,7 +399,16 @@ class MessageModel {
       conversationId: json['conversation_id']?.toString() ?? '',
       sender: UserMini(
         id: json['sender_id']?.toString() ?? '',
+        username: json['sender_username']?.toString() ?? '',
+        firstName: json['sender_first_name']?.toString() ?? '',
+        lastName: json['sender_last_name']?.toString() ?? '',
         displayName: json['sender_name']?.toString() ?? 'Unknown',
+        // FIX: backend (both ChatConsumer.handle_new_message and the
+        // REST conversations/<id>/messages/ POST handler) sends this key
+        // as `sender_profile_photo`, not `sender_avatar` — the old key
+        // name here never matched, so the sender's avatar never loaded
+        // on real-time/REST-broadcast messages.
+        profilePhoto: json['sender_profile_photo']?.toString(),
       ),
       type: json['message_type']?.toString() ?? 'text',
       text: json['text']?.toString(),

@@ -12,11 +12,17 @@ import 'package:image_picker/image_picker.dart'; // 🔥 NAYA — camera se seed
 import 'package:path_provider/path_provider.dart';
 import 'package:syncfusion_flutter_pdfviewer/pdfviewer.dart';
 import 'package:printing/printing.dart'; // 🔥 NAYA — PDF ke har page ko image me rasterize karke multi-page split karne ke liye (pubspec.yaml: printing: ^5.12.0)
+import 'package:pdf/pdf.dart'; // 🔥 NAYA — "Download All Pages (PDF)" ke liye PdfPageFormat
+import 'package:pdf/widgets.dart' as pw; // 🔥 NAYA — "Download All Pages (PDF)" ke liye naya multi-page PDF document banane ke liye (pubspec.yaml: pdf: ^3.10.7 — printing package ke saath already transitively aata hai, lekin direct use karne ke liye seedha dependency me bhi add kar lena)
 import 'package:livekit_client/livekit_client.dart';
 import 'package:uuid/uuid.dart';
 import 'package:permission_handler/permission_handler.dart';
 import 'package:device_info_plus/device_info_plus.dart';
 import 'package:http/http.dart' as http;
+// 🔥 NAYA — study room khula rehte tak phone ki screen auto-lock/sleep na
+// ho (jaise Meet/Zoom me hota hai). pubspec.yaml me add karna hoga:
+//   wakelock_plus: ^1.2.10
+import 'package:wakelock_plus/wakelock_plus.dart';
 
 import '../models/study_room_models.dart';
 import '../services/chat_socket_service.dart';
@@ -25,6 +31,7 @@ import '../services/call_manager.dart';
 import '../services/study_room_call_manager.dart';
 import '../services/message_api_service.dart';
 import '../services/ai_study_service.dart';
+import '../services/push_notification_service.dart'; // 🔥 NAYA — file downloads (annotated snapshot/all-pages PDF/original file) complete hone par bhi chat_screen jaisa hi system notification dikhane ke liye
 import '../widgets/whiteboard_painter.dart';
 
 // ============================================================
@@ -154,6 +161,14 @@ class StudyRoomScreen extends StatefulWidget {
   // `initialParticipants` me self ko shaamil na kare.
   final String? currentUserName;
   final String? currentUserAvatar;
+  // 🔥 NAYA — true jab chat_screen ke "Study Room" icon se FRESH session
+  // start ki jaa rahi ho (na ki kisi purane invite-card/pehle se chal rahi
+  // session me JOIN ki jaa rahi ho). true hone par purana whiteboard state
+  // restore NAHI hota — bilkul khaali page se shuru hota hai, jaise koi
+  // naya Google Meet link banaya ho. Invite-card tap flow (`_enterStudyRoom`
+  // bina is flag ke) isko false hi rakhta hai, taaki jo already-chal-rahi
+  // session me tap karke aaye use purana board/state mile, naya nahi.
+  final bool startNewSession;
 
   const StudyRoomScreen({
     super.key,
@@ -165,6 +180,7 @@ class StudyRoomScreen extends StatefulWidget {
     this.peerAvatar,
     this.currentUserName,
     this.currentUserAvatar,
+    this.startNewSession = false,
   });
 
   @override
@@ -221,6 +237,141 @@ class _StudyRoomScreenState extends State<StudyRoomScreen> {
   final Map<String, String> _pagePdfPaths = {};
   final Map<String, String> _pageImagePaths = {};
 
+  // 🔥 NAYA — RULED PAPER LINES
+  // ------------------------------------------------------------
+  // Notebook/copy jaisi ruled lines background — sirf un pages ke liye
+  // jinme koi PDF/image load nahi hai (khaali whiteboard page). Har page
+  // apna alag on/off state rakhta hai (jaise `_pagePdfPaths` etc. bhi page
+  // id se keyed hain), aur doosre participants ko bhi turant dikhe isliye
+  // socket se sync hota hai ('ruled_lines' room event — neeche
+  // `_toggleRuledLines`/`_setRuledLineStyle` aur socket switch case dono
+  // me hai). NOTE: ye sirf is live session ke liye hai — WhiteboardPage
+  // model me is field ke liye jagah nahi hai isliye reopen/restore pe
+  // reset ho jaata hai (agar permanently save karna ho to
+  // WhiteboardPage.toJson()/fromJson() me `ruledLines` field add karna hoga).
+  //
+  // 🔥 NAYA v2 — pehle sirf on/off tha, fixed 40px horizontal lines.
+  // Ab har page apni alag style rakh sakta hai: orientation (horizontal
+  // jaisa notebook / vertical jaisa graph paper columns / grid dono) aur
+  // spacing (lines choti-badi — paas-paas ya door-door).
+  final Map<String, _RuledLineStyle> _ruledPages = {};
+  bool get _showRuledLines => _ruledPages.containsKey(_page.id);
+  _RuledLineStyle get _currentRuledStyle => _ruledPages[_page.id] ?? const _RuledLineStyle();
+
+  void _toggleRuledLines() {
+    final pageId = _page.id;
+    setState(() {
+      if (_ruledPages.containsKey(pageId)) {
+        _ruledPages.remove(pageId);
+      } else {
+        _ruledPages[pageId] = const _RuledLineStyle();
+      }
+    });
+    _isDirty = true;
+    final style = _ruledPages[pageId];
+    _sendRoomEvent('ruled_lines', {
+      'pageId': pageId,
+      'enabled': style != null,
+      if (style != null) ...style.toJson(),
+    });
+  }
+
+  // 🔥 NAYA — spacing chhoti-badi karna aur orientation (horizontal/
+  // vertical/grid) badalna, dono isi ek function se hota hai taaki
+  // sirf ek hi socket event bhejna pade.
+  void _setRuledLineStyle({double? spacing, _RuledLineOrientation? orientation}) {
+    final pageId = _page.id;
+    final current = _currentRuledStyle;
+    final updated = _RuledLineStyle(
+      spacing: spacing ?? current.spacing,
+      orientation: orientation ?? current.orientation,
+    );
+    setState(() => _ruledPages[pageId] = updated);
+    _isDirty = true;
+    _sendRoomEvent('ruled_lines', {'pageId': pageId, 'enabled': true, ...updated.toJson()});
+  }
+
+  // 🔥 NAYA — "Line Style" bottom sheet: yahan se lines ki spacing
+  // (chhoti/darmiyani/badi) aur orientation (horizontal jaisa notebook /
+  // vertical jaisa graph-paper columns / grid dono) choose kar sakte ho.
+  // Tap karte hi turant apply + doosre participants ko sync ho jaata hai.
+  void _showRuledLineStyleSheet() {
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: const Color(0xFF262636),
+      shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(18))),
+      builder: (sheetContext) {
+        return StatefulBuilder(
+          builder: (sheetContext, setSheetState) {
+            final style = _currentRuledStyle;
+            Widget sectionTitle(String text) => Padding(
+                  padding: const EdgeInsets.fromLTRB(16, 14, 16, 6),
+                  child: Text(text, style: const TextStyle(color: Colors.white54, fontSize: 12, fontWeight: FontWeight.w600)),
+                );
+            Widget chip(String label, bool selected, VoidCallback onTap) => Padding(
+                  padding: const EdgeInsets.only(right: 8),
+                  child: ChoiceChip(
+                    label: Text(label),
+                    selected: selected,
+                    onSelected: (_) {
+                      onTap();
+                      setSheetState(() {});
+                    },
+                    labelStyle: TextStyle(color: selected ? Colors.black : Colors.white70),
+                    selectedColor: Colors.tealAccent,
+                    backgroundColor: Colors.white10,
+                  ),
+                );
+            return SafeArea(
+              child: Padding(
+                padding: const EdgeInsets.only(bottom: 12),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Padding(
+                      padding: const EdgeInsets.fromLTRB(16, 16, 16, 0),
+                      child: Row(children: const [
+                        Icon(Icons.tune, color: Colors.white),
+                        SizedBox(width: 8),
+                        Text('Line Style', style: TextStyle(color: Colors.white, fontSize: 16, fontWeight: FontWeight.bold)),
+                      ]),
+                    ),
+                    sectionTitle('DIRECTION'),
+                    Padding(
+                      padding: const EdgeInsets.symmetric(horizontal: 16),
+                      child: Row(children: [
+                        chip('Horizontal', style.orientation == _RuledLineOrientation.horizontal,
+                            () => _setRuledLineStyle(orientation: _RuledLineOrientation.horizontal)),
+                        chip('Vertical', style.orientation == _RuledLineOrientation.vertical,
+                            () => _setRuledLineStyle(orientation: _RuledLineOrientation.vertical)),
+                        chip('Grid (both)', style.orientation == _RuledLineOrientation.grid,
+                            () => _setRuledLineStyle(orientation: _RuledLineOrientation.grid)),
+                      ]),
+                    ),
+                    sectionTitle('LINE SIZE (spacing)'),
+                    Padding(
+                      padding: const EdgeInsets.symmetric(horizontal: 16),
+                      child: Row(children: [
+                        chip('Small', style.spacing == _RuledLineStyle.smallSpacing,
+                            () => _setRuledLineStyle(spacing: _RuledLineStyle.smallSpacing)),
+                        chip('Medium', style.spacing == _RuledLineStyle.mediumSpacing,
+                            () => _setRuledLineStyle(spacing: _RuledLineStyle.mediumSpacing)),
+                        chip('Large', style.spacing == _RuledLineStyle.largeSpacing,
+                            () => _setRuledLineStyle(spacing: _RuledLineStyle.largeSpacing)),
+                      ]),
+                    ),
+                    const SizedBox(height: 8),
+                  ],
+                ),
+              ),
+            );
+          },
+        );
+      },
+    );
+  }
+
   // 🔥 NAYA — SHARED FILE SYNC
   // ------------------------------------------------------------
   // `_pagePdfPaths`/`_pageImagePaths` upar sirf LOCAL device paths hain
@@ -275,6 +426,14 @@ class _StudyRoomScreenState extends State<StudyRoomScreen> {
   //     block sirf ek chhota corner-overlay hai, poori screen nahi leta.
   bool _participantsExpanded = false;
 
+  // 🔥 NAYA — participants collapsed pill ab kahin bhi drag karke rakha
+  // ja sakta hai (jaise video-call apps me self-camera thumbnail hota
+  // hai). null = abhi tak drag nahi kiya, default top-left corner par
+  // dikhega. Ek baar drag karne ke baad wahi position yaad rehti hai
+  // jab tak screen band na ho (kisi doosre participant ko iska koi
+  // asar nahi padta — ye purely local/visual position hai).
+  Offset? _participantsPillOffset;
+
   // 🔥 NAYA — Google Meet-style auto-join media (camera/mic). Purane
   // `CallManager.instance` (upar) se ALAG hai — wo abhi bhi normal 1:1
   // ringing calls ke liye hai (agar kabhi study room ke andar se koi
@@ -290,6 +449,11 @@ class _StudyRoomScreenState extends State<StudyRoomScreen> {
   // In-room Quick Chat — temporary, session-only (like Google Meet's
   // in-call chat). Never loaded from or saved to the real conversation.
   final List<_RoomChatMessage> _quickChatMessages = [];
+  // 🔥 NAYA — jab tak user khud chat drawer na khole, incoming message ka
+  // pata chalta rahe isliye chat icon ke upar WhatsApp jaisa blue "unread"
+  // dot + jisne bheja uska naam (tooltip me) track karte hain.
+  bool _hasUnreadChat = false;
+  String? _lastChatSenderName;
   final TextEditingController _chatInputController = TextEditingController();
 
   // Sticker Reactions — study room ke liye sabse useful 10 quick
@@ -343,7 +507,20 @@ class _StudyRoomScreenState extends State<StudyRoomScreen> {
     // Ab yahan defensively apna window guaranteed bana dete hain.
     _ensureSelfWindow();
     _timerRemaining = _timer.totalDuration;
-    _restoreBoardState();
+    // 🔥 FIX — pehle yahan hamesha unconditionally purana whiteboard state
+    // restore ho jaata tha, chahe user "Study Room" icon se bilkul NAYI
+    // session start kar raha ho ya kisi purani/active session me JOIN kar
+    // raha ho — dono cases me same persistent room + purana board dikhta
+    // tha. Ab `startNewSession` true ho (fresh start) to restore skip karke
+    // khaali page se shuru karte hain, aur purana backend state bhi khaali
+    // pages se overwrite kar dete hain taaki agli baar (join flow se) koi
+    // aur galti se purana content na dekhe.
+    if (widget.startNewSession) {
+      _isDirty = true;
+      _saveBoardState();
+    } else {
+      _restoreBoardState();
+    }
     _connectSocket();
     _startAutoSave();
     // Study room khulte hi system nav bar hide — sirf whiteboard/toolbar
@@ -365,6 +542,13 @@ class _StudyRoomScreenState extends State<StudyRoomScreen> {
     // hamesha ke liye "camera off" state me pada reh jaata tha).
     _roomCall.onParticipantLeft = _onRemoteParticipantLeft;
     _joinStudyRoomMedia();
+
+    // 🔥 NAYA — jab tak study room screen khuli hai, phone khud-ba-khud
+    // lock/sleep nahi hona chahiye (whiteboard use karte waqt beech me
+    // screen band ho jaana bahut irritating hai). Screen band karna
+    // (ya app minimize karna) user apni marzi se kar sakta hai — ye sirf
+    // AUTO screen-timeout ko rokta hai.
+    WakelockPlus.enable();
   }
 
   void _onRemoteParticipantLeft(String identity) {
@@ -372,6 +556,27 @@ class _StudyRoomScreenState extends State<StudyRoomScreen> {
     setState(() {
       _windows.removeWhere((w) => w.userId == identity);
     });
+  }
+
+  // ============================================================
+  // PARTICIPANT-JOINED TOAST — jab bhi koi naya participant room me
+  // aata hai, uska naam chhote se floating pill me top se andar aakar
+  // ~2.5s dikhta hai, phir khud fade/slide-out ho jaata hai. Isse
+  // participants grid khole bina hi turant pata chal jaata hai ki
+  // "kaun-kaun newly join hua" — bilkul Meet/Zoom ke "X joined the
+  // meeting" toast jaisa.
+  // ============================================================
+  void _announceParticipantJoined(String name) {
+    if (!mounted) return;
+    final overlay = Overlay.of(context);
+    late OverlayEntry entry;
+    entry = OverlayEntry(
+      builder: (overlayContext) => _JoinToast(
+        name: name,
+        onDone: () => entry.remove(),
+      ),
+    );
+    overlay.insert(entry);
   }
 
   // 🔥 NAYA — apna window guaranteed banata hai agar pehle se `_windows`
@@ -391,6 +596,36 @@ class _StudyRoomScreenState extends State<StudyRoomScreen> {
       size: const Size(120, 160),
       zIndex: ++_topZIndex,
     ));
+  }
+
+  // 🔥 NAYA — StudyRoomJoinView ab conversation ke saare members ka
+  // `user_id`/`display_name`/`avatar_url` bhejta hai. Jo bhi userId
+  // `_windows` me pehle se nahi hai (self ko chhodkar) uske liye ek naya
+  // profile window bana dete hain — isse room khulte hi sabka naam/photo
+  // dikhta hai, chahe wo abhi LiveKit me connect na hua ho (camera-off
+  // hone par bhi avatar placeholder dikhta rahega).
+  void _applyServerParticipants(List<dynamic> list) {
+    if (!mounted) return;
+    setState(() {
+      for (final raw in list) {
+        if (raw is! Map) continue;
+        final p = raw.cast<String, dynamic>();
+        final userId = p['user_id']?.toString();
+        if (userId == null || userId.isEmpty || userId == widget.currentUserId) continue;
+        if (_windows.any((w) => w.userId == userId)) continue;
+
+        final name = p['display_name']?.toString();
+        final offset = _windows.length * 24.0;
+        _windows.add(UserProfileWindowModel(
+          userId: userId,
+          displayName: (name != null && name.isNotEmpty) ? name : 'Participant',
+          avatarUrl: p['avatar_url']?.toString(),
+          position: Offset(16 + offset, 90 + offset),
+          size: const Size(120, 160),
+          zIndex: ++_topZIndex,
+        ));
+      }
+    });
   }
 
   // 🔥 NAYA — apna profile window (agar `initialParticipants` me pehle se
@@ -416,12 +651,22 @@ class _StudyRoomScreenState extends State<StudyRoomScreen> {
 
   Future<void> _joinStudyRoomMedia() async {
     try {
-      final data = await CallApiService.joinStudyRoom(widget.conversationId);
+      final data = await CallApiService.joinStudyRoom(widget.conversationId, newSession: widget.startNewSession);
       final livekitUrl = data['livekit_url']?.toString();
       final livekitToken = data['livekit_token']?.toString();
       if (livekitUrl == null || livekitToken == null) {
         throw Exception("Study room media credentials server se nahi mile");
       }
+      // 🔥 NAYA — backend ab conversation ke saare members ka naam/photo
+      // bhi bhejta hai. Isse turant (socket handshake ka wait kiye bina)
+      // har participant ka profile photo + naam room ke andar dikh jaata
+      // hai. Socket 'user_joined'/'update_window' events isi list ko
+      // upar hi refresh karte rehte hain — kuch conflict nahi hota.
+      final participantsData = data['participants'];
+      if (participantsData is List) {
+        _applyServerParticipants(participantsData);
+      }
+
       await _roomCall.joinRoom(livekitUrl: livekitUrl, livekitToken: livekitToken);
       _announceSelfJoined();
     } catch (e) {
@@ -455,6 +700,9 @@ class _StudyRoomScreenState extends State<StudyRoomScreen> {
     // Screen se bahar jaate hi phone ka normal system nav bar wapas la do —
     // baaki app is hidden state me stuck na rahe.
     SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
+    // 🔥 NAYA — study room band karte hi auto-lock wapas normal (taaki
+    // baaki poori app me phone hamesha ke liye jaagta na reh jaaye).
+    WakelockPlus.disable();
     super.dispose();
   }
 
@@ -581,6 +829,22 @@ class _StudyRoomScreenState extends State<StudyRoomScreen> {
             break;
           }
 
+        // 🔥 NAYA — kisi participant ne ruled-paper-lines background
+        // on/off ki (ya spacing/orientation badla), sabki screen turant
+        // sync ho jaani chahiye.
+        case 'ruled_lines':
+          {
+            final pageId = data['pageId']?.toString();
+            if (pageId == null) return;
+            final enabled = data['enabled'] == true;
+            if (enabled) {
+              _ruledPages[pageId] = _RuledLineStyle.fromJson(data);
+            } else {
+              _ruledPages.remove(pageId);
+            }
+            break;
+          }
+
         // 🔥 NAYA — koi naya user room me aaya (ya humein khud ko announce
         // kar raha hai). `widget.currentUserId` ka apna hi echo ignore karo.
         // Agar ye userId pehli baar dikha hai, tabhi apna khud ka
@@ -594,8 +858,15 @@ class _StudyRoomScreenState extends State<StudyRoomScreen> {
             if (userId == null || userId == widget.currentUserId) return;
             final idx = _windows.indexWhere((w) => w.userId == userId);
             if (idx == -1) {
-              _windows.add(UserProfileWindowModel.fromJson(data));
+              final joined = UserProfileWindowModel.fromJson(data);
+              _windows.add(joined);
               _pendingSelfAnnounceReply = true;
+              // 🔥 NAYA — pehle naya participant sirf silently _windows
+              // list me add ho jaata tha; uska naam kahin turant dikhta
+              // nahi tha jab tak koi khud participants grid na kholta.
+              // Ab room khulte hi ek chhota toast dikhta hai jisme uska
+              // naam saaf nazar aata hai (jaise Meet/Zoom "X joined").
+              _announceParticipantJoined(joined.displayName);
             } else {
               _windows[idx] = UserProfileWindowModel.fromJson(data);
             }
@@ -720,6 +991,11 @@ class _StudyRoomScreenState extends State<StudyRoomScreen> {
             final incoming = _RoomChatMessage.fromJson(data);
             if (incoming.senderId != widget.currentUserId) {
               _quickChatMessages.add(incoming);
+              // 🔥 NAYA — chat drawer band hai to unread badge on karo,
+              // saath hi sender ka naam yaad rakho (chat icon tooltip me
+              // dikhane ke liye).
+              _hasUnreadChat = true;
+              _lastChatSenderName = incoming.senderName;
             }
             break;
           }
@@ -755,6 +1031,42 @@ class _StudyRoomScreenState extends State<StudyRoomScreen> {
         _downloadAndCachePageFile(item['pageId']!, item['fileUrl']!, item['fileType'] ?? 'file');
       }
     }
+  }
+
+  // ============================================================
+  // LEAVE SESSION — sirf MAIN room se bahar nikalta hoon. Baaki sab
+  // participants ke liye room chalu rehta hai, aur main baad me isi
+  // conversation se dobara "Study Room" khol ke wapas join kar sakta
+  // hoon (whiteboard state backend me save hoti hai, `_restoreBoardState`
+  // se wapas load ho jaati hai). "End Session" se bilkul alag — usme
+  // room hamesha ke liye sabke liye band ho jaata hai.
+  // ============================================================
+  Future<void> _leaveSession() async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (_) => AlertDialog(
+        title: const Text('Leave Session?'),
+        content: const Text(
+          'You will leave this study room, but it stays open for everyone else — you can rejoin anytime. '
+          'To close it for everyone instead, use "End Session for Everyone".',
+        ),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('Cancel')),
+          ElevatedButton(
+            onPressed: () => Navigator.pop(context, true),
+            child: const Text('Leave'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true || !mounted) return;
+    // 🔥 NAYA — `end_session` room-event yahan BILKUL nahi bhejte (wo
+    // sirf `_endSessionForEveryone` bhejta hai) — isliye baaki sab
+    // participants ki screen pe koi asar nahi padta, sirf mera khud
+    // ka connection/screen band hota hai. Cleanup (`_roomCall.leaveRoom()`,
+    // `_socket.dispose()`, timers cancel) already `dispose()` me hota
+    // hai jab ye route pop hota hai.
+    Navigator.of(context).pop();
   }
 
   // ============================================================
@@ -804,8 +1116,16 @@ class _StudyRoomScreenState extends State<StudyRoomScreen> {
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(showMessage)));
-      if (Navigator.of(context).canPop()) {
-        Navigator.of(context).pop();
+      // 🔧 FIX — pehle sirf ek `.pop()` hota tha, jisse agar study room
+      // screen ke upar koi aur route (jaise call/connecting screen) stacked
+      // tha to user room se bahar nikal kar bhi kisi beech ke screen pe
+      // atak jaata tha — poori tarah room se "left" nahi hota tha. Ab
+      // stack ke sabse pehle (root/home) route tak seedha pop karte hain,
+      // taaki end-session/leave dono cases me user ek hi tap me poori
+      // tarah room ke bahar aa jaaye.
+      final navigator = Navigator.of(context);
+      if (navigator.canPop()) {
+        navigator.popUntil((route) => route.isFirst);
       }
     });
   }
@@ -1402,6 +1722,140 @@ class _StudyRoomScreenState extends State<StudyRoomScreen> {
   }
 
   // ============================================================
+  // BOTTOM CALL CONTROL BAR — mic / camera / screen-share, moved out of
+  // the AppBar (see fix notes at the top of the actions list). Styled
+  // like Meet/Zoom's bottom bar: big circular buttons, floating just
+  // above the phone's system nav area, always within thumb reach.
+  // ============================================================
+  Widget _buildBottomCallControlBar() {
+    final bottomSafeInset = MediaQuery.of(context).padding.bottom;
+
+    Widget circleButton({
+      required IconData icon,
+      required Color background,
+      required Color iconColor,
+      VoidCallback? onPressed,
+      required String tooltip,
+    }) {
+      return Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 8),
+        child: Tooltip(
+          message: tooltip,
+          child: Material(
+            color: background,
+            shape: const CircleBorder(),
+            child: InkWell(
+              customBorder: const CircleBorder(),
+              onTap: onPressed,
+              child: Container(
+                width: 52,
+                height: 52,
+                alignment: Alignment.center,
+                child: Icon(icon, color: iconColor, size: 24),
+              ),
+            ),
+          ),
+        ),
+      );
+    }
+
+    return Align(
+      alignment: Alignment.bottomCenter,
+      child: Container(
+        // Stacked directly above the drawing tool palette (which has its
+        // own bottom margin below this), so the two floating bars sit one
+        // above the other instead of overlapping.
+        margin: EdgeInsets.only(bottom: _bottomCallBarBottomMargin(bottomSafeInset)),
+        padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 6),
+        decoration: BoxDecoration(
+          color: const Color(0xFF0D0D15).withOpacity(0.92),
+          borderRadius: BorderRadius.circular(40),
+          boxShadow: const [BoxShadow(color: Colors.black45, blurRadius: 10)],
+        ),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            circleButton(
+              icon: _roomCall.micOn ? Icons.mic : Icons.mic_off,
+              background: _roomCall.micOn ? Colors.white12 : Colors.redAccent,
+              iconColor: Colors.white,
+              onPressed: _roomCall.isConnected ? () => _roomCall.toggleMic() : null,
+              tooltip: _roomCall.micOn ? 'Mute mic' : 'Unmute mic',
+            ),
+            circleButton(
+              icon: _roomCall.cameraOn ? Icons.videocam : Icons.videocam_off,
+              background: _roomCall.cameraOn ? Colors.white12 : Colors.white24,
+              iconColor: _roomCall.cameraOn ? Colors.white : Colors.white54,
+              onPressed: _roomCall.isConnected ? () => _roomCall.toggleCamera() : null,
+              tooltip: _roomCall.cameraOn ? 'Turn off camera' : 'Turn on camera',
+            ),
+            circleButton(
+              icon: _roomCall.isScreenSharing ? Icons.stop_screen_share : Icons.screen_share_outlined,
+              background: _roomCall.isScreenSharing ? Colors.tealAccent : Colors.white12,
+              iconColor: _roomCall.isScreenSharing ? Colors.black : Colors.white,
+              onPressed: _roomCall.isConnected ? _toggleScreenShare : null,
+              tooltip: _roomCall.isScreenSharing
+                  ? 'Stop presenting'
+                  : (_roomCall.activePresenterId != null ? 'Someone else is presenting' : 'Present screen'),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  // Shared height/spacing constants so the call control bar and the
+  // drawing tool palette stack cleanly instead of overlapping.
+  static const double _callBarApproxHeight = 64;
+  static const double _barStackGap = 10;
+
+  double _bottomCallBarBottomMargin(double bottomSafeInset) => 16 + bottomSafeInset;
+
+  double _toolPaletteBottomMargin(double bottomSafeInset) =>
+      _bottomCallBarBottomMargin(bottomSafeInset) + _callBarApproxHeight + _barStackGap;
+
+  // ============================================================
+  // ASK AI PILL — always-visible shortcut into the AI Notes/Quiz sheet.
+  // This used to be buried inside the drawing toolbar (only discoverable
+  // once someone opened it), so most people never found it. It's the
+  // most "wow" feature the room has, so it now floats on its own,
+  // reachable from anywhere in the session.
+  // ============================================================
+  Widget _buildAskAiPill() {
+    return Align(
+      alignment: const Alignment(1.0, 0.35),
+      child: SafeArea(
+        child: Padding(
+          padding: const EdgeInsets.only(right: 12),
+          child: Material(
+            color: Colors.tealAccent,
+            borderRadius: BorderRadius.circular(24),
+            elevation: 6,
+            child: InkWell(
+              borderRadius: BorderRadius.circular(24),
+              onTap: _openAiToolsSheet,
+              child: const Padding(
+                padding: EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Icon(Icons.auto_awesome, color: Colors.black, size: 18),
+                    SizedBox(width: 6),
+                    Text(
+                      'Ask AI',
+                      style: TextStyle(color: Colors.black, fontWeight: FontWeight.w700, fontSize: 13),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  // ============================================================
   // ROOM LINK SHARE
   // ============================================================
   String get _roomShareLink => "https://learnscroll.app/study-room/${widget.conversationId}";
@@ -1746,12 +2200,6 @@ class _StudyRoomScreenState extends State<StudyRoomScreen> {
           _pagePdfPaths.remove(pageId);
         }
       });
-
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('Shared file loaded'), duration: Duration(seconds: 2)),
-        );
-      }
     } catch (e) {
       developer.log('Study room shared-file download failed: $e');
       // Retry allowed next time (add_page/restore/reconnect).
@@ -1803,6 +2251,16 @@ class _StudyRoomScreenState extends State<StudyRoomScreen> {
       final file = File('${targetDir.path}/StudyRoom_Annotated_${DateTime.now().millisecondsSinceEpoch}.png');
       await file.writeAsBytes(pngBytes);
 
+      // 🔥 NAYA — chat_screen ke media download jaisa hi, yahan bhi download
+      // poora hone par app-wide system notification aani chahiye (study room
+      // ke downloads MediaDownloadService se nahi guzarte, isliye wo
+      // centralized notification yahan trigger nahi hoti — isliye explicitly
+      // call karna zaroori hai).
+      PushNotificationService.instance.showDownloadCompleteNotification(
+        fileName: file.path.split('/').last,
+        filePath: file.path,
+      );
+
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(content: Text('Saved to Downloads/flutter')),
@@ -1811,6 +2269,106 @@ class _StudyRoomScreenState extends State<StudyRoomScreen> {
     } catch (e) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Export Failed: $e')));
+      }
+    }
+  }
+
+  // ============================================================
+  // 🔥 NAYA — "Download All Pages (PDF)": upar wala _exportAndDownloadAnnotatedFile
+  // sirf ABHI khuli hui EK page ka PNG deta hai ("single page" download).
+  // Ye naya wala pura session — Page 1 se lekar aakhri page tak, sab kuch
+  // — ek hi multi-page PDF me deta hai. Kaam karne ka tarika: har page pe
+  // ek-ek karke (turant) switch karta hai taaki wahi RepaintBoundary
+  // (_globalKey) us page ka sahi content capture kare, uska PNG snapshot
+  // leta hai, aur sabko ek `pw.Document()` me jodta hai. Aakhri me user
+  // jis page pe tha, wahin wapas laa deta hai.
+  // ============================================================
+  Future<void> _exportAllPagesAsPdf() async {
+    if (_pages.isEmpty || !mounted) return;
+    final originalIndex = _currentPageIndex;
+
+    showDialog(
+      context: context,
+      barrierDismissible: false,
+      builder: (_) => AlertDialog(
+        backgroundColor: const Color(0xFF1E1E2C),
+        content: Row(children: [
+          const CircularProgressIndicator(color: Colors.blueAccent),
+          const SizedBox(width: 16),
+          Expanded(child: Text('Preparing PDF — 0/${_pages.length} pages...', style: const TextStyle(color: Colors.white))),
+        ]),
+      ),
+    );
+
+    try {
+      final pdf = pw.Document();
+      for (int i = 0; i < _pages.length; i++) {
+        // 🔧 Page switch karke ek frame + thoda extra wait — taaki naya
+        // page poora paint ho chuke (images/text/strokes sab render ho
+        // chuke) tab hi RepaintBoundary se snapshot liya jaaye, warna
+        // beech ka adhoora frame capture ho sakta hai.
+        setState(() => _currentPageIndex = i);
+        await WidgetsBinding.instance.endOfFrame;
+        await Future.delayed(const Duration(milliseconds: 80));
+
+        final boundary = _globalKey.currentContext!.findRenderObject() as RenderRepaintBoundary;
+        final image = await boundary.toImage(pixelRatio: 2.5);
+        final byteData = await image.toByteData(format: ui.ImageByteFormat.png);
+        final pngBytes = byteData!.buffer.asUint8List();
+        final pdfImage = pw.MemoryImage(pngBytes);
+
+        pdf.addPage(
+          pw.Page(
+            pageFormat: PdfPageFormat.a4,
+            build: (pwContext) => pw.Center(child: pw.Image(pdfImage, fit: pw.BoxFit.contain)),
+          ),
+        );
+      }
+
+      Directory targetDir;
+      if (Platform.isAndroid) {
+        final sdkInt = (await DeviceInfoPlugin().androidInfo).version.sdkInt;
+        var granted = false;
+        if (sdkInt >= 30) {
+          var status = await Permission.manageExternalStorage.status;
+          if (!status.isGranted) status = await Permission.manageExternalStorage.request();
+          granted = status.isGranted;
+        } else {
+          var status = await Permission.storage.status;
+          if (!status.isGranted) status = await Permission.storage.request();
+          granted = status.isGranted;
+        }
+        if (granted) {
+          targetDir = Directory("/storage/emulated/0/Download/flutter");
+          if (!await targetDir.exists()) await targetDir.create(recursive: true);
+        } else {
+          targetDir = await getApplicationDocumentsDirectory();
+        }
+      } else {
+        targetDir = await getApplicationDocumentsDirectory();
+      }
+
+      final file = File('${targetDir.path}/StudyRoom_AllPages_${DateTime.now().millisecondsSinceEpoch}.pdf');
+      await file.writeAsBytes(await pdf.save());
+
+      // 🔥 NAYA — chat_screen jaisa hi download-complete system notification.
+      PushNotificationService.instance.showDownloadCompleteNotification(
+        fileName: file.path.split('/').last,
+        filePath: file.path,
+      );
+
+      if (mounted) setState(() => _currentPageIndex = originalIndex);
+      if (mounted) {
+        Navigator.pop(context); // loading dialog band karo
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Saved all ${_pages.length} pages as one PDF to Downloads/flutter')),
+        );
+      }
+    } catch (e) {
+      if (mounted) setState(() => _currentPageIndex = originalIndex);
+      if (mounted) {
+        Navigator.pop(context); // loading dialog band karo
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('PDF export failed: $e')));
       }
     }
   }
@@ -1851,6 +2409,12 @@ class _StudyRoomScreenState extends State<StudyRoomScreen> {
       final originalName = sourcePath.split('/').last;
       final destPath = '${targetDir.path}/StudyRoom_${DateTime.now().millisecondsSinceEpoch}_$originalName';
       await File(sourcePath).copy(destPath);
+
+      // 🔥 NAYA — chat_screen jaisa hi download-complete system notification.
+      PushNotificationService.instance.showDownloadCompleteNotification(
+        fileName: originalName,
+        filePath: destPath,
+      );
 
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
@@ -1921,46 +2485,56 @@ class _StudyRoomScreenState extends State<StudyRoomScreen> {
       key: _scaffoldKey,
       backgroundColor: const Color(0xFF1E1E2C),
       endDrawer: _buildChatDrawer(),
+      // 🔥 NAYA — end drawer khulte hi (chahe icon-tap se ho ya edge-swipe
+      // se) unread badge turant clear ho jaata hai.
+      onEndDrawerChanged: (isOpen) {
+        if (isOpen && _hasUnreadChat) {
+          setState(() => _hasUnreadChat = false);
+        }
+      },
       appBar: AppBar(
         title: Text(widget.peerName ?? 'Group Study Room', style: const TextStyle(color: Colors.white)),
         backgroundColor: const Color(0xFF0D0D15),
         actions: [
-          // 🔥 NAYA — Google Meet-style: ye "call" nahi hai, sirf apna
-          // mic/camera on-off karne ka toggle hai. Room se already
-          // (silently) connected ho, isliye koi "start call" step nahi.
-          IconButton(
-            icon: Icon(
-              _roomCall.micOn ? Icons.mic : Icons.mic_off,
-              color: _roomCall.micOn ? Colors.white : Colors.redAccent,
-            ),
-            onPressed: _roomCall.isConnected ? () => _roomCall.toggleMic() : null,
-            tooltip: _roomCall.micOn ? 'Mute mic' : 'Unmute mic',
-          ),
-          IconButton(
-            icon: Icon(
-              _roomCall.cameraOn ? Icons.videocam : Icons.videocam_off,
-              color: _roomCall.cameraOn ? Colors.white : Colors.white54,
-            ),
-            onPressed: _roomCall.isConnected ? () => _roomCall.toggleCamera() : null,
-            tooltip: _roomCall.cameraOn ? 'Turn off camera' : 'Turn on camera',
-          ),
-          // 🔥 NAYA — screen share toggle. Jo bhi active presenter hai
-          // (khud ya koi aur), sabko dikhta hai ki kaun present kar raha
-          // hai; khud ka button start/stop dono handle karta hai.
-          IconButton(
-            icon: Icon(
-              _roomCall.isScreenSharing ? Icons.stop_screen_share : Icons.screen_share_outlined,
-              color: _roomCall.isScreenSharing ? Colors.tealAccent : Colors.white,
-            ),
-            onPressed: _roomCall.isConnected ? _toggleScreenShare : null,
-            tooltip: _roomCall.isScreenSharing
-                ? 'Stop presenting'
-                : (_roomCall.activePresenterId != null ? 'Someone else is presenting' : 'Present screen'),
-          ),
-          IconButton(
-            icon: const Icon(Icons.chat_bubble_outline, color: Colors.white),
-            onPressed: () => _scaffoldKey.currentState?.openEndDrawer(),
-            tooltip: 'Quick Chat',
+          // Kept intentionally minimal: only "secondary/social" actions
+          // live in the AppBar now (chat + sticker) plus the overflow
+          // menu. Everything call-critical (mic / camera / screen-share)
+          // has moved to the floating bottom call control bar — see
+          // _buildBottomCallControlBar — Meet/Zoom style, big circular
+          // buttons within thumb reach instead of cramped into the top bar.
+          // 🔥 NAYA — WhatsApp jaisa hi unread blue dot: jab tak drawer nahi
+          // khola, naya message aane par icon ke upar-right corner me dot
+          // dikhta hai, aur tooltip me bhejne wale ka naam bhi show hota hai.
+          Stack(
+            clipBehavior: Clip.none,
+            children: [
+              IconButton(
+                icon: const Icon(Icons.chat_bubble_outline, color: Colors.white),
+                onPressed: () {
+                  if (_hasUnreadChat) setState(() => _hasUnreadChat = false);
+                  _scaffoldKey.currentState?.openEndDrawer();
+                },
+                tooltip: (_hasUnreadChat && _lastChatSenderName != null)
+                    ? 'New message from $_lastChatSenderName'
+                    : 'Quick Chat',
+              ),
+              if (_hasUnreadChat)
+                Positioned(
+                  top: 8,
+                  right: 8,
+                  child: IgnorePointer(
+                    child: Container(
+                      width: 10,
+                      height: 10,
+                      decoration: BoxDecoration(
+                        color: Colors.blueAccent,
+                        shape: BoxShape.circle,
+                        border: Border.all(color: const Color(0xFF0D0D15), width: 1.5),
+                      ),
+                    ),
+                  ),
+                ),
+            ],
           ),
           // 🔥 NAYA — quick sticker/reaction picker. Tap karke ek chota
           // grid khulta hai, jahan se sticker bhejte hi wo turant sabki
@@ -1969,19 +2543,6 @@ class _StudyRoomScreenState extends State<StudyRoomScreen> {
             icon: const Icon(Icons.emoji_emotions_outlined, color: Colors.white),
             onPressed: _openStickerPicker,
             tooltip: 'Send Sticker',
-          ),
-          // 🔥 NAYA — "Hand" (Pan/Zoom) toggle ab 3-dot menu ke andar dabka
-          // hua nahi hai — direct ek-tap access ke liye toolbar me bahar
-          // nikaal diya hai. ON hone par canvas "movable" (pan/scroll/zoom)
-          // ho jaata hai; OFF hone par "stable" rehta hai taaki draw kiya
-          // ja sake.
-          IconButton(
-            icon: Icon(
-              _panZoomMode ? Icons.pan_tool : Icons.pan_tool_outlined,
-              color: _panZoomMode ? Colors.blueAccent : Colors.white,
-            ),
-            onPressed: () => setState(() => _panZoomMode = !_panZoomMode),
-            tooltip: _panZoomMode ? 'Disable Pan/Zoom (Hand)' : 'Enable Pan/Zoom (Hand)',
           ),
           PopupMenuButton<String>(
             icon: const Icon(Icons.more_vert, color: Colors.white),
@@ -2002,11 +2563,23 @@ class _StudyRoomScreenState extends State<StudyRoomScreen> {
                 case 'download':
                   _exportAndDownloadAnnotatedFile();
                   break;
+                case 'download_all_pdf':
+                  _exportAllPagesAsPdf();
+                  break;
                 case 'download_original':
                   _downloadOriginalFile();
                   break;
                 case 'timer':
                   _showTimerSheet();
+                  break;
+                case 'ruled_lines':
+                  _toggleRuledLines();
+                  break;
+                case 'ruled_lines_style':
+                  _showRuledLineStyleSheet();
+                  break;
+                case 'leave_session':
+                  _leaveSession();
                   break;
                 case 'end_session':
                   _endSessionForEveryone();
@@ -2044,8 +2617,39 @@ class _StudyRoomScreenState extends State<StudyRoomScreen> {
                 ),
               const PopupMenuItem(
                 value: 'download',
-                child: Row(children: [Icon(Icons.download), SizedBox(width: 8), Text('Download Annotated Snapshot')]),
+                child: Row(children: [Icon(Icons.download), SizedBox(width: 8), Text('Download This Page (Image)')]),
               ),
+              // 🔥 NAYA — Page 1 se lekar aakhri page tak, SAB pages ek
+              // hi PDF file me — upar wale se alag, jo sirf ABHI wali
+              // ek page deta hai.
+              const PopupMenuItem(
+                value: 'download_all_pdf',
+                child: Row(children: [Icon(Icons.picture_as_pdf_outlined), SizedBox(width: 8), Text('Download All Pages (PDF)')]),
+              ),
+              // 🔥 NAYA — notebook/copy jaisi ruled lines background, sirf
+              // khaali page (koi PDF/image load na ho) pe hi maayne rakhta
+              // hai, isliye sirf tabhi menu me dikhta hai.
+              if (_loadedPdfPath == null && _loadedImagePath == null)
+                PopupMenuItem(
+                  value: 'ruled_lines',
+                  child: Row(children: [
+                    Icon(_showRuledLines ? Icons.check_box : Icons.check_box_outline_blank),
+                    const SizedBox(width: 8),
+                    const Text('Ruled Paper Lines'),
+                  ]),
+                ),
+              // 🔥 NAYA — lines choti-badi (spacing) aur horizontal/
+              // vertical/grid orientation badalne ke liye — sirf tab
+              // dikhta hai jab ruled lines already ON hon.
+              if (_loadedPdfPath == null && _loadedImagePath == null && _showRuledLines)
+                const PopupMenuItem(
+                  value: 'ruled_lines_style',
+                  child: Row(children: [
+                    Icon(Icons.tune),
+                    SizedBox(width: 8),
+                    Text('Line Style (size / direction)'),
+                  ]),
+                ),
               PopupMenuItem(
                 value: 'timer',
                 child: Row(children: [
@@ -2055,6 +2659,14 @@ class _StudyRoomScreenState extends State<StudyRoomScreen> {
                 ]),
               ),
               const PopupMenuDivider(),
+              const PopupMenuItem(
+                value: 'leave_session',
+                child: Row(children: [
+                  Icon(Icons.logout, color: Colors.white70),
+                  SizedBox(width: 8),
+                  Text('Leave Session'),
+                ]),
+              ),
               const PopupMenuItem(
                 value: 'end_session',
                 child: Row(children: [
@@ -2075,8 +2687,27 @@ class _StudyRoomScreenState extends State<StudyRoomScreen> {
               Expanded(child: _buildWhiteboardArea()),
             ],
           ),
-          ..._windows.map((win) => _buildFloatingWindowWidget(win)),
+          // 🔧 FIX — pehle har participant ka apna alag draggable video
+          // window seedha whiteboard ke upar bikhra hota tha
+          // (`_buildFloatingWindowWidget` har `_windows` entry ke liye),
+          // jisse whiteboard content dikhna mushkil ho jaata tha. Ab
+          // whiteboard par koi bhi participant container nahi dikhta —
+          // sirf neeche wala ek chota floating "collapsed" box dikhta hai
+          // (`_buildParticipantsCollapsedBlock`), aur usi pe tap karne se
+          // hi sab participants (video + username) grid me khulte hain
+          // (`_buildParticipantsExpandedOverlay`).
           _buildToolPalette(),
+          // 🔥 NAYA — Meet/Zoom-style floating call control bar: mic,
+          // camera aur screen-share ab yahan hain (thumb-reach me, bade
+          // circular buttons), AppBar me nahi. Yeh hamesha drawing tool
+          // palette ke NEECHE (screen ke bilkul bottom-most) rehta hai —
+          // dono ek saath fit ho jaate hain, overlap nahi hota.
+          _buildBottomCallControlBar(),
+          // 🔥 NAYA — sabse "wow" feature (AI Notes/Quiz generator) pehle
+          // drawing-toolbar ke andar buried tha, isliye discover hi nahi
+          // hota tha. Ab ek hamesha-visible floating pill hai, poori
+          // whiteboard session ke dauraan kahin bhi se ek-tap access.
+          _buildAskAiPill(),
           _buildCallStatusBar(),
           // 🔥 NAYA — chota "kaun online hai" block, hamesha visible
           // (mainly whiteboard hi dikhta hai, ye sirf ek corner-pill hai).
@@ -2180,22 +2811,53 @@ class _StudyRoomScreenState extends State<StudyRoomScreen> {
                       // sambhalta hai (multi-page). Poori width/height de
                       // rahe hain taaki poori file open ho, kahin se crop
                       // na ho.
-                      SfPdfViewer.file(
-                        File(_loadedPdfPath!),
-                        canShowScrollHead: true,
-                        canShowScrollStatus: true,
-                        enableDoubleTapZooming: true,
+                      // 🔧 FIX — pehle SfPdfViewer seedha yahan render hota
+                      // tha bina kisi background ke, isliye jab PDF load ho
+                      // raha ho ya page ke around jagah bache to peeche ka
+                      // (dark) Scaffold background jhalak jaata tha — black
+                      // background dikhta tha. Ab ek explicit white
+                      // Container ke andar wrap kiya, jaise doc/paper hota
+                      // hai wapar hamesha safed rahega.
+                      Container(
+                        color: Colors.white,
+                        child: SfPdfViewer.file(
+                          File(_loadedPdfPath!),
+                          canShowScrollHead: true,
+                          canShowScrollStatus: true,
+                          enableDoubleTapZooming: true,
+                        ),
                       )
                     else if (_loadedImagePath != null)
-                      // BoxFit.contain ki jagah poori image uske actual
-                      // size me dikhao — InteractiveViewer khud hi
-                      // zoom/pan sambhal lega, isliye image ko artificially
-                      // screen ke andar squeeze karne ki zaroorat nahi.
+                      // 🔧 FIX — ye asli culprit thi "PDF/file ka background
+                      // black ho jaata hai" wale issue ki: PDF pages
+                      // `_loadPdfAsPages` me rasterize hoke isi
+                      // `_loadedImagePath` path se yahan dikhte hain, aur
+                      // unke PNG me transparent alpha hota hai un jagah jahan
+                      // PDF page pe kuch draw nahi hua tha. Pehle seedha
+                      // `Image.file` ek plain `Positioned.fill` ke andar tha —
+                      // koi background hi nahi tha, isliye transparent hissa
+                      // peeche wale dark Scaffold background (0xFF1E1E2C) se
+                      // hoke black/dark dikhta tha. Ab SfPdfViewer wale case
+                      // jaisa hi ek explicit white Container wrap kar diya,
+                      // taaki transparent areas hamesha ek asli page/paper ki
+                      // tarah white dikhein, chahe PDF ho ya koi transparent
+                      // PNG/sticker.
                       Positioned.fill(
-                        child: Image.file(File(_loadedImagePath!), fit: BoxFit.contain),
+                        child: Container(
+                          color: Colors.white,
+                          child: Image.file(File(_loadedImagePath!), fit: BoxFit.contain),
+                        ),
                       )
                     else
-                      Container(color: Colors.white),
+                      // 🔥 NAYA — khaali page ka default background ab ya to
+                      // plain white hai (jaisa pehle tha) ya, toggle on karne
+                      // par, notebook jaisi ruled lines wala paper.
+                      Container(
+                        color: Colors.white,
+                        child: _showRuledLines
+                            ? CustomPaint(painter: _RuledPaperPainter(_currentRuledStyle), size: Size.infinite)
+                            : null,
+                      ),
 
                 GestureDetector(
                   behavior: HitTestBehavior.translucent,
@@ -2527,68 +3189,105 @@ class _StudyRoomScreenState extends State<StudyRoomScreen> {
       return isSelf ? (_roomCall.cameraOn && track != null) : track != null;
     });
 
+    // 🔧 FIX — pehle ye hamesha "top: 8, left: 8" par fixed tha, jo
+    // page-tabs / dialogs ke upar overlap kar jaata tha aur user usse
+    // kahin aur hata nahi sakta tha. Ab is pill ko kahin bhi drag karke
+    // rakha ja sakta hai — position `_participantsPillOffset` me
+    // (locally) yaad rehti hai, aur screen ke bahar nahi jaane diya
+    // jaata (clamp).
+    // Pill ka approximate size — clamping ke liye. Exact size thoda vary
+    // karta hai (preview.length ke hisaab se), lekin ek safe upper-bound
+    // rakhna kaafi hai taaki drag karte waqt pill screen ke bahar na
+    // chala jaaye. `context` yahan seedha available hai (ye ek State
+    // method hai), isliye LayoutBuilder ki zaroorat nahi — aur Positioned
+    // ko Stack ka DIRECT child rehne dete hain (varna Flutter error deta
+    // hai agar beech me LayoutBuilder jaisa koi RenderObjectWidget aa jaye).
+    const double pillWidth = 130;
+    const double pillHeight = 44;
+    final screenSize = MediaQuery.of(context).size;
+    final maxX = math.max(0.0, screenSize.width - pillWidth);
+    final maxY = math.max(0.0, screenSize.height - pillHeight);
+
+    final offset = _participantsPillOffset ?? const Offset(8, 8);
+    final clampedOffset = Offset(
+      offset.dx.clamp(0.0, maxX),
+      offset.dy.clamp(0.0, maxY),
+    );
+
     return Positioned(
-      top: 8,
-      right: 8,
+      left: clampedOffset.dx,
+      top: clampedOffset.dy,
       child: SafeArea(
-        child: Material(
-          color: const Color(0xFF1E1E2C),
-          elevation: 6,
-          borderRadius: BorderRadius.circular(24),
-          child: InkWell(
-            borderRadius: BorderRadius.circular(24),
-            onTap: () => setState(() => _participantsExpanded = true),
-            child: Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
-              child: Row(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  SizedBox(
-                    width: 20.0 + (preview.length - 1) * 14.0,
-                    height: 26,
-                    child: Stack(
+        child: GestureDetector(
+          onPanUpdate: (details) {
+            setState(() {
+              final current = _participantsPillOffset ?? const Offset(8, 8);
+              _participantsPillOffset = Offset(
+                (current.dx + details.delta.dx).clamp(0.0, maxX),
+                (current.dy + details.delta.dy).clamp(0.0, maxY),
+              );
+            });
+          },
+          child: Material(
+                color: const Color(0xFF1E1E2C),
+                elevation: 6,
+                borderRadius: BorderRadius.circular(24),
+                child: InkWell(
+                  borderRadius: BorderRadius.circular(24),
+                  onTap: () => setState(() => _participantsExpanded = true),
+                  child: Padding(
+                    padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+                    child: Row(
+                      mainAxisSize: MainAxisSize.min,
                       children: [
-                        for (int i = 0; i < preview.length; i++)
-                          Positioned(
-                            left: i * 14.0,
-                            child: Stack(
-                              clipBehavior: Clip.none,
-                              children: [
-                                CircleAvatar(
-                                  radius: 13,
-                                  backgroundColor: Colors.white24,
-                                  backgroundImage:
-                                      preview[i].avatarUrl != null ? NetworkImage(preview[i].avatarUrl!) : null,
-                                  child: preview[i].avatarUrl == null
-                                      ? const Icon(Icons.person, size: 14, color: Colors.white)
-                                      : null,
-                                ),
-                                // 🔥 NAYA — chota active-status dot, taaki
-                                // collapsed pill se hi pata chale ki ye
-                                // participant abhi room me active hai.
+                        SizedBox(
+                          width: 20.0 + (preview.length - 1) * 14.0,
+                          height: 26,
+                          child: Stack(
+                            children: [
+                              for (int i = 0; i < preview.length; i++)
                                 Positioned(
-                                  right: -1,
-                                  bottom: -1,
-                                  child: _buildActiveDot(isSelf: preview[i].userId == widget.currentUserId),
+                                  left: i * 14.0,
+                                  child: Stack(
+                                    clipBehavior: Clip.none,
+                                    children: [
+                                      CircleAvatar(
+                                        radius: 13,
+                                        backgroundColor: Colors.white24,
+                                        backgroundImage: preview[i].avatarUrl != null
+                                            ? NetworkImage(preview[i].avatarUrl!)
+                                            : null,
+                                        child: preview[i].avatarUrl == null
+                                            ? const Icon(Icons.person, size: 14, color: Colors.white)
+                                            : null,
+                                      ),
+                                      // 🔥 NAYA — chota active-status dot, taaki
+                                      // collapsed pill se hi pata chale ki ye
+                                      // participant abhi room me active hai.
+                                      Positioned(
+                                        right: -1,
+                                        bottom: -1,
+                                        child: _buildActiveDot(isSelf: preview[i].userId == widget.currentUserId),
+                                      ),
+                                    ],
+                                  ),
                                 ),
-                              ],
-                            ),
+                            ],
                           ),
+                        ),
+                        const SizedBox(width: 6),
+                        Icon(anyCameraOn ? Icons.videocam : Icons.groups_rounded,
+                            size: 16, color: anyCameraOn ? Colors.greenAccent : Colors.white70),
+                        const SizedBox(width: 4),
+                        Text('${_windows.length}',
+                            style: const TextStyle(color: Colors.white, fontSize: 12, fontWeight: FontWeight.bold)),
                       ],
                     ),
                   ),
-                  const SizedBox(width: 6),
-                  Icon(anyCameraOn ? Icons.videocam : Icons.groups_rounded,
-                      size: 16, color: anyCameraOn ? Colors.greenAccent : Colors.white70),
-                  const SizedBox(width: 4),
-                  Text('${_windows.length}',
-                      style: const TextStyle(color: Colors.white, fontSize: 12, fontWeight: FontWeight.bold)),
-                ],
+                ),
               ),
             ),
           ),
-        ),
-      ),
     );
   }
 
@@ -2629,7 +3328,11 @@ class _StudyRoomScreenState extends State<StudyRoomScreen> {
               ),
               Expanded(
                 child: Padding(
-                  padding: const EdgeInsets.fromLTRB(12, 0, 12, 12),
+                  // 🔧 FIX — spacing bahut zyada lag raha tha, khaaskar
+                  // 2-column layout par (chhote phones). Outer padding aur
+                  // grid gaps dono tighten kiye — tiles ab ek-doosre ke
+                  // zyada paas, kam khaali jagah ke saath baithte hain.
+                  padding: const EdgeInsets.fromLTRB(8, 0, 8, 8),
                   child: LayoutBuilder(
                     builder: (context, constraints) {
                       final crossAxisCount = constraints.maxWidth > 900
@@ -2640,9 +3343,9 @@ class _StudyRoomScreenState extends State<StudyRoomScreen> {
                       return GridView.builder(
                         gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
                           crossAxisCount: crossAxisCount,
-                          crossAxisSpacing: 10,
-                          mainAxisSpacing: 10,
-                          childAspectRatio: 1.1,
+                          crossAxisSpacing: 6,
+                          mainAxisSpacing: 6,
+                          childAspectRatio: 1.05,
                         ),
                         itemCount: _windows.length,
                         itemBuilder: (context, index) => _buildParticipantGridTile(_windows[index]),
@@ -3199,12 +3902,14 @@ class _StudyRoomScreenState extends State<StudyRoomScreen> {
     // nav bar (back/home/recents) dikhta tha to wo is toolbar ke upar
     // aa jaata tha. Ab device ke bottom safe-area inset ko bhi margin
     // me jod dete hain taaki toolbar hamesha nav bar se upar, clear
-    // space me rahe.
+    // space me rahe. Additionally, ab is margin me call control bar ka
+    // height + gap bhi shaamil hai, taaki dono floating bars stack ho
+    // jayein (ek doosre ke upar) aur overlap na karein.
     final bottomSafeInset = MediaQuery.of(context).padding.bottom;
     return Align(
       alignment: Alignment.bottomCenter,
       child: Container(
-        margin: EdgeInsets.only(bottom: 16 + bottomSafeInset),
+        margin: EdgeInsets.only(bottom: _toolPaletteBottomMargin(bottomSafeInset)),
         padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
         decoration: BoxDecoration(
           color: const Color(0xFF0D0D15).withOpacity(0.92),
@@ -3214,6 +3919,19 @@ class _StudyRoomScreenState extends State<StudyRoomScreen> {
           scrollDirection: Axis.horizontal,
           child: Row(
             children: [
+              // 🔧 MOVED — Pan/Zoom (Hand) toggle pehle AppBar me tha; ye
+              // ek canvas navigation tool hai (call control nahi), isliye
+              // ab yahan baaki drawing tools ke saath hai — same jagah jahan
+              // se log naturally is tarah ke tools dhoondte hain.
+              IconButton(
+                icon: Icon(
+                  _panZoomMode ? Icons.pan_tool : Icons.pan_tool_outlined,
+                  color: _panZoomMode ? Colors.blueAccent : Colors.white54,
+                ),
+                onPressed: () => setState(() => _panZoomMode = !_panZoomMode),
+                tooltip: _panZoomMode ? 'Disable Pan/Zoom (Hand)' : 'Enable Pan/Zoom (Hand)',
+              ),
+              const SizedBox(width: 4),
               _toolIcon(Icons.edit, ToolType.marker),
               _toolIcon(Icons.brush, ToolType.paint),
               _toolIcon(Icons.highlight, ToolType.highlighter),
@@ -3254,12 +3972,6 @@ class _StudyRoomScreenState extends State<StudyRoomScreen> {
                 icon: const Icon(Icons.note_add, color: Colors.amber),
                 onPressed: _addStickyNote,
                 tooltip: 'Add Sticky Note',
-              ),
-              const SizedBox(width: 6),
-              IconButton(
-                icon: const Icon(Icons.auto_awesome, color: Colors.tealAccent),
-                onPressed: _openAiToolsSheet,
-                tooltip: 'AI Summary & Quiz',
               ),
             ],
           ),
@@ -3471,6 +4183,91 @@ class _StudyRoomScreenState extends State<StudyRoomScreen> {
 }
 
 // ============================================================
+// RULED LINE STYLE — orientation (horizontal jaisa notebook / vertical
+// jaisa graph-paper columns / grid dono) + spacing (lines choti-badi).
+// Socket ke through JSON me sync hota hai taaki sab participants ko
+// same style dikhe.
+// ============================================================
+enum _RuledLineOrientation { horizontal, vertical, grid }
+
+class _RuledLineStyle {
+  static const double smallSpacing = 24;
+  static const double mediumSpacing = 40;
+  static const double largeSpacing = 64;
+
+  final double spacing;
+  final _RuledLineOrientation orientation;
+
+  const _RuledLineStyle({this.spacing = mediumSpacing, this.orientation = _RuledLineOrientation.horizontal});
+
+  Map<String, dynamic> toJson() => {
+        'spacing': spacing,
+        'orientation': orientation.name,
+      };
+
+  factory _RuledLineStyle.fromJson(Map<String, dynamic> json) {
+    final orientationStr = json['orientation']?.toString();
+    final orientation = _RuledLineOrientation.values.firstWhere(
+      (o) => o.name == orientationStr,
+      orElse: () => _RuledLineOrientation.horizontal,
+    );
+    final spacing = (json['spacing'] is num) ? (json['spacing'] as num).toDouble() : mediumSpacing;
+    return _RuledLineStyle(spacing: spacing, orientation: orientation);
+  }
+}
+
+// ============================================================
+// RULED PAPER PAINTER — notebook/copy jaisi ruled lines. Ab spacing
+// (chhoti/badi) aur orientation (horizontal/vertical/grid) style se
+// aate hain — pehle fixed 40px horizontal-only tha. Left margin ki red
+// line sirf tab dikhti hai jab horizontal lines maujood hon (notebook
+// jaisa look), pure-vertical graph-paper style me nahi dikhti. Sirf
+// khaali whiteboard page ke background pe draw hota hai (annotations/
+// strokes upar alag layer me render hote hain, isse koi interference
+// nahi).
+// ============================================================
+class _RuledPaperPainter extends CustomPainter {
+  final _RuledLineStyle style;
+  const _RuledPaperPainter(this.style);
+
+  static const double _marginLeft = 56;
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final linePaint = Paint()
+      ..color = Colors.blue.withOpacity(0.25)
+      ..strokeWidth = 1;
+
+    final drawHorizontal = style.orientation == _RuledLineOrientation.horizontal || style.orientation == _RuledLineOrientation.grid;
+    final drawVertical = style.orientation == _RuledLineOrientation.vertical || style.orientation == _RuledLineOrientation.grid;
+
+    if (drawHorizontal) {
+      for (double y = style.spacing; y < size.height; y += style.spacing) {
+        canvas.drawLine(Offset(0, y), Offset(size.width, y), linePaint);
+      }
+    }
+    if (drawVertical) {
+      for (double x = style.spacing; x < size.width; x += style.spacing) {
+        canvas.drawLine(Offset(x, 0), Offset(x, size.height), linePaint);
+      }
+    }
+
+    // notebook jaisa red margin — sirf horizontal-wale styles (horizontal
+    // ya grid) me maayne rakhta hai.
+    if (drawHorizontal) {
+      final marginPaint = Paint()
+        ..color = Colors.redAccent.withOpacity(0.4)
+        ..strokeWidth = 1.5;
+      canvas.drawLine(Offset(_marginLeft, 0), Offset(_marginLeft, size.height), marginPaint);
+    }
+  }
+
+  @override
+  bool shouldRepaint(covariant _RuledPaperPainter oldDelegate) =>
+      oldDelegate.style.spacing != style.spacing || oldDelegate.style.orientation != style.orientation;
+}
+
+// ============================================================
 // STICKER BUBBLE — ek single reaction ka pop-up + float-up + fade
 // animation. 3 second ke total lifecycle ke saath sync rehta hai
 // (parent hi 3s baad ise list se hata deta hai — ye widget khud sirf
@@ -3517,6 +4314,110 @@ class _StickerBubble extends StatelessWidget {
             ),
           ),
         ],
+      ),
+    );
+  }
+}
+
+// ============================================================
+// JOIN TOAST — ek chhota, professional floating pill jo top se slide
+// + fade-in hoke ~2.5s dikhta hai (naya participant ka naam ke saath),
+// phir khud slide + fade-out hoke Overlay se hat jaata hai. Screen
+// reader / layout ko touch nahi karta (Overlay ka standalone entry
+// hai), isliye kisi bhi existing bar ke saath overlap/collision nahi
+// hoti — bas thodi der ke liye sabse upar float karta hai.
+// ============================================================
+class _JoinToast extends StatefulWidget {
+  final String name;
+  final VoidCallback onDone;
+
+  const _JoinToast({required this.name, required this.onDone});
+
+  @override
+  State<_JoinToast> createState() => _JoinToastState();
+}
+
+class _JoinToastState extends State<_JoinToast> with SingleTickerProviderStateMixin {
+  late final AnimationController _controller;
+  late final Animation<double> _fade;
+  late final Animation<Offset> _slide;
+
+  @override
+  void initState() {
+    super.initState();
+    _controller = AnimationController(vsync: this, duration: const Duration(milliseconds: 350));
+    _fade = CurvedAnimation(parent: _controller, curve: Curves.easeOut);
+    _slide = Tween<Offset>(begin: const Offset(0, -0.4), end: Offset.zero)
+        .animate(CurvedAnimation(parent: _controller, curve: Curves.easeOutCubic));
+    _controller.forward();
+
+    // ~2.5s visible, phir reverse (fade + slide-up) karke khatam.
+    Future.delayed(const Duration(milliseconds: 2500), () async {
+      if (!mounted) return;
+      await _controller.reverse();
+      widget.onDone();
+    });
+  }
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Positioned(
+      top: MediaQuery.of(context).padding.top + 12,
+      left: 0,
+      right: 0,
+      child: IgnorePointer(
+        child: Center(
+          child: FadeTransition(
+            opacity: _fade,
+            child: SlideTransition(
+              position: _slide,
+              child: Material(
+                color: Colors.transparent,
+                child: Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+                  decoration: BoxDecoration(
+                    color: const Color(0xFF0D0D15).withOpacity(0.94),
+                    borderRadius: BorderRadius.circular(24),
+                    border: Border.all(color: Colors.white.withOpacity(0.08)),
+                    boxShadow: const [BoxShadow(color: Colors.black45, blurRadius: 12, offset: Offset(0, 4))],
+                  ),
+                  child: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      const CircleAvatar(
+                        radius: 10,
+                        backgroundColor: Colors.greenAccent,
+                        child: Icon(Icons.person, size: 12, color: Colors.black),
+                      ),
+                      const SizedBox(width: 10),
+                      Flexible(
+                        child: RichText(
+                          overflow: TextOverflow.ellipsis,
+                          text: TextSpan(
+                            style: const TextStyle(fontSize: 13, color: Colors.white70),
+                            children: [
+                              TextSpan(
+                                text: widget.name,
+                                style: const TextStyle(color: Colors.white, fontWeight: FontWeight.w700),
+                              ),
+                              const TextSpan(text: '  joined the study room'),
+                            ],
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            ),
+          ),
+        ),
       ),
     );
   }

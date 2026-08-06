@@ -1,4 +1,3 @@
-
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
@@ -30,12 +29,16 @@ import '../services/auth_service.dart';
 import '../message/screens/conversations_screen.dart';
 
 class HomeScreen extends StatefulWidget {
-  const HomeScreen({super.key});
+  // 🔥 NAYA — optional starting tab (0=Home, 1=Search, 2=Profile), default
+  // same as before (0). Bottom nav bars on other screens (chats, etc.) use
+  // this to jump straight to the right tab instead of always landing on Home.
+  final int initialIndex;
+  const HomeScreen({super.key, this.initialIndex = 0});
   @override State<HomeScreen> createState() => _HomeScreenState();
 }
 
 class _HomeScreenState extends State<HomeScreen> {
-  int _selectedIndex = 0;
+  late int _selectedIndex = widget.initialIndex;
   List<PostModel> _posts = [];
   bool _isLoading = true;
   bool _isLoadingMore = false;

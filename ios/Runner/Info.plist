@@ -74,5 +74,14 @@
 	<string>To select photos for comments and posts</string>
 	<key>NSMicrophoneUsageDescription</key>
 	<string>To capture videos with audio</string>
+	<key>CFBundleURLTypes</key>
+	<array>
+		<dict>
+			<key>CFBundleURLSchemes</key>
+			<array>
+			<string>com.googleusercontent.apps.362717733057-1q2o6s0p8i0u67533dc2r1nn057nq0cs</string>
+			</array>
+		</dict>
+	</array>
 </dict>
 </plist>

@@ -1,5 +1,9 @@
 import 'package:flutter/material.dart';
+import 'package:google_sign_in/google_sign_in.dart';
 import '../services/api_service.dart';
+import '../services/auth_service.dart';
+import '../home.dart';
+import 'complete_profile_screen.dart'; // ✅ Google signup ke baad phone lene ke liye
 
 class SignupScreen extends StatefulWidget {
   const SignupScreen({super.key});
@@ -15,29 +19,52 @@ class _SignupScreenState extends State<SignupScreen> {
   final _emailController = TextEditingController();
   final _firstNameController = TextEditingController();
   final _lastNameController = TextEditingController();
-  final _phoneController = TextEditingController(); 
+  final _phoneController = TextEditingController();
   final _passwordController = TextEditingController();
   final _confirmPasswordController = TextEditingController();
   final _otpController = TextEditingController();
 
   bool _isLoading = false;
+  bool _isGoogleLoading = false;
   bool _hidePassword = true;
   bool _hideConfirmPassword = true;
 
   // Country Code State Variable (Default: India +91)
-  String _selectedCountryCode = "91"; 
+  String _selectedCountryCode = "91";
 
   // Backend Inline Errors State
   String? _usernameBackendError;
   String? _emailBackendError;
-  String? _phoneBackendError; 
-  String? _globalError; 
+  String? _phoneBackendError;
+  String? _globalError;
 
   final _apiService = ApiService();
 
-  static const Color brandColor = Color(0xFF6366F1); 
-  static const Color backgroundColor = Colors.white; 
-  static const Color textColor = Color(0xFF0F172A); 
+  // ⚠️ Same Web Client ID jo login_screen.dart me hai — dono jagah exact
+  // same value honi chahiye (Google Cloud Console -> Web application type),
+  // aur Django's settings.GOOGLE_CLIENT_ID / .env se bhi match honi chahiye.
+  static const String _googleWebClientId =
+      "384486121301-ls1m94qdskoh3d3jig6fso9mk9q3v9ll.apps.googleusercontent.com";
+
+  // ✅ google_sign_in v7.x me GoogleSignIn ab singleton hai — direct
+  // constructor v7.0.0 se hata diya gaya hai.
+  final GoogleSignIn _googleSignIn = GoogleSignIn.instance;
+
+  // v7.x me initialize() authenticate() se pehle ek baar complete hona
+  // zaroori hai — initState() me start karke yahan store kar rahe hain.
+  late final Future<void> _googleSignInInit;
+
+  static const Color brandColor = Color(0xFF6366F1);
+  static const Color backgroundColor = Colors.white;
+  static const Color textColor = Color(0xFF0F172A);
+
+  @override
+  void initState() {
+    super.initState();
+    _googleSignInInit = _googleSignIn.initialize(
+      serverClientId: _googleWebClientId,
+    );
+  }
 
   @override
   void dispose() {
@@ -45,7 +72,7 @@ class _SignupScreenState extends State<SignupScreen> {
     _emailController.dispose();
     _firstNameController.dispose();
     _lastNameController.dispose();
-    _phoneController.dispose(); 
+    _phoneController.dispose();
     _passwordController.dispose();
     _confirmPasswordController.dispose();
     _otpController.dispose();
@@ -72,7 +99,7 @@ class _SignupScreenState extends State<SignupScreen> {
     try {
       // Direct ApiService use karke OTP bhej rahe hain
       await _apiService.sendOtp(email);
-      
+
       setState(() {
         _isLoading = false;
       });
@@ -80,7 +107,6 @@ class _SignupScreenState extends State<SignupScreen> {
       if (!mounted) return;
       // OTP send successfully, open popup sheet
       _showOtpBottomSheet();
-
     } catch (e) {
       setState(() {
         _isLoading = false;
@@ -136,11 +162,9 @@ class _SignupScreenState extends State<SignupScreen> {
 
         if (errorMsg.toLowerCase().contains("username") || errorMsg.toLowerCase().contains("user already exist")) {
           _usernameBackendError = "User already exists with this username";
-        } 
-        else if (errorMsg.toLowerCase().contains("email")) {
+        } else if (errorMsg.toLowerCase().contains("email")) {
           _emailBackendError = "Account already exists with this email";
-        } 
-        else {
+        } else {
           _globalError = errorMsg;
         }
       });
@@ -148,6 +172,82 @@ class _SignupScreenState extends State<SignupScreen> {
       // Bottom sheet band karke main screen pe aa jao errors dikhane ke liye
       Navigator.pop(context);
       _formKey.currentState!.validate();
+    }
+  }
+
+  // --- Google Sign-Up flow (same endpoint as login — backend decides signup vs login) ---
+  Future<void> _signupWithGoogle() async {
+    setState(() {
+      _globalError = null;
+      _isGoogleLoading = true;
+    });
+
+    try {
+      // v7.x me initialize() authenticate() se pehle complete hona zaroori hai.
+      await _googleSignInInit;
+
+      await _googleSignIn.signOut();
+
+      // ✅ v7.x: signIn() hata diya gaya, authenticate() use karo.
+      final googleUser = await _googleSignIn.authenticate();
+
+      // ✅ v7.x: .authentication ab synchronous getter hai (Future nahi).
+      final idToken = googleUser.authentication.idToken;
+
+      if (idToken == null) {
+        throw Exception("Could not get Google credentials. Please try again.");
+      }
+
+      final res = await _apiService.loginWithGoogle(idToken);
+
+      if (!mounted) return;
+
+      setState(() => _isGoogleLoading = false);
+
+      if (res.access != null) {
+        await AuthService.saveToken(res.access!);
+      }
+
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(res.message ?? "Account created with Google"),
+          backgroundColor: Colors.green,
+          behavior: SnackBarBehavior.floating,
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+        ),
+      );
+
+      if (!mounted) return;
+
+      if (res.phoneMissing == true) {
+        Navigator.pushReplacement(
+          context,
+          MaterialPageRoute(builder: (context) => const CompleteProfileScreen()),
+        );
+      } else {
+        Navigator.pushReplacement(
+          context,
+          MaterialPageRoute(builder: (context) => const HomeScreen()),
+        );
+      }
+    } on GoogleSignInException catch (e) {
+      // ✅ v7.x: user cancel karne pe ab GoogleSignInException throw hoti
+      // hai (pehle .signIn() null return karta tha) — cancel ko chup-chaap
+      // handle karo, baaki errors dikhao.
+      if (!mounted) return;
+      setState(() => _isGoogleLoading = false);
+
+      if (e.code != GoogleSignInExceptionCode.canceled) {
+        setState(() {
+          _globalError = e.description ?? "Google sign-in failed. Please try again.";
+        });
+      }
+    } catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _isGoogleLoading = false;
+        _globalError = e.toString().replaceAll("Exception:", "").trim();
+      });
     }
   }
 
@@ -194,7 +294,7 @@ class _SignupScreenState extends State<SignupScreen> {
                     style: TextStyle(fontSize: 14, color: textColor.withOpacity(0.6)),
                   ),
                   const SizedBox(height: 24),
-                  
+
                   // OTP Entry Box
                   TextField(
                     controller: _otpController,
@@ -226,8 +326,8 @@ class _SignupScreenState extends State<SignupScreen> {
                         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
                         elevation: 0,
                       ),
-                      onPressed: _isLoading 
-                          ? null 
+                      onPressed: _isLoading
+                          ? null
                           : () async {
                               final otp = _otpController.text.trim();
                               if (otp.isEmpty || otp.length < 4) {
@@ -238,16 +338,15 @@ class _SignupScreenState extends State<SignupScreen> {
                               }
 
                               setModalState(() => _isLoading = true);
-                              
+
                               try {
                                 // Step A: OTP Match Check Karo Django se
                                 await _apiService.verifyOtp(_emailController.text.trim(), otp);
-                                
+
                                 setModalState(() => _isLoading = false);
 
                                 // Step B: Success hone pe final signup system hit karo
                                 await _completeFinalSignup();
-
                               } catch (e) {
                                 setModalState(() => _isLoading = false);
                                 ScaffoldMessenger.of(context).showSnackBar(
@@ -274,6 +373,8 @@ class _SignupScreenState extends State<SignupScreen> {
 
   @override
   Widget build(BuildContext context) {
+    final bool anyLoading = _isLoading || _isGoogleLoading;
+
     return Scaffold(
       backgroundColor: backgroundColor,
       appBar: AppBar(
@@ -289,7 +390,7 @@ class _SignupScreenState extends State<SignupScreen> {
             child: Form(
               key: _formKey,
               child: Column(
-                crossAxisAlignment: CrossAxisAlignment.center, 
+                crossAxisAlignment: CrossAxisAlignment.center,
                 mainAxisAlignment: MainAxisAlignment.center,
                 children: [
                   const Text(
@@ -309,7 +410,63 @@ class _SignupScreenState extends State<SignupScreen> {
                       color: textColor.withOpacity(0.5),
                     ),
                   ),
-                  const SizedBox(height: 35),
+                  const SizedBox(height: 28),
+
+                  // ---------- Continue with Google (fastest path) ----------
+                  SizedBox(
+                    width: double.infinity,
+                    height: 56,
+                    child: OutlinedButton(
+                      onPressed: anyLoading ? null : _signupWithGoogle,
+                      style: OutlinedButton.styleFrom(
+                        backgroundColor: Colors.white,
+                        side: BorderSide(color: Colors.grey.withOpacity(0.25), width: 1),
+                        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+                      ),
+                      child: _isGoogleLoading
+                          ? const SizedBox(
+                              height: 22,
+                              width: 22,
+                              child: CircularProgressIndicator(strokeWidth: 2.5, color: brandColor),
+                            )
+                          : Row(
+                              mainAxisAlignment: MainAxisAlignment.center,
+                              children: [
+                                Image.asset(
+                                  'assets/google_logo.png',
+                                  height: 20,
+                                  errorBuilder: (context, error, stackTrace) =>
+                                      const Icon(Icons.g_mobiledata_rounded, size: 26, color: brandColor),
+                                ),
+                                const SizedBox(width: 10),
+                                Text(
+                                  "Sign up with Google",
+                                  style: TextStyle(
+                                    fontSize: 15,
+                                    fontWeight: FontWeight.w600,
+                                    color: textColor.withOpacity(0.8),
+                                  ),
+                                ),
+                              ],
+                            ),
+                    ),
+                  ),
+                  const SizedBox(height: 22),
+
+                  Row(
+                    children: [
+                      Expanded(child: Divider(color: Colors.grey.withOpacity(0.3))),
+                      Padding(
+                        padding: const EdgeInsets.symmetric(horizontal: 10),
+                        child: Text(
+                          "OR SIGN UP WITH EMAIL",
+                          style: TextStyle(color: textColor.withOpacity(0.4), fontSize: 11, fontWeight: FontWeight.w600),
+                        ),
+                      ),
+                      Expanded(child: Divider(color: Colors.grey.withOpacity(0.3))),
+                    ],
+                  ),
+                  const SizedBox(height: 22),
 
                   // Username Field
                   _buildInputField(
@@ -325,7 +482,7 @@ class _SignupScreenState extends State<SignupScreen> {
                     validator: (val) => val == null || val.trim().isEmpty ? "Username is required" : null,
                   ),
                   const SizedBox(height: 18),
-                  
+
                   // Email Field
                   _buildInputField(
                     controller: _emailController,
@@ -450,7 +607,7 @@ class _SignupScreenState extends State<SignupScreen> {
                       return null;
                     },
                   ),
-                  
+
                   if (_globalError != null) ...[
                     const SizedBox(height: 14),
                     Text(
@@ -472,7 +629,7 @@ class _SignupScreenState extends State<SignupScreen> {
                         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
                         elevation: 0,
                       ),
-                      onPressed: _isLoading ? null : _initiateSignupFlow,
+                      onPressed: anyLoading ? null : _initiateSignupFlow,
                       child: _isLoading
                           ? const CircularProgressIndicator(color: Colors.white)
                           : const Text(

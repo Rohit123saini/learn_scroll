@@ -25,6 +25,7 @@
 import 'package:flutter/material.dart';
 import 'package:cached_network_image/cached_network_image.dart';
 import '../services/call_manager.dart';
+import '../services/call_kit_service.dart';
 import '../screens/call_screen.dart';
 
 class MinimizedCallBar extends StatelessWidget {
@@ -35,9 +36,23 @@ class MinimizedCallBar extends StatelessWidget {
     return "${d.inMinutes}:${two(d.inSeconds.remainder(60))}";
   }
 
-  void _expand(BuildContext context, CallManager cm) {
+  // 🔥 FIX — "back karne ke baad fullscreen wapas nahi aati" bug ka root
+  // cause: main.dart me ye widget MaterialApp.builder ke Stack me `child`
+  // ke SIBLING ke taur pe lagaya jaata hai (jaisa is file ke header
+  // comment me hi likha hai) — matlab iska BuildContext Navigator ke
+  // ANDAR nahi, uske BAHAR hota hai. Isliye pehle wala
+  // `Navigator.of(context, rootNavigator: true)` kaam nahi karta tha
+  // (no Navigator found in context) aur tap silently fail ho jaata tha.
+  //
+  // Fix: local context ke bharose na rehke wahi global `navigatorKey`
+  // reuse karo jo already CallKitService me set hota hai (main.dart me
+  // MaterialApp ke `navigatorKey:` field ke saath) — ye poori app me
+  // hamesha reliably kaam karta hai, chahe widget kahin bhi mounted ho.
+  void _expand(CallManager cm) {
     cm.unminimize();
-    Navigator.of(context, rootNavigator: true).push(MaterialPageRoute(
+    final navigator = CallKitService.navigatorKey?.currentState;
+    if (navigator == null) return; // main.dart me navigatorKey wire nahi hua — neeche wiring note dekho
+    navigator.push(MaterialPageRoute(
       builder: (_) => CallScreen(
         callId: cm.callId ?? '',
         conversationId: cm.conversationId ?? '',
@@ -91,7 +106,7 @@ class MinimizedCallBar extends StatelessWidget {
             borderRadius: BorderRadius.circular(30),
             child: InkWell(
               borderRadius: BorderRadius.circular(30),
-              onTap: () => _expand(context, cm),
+              onTap: () => _expand(cm),
               child: Padding(
                 padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
                 child: Row(

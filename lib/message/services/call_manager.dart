@@ -8,6 +8,7 @@ import 'package:audioplayers/audioplayers.dart';
 import 'package:flutter_background/flutter_background.dart';
 import 'package:permission_handler/permission_handler.dart';
 import 'call_api_service.dart';
+import 'push_notification_service.dart'; // 🔥 NAYA — ongoing-call system notification (timer + tap-to-return)
 
 /// 🔥 NAYA — local video preview par lagne wale color filters (sirf
 /// isi device pe render, peer ko normal video jaata hai — dekho
@@ -186,6 +187,16 @@ class CallManager extends ChangeNotifier {
   Duration connectedDuration = Duration.zero;
   int reconnectSecondsLeft = 2;
 
+  // 🔥 FIX — "call properly cut nahi hoti" bug. Pehle dusri taraf ko pata
+  // chalne ka SIRF ek zariya tha: LiveKit ka RoomDisconnectedEvent /
+  // ParticipantDisconnectedEvent — jo 2-second "reconnecting" grace
+  // period se guzarta tha (taaki normal network hiccup pe call na kate).
+  // Isse jab koi EXPLICITLY call end karta tha, dusri taraf turant nahi
+  // katti thi. Ab end karne wala pehle ek data-channel signal
+  // ({'type':'call_end'}) bhejta hai — jo isse turant true ho jaata hai
+  // aur reconnect-wait poori tarah skip ho jaata hai, call turant band.
+  bool _peerEndedCall = false;
+
   String status = "Connecting...";
   String? error;
   bool needsSettingsRedirect = false;
@@ -255,6 +266,7 @@ class CallManager extends ChangeNotifier {
     needsSettingsRedirect = false;
     isActive = true;
     isMinimized = false;
+    _peerEndedCall = false;
     notifyListeners();
 
     await _initCall();
@@ -502,14 +514,28 @@ class CallManager extends ChangeNotifier {
             remoteConnected = false;
             remoteVideoTrack = null;
             _stopCallTimer();
-            _startReconnectCountdown();
+            // 🔥 FIX — agar 'call_end' data-signal already aa chuka hai
+            // (DataReceivedEvent handler ne _cleanup() bhi call kar diya
+            // hoga), to yahan se dobara reconnect-countdown shuru mat
+            // karo — warna race condition me call phir se "reconnecting"
+            // dikhne lag sakti hai fraction-of-a-second ke liye.
+            if (!_peerEndedCall) {
+              _startReconnectCountdown();
+            }
           }
           notifyListeners();
         })
         ..on<RoomDisconnectedEvent>((_) {
+          // 🔥 FIX — pehle yahan `if (isReconnecting) return;` tha, jo
+          // genuine/explicit call-end ko bhi 2-second reconnect-timer ke
+          // bharose chhod deta tha (delay). Room khud disconnect ho chuka
+          // hai — ye khud me authoritative signal hai ki call khatam ho
+          // chuki hai, isliye ab turant clean up karte hain, kisi bhi
+          // pending reconnect-wait ko cancel karke.
           _stopRingtone();
-          if (isReconnecting) return;
+          _reconnectTimer?.cancel();
           _stopCallTimer();
+          _notifyBackendLeft(); // backend ko bhi pata chale ki humne chhod di
           _cleanup();
         })
         ..on<RoomReconnectingEvent>((_) => _startReconnectCountdown())
@@ -534,6 +560,17 @@ class CallManager extends ChangeNotifier {
             if (decoded['type'] == 'call_hold') {
               peerOnHold = decoded['hold'] == true;
               notifyListeners();
+            } else if (decoded['type'] == 'call_end') {
+              // 🔥 FIX — dusri taraf ne EXPLICITLY call end ki hai (signal
+              // upar endCall() se bheja gaya). Ye ambiguous "network drop"
+              // nahi hai, isliye reconnect-grace-period bilkul skip karo
+              // aur turant clean up karo — call turant band honi chahiye.
+              _peerEndedCall = true;
+              _reconnectTimer?.cancel();
+              _stopCallTimer();
+              status = "Call ended";
+              notifyListeners();
+              _cleanup();
             }
           } catch (e) {
             developer.log("DataReceivedEvent parse failed: $e");
@@ -637,6 +674,20 @@ class CallManager extends ChangeNotifier {
         notifyListeners();
       }
     });
+
+    // 🔥 NAYA — WhatsApp/system-dialer jaisa "ongoing call" system
+    // notification — chahe user app se hatke kisi aur app pe chala jaaye,
+    // ye phone notification bar me dikhti rahegi (live timer ke saath,
+    // Android khud update karta hai), tap karne pe seedha CallScreen wapas
+    // khul jaata hai.
+    if (callId != null) {
+      PushNotificationService.instance.showOngoingCallNotification(
+        peerName: peerName ?? "Ongoing call",
+        connectedAt: _connectedAt!,
+        callId: callId!,
+        isVideo: isVideo,
+      );
+    }
   }
 
   void _stopCallTimer() {
@@ -657,6 +708,7 @@ class CallManager extends ChangeNotifier {
       if (reconnectSecondsLeft <= 0) {
         timer.cancel();
         _stopCallTimer();
+        _notifyBackendLeft(); // 🔥 FIX — backend ko bhi pata chale ki humne chhod di
         _cleanup();
       }
     });
@@ -892,6 +944,21 @@ class CallManager extends ChangeNotifier {
     _noAnswerTimer = null;
     await _stopRingtone();
 
+    // 🔥 FIX — peer ko TURANT batao ki maine call end kar di, LiveKit ke
+    // apne (delayed / grace-period wale) disconnect events ka wait mat
+    // karo. Ye reliable data-channel message peer tak LiveKit ke
+    // RoomDisconnectedEvent se bhi pehle pahunchta hai — receiving side
+    // isko dekhte hi turant call khatam kar deta hai, "reconnecting..."
+    // dikhaye bina.
+    try {
+      await room?.localParticipant?.publishData(
+        utf8.encode(jsonEncode({'type': 'call_end'})),
+        reliable: true,
+      );
+    } catch (e) {
+      developer.log("publishData(call_end) failed (non-fatal): $e");
+    }
+
     final id = callId;
     if (id != null) {
       try {
@@ -901,6 +968,29 @@ class CallManager extends ChangeNotifier {
       }
     }
     await _cleanup();
+  }
+
+  // 🔥 FIX — asli "call properly cut nahi hoti" wale bug ka fix. Jab call
+  // KHUD apni taraf se end nahi ki gayi (na apna `endCall()` button dabaya),
+  // balki DUSRI taraf ke chhod dene ki wajah se yahan disconnect detect hua
+  // hai (RoomDisconnectedEvent, ya reconnect-countdown expire), tab bhi
+  // backend ko batana zaroori hai ki "main bhi is call se nikal gaya" —
+  // warna backend hamesha DONO participants ka `left_at` set hone ka
+  // wait karta rehta hai (`CallActionView` action='end' dekho) aur agar
+  // sirf ek hi taraf se kabhi 'end' nahi jaata, call backend me hamesha
+  // "ongoing" hi reh jaati hai — agli baar call karne pe wahi purani call
+  // "already active"/"waiting call" ki tarah dikhti hai.
+  //
+  // Best-effort hai (jaisa `endCall()` me bhi hai) — fail ho to bhi local
+  // cleanup rukna nahi chahiye.
+  Future<void> _notifyBackendLeft() async {
+    final id = callId;
+    if (id == null) return;
+    try {
+      await CallApiService.callAction(id, 'end');
+    } catch (e) {
+      developer.log("_notifyBackendLeft (passive disconnect) failed: $e");
+    }
   }
 
   Future<void> _cleanup() async {
@@ -919,11 +1009,13 @@ class CallManager extends ChangeNotifier {
     needsSettingsRedirect = false;
     callId = null;
     _micPendingForCaller = false;
+    _peerEndedCall = false;
     _noAnswerTimer?.cancel();
     _noAnswerTimer = null;
 
     WakelockPlus.disable();
     await _disableBackgroundExecution();
+    await PushNotificationService.instance.cancelOngoingCallNotification();
 
     try {
       await _listener?.dispose();

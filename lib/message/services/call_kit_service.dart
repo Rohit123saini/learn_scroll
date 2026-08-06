@@ -8,22 +8,30 @@
 //   - completely killed/terminated ho
 // (jab tak FCM data-message device tak pahunch jaaye)
 //
-// pubspec.yaml me EXACT pin rakho (^ mat lagao, warna pub resolver kabhi
-// bhi 3.x uthaa lega aur API breaking change ki wajah se build fail hogi):
+// ⚠️ PACKAGE VERSION — ye zaroori hai, warna full-screen popup nahi aayega:
+// `canUseFullScreenIntent()` / `requestFullIntentPermission()` (Android 14+
+// full-screen-intent fix, neeche dekho) sirf `flutter_callkit_incoming`
+// >= 2.5.0 me maujood hain. pubspec.yaml me EXACT pin rakho:
 //
 //   dependencies:
-//     flutter_callkit_incoming: 2.0.4+2
+//     flutter_callkit_incoming: 2.5.0+2
 //     uuid: ^4.5.1
 //
 // Agar `flutter pub get` phir bhi koi aur version resolve kare (kisi doosri
 // dependency ki wajah se), to pubspec.yaml me ye bhi add karo:
 //
 //   dependency_overrides:
-//     flutter_callkit_incoming: 2.0.4+2
+//     flutter_callkit_incoming: 2.5.0+2
 //
-// Uske baad zaroor chalao:
+// Uske baad zaroor chalao (sirf hot-restart kaafi NAHI hai):
 //   flutter clean
 //   flutter pub get
+//   flutter run   (device se app pehle PURA uninstall karke)
+//
+// Uninstall+reinstall zaroori hai kyunki Android notification channels
+// (neeche `incomingCallNotificationChannelName` dekho) ek baar ban jaayein
+// to immutable hote hain — purana install already ek "silent/no full-screen"
+// channel bana chuka hoga jo code se overwrite nahi hota.
 
 import 'dart:async';
 import 'dart:developer' as developer;
@@ -47,6 +55,11 @@ class CallKitService {
   /// (bina BuildContext ke).
   static GlobalKey<NavigatorState>? navigatorKey;
 
+  /// Debug/QA ke liye — init() ke baad ye batata hai ki Android ne
+  /// full-screen-intent permission diya hai ya nahi. `null` = abhi check
+  /// nahi hua ya platform iOS hai (jahan ye concept apply nahi hota).
+  static bool? lastKnownFullScreenIntentGranted;
+
   StreamSubscription? _eventSub;
 
   /// App start hote hi (MyApp ke initState me) ek baar call karo.
@@ -66,25 +79,7 @@ class CallKitService {
       developer.log("CallKit notification permission error: $e");
     }
 
-    // 🔥 FIX — ROOT CAUSE of "popup aata hai par chhota/normal notification
-    // hota hai, full-screen nahi": Android 14 (API 34)+ pe USE_FULL_SCREEN_INTENT
-    // manifest permission akele kaafi nahi hai — user ko Settings me jaake
-    // ise EXPLICITLY allow karna padta hai, warna Android khud call ko
-    // chhote heads-up notification me downgrade kar deta hai (koi
-    // accept/decline full-screen UI nahi). Ye check + request ab package
-    // upgrade (2.0.4+2 -> 2.5.0+, jahan ye methods add hue) ke baad kaam
-    // karega — pubspec.yaml update karna zaroori hai.
-    try {
-      final canFullScreen = await FlutterCallkitIncoming.canUseFullScreenIntent();
-      if (canFullScreen != true) {
-        // Ye seedha system Settings screen kholta hai — user ko manually
-        // "Allow full screen notifications" ON karna hoga is app ke liye.
-        // Koi bhi code se ise auto-grant nahi kiya ja sakta (Android policy).
-        await FlutterCallkitIncoming.requestFullIntentPermission();
-      }
-    } catch (e) {
-      developer.log("Full screen intent permission check/request error: $e");
-    }
+    await _ensureFullScreenIntentPermission();
 
     await _eventSub?.cancel();
     _eventSub = FlutterCallkitIncoming.onEvent.listen(_onCallKitEvent);
@@ -92,6 +87,43 @@ class CallKitService {
     // App terminated state se khula ho aur pehle se koi accepted call ho
     // (rare edge-case), use resume karne ke liye.
     unawaited(_checkPendingCallOnLaunch());
+  }
+
+  // ROOT CAUSE FIX of "popup aata hai par chhota/normal notification hota
+  // hai, full-screen nahi": Android 14 (API 34)+ pe akele
+  // USE_FULL_SCREEN_INTENT manifest permission kaafi nahi hai — user ko
+  // Settings me jaake ise EXPLICITLY allow karna padta hai, warna Android
+  // khud call ko chhote heads-up notification me downgrade kar deta hai
+  // (koi accept/decline full-screen UI nahi).
+  //
+  // Ye method sirf pub package >= 2.5.0 ke saath kaam karega — header
+  // comment dekho.
+  Future<void> _ensureFullScreenIntentPermission() async {
+    try {
+      final canFullScreen = await FlutterCallkitIncoming.canUseFullScreenIntent();
+      lastKnownFullScreenIntentGranted = canFullScreen == true;
+
+      if (canFullScreen != true) {
+        developer.log(
+            "CallKit: full-screen-intent NOT granted yet — opening system settings for user to allow it manually.");
+        // Ye seedha system Settings screen kholta hai — user ko manually
+        // "Allow full screen notifications" ON karna hoga is app ke liye.
+        // Koi bhi code se ise auto-grant nahi kiya ja sakta (Android policy),
+        // isliye is call ka koi return value nahi hota jo turant "granted"
+        // confirm kare — agli baar init() chalne par (jaise app restart)
+        // re-check ho jaayega.
+        await FlutterCallkitIncoming.requestFullIntentPermission();
+      } else {
+        developer.log("CallKit: full-screen-intent already granted.");
+      }
+    } catch (e) {
+      // Agar ye methods hi missing hain (purana package version resolve
+      // hua), to yahan exception aayega — is case me full-screen popup
+      // KABHI nahi dikhega jab tak package upgrade na ho. Loudly log karo
+      // taaki QA/dev ko turant pata chale, silent fail na ho.
+      developer.log(
+          "CallKit: full-screen-intent check/request FAILED — is flutter_callkit_incoming >= 2.5.0 installed? Error: $e");
+    }
   }
 
   void dispose() {
@@ -113,12 +145,10 @@ class CallKitService {
     final isVideo = callType == 'video';
     final uuid = const Uuid().v4();
 
-    // 🔥 FIX: pehle yahan hamesha `https://i.pravatar.cc/500` (ek random,
-    // har call pe badalta hua ajnabi ka photo) dikhta tha — jo galat aur
-    // gair-professional lagta hai. Ab agar backend FCM payload me
-    // `caller_avatar` bhejta hai to wahi dikhega, warna koi background
-    // photo nahi (solid color) — jaise WhatsApp bhi photo na hone par
-    // sirf initials/solid background dikhata hai, random photo nahi.
+    // Backend agar FCM payload me `caller_avatar` bheje to wahi dikhega,
+    // warna koi background photo nahi (solid color) — jaise WhatsApp bhi
+    // photo na hone par sirf initials/solid background dikhata hai, koi
+    // random placeholder photo nahi.
     final callerAvatarUrl = data['caller_avatar']?.toString();
     final hasAvatar = callerAvatarUrl != null && callerAvatarUrl.isNotEmpty;
 
@@ -129,7 +159,7 @@ class CallKitService {
       avatar: hasAvatar ? callerAvatarUrl : null,
       handle: isVideo ? 'Video Call' : 'Voice Call',
       type: isVideo ? 1 : 0,
-      duration: 30000, // 🔥 30 sec tak ring hoga — caller side CallManager ke 30s no-answer auto-hangup se sync
+      duration: 30000, // 30 sec tak ring hoga — caller side CallManager ke 30s no-answer auto-hangup se sync
       textAccept: 'Accept',
       textDecline: 'Decline',
       missedCallNotification: const NotificationParams(
@@ -148,26 +178,24 @@ class CallKitService {
       android: AndroidParams(
         isCustomNotification: true,
         isShowLogo: false,
-        // 🔥 FIX: system_ringtone_default hi bajega, yehi sahi hai.
-        // Custom mp3 bajana hai to use `android/app/src/main/res/raw/` me daalna padta hai
-        // aur yahan `ringtonePath: 'raw_incoming_ring'` likhna padta hai.
+        // system_ringtone_default hi bajega, yehi sahi hai. Custom mp3
+        // bajana ho to use `android/app/src/main/res/raw/` me daalna
+        // padta hai aur yahan `ringtonePath: 'raw_incoming_ring'` likhna
+        // padta hai.
         ringtonePath: 'system_ringtone_default',
         backgroundColor: '#0F0F11',
         backgroundUrl: hasAvatar ? callerAvatarUrl : null,
         actionColor: '#25D366', // WhatsApp-style accept green
-        // 🔥 FIX: Android me notification channel ek baar ban jaaye to
-        // uska sound/ringtone setting CODE SE dobara change NAHI hoti —
-        // channel immutable hai. Agar tumne pehle bhi is app ko install
-        // karke test kiya tha, purana "Incoming Calls" channel silent/bina
-        // sound ke already ban chuka hoga aur wahi use ho raha hoga chahe
-        // kuch bhi badlo. Naam badal ke (v3) Android ko FORCE karte hain ki
-        // ek bilkul naya channel bane jisme sound sahi se set ho.
-        //
-        // ⚠ Ye tabhi kaam karega jab app ko FRESH install karoge (uninstall
-        // karke phir install, sirf hot-restart se nahi) — kyunki purana
-        // channel already device ki notification settings me stored hai.
-        incomingCallNotificationChannelName: "Incoming Calls v3",
-        missedCallNotificationChannelName: "Missed Calls v3",
+        // Android me notification channel ek baar ban jaaye to uska
+        // sound/full-screen setting CODE SE dobara change NAHI hoti —
+        // channel immutable hai. Naam "v4" rakha hai (v3 se bump) taaki
+        // is fix ke baad Android FORCE se ek bilkul naya channel banaye —
+        // purana channel (agar kisi purane test-install se already bana
+        // hua ho) ignore ho jaaye.
+        // ⚠ Ye tabhi effect karega jab app FRESH install ho (uninstall
+        // karke phir install, sirf hot-restart se nahi).
+        incomingCallNotificationChannelName: "Incoming Calls v4",
+        missedCallNotificationChannelName: "Missed Calls v4",
         isShowFullLockedScreen: true,
       ),
       ios: const IOSParams(
@@ -188,7 +216,15 @@ class CallKitService {
       ),
     );
 
-    await FlutterCallkitIncoming.showCallkitIncoming(params);
+    try {
+      await FlutterCallkitIncoming.showCallkitIncoming(params);
+    } catch (e) {
+      // Agar native popup show hi nahi ho paaya (permission missing,
+      // plugin error, etc), silently mat chhodo — kam se kam log to karo
+      // taaki crash reports/QA se pakda ja sake. Caller (background
+      // handler) already best-effort hai isliye yahan rethrow nahi karte.
+      developer.log("CallKit: showCallkitIncoming failed: $e");
+    }
   }
 
   /// Har CallKit call-entry ko safely Map me convert karta hai — kuch
@@ -270,6 +306,26 @@ class CallKitService {
     }
   }
 
+  /// Cold start (app killed state se CallKit popup accept karke khula) me
+  /// `Event.actionCallAccept` bahut jaldi fire ho sakta hai — usse pehle ki
+  /// MaterialApp/Navigator poori tarah mount ho chuka ho. Agar us waqt
+  /// seedha `navigatorKey.currentState` use kiya jaaye to wo null milega
+  /// aur `.push(...)` chup-chaap kuch nahi karega (na error, na screen) —
+  /// yahi ek wajah ho sakti hai "accept hua par screen nahi khuli" jaisa
+  /// lagne ki. Isliye thoda wait karke retry karte hain (bounded, taaki
+  /// kabhi hamesha ke liye na latke).
+  Future<NavigatorState?> _waitForNavigator({
+    Duration timeout = const Duration(seconds: 6),
+  }) async {
+    final deadline = DateTime.now().add(timeout);
+    while (DateTime.now().isBefore(deadline)) {
+      final nav = navigatorKey?.currentState;
+      if (nav != null) return nav;
+      await Future.delayed(const Duration(milliseconds: 150));
+    }
+    return navigatorKey?.currentState;
+  }
+
   Future<void> _acceptAndNavigate(Map<String, dynamic> body) async {
     final extra = _asMap(body['extra']) ?? {};
     final callId = extra['call_id']?.toString();
@@ -288,7 +344,14 @@ class CallKitService {
       final callerName = extra['caller_name']?.toString();
       final callerAvatar = extra['caller_avatar']?.toString();
 
-      navigatorKey?.currentState?.push(MaterialPageRoute(
+      final navigator = await _waitForNavigator();
+      if (navigator == null) {
+        developer.log(
+            "CallKit: navigator never became ready — cannot open CallScreen after accept (callId=$callId).");
+        return;
+      }
+
+      navigator.push(MaterialPageRoute(
         builder: (_) => CallScreen(
           callId: callId,
           conversationId: conversationId,

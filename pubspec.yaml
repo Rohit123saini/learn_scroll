@@ -64,7 +64,7 @@ dependencies:
   geolocator: ^14.0.2
   flutter_webrtc: ^1.5.2
   gal: ^2.3.2
-  firebase_core: ^4.12.1
+  firebase_core: ^4.13.0
   firebase_messaging: ^16.4.3
   flutter_local_notifications: ^22.2.0
   livekit_client: ^2.9.0-dev.0
@@ -76,9 +76,9 @@ dependencies:
   printing: ^5.15.0
   flutter_portal: ^1.1.4
   connectivity_plus: ^7.3.1
-  lottie: ^3.5.1
-  rive: ^0.14.10
   flutter_callkit_incoming: ^2.5.0 
+  google_sign_in: ^7.2.0
+  firebase_auth: ^6.5.7
 dependency_overrides:
   # flutter_callkit_incoming: 2.0.4+2
   flutter_callkit_incoming: ^2.5.0
@@ -108,6 +108,7 @@ flutter:
     - assets/sounds/outgoing_ring.wav
     - assets/sounds/incoming_ring.wav
     - assets/sounds/call_waiting.wav
+    - assets/stickers/
   # To add assets to your application, add an assets section, like this:
   # assets:
   #   - images/a_dot_burr.jpeg

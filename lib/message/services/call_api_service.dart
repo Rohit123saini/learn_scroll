@@ -6,7 +6,7 @@ class CallApiService {
   // TESTING (abhi): LAN IP hi rakho - dono phone same WiFi pe hone chahiye
   // PRODUCTION (backend deploy hone ke baad): sirf ye ek line badalni hai, jaise:
   //   static const String baseUrl = "https://api.yourdomain.com";
-  static const String baseUrl = "http://10.250.108.189:8000";
+  static const String baseUrl = "http://10.191.152.189:8000";
 
   static Future<Map<String, String>> _getHeaders() async {
     final prefs = await SharedPreferences.getInstance();
@@ -135,6 +135,20 @@ class CallApiService {
   // (call_id ki zaroorat nahi — room_name backend khud
   // conversation_id se derive kar sakta hai, taaki sab participants
   // ek hi persistent room me milein.)
+  //
+  // 🔥 NAYA — "always new session on open" ke liye `newSession: true`
+  // bhejte hain (body: {"new_session": true}). Isse chat_screen ke
+  // "Study Room" icon se HAR baar bilkul fresh room + fresh whiteboard
+  // state milta hai (na ki purani persistent room reuse ho). Invite-card
+  // tap se JOIN karne wale flow me ye flag false hi rehta hai, taaki wo
+  // already-chal-rahi session me hi jud sakein.
+  // Backend ko is flag ke saath ye karna hoga:
+  //   - agar `new_session: true` hai to naya LiveKit room banao
+  //     (jaise room_name = "<conversation_id>_<naya session uuid/timestamp>")
+  //     is naye room ka hi livekit_url/livekit_token wapas bhejo, taaki
+  //     purani session me abhi jo log connected hain unse ye alag ho.
+  //   - is naye session ke against whiteboard-state bhi khaali/fresh maano
+  //     (`GET .../study-room-state/` naye session ke liye khaali return kare).
   // 🔥 NAYA — NETWORK-RESTORE PE MISSED CALL: jab net off tha tab jitni bhi
   // calls aayi (ring hoke khud-ba-khud "missed" ho gayi kyunki push hi
   // nahi pahuncha), net wapas aate hi unko fetch karke notification
@@ -174,11 +188,12 @@ class CallApiService {
     }
   }
 
-  static Future<Map<String, dynamic>> joinStudyRoom(String conversationId) async {
+  static Future<Map<String, dynamic>> joinStudyRoom(String conversationId, {bool newSession = false}) async {
     try {
       final res = await http.post(
         Uri.parse("$baseUrl/message/study-room/$conversationId/join/"),
         headers: await _getHeaders(),
+        body: jsonEncode({"new_session": newSession}),
       );
 
       final data = jsonDecode(res.body);

@@ -2,7 +2,7 @@
 
 import 'dart:convert';
 import 'dart:developer' as developer;
-import 'package:flutter/widgets.dart';
+import 'package:flutter/material.dart'; // 🔥 NAYA — MaterialPageRoute chahiye ongoing-call notification tap navigation ke liye (widgets.dart me nahi hai)
 import 'package:firebase_core/firebase_core.dart';
 import 'package:firebase_messaging/firebase_messaging.dart';
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
@@ -16,6 +16,7 @@ import 'call_kit_service.dart';
 import 'message_api_service.dart';
 import 'call_manager.dart'; // 🔥 NAYA — call waiting: active call check karne ke liye
 import '../screens/incoming_call_screen.dart'; // 🔥 NAYA — foreground me app-wide call screen push karne ke liye
+import '../screens/call_screen.dart'; // 🔥 NAYA — ongoing-call notification tap se wapas call screen kholne ke liye
 import 'missed_call_watcher.dart'; // 🔥 NAYA — net off->on hote hi missed call notification
 
 // 🔥 FIX #2 (root cause of "app band ho to na reply aata na call aati"):
@@ -52,6 +53,19 @@ Future<void> firebaseBackgroundHandler(RemoteMessage message) async {
     // me set hai) se ringtone bhi khud bajta hai. Kuch extra karne ki
     // zaroorat nahi.
     await CallKitService.showIncomingCall(data);
+    return;
+  }
+
+  // 🔥 NAYA — caller ne call abhi tak "ringing" state me hi cancel/end kar
+  // di (callee ke accept karne se pehle) — background/killed me CallKit UI
+  // apne aap 30s tak nahi hatti thi jab tak apna khud ka timeout na ho
+  // jaaye. Ab backend se ye alag push type aate hi turant CallKit popup
+  // hata do.
+  if (data['type'] == 'call_cancelled') {
+    final callId = data['call_id']?.toString();
+    if (callId != null) {
+      await CallKitService.endCallUiByCallId(callId);
+    }
     return;
   }
 
@@ -232,6 +246,39 @@ Future<void> _handleNotificationResponse(NotificationResponse response) async {
     return;
   }
 
+  // 🔥 NAYA — ONGOING CALL notification. Isme sirf 2 cheezein ho sakti hain:
+  //   1) "Hang Up" action button dabaya — seedha call end kardo, kahin
+  //      navigate karne ki zaroorat nahi.
+  //   2) Notification body pe hi tap kiya — call ki taraf wapas le jao
+  //      (jaise WhatsApp/system phone dialer ka "tap to return" karta hai).
+  // Ye notification sirf tab tak dikhti hai jab tak app process zinda hai
+  // (call khud LiveKit ke through isi process me chalti hai), isliye
+  // CallManager.instance yahan hamesha wahi live/asli instance hoga —
+  // background isolate wala concern yahan lagu nahi hota.
+  if (data['type'] == 'ongoing_call') {
+    if (response.actionId == 'hangup_action') {
+      await CallManager.instance.endCall();
+      return;
+    }
+    final cm = CallManager.instance;
+    if (!cm.isActive) return; // call already khatam ho chuki — kuch mat karo
+    cm.unminimize();
+    final navigator = CallKitService.navigatorKey?.currentState;
+    navigator?.push(MaterialPageRoute(
+      builder: (_) => CallScreen(
+        callId: cm.callId ?? '',
+        conversationId: cm.conversationId ?? '',
+        isVideo: cm.isVideo,
+        isCaller: cm.isCaller,
+        livekitUrl: '', // already connected — startCallIfNeeded() same callId dekh ke reuse karega
+        livekitToken: '',
+        peerName: cm.peerName,
+        peerAvatar: cm.peerAvatar,
+      ),
+    ));
+    return;
+  }
+
   final convId = data['conversation_id']?.toString();
   if (convId == null || convId.isEmpty) return;
 
@@ -311,12 +358,28 @@ class PushNotificationService {
       description: 'Message reaction notifications',
       importance: Importance.high,
     );
+    // 🔥 NAYA — ongoing call ka persistent status notification (WhatsApp
+    // jaisa "tap to return to call"). `Importance.low` jaan-bujh kar —
+    // ye har second update hoti rahegi (chronometer ki wajah se system
+    // khud update karta hai), agar importance high rakhte to har update
+    // pe heads-up popup/sound aata rehta jo galat UX hota.
+    const ongoingCallChannel = AndroidNotificationChannel(
+      'ongoing_call',
+      'Ongoing Call',
+      description: 'Shows while a call is in progress — tap to return to it',
+      importance: Importance.low,
+      playSound: false,
+      enableVibration: false,
+    );
     await _fln
         .resolvePlatformSpecificImplementation<AndroidFlutterLocalNotificationsPlugin>()
         ?.createNotificationChannel(downloadsChannel);
     await _fln
         .resolvePlatformSpecificImplementation<AndroidFlutterLocalNotificationsPlugin>()
         ?.createNotificationChannel(reactionsChannel);
+    await _fln
+        .resolvePlatformSpecificImplementation<AndroidFlutterLocalNotificationsPlugin>()
+        ?.createNotificationChannel(ongoingCallChannel);
 
     FirebaseMessaging.onMessage.listen((message) {
       // 🔥 FIX: call ka payload aaye to Instagram/WhatsApp jaisa CallKit
@@ -357,6 +420,22 @@ class PushNotificationService {
           callerAvatar: d['caller_avatar']?.toString(),
           conversationId: d['conversation_id']?.toString() ?? '',
         );
+        return;
+      }
+
+      // 🔥 NAYA — caller ne ringing call cancel/end kar di (accept hone se
+      // pehle) — app foreground me hai to bhi CallKit UI hata do, aur agar
+      // ye call abhi "waiting call" (call-waiting banner) ke roop me track
+      // ho rahi hai to use bhi clear karo; warna agar IncomingCallScreen
+      // khula hua hai to use pop karo.
+      if (message.data['type'] == 'call_cancelled') {
+        final cancelledCallId = message.data['call_id']?.toString() ?? '';
+        CallKitService.endCallUiByCallId(cancelledCallId);
+        if (CallManager.instance.waitingCallId == cancelledCallId) {
+          CallManager.instance.clearWaitingCall();
+        } else {
+          CallKitService.navigatorKey?.currentState?.popUntil((r) => r.isFirst);
+        }
         return;
       }
 
@@ -459,6 +538,65 @@ class PushNotificationService {
       notificationDetails: const NotificationDetails(android: androidDetails),
       payload: jsonEncode(message.data),
     );
+  }
+
+  // 🔥 NAYA — ONGOING CALL notification (WhatsApp/system phone jaisa
+  // "tap to return to your call"). Fixed id use karta hai taaki dobara
+  // `.show()` call karne se DUPLICATE notification na bane — same id pe
+  // dobara show karna existing notification ko hi UPDATE kar deta hai.
+  //
+  // `usesChronometer: true` + `when: connectedAt` — timer ANDROID KHUD
+  // update karta hai (jaise call-dialer app karta hai), humein har second
+  // `.show()` dobara call karke battery/CPU waste nahi karna padta.
+  static const int _ongoingCallNotificationId = 778899;
+
+  Future<void> showOngoingCallNotification({
+    required String peerName,
+    required DateTime connectedAt,
+    required String callId,
+    bool isVideo = false,
+  }) async {
+    final androidDetails = AndroidNotificationDetails(
+      'ongoing_call',
+      'Ongoing Call',
+      channelDescription: 'Shows while a call is in progress — tap to return to it',
+      importance: Importance.low,
+      priority: Priority.low,
+      playSound: false,
+      enableVibration: false,
+      ongoing: true, // swipe se dismiss nahi ho sakti — sirf call end hone pe hatti hai
+      autoCancel: false,
+      showWhen: true,
+      usesChronometer: true,
+      when: connectedAt.millisecondsSinceEpoch,
+      chronometerCountDown: false,
+      category: AndroidNotificationCategory.call,
+      visibility: NotificationVisibility.public,
+      actions: <AndroidNotificationAction>[
+        const AndroidNotificationAction(
+          'hangup_action',
+          'Hang Up',
+          showsUserInterface: false, // app khole bina hi call turant end ho jaani chahiye
+          cancelNotification: true,
+        ),
+      ],
+    );
+
+    await _fln.show(
+      id: _ongoingCallNotificationId,
+      title: peerName,
+      body: isVideo ? 'Video call in progress — tap to return' : 'Voice call in progress — tap to return',
+      notificationDetails: NotificationDetails(android: androidDetails),
+      payload: jsonEncode({'type': 'ongoing_call', 'call_id': callId}),
+    );
+  }
+
+  Future<void> cancelOngoingCallNotification() async {
+    try {
+      await _fln.cancel(id: _ongoingCallNotificationId);
+    } catch (e) {
+      developer.log("cancelOngoingCallNotification failed: $e");
+    }
   }
 
   // 🔥 NAYA — chat_screen.dart se download poora hone par call karo. Tap

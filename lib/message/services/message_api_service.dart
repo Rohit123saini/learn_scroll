@@ -57,6 +57,10 @@ class MessageApiService {
   // Sab REST routes `message/` prefix ke andar hain (router.register).
   static String get _base => "${Api.baseUrl}/message";
 
+  // 🔥 NAYA — Block/Unblock ka model (`BlockUser`) profile app me hai,
+  // isliye uska API bhi `message/` se nahi, `profile/` se hit hota hai.
+  static String get _profileBase => "${Api.baseUrl}/profile";
+
   static Future<Map<String, String>> _headers({bool json = true}) async {
     final token = await AuthService.getToken();
     return {
@@ -179,15 +183,124 @@ class MessageApiService {
     return ConversationSettings.fromJson(_decode(res));
   }
 
-  /// GET /message/conversations/<id>/messages/?page=1  (paginated history)
+  /// PATCH /message/conversations/<id>/label/  {"label"}
+  ///
+  /// 🔥 NAYA — Is chat ko apna custom nickname/label dena (sirf tumhare
+  /// account ke liye — dusre participant/group members ko nahi dikhega).
+  /// Empty string bhejo to label clear ho jaayega aur wapas default naam
+  /// (participant/group ka naam) dikhne lagega. Success pe backend jo
+  /// (trimmed/cleared) label save hua wahi wapas deta hai.
+  static Future<String?> updateConversationLabel(
+    String conversationId,
+    String label,
+  ) async {
+    final res = await http.patch(
+      Uri.parse("$_base/conversations/$conversationId/label/"),
+      headers: await _headers(),
+      body: jsonEncode({"label": label}),
+    );
+    final data = _decode(res);
+    final value = data is Map ? data['label'] : null;
+    return value is String && value.isNotEmpty ? value : null;
+  }
+
+  /// GET /message/conversations/<id>/ -> `disappearing_messages_duration`
+  /// nikal ke deta hai. ('none' | '1_month' | '6_months' | '1_year')
+  ///
+  /// 🔥 NAYA — Temporary chat: chat screen khulte hi current setting
+  /// jaanne ke liye (menu me sahi label dikhane ke liye). Raw JSON se
+  /// seedha padha hai (isConversationMuted jaisa hi pattern) taaki
+  /// `ConversationModel` me field ka naam/wajood kuch bhi ho, isse koi
+  /// farak na pade — fail ho jaaye to chup-chaap 'none' maan lo.
+  static Future<String> getDisappearingDuration(String conversationId) async {
+    try {
+      final res = await http.get(
+        Uri.parse("$_base/conversations/$conversationId/"),
+        headers: await _headers(),
+      );
+      final data = _decode(res);
+      final value = data is Map ? data['disappearing_messages_duration'] : null;
+      return value is String && value.isNotEmpty ? value : 'none';
+    } catch (_) {
+      return 'none';
+    }
+  }
+
+  /// PATCH /message/conversations/<id>/disappearing_messages/  {"duration"}
+  ///
+  /// 🔥 NAYA — Temporary chat (disappearing messages) on/off ya duration
+  /// change karne ke liye. `duration` in me se ek hona chahiye:
+  /// 'none' | '1_month' | '6_months' | '1_year'. Group chat me backend
+  /// sirf admin/moderator ko allow karta hai — non-admin call kare to
+  /// 403 aayega, jo caller ko catch karke user ko dikhana hoga.
+  static Future<void> setDisappearingMessages(
+    String conversationId,
+    String duration,
+  ) async {
+    final res = await http.patch(
+      Uri.parse("$_base/conversations/$conversationId/disappearing_messages/"),
+      headers: await _headers(),
+      body: jsonEncode({"duration": duration}),
+    );
+    _decode(res); // non-2xx pe _decode khud exception throw karta hai
+  }
+
+  /// POST /message/conversations/bulk_delete/  {"conversation_ids": [...]}
+  ///
+  /// 🔥 NAYA — chat list se ek ya multiple chats select karke delete
+  /// karne ke liye. Ye sirf tumhare (current user ke) liye chat hide
+  /// karta hai — dusre participant/group members ki chat waisi hi rehti
+  /// hai. Screen se select mode ke saare selected `conversation.id`
+  /// yahan bhejo, delete hone ke baad wo IDs local list se bhi remove
+  /// kar dena.
+  static Future<int> bulkDeleteConversations(
+      List<String> conversationIds) async {
+    final res = await http.post(
+      Uri.parse("$_base/conversations/bulk_delete/"),
+      headers: await _headers(),
+      body: jsonEncode({"conversation_ids": conversationIds}),
+    );
+    final data = _decode(res);
+    final count = data is Map ? data['deleted_count'] : null;
+    return count is int ? count : conversationIds.length;
+  }
+
+  /// GET /message/conversations/<id>/  -> `my_settings.is_muted` nikal
+  /// ke deta hai.
+  ///
+  /// 🔥 NAYA — chat screen khulte hi 3-dot menu me "Mute"/"Unmute" ka
+  /// sahi label dikhane ke liye current mute status jaanna zaroori hai.
+  /// Raw JSON se seedha padha isliye taaki `ConversationModel` me field
+  /// ka naam kuch bhi ho, isse koi farak na pade.
+  static Future<bool> isConversationMuted(String conversationId) async {
+    final res = await http.get(
+      Uri.parse("$_base/conversations/$conversationId/"),
+      headers: await _headers(),
+    );
+    final data = _decode(res);
+    final settings = data is Map ? data['my_settings'] : null;
+    return settings is Map && settings['is_muted'] == true;
+  }
+
+  /// GET /message/conversations/<id>/messages/?page=1&page_size=20  (paginated history)
+  ///
+  /// 🔥 NAYA — `pageSize` optional param add kiya (backend
+  /// `MessagePagination.page_size_query_param = 'page_size'` already
+  /// support karta hai) taaki chat screen initial load par sirf
+  /// 10-20 messages mangwa sake, baaki top pe scroll karne par
+  /// (older pages) load ho.
   static Future<List<MessageModel>> getMessages(
     String conversationId, {
     int page = 1,
+    int? pageSize,
   }) async {
-    final res = await http.get(
-      Uri.parse("$_base/conversations/$conversationId/messages/?page=$page"),
-      headers: await _headers(),
-    );
+    final query = {
+      'page': '$page',
+      if (pageSize != null) 'page_size': '$pageSize',
+    };
+    final uri = Uri.parse("$_base/conversations/$conversationId/messages/")
+        .replace(queryParameters: query);
+    final res = await http.get(uri, headers: await _headers());
     final data = _decode(res);
     final List list = data is Map && data.containsKey('results')
         ? data['results']
@@ -292,6 +405,56 @@ class MessageApiService {
     _decode(res);
   }
 
+  /// POST /message/messages/forward/
+  /// body: {"message_ids": [...], "conversation_ids": [...]}
+  ///
+  /// Forwards one or many messages (any type: text/image/video/audio/
+  /// file/location) into one or many target chats in a single call.
+  /// Each forwarded copy becomes a brand new message (sender = you,
+  /// isForwarded = true) in every target conversation — it's a copy,
+  /// not a reference, so editing/deleting the original later doesn't
+  /// touch the forwarded copies. Real-time delivery to the target
+  /// chats happens over the socket on the backend side; this call just
+  /// confirms success/failure.
+  static Future<void> forwardMessages({
+    required List<String> messageIds,
+    required List<String> conversationIds,
+  }) async {
+    final res = await http.post(
+      Uri.parse("$_base/messages/forward/"),
+      headers: await _headers(),
+      body: jsonEncode({
+        "message_ids": messageIds,
+        "conversation_ids": conversationIds,
+      }),
+    );
+    _decode(res);
+  }
+
+  // ==================================================================
+  // USER SEARCH — group members select karne ke liye
+  // ==================================================================
+
+  /// GET /profile/chat-search/?search=<query>
+  ///
+  /// 🔥 NAYA — "Add members" step (naya group banate waqt) ke liye user
+  /// search. Ye endpoint `message` app me NAHI, `user_profile` app me hai
+  /// isliye `Api.baseUrl` ke saath seedha "/profile/..." use kiya hai, na
+  /// ki `$_base` (jo "/message" prefix laga deta). Sirf unhi logo ko
+  /// dhoondta hai jinko tumne follow kiya hai ya jinhone tumhe follow
+  /// kiya hai — response me id/username/first_name/last_name/mutual_friends.
+  static Future<List<Map<String, dynamic>>> searchUsers(String query) async {
+    if (query.trim().isEmpty) return [];
+    final res = await http.get(
+      Uri.parse("${Api.baseUrl}/profile/chat-search/?search=${Uri.encodeComponent(query.trim())}"),
+      headers: await _headers(),
+    );
+    final decoded = _decode(res);
+    final data = decoded is Map ? decoded['data'] : decoded;
+    if (data is List) return data.cast<Map<String, dynamic>>();
+    return [];
+  }
+
   // ==================================================================
   // GROUPS
   // ==================================================================
@@ -370,6 +533,21 @@ class MessageApiService {
     _decode(res);
   }
 
+  /// DELETE /message/groups/<id>/  (ADMIN ONLY)
+  ///
+  /// 🔥 NAYA — poora group permanently delete karta hai (saare messages,
+  /// media, members sab backend pe CASCADE se saath hi delete ho jaate
+  /// hain). Backend 403 dega agar caller group ka admin nahi hai (yahan
+  /// koi client-side role check nahi hai, wo caller — UI — ki
+  /// zimmedari hai ki button hi admin ko dikhaye).
+  static Future<void> deleteGroup(String groupId) async {
+    final res = await http.delete(
+      Uri.parse("$_base/groups/$groupId/"),
+      headers: await _headers(),
+    );
+    _decode(res);
+  }
+
   /// GET /message/groups/<id>/media/
   static Future<List<dynamic>> getGroupMedia(String groupId) async {
     final res = await http.get(Uri.parse("$_base/groups/$groupId/media/"),
@@ -378,35 +556,125 @@ class MessageApiService {
     return data is Map && data.containsKey('results') ? data['results'] : data;
   }
 
+  // ------------------------------------------------------------------
+  // INVITE LINK / JOIN-REQUESTS
+  //
+  // Backend (`GroupViewSet` — views.py) ka rule: PUBLIC group me
+  // `join()` turant member bana deta hai (201 "joined"). PRIVATE group
+  // me wahi call ek `GroupJoinRequest` PENDING bana deta hai (202
+  // "pending") — us request ko group ka admin/moderator baad me
+  // `approveJoinRequest` / `rejectJoinRequest` se handle karta hai.
+  // ------------------------------------------------------------------
+
+  /// POST /message/groups/join/  {"invite_code"}
+  ///
+  /// Invite-link/code se group join karna. Return value me hamesha
+  /// `status` key hoga: 'joined' (public — turant member) ya 'pending'
+  /// (private — request bhej di, admin approve karega). Already-member
+  /// ya invalid/banned case backend se 400/403/404 ke saath aata hai,
+  /// jo `_decode()` khud `MessageApiException` throw kar dega.
+  static Future<Map<String, dynamic>> joinGroupByInviteCode(String inviteCode) async {
+    final res = await http.post(
+      Uri.parse("$_base/groups/join/"),
+      headers: await _headers(),
+      body: jsonEncode({"invite_code": inviteCode}),
+    );
+    return _decode(res);
+  }
+
+  /// GET /message/groups/<id>/join-requests/  (admin/moderator only)
+  ///
+  /// Private group ki pending join-requests ki list — har entry me
+  /// requester ka user info + request `id` hota hai, jo neeche
+  /// approve/reject me chahiye.
+  static Future<List<dynamic>> getJoinRequests(String groupId) async {
+    final res = await http.get(
+      Uri.parse("$_base/groups/$groupId/join-requests/"),
+      headers: await _headers(),
+    );
+    final data = _decode(res);
+    return data is List ? data : (data is Map && data['results'] is List ? data['results'] : []);
+  }
+
+  /// POST /message/groups/<id>/join-requests/<request_id>/approve/
+  /// (admin/moderator only) — requester turant `GroupMember` ban jaata
+  /// hai, `addGroupMembers` jaisa hi effect.
+  static Future<Map<String, dynamic>> approveJoinRequest(String groupId, String requestId) async {
+    final res = await http.post(
+      Uri.parse("$_base/groups/$groupId/join-requests/$requestId/approve/"),
+      headers: await _headers(),
+    );
+    return _decode(res);
+  }
+
+  /// POST /message/groups/<id>/join-requests/<request_id>/reject/
+  /// (admin/moderator only)
+  static Future<void> rejectJoinRequest(String groupId, String requestId) async {
+    final res = await http.post(
+      Uri.parse("$_base/groups/$groupId/join-requests/$requestId/reject/"),
+      headers: await _headers(),
+    );
+    _decode(res);
+  }
+
   // ==================================================================
   // BLOCKED USERS
   // ==================================================================
 
-  /// GET /message/blocked-users/
+  /// GET /profile/blocked-users/
+  /// 🔥 NAYA — profile app se hit hota hai (model wahi hai), message app se nahi.
   static Future<List<dynamic>> getBlockedUsers() async {
-    final res = await http.get(Uri.parse("$_base/blocked-users/"),
+    final res = await http.get(Uri.parse("$_profileBase/blocked-users/"),
         headers: await _headers());
     final data = _decode(res);
-    return data is Map && data.containsKey('results') ? data['results'] : data;
+    return data is Map && data.containsKey('data') ? data['data'] : data;
   }
 
-  /// POST /message/blocked-users/  {"blocked": "<user_id>"}
+  /// POST /profile/blocked-users/  {"blocked": "<user_id>"}
   static Future<void> blockUser(String userId) async {
     final res = await http.post(
-      Uri.parse("$_base/blocked-users/"),
+      Uri.parse("$_profileBase/blocked-users/"),
       headers: await _headers(),
       body: jsonEncode({"blocked": userId}),
     );
     _decode(res);
   }
 
-  /// DELETE /message/blocked-users/<id>/
-  static Future<void> unblockUser(String blockedUserRecordId) async {
+  /// DELETE /profile/blocked-users/<id>/
+  ///
+  /// Backend `<id>` ko do tarike se accept karta hai — ya to `BlockUser`
+  /// record ki apni id, ya seedha target USER ki id. Isliye yahan seedha
+  /// `userId` pass karna hi kaafi hai, alag se record-id track karne ki
+  /// zaroorat nahi.
+  static Future<void> unblockUser(String userId) async {
     final res = await http.delete(
-      Uri.parse("$_base/blocked-users/$blockedUserRecordId/"),
+      Uri.parse("$_profileBase/blocked-users/$userId/"),
       headers: await _headers(),
     );
     _decode(res);
+  }
+
+  /// GET /profile/blocked-users/  -> current user ne diye gaye `userId`
+  /// ko block kiya hua hai ya nahi, ye check karta hai.
+  ///
+  /// 🔥 NAYA — chat screen khulte hi AppBar ke 3-dot menu me "Block"
+  /// ya "Unblock" ka sahi label dikhane ke liye. Poori block-list fetch
+  /// karke local search karta hai (list generally chhoti hoti hai);
+  /// koi bhi error/network-fail case me chup-chaap `false` (not blocked)
+  /// maan leta hai, taaki chat screen crash na ho.
+  static Future<bool> isUserBlocked(String userId) async {
+    try {
+      final list = await getBlockedUsers();
+      for (final item in list) {
+        if (item is Map) {
+          final blockedId = (item['blocked'] ?? item['blocked_detail']?['id'])?.toString();
+          if (blockedId == userId) return true;
+        }
+      }
+      return false;
+    } catch (_) {
+      return false;
+    }
   }
 
   // ==================================================================
