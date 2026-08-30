@@ -238,6 +238,18 @@ class Classroom(models.Model):
     enrolled_count = models.PositiveIntegerField(
         default=0, help_text="Distinct students currently holding an active, unexpired pass."
     )
+    # ---------------------------------------------------------------------
+    # FEATURE (share): denormalized counter, bumped once per ClassroomShare
+    # row (see that model below) regardless of channel — in-app or
+    # external. Cached here for the same reason rating_avg/enrolled_count
+    # are: the Explore card and the teacher's own stats view need this on
+    # every list render, and counting ClassroomShare rows per-row would be
+    # an extra aggregate query per classroom on the highest-traffic read
+    # path in this app.
+    # ---------------------------------------------------------------------
+    share_count = models.PositiveIntegerField(
+        default=0, help_text="Total number of times this classroom has been shared, any channel."
+    )
 
     is_active = models.BooleanField(default=True)
 
@@ -287,7 +299,7 @@ class Classroom(models.Model):
             # cost once the platform has thousands. A trigram GIN index lets
             # Postgres use an index scan for icontains/substring matches
             # instead. Requires the `pg_trgm` extension (enabled via a
-            # migration — see migrations/0XXX_trigram_search_indexes.py in
+            # migration — see migrations/0012_trigram_search_indexes.py in
             # the same change) and Postgres as the DB backend; this index is
             # silently ignored (not an error) on any other backend, so it's
             # safe to leave in Meta.indexes even if a non-Postgres DB is
@@ -465,6 +477,38 @@ class Classroom(models.Model):
         used to render a 'class off on these dates' notice to students."""
         today = timezone.now().date()
         return self.holidays.filter(date__gte=today, date__lte=today + timezone.timedelta(days=days_ahead))
+
+    def record_share(self) -> None:
+        """Bump the denormalized share_count. Called once per ClassroomShare
+        row created (see ClassroomViewSet.share in views.py) — kept as a
+        tiny F()-expression update (not read-modify-write) so two shares
+        landing at the same instant can't stomp on each other the way a
+        plain `self.share_count += 1; self.save()` would."""
+        Classroom.objects.filter(pk=self.pk).update(share_count=models.F("share_count") + 1)
+        self.refresh_from_db(fields=["share_count"])
+
+    def share_urls(self) -> tuple[str, str]:
+        """(web_url, deep_link) for this classroom, used by
+        ClassroomViewSet.share to hand the client something it can either
+        open in-app (deep_link) or drop into any outside-the-app share
+        target — WhatsApp, SMS, email, copy-link, etc. — where a
+        recipient without the app installed still lands somewhere useful
+        (web_url).
+
+        Both base pieces are getattr(settings, ..., default) with sane
+        fallbacks, same pattern CHUNKED_UPLOAD_TMP_ROOT uses in
+        chunked_upload_views.py — this works out of the box in dev and is
+        meant to be overridden in settings.py/.env per environment
+        (staging vs production web domain, custom URL scheme per app
+        flavor) without touching this code.
+        """
+        from django.conf import settings
+
+        web_base = getattr(settings, "LIVECLASS_WEB_BASE_URL", "https://app.example.com").rstrip("/")
+        deep_link_scheme = getattr(settings, "LIVECLASS_DEEP_LINK_SCHEME", "liveclass")
+        web_url = f"{web_base}/classroom/{self.id}"
+        deep_link = f"{deep_link_scheme}://classroom/{self.id}"
+        return web_url, deep_link
 
 
 # ---------------------------------------------------------------------------
@@ -1275,6 +1319,55 @@ class ClassroomWishlist(models.Model):
 
 
 # ---------------------------------------------------------------------------
+# 11C. CLASSROOM SHARE (word-of-mouth: in-app + outside-the-app sharing)
+#
+# WHY THIS EXISTS: there was no "share this class" feature at all — a
+# student who liked a classroom had no way to send it to a friend, whether
+# that friend is already on the platform (in-app) or not (outside the app,
+# via WhatsApp/SMS/email/copy-link). One row per share attempt, whatever
+# the channel, so:
+#   - a teacher can see how much word-of-mouth their classroom is getting
+#     (see ClassroomViewSet.share-stats), broken down by channel
+#   - shared_with (nullable) lets an in-app share also drive a Notification
+#     to a specific platform user — see ClassroomViewSet.share in views.py
+#   - it's a natural place to hang basic anti-spam (e.g. a per-user daily
+#     share cap) later without redesigning anything, if that ever becomes
+#     necessary
+# ---------------------------------------------------------------------------
+class ClassroomShare(models.Model):
+    class Channel(models.TextChoices):
+        IN_APP = "in_app", "In-App"
+        WHATSAPP = "whatsapp", "WhatsApp"
+        SMS = "sms", "SMS"
+        EMAIL = "email", "Email"
+        COPY_LINK = "copy_link", "Copy Link"
+        OTHER = "other", "Other"
+
+    classroom = models.ForeignKey(Classroom, on_delete=models.CASCADE, related_name="shares")
+    shared_by = models.ForeignKey(User, on_delete=models.CASCADE, related_name="classroom_shares_made")
+    # Only set for an IN_APP share to a specific platform user — every
+    # outside-the-app channel (WhatsApp/SMS/email/copy-link/other) hands
+    # the link off to something outside this app entirely, so there's no
+    # platform user row to point at.
+    shared_with = models.ForeignKey(
+        User, on_delete=models.CASCADE, null=True, blank=True, related_name="classroom_shares_received"
+    )
+    channel = models.CharField(max_length=20, choices=Channel.choices, default=Channel.OTHER)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+        indexes = [
+            models.Index(fields=["classroom", "-created_at"]),
+            models.Index(fields=["shared_by", "-created_at"]),
+        ]
+
+    def __str__(self):
+        target = self.shared_with or self.get_channel_display()
+        return f"{self.shared_by} shared {self.classroom.title} -> {target}"
+
+
+# ---------------------------------------------------------------------------
 # 12. COUPONS (discounts on ClassPass purchases)
 # ---------------------------------------------------------------------------
 class Coupon(models.Model):
@@ -1925,6 +2018,9 @@ class Notification(models.Model):
         WITHDRAWAL_APPROVED = "withdrawal_approved", "Withdrawal Approved"
         WITHDRAWAL_REJECTED = "withdrawal_rejected", "Withdrawal Rejected"
         WITHDRAWAL_PAID = "withdrawal_paid", "Withdrawal Paid"
+        # NOTE (feature add — classroom sharing): see ClassroomShare above
+        # and ClassroomViewSet.share in views.py.
+        CLASSROOM_SHARED = "classroom_shared", "Classroom Shared With You"
         GENERIC = "generic", "Generic"
 
     recipient = models.ForeignKey(User, on_delete=models.CASCADE, related_name="notifications")

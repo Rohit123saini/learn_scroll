@@ -7,16 +7,24 @@
 #
 # Sab jagah (REST message send, WS message send, call initiate, study-room
 # join) yahi 2 functions reuse hote hain taaki rule ek jagah rahe.
+#
+# 🔥 FIX (perf) — `is_group_admin_or_mod` sabse zyada-hit query hai in is
+# poori app me (har pin/message/call/study-room/member-management action
+# pe chalta hai). Ab `cache_utils.get_group_role_cached` ke peeche se guzarta
+# hai (60s TTL + write-time invalidation) — role change hote hi caller ko
+# `invalidate_group_role_cache(group_id, user_id)` bhi call karna hoga
+# (see cache_utils.py docstring for call-sites).
 
 from django.utils import timezone
 
-from .models import GroupMember
+from .cache_utils import get_group_role_cached
 
 
 def is_group_admin_or_mod(group, user_id) -> bool:
-    return GroupMember.objects.filter(
-        group=group, user_id=user_id, role__in=['admin', 'moderator'], is_banned=False,
-    ).exists()
+    member = get_group_role_cached(group.id, user_id)
+    if member is None:
+        return False
+    return member["role"] in ('admin', 'moderator') and not member["is_banned"]
 
 
 def check_group_permission(group, user_id, permission_field: str) -> tuple[bool, str]:

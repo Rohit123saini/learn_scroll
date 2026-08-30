@@ -33,6 +33,7 @@ from .models import (
     ClassroomReport,
     ClassroomBan,
     ClassroomReview,
+    ClassroomShare,
     ClassroomStaff,
     ClassroomWishlist,
     CoinTransaction,
@@ -109,12 +110,16 @@ class ClassroomSerializer(serializers.ModelSerializer):
             # _sync_classroom_rating) — exposed here so the Explore/Search list
             # can show a star rating per card without an extra request per
             # classroom (that's what classrooms/{id}/stats/ is for instead).
-            "rating_avg", "rating_count",
+            "rating_avg", "rating_count", "share_count",
             "is_active", "is_flagged", "created_at", "updated_at",
         ]
         # is_flagged is set automatically once enough reports come in (see
-        # _auto_flag_classroom in models.py) — never client-writable.
-        read_only_fields = ["id", "rating_avg", "rating_count", "is_flagged", "created_at", "updated_at"]
+        # _auto_flag_classroom in models.py); share_count only moves via
+        # Classroom.record_share() (see ClassroomViewSet.share) — neither
+        # is ever client-writable.
+        read_only_fields = [
+            "id", "rating_avg", "rating_count", "share_count", "is_flagged", "created_at", "updated_at",
+        ]
 
     def validate(self, attrs):
         classroom_type = attrs.get(
@@ -643,6 +648,73 @@ class ClassroomReportSerializer(serializers.ModelSerializer):
 
 
 # ---------------------------------------------------------------------------
+# 11D. CLASSROOM SHARE — request/response shapes for ClassroomViewSet.share.
+# Not a plain ModelSerializer for the input side: `to_user_id` is the only
+# thing a client actually sends (channel is optional metadata about where
+# the link is headed, not something this endpoint enforces), everything
+# else on ClassroomShare (classroom/shared_by/shared_with) is set
+# server-side in the view from the URL pk / request.user / the resolved
+# to_user_id — same "server controls the owner fields" convention as every
+# other perform_create in this file.
+# ---------------------------------------------------------------------------
+class ClassroomShareSerializer(serializers.Serializer):
+    # In-app share target — omit entirely for an outside-the-app share
+    # (WhatsApp/SMS/email/copy-link), where there's no platform user to
+    # notify and this endpoint's job is just to hand back the link.
+    to_user_id = serializers.PrimaryKeyRelatedField(
+        source="to_user",
+        queryset=get_user_model().objects.all(),
+        required=False,
+        allow_null=True,
+        default=None,
+    )
+    channel = serializers.ChoiceField(
+        choices=ClassroomShare.Channel.choices, default=ClassroomShare.Channel.OTHER
+    )
+
+    def validate(self, attrs):
+        # Sharing TO a specific platform user is what "in_app" means —
+        # force it regardless of whatever (or nothing) the client passed
+        # for channel, so a stray channel="copy_link" alongside a real
+        # to_user_id can't produce a misleading analytics row. Going the
+        # other way — channel="in_app" with no to_user_id — is a client
+        # bug (there's no one to notify), so that's a 400 instead of a
+        # silently half-meaningful row.
+        to_user = attrs.get("to_user")
+        if to_user is not None:
+            attrs["channel"] = ClassroomShare.Channel.IN_APP
+        elif attrs.get("channel") == ClassroomShare.Channel.IN_APP:
+            raise serializers.ValidationError({"to_user_id": "Required when channel is 'in_app'."})
+        return attrs
+
+
+class ClassroomShareResultSerializer(serializers.Serializer):
+    """Response shape for ClassroomViewSet.share — everything the client
+    needs to either notify (already done server-side, for in_app) or hand
+    off to the OS's native share sheet for every outside-the-app channel."""
+
+    share_id = serializers.IntegerField()
+    web_url = serializers.URLField()
+    deep_link = serializers.CharField()
+    share_text = serializers.CharField()
+    shared_with = UserMiniSerializer(allow_null=True)
+    share_count = serializers.IntegerField()
+
+
+class ClassroomShareLogSerializer(serializers.ModelSerializer):
+    """Read-only history row — used by ClassroomViewSet.share-stats so a
+    teacher can see who's sharing their classroom and how, not just the
+    running total on share_count."""
+
+    shared_by = UserMiniSerializer(read_only=True)
+    shared_with = UserMiniSerializer(read_only=True)
+
+    class Meta:
+        model = ClassroomShare
+        fields = ["id", "shared_by", "shared_with", "channel", "created_at"]
+
+
+# ---------------------------------------------------------------------------
 # 12. COUPON
 # ---------------------------------------------------------------------------
 class CouponSerializer(serializers.ModelSerializer):
@@ -907,6 +979,7 @@ class ClassroomStatsSerializer(serializers.Serializer):
     rating_avg = serializers.DecimalField(max_digits=3, decimal_places=2)
     rating_count = serializers.IntegerField()
     enrolled_count = serializers.IntegerField()
+    share_count = serializers.IntegerField()
     weekly_timing = serializers.CharField()
     upcoming_holidays = ClassHolidaySerializer(many=True)
 

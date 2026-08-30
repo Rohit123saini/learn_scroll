@@ -65,6 +65,57 @@ def generate_summary(content: str) -> str:
     cache.set(key, result, CACHE_TTL)
     return result
 
+def transcribe_audio(file_url: str, mime_type: str = "audio/ogg") -> str:
+    """
+    🔥 NAYA — Voice-message transcription. Roadmap me "cheap win" the tha
+    kyunki Gemini client already wired hai upar — sirf audio-input call
+    add karna tha.
+
+    `file_url` chat me already-uploaded voice message ka URL hai
+    (`upload_view.py` se). Gemini ko file bytes chahiye, URL nahi, isliye
+    pehle download karte hain — production me agar file size/latency
+    concern ho to isse ek background task (Celery) me chalao aur result
+    ko `Message.meta['transcript']` me save kar do, taaki client ko baar-baar
+    re-transcribe na karna pade.
+
+    Same 24h cache pattern jo summary/quiz already use karte hain — same
+    audio dobara transcribe na ho (e.g. forwarded voice message).
+    """
+    if not AI_ENABLED:
+        raise RuntimeError("AI not configured")
+
+    key = _get_cache_key("transcript", file_url)
+    if cached := cache.get(key):
+        logger.info(f"CACHE HIT transcript {key}")
+        return cached
+
+    import requests  # local import — sirf is function ke liye chahiye
+
+    resp = requests.get(file_url, timeout=15)
+    resp.raise_for_status()
+    audio_bytes = resp.content
+
+    try:
+        res = _client.models.generate_content(
+            model=_MODEL,
+            contents=[
+                "Transcribe this audio message exactly, in its original language. "
+                "Return ONLY the transcript text, no preamble, no explanation.",
+                {"mime_type": mime_type, "data": audio_bytes},
+            ],
+        )
+    except Exception as e:
+        logger.critical(f"Gemini transcription failed (model={_MODEL}): {e}")
+        raise
+
+    result = res.text.strip()
+    if not result:
+        raise ValueError("AI returned empty transcript")
+
+    cache.set(key, result, CACHE_TTL)
+    return result
+
+
 def generate_quiz(content: str) -> list:
     if not AI_ENABLED:
         raise RuntimeError("AI not configured")

@@ -54,6 +54,7 @@ from .models import (
     ClassroomBan,
     ClassroomReport,
     ClassroomReview,
+    ClassroomShare,
     ClassroomStaff,
     ClassroomWishlist,
     CoinTransaction,
@@ -109,6 +110,9 @@ from .serializers import (
     ClassroomReportSerializer,
     ClassroomReviewSerializer,
     ClassroomSerializer,
+    ClassroomShareLogSerializer,
+    ClassroomShareResultSerializer,
+    ClassroomShareSerializer,
     ClassroomStaffSerializer,
     ClassroomStatsSerializer,
     ClassroomWishlistSerializer,
@@ -600,10 +604,112 @@ class ClassroomViewSet(viewsets.ModelViewSet):
                     "rating_avg": classroom.rating_avg,
                     "rating_count": classroom.rating_count,
                     "enrolled_count": classroom.enrolled_count,
+                    "share_count": classroom.share_count,
                     "weekly_timing": classroom.weekly_timing_summary(),
                     "upcoming_holidays": classroom.upcoming_holidays(),
                 }
             ).data
+        )
+
+    # -----------------------------------------------------------------
+    # FEATURE (share): two ways to spread a classroom around, both behind
+    # one endpoint —
+    #   - IN-APP (app ke andar): pass to_user_id (and/or channel="in_app")
+    #     to share with another platform user. Creates the in-app
+    #     Notification bell row synchronously, same as every other
+    #     create_notification() call site in this file, then queues a push
+    #     via notify_classroom_shared (tasks.py) the same way
+    #     join-request/waitlist/etc. notifications do.
+    #   - OUTSIDE THE APP (app ke bhar): omit to_user_id. Nothing is sent
+    #     to anyone from this server — the actual "send" (WhatsApp/SMS/
+    #     email/whatever) happens on the user's own device, via their OS's
+    #     native share sheet. This endpoint's job there is just to hand
+    #     back a stable web_url (works even if the recipient doesn't have
+    #     the app) and deep_link (opens straight into the app if they do),
+    #     plus a ready-to-use share_text, so every client on every
+    #     platform shares the exact same link/wording instead of each
+    #     building its own.
+    # Either way, one ClassroomShare row is logged and Classroom.share_count
+    # is bumped — see share-stats below for the teacher-facing view of that.
+    # -----------------------------------------------------------------
+    @action(detail=True, methods=["post"])
+    def share(self, request, pk=None):
+        # get_object() already applies get_queryset()'s visibility rules
+        # (public+active+unflagged, or the requester's own) — if you can't
+        # otherwise see this classroom, you can't share it either.
+        classroom = self.get_object()
+
+        serializer = ClassroomShareSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        to_user = serializer.validated_data.get("to_user")
+        channel = serializer.validated_data["channel"]
+
+        if to_user is not None and to_user.id == request.user.id:
+            raise ValidationError("You can't share a classroom with yourself.")
+
+        share_log = ClassroomShare.objects.create(
+            classroom=classroom, shared_by=request.user, shared_with=to_user, channel=channel,
+        )
+        classroom.record_share()
+
+        if to_user is not None:
+            teacher_name = request.user.get_full_name() or request.user.username
+            create_notification(
+                recipient=to_user,
+                notif_type=Notification.NotifType.CLASSROOM_SHARED,
+                title="A class was shared with you",
+                message=f"{teacher_name} shared '{classroom.title}' with you.",
+                classroom=classroom,
+            )
+            # NOTE: in-app row only got created above — same "queue the
+            # push separately so a slow/failing provider never adds
+            # latency here" reasoning as every other notify_*.delay() call
+            # site in this file (see _safe_delay's docstring).
+            from .tasks import notify_classroom_shared
+
+            _safe_delay(notify_classroom_shared, share_log.id)
+
+        web_url, deep_link = classroom.share_urls()
+        return Response(
+            ClassroomShareResultSerializer(
+                {
+                    "share_id": share_log.id,
+                    "web_url": web_url,
+                    "deep_link": deep_link,
+                    "share_text": f"Check out '{classroom.title}' — {web_url}",
+                    "shared_with": to_user,
+                    "share_count": classroom.share_count,
+                }
+            ).data,
+            status=status.HTTP_201_CREATED,
+        )
+
+    @action(detail=True, methods=["get"], url_path="share-stats")
+    def share_stats(self, request, pk=None):
+        """Teacher/co-teacher/moderator only: who's sharing this classroom,
+        via which channel, and when — the breakdown behind the single
+        share_count number on the stats/list card."""
+        classroom = self.get_object()
+        if not _can_manage_classroom(classroom, request.user):
+            raise PermissionDenied(
+                "Only the classroom's teacher, co-teacher, or moderator can view share stats."
+            )
+        qs = classroom.shares.select_related("shared_by", "shared_with")
+        by_channel = qs.values("channel").annotate(count=Count("id")).order_by("-count")
+        # Not run through pagination_class: this is a small summary payload
+        # (aggregate counts + a recent-activity slice), not a bare list, so
+        # DRF's page/results envelope doesn't fit it. Capped to the newest
+        # 50 rather than paginated — plenty for "who's been sharing this
+        # lately"; a teacher wanting the full history can be given a
+        # dedicated paginated endpoint later if that's ever actually asked
+        # for.
+        recent = ClassroomShareLogSerializer(qs[:50], many=True).data
+        return Response(
+            {
+                "share_count": classroom.share_count,
+                "by_channel": {row["channel"]: row["count"] for row in by_channel},
+                "recent": recent,
+            }
         )
 
     # -----------------------------------------------------------------

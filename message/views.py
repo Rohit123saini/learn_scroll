@@ -65,6 +65,7 @@ from .push_utils import (
 from .livekit_utils import generate_livekit_token
 from .user_display import build_user_mini, get_display_name, get_profile_photo_url
 from .group_rules import check_group_permission, check_daily_message_limit, is_group_admin_or_mod
+from .cache_utils import invalidate_group_role_cache
 from .mentions import extract_mentioned_user_ids
 from .media_utils import create_group_media_for_message
 from .constants import MAX_PINNED_PER_CONVERSATION
@@ -201,11 +202,14 @@ class ConversationViewSet(viewsets.ReadOnlyModelViewSet):
             )
 
         if conversation.type == ConversationType.GROUP:
-            is_admin = GroupMember.objects.filter(
-                group=conversation.group_detail, user=request.user,
-                role__in=['admin', 'moderator'], is_banned=False,
-            ).exists()
-            if not is_admin:
+            # 🔥 FIX — pehle yahan is check ka apna alag raw
+            # `GroupMember.objects.filter(...)` query tha, jabki
+            # `group_rules.is_group_admin_or_mod` (ab cached) exact
+            # same rule already implement karta hai. Teen jagah (yahan,
+            # `add_participant_to_conversation`, `GroupViewSet.
+            # _require_admin`) same "admin/mod, not banned" logic
+            # independently duplicate thi — single source pe unify kiya.
+            if not is_group_admin_or_mod(conversation.group_detail, request.user.id):
                 raise PermissionDenied('Sirf group admin/moderator ye setting change kar sakte hain.')
 
         conversation.disappearing_messages_duration = duration
@@ -292,10 +296,8 @@ class ConversationViewSet(viewsets.ReadOnlyModelViewSet):
 
         group = getattr(conversation, 'group_detail', None)
         if group and group.is_private:
-            is_admin = GroupMember.objects.filter(
-                group=group, user=request.user, role__in=['admin', 'moderator'], is_banned=False,
-            ).exists()
-            if not is_admin:
+            # 🔥 FIX — same unification as `disappearing_messages` above.
+            if not is_group_admin_or_mod(group, request.user.id):
                 raise PermissionDenied('Sirf group admin/moderator member add kar sakte hain.')
 
         target_user = get_object_or_404(User, id=user_id)
@@ -389,6 +391,25 @@ class ConversationViewSet(viewsets.ReadOnlyModelViewSet):
             ConversationParticipant.objects.filter(conversation=conversation).exclude(
                 user=request.user
             ).update(unread_count=F('unread_count') + 1)
+
+            # 🔥 FIX — REST se message bhejte waqt `MessageStatus` rows
+            # (delivery/read tracking) pehle kabhi nahi banti thi — sirf WS
+            # `ChatConsumer.save_message` ye karta tha. Har media/location
+            # message (jo hamesha REST se jaate hain, WS text-first flow
+            # ke against) is wajah se kabhi bhi "delivered" (double-tick)
+            # state nahi dikhata tha jab tak recipient use actively read na
+            # kar de — kyunki `mark_undelivered_as_delivered` (WS connect())
+            # sirf EXISTING rows ko update karta hai, naya row nahi banata.
+            # Ab dono paths consistent hain.
+            other_participant_ids = list(
+                ConversationParticipant.objects.filter(conversation=conversation)
+                .exclude(user=request.user)
+                .values_list('user_id', flat=True)
+            )
+            MessageStatus.objects.bulk_create(
+                [MessageStatus(message=message, user_id=uid) for uid in other_participant_ids],
+                ignore_conflicts=True,
+            )
 
             # 🔥 NAYA — @mentions resolve karke message pe attach karo.
             # Sirf conversation ke ACTIVE members hi mention ho sakte hain.
@@ -1238,10 +1259,17 @@ class GroupViewSet(viewsets.ModelViewSet):
 
     @staticmethod
     def _require_admin(group_id, user):
-        allowed = GroupMember.objects.filter(
-            group_id=group_id, user=user, role__in=['admin', 'moderator'], is_banned=False,
-        ).exists()
-        if not allowed:
+        # 🔥 FIX — pehle yahan is check ka apna alag raw query tha
+        # (`GroupMember.objects.filter(...)`), jabki `group_rules.
+        # is_group_admin_or_mod` bhi EXACT same rule (admin/mod, not
+        # banned) implement karta hai. Do independent implementations ek
+        # hi rule ki — bilkul wahi class ka risk jo `MAX_PINNED_PER_
+        # CONVERSATION` pehle duplicate hone se hua tha (dono kabhi
+        # silently drift kar sakte the). Ab dono ek hi (cached) function
+        # use karte hain — single source of truth.
+        from .models import Group
+        group = Group.objects.get(id=group_id)
+        if not is_group_admin_or_mod(group, user.id):
             raise PermissionDenied('Sirf group admin/moderator ye action kar sakte hain.')
 
     @action(detail=True, methods=['patch', 'delete'], url_path=r'members/(?P<user_id>[^/.]+)')
@@ -1260,6 +1288,12 @@ class GroupViewSet(viewsets.ModelViewSet):
             Group.objects.filter(id=group.id).update(
                 members_count=group.group_members.filter(is_banned=False).count()
             )
+            # 🔥 FIX — member remove hone ke baad (khaaskar agar wo khud
+            # admin/mod tha) is_group_admin_or_mod cache ab stale ho gayi
+            # hai (member row hi delete ho gaya, par cache abhi bhi purana
+            # role/is_banned dikha sakti thi TTL khatam hone tak). Turant
+            # invalidate karo taaki access-check turant sahi reflect kare.
+            invalidate_group_role_cache(group.id, user_id)
             return Response(status=status.HTTP_204_NO_CONTENT)
 
         self._require_admin(group.id, request.user)
@@ -1268,6 +1302,17 @@ class GroupViewSet(viewsets.ModelViewSet):
             if field in request.data:
                 setattr(membership, field, request.data[field])
         membership.save()
+
+        # 🔥 CRITICAL FIX — role ya is_banned change hone ke baad group-role
+        # cache (`cache_utils.get_group_role_cached`, `group_rules.
+        # is_group_admin_or_mod` ke peeche) turant invalidate karna ZAROORI
+        # hai. Bina is call ke, ek demote/ban kiye gaye admin ke paas agle
+        # 60s (cache TTL) tak bhi pin/message/call/study-room jaisi
+        # admin-only actions ka access reh sakta tha — cache add karne se
+        # pehle ye gap exist hi nahi karta tha (har check seedha DB se
+        # hota tha), isliye ye is session ki caching change ka direct
+        # side-effect hai aur usi ke saath fix hona chahiye tha.
+        invalidate_group_role_cache(group.id, user_id)
 
         # 🔥 FIX — pehle sirf `GroupMember.is_banned` set hota tha.
         # Har permission check (`IsConversationParticipant`, chat list

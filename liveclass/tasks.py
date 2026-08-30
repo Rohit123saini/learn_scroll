@@ -400,6 +400,46 @@ def notify_waitlist_promotion(student_id, session_id):
     )
 
 
+@shared_task(name="liveclass.notify_classroom_shared")
+def notify_classroom_shared(share_id):
+    """Fired from ClassroomViewSet.share() the instant an IN-APP share
+    lands (to_user_id was given) — the in-app bell row is created
+    synchronously in the view (see create_notification there); this is
+    just the push half, queued the same way every other notify_*.delay()
+    call site in this file is, so a slow/unconfigured push provider never
+    adds latency to the share request itself.
+
+    Takes share_id (not the (classroom_id, shared_by_id, shared_with_id)
+    tuple) so the task always reflects exactly the row the view just
+    created, and re-looks everything up from it rather than trusting
+    values passed across the broker — same reasoning as
+    notify_waitlist_promotion's NOTE (fix) below about not racing a
+    caller that might delete/mutate rows out from under a queued task.
+    """
+    from .models import ClassroomShare
+    from .notifications import send_notification
+
+    share = (
+        ClassroomShare.objects.select_related("classroom", "shared_by", "shared_with")
+        .filter(pk=share_id)
+        .first()
+    )
+    if not share or not share.shared_with:
+        return False
+
+    sharer_name = share.shared_by.get_full_name() or share.shared_by.username
+    title = "A class was shared with you"
+    message = f"{sharer_name} shared '{share.classroom.title}' with you."
+    return send_notification(
+        share.shared_with, title, message, channel="push",
+        data={
+            "type": "classroom_shared",
+            "classroom_id": str(share.classroom_id),
+            "shared_by": str(share.shared_by_id),
+        },
+    )
+
+
 @shared_task(name="liveclass.notify_purchase_refunded")
 def notify_purchase_refunded(purchase_id):
     """Fired from PassPurchase.reverse() the instant a refund lands (a

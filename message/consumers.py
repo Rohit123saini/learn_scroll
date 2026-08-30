@@ -22,6 +22,7 @@ from .user_display import build_user_mini, get_display_name
 from .mentions import extract_mentioned_user_ids
 from .media_utils import create_group_media_for_message
 from .constants import MAX_PINNED_PER_CONVERSATION
+from .throttles import WSMessageRateLimiter
 
 logger = logging.getLogger(__name__)
 
@@ -183,6 +184,18 @@ class ChatConsumer(AsyncWebsocketConsumer):
     _MEDIA_TYPES = {'image', 'video', 'audio', 'file', 'presentation'}
 
     async def handle_new_message(self, data):
+        # 🔥 NAYA — REST side `MessageSendThrottle` (DRF) se protected thi,
+        # WS path (jo docs ke mutabik zyada-use-hone-wala primary path hai)
+        # bilkul unprotected tha — koi bhi ek tight client-side loop se
+        # is socket pe unlimited messages bhej sakta tha. DRF throttles WS
+        # consumers pe apply nahi hote, isliye ye alag, cache-backed
+        # sliding-window limiter hai (`throttles.py`).
+        allowed, retry_after = await database_sync_to_async(WSMessageRateLimiter.check)(self.user.id)
+        if not allowed:
+            return await self.send_error(
+                "rate_limited", f"Bahut fast bhej rahe ho, {retry_after}s ruko."
+            )
+
         text = (data.get('text') or '').strip()
         message_type = data.get('message_type', 'text')
         client_id = data.get('client_id')  # offline-retry idempotency
@@ -284,6 +297,18 @@ class ChatConsumer(AsyncWebsocketConsumer):
             await self.send_mention_push_notification(message, text)
 
     async def handle_typing(self, data):
+        # 🔥 NAYA — har keystroke pe client `typing` event bhej sakta hai;
+        # bina throttle ke ye channel layer (Redis) ko high-frequency
+        # broadcast se flood kar sakta hai. Same WSMessageRateLimiter reuse
+        # kiya hai par alag, generous limit ke saath (typing kam "costly"
+        # hai message-send se, isliye tight rakhne ki zaroorat nahi — sirf
+        # abuse-level spam rokna hai).
+        allowed, _ = await database_sync_to_async(WSMessageRateLimiter.check)(
+            f"typing:{self.user.id}"
+        )
+        if not allowed:
+            return  # silently drop — typing indicator ke liye error dikhana UX-wrong hoga
+
         # DB me kuch save nahi karte, sirf broadcast — high frequency event
         await self.channel_layer.group_send(
             self.room_group_name,

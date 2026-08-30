@@ -1,7 +1,8 @@
 # message/permissions.py
 from rest_framework import permissions
 
-from .models import ConversationParticipant, GroupMember
+from .group_rules import is_group_admin_or_mod
+from .models import ConversationParticipant, Group, GroupMember
 
 
 class IsConversationParticipant(permissions.BasePermission):
@@ -45,6 +46,14 @@ class IsGroupAdminOrModerator(permissions.BasePermission):
         group_id = view.kwargs.get('group_id') or view.kwargs.get('pk')
         if not group_id:
             return True
-        return GroupMember.objects.filter(
-            group_id=group_id, user=request.user, role__in=['admin', 'moderator'], is_banned=False
-        ).exists()
+        # 🔥 FIX — pehle yahan apna alag raw `GroupMember.objects.filter(...)`
+        # query tha. Poori app me isi "admin/mod, not banned" rule ki 4
+        # independent copies mil gayi thi (yahan, `views.py`'s
+        # `_require_admin`, `disappearing_messages`,
+        # `add_participant_to_conversation`) — sab ab `group_rules.
+        # is_group_admin_or_mod` (cached, single source of truth) use
+        # karte hain.
+        group = Group.objects.filter(id=group_id).first()
+        if group is None:
+            return False
+        return is_group_admin_or_mod(group, request.user.id)

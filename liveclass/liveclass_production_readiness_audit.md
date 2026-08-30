@@ -91,8 +91,8 @@ model source for the display-label text if needed.
 `classroom_type, organisation_name, teacher(FK User), title, subject,
 description, cover_image(Image), language, whiteboard_enabled,
 screen_share_enabled, chat_enabled, recording_enabled, max_participants,
-rating_avg(Decimal), rating_count, enrolled_count, is_active, is_deleted,
-deleted_at, is_flagged, created_at, updated_at`
+rating_avg(Decimal), rating_count, enrolled_count, share_count, is_active,
+is_deleted, deleted_at, is_flagged, created_at, updated_at`
 - `ClassroomType`: `INDIVIDUAL` / `ORGANISATION` — org type unlocks the
   co-teacher/moderator/TA staff bypass everywhere (see §4).
 - **`has_access(user) -> bool`** — the TIGHT gate: does this user hold a
@@ -121,6 +121,14 @@ deleted_at, is_flagged, created_at, updated_at`
 - **`weekly_timing_summary()`** — human string like "Mon, Wed, Fri 6:00
   PM (60 min)" built from active `ClassSchedule` rows.
 - **`upcoming_holidays(days_ahead=30)`** — off-days in the next N days.
+- **`record_share()`** *(Pass 6)* — bumps `share_count` via a race-safe
+  `F()`-expression `.update()` (not read-modify-write), then
+  `refresh_from_db()`s just that field. Called once per `ClassroomShare`
+  row created, any channel.
+- **`share_urls() -> (web_url, deep_link)`** *(Pass 6)* — builds the
+  shareable web link and in-app deep link for this classroom from
+  `getattr(settings, "LIVECLASS_WEB_BASE_URL"/"LIVECLASS_DEEP_LINK_SCHEME",
+  <default>)` — see §10.
 
 ### `ClassSchedule` (recurrence rule → generates `ClassSession` rows)
 `classroom(FK), recurrence_type, days_of_week(JSON), day_of_month,
@@ -235,6 +243,19 @@ submitted_at, score, feedback, graded_at`
 `ClassroomReview: classroom(FK), student(FK), rating(1–5), comment,
 created_at`
 `ClassroomWishlist: user(FK), classroom(FK), created_at`
+
+### `ClassroomShare` *(Pass 6 — see §11)*
+`classroom(FK), shared_by(FK User), shared_with(FK User, nullable),
+channel, created_at`
+- `Channel`: `IN_APP / WHATSAPP / SMS / EMAIL / COPY_LINK / OTHER`
+- One row per share attempt, whatever the channel — the audit trail
+  behind `Classroom.share_count`. `shared_with` is only ever set for an
+  `IN_APP` share (a specific platform user was the target); every
+  outside-the-app channel leaves it `None` since the actual send happens
+  on the user's device, outside this app.
+- Written and its parent `share_count` bumped from
+  `ClassroomViewSet.share`; read back (aggregated by channel + a recent
+  slice) from `ClassroomViewSet.share_stats`.
 
 ### `Coupon`
 `classroom(FK), created_by(FK), code, discount_percent, discount_amount,
@@ -355,12 +376,17 @@ answer, answered_by(FK), answered_at, created_at`
 ### `Notification` — in-app bell row
 `recipient(FK), notif_type, title, message, classroom(FK, SET_NULL),
 session(FK, SET_NULL), is_read, created_at, read_at`
-- `NotifType` (21 values total): `JOIN_REQUEST_RECEIVED/ACCEPTED/
-  REJECTED, PASS_REFUNDED, SESSION_REMINDER, ASSIGNMENT_GRADED,
-  QUERY_ANSWERED, CERTIFICATE_ISSUED, WAITLIST_PROMOTED,
-  CLASSROOM_FLAGGED, NOTICE_POSTED, SESSION_LIVE, SESSION_CANCELLED,
-  ASSIGNMENT_POSTED, SUBMISSION_RECEIVED, STAFF_ADDED, REVIEW_POSTED,
-  REPORT_REVIEWED, GENERIC`
+- `NotifType` (23 values total) — corrected here to match the actual
+  model source, which had drifted from this list even before this pass:
+  `JOIN_REQUEST_RECEIVED/ACCEPTED/REJECTED, PASS_REFUNDED,
+  SESSION_REMINDER, ASSIGNMENT_GRADED, QUERY_ANSWERED,
+  CERTIFICATE_ISSUED, WAITLIST_PROMOTED, CLASSROOM_FLAGGED,
+  NOTICE_POSTED, SESSION_LIVE, SESSION_CANCELLED, ASSIGNMENT_POSTED,
+  SUBMISSION_RECEIVED, STAFF_ADDED, REVIEW_POSTED, REPORT_REVIEWED,
+  WITHDRAWAL_APPROVED, WITHDRAWAL_REJECTED, WITHDRAWAL_PAID` (these
+  three were added in Pass 5 but this list was never updated to match —
+  fixed as part of this pass), **`CLASSROOM_SHARED`** *(new, Pass 6)*,
+  `GENERIC`
 - **`mark_read()`** — sets `is_read=True` + `read_at=now()`.
 - Module helpers: **`create_notification(...)`** (single row) /
   **`create_bulk_notifications(...)`** (many recipients at once) — every
@@ -388,7 +414,7 @@ own header comment for the authoritative, always-in-sync version**
 
 | Resource | Base path | Notable actions |
 |---|---|---|
-| Classrooms | `classrooms/` | `close/`, `has-access/`, `my-pass/`, `start-or-join/`, `stats/`, `ban/`, `bans/`, `unban/{student_id}/`, `recordings/` |
+| Classrooms | `classrooms/` | `close/`, `has-access/`, `my-pass/`, `start-or-join/`, `stats/`, `ban/`, `bans/`, `unban/{student_id}/`, `recordings/`, `share/`, `share-stats/` |
 | Classroom reports | `classroom-reports/` | `{id}/review/` (staff) |
 | Schedules | `schedules/` | — |
 | Sessions | `sessions/` | `join/`, `token/`, `end/`, `kick/{user_id}/`, `mute/{user_id}/`, `hand/`, `hand/{user_id}/lower/`, `start-recording/`, `stop-recording/`, `breakout/` (GET+POST), `breakout/assign/`, `breakout/close/` |
@@ -432,6 +458,28 @@ own header comment for the authoritative, always-in-sync version**
 applied), `?mine=` (own classrooms). Malformed `min_rating`/price values
 are silently ignored, not 400'd.
 
+**`classrooms/{id}/share/`** (POST, Pass 6) — one endpoint, two modes,
+picked by whether `to_user_id` is present in the body:
+- **In-app** (`to_user_id` given): creates an in-app `Notification`
+  (`CLASSROOM_SHARED`) synchronously + queues a push via
+  `notify_classroom_shared`. `channel` is forced to `in_app` regardless
+  of what was sent.
+- **Outside the app** (`to_user_id` omitted): nothing is sent from the
+  server — returns `web_url`/`deep_link`/`share_text` for the client to
+  hand to the OS's native share sheet (WhatsApp/SMS/email/etc.).
+  `channel` here is just an analytics label, not something the endpoint
+  acts on.
+
+Either mode logs one `ClassroomShare` row and bumps `Classroom.
+share_count`. Gated by the same visibility rule as `retrieve()` (via
+`get_object()`) — if you can't see the classroom, you can't share it.
+Self-share (`to_user_id == request.user.id`) is rejected. See §11 Pass 6.
+
+**`classrooms/{id}/share-stats/`** (GET, Pass 6) — teacher/co-teacher/
+moderator only (`_can_manage_classroom`). Returns `share_count`, a
+`by_channel` breakdown, and the 50 most recent `ClassroomShare` rows.
+Not paginated — deliberately a small summary payload, not a bare list.
+
 ---
 
 ## 4. Access-control model
@@ -459,6 +507,12 @@ Core helper functions (views.py):
 **`ClassroomBan` enforcement points** (all three independently check —
 belt and suspenders): `ClassJoinRequestViewSet.perform_create`,
 `_perform_join`, `Classroom.has_access()`.
+
+**`classrooms/{id}/share/`** *(Pass 6)* deliberately introduces no new
+tier — it reuses `get_object()`'s existing visibility rule (the same
+queryset `retrieve()` uses), so "can you share it" is always exactly
+"can you already see it". `share-stats` is gated by the existing
+`_can_manage_classroom`.
 
 ---
 
@@ -548,8 +602,8 @@ commit, and avoids side effects surviving a rolled-back transaction.
 
 ## 7. Celery tasks
 
-23 tasks total in `tasks.py`, all `@shared_task(name="liveclass....")`.
-**6 are on `CELERY_BEAT_SCHEDULE`** (cron jobs); **17 are fire-and-forget
+24 tasks total in `tasks.py`, all `@shared_task(name="liveclass....")`.
+**6 are on `CELERY_BEAT_SCHEDULE`** (cron jobs); **18 are fire-and-forget
 `.delay()` notification dispatchers** called from views.py/signals.py.
 
 ### Scheduled (beat) jobs
@@ -566,7 +620,8 @@ All 6 have intervals shorter than their own lookback/staleness windows
 (no gap where a batch could be missed).
 
 ### Notification dispatchers (all `.delay()`'d, never called inline)
-`notify_waitlist_promotion`, `notify_purchase_refunded`,
+`notify_waitlist_promotion`, `notify_classroom_shared` *(Pass 6)*,
+`notify_purchase_refunded`,
 `notify_classroom_flagged`, `notify_session_auto_completed`,
 `notify_join_request_received/accepted/rejected`,
 `notify_assignment_graded`, `notify_certificate_issued`,
@@ -575,7 +630,9 @@ All 6 have intervals shorter than their own lookback/staleness windows
 `notify_submission_received`, `notify_staff_added`,
 `notify_review_posted`, `notify_report_reviewed`,
 `notify_query_answered` — each pairs with a `Notification.NotifType`
-value and calls `notifications.send_notification()`.
+value and calls `notifications.send_notification()`. (Withdrawal
+notifications are in-app only, via `create_notification()` directly in
+`views.py` — no matching Celery push task exists for those three.)
 
 ---
 
@@ -664,6 +721,8 @@ LiveKit calls and `_safe_delay` (Celery dispatch) are patched module-wide
 | 11 | **`TeacherEarningsTests`** *(added this pass)* | scoping to caller's own classrooms, no cross-teacher leakage, 403 on unowned `?classroom=`, 30-day daily-breakdown window |
 | 12 | **`ClassroomRecordingsTests`** *(added this pass)* | recorded-only filtering, teacher/enrolled-student access, 403 for no access |
 | 13 | **`ClassroomPriceRatingFilterTests`** *(added this pass)* | `min_rating`, `min_price`, `max_price`, range matching, malformed-param graceful handling |
+| 14 | `CoinWithdrawalTests` *(Pass 5 — row was missing from this table until now)* | debit-at-request, minimum-amount rejection, insufficient-balance rejection, payout_details validation (bank/UPI), self-cancel + refund, cross-user cancel forbidden, non-staff approve forbidden, full approve→mark-paid happy path, reject-requires-a-reason + refund, cannot cancel an already-approved request, staff-sees-all vs self-sees-own |
+| 15 | **`ClassroomShareTests`** *(Pass 6)* | outside-the-app share returns link + bumps `share_count` + notifies nobody, in-app share notifies target + forces `channel="in_app"`, self-share rejected, `channel="in_app"` without `to_user_id` rejected, sharing a classroom you can't see 404s, `share-stats` visible to teacher / 403 for a student |
 
 **Deliberately NOT covered** (per `tests.py`'s own module docstring):
 scheduling/recurrence generation, chat, polls, assignments grading flow
@@ -683,6 +742,15 @@ confirm these exist with real values before deploy:
   `chunked_upload_complete` entries, and (Pass 5 — see §11)
   `coin_withdrawal` (a low rate, e.g. `5/day`, is enough — this is a
   real-money-adjacent action, not a browsing endpoint)
+- `LIVECLASS_WEB_BASE_URL` *(Pass 6, optional)* — base web URL used by
+  `Classroom.share_urls()` to build `.../classroom/{id}` links; falls
+  back to a placeholder (`https://app.example.com`) via `getattr` if
+  unset, so this works out of the box in dev but MUST be set to the real
+  domain before any share link reaches an actual user.
+- `LIVECLASS_DEEP_LINK_SCHEME` *(Pass 6, optional)* — URL scheme used for
+  the in-app deep link half of `share_urls()` (e.g. `liveclass://...`);
+  falls back to `"liveclass"` via `getattr` if unset — should match
+  whatever custom scheme the Flutter app actually registers.
 - `CHUNKED_UPLOAD_TMP_ROOT` (Pass 3) — filesystem path for in-progress
   chunk assembly, deliberately outside `MEDIA_ROOT` (see §2
   `ChunkedUpload`). Local-disk only as written; a multi-instance
@@ -977,6 +1045,91 @@ for the full reasoning if needed.)
   requests — both reasonable small follow-ups if the manual approve/
   reject/mark-paid flow above turns out to be too slow at volume.
 
+### Pass 6 — share a classroom (in-app + outside-the-app)
+
+- **`models.py`** — new `ClassroomShare` model (§2, "11C"): one row per
+  share attempt, whatever the channel (`IN_APP / WHATSAPP / SMS / EMAIL /
+  COPY_LINK / OTHER`); `shared_with` is only ever set for `IN_APP`. New
+  `Classroom.share_count` field (denormalized, same pattern as
+  `rating_avg`/`enrolled_count`), bumped by the new race-safe
+  `Classroom.record_share()` (`F()`-expression update, not
+  read-modify-write — two shares landing at once can't stomp on each
+  other). New `Classroom.share_urls()` builds the web link + in-app deep
+  link from the two new `LIVECLASS_WEB_BASE_URL`/
+  `LIVECLASS_DEEP_LINK_SCHEME` settings (see §10), `getattr`-defaulted so
+  it works out of the box in dev. New `Notification.NotifType.
+  CLASSROOM_SHARED` value.
+  **While touching this list, also corrected a pre-existing drift**: §2's
+  `NotifType` value list and §7's dispatcher-task list had never been
+  updated when Pass 5 added the three `WITHDRAWAL_*` notification types —
+  both are now accurate again (see those sections).
+- **`serializers.py`** — `share_count` added to `ClassroomSerializer`
+  (read-only) and `ClassroomStatsSerializer`. New
+  `ClassroomShareSerializer` (request validation — `to_user_id` optional,
+  `channel` optional; `validate()` forces `channel="in_app"` whenever
+  `to_user_id` is given, and rejects `channel="in_app"` with no
+  `to_user_id` as a 400), `ClassroomShareResultSerializer` (response
+  shape: `share_id`/`web_url`/`deep_link`/`share_text`/`shared_with`/
+  `share_count`), and `ClassroomShareLogSerializer` (read-only history
+  row, used by `share-stats`).
+- **`views.py`** — two new `ClassroomViewSet` actions:
+  - `share` (POST) — `get_object()` already applies the viewset's normal
+    visibility rule, so a classroom you can't otherwise see 404s here
+    too, no separate check needed. Rejects self-share
+    (`to_user_id == request.user.id`). Always creates one `ClassroomShare`
+    row and calls `record_share()`. When `to_user_id` is given: calls
+    `create_notification()` synchronously (same as every other
+    `create_notification` call site in this file) for the in-app bell
+    row, then queues `notify_classroom_shared` via the existing
+    `_safe_delay` helper for the push half — never calls `.delay()`
+    unguarded, same discipline as every other `notify_*` call site.
+  - `share-stats` (GET) — gated by `_can_manage_classroom` (teacher/
+    co-teacher/moderator, same tier as `bans`/`ban`/`unban`). Returns
+    `share_count`, a channel breakdown (`.values("channel").annotate
+    (count=Count("id"))`), and the 50 most recent rows. Deliberately NOT
+    run through `pagination_class` — this is a small aggregate summary,
+    not a bare list, so DRF's page/results envelope doesn't fit it; a
+    dedicated paginated full-history endpoint can be split out later if
+    that's ever actually needed.
+  - `stats` (existing action) updated to include `share_count` in its
+    response, matching the model/serializer change.
+- **`tasks.py`** — new `notify_classroom_shared` task, mirroring
+  `notify_waitlist_promotion`'s exact pattern: takes `share_id` (not a
+  tuple of ids passed across the broker) and re-looks the row up from the
+  DB, so it always reflects exactly what the view created rather than
+  trusting values that could race against a caller mutating/deleting
+  rows — same reasoning documented on `notify_waitlist_promotion`'s own
+  NOTE (fix).
+- **`urls.py`** — no change; `share`/`share-stats` are `@action`s on the
+  already-registered `ClassroomViewSet`, so the router picks them up
+  automatically (`classroom-share`, `classroom-share-stats`).
+- **`tests.py`** — new `ClassroomShareTests`: outside-the-app share
+  returns a link containing the classroom id, bumps `share_count`, and
+  creates zero `Notification` rows; in-app share notifies the target and
+  forces `channel="in_app"` regardless of what was sent; self-share is
+  rejected (400); `channel="in_app"` with no `to_user_id` is rejected
+  (400); sharing a classroom outside your visibility (inactive, not your
+  own) 404s; `share-stats` returns correct counts/breakdown for the
+  teacher and 403s for a student.
+- **New migration needed** — one new field (`Classroom.share_count`) +
+  one new model (`ClassroomShare`). Not generated/run in this pass —
+  same reason as every other migration note in this doc (no live Django
+  project in this sandbox, see §13): run
+  `python manage.py makemigrations liveclass && python manage.py migrate`
+  against the real project.
+- **Settings needed (added to §10 above):** `LIVECLASS_WEB_BASE_URL`,
+  `LIVECLASS_DEEP_LINK_SCHEME` — both optional with working defaults, but
+  the web-base-URL default is a placeholder domain that must be
+  overridden with the real one before shipping.
+- **Not done this pass (reasonable follow-ups, out of scope per this
+  pass's request):** a per-user daily share-rate cap (the `ClassroomShare`
+  model was deliberately shaped to make this easy to add later without a
+  redesign — see its docstring in `models.py`); a "my shares" self-service
+  history endpoint (today only the teacher-facing `share-stats` exists);
+  a `share_count`-aware sort option on the Explore listing's
+  `OrderingFilter` (`ordering_fields` currently stops at `created_at`/
+  `rating_avg`/`enrolled_count`/`title`).
+
 ---
 
 ## 12. Open action items before deploy
@@ -1019,13 +1172,22 @@ what "known" means here).
     placeholder value of `1` is almost certainly wrong; set it to match
     whatever real-money rate coins are actually sold at elsewhere in the
     platform before any withdrawal is approved for real.
-12. **Consider, but not yet built:** DB connection pooling
+12. **Generate and run the Pass 6 `ClassroomShare`/`share_count`
+    migration** — see Pass 6 above; plain new field + new table, no
+    extension needed, safe on any DB backend.
+13. **Set `LIVECLASS_WEB_BASE_URL` to the real domain** (Pass 6) — the
+    `getattr` default is a placeholder (`https://app.example.com`) that
+    will silently produce dead/wrong links in every share response until
+    overridden.
+14. **Consider, but not yet built:** DB connection pooling
     (`CONN_MAX_AGE`/PgBouncer), a CDN in front of media/recording URLs,
     and a Channels/WebSocket layer for chat/raise-hand/live-poll if
     REST-polling latency becomes a real user complaint — all flagged in
     Pass 4 as bigger-scope follow-ups, not done in this pass. Coin
     top-up (buying coins with real money) — flagged in Pass 5,
-    deliberately excluded from that pass.
+    deliberately excluded from that pass. Per-user share-rate limiting,
+    a "my shares" endpoint, and `share_count` as an `Explore` sort
+    option — flagged in Pass 6, deliberately excluded from that pass.
 
 ---
 

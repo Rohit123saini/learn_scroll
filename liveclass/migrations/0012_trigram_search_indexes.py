@@ -1,9 +1,8 @@
-# liveclass/migrations/0XXX_trigram_search_indexes.py
+# liveclass/migrations/0012_trigram_search_indexes.py
 #
-# RENAME THIS FILE before running: replace "0XXX" with the next sequence
-# number after your actual latest migration in liveclass/migrations/
-# (e.g. if your last one is 0012_xxx.py, this becomes 0013_trigram_search_indexes.py).
-# Set `dependencies` below to that latest migration's (app_label, name) tuple.
+# Adds Postgres trigram (pg_trgm) GIN indexes on Classroom.title,
+# Classroom.subject, and Classroom.description for fast fuzzy/ILIKE-style
+# search.
 #
 # Postgres-only. If liveclass ever needs to run on a non-Postgres backend
 # (e.g. sqlite in a lightweight test setting), guard this migration with
@@ -12,14 +11,14 @@
 # both Postgres-specific and will fail migrate on any other backend.
 
 from django.contrib.postgres.operations import TrigramExtension
-from django.db import migrations, models
 from django.contrib.postgres.indexes import GinIndex
+from django.db import migrations
 
 
 class Migration(migrations.Migration):
 
     dependencies = [
-        # ("liveclass", "00XX_previous_migration"),  # <-- fill this in
+        ("liveclass", "0011_referral_classroomban"),
     ]
 
     operations = [
@@ -31,11 +30,15 @@ class Migration(migrations.Migration):
         TrigramExtension(),
         migrations.AddIndex(
             model_name="classroom",
-            index=GinIndex(fields=["title"], name="classroom_title_trgm", opclasses=["gin_trgm_ops"]),
+            index=GinIndex(
+                fields=["title"], name="classroom_title_trgm", opclasses=["gin_trgm_ops"]
+            ),
         ),
         migrations.AddIndex(
             model_name="classroom",
-            index=GinIndex(fields=["subject"], name="classroom_subject_trgm", opclasses=["gin_trgm_ops"]),
+            index=GinIndex(
+                fields=["subject"], name="classroom_subject_trgm", opclasses=["gin_trgm_ops"]
+            ),
         ),
         migrations.AddIndex(
             model_name="classroom",

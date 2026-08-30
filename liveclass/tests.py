@@ -55,9 +55,11 @@ from .models import (
     ClassSession,
     Classroom,
     ClassroomBan,
+    ClassroomShare,
     CoinTransaction,
     CoinWithdrawal,
     Coupon,
+    Notification,
     PassDailyCharge,
     PassPurchase,
     Referral,
@@ -1551,3 +1553,97 @@ class CoinWithdrawalTests(LiveClassTestBase):
         staff_resp = self._client_for(staff_user).get(reverse("coinwithdrawal-list"))
         staff_ids = {row["id"] for row in staff_resp.data.get("results", staff_resp.data)}
         self.assertIn(other_teacher_withdrawal.id, staff_ids)
+
+# ===========================================================================
+# 16. CLASSROOM SHARE — in-app (notifies a specific user) vs outside-the-app
+#     (just returns the link), share_count bookkeeping, and share-stats.
+# ===========================================================================
+class ClassroomShareTests(LiveClassTestBase):
+    def setUp(self):
+        super().setUp()
+        self.friend = User.objects.create_user(username="friend1", password="pass12345")
+
+    def _client_for(self, user):
+        client = APIClient()
+        client.force_authenticate(user)
+        return client
+
+    def test_outside_app_share_returns_link_and_bumps_count_without_notifying_anyone(self):
+        url = reverse("classroom-share", args=[self.classroom.pk])
+        resp = self._client_for(self.student).post(url, {"channel": "whatsapp"}, format="json")
+
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
+        self.assertIn(str(self.classroom.pk), resp.data["deep_link"])
+        self.assertIn(str(self.classroom.pk), resp.data["web_url"])
+        self.assertIsNone(resp.data["shared_with"])
+        self.assertEqual(resp.data["share_count"], 1)
+
+        self.classroom.refresh_from_db()
+        self.assertEqual(self.classroom.share_count, 1)
+
+        share = ClassroomShare.objects.get(classroom=self.classroom, shared_by=self.student)
+        self.assertEqual(share.channel, ClassroomShare.Channel.WHATSAPP)
+        self.assertIsNone(share.shared_with)
+        # Outside-the-app share must not create any in-app notification —
+        # nobody on the platform was actually the target.
+        self.assertFalse(Notification.objects.filter(classroom=self.classroom).exists())
+
+    def test_in_app_share_notifies_target_user_and_forces_channel(self):
+        url = reverse("classroom-share", args=[self.classroom.pk])
+        resp = self._client_for(self.student).post(
+            url, {"to_user_id": self.friend.id, "channel": "copy_link"}, format="json"
+        )
+
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(resp.data["shared_with"]["id"], self.friend.id)
+
+        share = ClassroomShare.objects.get(classroom=self.classroom, shared_by=self.student)
+        # channel is forced to in_app whenever a target user is given,
+        # regardless of what the client sent — see ClassroomShareSerializer.
+        self.assertEqual(share.channel, ClassroomShare.Channel.IN_APP)
+        self.assertEqual(share.shared_with, self.friend)
+
+        notif = Notification.objects.get(recipient=self.friend, classroom=self.classroom)
+        self.assertEqual(notif.notif_type, Notification.NotifType.CLASSROOM_SHARED)
+
+    def test_cannot_share_with_self(self):
+        url = reverse("classroom-share", args=[self.classroom.pk])
+        resp = self._client_for(self.student).post(
+            url, {"to_user_id": self.student.id}, format="json"
+        )
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_in_app_channel_without_target_user_is_rejected(self):
+        url = reverse("classroom-share", args=[self.classroom.pk])
+        resp = self._client_for(self.student).post(url, {"channel": "in_app"}, format="json")
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_cannot_share_a_classroom_you_cannot_see(self):
+        # A random unaffiliated user shouldn't be able to share (or even
+        # find) a classroom that isn't theirs and that they've never
+        # accessed — same visibility gate as get_object()/retrieve().
+        other_classroom = Classroom.objects.create(
+            teacher=self.other_teacher, title="Private-ish Batch", is_active=False
+        )
+        url = reverse("classroom-share", args=[other_classroom.pk])
+        resp = self._client_for(self.student).post(url, {}, format="json")
+        self.assertEqual(resp.status_code, status.HTTP_404_NOT_FOUND)
+
+    def test_share_stats_visible_to_teacher_forbidden_to_student(self):
+        share_url = reverse("classroom-share", args=[self.classroom.pk])
+        self._client_for(self.student).post(share_url, {"channel": "sms"}, format="json")
+        self._client_for(self.student).post(
+            share_url, {"to_user_id": self.friend.id}, format="json"
+        )
+
+        stats_url = reverse("classroom-share-stats", args=[self.classroom.pk])
+
+        teacher_resp = self._client_for(self.teacher).get(stats_url)
+        self.assertEqual(teacher_resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(teacher_resp.data["share_count"], 2)
+        self.assertEqual(teacher_resp.data["by_channel"]["sms"], 1)
+        self.assertEqual(teacher_resp.data["by_channel"]["in_app"], 1)
+        self.assertEqual(len(teacher_resp.data["recent"]), 2)
+
+        student_resp = self._client_for(self.student).get(stats_url)
+        self.assertEqual(student_resp.status_code, status.HTTP_403_FORBIDDEN)
