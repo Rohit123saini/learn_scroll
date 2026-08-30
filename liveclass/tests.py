@@ -56,6 +56,7 @@ from .models import (
     Classroom,
     ClassroomBan,
     CoinTransaction,
+    CoinWithdrawal,
     Coupon,
     PassDailyCharge,
     PassPurchase,
@@ -1363,3 +1364,190 @@ class ClassroomPriceRatingFilterTests(LiveClassTestBase):
         titles = {row["title"] for row in resp.data.get("results", resp.data)}
         self.assertIn(self.classroom.title, titles)
         self.assertIn(self.budget_classroom.title, titles)
+
+# ---------------------------------------------------------------------------
+# COIN WITHDRAWAL (payout of a real, earned coin balance) — new in this
+# pass. Covers: the debit-at-request-time balance math, minimum-amount and
+# payout_details validation, the four staff/self-service actions
+# (cancel/approve/reject/mark-paid), and that coins are actually refunded on
+# reject/cancel and NOT moved again on approve/mark-paid.
+# ---------------------------------------------------------------------------
+class CoinWithdrawalTests(LiveClassTestBase):
+    def setUp(self):
+        super().setUp()
+        # self.teacher has no starting coin balance in the base fixture —
+        # give it one, as if class-earning charges had already credited it.
+        self.teacher.coin = 500
+        self.teacher.save(update_fields=["coin"])
+        self.bank_details = {
+            "account_holder": "Teacher One",
+            "account_number": "1234567890",
+            "ifsc": "HDFC0000123",
+        }
+
+    def _client_for(self, user):
+        client = APIClient()
+        client.force_authenticate(user)
+        return client
+
+    def test_request_debits_coins_immediately(self):
+        client = self._client_for(self.teacher)
+        resp = client.post(
+            reverse("coinwithdrawal-list"),
+            {"coins": 200, "payout_method": "bank_transfer", "payout_details": self.bank_details},
+            format="json",
+        )
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
+        self.teacher.refresh_from_db()
+        self.assertEqual(self.teacher.coin, 300)
+        self.assertEqual(resp.data["status"], CoinWithdrawal.Status.PENDING)
+        self.assertTrue(
+            CoinTransaction.objects.filter(
+                user=self.teacher, reason=CoinTransaction.Reason.WITHDRAWAL, amount=200
+            ).exists()
+        )
+
+    def test_cannot_request_below_minimum(self):
+        client = self._client_for(self.teacher)
+        resp = client.post(
+            reverse("coinwithdrawal-list"),
+            {"coins": 10, "payout_method": "bank_transfer", "payout_details": self.bank_details},
+            format="json",
+        )
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+        self.teacher.refresh_from_db()
+        self.assertEqual(self.teacher.coin, 500)  # untouched
+
+    def test_cannot_request_more_than_balance(self):
+        client = self._client_for(self.teacher)
+        resp = client.post(
+            reverse("coinwithdrawal-list"),
+            {"coins": 999, "payout_method": "bank_transfer", "payout_details": self.bank_details},
+            format="json",
+        )
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+        self.teacher.refresh_from_db()
+        self.assertEqual(self.teacher.coin, 500)
+
+    def test_upi_request_requires_upi_id(self):
+        client = self._client_for(self.teacher)
+        resp = client.post(
+            reverse("coinwithdrawal-list"),
+            {"coins": 200, "payout_method": "upi", "payout_details": {}},
+            format="json",
+        )
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_bank_request_missing_ifsc_rejected(self):
+        client = self._client_for(self.teacher)
+        bad_details = {"account_holder": "Teacher One", "account_number": "1234567890"}
+        resp = client.post(
+            reverse("coinwithdrawal-list"),
+            {"coins": 200, "payout_method": "bank_transfer", "payout_details": bad_details},
+            format="json",
+        )
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_user_can_cancel_own_pending_request_and_gets_coins_back(self):
+        client = self._client_for(self.teacher)
+        create_resp = client.post(
+            reverse("coinwithdrawal-list"),
+            {"coins": 200, "payout_method": "bank_transfer", "payout_details": self.bank_details},
+            format="json",
+        )
+        withdrawal_id = create_resp.data["id"]
+        resp = client.post(reverse("coinwithdrawal-cancel", args=[withdrawal_id]), {}, format="json")
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.teacher.refresh_from_db()
+        self.assertEqual(self.teacher.coin, 500)
+        self.assertEqual(resp.data["status"], CoinWithdrawal.Status.CANCELLED)
+
+    def test_user_cannot_cancel_someone_elses_request(self):
+        withdrawal = CoinWithdrawal.create_request(
+            self.teacher, 200, CoinWithdrawal.PayoutMethod.BANK_TRANSFER, self.bank_details
+        )
+        client = self._client_for(self.student)
+        resp = client.post(reverse("coinwithdrawal-cancel", args=[withdrawal.pk]), {}, format="json")
+        self.assertEqual(resp.status_code, status.HTTP_403_FORBIDDEN)
+
+    def test_non_staff_cannot_approve(self):
+        withdrawal = CoinWithdrawal.create_request(
+            self.teacher, 200, CoinWithdrawal.PayoutMethod.BANK_TRANSFER, self.bank_details
+        )
+        client = self._client_for(self.teacher)
+        resp = client.post(reverse("coinwithdrawal-approve", args=[withdrawal.pk]), {}, format="json")
+        self.assertEqual(resp.status_code, status.HTTP_403_FORBIDDEN)
+
+    def test_staff_approve_then_mark_paid_moves_no_coins_again(self):
+        withdrawal = CoinWithdrawal.create_request(
+            self.teacher, 200, CoinWithdrawal.PayoutMethod.BANK_TRANSFER, self.bank_details
+        )
+        staff_user = User.objects.create_user(username="staff1", password="pass12345", is_staff=True)
+        client = self._client_for(staff_user)
+
+        approve_resp = client.post(reverse("coinwithdrawal-approve", args=[withdrawal.pk]), {}, format="json")
+        self.assertEqual(approve_resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(approve_resp.data["status"], CoinWithdrawal.Status.APPROVED)
+
+        paid_resp = client.post(
+            reverse("coinwithdrawal-mark-paid", args=[withdrawal.pk]),
+            {"external_reference": "UTR123456"},
+            format="json",
+        )
+        self.assertEqual(paid_resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(paid_resp.data["status"], CoinWithdrawal.Status.PAID)
+
+        self.teacher.refresh_from_db()
+        # Coins were already debited at request time — approve/mark-paid must
+        # not touch the wallet again.
+        self.assertEqual(self.teacher.coin, 300)
+
+    def test_staff_reject_refunds_coins_and_requires_reason(self):
+        withdrawal = CoinWithdrawal.create_request(
+            self.teacher, 200, CoinWithdrawal.PayoutMethod.BANK_TRANSFER, self.bank_details
+        )
+        staff_user = User.objects.create_user(username="staff2", password="pass12345", is_staff=True)
+        client = self._client_for(staff_user)
+
+        no_reason_resp = client.post(reverse("coinwithdrawal-reject", args=[withdrawal.pk]), {}, format="json")
+        self.assertEqual(no_reason_resp.status_code, status.HTTP_400_BAD_REQUEST)
+
+        resp = client.post(
+            reverse("coinwithdrawal-reject", args=[withdrawal.pk]),
+            {"reason": "Bank details could not be verified."},
+            format="json",
+        )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(resp.data["status"], CoinWithdrawal.Status.REJECTED)
+        self.teacher.refresh_from_db()
+        self.assertEqual(self.teacher.coin, 500)  # refunded in full
+
+    def test_cannot_cancel_already_approved_request(self):
+        withdrawal = CoinWithdrawal.create_request(
+            self.teacher, 200, CoinWithdrawal.PayoutMethod.BANK_TRANSFER, self.bank_details
+        )
+        staff_user = User.objects.create_user(username="staff3", password="pass12345", is_staff=True)
+        self._client_for(staff_user).post(reverse("coinwithdrawal-approve", args=[withdrawal.pk]), {}, format="json")
+
+        client = self._client_for(self.teacher)
+        resp = client.post(reverse("coinwithdrawal-cancel", args=[withdrawal.pk]), {}, format="json")
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_staff_sees_all_requests_non_staff_sees_only_own(self):
+        self.other_teacher.coin = 150
+        self.other_teacher.save(update_fields=["coin"])
+        CoinWithdrawal.create_request(
+            self.teacher, 200, CoinWithdrawal.PayoutMethod.BANK_TRANSFER, self.bank_details
+        )
+        other_teacher_withdrawal = CoinWithdrawal.create_request(
+            self.other_teacher, 150, CoinWithdrawal.PayoutMethod.UPI, {"upi_id": "other@upi"}
+        )
+
+        own_only_resp = self._client_for(self.teacher).get(reverse("coinwithdrawal-list"))
+        own_ids = {row["id"] for row in own_only_resp.data.get("results", own_only_resp.data)}
+        self.assertNotIn(other_teacher_withdrawal.id, own_ids)
+
+        staff_user = User.objects.create_user(username="staff4", password="pass12345", is_staff=True)
+        staff_resp = self._client_for(staff_user).get(reverse("coinwithdrawal-list"))
+        staff_ids = {row["id"] for row in staff_resp.data.get("results", staff_resp.data)}
+        self.assertIn(other_teacher_withdrawal.id, staff_ids)

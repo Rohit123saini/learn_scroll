@@ -36,6 +36,7 @@ from .models import (
     ClassroomStaff,
     ClassroomWishlist,
     CoinTransaction,
+    CoinWithdrawal,
     Coupon,
     LivePoll,
     Notice,
@@ -687,6 +688,52 @@ class CoinTransactionSerializer(serializers.ModelSerializer):
             "balance_after", "reference_id", "created_at",
         ]
         read_only_fields = fields  # entirely system-generated, never client-writable
+
+
+# ---------------------------------------------------------------------------
+# 13C. COIN WITHDRAWAL — payout of a user's real, earned coin balance.
+# `payout_details` shape depends on `payout_method`; validated here so a
+# malformed/incomplete payload never reaches the model layer:
+#   bank_transfer -> {"account_holder", "account_number", "ifsc"}
+#   upi           -> {"upi_id"}
+# ---------------------------------------------------------------------------
+class CoinWithdrawalSerializer(serializers.ModelSerializer):
+    user = UserMiniSerializer(read_only=True)
+
+    class Meta:
+        model = CoinWithdrawal
+        fields = [
+            "id", "user", "coins", "amount_inr", "payout_method", "payout_details",
+            "status", "admin_note", "external_reference",
+            "reviewed_by", "requested_at", "reviewed_at", "paid_at",
+        ]
+        read_only_fields = [
+            "id", "user", "amount_inr", "status", "admin_note", "external_reference",
+            "reviewed_by", "requested_at", "reviewed_at", "paid_at",
+        ]
+
+    def validate_coins(self, value):
+        if value < CoinWithdrawal.MIN_WITHDRAWAL_COINS:
+            raise serializers.ValidationError(
+                f"Minimum withdrawal is {CoinWithdrawal.MIN_WITHDRAWAL_COINS} coins."
+            )
+        return value
+
+    def validate(self, attrs):
+        method = attrs.get("payout_method")
+        details = attrs.get("payout_details") or {}
+        if method == CoinWithdrawal.PayoutMethod.BANK_TRANSFER:
+            required = {"account_holder", "account_number", "ifsc"}
+        elif method == CoinWithdrawal.PayoutMethod.UPI:
+            required = {"upi_id"}
+        else:
+            raise serializers.ValidationError({"payout_method": "Unsupported payout method."})
+        missing = required - details.keys()
+        if missing:
+            raise serializers.ValidationError(
+                {"payout_details": f"Missing required field(s) for {method}: {', '.join(sorted(missing))}."}
+            )
+        return attrs
 
 
 # ---------------------------------------------------------------------------

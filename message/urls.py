@@ -1,42 +1,52 @@
-# message/middleware.py
+# message/urls.py
 """
-Django Channels ka default AuthMiddlewareStack sirf session/cookie auth
-samajhta hai. Tera REST_FRAMEWORK settings.py me sirf JWTAuthentication use
-karta hai, matlab client (mobile app / SPA) cookie nahi, JWT access-token
-bhejta hai. Isliye websocket connect hote hi query-string se token nikal ke
-verify karna padta hai, warna scope['user'] hamesha AnonymousUser rahega.
+NOTE FROM THIS REBUILD:
+    Yeh file poori tarah reconstruct nahi ho payi hai kyunki `message` app
+    ka core `views.py` (jisme Conversation/Message ViewSets hongi) abhi
+    tak upload nahi hui — jo files milin unme baar-baar `middleware.py`
+    (JWTAuthMiddleware) ya `liveclass/views.py` galti se aa gayi.
 
-CLIENT connect karega:
-    wss://yourdomain.com/ws/chat/<conversation_id>/?token=<JWT_ACCESS_TOKEN>
+    Jo cheez CONFIRM ho chuki hai aur isme daal di gayi hai:
+        - AiStudyRoomView (message/views_ai.py) -> POST /ai-study-room/
+
+    Jo abhi TODO hai (neeche saaf marked hai):
+        - Conversation list/detail
+        - Message list/create/send
+        - DeviceToken registration (push ke liye, notifications.py me
+          reference hai message.push_utils.send_push_to_users ka, jiska
+          matlab kahin DeviceToken register karne ka endpoint zaroor
+          hoga)
+
+    Jab asli `message/views.py` mil jaye, TODO wale section me sirf apne
+    real ViewSet/View class names daal dena — structure yeh raise-ready
+    hai.
 """
-from urllib.parse import parse_qs
 
-from channels.db import database_sync_to_async
-from channels.middleware import BaseMiddleware
-from django.contrib.auth.models import AnonymousUser
-from rest_framework_simplejwt.exceptions import InvalidToken, TokenError
-from rest_framework_simplejwt.tokens import AccessToken
+from django.urls import path, include
+from rest_framework.routers import DefaultRouter
 
+from .views_ai import AiStudyRoomView
 
-@database_sync_to_async
-def get_user_from_token(token):
-    from django.contrib.auth import get_user_model
-    User = get_user_model()  # yahi tera AUTH_USER_MODEL = "login.User" resolve karega
-    try:
-        validated_token = AccessToken(token)
-        user_id = validated_token['user_id']
-        return User.objects.get(id=user_id, is_active=True)
-    except (InvalidToken, TokenError, User.DoesNotExist, KeyError):
-        return AnonymousUser()
+# -----------------------------------------------------------------------
+# TODO: yahan apne asli message/views.py se imports daalo, jaise:
+# from .views import ConversationViewSet, MessageViewSet, DeviceTokenViewSet
+# -----------------------------------------------------------------------
 
+router = DefaultRouter()
 
-class JWTAuthMiddleware(BaseMiddleware):
-    async def __call__(self, scope, receive, send):
-        query_string = parse_qs(scope.get('query_string', b'').decode())
-        token = query_string.get('token', [None])[0]
+# TODO: apne real ViewSets yahan register karo, jaise:
+# router.register(r"conversations", ConversationViewSet, basename="conversation")
+# router.register(r"messages", MessageViewSet, basename="message")
+# router.register(r"device-tokens", DeviceTokenViewSet, basename="device-token")
 
-        scope['user'] = AnonymousUser()
-        if token:
-            scope['user'] = await get_user_from_token(token)
+urlpatterns = [
+    path("", include(router.urls)),
 
-        return await super().__call__(scope, receive, send)
+    # --- CONFIRMED: AI Study Room (summary/quiz generation from board content) ---
+    path("ai-study-room/", AiStudyRoomView.as_view(), name="ai-study-room"),
+
+    # TODO: koi bhi plain APIView (router se auto-wire nahi hoti) yahan
+    # manually add karo, jaise teacher-earnings ko liveclass/urls.py me
+    # kiya gaya tha:
+    # path("some-plain-view/", SomePlainView.as_view(), name="some-plain-view"),
+]

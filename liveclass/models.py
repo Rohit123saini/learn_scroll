@@ -39,6 +39,7 @@ import uuid
 from django.core.cache import cache
 from django.core.exceptions import ValidationError
 from django.core.validators import FileExtensionValidator, MaxValueValidator, MinValueValidator
+from django.contrib.postgres.indexes import GinIndex
 from django.db import models, transaction
 from django.db.models import F
 from django.db.models.functions import Greatest
@@ -90,6 +91,41 @@ def bump_classroom_list_cache_version() -> None:
     except ValueError:
         # Key doesn't exist yet (cold cache / cache was cleared) — seed it.
         cache.set(CLASSROOM_LIST_CACHE_VERSION_KEY, 2, timeout=None)
+
+
+# ---------------------------------------------------------------------------
+# PER-CLASSROOM NOTICE LIST CACHE VERSIONING
+#
+# NOTE (perf — fix): NoticeViewSet.list is read far more often than it's
+# written (every enrolled student re-checks a classroom's notice board
+# regularly; a teacher posts a handful of notices total). It was hitting
+# the DB on every single request with no caching at all — same shape of gap
+# as the Classroom Explore/search list before it got the version-based
+# cache above, just scoped to one classroom's notices instead of the whole
+# platform. Same pattern reused here rather than inventing a new one: one
+# version counter PER CLASSROOM (not global — bumping one classroom's
+# notices shouldn't invalidate every other classroom's cached notice page),
+# bumped from a single Notice post_save/post_delete receiver below.
+# ---------------------------------------------------------------------------
+def _notice_list_cache_version_key(classroom_id) -> str:
+    return f"liveclass:notice_list:cache_version:{classroom_id}"
+
+
+def get_notice_list_cache_version(classroom_id) -> int:
+    key = _notice_list_cache_version_key(classroom_id)
+    version = cache.get(key)
+    if version is None:
+        version = 1
+        cache.set(key, version, timeout=None)
+    return version
+
+
+def bump_notice_list_cache_version(classroom_id) -> None:
+    key = _notice_list_cache_version_key(classroom_id)
+    try:
+        cache.incr(key)
+    except ValueError:
+        cache.set(key, 2, timeout=None)
 
 
 # ---------------------------------------------------------------------------
@@ -244,6 +280,23 @@ class Classroom(models.Model):
             models.Index(fields=["language"]),
             models.Index(fields=["classroom_type"]),
             models.Index(fields=["is_deleted"]),
+            # NOTE (perf — fix): ClassroomViewSet.get_queryset's ?search=
+            # does `title__icontains` / `subject__icontains` /
+            # `description__icontains`, each of which is a sequential scan
+            # over every Classroom row — fine at hundreds of rows, a real
+            # cost once the platform has thousands. A trigram GIN index lets
+            # Postgres use an index scan for icontains/substring matches
+            # instead. Requires the `pg_trgm` extension (enabled via a
+            # migration — see migrations/0XXX_trigram_search_indexes.py in
+            # the same change) and Postgres as the DB backend; this index is
+            # silently ignored (not an error) on any other backend, so it's
+            # safe to leave in Meta.indexes even if a non-Postgres DB is
+            # ever used in a test/dev environment.
+            GinIndex(fields=["title"], name="classroom_title_trgm", opclasses=["gin_trgm_ops"]),
+            GinIndex(fields=["subject"], name="classroom_subject_trgm", opclasses=["gin_trgm_ops"]),
+            GinIndex(
+                fields=["description"], name="classroom_desc_trgm", opclasses=["gin_trgm_ops"]
+            ),
         ]
 
     def __str__(self):
@@ -1272,6 +1325,8 @@ class CoinTransaction(models.Model):
         REFUND = "refund", "Refund"
         ADMIN_ADJUSTMENT = "admin_adjustment", "Admin Adjustment"
         TOPUP = "topup", "Wallet Top-up"
+        WITHDRAWAL = "withdrawal", "Withdrawal"  # debited the moment a CoinWithdrawal request is made
+        WITHDRAWAL_REVERSED = "withdrawal_reversed", "Withdrawal Reversed"  # credited back on reject/cancel
 
     user = models.ForeignKey(User, on_delete=models.CASCADE, related_name="coin_transactions")
 
@@ -1347,6 +1402,178 @@ class Referral(models.Model):
 
     def __str__(self):
         return f"{self.referrer} referred {self.referred}"
+
+
+# ---------------------------------------------------------------------------
+# 13C. COIN WITHDRAWAL (cash-out of a real, earned coin balance to a bank
+#      account / UPI id — the off-ramp this app was missing)
+#
+# GAP THIS CLOSES: CoinTransaction.Reason.CLASS_EARNING already credits a
+# teacher's User.coin balance one calendar day at a time as classes actually
+# happen (see PassPurchase.charge_for_session above), and REFERRAL_BONUS
+# credits it too — but until now there was NO way for that balance to ever
+# leave the platform as real money. A teacher could earn coins forever and
+# never be able to withdraw them. This model + CoinWithdrawalViewSet (views.py)
+# is that missing off-ramp. Coin TOP-UP (real money -> coins, i.e. buying
+# coins) is deliberately OUT of scope here per product decision — this only
+# covers coins -> real money, the direction that was actually missing.
+#
+# Design mirrors PassPurchase.reverse()'s pattern: debit eagerly at REQUEST
+# time (so a user can't request the same coins twice while a request is
+# pending, without needing a separate "coins on hold" bookkeeping field),
+# refund on reject/cancel, no further coin movement on approve/mark_paid
+# (the coins already left the wallet the moment the request was made — all
+# that's left is the actual bank/UPI transfer, done OUTSIDE this app by
+# finance/admin, then recorded here for audit).
+# ---------------------------------------------------------------------------
+class CoinWithdrawal(models.Model):
+    class Status(models.TextChoices):
+        PENDING = "pending", "Pending"
+        APPROVED = "approved", "Approved"  # admin approved, payout not sent yet
+        REJECTED = "rejected", "Rejected"  # coins refunded back to wallet
+        PAID = "paid", "Paid"  # payout actually sent (external to this app)
+        CANCELLED = "cancelled", "Cancelled"  # user cancelled their own request
+
+    class PayoutMethod(models.TextChoices):
+        BANK_TRANSFER = "bank_transfer", "Bank Transfer"
+        UPI = "upi", "UPI"
+
+    # Coins earned genuinely have a real INR value the moment they're
+    # credited via CLASS_EARNING (they're what a student actually paid for a
+    # pass) — COIN_TO_INR_RATE is the single conversion constant the whole
+    # withdrawal flow (validation, serializer display, admin payout amount)
+    # reads from, so it only ever needs to change in one place.
+    COIN_TO_INR_RATE = 1  # 1 coin == this many INR; adjust to match the actual coin pricing used when passes are priced
+    MIN_WITHDRAWAL_COINS = 100  # below this, a bank/UPI transfer typically costs more in fees than the payout itself
+
+    user = models.ForeignKey(User, on_delete=models.CASCADE, related_name="coin_withdrawals")
+
+    coins = models.PositiveIntegerField()
+    amount_inr = models.DecimalField(max_digits=10, decimal_places=2)  # coins * COIN_TO_INR_RATE, snapshotted at request time so a later rate change never rewrites history
+
+    payout_method = models.CharField(max_length=20, choices=PayoutMethod.choices)
+    # Bank: {"account_holder", "account_number", "ifsc"}. UPI: {"upi_id"}.
+    # Validated by CoinWithdrawalSerializer against payout_method at request
+    # time — kept as JSON (not separate columns) so adding a payout method
+    # later (e.g. a wallet provider) never needs a migration.
+    payout_details = models.JSONField()
+
+    status = models.CharField(max_length=20, choices=Status.choices, default=Status.PENDING)
+    admin_note = models.TextField(blank=True)  # rejection reason, or any payout note
+    external_reference = models.CharField(max_length=100, blank=True)  # bank UTR / UPI txn id, filled in on mark_paid
+
+    reviewed_by = models.ForeignKey(
+        User, on_delete=models.SET_NULL, null=True, blank=True, related_name="coin_withdrawals_reviewed"
+    )
+    requested_at = models.DateTimeField(auto_now_add=True)
+    reviewed_at = models.DateTimeField(null=True, blank=True)
+    paid_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        ordering = ["-requested_at"]
+        indexes = [models.Index(fields=["status", "requested_at"])]
+
+    def __str__(self):
+        return f"{self.user} withdraw {self.coins} coins ({self.status})"
+
+    @classmethod
+    def create_request(cls, user, coins: int, payout_method: str, payout_details: dict) -> "CoinWithdrawal":
+        """The only supported way to create a withdrawal request — debits
+        the coins from the wallet in the SAME transaction as creating the
+        row, so the balance check and the debit can never race each other
+        (two concurrent requests both reading a stale `user.coin` and both
+        passing validation). Caller (the view) does the permission check;
+        this does the money-moving + row-locking.
+        """
+        if coins < cls.MIN_WITHDRAWAL_COINS:
+            raise ValidationError(
+                f"Minimum withdrawal is {cls.MIN_WITHDRAWAL_COINS} coins."
+            )
+        with transaction.atomic():
+            locked_user = type(user).objects.select_for_update().get(pk=user.pk)
+            if locked_user.coin < coins:
+                raise ValidationError(
+                    f"Insufficient balance — you have {locked_user.coin} coins, requested {coins}."
+                )
+            locked_user.coin -= coins
+            locked_user.save(update_fields=["coin"])
+            CoinTransaction.objects.create(
+                user=locked_user,
+                txn_type=CoinTransaction.TxnType.DEBIT,
+                reason=CoinTransaction.Reason.WITHDRAWAL,
+                amount=coins,
+                balance_after=locked_user.coin,
+                reference_id="withdrawal:pending",  # backfilled to the real id right after creation, below
+            )
+            withdrawal = cls.objects.create(
+                user=locked_user,
+                coins=coins,
+                amount_inr=coins * cls.COIN_TO_INR_RATE,
+                payout_method=payout_method,
+                payout_details=payout_details,
+            )
+            CoinTransaction.objects.filter(
+                user=locked_user, reference_id="withdrawal:pending"
+            ).order_by("-created_at").update(reference_id=f"withdrawal:{withdrawal.id}")
+        return withdrawal
+
+    def _refund_coins(self, reason_note: str) -> None:
+        """Shared by reject() and cancel() — gives the debited coins back.
+        Caller must already hold a row lock on self (select_for_update) and
+        run inside transaction.atomic(), same contract as PassPurchase.reverse().
+        """
+        user = type(self.user).objects.select_for_update().get(pk=self.user_id)
+        user.coin += self.coins
+        user.save(update_fields=["coin"])
+        CoinTransaction.objects.create(
+            user=user,
+            txn_type=CoinTransaction.TxnType.CREDIT,
+            reason=CoinTransaction.Reason.WITHDRAWAL_REVERSED,
+            amount=self.coins,
+            balance_after=user.coin,
+            reference_id=f"withdrawal:{self.id}",
+        )
+        if reason_note:
+            self.admin_note = reason_note
+
+    def approve(self, admin_user) -> None:
+        """Marks intent to pay — no coin movement (already debited at
+        request time). The actual transfer happens outside this app; call
+        mark_paid() once it's done."""
+        if self.status != self.Status.PENDING:
+            raise ValidationError(f"This request is already {self.get_status_display().lower()}.")
+        self.status = self.Status.APPROVED
+        self.reviewed_by = admin_user
+        self.reviewed_at = timezone.now()
+        self.save(update_fields=["status", "reviewed_by", "reviewed_at"])
+
+    def reject(self, admin_user, reason: str) -> None:
+        if self.status not in (self.Status.PENDING, self.Status.APPROVED):
+            raise ValidationError(f"This request is already {self.get_status_display().lower()}.")
+        self._refund_coins(reason)
+        self.status = self.Status.REJECTED
+        self.reviewed_by = admin_user
+        self.reviewed_at = timezone.now()
+        self.save(update_fields=["status", "admin_note", "reviewed_by", "reviewed_at"])
+
+    def cancel(self) -> None:
+        """User-initiated: only while still PENDING (once an admin has
+        APPROVED it, a payout may already be in flight — cancel through
+        support instead)."""
+        if self.status != self.Status.PENDING:
+            raise ValidationError(f"This request is already {self.get_status_display().lower()}.")
+        self._refund_coins("Cancelled by user.")
+        self.status = self.Status.CANCELLED
+        self.save(update_fields=["status", "admin_note"])
+
+    def mark_paid(self, admin_user, external_reference: str) -> None:
+        if self.status != self.Status.APPROVED:
+            raise ValidationError("Only an approved request can be marked paid.")
+        self.status = self.Status.PAID
+        self.external_reference = external_reference
+        self.reviewed_by = admin_user
+        self.paid_at = timezone.now()
+        self.save(update_fields=["status", "external_reference", "reviewed_by", "paid_at"])
 
 
 # ---------------------------------------------------------------------------
@@ -1693,6 +1920,11 @@ class Notification(models.Model):
         STAFF_ADDED = "staff_added", "Added As Staff"
         REVIEW_POSTED = "review_posted", "New Review"
         REPORT_REVIEWED = "report_reviewed", "Report Reviewed"
+        # NOTE (feature add — coin withdrawal / payout): see CoinWithdrawal
+        # in this file and CoinWithdrawalViewSet in views.py.
+        WITHDRAWAL_APPROVED = "withdrawal_approved", "Withdrawal Approved"
+        WITHDRAWAL_REJECTED = "withdrawal_rejected", "Withdrawal Rejected"
+        WITHDRAWAL_PAID = "withdrawal_paid", "Withdrawal Paid"
         GENERIC = "generic", "Generic"
 
     recipient = models.ForeignKey(User, on_delete=models.CASCADE, related_name="notifications")
@@ -1891,6 +2123,23 @@ def _bump_classroom_list_cache(sender, instance, **kwargs):
     on every delete, so the cached list can never drift from what's
     actually in the DB by more than the time it takes this signal to run."""
     bump_classroom_list_cache_version()
+
+
+@receiver(post_save, sender=Notice)
+@receiver(post_delete, sender=Notice)
+def _bump_notice_list_cache(sender, instance, **kwargs):
+    """Invalidates the cached notice-board page for this notice's
+    classroom only — see the PER-CLASSROOM NOTICE LIST CACHE VERSIONING
+    note near the top of this file. Also fires on the expires_at auto-hide
+    boundary being crossed only if something re-saves the row at that
+    point (nothing currently does) — same known limitation as
+    Classroom.enrolled_count going stale on pure time-based expiry; a
+    reasonable follow-up is a short TTL on top of this (see
+    NoticeViewSet.LIST_CACHE_TTL_SECONDS) rather than a new sweep task,
+    since a notice going stale by a few minutes is low-stakes compared to
+    money/access state.
+    """
+    bump_notice_list_cache_version(instance.classroom_id)
 
 
 @receiver(post_save, sender=ClassroomReview)

@@ -680,7 +680,9 @@ confirm these exist with real values before deploy:
 - `REST_FRAMEWORK["DEFAULT_THROTTLE_RATES"]` — needs `session_join`,
   `session_token`, `coupon_validate`, `chat_message_create`, and
   (Pass 3) `chunked_upload_init`, `chunked_upload_chunk`,
-  `chunked_upload_complete` entries
+  `chunked_upload_complete` entries, and (Pass 5 — see §11)
+  `coin_withdrawal` (a low rate, e.g. `5/day`, is enough — this is a
+  real-money-adjacent action, not a browsing endpoint)
 - `CHUNKED_UPLOAD_TMP_ROOT` (Pass 3) — filesystem path for in-progress
   chunk assembly, deliberately outside `MEDIA_ROOT` (see §2
   `ChunkedUpload`). Local-disk only as written; a multi-instance
@@ -851,6 +853,130 @@ for the full reasoning if needed.)
   coverage added for the new endpoints (`tests.py` untouched this
   pass).
 
+### Pass 4 — performance follow-up (search index + notice-board caching)
+- **`models.py`** — added 3 Postgres trigram (`GinIndex`, `gin_trgm_ops`)
+  indexes on `Classroom.title` / `subject` / `description`. The
+  `?search=` filter in `ClassroomViewSet.get_queryset` does
+  `__icontains` across all three — a sequential scan today, fine at
+  hundreds of rows, a real cost once the platform has thousands. Also
+  added a new per-classroom notice-list cache-version helper pair
+  (`get_notice_list_cache_version` / `bump_notice_list_cache_version`,
+  same O(1) invalidation pattern as the existing classroom-list
+  versioning) and a `Notice` post_save/post_delete receiver that bumps
+  it.
+- **New migration `migrations/0XXX_trigram_search_indexes.py`** —
+  **file name is a placeholder**: rename `0XXX` to the next sequence
+  number after this project's actual latest `liveclass` migration, and
+  fill in `dependencies`. Runs `TrigramExtension()` (enables Postgres's
+  `pg_trgm`) then adds the 3 indexes above. Postgres-only — will fail
+  `migrate` on any other DB backend; see in-file note re: RDS vs
+  self-managed Postgres extension privileges. **Not yet generated
+  against a real project or run** — same environment limitation as the
+  rest of this doc (§13): no live Django project here to run
+  `makemigrations`/`migrate` against, so this was hand-written to match
+  what `makemigrations` would produce for these 3 `Meta.indexes`
+  entries, not machine-generated.
+- **`views.py`** — `NoticeViewSet.list()` now caches per classroom,
+  per user, per query-string (60s TTL + version bump on any `Notice`
+  write for that classroom), mirroring `ClassroomViewSet.list()`'s
+  existing pattern. Scoped **per user** (not just per classroom) because
+  `_can_view_classroom_internals` can return a different result per
+  caller (teacher/staff vs enrolled vs no-access), so a shared
+  per-classroom cache key would risk leaking one user's page to
+  another. `NotificationViewSet` (private, per-user, already small) and
+  `NotificationViewSet`'s own list were deliberately left uncached —
+  same reasoning `ClassroomViewSet.list` already gives for skipping
+  `?mine=` results: low-cardinality, already fast, caching would just
+  multiply cache keys for near-zero benefit.
+- **Not done this pass (recommended, larger scope — see below):** DB
+  connection pooling (`CONN_MAX_AGE` / PgBouncer), CDN in front of
+  recording/media URLs, WebSocket/Channels layer for chat/raise-hand/
+  live-poll (currently REST), short-TTL caching on
+  `Classroom.has_access()`/`is_enrolled()` (skipped deliberately —
+  correctness risk on a money/access-gating path outweighs the read
+  savings without a carefully designed invalidation story), APM/slow-
+  query monitoring (Sentry / django-silk), waitlist-offer auto-expiry
+  timeout.
+
+### Pass 5 — coin withdrawal / payout (the missing coins-to-cash off-ramp)
+
+- **`models.py`** — new `CoinWithdrawal` model (§13C). A user requests a
+  payout of their real, earned coin balance to a bank account or UPI id.
+  Coins are debited **at request time**, inside
+  `CoinWithdrawal.create_request()` (row-locked, atomic — the same
+  race-safety pattern `PassPurchase.charge_for_session`/`reverse` already
+  use), not on admin approval — this is what stops a user submitting two
+  overlapping requests for the same coins without needing a separate
+  "coins on hold" field. `reject()`/`cancel()` refund the coins;
+  `approve()`/`mark_paid()` move the request through its status only —
+  the actual bank/UPI transfer happens OUTSIDE this app (finance/admin
+  does it manually via the bank's own portal, or a payout API integrated
+  later), and `mark_paid()` just records the external reference (UTR/UPI
+  txn id) for audit/reconciliation. `COIN_TO_INR_RATE` and
+  `MIN_WITHDRAWAL_COINS` are the two tunables — adjust `COIN_TO_INR_RATE`
+  to match whatever real-money rate coins were actually sold/priced at
+  elsewhere in the platform. Two new `CoinTransaction.Reason` values
+  (`WITHDRAWAL`, `WITHDRAWAL_REVERSED`) and three new
+  `Notification.NotifType` values (`WITHDRAWAL_APPROVED`,
+  `WITHDRAWAL_REJECTED`, `WITHDRAWAL_PAID`) were added alongside it.
+  **Deliberately out of scope (product decision):** coin TOP-UP, i.e.
+  buying coins with real money — this pass only closes the withdrawal
+  (coins → cash) direction.
+- **`serializers.py`** — new `CoinWithdrawalSerializer`. Validates
+  `payout_details` against `payout_method` (`bank_transfer` requires
+  `account_holder`/`account_number`/`ifsc`; `upi` requires `upi_id`) so a
+  malformed payload never reaches the model layer, and enforces
+  `MIN_WITHDRAWAL_COINS` at the field level for a clean 400 before any
+  DB work happens.
+- **`views.py`** — new `CoinWithdrawalViewSet`. `create`/`list`/`retrieve`
+  are self-service (own requests only); `cancel` is self-service (own
+  request, only while still `PENDING`); `approve`/`reject`/`mark_paid`
+  are `is_staff`-only. Staff additionally see every request across every
+  user via `get_queryset` (optionally filtered by `?status=`), the same
+  "escalated queryset for the party who actually needs the wider view"
+  shape `PassPurchaseViewSet.get_queryset`'s `?classroom=` already uses.
+  Every model-raised `django.core.exceptions.ValidationError` (from
+  `create_request`/`approve`/`reject`/`cancel`/`mark_paid`) is caught at
+  the view boundary and re-raised as DRF's own `ValidationError` — this
+  is a NEW pattern in this file (every other model method that needs to
+  reject work either returns `None`/`False` or the view pre-validates
+  before calling it); documented here since it's not yet used anywhere
+  else in views.py, and any future model method that raises validation
+  errors directly should follow the same catch to keep getting the
+  clean `{"detail", "code"}` envelope instead of an unhandled 500 (see
+  `exceptions.py` — Django's plain `ValidationError` is NOT one of the
+  types `liveclass_exception_handler` normalises today, only
+  `Http404`/`DjangoPermissionDenied`/`IntegrityError`).
+- **`urls.py`** — new `withdrawals/` route (`CoinWithdrawalViewSet`,
+  basename `coinwithdrawal`), fully documented in the header comment.
+- **`tests.py`** — new `CoinWithdrawalTests` covering: debit-at-request,
+  minimum-amount rejection, insufficient-balance rejection,
+  payout_details validation for both methods, self-cancel + refund,
+  cross-user cancel forbidden, non-staff approve forbidden, the full
+  approve→mark-paid happy path (asserting coins move ONCE, at request
+  time, never again), reject-requires-a-reason + refund, cannot
+  cancel an already-approved request, and the staff-sees-all vs
+  self-sees-own queryset split.
+- **New migration `migrations/0XXX_coinwithdrawal.py`** — **placeholder
+  name**, same caveat as Pass 4's trigram migration: rename `0XXX` to the
+  next real sequence number and fill in `dependencies` against this
+  project's actual latest `liveclass` migration. Adds the `CoinWithdrawal`
+  table (all fields above) plus its `Meta.indexes` entry
+  (`status`, `requested_at`). **Not generated against a real project or
+  run** — no live Django project in this sandbox (see §13); hand-written
+  to match what `makemigrations` would produce for this one new model.
+- **Settings needed (added to §10 below):** `coin_withdrawal` throttle
+  scope in `DEFAULT_THROTTLE_RATES` — a low rate (e.g. `5/day`) is
+  appropriate; this is a real-money-adjacent action, not a browsing
+  endpoint.
+- **Not done this pass (recommended, out of scope per this pass's
+  request):** coin top-up (buying coins with real money) — the reverse
+  direction, deliberately excluded. Also not done: an admin-facing bulk
+  payout export/CSV for finance to action many `APPROVED` requests at
+  once, and a Celery task to auto-remind staff of stale `PENDING`
+  requests — both reasonable small follow-ups if the manual approve/
+  reject/mark-paid flow above turns out to be too slow at volume.
+
 ---
 
 ## 12. Open action items before deploy
@@ -882,6 +1008,24 @@ what "known" means here).
    resolving the DRF router's actual generated URL names, but never
    actually executed, since this environment has no `settings.py` or
    the `login`/`message` apps.
+9. **Rename and run the Pass 4 trigram migration** — see Pass 4 above;
+   requires Postgres and `CREATE EXTENSION` privilege (or a DBA to run
+   `CREATE EXTENSION IF NOT EXISTS pg_trgm;` once beforehand on a
+   self-managed instance — RDS's master user can run it directly).
+10. **Rename and run the Pass 5 `CoinWithdrawal` migration** — see Pass 5
+    above; plain table + index, no extension needed, safe on any DB
+    backend.
+11. **Set `CoinWithdrawal.COIN_TO_INR_RATE` correctly** (Pass 5) — the
+    placeholder value of `1` is almost certainly wrong; set it to match
+    whatever real-money rate coins are actually sold at elsewhere in the
+    platform before any withdrawal is approved for real.
+12. **Consider, but not yet built:** DB connection pooling
+    (`CONN_MAX_AGE`/PgBouncer), a CDN in front of media/recording URLs,
+    and a Channels/WebSocket layer for chat/raise-hand/live-poll if
+    REST-polling latency becomes a real user complaint — all flagged in
+    Pass 4 as bigger-scope follow-ups, not done in this pass. Coin
+    top-up (buying coins with real money) — flagged in Pass 5,
+    deliberately excluded from that pass.
 
 ---
 

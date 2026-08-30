@@ -116,6 +116,21 @@ router — list/retrieve/create/update/delete on each, plus the custom
     coupons/validate/                    GET             (?code= required — checks without spending)
     coin-transactions/                   GET               (own ledger only)
     coin-transactions/balance/           GET               (real User.coin balance)
+    withdrawals/                         GET, POST         (GET: own requests, or every request —
+                                                          filterable by ?status= — for platform staff;
+                                                          POST: request a payout, body {"coins",
+                                                          "payout_method", "payout_details"}. Coins are
+                                                          debited immediately on request — see
+                                                          CoinWithdrawal in models.py. Coin TOP-UP i.e.
+                                                          buying coins is a separate, out-of-scope feature.)
+    withdrawals/{id}/                    GET
+    withdrawals/{id}/cancel/             POST              (own request, only while still pending —
+                                                          refunds the coins)
+    withdrawals/{id}/approve/            POST              (platform staff only)
+    withdrawals/{id}/reject/             POST              (platform staff only; body {"reason": "..."} —
+                                                          refunds the coins)
+    withdrawals/{id}/mark-paid/          POST              (platform staff only; body
+                                                          {"external_reference": "<UTR/UPI txn id>"})
     staff/                               GET, POST
     staff/{id}/                          GET, PUT, PATCH, DELETE
     waitlist/                            GET               (own waitlist entries)
@@ -212,6 +227,7 @@ from .views import (
     ClassroomViewSet,
     ClassroomWishlistViewSet,
     CoinTransactionViewSet,
+    CoinWithdrawalViewSet,
     CouponViewSet,
     HealthCheckView,
     LiveKitWebhookView,
@@ -246,6 +262,7 @@ router.register(r"reviews", ClassroomReviewViewSet, basename="classroomreview")
 router.register(r"wishlist-classrooms", ClassroomWishlistViewSet, basename="classroomwishlist")
 router.register(r"coupons", CouponViewSet, basename="coupon")
 router.register(r"coin-transactions", CoinTransactionViewSet, basename="cointransaction")
+router.register(r"withdrawals", CoinWithdrawalViewSet, basename="coinwithdrawal")
 router.register(r"staff", ClassroomStaffViewSet, basename="classroomstaff")
 router.register(r"waitlist", SessionWaitlistViewSet, basename="sessionwaitlist")
 router.register(r"certificates", CertificateViewSet, basename="certificate")

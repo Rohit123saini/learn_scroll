@@ -66,6 +66,8 @@ from .livekit_utils import generate_livekit_token
 from .user_display import build_user_mini, get_display_name, get_profile_photo_url
 from .group_rules import check_group_permission, check_daily_message_limit, is_group_admin_or_mod
 from .mentions import extract_mentioned_user_ids
+from .media_utils import create_group_media_for_message
+from .constants import MAX_PINNED_PER_CONVERSATION
 
 # LiveKit URL env se lo, nahi to default
 LIVEKIT_WS_URL = os.getenv("LIVEKIT_WS_URL", "ws://10.93.221.189:7880")
@@ -394,6 +396,10 @@ class ConversationViewSet(viewsets.ReadOnlyModelViewSet):
             mentioned_ids = [uid for uid in mentioned_ids if uid != request.user.id]
             if mentioned_ids:
                 message.mentioned_users.set(mentioned_ids)
+
+            # 🔥 BUG FIX — group gallery ke liye GroupMedia row (pehle
+            # kahin bhi nahi banti thi, see media_utils.py).
+            create_group_media_for_message(message)
 
         # NOTE: this payload must carry the same sender_* fields as
         # ChatConsumer.handle_new_message's websocket payload. This REST
@@ -743,7 +749,10 @@ class MessageViewSet(mixins.RetrieveModelMixin, mixins.UpdateModelMixin,
     # "pinned messages" list bemaani zyada lambi na ho jaaye — limit
     # cross ho to naya pin karne se pehle purana unpin karne ko kaha
     # jaata hai (auto-replace nahi karte, taaki accidental unpin na ho).
-    MAX_PINNED_PER_CONVERSATION = 3
+    # 🔥 FIX — `MAX_PINNED_PER_CONVERSATION` ab `constants.py` se shared
+    # (module-level import, upar dekho) — pehle yahan aur consumers.py
+    # dono me alag-alag class attribute ke roop me hardcoded tha, dono ko
+    # manually sync rakhna padta tha (see constants.py comment).
 
     @action(detail=True, methods=['post', 'delete'], url_path='pin')
     def pin(self, request, pk=None):
@@ -766,9 +775,9 @@ class MessageViewSet(mixins.RetrieveModelMixin, mixins.UpdateModelMixin,
                 return Response({'detail': 'Delete kiya hua message pin nahi ho sakta.'}, status=status.HTTP_400_BAD_REQUEST)
             if not message.is_pinned:
                 pinned_count = conversation.all_messages.filter(is_pinned=True).count()
-                if pinned_count >= self.MAX_PINNED_PER_CONVERSATION:
+                if pinned_count >= MAX_PINNED_PER_CONVERSATION:
                     return Response(
-                        {'detail': f'Ek chat me max {self.MAX_PINNED_PER_CONVERSATION} messages hi pin ho sakte hain. Pehle koi purana unpin karo.'},
+                        {'detail': f'Ek chat me max {MAX_PINNED_PER_CONVERSATION} messages hi pin ho sakte hain. Pehle koi purana unpin karo.'},
                         status=status.HTTP_400_BAD_REQUEST,
                     )
                 message.is_pinned = True

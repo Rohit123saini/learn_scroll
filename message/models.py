@@ -357,6 +357,23 @@ class Message(BaseModel):
         User, blank=True, related_name='mentioned_in_messages'
     )
 
+    # 🔥 NAYA — Starred/saved messages. Pin ki tarah nahi hai — pin SABKO
+    # dikhta hai (group-wide "important message"), star sirf PERSONAL
+    # bookmark hai (WhatsApp ka "Starred Messages" jaisa — har user ki
+    # apni list, kisi aur ko pata bhi nahi chalta). Isliye simple M2M —
+    # koi extra "starred_at"/"starred_by" single-FK ki zaroorat nahi.
+    starred_by = models.ManyToManyField(User, blank=True, related_name='starred_messages')
+
+    # 🔥 NAYA — Scheduled messages ("Send later"). `scheduled_for` = kab
+    # bhejna hai; `is_scheduled=True` jab tak `send_scheduled_messages`
+    # management command (cron/Celery-beat se periodically chalega) ise
+    # process karke False na kar de. Jab tak scheduled hai, ye message
+    # SIRF sender ko dikhta hai (`ConversationViewSet.messages` GET me
+    # filter hai) — baaki participants ko tab tak pata hi nahi chalta,
+    # jaisa Gmail/WhatsApp scheduled-send karta hai.
+    is_scheduled = models.BooleanField(default=False, db_index=True)
+    scheduled_for = models.DateTimeField(null=True, blank=True, db_index=True)
+
     class Meta(BaseModel.Meta):
         indexes = [
             models.Index(fields=['conversation', '-created_at']),
@@ -365,6 +382,7 @@ class Message(BaseModel):
             models.Index(fields=['reply_to']),
             models.Index(fields=['expires_at']),
             models.Index(fields=['conversation', 'is_pinned']),
+            models.Index(fields=['is_scheduled', 'scheduled_for']),
         ]
         constraints = [
             # same sender ek hi client_id do baar submit kare to DB level pe hi block

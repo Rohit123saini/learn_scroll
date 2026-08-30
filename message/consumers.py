@@ -20,6 +20,8 @@ from .models import (
 )
 from .user_display import build_user_mini, get_display_name
 from .mentions import extract_mentioned_user_ids
+from .media_utils import create_group_media_for_message
+from .constants import MAX_PINNED_PER_CONVERSATION
 
 logger = logging.getLogger(__name__)
 
@@ -34,6 +36,11 @@ class ChatConsumer(AsyncWebsocketConsumer):
     Client -> Server event types (JSON body me "type" field):
         {"type": "message", "client_id": "...", "message_type": "text",
          "text": "hi", "reply_to": null}
+        # 🔥 FIX — media message ab WS se bhi bheja ja sakta hai (pehle
+        # sirf REST se possible tha, see media_utils.py / save_message):
+        {"type": "message", "client_id": "...", "message_type": "image",
+         "file_url": "https://.../photo.jpg", "file_urls": [], "thumbnail_url": null,
+         "meta": {"size": 204800}, "reply_to": null}
         {"type": "typing", "is_typing": true}
         {"type": "read", "message_id": "..."}
         {"type": "delete", "message_id": "...", "for_everyone": false}
@@ -160,14 +167,38 @@ class ChatConsumer(AsyncWebsocketConsumer):
             await self.send_error("server_error", "Kuch galat ho gaya, dobara try karo")
 
     # ---------------- EVENT HANDLERS ----------------
+    # 🔥 FIX — WS `message` event pehle sirf text carry karta tha
+    # (file_url/file_urls/thumbnail_url/meta socket payload me the hi
+    # nahi, aur `save_message` unhe Message row pe set hi nahi karta
+    # tha). Isse do problems thi:
+    #   1. Media message WS se bheja jaaye to DB me file_url blank save
+    #      hota — effectively media message REST ke bina bhejna hi
+    #      possible nahi tha (jabki upload_view.py ka doc comment kehta
+    #      hai "REST ya WS dono se bheja ja sakta hai").
+    #   2. `GroupMedia` gallery wire karne ke liye (ye session ka fix)
+    #      file data chahiye hi thi — wo bina iske available nahi thi.
+    # Ab REST `MessageCreateSerializer` jaisa hi basic validation yahan
+    # bhi hai: media type ho to file_url ya file_urls me se koi ek hona
+    # zaroori hai.
+    _MEDIA_TYPES = {'image', 'video', 'audio', 'file', 'presentation'}
+
     async def handle_new_message(self, data):
         text = (data.get('text') or '').strip()
         message_type = data.get('message_type', 'text')
         client_id = data.get('client_id')  # offline-retry idempotency
         reply_to = data.get('reply_to')
+        file_url = data.get('file_url')
+        file_urls = data.get('file_urls') or []
+        thumbnail_url = data.get('thumbnail_url')
+        meta = data.get('meta') or {}
 
         if not text and message_type == 'text':
             return await self.send_error("empty_message", "Empty message bhej nahi sakte")
+
+        if message_type in self._MEDIA_TYPES and not file_url and not file_urls:
+            return await self.send_error(
+                "missing_file", "Media message ke liye file_url ya file_urls chahiye"
+            )
 
         # 🔥 NAYA — REST `messages` action jaisa hi block-check yahan bhi
         # zaroori tha: `BlockedUser` import to top pe already tha lekin
@@ -191,6 +222,10 @@ class ChatConsumer(AsyncWebsocketConsumer):
             message_type=message_type,
             client_id=client_id,
             reply_to_id=reply_to,
+            file_url=file_url,
+            file_urls=file_urls,
+            thumbnail_url=thumbnail_url,
+            meta=meta,
         )
         if message is None:
             # duplicate client_id -> already saved, silently ignore (idempotent retry)
@@ -214,6 +249,14 @@ class ChatConsumer(AsyncWebsocketConsumer):
             'sender_profile_photo': sender['profile_photo'],
             'message_type': message_type,
             'text': text,
+            # 🔥 FIX — media fields ab broadcast me bhi jaate hain (pehle
+            # sirf text jaata tha, isliye WS se bheja hua media message
+            # doosre connected members ko bina file ke dikhta — sirf
+            # sender ke apne local optimistic-UI se hi file dikhta tha).
+            'file_url': file_url,
+            'file_urls': file_urls,
+            'thumbnail_url': thumbnail_url,
+            'meta': meta,
             'reply_to': reply_to,
             'client_id': client_id,
             # 🔥 NAYA — @mentions (REST path ke `mentioned_user_ids` jaisa hi field).
@@ -304,7 +347,9 @@ class ChatConsumer(AsyncWebsocketConsumer):
     # permission rule: group me sirf admin/mod, private chat me dono me
     # se koi bhi). WhatsApp jaisa max-3-pinned limit REST wale
     # `MAX_PINNED_PER_CONVERSATION` constant jaisa hi yahan bhi hai.
-    MAX_PINNED_PER_CONVERSATION = 3
+    # 🔥 FIX — ab `constants.py` se shared module-level import (upar
+    # dekho), pehle yahan alag class attribute tha jo views.py se
+    # manually sync rakhna padta (see constants.py comment).
 
     async def handle_pin_message(self, data):
         message_id = data.get('message_id')
@@ -370,6 +415,23 @@ class ChatConsumer(AsyncWebsocketConsumer):
 
     async def pin_event(self, event):
         await self.send(text_data=json.dumps({'type': 'pin', **event}))
+
+    # 🔥 BUG FIX — `ConversationViewSet.disappearing_messages` (views.py)
+    # broadcasts `type: 'disappearing_messages_updated'` to this exact
+    # room group, but there was NO handler method for it here. Channels
+    # requires a consumer method named after the event `type` for every
+    # group_send — without it, every connected member of the chat gets a
+    # "No handler for message type" error the moment someone changes this
+    # setting. Plain passthrough, same pattern as `presence_update`.
+    async def disappearing_messages_updated(self, event):
+        await self.send(text_data=json.dumps(event))
+
+    # 🔥 BUG FIX — same issue as above: `GroupViewSet.destroy` (views.py)
+    # broadcasts `type: 'group_deleted'` right before deleting the group,
+    # so every member still connected to the chat can be told to leave
+    # the screen — but again, no handler existed for it.
+    async def group_deleted(self, event):
+        await self.send(text_data=json.dumps(event))
 
     async def presence_update(self, event):
         await self.send(text_data=json.dumps({'type': 'presence', **event}))
@@ -450,7 +512,8 @@ class ChatConsumer(AsyncWebsocketConsumer):
         return check_daily_message_limit(group, user, conversation)
 
     @database_sync_to_async
-    def save_message(self, conversation_id, sender_id, text, message_type, client_id, reply_to_id):
+    def save_message(self, conversation_id, sender_id, text, message_type, client_id, reply_to_id,
+                      file_url=None, file_urls=None, thumbnail_url=None, meta=None):
         from django.db import IntegrityError
         from .models import Conversation
 
@@ -462,6 +525,13 @@ class ChatConsumer(AsyncWebsocketConsumer):
                 type=message_type,
                 client_id=client_id,
                 reply_to_id=reply_to_id,
+                # 🔥 FIX — pehle ye 4 fields yahan set hi nahi hote the,
+                # isliye WS se bheja gaya media message DB me file ke
+                # bina save hota tha (see handle_new_message comment).
+                file_url=file_url or None,
+                file_urls=file_urls or [],
+                thumbnail_url=thumbnail_url or None,
+                meta=meta or {},
             )
         except IntegrityError:
             # duplicate client_id -> retry of an already-saved message
@@ -493,6 +563,13 @@ class ChatConsumer(AsyncWebsocketConsumer):
         mentioned_ids = [uid for uid in mentioned_ids if str(uid) != str(sender_id)]
         if mentioned_ids:
             message.mentioned_users.set(mentioned_ids)
+
+        # 🔥 BUG FIX — pehle sirf REST path (`ConversationViewSet.messages`)
+        # `create_group_media_for_message` call karta tha; WS se bheja gaya
+        # media message kabhi group gallery (`GroupMedia`) me nahi jaata
+        # tha, matlab jo bhi media WS se bheja jaaye wo `/groups/<id>/media/`
+        # me kabhi dikhta hi nahi. Ab dono paths consistent hain.
+        create_group_media_for_message(message)
 
         return {'id': message.id, 'created_at': message.created_at.isoformat(), 'mentioned_ids': mentioned_ids}
 
@@ -634,8 +711,8 @@ class ChatConsumer(AsyncWebsocketConsumer):
 
         if not message.is_pinned:
             pinned_count = conversation.all_messages.filter(is_pinned=True).count()
-            if pinned_count >= self.MAX_PINNED_PER_CONVERSATION:
-                return False, f"Ek chat me max {self.MAX_PINNED_PER_CONVERSATION} messages hi pin ho sakte hain"
+            if pinned_count >= MAX_PINNED_PER_CONVERSATION:
+                return False, f"Ek chat me max {MAX_PINNED_PER_CONVERSATION} messages hi pin ho sakte hain"
 
             User = get_user_model()
             message.is_pinned = True

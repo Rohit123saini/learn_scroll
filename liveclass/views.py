@@ -22,6 +22,7 @@ from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
 from django.conf import settings as django_settings
 from django.contrib.auth import get_user_model
 from django.core.cache import cache
+from django.core.exceptions import ValidationError as DjangoValidationError
 from django.db import IntegrityError, connection, transaction
 from django.db.models import Count, F, Q, Sum
 from django.utils import timezone
@@ -56,6 +57,7 @@ from .models import (
     ClassroomStaff,
     ClassroomWishlist,
     CoinTransaction,
+    CoinWithdrawal,
     Coupon,
     LivePoll,
     Notice,
@@ -69,6 +71,7 @@ from .models import (
     create_bulk_notifications,
     create_notification,
     get_classroom_list_cache_version,
+    get_notice_list_cache_version,
     referral_code_for_user,
     referral_code_to_user_id,
 )
@@ -110,6 +113,7 @@ from .serializers import (
     ClassroomStatsSerializer,
     ClassroomWishlistSerializer,
     CoinTransactionSerializer,
+    CoinWithdrawalSerializer,
     CouponSerializer,
     LivePollSerializer,
     MyReferralCodeSerializer,
@@ -3286,6 +3290,146 @@ class CoinTransactionViewSet(mixins.ListModelMixin, viewsets.GenericViewSet):
 
 
 # ---------------------------------------------------------------------------
+# 13C. COIN WITHDRAWAL — cash-out of a real, earned coin balance to a bank
+# account / UPI id. See CoinWithdrawal in models.py for the full design
+# note (why coins are debited at request time, not on approval).
+#
+# Coin TOP-UP (buying coins with real money) is deliberately out of scope
+# here — this viewset only covers the withdrawal direction.
+# ---------------------------------------------------------------------------
+class CoinWithdrawalViewSet(
+    mixins.CreateModelMixin, mixins.ListModelMixin, mixins.RetrieveModelMixin, viewsets.GenericViewSet
+):
+    """Own withdrawal requests only, UNLESS the caller is platform staff
+    (`is_staff`), who see every request across every user — staff are the
+    ones who actually action a payout, so they need the full queue, not
+    just their own wallet. Same "?classroom= opts a manager into a wider
+    queryset" shape used by PassPurchaseViewSet.get_queryset, but here the
+    escalation is a plain is_staff check since there's no per-classroom
+    scoping concept for a wallet payout."""
+
+    serializer_class = CoinWithdrawalSerializer
+    permission_classes = [IsAuthenticated]
+    pagination_class = LiveClassPagination
+    throttle_scope = "coin_withdrawal"
+    throttle_classes = [ScopedRateThrottle]
+
+    def get_queryset(self):
+        base = CoinWithdrawal.objects.select_related("user", "reviewed_by")
+        if self.request.user.is_staff:
+            status_filter = self.request.query_params.get("status")
+            if status_filter:
+                base = base.filter(status=status_filter)
+            return base
+        return base.filter(user=self.request.user)
+
+    def perform_create(self, serializer):
+        # NOTE: coins/amount_inr/status are never trusted from the client —
+        # CoinWithdrawal.create_request() does the actual balance check +
+        # debit atomically. serializer.save() is deliberately NOT called
+        # here (there's nothing to save yet — create_request() creates the
+        # row itself); perform_create just needs to hand the instance back
+        # to DRF's CreateModelMixin via serializer.instance.
+        try:
+            instance = CoinWithdrawal.create_request(
+                user=self.request.user,
+                coins=serializer.validated_data["coins"],
+                payout_method=serializer.validated_data["payout_method"],
+                payout_details=serializer.validated_data["payout_details"],
+            )
+        except DjangoValidationError as exc:
+            raise ValidationError(exc.messages if hasattr(exc, "messages") else str(exc))
+        serializer.instance = instance
+
+    @action(detail=True, methods=["post"])
+    def cancel(self, request, pk=None):
+        """Self-service: the requester cancels their OWN still-pending
+        request and gets the coins back immediately."""
+        withdrawal = get_object_or_404(CoinWithdrawal, pk=pk)
+        if withdrawal.user_id != request.user.id:
+            raise PermissionDenied("You can only cancel your own withdrawal request.")
+        try:
+            with transaction.atomic():
+                locked = CoinWithdrawal.objects.select_for_update().get(pk=withdrawal.pk)
+                locked.cancel()
+        except DjangoValidationError as exc:
+            raise ValidationError(exc.messages if hasattr(exc, "messages") else str(exc))
+        return Response(CoinWithdrawalSerializer(locked).data)
+
+    @action(detail=True, methods=["post"])
+    def approve(self, request, pk=None):
+        """Staff-only: marks intent to pay. No coin movement here — the
+        coins already left the wallet at request time; this just moves the
+        request into the "queued for payout" state."""
+        if not request.user.is_staff:
+            raise PermissionDenied("Only platform staff can approve a withdrawal.")
+        withdrawal = get_object_or_404(CoinWithdrawal, pk=pk)
+        try:
+            with transaction.atomic():
+                locked = CoinWithdrawal.objects.select_for_update().get(pk=withdrawal.pk)
+                locked.approve(request.user)
+        except DjangoValidationError as exc:
+            raise ValidationError(exc.messages if hasattr(exc, "messages") else str(exc))
+        create_notification(
+            recipient=locked.user,
+            notif_type=Notification.NotifType.WITHDRAWAL_APPROVED,
+            title="Withdrawal approved",
+            message=f"Your withdrawal of {locked.coins} coins (₹{locked.amount_inr}) has been approved and is queued for payout.",
+        )
+        return Response(CoinWithdrawalSerializer(locked).data)
+
+    @action(detail=True, methods=["post"])
+    def reject(self, request, pk=None):
+        """Staff-only: refunds the coins back to the user's wallet.
+        Body: {"reason": "..."} — stored as admin_note and shown to the user."""
+        if not request.user.is_staff:
+            raise PermissionDenied("Only platform staff can reject a withdrawal.")
+        reason = (request.data.get("reason") or "").strip()
+        if not reason:
+            raise ValidationError({"reason": "A rejection reason is required."})
+        withdrawal = get_object_or_404(CoinWithdrawal, pk=pk)
+        try:
+            with transaction.atomic():
+                locked = CoinWithdrawal.objects.select_for_update().get(pk=withdrawal.pk)
+                locked.reject(request.user, reason)
+        except DjangoValidationError as exc:
+            raise ValidationError(exc.messages if hasattr(exc, "messages") else str(exc))
+        create_notification(
+            recipient=locked.user,
+            notif_type=Notification.NotifType.WITHDRAWAL_REJECTED,
+            title="Withdrawal rejected",
+            message=f"Your withdrawal of {locked.coins} coins was rejected: {reason}. The coins have been returned to your wallet.",
+        )
+        return Response(CoinWithdrawalSerializer(locked).data)
+
+    @action(detail=True, methods=["post"], url_path="mark-paid")
+    def mark_paid(self, request, pk=None):
+        """Staff-only: records that the actual bank/UPI transfer (done
+        outside this app, e.g. via the bank's own portal) has gone through.
+        Body: {"external_reference": "<UTR / UPI txn id>"} — kept for audit
+        and for the user to reconcile against their own bank statement."""
+        if not request.user.is_staff:
+            raise PermissionDenied("Only platform staff can mark a withdrawal as paid.")
+        external_reference = (request.data.get("external_reference") or "").strip()
+        if not external_reference:
+            raise ValidationError({"external_reference": "A bank UTR or UPI transaction id is required."})
+        withdrawal = get_object_or_404(CoinWithdrawal, pk=pk)
+        try:
+            with transaction.atomic():
+                locked = CoinWithdrawal.objects.select_for_update().get(pk=withdrawal.pk)
+                locked.mark_paid(request.user, external_reference)
+        except DjangoValidationError as exc:
+            raise ValidationError(exc.messages if hasattr(exc, "messages") else str(exc))
+        create_notification(
+            recipient=locked.user,
+            notif_type=Notification.NotifType.WITHDRAWAL_PAID,
+            title="Withdrawal paid",
+            message=f"₹{locked.amount_inr} has been sent to your {locked.get_payout_method_display()}.",
+        )
+        return Response(CoinWithdrawalSerializer(locked).data)
+
+
+# ---------------------------------------------------------------------------
 # 13B. REFERRAL PROGRAM
 #
 # GAP THIS CLOSES: CoinTransaction.Reason.REFERRAL_BONUS existed as an enum
@@ -3795,6 +3939,43 @@ class NoticeViewSet(viewsets.ModelViewSet):
     pagination_class = LiveClassPagination
     # NOTE (perf): posted_by is nested (UserMiniSerializer) on every row.
     queryset = Notice.objects.select_related("posted_by", "classroom")
+
+    # NOTE (perf — fix): same version-based caching pattern as
+    # ClassroomViewSet.list above, scoped per classroom instead of
+    # platform-wide (see get_notice_list_cache_version in models.py). A
+    # short TTL is kept on top of the version bump for the same
+    # belt-and-braces reason as the classroom list (a raw bulk .update()
+    # or data migration wouldn't fire the post_save/post_delete signal
+    # that bumps the version).
+    LIST_CACHE_TTL_SECONDS = 60
+
+    def list(self, request, *args, **kwargs):
+        classroom_id = request.query_params.get("classroom")
+        if not classroom_id:
+            # get_queryset() below already returns .none() for this case —
+            # no point building a cache key with no classroom to scope it to.
+            return super().list(request, *args, **kwargs)
+
+        version = get_notice_list_cache_version(classroom_id)
+        # Cache key is per-USER, not just per-classroom+query-string: two
+        # different users hitting the same classroom can get different
+        # results (include_expired aside, _can_view_classroom_internals
+        # itself can differ — teacher/staff vs enrolled student vs a user
+        # with no access at all, who gets .none()). Scoping by user avoids
+        # ever leaking one user's cached page to another.
+        query_fingerprint = hashlib.sha256(
+            request.get_full_path().encode("utf-8")
+        ).hexdigest()
+        cache_key = f"liveclass:notice_list:{request.user.id}:{version}:{query_fingerprint}"
+
+        cached = cache.get(cache_key)
+        if cached is not None:
+            return Response(cached)
+
+        response = super().list(request, *args, **kwargs)
+        if response.status_code == status.HTTP_200_OK:
+            cache.set(cache_key, response.data, timeout=self.LIST_CACHE_TTL_SECONDS)
+        return response
 
     def get_queryset(self):
         qs = super().get_queryset()
