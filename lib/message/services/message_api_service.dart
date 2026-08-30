@@ -19,7 +19,15 @@ import '../models/message_models.dart';
 class MessageApiException implements Exception {
   final String message;
   final int? statusCode;
-  MessageApiException(this.message, {this.statusCode});
+  // 🔥 NAYA — group send-permission errors (`check_group_send_permission()`
+  // — views.py) backend se `{"detail": "...", "code": "..."}` shape me
+  // aate hain. `code` yahan capture karte hain taaki UI generic error text
+  // match kiye bina hi (jo fragile hota) reliably decide kar sake ki
+  // "admins/mods only" wala dialog dikhana hai ya "daily limit khatam"
+  // wala. Non-group errors (jinme `code` nahi hota) me ye simply null
+  // rehta hai — koi behaviour change nahi.
+  final String? code;
+  MessageApiException(this.message, {this.statusCode, this.code});
   @override
   String toString() => message;
 }
@@ -75,15 +83,18 @@ class MessageApiService {
       return jsonDecode(utf8.decode(res.bodyBytes));
     }
     String msg = "Request failed (${res.statusCode})";
+    String? code;
     try {
       final body = jsonDecode(utf8.decode(res.bodyBytes));
       if (body is Map && body.isNotEmpty) {
         msg = body.values.first is List
             ? body.values.first.first.toString()
             : body.values.first.toString();
+        // 🔥 NAYA — group message-permission/daily-limit errors ka 'code' field
+        code = body['code']?.toString();
       }
     } catch (_) {}
-    throw MessageApiException(msg, statusCode: res.statusCode);
+    throw MessageApiException(msg, statusCode: res.statusCode, code: code);
   }
 
   // ==================================================================
@@ -396,6 +407,211 @@ class MessageApiService {
     _decode(res);
   }
 
+  // ==================================================================
+  // 🔥 NAYA — PINNED MESSAGES
+  // ==================================================================
+
+  /// GET /message/conversations/<id>/pins/
+  static Future<List<PinnedMessageModel>> getPinnedMessages(String conversationId) async {
+    final res = await http.get(
+      Uri.parse("$_base/conversations/$conversationId/pins/"),
+      headers: await _headers(),
+    );
+    final data = _decode(res) as List;
+    return data.map((e) => PinnedMessageModel.fromJson(e as Map<String, dynamic>)).toList();
+  }
+
+  /// POST /message/conversations/<id>/pins/  {"message_id"}
+  /// Backend max 3 pinned/conversation allow karta hai — 400 aayega agar
+  /// limit cross ho ya message pehle se pinned ho, dono `MessageApiException`
+  /// me readable `.message` ke saath aate hain (UI seedha snackbar me dikha sakta hai).
+  static Future<PinnedMessageModel> pinMessage(String conversationId, String messageId) async {
+    final res = await http.post(
+      Uri.parse("$_base/conversations/$conversationId/pins/"),
+      headers: await _headers(),
+      body: jsonEncode({"message_id": messageId}),
+    );
+    return PinnedMessageModel.fromJson(_decode(res));
+  }
+
+  /// DELETE /message/conversations/<id>/pins/<message_id>/
+  static Future<void> unpinMessage(String conversationId, String messageId) async {
+    final res = await http.delete(
+      Uri.parse("$_base/conversations/$conversationId/pins/$messageId/"),
+      headers: await _headers(),
+    );
+    _decode(res);
+  }
+
+  // ==================================================================
+  // 🔥 NAYA — POLLS
+  // ==================================================================
+
+  /// POST /message/conversations/<id>/polls/
+  /// Ek naya poll message banata hai. Response ka `PollModel.messageId`
+  /// wahi naya `Message.id` hai jo chat list me insert karna hai.
+  static Future<PollModel> createPoll(
+    String conversationId, {
+    required String question,
+    required List<String> options,
+    bool allowsMultipleAnswers = false,
+    bool isAnonymous = false,
+  }) async {
+    final res = await http.post(
+      Uri.parse("$_base/conversations/$conversationId/polls/"),
+      headers: await _headers(),
+      body: jsonEncode({
+        "question": question,
+        "options": options,
+        "allows_multiple_answers": allowsMultipleAnswers,
+        "is_anonymous": isAnonymous,
+      }),
+    );
+    return PollModel.fromJson(_decode(res));
+  }
+
+  /// GET /message/polls/<poll_id>/  — live results (counts + apna vote)
+  static Future<PollModel> getPoll(String pollId) async {
+    final res = await http.get(
+      Uri.parse("$_base/polls/$pollId/"),
+      headers: await _headers(),
+    );
+    return PollModel.fromJson(_decode(res));
+  }
+
+  /// POST /message/polls/<poll_id>/vote/  {"option_ids": [...]}
+  /// Re-vote automatically switch ho jaata hai (backend purana vote
+  /// hataake naya save karta hai) — isliye single-select poll me bas
+  /// naya `option_id` bhej do, dobara call karna hi "switch" hai.
+  static Future<PollModel> votePoll(String pollId, List<String> optionIds) async {
+    final res = await http.post(
+      Uri.parse("$_base/polls/$pollId/vote/"),
+      headers: await _headers(),
+      body: jsonEncode({"option_ids": optionIds}),
+    );
+    return PollModel.fromJson(_decode(res));
+  }
+
+  /// POST /message/polls/<poll_id>/close/  — sirf poll creator ya group
+  /// admin/mod kar sakta hai (backend `IsPollCreatorOrGroupAdmin`), warna
+  /// 403 aayega.
+  static Future<PollModel> closePoll(String pollId) async {
+    final res = await http.post(
+      Uri.parse("$_base/polls/$pollId/close/"),
+      headers: await _headers(),
+    );
+    return PollModel.fromJson(_decode(res));
+  }
+
+  // ==================================================================
+  // 🔥 NAYA — SCHEDULED MESSAGES
+  // ==================================================================
+
+  /// GET /message/conversations/<id>/scheduled/
+  /// Sirf apne khud ke pending (not sent, not cancelled) scheduled
+  /// messages dikhata hai.
+  static Future<List<ScheduledMessageModel>> getScheduledMessages(String conversationId) async {
+    final res = await http.get(
+      Uri.parse("$_base/conversations/$conversationId/scheduled/"),
+      headers: await _headers(),
+    );
+    final data = _decode(res) as List;
+    return data.map((e) => ScheduledMessageModel.fromJson(e as Map<String, dynamic>)).toList();
+  }
+
+  /// POST /message/conversations/<id>/scheduled/
+  /// `scheduledFor` future me hona chahiye (backend validate karta hai,
+  /// warna 400 + "scheduled_for future me hona chahiye.").
+  static Future<ScheduledMessageModel> scheduleMessage(
+    String conversationId, {
+    required String text,
+    required DateTime scheduledFor,
+    String type = MessageType.text,
+    String? replyTo,
+  }) async {
+    final res = await http.post(
+      Uri.parse("$_base/conversations/$conversationId/scheduled/"),
+      headers: await _headers(),
+      body: jsonEncode({
+        "type": type,
+        "text": text,
+        "scheduled_for": scheduledFor.toUtc().toIso8601String(),
+        if (replyTo != null) "reply_to": replyTo,
+      }),
+    );
+    return ScheduledMessageModel.fromJson(_decode(res));
+  }
+
+  /// PATCH /message/scheduled/<id>/  — reschedule (naya scheduled_for)
+  static Future<ScheduledMessageModel> rescheduleMessage(String scheduledId, DateTime newTime) async {
+    final res = await http.patch(
+      Uri.parse("$_base/scheduled/$scheduledId/"),
+      headers: await _headers(),
+      body: jsonEncode({"scheduled_for": newTime.toUtc().toIso8601String()}),
+    );
+    return ScheduledMessageModel.fromJson(_decode(res));
+  }
+
+  /// DELETE /message/scheduled/<id>/  — cancel (soft delete, backend me
+  /// `is_cancelled=True` set hota hai)
+  static Future<void> cancelScheduledMessage(String scheduledId) async {
+    final res = await http.delete(
+      Uri.parse("$_base/scheduled/$scheduledId/"),
+      headers: await _headers(),
+    );
+    _decode(res);
+  }
+
+  // ==================================================================
+  // WHOLE CHAT-SCREEN WALLPAPER (WhatsApp jaisa)
+  // ==================================================================
+  // Flow: pehle `uploadFile()` se image upload karo -> milta hai
+  // `fileUrl` -> wahi URL yahan PATCH karo. Ye poori chat screen ka
+  // background hai (sirf tumhare account ke liye — dusre participant/
+  // group members ko nahi dikhega), per-message bubble background NAHI.
+
+  /// GET /message/conversations/<id>/wallpaper/ -> current per-user
+  /// wallpaper URL (ya null agar set hi nahi hai). Chat screen khulte hi
+  /// call karo taaki wallpaper turant sahi dikhe.
+  static Future<String?> getConversationWallpaper(String conversationId) async {
+    try {
+      final res = await http.get(
+        Uri.parse("$_base/conversations/$conversationId/wallpaper/"),
+        headers: await _headers(),
+      );
+      final data = _decode(res);
+      final value = data is Map ? data['wallpaper_url'] : null;
+      return value is String && value.isNotEmpty ? value : null;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /// PATCH /message/conversations/<id>/wallpaper/  {"wallpaper_url"}
+  ///
+  /// Empty string bhejo (ya `removeConversationWallpaper` call karo) to
+  /// wallpaper hat jaayega aur wapas default chat background dikhega.
+  /// Success pe backend jo (trimmed/cleared) URL save hua wahi wapas
+  /// deta hai.
+  static Future<String?> setConversationWallpaper(
+    String conversationId,
+    String wallpaperUrl,
+  ) async {
+    final res = await http.patch(
+      Uri.parse("$_base/conversations/$conversationId/wallpaper/"),
+      headers: await _headers(),
+      body: jsonEncode({"wallpaper_url": wallpaperUrl}),
+    );
+    final data = _decode(res);
+    final value = data is Map ? data['wallpaper_url'] : null;
+    return value is String && value.isNotEmpty ? value : null;
+  }
+
+  /// PATCH /message/conversations/<id>/wallpaper/  {"wallpaper_url": ""}
+  static Future<void> removeConversationWallpaper(String conversationId) async {
+    await setConversationWallpaper(conversationId, '');
+  }
+
   /// POST /message/messages/<id>/read/
   static Future<void> markRead(String messageId) async {
     final res = await http.post(
@@ -531,6 +747,20 @@ class MessageApiService {
       headers: await _headers(),
     );
     _decode(res);
+  }
+
+  /// DELETE /message/groups/<id>/photo/  (admin/mod only)
+  ///
+  /// 🔥 NAYA — group photo remove karta hai (`photo_url` -> null).
+  /// Naya photo SET karne ke liye alag endpoint nahi chahiye: pehle
+  /// `uploadFile()` se file upload karo, phir wahi `file_url`
+  /// `updateGroup(groupId, {'photo_url': fileUrl})` me bhej do.
+  static Future<Map<String, dynamic>> removeGroupPhoto(String groupId) async {
+    final res = await http.delete(
+      Uri.parse("$_base/groups/$groupId/photo/"),
+      headers: await _headers(),
+    );
+    return _decode(res);
   }
 
   /// DELETE /message/groups/<id>/  (ADMIN ONLY)
@@ -770,6 +1000,21 @@ class MessageApiService {
     );
     final data = _decode(res);
     return data is Map<String, dynamic> ? data : null;
+  }
+
+  /// DELETE /message/conversations/<id>/study-room-state/
+  ///
+  /// 🔥 NAYA — "End Session for Everyone" par call hota hai taaki saved
+  /// whiteboard state permanently mit jaaye. "Leave Session" isko kabhi
+  /// call NAHI karta (wahan state jaan-boojhkar save rehti hai taaki
+  /// rejoin karne par board wahi se mile) — sirf end-session par board
+  /// ko agli baar ke liye bilkul fresh/khaali kar dete hain.
+  static Future<void> endStudyRoomState(String conversationId) async {
+    final res = await http.delete(
+      Uri.parse("$_base/conversations/$conversationId/study-room-state/"),
+      headers: await _headers(),
+    );
+    _decode(res);
   }
 
   static Future<ConversationModel> getOrCreateConversation(

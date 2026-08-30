@@ -405,39 +405,47 @@ class _StudyRoomScreenState extends State<StudyRoomScreen> {
 
   bool _startingCall = false;
 
-  // 🔥 NAYA — PARTICIPANTS CONTAINER (collapsed block <-> full-screen grid)
+  // PARTICIPANTS PANEL (compact button in the bottom control bar <->
+  // full-screen grid)
   // ------------------------------------------------------------
-  // Ye ek SINGLE consolidated container hai — jiska bhi video ON ho, uske
-  // liye is container ke andar hi jagah bani hui hai (individual floating
-  // windows ke alawa). Default me chota, hidable block (jaise ek "online"
-  // pill) — mainly whiteboard hi screen pe dikhta hai. Tap karne par PURI
-  // screen pe expand ho jaata hai (grid: jiska camera ON hai uska live
-  // video, jiska OFF hai uska profile picture).
+  // This is a SINGLE consolidated container — whoever has their video ON
+  // gets a spot inside this container (instead of separate floating
+  // windows per participant). It lives as a small icon button in the
+  // bottom call control bar (next to mic/camera/screen-share) so it
+  // doesn't compete for space on the whiteboard. Tapping it expands to a
+  // full-screen grid (live video for anyone with camera ON, profile
+  // picture for anyone with it OFF).
   //
-  // ⚠ `_participantsExpanded` sirf LOCAL UI state hai — koi socket event
-  // isse NAHI bhejta. Isliye:
-  //   - Agar main container expand karta hoon, sirf MUJHE full grid
-  //     dikhega — doosre participants ki screen par koi asar nahi.
-  //   - Har participant ke paas yehi same collapse/expand access hai
-  //     (sabko chota block hamesha dikhta rahega, jisse "kaun online hai"
-  //     hamesha pata chal sake, chahe unhone apna grid band hi kyun na
-  //     kiya ho).
-  //   - Collapse state me bhi mainly whiteboard hi visible rehta hai —
-  //     block sirf ek chhota corner-overlay hai, poori screen nahi leta.
+  // `_participantsExpanded` is LOCAL UI state only — no socket event
+  // sends it anywhere. So:
+  //   - If I expand the grid, only I see it — it has no effect on other
+  //     participants' screens.
+  //   - Every participant has the same collapse/expand access (everyone
+  //     always sees the same compact button, so "who's online" is
+  //     always one tap away, even if nobody has opened their grid).
   bool _participantsExpanded = false;
 
-  // 🔥 NAYA — participants collapsed pill ab kahin bhi drag karke rakha
-  // ja sakta hai (jaise video-call apps me self-camera thumbnail hota
-  // hai). null = abhi tak drag nahi kiya, default top-left corner par
-  // dikhega. Ek baar drag karne ke baad wahi position yaad rehti hai
-  // jab tak screen band na ho (kisi doosre participant ko iska koi
-  // asar nahi padta — ye purely local/visual position hai).
-  Offset? _participantsPillOffset;
+  // When set, the participants overlay shows a "spotlight" layout instead
+  // of the grid: this participant large (~70% of the overlay height) with
+  // everyone else in a scrollable strip below (~30%). Tapping any tile —
+  // in the grid or in the strip — focuses that participant; tapping
+  // "back to grid" or closing the overlay clears it. Purely local UI
+  // state, same as `_participantsExpanded`.
+  String? _focusedParticipantId;
 
-  // 🔥 NAYA — Google Meet-style auto-join media (camera/mic). Purane
-  // `CallManager.instance` (upar) se ALAG hai — wo abhi bhi normal 1:1
-  // ringing calls ke liye hai (agar kabhi study room ke andar se koi
-  // real 1:1 call receive ho). Ye naya instance sirf is study room
+  UserProfileWindowModel? _focusedWindowOrNull() {
+    if (_focusedParticipantId == null) return null;
+    for (final w in _windows) {
+      if (w.userId == _focusedParticipantId) return w;
+    }
+    return null; // focused participant left the room — falls back to grid
+  }
+
+  // Google Meet-style auto-join media (camera/mic). This is SEPARATE
+  // from the older `CallManager.instance` above — that one is still used
+  // for regular 1:1 ringing calls (in case a real 1:1 call is ever
+  // received while inside the study room). This new instance is only
+  // for this study room
   // session ke liye hai, koi ringing nahi karta.
   final StudyRoomCallManager _roomCall = StudyRoomCallManager();
 
@@ -1100,7 +1108,18 @@ class _StudyRoomScreenState extends State<StudyRoomScreen> {
     );
     if (confirmed != true) return;
 
+    // Auto-save timer ko pehle hi cancel karte hain — warna wo state-delete
+    // ke baad bhi ek aakhri baar purana board wapas save kar sakta hai
+    // (race condition), aur "fresh" hone ka poora maksad hi fail ho jaayega.
+    _autoSaveTimer?.cancel();
     _sendRoomEvent('end_session', {'endedBy': widget.currentUserId});
+    // 🔥 NAYA — sirf "End Session for Everyone" par saved whiteboard state
+    // permanently delete karte hain (fire-and-forget — iske liye user ko
+    // ruk kar wait nahi karna, screen turant band ho jaani chahiye jaise
+    // upar `_leaveRoomAfterSessionEnd` karta hai).
+    unawaited(MessageApiService.endStudyRoomState(widget.conversationId).catchError((e) {
+      developer.log('Failed to clear study room state: $e');
+    }));
     _leaveRoomAfterSessionEnd(showMessage: 'Study session ended.');
   }
 
@@ -1442,7 +1461,7 @@ class _StudyRoomScreenState extends State<StudyRoomScreen> {
     if (!started) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text(_roomCall.error ?? "Screen share start nahi ho paya")),
+          SnackBar(content: Text(_roomCall.error ?? "Could not start screen share")),
         );
       }
       return;
@@ -1453,6 +1472,37 @@ class _StudyRoomScreenState extends State<StudyRoomScreen> {
       'presenterId': widget.currentUserId,
       'presenterName': _myDisplayName,
     });
+  }
+
+  // Flips the local camera between front and back. Only affects the
+  // local user's own outgoing video — available from the bottom call
+  // control bar (while camera is on) and from the spotlight view when
+  // viewing yourself large in the participants overlay.
+  Future<void> _switchCamera() async {
+    final track = _roomCall.localVideoTrack;
+    if (track == null) return;
+    try {
+      final devices = await Hardware.instance.videoInputs();
+      if (devices.isEmpty) return;
+
+      final currentDeviceId = track.currentOptions is CameraCaptureOptions
+          ? (track.currentOptions as CameraCaptureOptions).deviceId
+          : null;
+
+      final nextDevice = devices.firstWhere(
+        (d) => d.deviceId != currentDeviceId,
+        orElse: () => devices.first,
+      );
+
+      await track.switchCamera(nextDevice.deviceId);
+      if (mounted) setState(() {});
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Could not switch camera: $e')),
+        );
+      }
+    }
   }
 
   // ============================================================
@@ -1722,10 +1772,13 @@ class _StudyRoomScreenState extends State<StudyRoomScreen> {
   }
 
   // ============================================================
-  // BOTTOM CALL CONTROL BAR — mic / camera / screen-share, moved out of
-  // the AppBar (see fix notes at the top of the actions list). Styled
-  // like Meet/Zoom's bottom bar: big circular buttons, floating just
-  // above the phone's system nav area, always within thumb reach.
+  // BOTTOM CALL CONTROL BAR — mic / camera / screen-share / participants
+  // / Ask AI, all in one place. Styled like Meet/Zoom's bottom bar: big
+  // circular buttons, floating just above the phone's system nav area,
+  // always within thumb reach. Participants and Ask AI used to be
+  // separate floating pills scattered around the screen — they now live
+  // here alongside the call controls so everything actionable is in one
+  // predictable spot.
   // ============================================================
   Widget _buildBottomCallControlBar() {
     final bottomSafeInset = MediaQuery.of(context).padding.bottom;
@@ -1736,28 +1789,68 @@ class _StudyRoomScreenState extends State<StudyRoomScreen> {
       required Color iconColor,
       VoidCallback? onPressed,
       required String tooltip,
+      int? badgeCount,
+      Color badgeColor = Colors.tealAccent,
     }) {
-      return Padding(
-        padding: const EdgeInsets.symmetric(horizontal: 8),
-        child: Tooltip(
-          message: tooltip,
-          child: Material(
-            color: background,
-            shape: const CircleBorder(),
-            child: InkWell(
-              customBorder: const CircleBorder(),
-              onTap: onPressed,
-              child: Container(
-                width: 52,
-                height: 52,
-                alignment: Alignment.center,
-                child: Icon(icon, color: iconColor, size: 24),
-              ),
-            ),
+      final button = Material(
+        color: background,
+        shape: const CircleBorder(),
+        child: InkWell(
+          customBorder: const CircleBorder(),
+          onTap: onPressed,
+          child: Container(
+            width: 42,
+            height: 42,
+            alignment: Alignment.center,
+            child: Icon(icon, color: iconColor, size: 19),
           ),
         ),
       );
+
+      return Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 5),
+        child: Tooltip(
+          message: tooltip,
+          child: badgeCount == null || badgeCount <= 0
+              ? button
+              : Stack(
+                  clipBehavior: Clip.none,
+                  children: [
+                    button,
+                    Positioned(
+                      top: -2,
+                      right: -2,
+                      child: Container(
+                        padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 2),
+                        constraints: const BoxConstraints(minWidth: 18),
+                        decoration: BoxDecoration(
+                          color: badgeColor,
+                          borderRadius: BorderRadius.circular(10),
+                          border: Border.all(color: const Color(0xFF0D0D15), width: 1.5),
+                        ),
+                        child: Text(
+                          '$badgeCount',
+                          textAlign: TextAlign.center,
+                          style: const TextStyle(
+                            color: Colors.black,
+                            fontSize: 10,
+                            fontWeight: FontWeight.w800,
+                            height: 1.2,
+                          ),
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+        ),
+      );
     }
+
+    final anyCameraOn = _windows.any((w) {
+      final isSelf = w.userId == widget.currentUserId;
+      final track = isSelf ? _roomCall.localVideoTrack : _roomCall.remoteVideoTracks[w.userId];
+      return isSelf ? (_roomCall.cameraOn && track != null) : track != null;
+    });
 
     return Align(
       alignment: Alignment.bottomCenter,
@@ -1776,6 +1869,15 @@ class _StudyRoomScreenState extends State<StudyRoomScreen> {
           mainAxisSize: MainAxisSize.min,
           children: [
             circleButton(
+              icon: anyCameraOn ? Icons.videocam : Icons.groups_rounded,
+              background: Colors.white12,
+              iconColor: anyCameraOn ? Colors.greenAccent : Colors.white,
+              onPressed: () => setState(() => _participantsExpanded = true),
+              tooltip: 'Participants (${_windows.length})',
+              badgeCount: _windows.length,
+              badgeColor: Colors.white,
+            ),
+            circleButton(
               icon: _roomCall.micOn ? Icons.mic : Icons.mic_off,
               background: _roomCall.micOn ? Colors.white12 : Colors.redAccent,
               iconColor: Colors.white,
@@ -1789,6 +1891,14 @@ class _StudyRoomScreenState extends State<StudyRoomScreen> {
               onPressed: _roomCall.isConnected ? () => _roomCall.toggleCamera() : null,
               tooltip: _roomCall.cameraOn ? 'Turn off camera' : 'Turn on camera',
             ),
+            if (_roomCall.cameraOn)
+              circleButton(
+                icon: Icons.cameraswitch_rounded,
+                background: Colors.white12,
+                iconColor: Colors.white,
+                onPressed: _roomCall.isConnected ? _switchCamera : null,
+                tooltip: 'Switch camera',
+              ),
             circleButton(
               icon: _roomCall.isScreenSharing ? Icons.stop_screen_share : Icons.screen_share_outlined,
               background: _roomCall.isScreenSharing ? Colors.tealAccent : Colors.white12,
@@ -1797,6 +1907,13 @@ class _StudyRoomScreenState extends State<StudyRoomScreen> {
               tooltip: _roomCall.isScreenSharing
                   ? 'Stop presenting'
                   : (_roomCall.activePresenterId != null ? 'Someone else is presenting' : 'Present screen'),
+            ),
+            circleButton(
+              icon: Icons.auto_awesome,
+              background: Colors.tealAccent,
+              iconColor: Colors.black,
+              onPressed: _openAiToolsSheet,
+              tooltip: 'Ask AI',
             ),
           ],
         ),
@@ -1813,47 +1930,6 @@ class _StudyRoomScreenState extends State<StudyRoomScreen> {
 
   double _toolPaletteBottomMargin(double bottomSafeInset) =>
       _bottomCallBarBottomMargin(bottomSafeInset) + _callBarApproxHeight + _barStackGap;
-
-  // ============================================================
-  // ASK AI PILL — always-visible shortcut into the AI Notes/Quiz sheet.
-  // This used to be buried inside the drawing toolbar (only discoverable
-  // once someone opened it), so most people never found it. It's the
-  // most "wow" feature the room has, so it now floats on its own,
-  // reachable from anywhere in the session.
-  // ============================================================
-  Widget _buildAskAiPill() {
-    return Align(
-      alignment: const Alignment(1.0, 0.35),
-      child: SafeArea(
-        child: Padding(
-          padding: const EdgeInsets.only(right: 12),
-          child: Material(
-            color: Colors.tealAccent,
-            borderRadius: BorderRadius.circular(24),
-            elevation: 6,
-            child: InkWell(
-              borderRadius: BorderRadius.circular(24),
-              onTap: _openAiToolsSheet,
-              child: const Padding(
-                padding: EdgeInsets.symmetric(horizontal: 14, vertical: 10),
-                child: Row(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    Icon(Icons.auto_awesome, color: Colors.black, size: 18),
-                    SizedBox(width: 6),
-                    Text(
-                      'Ask AI',
-                      style: TextStyle(color: Colors.black, fontWeight: FontWeight.w700, fontSize: 13),
-                    ),
-                  ],
-                ),
-              ),
-            ),
-          ),
-        ),
-      ),
-    );
-  }
 
   // ============================================================
   // ROOM LINK SHARE
@@ -2687,37 +2763,24 @@ class _StudyRoomScreenState extends State<StudyRoomScreen> {
               Expanded(child: _buildWhiteboardArea()),
             ],
           ),
-          // 🔧 FIX — pehle har participant ka apna alag draggable video
-          // window seedha whiteboard ke upar bikhra hota tha
-          // (`_buildFloatingWindowWidget` har `_windows` entry ke liye),
-          // jisse whiteboard content dikhna mushkil ho jaata tha. Ab
-          // whiteboard par koi bhi participant container nahi dikhta —
-          // sirf neeche wala ek chota floating "collapsed" box dikhta hai
-          // (`_buildParticipantsCollapsedBlock`), aur usi pe tap karne se
-          // hi sab participants (video + username) grid me khulte hain
-          // (`_buildParticipantsExpandedOverlay`).
+          // Individual participant video windows used to float loose on
+          // top of the whiteboard, which made board content hard to see.
+          // Now no per-participant tile sits on the whiteboard — the
+          // bottom call control bar has a single "Participants" button
+          // (with an online-count badge) that opens everyone into a
+          // full-screen grid on tap.
           _buildToolPalette(),
-          // 🔥 NAYA — Meet/Zoom-style floating call control bar: mic,
-          // camera aur screen-share ab yahan hain (thumb-reach me, bade
-          // circular buttons), AppBar me nahi. Yeh hamesha drawing tool
-          // palette ke NEECHE (screen ke bilkul bottom-most) rehta hai —
-          // dono ek saath fit ho jaate hain, overlap nahi hota.
+          // Meet/Zoom-style floating call control bar: mic, camera,
+          // screen-share, Participants, and Ask AI all live here (thumb
+          // reach, large circular buttons), not scattered across the
+          // screen and not in the AppBar. It always sits directly below
+          // the drawing tool palette so the two floating bars stack
+          // cleanly instead of overlapping.
           _buildBottomCallControlBar(),
-          // 🔥 NAYA — sabse "wow" feature (AI Notes/Quiz generator) pehle
-          // drawing-toolbar ke andar buried tha, isliye discover hi nahi
-          // hota tha. Ab ek hamesha-visible floating pill hai, poori
-          // whiteboard session ke dauraan kahin bhi se ek-tap access.
-          _buildAskAiPill(),
           _buildCallStatusBar(),
-          // 🔥 NAYA — chota "kaun online hai" block, hamesha visible
-          // (mainly whiteboard hi dikhta hai, ye sirf ek corner-pill hai).
-          // Sabke paas same access hai — koi bhi tap karke apna khud ka
-          // grid expand/collapse kar sakta hai (locally, kisi aur pe
-          // asar nahi).
-          _buildParticipantsCollapsedBlock(),
-          // 🔥 NAYA — tap karne par PURI screen pe aata hai. Sirf isi
-          // device par (local state) — kisi aur participant ki screen
-          // par ye overlay nahi khulta.
+          // Opens full-screen when the Participants button in the
+          // bottom bar is tapped. Local state only (`_participantsExpanded`)
+          // — this overlay never opens on anyone else's screen.
           if (_participantsExpanded) _buildParticipantsExpandedOverlay(),
           // 🔥 NAYA — floating sticker/reaction bubbles. Body Stack ke
           // sabse upar wale layers me se ek hai taaki whiteboard, video
@@ -3174,131 +3237,14 @@ class _StudyRoomScreenState extends State<StudyRoomScreen> {
     );
   }
 
-  // --- PARTICIPANTS CONTAINER: COLLAPSED "ONLINE" BLOCK ---
-  // 🔥 NAYA — chota, hidable block. Poori screen kabhi nahi leta — bas
-  // ek corner pill jisme ek overlapping-avatar stack + online count
-  // dikhta hai, taaki "kaun online hai" hamesha pata chale, chahe kisi
-  // ne apna grid open na kiya ho. Tap => sirf ISI device par full-screen
-  // grid khulta hai (local state, kisi ko sync nahi hota).
-  Widget _buildParticipantsCollapsedBlock() {
-    if (_windows.isEmpty) return const SizedBox.shrink();
-    final preview = _windows.take(3).toList();
-    final anyCameraOn = _windows.any((w) {
-      final isSelf = w.userId == widget.currentUserId;
-      final track = isSelf ? _roomCall.localVideoTrack : _roomCall.remoteVideoTracks[w.userId];
-      return isSelf ? (_roomCall.cameraOn && track != null) : track != null;
-    });
-
-    // 🔧 FIX — pehle ye hamesha "top: 8, left: 8" par fixed tha, jo
-    // page-tabs / dialogs ke upar overlap kar jaata tha aur user usse
-    // kahin aur hata nahi sakta tha. Ab is pill ko kahin bhi drag karke
-    // rakha ja sakta hai — position `_participantsPillOffset` me
-    // (locally) yaad rehti hai, aur screen ke bahar nahi jaane diya
-    // jaata (clamp).
-    // Pill ka approximate size — clamping ke liye. Exact size thoda vary
-    // karta hai (preview.length ke hisaab se), lekin ek safe upper-bound
-    // rakhna kaafi hai taaki drag karte waqt pill screen ke bahar na
-    // chala jaaye. `context` yahan seedha available hai (ye ek State
-    // method hai), isliye LayoutBuilder ki zaroorat nahi — aur Positioned
-    // ko Stack ka DIRECT child rehne dete hain (varna Flutter error deta
-    // hai agar beech me LayoutBuilder jaisa koi RenderObjectWidget aa jaye).
-    const double pillWidth = 130;
-    const double pillHeight = 44;
-    final screenSize = MediaQuery.of(context).size;
-    final maxX = math.max(0.0, screenSize.width - pillWidth);
-    final maxY = math.max(0.0, screenSize.height - pillHeight);
-
-    final offset = _participantsPillOffset ?? const Offset(8, 8);
-    final clampedOffset = Offset(
-      offset.dx.clamp(0.0, maxX),
-      offset.dy.clamp(0.0, maxY),
-    );
-
-    return Positioned(
-      left: clampedOffset.dx,
-      top: clampedOffset.dy,
-      child: SafeArea(
-        child: GestureDetector(
-          onPanUpdate: (details) {
-            setState(() {
-              final current = _participantsPillOffset ?? const Offset(8, 8);
-              _participantsPillOffset = Offset(
-                (current.dx + details.delta.dx).clamp(0.0, maxX),
-                (current.dy + details.delta.dy).clamp(0.0, maxY),
-              );
-            });
-          },
-          child: Material(
-                color: const Color(0xFF1E1E2C),
-                elevation: 6,
-                borderRadius: BorderRadius.circular(24),
-                child: InkWell(
-                  borderRadius: BorderRadius.circular(24),
-                  onTap: () => setState(() => _participantsExpanded = true),
-                  child: Padding(
-                    padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
-                    child: Row(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        SizedBox(
-                          width: 20.0 + (preview.length - 1) * 14.0,
-                          height: 26,
-                          child: Stack(
-                            children: [
-                              for (int i = 0; i < preview.length; i++)
-                                Positioned(
-                                  left: i * 14.0,
-                                  child: Stack(
-                                    clipBehavior: Clip.none,
-                                    children: [
-                                      CircleAvatar(
-                                        radius: 13,
-                                        backgroundColor: Colors.white24,
-                                        backgroundImage: preview[i].avatarUrl != null
-                                            ? NetworkImage(preview[i].avatarUrl!)
-                                            : null,
-                                        child: preview[i].avatarUrl == null
-                                            ? const Icon(Icons.person, size: 14, color: Colors.white)
-                                            : null,
-                                      ),
-                                      // 🔥 NAYA — chota active-status dot, taaki
-                                      // collapsed pill se hi pata chale ki ye
-                                      // participant abhi room me active hai.
-                                      Positioned(
-                                        right: -1,
-                                        bottom: -1,
-                                        child: _buildActiveDot(isSelf: preview[i].userId == widget.currentUserId),
-                                      ),
-                                    ],
-                                  ),
-                                ),
-                            ],
-                          ),
-                        ),
-                        const SizedBox(width: 6),
-                        Icon(anyCameraOn ? Icons.videocam : Icons.groups_rounded,
-                            size: 16, color: anyCameraOn ? Colors.greenAccent : Colors.white70),
-                        const SizedBox(width: 4),
-                        Text('${_windows.length}',
-                            style: const TextStyle(color: Colors.white, fontSize: 12, fontWeight: FontWeight.bold)),
-                      ],
-                    ),
-                  ),
-                ),
-              ),
-            ),
-          ),
-    );
-  }
-
-  // --- PARTICIPANTS CONTAINER: FULL-SCREEN EXPANDED GRID ---
-  // 🔥 NAYA — collapsed block pe tap karne ke baad yahi khulta hai.
-  // Sirf isi user ki screen par (local `_participantsExpanded` state) —
-  // koi socket broadcast nahi hota, isliye doosre participants ki screen
-  // par isse koi farak nahi padta. Andar joined har participant ka tile
-  // hai — jiska camera ON hai uska live video, jiska OFF hai uska
-  // profile picture.
+  // --- PARTICIPANTS: FULL-SCREEN EXPANDED GRID ---
+  // Opens when the Participants button in the bottom bar is tapped.
+  // Only on this user's screen (local `_participantsExpanded` state) —
+  // no socket broadcast happens, so it has no effect on anyone else's
+  // screen. Each joined participant gets a tile — live video for anyone
+  // with camera ON, profile picture for anyone with it OFF.
   Widget _buildParticipantsExpandedOverlay() {
+    final focused = _focusedWindowOrNull();
     return Positioned.fill(
       child: Material(
         color: const Color(0xFF0F0F11).withOpacity(0.97),
@@ -3316,43 +3262,53 @@ class _StudyRoomScreenState extends State<StudyRoomScreen> {
                       style: const TextStyle(color: Colors.white, fontSize: 16, fontWeight: FontWeight.bold),
                     ),
                     const Spacer(),
+                    if (focused != null)
+                      IconButton(
+                        tooltip: 'Back to grid',
+                        icon: const Icon(Icons.grid_view_rounded, color: Colors.white70),
+                        onPressed: () => setState(() => _focusedParticipantId = null),
+                      ),
                     IconButton(
                       tooltip: 'Close',
                       icon: const Icon(Icons.close, color: Colors.white70),
-                      // Sirf collapse hota hai — whiteboard aur call dono
-                      // chalte rehte hain, koi disconnect nahi hota.
-                      onPressed: () => setState(() => _participantsExpanded = false),
+                      // Only collapses the overlay — whiteboard and call
+                      // both keep running, nothing disconnects.
+                      onPressed: () => setState(() {
+                        _participantsExpanded = false;
+                        _focusedParticipantId = null;
+                      }),
                     ),
                   ],
                 ),
               ),
               Expanded(
-                child: Padding(
-                  // 🔧 FIX — spacing bahut zyada lag raha tha, khaaskar
-                  // 2-column layout par (chhote phones). Outer padding aur
-                  // grid gaps dono tighten kiye — tiles ab ek-doosre ke
-                  // zyada paas, kam khaali jagah ke saath baithte hain.
-                  padding: const EdgeInsets.fromLTRB(8, 0, 8, 8),
-                  child: LayoutBuilder(
-                    builder: (context, constraints) {
-                      final crossAxisCount = constraints.maxWidth > 900
-                          ? 4
-                          : constraints.maxWidth > 600
-                              ? 3
-                              : 2;
-                      return GridView.builder(
-                        gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
-                          crossAxisCount: crossAxisCount,
-                          crossAxisSpacing: 6,
-                          mainAxisSpacing: 6,
-                          childAspectRatio: 1.05,
+                child: focused != null
+                    ? _buildSpotlightView(focused)
+                    : Padding(
+                        // Grid spacing kept tight, especially on the
+                        // 2-column layout (smaller phones) — tiles sit
+                        // close together with minimal wasted space.
+                        padding: const EdgeInsets.fromLTRB(8, 0, 8, 8),
+                        child: LayoutBuilder(
+                          builder: (context, constraints) {
+                            final crossAxisCount = constraints.maxWidth > 900
+                                ? 4
+                                : constraints.maxWidth > 600
+                                    ? 3
+                                    : 2;
+                            return GridView.builder(
+                              gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
+                                crossAxisCount: crossAxisCount,
+                                crossAxisSpacing: 6,
+                                mainAxisSpacing: 6,
+                                childAspectRatio: 1.05,
+                              ),
+                              itemCount: _windows.length,
+                              itemBuilder: (context, index) => _buildParticipantGridTile(_windows[index]),
+                            );
+                          },
                         ),
-                        itemCount: _windows.length,
-                        itemBuilder: (context, index) => _buildParticipantGridTile(_windows[index]),
-                      );
-                    },
-                  ),
-                ),
+                      ),
               ),
             ],
           ),
@@ -3361,85 +3317,252 @@ class _StudyRoomScreenState extends State<StudyRoomScreen> {
     );
   }
 
-  // --- PARTICIPANTS CONTAINER: SINGLE GRID TILE ---
-  // 🔥 NAYA — `_buildFloatingWindowWidget` jaisa hi video/avatar logic
-  // reuse karta hai, bas drag/resize ke bina — grid me fixed cell hai.
+  // --- PARTICIPANTS: SPOTLIGHT VIEW ---
+  // One participant large (~70% of the overlay height) so their video is
+  // actually watchable, with everyone else in a horizontally scrollable
+  // strip underneath (~30%) — tap any of them to bring them into focus
+  // instead. The strip scrolls rather than growing, so it stays out of
+  // the way even with a large room. When the focused tile is yourself,
+  // mic/camera/switch-camera controls sit on the video itself so you
+  // don't have to back out to the whiteboard's bottom bar to use them.
+  Widget _buildSpotlightView(UserProfileWindowModel focused) {
+    final isSelf = focused.userId == widget.currentUserId;
+    final videoTrack = isSelf ? _roomCall.localVideoTrack : _roomCall.remoteVideoTracks[focused.userId];
+    final cameraIsOn = isSelf ? (_roomCall.cameraOn && videoTrack != null) : videoTrack != null;
+    final micIsOn = isSelf ? _roomCall.micOn : (_roomCall.remoteMicOn[focused.userId] ?? false);
+    final others = _windows.where((w) => w.userId != focused.userId).toList();
+
+    return Column(
+      children: [
+        Expanded(
+          flex: others.isEmpty ? 10 : 7,
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(10, 4, 10, 6),
+            child: ClipRRect(
+              borderRadius: BorderRadius.circular(16),
+              child: Container(
+                color: const Color(0xFF2A2A3C),
+                child: Stack(
+                  fit: StackFit.expand,
+                  children: [
+                    cameraIsOn
+                        ? VideoTrackRenderer(videoTrack!)
+                        : Center(
+                            child: Column(
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                CircleAvatar(
+                                  radius: 48,
+                                  backgroundColor: Colors.white24,
+                                  backgroundImage: focused.avatarUrl != null ? NetworkImage(focused.avatarUrl!) : null,
+                                  child: focused.avatarUrl == null
+                                      ? const Icon(Icons.person, size: 44, color: Colors.white)
+                                      : null,
+                                ),
+                                const SizedBox(height: 12),
+                                Text(
+                                  focused.displayName,
+                                  style: const TextStyle(color: Colors.white, fontSize: 16, fontWeight: FontWeight.bold),
+                                ),
+                              ],
+                            ),
+                          ),
+                    Positioned(
+                      left: 14,
+                      bottom: 14,
+                      child: Container(
+                        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+                        decoration: BoxDecoration(
+                          color: Colors.black.withOpacity(0.55),
+                          borderRadius: BorderRadius.circular(8),
+                        ),
+                        child: Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            Icon(micIsOn ? Icons.mic : Icons.mic_off,
+                                size: 14, color: micIsOn ? Colors.white : Colors.redAccent),
+                            const SizedBox(width: 6),
+                            Text(
+                              isSelf ? '${focused.displayName} (You)' : focused.displayName,
+                              style: const TextStyle(color: Colors.white, fontSize: 13, fontWeight: FontWeight.w600),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ),
+                    Positioned(top: 12, right: 12, child: _buildActiveDot(isSelf: isSelf)),
+                    // Self-only controls — you can only toggle your own
+                    // mic/camera, never another participant's.
+                    if (isSelf)
+                      Positioned(
+                        right: 12,
+                        bottom: 12,
+                        child: Row(
+                          children: [
+                            _buildSpotlightControlButton(
+                              icon: micIsOn ? Icons.mic : Icons.mic_off,
+                              active: micIsOn,
+                              tooltip: micIsOn ? 'Mute mic' : 'Unmute mic',
+                              onTap: _roomCall.isConnected ? () => _roomCall.toggleMic() : null,
+                            ),
+                            const SizedBox(width: 8),
+                            _buildSpotlightControlButton(
+                              icon: cameraIsOn ? Icons.videocam : Icons.videocam_off,
+                              active: cameraIsOn,
+                              tooltip: cameraIsOn ? 'Turn off camera' : 'Turn on camera',
+                              onTap: _roomCall.isConnected ? () => _roomCall.toggleCamera() : null,
+                            ),
+                            if (cameraIsOn) ...[
+                              const SizedBox(width: 8),
+                              _buildSpotlightControlButton(
+                                icon: Icons.cameraswitch_rounded,
+                                active: true,
+                                tooltip: 'Switch camera',
+                                onTap: _switchCamera,
+                              ),
+                            ],
+                          ],
+                        ),
+                      ),
+                  ],
+                ),
+              ),
+            ),
+          ),
+        ),
+        if (others.isNotEmpty)
+          Expanded(
+            flex: 3,
+            child: Padding(
+              padding: const EdgeInsets.fromLTRB(10, 0, 10, 10),
+              child: ListView.separated(
+                scrollDirection: Axis.horizontal,
+                itemCount: others.length,
+                separatorBuilder: (_, __) => const SizedBox(width: 8),
+                itemBuilder: (context, index) => SizedBox(
+                  width: 110,
+                  child: _buildParticipantGridTile(others[index]),
+                ),
+              ),
+            ),
+          ),
+      ],
+    );
+  }
+
+  // Small circular control button used on the spotlight video itself
+  // (mic / camera / switch-camera) — same visual language as the bottom
+  // call control bar's circleButton, just sized for sitting on a video
+  // tile instead of floating on its own.
+  Widget _buildSpotlightControlButton({
+    required IconData icon,
+    required bool active,
+    required String tooltip,
+    required VoidCallback? onTap,
+  }) {
+    return Tooltip(
+      message: tooltip,
+      child: Material(
+        color: active ? Colors.white24 : Colors.redAccent,
+        shape: const CircleBorder(),
+        child: InkWell(
+          customBorder: const CircleBorder(),
+          onTap: onTap,
+          child: Container(
+            width: 40,
+            height: 40,
+            alignment: Alignment.center,
+            child: Icon(icon, color: Colors.white, size: 20),
+          ),
+        ),
+      ),
+    );
+  }
+
+  // --- PARTICIPANTS: SINGLE GRID/STRIP TILE ---
+  // Reuses the same video/avatar rendering in both the grid and the
+  // spotlight strip. Tapping any tile focuses that participant into the
+  // spotlight view (see `_buildSpotlightView`).
   Widget _buildParticipantGridTile(UserProfileWindowModel win) {
     final isSelf = win.userId == widget.currentUserId;
     final videoTrack = isSelf ? _roomCall.localVideoTrack : _roomCall.remoteVideoTracks[win.userId];
     final cameraIsOn = isSelf ? (_roomCall.cameraOn && videoTrack != null) : videoTrack != null;
     final micIsOn = isSelf ? _roomCall.micOn : (_roomCall.remoteMicOn[win.userId] ?? false);
 
-    return Container(
-      clipBehavior: Clip.antiAlias,
-      decoration: BoxDecoration(
-        color: const Color(0xFF2A2A3C),
-        borderRadius: BorderRadius.circular(12),
-        border: Border.all(color: cameraIsOn ? Colors.greenAccent : Colors.white24, width: 1.5),
-      ),
-      child: Stack(
-        fit: StackFit.expand,
-        children: [
-          cameraIsOn
-              ? VideoTrackRenderer(videoTrack!)
-              : Center(
-                  child: Column(
-                    mainAxisSize: MainAxisSize.min,
-                    mainAxisAlignment: MainAxisAlignment.center,
-                    children: [
-                      CircleAvatar(
-                        radius: 28,
-                        backgroundColor: Colors.white24,
-                        backgroundImage: win.avatarUrl != null ? NetworkImage(win.avatarUrl!) : null,
-                        child: win.avatarUrl == null ? const Icon(Icons.person, color: Colors.white) : null,
-                      ),
-                      const SizedBox(height: 6),
-                      Padding(
-                        padding: const EdgeInsets.symmetric(horizontal: 6),
+    return InkWell(
+      borderRadius: BorderRadius.circular(12),
+      onTap: () => setState(() => _focusedParticipantId = win.userId),
+      child: Container(
+        clipBehavior: Clip.antiAlias,
+        decoration: BoxDecoration(
+          color: const Color(0xFF2A2A3C),
+          borderRadius: BorderRadius.circular(12),
+          border: Border.all(color: cameraIsOn ? Colors.greenAccent : Colors.white24, width: 1.5),
+        ),
+        child: Stack(
+          fit: StackFit.expand,
+          children: [
+            cameraIsOn
+                ? VideoTrackRenderer(videoTrack!)
+                : Center(
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      mainAxisAlignment: MainAxisAlignment.center,
+                      children: [
+                        CircleAvatar(
+                          radius: 28,
+                          backgroundColor: Colors.white24,
+                          backgroundImage: win.avatarUrl != null ? NetworkImage(win.avatarUrl!) : null,
+                          child: win.avatarUrl == null ? const Icon(Icons.person, color: Colors.white) : null,
+                        ),
+                        const SizedBox(height: 6),
+                        Padding(
+                          padding: const EdgeInsets.symmetric(horizontal: 6),
+                          child: Text(
+                            win.displayName,
+                            textAlign: TextAlign.center,
+                            overflow: TextOverflow.ellipsis,
+                            style: const TextStyle(color: Colors.white, fontSize: 12, fontWeight: FontWeight.bold),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+            Positioned(
+              left: 6,
+              bottom: 6,
+              child: Container(
+                padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                decoration: BoxDecoration(
+                  color: Colors.black.withOpacity(0.5),
+                  borderRadius: BorderRadius.circular(6),
+                ),
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Icon(micIsOn ? Icons.mic : Icons.mic_off,
+                        size: 11, color: micIsOn ? Colors.white : Colors.redAccent),
+                    if (cameraIsOn) ...[
+                      const SizedBox(width: 3),
+                      Flexible(
                         child: Text(
                           win.displayName,
-                          textAlign: TextAlign.center,
                           overflow: TextOverflow.ellipsis,
-                          style: const TextStyle(color: Colors.white, fontSize: 12, fontWeight: FontWeight.bold),
+                          style: const TextStyle(color: Colors.white, fontSize: 10, fontWeight: FontWeight.w600),
                         ),
                       ),
                     ],
-                  ),
-                ),
-          Positioned(
-            left: 6,
-            bottom: 6,
-            child: Container(
-              padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
-              decoration: BoxDecoration(
-                color: Colors.black.withOpacity(0.5),
-                borderRadius: BorderRadius.circular(6),
-              ),
-              child: Row(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  Icon(micIsOn ? Icons.mic : Icons.mic_off,
-                      size: 11, color: micIsOn ? Colors.white : Colors.redAccent),
-                  if (cameraIsOn) ...[
-                    const SizedBox(width: 3),
-                    Flexible(
-                      child: Text(
-                        win.displayName,
-                        overflow: TextOverflow.ellipsis,
-                        style: const TextStyle(color: Colors.white, fontSize: 10, fontWeight: FontWeight.w600),
-                      ),
-                    ),
                   ],
-                ],
+                ),
               ),
             ),
-          ),
-          // 🔥 NAYA — top-right green dot: ye participant is waqt room me
-          // actively joined/connected hai (self ke liye _roomCall ki real
-          // connection state, doosron ke liye unka window tabhi tak yahan
-          // rehta hai jab tak wo LiveKit room me hain).
-          Positioned(top: 6, right: 6, child: _buildActiveDot(isSelf: isSelf)),
-        ],
+            // Top-right green dot: this participant is actively connected
+            // right now (self uses `_roomCall`'s real connection state,
+            // others stay in `_windows` only while actively in the LiveKit
+            // room).
+            Positioned(top: 6, right: 6, child: _buildActiveDot(isSelf: isSelf)),
+          ],
+        ),
       ),
     );
   }
@@ -4300,18 +4423,47 @@ class _StickerBubble extends StatelessWidget {
       child: Column(
         mainAxisSize: MainAxisSize.min,
         children: [
-          Text(sticker.emoji, style: const TextStyle(fontSize: 44)),
-          const SizedBox(height: 2),
+          // 🔥 Naya arrangement: sender chip ab UPAR (avatar-initial ke saath),
+          // emoji NEECHE ek soft glow-disc ke andar — pehle ye ulta tha
+          // (emoji upar, plain name-pill neeche). Feels zyada "live reaction
+          // card" jaisa, kam "floating label" jaisa.
           Container(
-            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+            padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 3),
+            margin: const EdgeInsets.only(bottom: 6),
             decoration: BoxDecoration(
-              color: Colors.black54,
-              borderRadius: BorderRadius.circular(8),
+              color: Colors.black.withOpacity(0.55),
+              borderRadius: BorderRadius.circular(20),
+              border: Border.all(color: Colors.white.withOpacity(0.1)),
             ),
-            child: Text(
-              sticker.senderName,
-              style: const TextStyle(color: Colors.white, fontSize: 11, fontWeight: FontWeight.w600),
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                CircleAvatar(
+                  radius: 7,
+                  backgroundColor: Colors.white24,
+                  child: Text(
+                    sticker.senderName.isNotEmpty ? sticker.senderName[0].toUpperCase() : '?',
+                    style: const TextStyle(color: Colors.white, fontSize: 8, fontWeight: FontWeight.w700),
+                  ),
+                ),
+                const SizedBox(width: 5),
+                Text(
+                  sticker.senderName,
+                  style: const TextStyle(color: Colors.white, fontSize: 10.5, fontWeight: FontWeight.w600),
+                ),
+              ],
             ),
+          ),
+          Container(
+            padding: const EdgeInsets.all(10),
+            decoration: BoxDecoration(
+              shape: BoxShape.circle,
+              color: Colors.white.withOpacity(0.06),
+              boxShadow: [
+                BoxShadow(color: Colors.black.withOpacity(0.25), blurRadius: 18, spreadRadius: 2),
+              ],
+            ),
+            child: Text(sticker.emoji, style: const TextStyle(fontSize: 40)),
           ),
         ],
       ),
@@ -4345,13 +4497,16 @@ class _JoinToastState extends State<_JoinToast> with SingleTickerProviderStateMi
   @override
   void initState() {
     super.initState();
-    _controller = AnimationController(vsync: this, duration: const Duration(milliseconds: 350));
+    _controller = AnimationController(vsync: this, duration: const Duration(milliseconds: 380));
     _fade = CurvedAnimation(parent: _controller, curve: Curves.easeOut);
-    _slide = Tween<Offset>(begin: const Offset(0, -0.4), end: Offset.zero)
+    // 🔥 Naya layout: ab top-center pill ki jagah top-right se slide-in
+    // hota hai (Slack/Zoom notification-card jaisa) — center screen
+    // clutter nahi hota aur video tiles ke saath overlap kam hota hai.
+    _slide = Tween<Offset>(begin: const Offset(0.35, 0), end: Offset.zero)
         .animate(CurvedAnimation(parent: _controller, curve: Curves.easeOutCubic));
     _controller.forward();
 
-    // ~2.5s visible, phir reverse (fade + slide-up) karke khatam.
+    // ~2.5s visible, phir reverse (fade + slide-out) karke khatam.
     Future.delayed(const Duration(milliseconds: 2500), () async {
       if (!mounted) return;
       await _controller.reverse();
@@ -4368,47 +4523,90 @@ class _JoinToastState extends State<_JoinToast> with SingleTickerProviderStateMi
   @override
   Widget build(BuildContext context) {
     return Positioned(
-      top: MediaQuery.of(context).padding.top + 12,
-      left: 0,
-      right: 0,
+      top: MediaQuery.of(context).padding.top + 16,
+      right: 16,
       child: IgnorePointer(
-        child: Center(
-          child: FadeTransition(
-            opacity: _fade,
-            child: SlideTransition(
-              position: _slide,
-              child: Material(
-                color: Colors.transparent,
-                child: Container(
-                  padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
-                  decoration: BoxDecoration(
-                    color: const Color(0xFF0D0D15).withOpacity(0.94),
-                    borderRadius: BorderRadius.circular(24),
-                    border: Border.all(color: Colors.white.withOpacity(0.08)),
-                    boxShadow: const [BoxShadow(color: Colors.black45, blurRadius: 12, offset: Offset(0, 4))],
-                  ),
+        child: FadeTransition(
+          opacity: _fade,
+          child: SlideTransition(
+            position: _slide,
+            child: Material(
+              color: Colors.transparent,
+              child: Container(
+                constraints: const BoxConstraints(maxWidth: 260),
+                decoration: BoxDecoration(
+                  color: const Color(0xFF12121C).withOpacity(0.96),
+                  borderRadius: BorderRadius.circular(14),
+                  border: Border.all(color: Colors.white.withOpacity(0.08)),
+                  boxShadow: const [BoxShadow(color: Colors.black54, blurRadius: 16, offset: Offset(0, 6))],
+                ),
+                child: IntrinsicHeight(
                   child: Row(
                     mainAxisSize: MainAxisSize.min,
+                    crossAxisAlignment: CrossAxisAlignment.stretch,
                     children: [
-                      const CircleAvatar(
-                        radius: 10,
-                        backgroundColor: Colors.greenAccent,
-                        child: Icon(Icons.person, size: 12, color: Colors.black),
-                      ),
-                      const SizedBox(width: 10),
-                      Flexible(
-                        child: RichText(
-                          overflow: TextOverflow.ellipsis,
-                          text: TextSpan(
-                            style: const TextStyle(fontSize: 13, color: Colors.white70),
-                            children: [
-                              TextSpan(
-                                text: widget.name,
-                                style: const TextStyle(color: Colors.white, fontWeight: FontWeight.w700),
-                              ),
-                              const TextSpan(text: '  joined the study room'),
-                            ],
+                      // Left accent bar — ek nazar me "someone joined" signal.
+                      Container(
+                        width: 4,
+                        decoration: const BoxDecoration(
+                          gradient: LinearGradient(
+                            begin: Alignment.topCenter,
+                            end: Alignment.bottomCenter,
+                            colors: [Color(0xFF34D399), Color(0xFF10B981)],
                           ),
+                          borderRadius: BorderRadius.horizontal(left: Radius.circular(14)),
+                        ),
+                      ),
+                      Padding(
+                        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+                        child: Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            Stack(
+                              clipBehavior: Clip.none,
+                              children: [
+                                CircleAvatar(
+                                  radius: 15,
+                                  backgroundColor: Colors.white12,
+                                  child: Text(
+                                    widget.name.isNotEmpty ? widget.name[0].toUpperCase() : '?',
+                                    style: const TextStyle(color: Colors.white, fontWeight: FontWeight.w700, fontSize: 13),
+                                  ),
+                                ),
+                                Positioned(
+                                  right: -1,
+                                  bottom: -1,
+                                  child: Container(
+                                    width: 10,
+                                    height: 10,
+                                    decoration: BoxDecoration(
+                                      color: const Color(0xFF34D399),
+                                      shape: BoxShape.circle,
+                                      border: Border.all(color: const Color(0xFF12121C), width: 2),
+                                    ),
+                                  ),
+                                ),
+                              ],
+                            ),
+                            const SizedBox(width: 10),
+                            Flexible(
+                              child: Column(
+                                mainAxisSize: MainAxisSize.min,
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                children: [
+                                  Text(
+                                    widget.name,
+                                    overflow: TextOverflow.ellipsis,
+                                    style: const TextStyle(color: Colors.white, fontWeight: FontWeight.w700, fontSize: 13),
+                                  ),
+                                  const Text(
+                                    'joined the study room',
+                                    style: TextStyle(color: Colors.white54, fontSize: 11),
+                                  ),
+                                ],
+                              ),
+                            ),
+                          ],
                         ),
                       ),
                     ],
@@ -4441,6 +4639,8 @@ class _QuizQuestionCard extends StatefulWidget {
 class _QuizQuestionCardState extends State<_QuizQuestionCard> {
   bool _revealed = false;
 
+  static const List<String> _labels = ['A', 'B', 'C', 'D', 'E', 'F'];
+
   @override
   Widget build(BuildContext context) {
     final questionText = (widget.question['question'] ?? '').toString();
@@ -4448,34 +4648,136 @@ class _QuizQuestionCardState extends State<_QuizQuestionCard> {
     final options = (widget.question['options'] as List?)?.map((e) => e.toString()).toList() ?? [];
 
     return Container(
-      margin: const EdgeInsets.only(bottom: 12),
-      padding: const EdgeInsets.all(14),
+      margin: const EdgeInsets.only(bottom: 14),
       decoration: BoxDecoration(
-        color: Colors.white.withOpacity(0.05),
-        borderRadius: BorderRadius.circular(12),
+        color: Colors.white.withOpacity(0.045),
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(color: Colors.white.withOpacity(0.06)),
       ),
+      clipBehavior: Clip.antiAlias,
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Text(
-            'Q${widget.index + 1}. $questionText',
-            style: const TextStyle(color: Colors.white, fontWeight: FontWeight.w600),
+          // Header row — gradient index badge + question text, ab plain
+          // "Q1." prefix ki jagah proper card-title jaisa dikhta hai.
+          Padding(
+            padding: EdgeInsets.fromLTRB(14, 14, 14, options.isEmpty ? 4 : 10),
+            child: Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Container(
+                  width: 26,
+                  height: 26,
+                  alignment: Alignment.center,
+                  decoration: BoxDecoration(
+                    gradient: const LinearGradient(colors: [Color(0xFF6366F1), Color(0xFF8B5CF6)]),
+                    borderRadius: BorderRadius.circular(8),
+                  ),
+                  child: Text(
+                    '${widget.index + 1}',
+                    style: const TextStyle(color: Colors.white, fontWeight: FontWeight.w700, fontSize: 13),
+                  ),
+                ),
+                const SizedBox(width: 10),
+                Expanded(
+                  child: Text(
+                    questionText,
+                    style: const TextStyle(color: Colors.white, fontWeight: FontWeight.w600, fontSize: 14, height: 1.35),
+                  ),
+                ),
+              ],
+            ),
           ),
-          if (options.isNotEmpty) ...[
-            const SizedBox(height: 8),
-            ...options.map((o) => Padding(
-                  padding: const EdgeInsets.only(bottom: 4),
-                  child: Text('• $o', style: const TextStyle(color: Colors.white54)),
-                )),
-          ],
-          const SizedBox(height: 8),
-          if (!_revealed)
-            TextButton(
-              onPressed: () => setState(() => _revealed = true),
-              child: const Text('Reveal Answer', style: TextStyle(color: Colors.tealAccent)),
-            )
-          else
-            Text('Answer: $answerText', style: const TextStyle(color: Colors.greenAccent, fontWeight: FontWeight.w600)),
+          // Options ab bullet-list ki jagah A/B/C labelled wrap-chips me —
+          // do-column jaisa flexible grid, chhoti screen pe khud wrap hota hai.
+          if (options.isNotEmpty)
+            Padding(
+              padding: const EdgeInsets.fromLTRB(14, 0, 14, 10),
+              child: Wrap(
+                spacing: 8,
+                runSpacing: 8,
+                children: List.generate(options.length, (i) {
+                  final label = i < _labels.length ? _labels[i] : '${i + 1}';
+                  return Container(
+                    constraints: BoxConstraints(minWidth: (MediaQuery.of(context).size.width - 60) / 2),
+                    padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+                    decoration: BoxDecoration(
+                      color: Colors.white.withOpacity(0.04),
+                      borderRadius: BorderRadius.circular(10),
+                      border: Border.all(color: Colors.white.withOpacity(0.07)),
+                    ),
+                    child: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        CircleAvatar(
+                          radius: 9,
+                          backgroundColor: Colors.white10,
+                          child: Text(label, style: const TextStyle(color: Colors.white70, fontSize: 10, fontWeight: FontWeight.w700)),
+                        ),
+                        const SizedBox(width: 8),
+                        Flexible(
+                          child: Text(options[i], style: const TextStyle(color: Colors.white70, fontSize: 12.5)),
+                        ),
+                      ],
+                    ),
+                  );
+                }),
+              ),
+            ),
+          // Reveal button -> animated highlighted answer panel (checkmark +
+          // green tint) ki jagah pehle sirf plain text tha.
+          AnimatedSize(
+            duration: const Duration(milliseconds: 220),
+            curve: Curves.easeOut,
+            child: _revealed
+                ? Container(
+                    width: double.infinity,
+                    margin: const EdgeInsets.fromLTRB(14, 0, 14, 14),
+                    padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+                    decoration: BoxDecoration(
+                      color: const Color(0xFF10B981).withOpacity(0.12),
+                      borderRadius: BorderRadius.circular(10),
+                      border: Border.all(color: const Color(0xFF10B981).withOpacity(0.35)),
+                    ),
+                    child: Row(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        const Icon(Icons.check_circle_rounded, color: Color(0xFF34D399), size: 18),
+                        const SizedBox(width: 8),
+                        Expanded(
+                          child: Text(
+                            answerText,
+                            style: const TextStyle(color: Color(0xFFD1FAE5), fontWeight: FontWeight.w600, fontSize: 13),
+                          ),
+                        ),
+                      ],
+                    ),
+                  )
+                : Padding(
+                    padding: const EdgeInsets.fromLTRB(14, 0, 14, 14),
+                    child: InkWell(
+                      borderRadius: BorderRadius.circular(10),
+                      onTap: () => setState(() => _revealed = true),
+                      child: Container(
+                        width: double.infinity,
+                        padding: const EdgeInsets.symmetric(vertical: 9),
+                        alignment: Alignment.center,
+                        decoration: BoxDecoration(
+                          borderRadius: BorderRadius.circular(10),
+                          border: Border.all(color: Colors.tealAccent.withOpacity(0.4)),
+                        ),
+                        child: const Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            Icon(Icons.visibility_rounded, size: 15, color: Colors.tealAccent),
+                            SizedBox(width: 6),
+                            Text('Reveal Answer', style: TextStyle(color: Colors.tealAccent, fontWeight: FontWeight.w600, fontSize: 12.5)),
+                          ],
+                        ),
+                      ),
+                    ),
+                  ),
+          ),
         ],
       ),
     );

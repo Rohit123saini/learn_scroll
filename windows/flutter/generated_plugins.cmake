@@ -4,7 +4,9 @@
 
 list(APPEND FLUTTER_PLUGIN_LIST
   audioplayers_windows
+  battery_plus
   connectivity_plus
+  ffmpeg_kit_flutter_new
   file_selector_windows
   firebase_auth
   firebase_core
@@ -16,6 +18,7 @@ list(APPEND FLUTTER_PLUGIN_LIST
   printing
   record_windows
   share_plus
+  speech_to_text_windows
   syncfusion_pdfviewer_windows
   url_launcher_windows
 )

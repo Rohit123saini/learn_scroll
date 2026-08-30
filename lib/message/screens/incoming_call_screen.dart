@@ -96,11 +96,24 @@ class IncomingCallScreen extends StatefulWidget {
 }
 
 class _IncomingCallScreenState extends State<IncomingCallScreen>
-    with SingleTickerProviderStateMixin {
+    with TickerProviderStateMixin {
   // ---------- outgoing call screen jaisa hi pulsing ring animation ----------
   late final AnimationController _pulseController;
   final AudioPlayer _ringtonePlayer = AudioPlayer();
   bool _busy = false;
+
+  // ============================================================
+  // 🔥 NAYA — SWIPE TO ACCEPT/DECLINE. Center knob ko left (decline) ya
+  // right (accept) drag karo — jaise Google Phone/Pixel ka "slide to
+  // answer". `_dragX` (pixels, track-center se relative) drag ke dauraan
+  // live update hota hai; threshold paar hote hi haptic + action fire
+  // hoti hai, warna knob spring-back ho ke center wapas aa jaata hai.
+  // ============================================================
+  late final AnimationController _hintController; // idle "swipe" hint pulse
+  late final AnimationController _knobSnapController; // release ke baad snap/complete animation
+  Animation<double>? _knobSnapAnimation;
+  double _dragX = 0;
+  bool _swipeSettled = false; // true jab knob edge tak pahunch chuka ho (action fire ho chuki)
 
   @override
   void initState() {
@@ -109,6 +122,14 @@ class _IncomingCallScreenState extends State<IncomingCallScreen>
       vsync: this,
       duration: const Duration(milliseconds: 1600),
     )..repeat();
+    _hintController = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 1100),
+    )..repeat(reverse: true);
+    _knobSnapController = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 260),
+    );
     _startRinging();
   }
 
@@ -138,6 +159,8 @@ class _IncomingCallScreenState extends State<IncomingCallScreen>
     _stopRinging();
     _ringtonePlayer.dispose();
     _pulseController.dispose();
+    _hintController.dispose();
+    _knobSnapController.dispose();
     super.dispose();
   }
 
@@ -199,6 +222,59 @@ class _IncomingCallScreenState extends State<IncomingCallScreen>
     }
   }
 
+  // ---------- swipe-to-answer drag handling ----------
+
+  void _onDragUpdate(DragUpdateDetails details, double maxDrag) {
+    if (_busy || _swipeSettled) return;
+    setState(() {
+      _dragX = (_dragX + details.delta.dx).clamp(-maxDrag, maxDrag);
+    });
+  }
+
+  void _onDragEnd(DragEndDetails details, double maxDrag, double threshold) {
+    if (_busy || _swipeSettled) return;
+    if (_dragX <= -threshold) {
+      _completeSwipe(isAccept: false, maxDrag: maxDrag);
+    } else if (_dragX >= threshold) {
+      _completeSwipe(isAccept: true, maxDrag: maxDrag);
+    } else {
+      _springBack();
+    }
+  }
+
+  void _springBack() {
+    _knobSnapAnimation = Tween<double>(begin: _dragX, end: 0).animate(
+      CurvedAnimation(parent: _knobSnapController, curve: Curves.elasticOut),
+    )..addListener(() {
+        if (mounted) setState(() => _dragX = _knobSnapAnimation!.value);
+      });
+    _knobSnapController.forward(from: 0);
+  }
+
+  Future<void> _completeSwipe({required bool isAccept, required double maxDrag}) async {
+    setState(() => _swipeSettled = true);
+    try {
+      HapticFeedback.mediumImpact();
+    } catch (_) {}
+    _knobSnapAnimation = Tween<double>(begin: _dragX, end: isAccept ? maxDrag : -maxDrag).animate(
+      CurvedAnimation(parent: _knobSnapController, curve: Curves.easeOut),
+    )..addListener(() {
+        if (mounted) setState(() => _dragX = _knobSnapAnimation!.value);
+      });
+    await _knobSnapController.forward(from: 0);
+    if (isAccept) {
+      await _accept();
+    } else {
+      await _reject();
+    }
+    // Agar accept fail ho gaya (abhi bhi isi screen pe hain), knob ko
+    // wapas center laao taaki dobara try kiya ja sake.
+    if (mounted && !_busy) {
+      setState(() => _swipeSettled = false);
+      _springBack();
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     final initial =
@@ -236,11 +312,14 @@ class _IncomingCallScreenState extends State<IncomingCallScreen>
                 ),
                 const Spacer(),
                 SizedBox(
-                  width: 168,
-                  height: 168,
+                  width: 176,
+                  height: 176,
                   child: Stack(
                     alignment: Alignment.center,
                     children: [
+                      // 🔥 Do staggered pulsing rings (ek dusre se ~35% phase
+                      // shifted) — pehle sirf ek ring thi, ab WhatsApp jaisa
+                      // continuous "breathing" wave effect dikhta hai.
                       AnimatedBuilder(
                         animation: _pulseController,
                         builder: (context, child) {
@@ -248,13 +327,33 @@ class _IncomingCallScreenState extends State<IncomingCallScreen>
                           return Opacity(
                             opacity: (1 - t) * 0.35,
                             child: Transform.scale(
-                              scale: 1 + t * 0.35,
+                              scale: 1 + t * 0.4,
                               child: Container(
                                 width: 140,
                                 height: 140,
                                 decoration: const BoxDecoration(
                                   shape: BoxShape.circle,
                                   color: Color(0xFF2E7CF6),
+                                ),
+                              ),
+                            ),
+                          );
+                        },
+                      ),
+                      AnimatedBuilder(
+                        animation: _pulseController,
+                        builder: (context, child) {
+                          final t = (_pulseController.value + 0.35) % 1.0;
+                          return Opacity(
+                            opacity: (1 - t) * 0.22,
+                            child: Transform.scale(
+                              scale: 1 + t * 0.55,
+                              child: Container(
+                                width: 140,
+                                height: 140,
+                                decoration: const BoxDecoration(
+                                  shape: BoxShape.circle,
+                                  color: Color(0xFF25D366),
                                 ),
                               ),
                             ),
@@ -307,26 +406,19 @@ class _IncomingCallScreenState extends State<IncomingCallScreen>
                 ),
                 const Spacer(),
                 Padding(
-                  padding: const EdgeInsets.symmetric(horizontal: 44),
-                  child: Row(
-                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                    children: [
-                      _actionButton(
-                        icon: Icons.call_end_rounded,
-                        color: const Color(0xFFE53E3E),
-                        label: "Decline",
-                        onTap: _reject,
-                      ),
-                      _actionButton(
-                        icon: isVideo ? Icons.videocam_rounded : Icons.call_rounded,
-                        color: const Color(0xFF25D366), // WhatsApp-style accept green
-                        label: "Accept",
-                        onTap: _accept,
-                      ),
-                    ],
+                  padding: const EdgeInsets.symmetric(horizontal: 28),
+                  child: _buildSwipeTrack(isVideo),
+                ),
+                const SizedBox(height: 10),
+                AnimatedOpacity(
+                  opacity: _swipeSettled ? 0 : 1,
+                  duration: const Duration(milliseconds: 200),
+                  child: Text(
+                    "Slide to decline or accept",
+                    style: TextStyle(color: Colors.white.withOpacity(0.4), fontSize: 12.5),
                   ),
                 ),
-                const SizedBox(height: 48),
+                const SizedBox(height: 40),
               ],
             ),
           ),
@@ -335,38 +427,161 @@ class _IncomingCallScreenState extends State<IncomingCallScreen>
     );
   }
 
-  Widget _actionButton({
-    required IconData icon,
-    required Color color,
-    required String label,
-    required VoidCallback onTap,
-  }) {
-    return Column(
-      mainAxisSize: MainAxisSize.min,
-      children: [
-        GestureDetector(
-          onTap: _busy ? null : onTap,
-          child: Container(
-            width: 68,
-            height: 68,
-            decoration: BoxDecoration(
-              shape: BoxShape.circle,
-              color: color,
-              boxShadow: [
-                BoxShadow(color: color.withOpacity(0.45), blurRadius: 18, spreadRadius: 1),
-              ],
-            ),
-            child: _busy
-                ? const Padding(
-                    padding: EdgeInsets.all(20),
-                    child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white),
-                  )
-                : Icon(icon, color: Colors.white, size: 30),
-          ),
+  // ============================================================
+  // SWIPE-TO-ANSWER TRACK — center knob ko drag karke Accept (right,
+  // green) ya Decline (left, red) tak le jaao. Threshold paar hote hi
+  // knob khud edge tak snap ho jaata hai (haptic ke saath) aur action
+  // fire hoti hai; beech me chhod dene par elastic spring-back hota hai.
+  // Track ke dono ends khud bhi tappable hain — jisko drag pasand na ho
+  // wo seedha tap kar sakta hai, koi functionality lock nahi hoti.
+  // ============================================================
+  Widget _buildSwipeTrack(bool isVideo) {
+    const double trackHeight = 76;
+    const double knobSize = 62;
+    final trackWidth = MediaQuery.of(context).size.width - 56;
+    final maxDrag = (trackWidth - knobSize) / 2 - 6;
+    final threshold = maxDrag * 0.6;
+    // -1 (full decline) .. 0 (center) .. +1 (full accept)
+    final progress = maxDrag == 0 ? 0.0 : (_dragX / maxDrag).clamp(-1.0, 1.0);
+    final declineStrength = (-progress).clamp(0.0, 1.0);
+    final acceptStrength = progress.clamp(0.0, 1.0);
+
+    const declineColor = Color(0xFFE53E3E);
+    const acceptColor = Color(0xFF25D366);
+    final trackTint = progress < 0
+        ? Color.lerp(const Color(0xFF17171F), declineColor.withOpacity(0.55), declineStrength)!
+        : Color.lerp(const Color(0xFF17171F), acceptColor.withOpacity(0.55), acceptStrength)!;
+    final knobColor = progress < 0
+        ? Color.lerp(Colors.white, declineColor, declineStrength)!
+        : Color.lerp(Colors.white, acceptColor, acceptStrength)!;
+    final knobIconColor = progress.abs() > 0.08 ? Colors.white : const Color(0xFF0B0B0D);
+
+    return GestureDetector(
+      onHorizontalDragUpdate: (d) => _onDragUpdate(d, maxDrag),
+      onHorizontalDragEnd: (d) => _onDragEnd(d, maxDrag, threshold),
+      child: Container(
+        width: trackWidth,
+        height: trackHeight,
+        padding: const EdgeInsets.symmetric(horizontal: 6),
+        decoration: BoxDecoration(
+          color: trackTint,
+          borderRadius: BorderRadius.circular(trackHeight / 2),
+          border: Border.all(color: Colors.white.withOpacity(0.1)),
+          boxShadow: [
+            BoxShadow(color: Colors.black.withOpacity(0.35), blurRadius: 20, offset: const Offset(0, 8)),
+          ],
         ),
-        const SizedBox(height: 8),
-        Text(label, style: TextStyle(color: Colors.white.withOpacity(0.85), fontSize: 13)),
-      ],
+        child: Stack(
+          alignment: Alignment.center,
+          children: [
+            // Decline label — left end, tap-fallback bhi hai.
+            Align(
+              alignment: Alignment.centerLeft,
+              child: GestureDetector(
+                onTap: _busy ? null : () => _completeSwipe(isAccept: false, maxDrag: maxDrag),
+                child: Padding(
+                  padding: const EdgeInsets.only(left: 14),
+                  child: Opacity(
+                    opacity: 0.5 + declineStrength * 0.5,
+                    child: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Icon(Icons.call_end_rounded, color: declineColor, size: 20),
+                        const SizedBox(width: 6),
+                        Text("Decline",
+                            style: TextStyle(
+                                color: declineColor, fontSize: 12.5, fontWeight: FontWeight.w600)),
+                      ],
+                    ),
+                  ),
+                ),
+              ),
+            ),
+            // Accept label — right end, tap-fallback bhi hai.
+            Align(
+              alignment: Alignment.centerRight,
+              child: GestureDetector(
+                onTap: _busy ? null : () => _completeSwipe(isAccept: true, maxDrag: maxDrag),
+                child: Padding(
+                  padding: const EdgeInsets.only(right: 14),
+                  child: Opacity(
+                    opacity: 0.5 + acceptStrength * 0.5,
+                    child: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Text("Accept",
+                            style: TextStyle(
+                                color: acceptColor, fontSize: 12.5, fontWeight: FontWeight.w600)),
+                        const SizedBox(width: 6),
+                        Icon(isVideo ? Icons.videocam_rounded : Icons.call_rounded,
+                            color: acceptColor, size: 20),
+                      ],
+                    ),
+                  ),
+                ),
+              ),
+            ),
+            // Idle hint chevrons — dono taraf halka sa pulse karte hain jab
+            // tak koi drag shuru na ho, taaki gesture discover ho sake.
+            if (progress == 0 && !_swipeSettled)
+              AnimatedBuilder(
+                animation: _hintController,
+                builder: (context, child) {
+                  final v = _hintController.value;
+                  return Opacity(
+                    opacity: 0.15 + v * 0.2,
+                    child: child,
+                  );
+                },
+                child: Row(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  children: const [
+                    Icon(Icons.chevron_left_rounded, color: Colors.white, size: 18),
+                    SizedBox(width: 26),
+                    Icon(Icons.chevron_right_rounded, color: Colors.white, size: 18),
+                  ],
+                ),
+              ),
+            // Draggable knob — poore track pe left/right transform hota hai.
+            Transform.translate(
+              offset: Offset(_dragX, 0),
+              child: Container(
+                width: knobSize,
+                height: knobSize,
+                decoration: BoxDecoration(
+                  shape: BoxShape.circle,
+                  color: knobColor,
+                  boxShadow: [
+                    BoxShadow(
+                      color: (progress < 0 ? declineColor : acceptColor)
+                          .withOpacity(0.25 + progress.abs() * 0.35),
+                      blurRadius: 16,
+                      spreadRadius: 1,
+                    ),
+                  ],
+                ),
+                alignment: Alignment.center,
+                child: _busy
+                    ? SizedBox(
+                        width: 22,
+                        height: 22,
+                        child: CircularProgressIndicator(strokeWidth: 2, color: knobIconColor),
+                      )
+                    : Transform.rotate(
+                        angle: progress * -0.5,
+                        child: Icon(
+                          progress < -0.2
+                              ? Icons.call_end_rounded
+                              : (isVideo ? Icons.videocam_rounded : Icons.call_rounded),
+                          color: knobIconColor,
+                          size: 26,
+                        ),
+                      ),
+              ),
+            ),
+          ],
+        ),
+      ),
     );
   }
 }

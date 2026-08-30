@@ -239,12 +239,266 @@ class _ChatScreenState extends State<ChatScreen> {
   // nahi) ko dikhane ke liye — apni role group detail se load karte hain.
   bool _isGroupAdmin = false;
 
+  // 🔥 NAYA — ACCESS CONTROL SYSTEM: teen alag roles (admin/moderator/
+  // member), har ek ki alag capability:
+  //   - admin: sab kuch (delete group, message-permission/limit set karna,
+  //     photo change, join-requests approve/reject)
+  //   - moderator: photo change + message-permission/limit set karna +
+  //     join-requests handle karna (delete group NAHI — sirf admin)
+  //   - member: sirf group ki current `message_permission` policy follow
+  //     karta hai (agar "admins_mods" set hai to bilkul message nahi bhej
+  //     sakta) + `daily_message_limit` se bandha hota hai
+  // Sab enforcement backend (`check_group_send_permission`) pe already
+  // hoti hai — ye flags sirf UI ko sahi buttons/banners dikhane ke liye
+  // hain, security ka source-of-truth backend hi hai.
+  bool _isGroupModerator = false;
+  String _groupMessagePermission = 'everyone'; // 'everyone' | 'admins_mods'
+  int? _groupDailyLimit; // null = no limit
+  int _pendingJoinRequestsCount = 0; // admin/mod badge (private group only)
+
+  // 🔥 NAYA — session-local "aaj kitne message bheje" counter. Backend hi
+  // asli limit enforce karta hai (403 + code milega limit cross hone pe),
+  // ye sirf best-effort local estimate hai taaki member ko pehle se hi
+  // andaza mil jaaye ki kitne bache hain — app restart pe reset ho jaata
+  // hai, isliye kabhi bhi security check ke liye trust mat karna.
+  int _myMessagesSentToday = 0;
+  DateTime _messagesCounterDay = DateTime.now();
+
+  bool get _isGroupAdminOrMod => _isGroupAdmin || _isGroupModerator;
+
+  // group ne "sirf admin/moderator hi bhej sakte hain" set kiya hua hai
+  // aur main sirf ek normal member hoon -> composer band, banner dikhao.
+  bool get _isMessagingRestrictedForMe =>
+      widget.conversation.isGroup &&
+      _groupMessagePermission == 'admins_mods' &&
+      !_isGroupAdminOrMod;
+
   // NEW — multi-select mode for forwarding messages. When active, the
   // normal AppBar is swapped for a selection bar (count + forward icon),
   // tapping a message toggles it in/out of `_selectedMessageIds` instead
   // of opening it, and long-press/media-tap gestures are absorbed.
   bool _selectionMode = false;
   final Set<String> _selectedMessageIds = {};
+
+  // 🔥 NAYA — WHOLE CHAT-SCREEN WALLPAPER (WhatsApp jaisa)
+  // Poori chat screen ka background image (message bubbles ke peeche,
+  // saara chat screen), ek message ki bubble ka background NAHI. Backend
+  // me `ConversationParticipant.wallpaper_url` field + GET/PATCH
+  // /message/conversations/<id>/wallpaper/ endpoint hai (views.py
+  // `ConversationViewSet.wallpaper`) — per-user setting hai (sirf apne
+  // account ke liye, dusre participant/group members ko nahi dikhega).
+  // `null` matlab koi custom wallpaper nahi hai, default doodle-pattern
+  // (`_ChatWallpaperPainter`) dikhega.
+  String? _wallpaperUrl;
+  bool _wallpaperUploading = false;
+
+  // 🔥 NAYA — PINNED MESSAGES: is chat ke pinned messages (max 3, backend
+  // cap). Top banner isi list se render hota hai — dekho _buildPinnedBanner().
+  List<PinnedMessageModel> _pinnedMessages = [];
+
+  Future<void> _loadPinnedMessages() async {
+    try {
+      final pins = await MessageApiService.getPinnedMessages(widget.conversation.id);
+      if (!mounted) return;
+      setState(() => _pinnedMessages = pins);
+    } catch (_) {
+      // silent — pinned banner bas nahi dikhega, chat load hona nahi rukna chahiye
+    }
+  }
+
+  Future<void> _pinMessage(MessageModel msg) async {
+    try {
+      final pin = await MessageApiService.pinMessage(widget.conversation.id, msg.id);
+      if (!mounted) return;
+      setState(() => _pinnedMessages = [pin, ..._pinnedMessages]);
+    } on MessageApiException catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(e.message)));
+      }
+    }
+  }
+
+  Future<void> _unpinMessage(String messageId) async {
+    final prev = _pinnedMessages;
+    setState(() => _pinnedMessages = _pinnedMessages.where((p) => p.message.id != messageId).toList());
+    try {
+      await MessageApiService.unpinMessage(widget.conversation.id, messageId);
+    } catch (_) {
+      if (mounted) setState(() => _pinnedMessages = prev); // rollback on failure
+    }
+  }
+
+  Widget _buildPinnedBanner() {
+    final latest = _pinnedMessages.first;
+    return GestureDetector(
+      onTap: _showPinnedMessagesSheet,
+      child: Container(
+        width: double.infinity,
+        color: const Color(0xFFFFF6D9),
+        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+        child: Row(children: [
+          const Icon(Icons.push_pin, size: 16, color: Color(0xFF8A6D00)),
+          const SizedBox(width: 8),
+          Expanded(
+            child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+              Text(
+                _pinnedMessages.length == 1 ? "Pinned message" : "${_pinnedMessages.length} pinned messages",
+                style: const TextStyle(color: Color(0xFF8A6D00), fontSize: 11, fontWeight: FontWeight.bold),
+              ),
+              Text(
+                latest.message.text?.isNotEmpty == true ? latest.message.text! : "📎 Attachment",
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: const TextStyle(color: Colors.black87, fontSize: 12.5),
+              ),
+            ]),
+          ),
+          const Icon(Icons.chevron_right, size: 18, color: Color(0xFF8A6D00)),
+        ]),
+      ),
+    );
+  }
+
+  void _showPinnedMessagesSheet() {
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: Colors.white,
+      shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(18))),
+      builder: (sheetCtx) => StatefulBuilder(builder: (sheetCtx, setSheetState) {
+        return SafeArea(
+          child: Column(mainAxisSize: MainAxisSize.min, children: [
+            const Padding(
+              padding: EdgeInsets.all(14),
+              child: Text("Pinned messages", style: TextStyle(fontWeight: FontWeight.bold, fontSize: 15)),
+            ),
+            if (_pinnedMessages.isEmpty)
+              const Padding(padding: EdgeInsets.all(20), child: Text("Koi pinned message nahi hai")),
+            ..._pinnedMessages.map((p) => ListTile(
+                  leading: const Icon(Icons.push_pin_outlined),
+                  title: Text(
+                    p.message.text?.isNotEmpty == true ? p.message.text! : "📎 Attachment",
+                    maxLines: 2,
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                  subtitle: Text("Pinned by ${p.pinnedBy.displayName}"),
+                  trailing: IconButton(
+                    icon: const Icon(Icons.close, size: 18),
+                    onPressed: () async {
+                      await _unpinMessage(p.message.id);
+                      setSheetState(() {});
+                      if (_pinnedMessages.isEmpty && mounted) Navigator.pop(sheetCtx);
+                    },
+                  ),
+                  onTap: () {
+                    Navigator.pop(sheetCtx);
+                    _scrollToMessage(p.message.id);
+                  },
+                )),
+          ]),
+        );
+      }),
+    );
+  }
+
+  Future<void> _loadWallpaper() async {
+    final url = await MessageApiService.getConversationWallpaper(widget.conversation.id);
+    if (!mounted) return;
+    setState(() => _wallpaperUrl = url);
+  }
+
+  Future<void> _pickChatWallpaper() async {
+    // 🔥 NAYA — pehle se ek upload chal raha ho to dobara tap ignore karo
+    // (warna do parallel upload+set requests race kar sakti hain).
+    if (_wallpaperUploading) return;
+    try {
+      final picked = await ImagePicker().pickImage(source: ImageSource.gallery, imageQuality: 85);
+      if (picked == null || !mounted) return;
+
+      setState(() => _wallpaperUploading = true);
+
+      // Step 1: file upload -> file_url milta hai.
+      final uploaded = await MessageApiService.uploadFile(File(picked.path));
+      // Step 2: wahi file_url is poori chat ke wallpaper ke roop me set karo.
+      final saved = await MessageApiService.setConversationWallpaper(
+        widget.conversation.id,
+        uploaded.fileUrl,
+      );
+
+      if (!mounted) return;
+      setState(() {
+        _wallpaperUrl = saved ?? uploaded.fileUrl;
+        _wallpaperUploading = false;
+      });
+    } catch (e) {
+      if (!mounted) return;
+      setState(() => _wallpaperUploading = false);
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text("Wallpaper set nahi ho paaya: $e")),
+      );
+    }
+  }
+
+  Future<void> _removeChatWallpaper() async {
+    // 🔥 NAYA — accidental tap se turant wallpaper na hat jaaye, ek chhota
+    // confirm dialog dikha dete hain.
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (_) => AlertDialog(
+        title: const Text("Remove wallpaper?"),
+        content: const Text("Ye chat wapas default background pe chali jaayegi."),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(context, false), child: const Text("Cancel")),
+          TextButton(onPressed: () => Navigator.pop(context, true), child: const Text("Remove")),
+        ],
+      ),
+    );
+    if (confirmed != true || !mounted) return;
+
+    // Optimistic update — turant hata do, fail hone par wapas laga denge.
+    final previousUrl = _wallpaperUrl;
+    setState(() => _wallpaperUrl = null);
+    try {
+      await MessageApiService.removeConversationWallpaper(widget.conversation.id);
+    } catch (e) {
+      if (!mounted) return;
+      setState(() => _wallpaperUrl = previousUrl);
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text("Wallpaper remove nahi ho paaya: $e")),
+      );
+    }
+  }
+
+  // 🔥 NAYA — 3-dot menu se "Chat wallpaper" option: change ya remove
+  // (agar already set hai) dikhane wala chhota bottom sheet.
+  void _showWallpaperSheet() {
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: Colors.white,
+      shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(18))),
+      builder: (_) => SafeArea(
+        child: Wrap(children: [
+          ListTile(
+            leading: const Icon(Icons.wallpaper),
+            title: Text(_wallpaperUrl != null ? "Change wallpaper" : "Set wallpaper"),
+            enabled: !_wallpaperUploading,
+            onTap: () {
+              Navigator.pop(context);
+              _pickChatWallpaper();
+            },
+          ),
+          if (_wallpaperUrl != null)
+            ListTile(
+              leading: const Icon(Icons.image_not_supported_outlined),
+              title: const Text("Remove wallpaper"),
+              onTap: () {
+                Navigator.pop(context);
+                _removeChatWallpaper();
+              },
+            ),
+        ]),
+      ),
+    );
+  }
 
   // 🔥 NAYA — ek message diye gaye filter category me aata hai ya nahi, ye check karta hai.
   //  text  -> sirf plain text message (jisme koi URL na ho)
@@ -323,6 +577,8 @@ class _ChatScreenState extends State<ChatScreen> {
     _loadMuteStatus(); // 🔥 NAYA
     _loadBlockStatus(); // 🔥 NAYA
     _loadDisappearingStatus(); // 🔥 NAYA
+    _loadWallpaper(); // 🔥 NAYA — poori chat screen ka background image (agar set hai)
+    _loadPinnedMessages(); // 🔥 NAYA — pinned messages banner
   }
 
   // 🔥 NAYA — jab user list ko top ke paas scroll kare (chat me sabse
@@ -403,6 +659,15 @@ class _ChatScreenState extends State<ChatScreen> {
     if (groupId == null || groupId.isEmpty || _myUserId == null) return;
     try {
       final data = await MessageApiService.getGroup(groupId);
+
+      // 🔥 NAYA — access-control fields (message_permission /
+      // daily_message_limit) — model field names ke hi hisaab se, defensive
+      // fallback ke saath (agar backend response me na ho to defaults).
+      final permission = data['message_permission']?.toString() ?? 'everyone';
+      final rawLimit = data['daily_message_limit'];
+      final limit = rawLimit is int ? rawLimit : int.tryParse(rawLimit?.toString() ?? '');
+
+      String? myRole;
       final membersRaw = data['members'] ?? data['group_members'] ?? [];
       if (membersRaw is List) {
         for (final m in membersRaw) {
@@ -410,13 +675,39 @@ class _ChatScreenState extends State<ChatScreen> {
             final userField = m['user'];
             final memberUserId = (userField is Map ? userField['id'] : (m['user_id'] ?? m['id']))?.toString();
             if (memberUserId == _myUserId) {
-              final role = m['role']?.toString();
-              if (mounted) setState(() => _isGroupAdmin = role == 'admin');
+              myRole = m['role']?.toString();
               break;
             }
           }
         }
       }
+
+      if (mounted) {
+        setState(() {
+          _isGroupAdmin = myRole == 'admin';
+          _isGroupModerator = myRole == 'moderator';
+          _groupMessagePermission = permission;
+          _groupDailyLimit = limit;
+        });
+      }
+
+      // 🔥 NAYA — admin/moderator ho aur group private ho, to pending
+      // "join requests" ka badge count bhi load karo (approve/reject UI
+      // ke liye).
+      if ((_isGroupAdmin || _isGroupModerator) && (data['is_private'] == true)) {
+        _loadPendingJoinRequestsCount();
+      }
+    } catch (_) {}
+  }
+
+  // 🔥 NAYA — sirf count chahiye (badge ke liye), list `_showJoinRequestsSheet`
+  // khulne pe fresh fetch hoti hai.
+  Future<void> _loadPendingJoinRequestsCount() async {
+    final groupId = widget.conversation.group?.id;
+    if (groupId == null) return;
+    try {
+      final list = await MessageApiService.getJoinRequests(groupId);
+      if (mounted) setState(() => _pendingJoinRequestsCount = list.length);
     } catch (_) {}
   }
 
@@ -612,6 +903,269 @@ class _ChatScreenState extends State<ChatScreen> {
               },
             ),
         ]),
+      ),
+    );
+  }
+
+  // ================================================================
+  // 🔥 NAYA — FEATURE 1: ACCESS CONTROL — "Kaun message bhej sakta hai"
+  // (Everyone / sirf Admins & Moderators) aur "Daily message limit"
+  // (normal members ke liye, e.g. 4/din) — dono admin/moderator hi
+  // set kar sakte hain (`IsGroupAdminOrModerator` — views.py). Backend
+  // hi asal me enforce karta hai (`group_rules.check_group_send_
+  // permission`), ye sheet sirf un dono flags ko `Group.message_
+  // permission` / `Group.daily_message_limit` pe likhti hai.
+  // ================================================================
+  void _showAccessControlSheet() {
+    String selectedPermission = _groupMessagePermission;
+    final limitController = TextEditingController(
+      text: _groupDailyLimit == null ? '' : _groupDailyLimit.toString(),
+    );
+    showModalBottomSheet(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: Colors.white,
+      shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(18))),
+      builder: (sheetCtx) => StatefulBuilder(
+        builder: (sheetCtx, setSheetState) => Padding(
+          padding: EdgeInsets.only(bottom: MediaQuery.of(sheetCtx).viewInsets.bottom),
+          child: SafeArea(
+            child: SingleChildScrollView(
+              child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children: [
+                const Padding(
+                  padding: EdgeInsets.fromLTRB(16, 14, 16, 4),
+                  child: Text("Message permissions", style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
+                ),
+                const Padding(
+                  padding: EdgeInsets.fromLTRB(16, 0, 16, 8),
+                  child: Text(
+                    "Decide kaun is group me message bhej sakta hai.",
+                    style: TextStyle(fontSize: 12.5, color: Colors.black54),
+                  ),
+                ),
+                RadioListTile<String>(
+                  value: 'everyone',
+                  groupValue: selectedPermission,
+                  activeColor: const Color(0xFF3D7EFF),
+                  title: const Text("Everyone"),
+                  subtitle: const Text("Sabhi members chat kar sakte hain", style: TextStyle(fontSize: 12)),
+                  onChanged: (v) => setSheetState(() => selectedPermission = v!),
+                ),
+                RadioListTile<String>(
+                  value: 'admins_mods',
+                  groupValue: selectedPermission,
+                  activeColor: const Color(0xFF3D7EFF),
+                  title: const Text("Only admins & moderators"),
+                  subtitle: const Text("Baki sab sirf padh sakte hain, message nahi bhej sakte", style: TextStyle(fontSize: 12)),
+                  onChanged: (v) => setSheetState(() => selectedPermission = v!),
+                ),
+                const Divider(height: 24),
+                Padding(
+                  padding: const EdgeInsets.symmetric(horizontal: 16),
+                  child: Text("Daily message limit (members)", style: TextStyle(fontWeight: FontWeight.w600, fontSize: 13.5, color: Colors.grey[800])),
+                ),
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(16, 4, 16, 4),
+                  child: Text(
+                    "Normal members din bhar me itne hi messages bhej payenge (admin/moderator hamesha unlimited). Khaali chodo to koi limit nahi.",
+                    style: TextStyle(fontSize: 12, color: Colors.black54),
+                  ),
+                ),
+                Padding(
+                  padding: const EdgeInsets.symmetric(horizontal: 16),
+                  child: TextField(
+                    controller: limitController,
+                    keyboardType: TextInputType.number,
+                    decoration: InputDecoration(
+                      hintText: "e.g. 4",
+                      isDense: true,
+                      border: OutlineInputBorder(borderRadius: BorderRadius.circular(10)),
+                      suffixText: "msgs / day",
+                    ),
+                  ),
+                ),
+                const SizedBox(height: 16),
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(16, 0, 16, 16),
+                  child: SizedBox(
+                    width: double.infinity,
+                    child: ElevatedButton(
+                      style: ElevatedButton.styleFrom(backgroundColor: const Color(0xFF030F27), padding: const EdgeInsets.symmetric(vertical: 13)),
+                      onPressed: () {
+                        final raw = limitController.text.trim();
+                        final newLimit = raw.isEmpty ? null : int.tryParse(raw);
+                        Navigator.pop(sheetCtx);
+                        _saveAccessControl(selectedPermission, newLimit);
+                      },
+                      child: const Text("Save", style: TextStyle(color: Colors.white)),
+                    ),
+                  ),
+                ),
+              ]),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  Future<void> _saveAccessControl(String permission, int? dailyLimit) async {
+    final groupId = widget.conversation.group?.id;
+    if (groupId == null) return;
+    final prevPermission = _groupMessagePermission;
+    final prevLimit = _groupDailyLimit;
+    setState(() {
+      _groupMessagePermission = permission;
+      _groupDailyLimit = dailyLimit;
+    });
+    try {
+      await MessageApiService.updateGroup(groupId, {
+        'message_permission': permission,
+        'daily_message_limit': dailyLimit,
+      });
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(
+          permission == 'admins_mods'
+              ? "Ab sirf admins & moderators hi message bhej sakte hain."
+              : "Ab sabhi members message bhej sakte hain.",
+        )));
+      }
+    } catch (e) {
+      if (mounted) {
+        setState(() { _groupMessagePermission = prevPermission; _groupDailyLimit = prevLimit; });
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text("Update failed: $e")));
+      }
+    }
+  }
+
+  // ================================================================
+  // 🔥 NAYA — FEATURE 2: CHANGE GROUP PROFILE PHOTO seedha chat screen
+  // se — pehle sirf `group_profile_screen.dart` se hota tha. Admin/
+  // moderator dono allowed hain (backend `IsGroupAdminOrModerator`).
+  // ================================================================
+  Future<void> _changeGroupPhoto() async {
+    final groupId = widget.conversation.group?.id;
+    if (groupId == null) return;
+    final picked = await ImagePicker().pickImage(source: ImageSource.gallery, imageQuality: 85);
+    if (picked == null) return;
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("Uploading photo...")));
+    try {
+      final uploaded = await MessageApiService.uploadFile(File(picked.path));
+      await MessageApiService.updateGroup(groupId, {'photo_url': uploaded.fileUrl});
+      if (mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("Group photo updated ✅")));
+    } catch (e) {
+      if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text("Photo update failed: $e")));
+    }
+  }
+
+  // ================================================================
+  // 🔥 NAYA — FEATURE 3: JOIN REQUESTS — private group me naye members
+  // pehle `GroupJoinRequest` (PENDING) banate hain, admin/moderator yahan
+  // se hi approve/reject kar sakte hain (`GroupMember` turant ban jaata
+  // hai approve pe).
+  // ================================================================
+  void _showJoinRequestsSheet() {
+    final groupId = widget.conversation.group?.id;
+    if (groupId == null) return;
+
+    // 🔥 FIX — ye state `StatefulBuilder`'s OUTER method scope me honi
+    // chahiye, uske andar wale `builder:` callback me NAHI — wo callback
+    // har `setSheetState()` call pe dobara chalta hai, aur agar
+    // `requests`/`error` uske andar declare kiye jaate to har rebuild pe
+    // wapas `null` ho jaate (fresh local variables), jisse `load()`
+    // baar-baar (infinite loop) call hota aur list kabhi dikhti hi nahi —
+    // hamesha loading spinner pe atki rehti.
+    List<dynamic>? requests;
+    String? error;
+
+    showModalBottomSheet(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: Colors.white,
+      shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(18))),
+      builder: (sheetCtx) => StatefulBuilder(
+        builder: (sheetCtx, setSheetState) {
+          Future<void> load() async {
+            try {
+              final list = await MessageApiService.getJoinRequests(groupId);
+              if (sheetCtx.mounted) setSheetState(() { requests = list; error = null; });
+            } catch (e) {
+              if (sheetCtx.mounted) setSheetState(() => error = e.toString());
+            }
+          }
+          if (requests == null && error == null) load();
+
+          return DraggableScrollableSheet(
+            initialChildSize: 0.55,
+            minChildSize: 0.3,
+            maxChildSize: 0.85,
+            expand: false,
+            builder: (_, scrollCtl) => SafeArea(
+              child: Column(children: [
+                const Padding(
+                  padding: EdgeInsets.fromLTRB(16, 14, 16, 8),
+                  child: Align(alignment: Alignment.centerLeft, child: Text("Join requests", style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16))),
+                ),
+                if (requests == null && error == null)
+                  const Expanded(child: Center(child: CircularProgressIndicator()))
+                else if (error != null)
+                  Expanded(child: Center(child: Text("Failed to load: $error")))
+                else if (requests!.isEmpty)
+                  const Expanded(child: Center(child: Text("Koi pending request nahi hai", style: TextStyle(color: Colors.black54))))
+                else
+                  Expanded(
+                    child: ListView.builder(
+                      controller: scrollCtl,
+                      itemCount: requests!.length,
+                      itemBuilder: (_, i) {
+                        final r = requests![i];
+                        final user = r is Map ? (r['user'] ?? r) : {};
+                        final requestId = (r is Map ? (r['id'] ?? r['request_id']) : null)?.toString() ?? '';
+                        final username = (user is Map ? (user['username'] ?? user['name']) : null)?.toString() ?? 'Unknown';
+                        final photoUrl = (user is Map ? user['profile_pic'] : null)?.toString();
+                        return ListTile(
+                          leading: CircleAvatar(
+                            backgroundImage: (photoUrl != null && photoUrl.isNotEmpty) ? CachedNetworkImageProvider(photoUrl) : null,
+                            child: (photoUrl == null || photoUrl.isEmpty) ? Text(username.isNotEmpty ? username[0].toUpperCase() : '?') : null,
+                          ),
+                          title: Text(username),
+                          trailing: Row(mainAxisSize: MainAxisSize.min, children: [
+                            IconButton(
+                              icon: const Icon(Icons.check_circle, color: Colors.green),
+                              tooltip: "Approve",
+                              onPressed: () async {
+                                try {
+                                  await MessageApiService.approveJoinRequest(groupId, requestId);
+                                  setSheetState(() => requests!.removeAt(i));
+                                  if (mounted) setState(() => _pendingJoinRequestsCount = requests!.length);
+                                } catch (e) {
+                                  if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text("Approve failed: $e")));
+                                }
+                              },
+                            ),
+                            IconButton(
+                              icon: const Icon(Icons.cancel, color: Colors.red),
+                              tooltip: "Reject",
+                              onPressed: () async {
+                                try {
+                                  await MessageApiService.rejectJoinRequest(groupId, requestId);
+                                  setSheetState(() => requests!.removeAt(i));
+                                  if (mounted) setState(() => _pendingJoinRequestsCount = requests!.length);
+                                } catch (e) {
+                                  if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text("Reject failed: $e")));
+                                }
+                              },
+                            ),
+                          ]),
+                        );
+                      },
+                    ),
+                  ),
+              ]),
+            ),
+          );
+        },
       ),
     );
   }
@@ -815,6 +1369,26 @@ class _ChatScreenState extends State<ChatScreen> {
           _scrollController.jumpTo(prevOffset + diff);
         }
       });
+    } on MessageApiException catch (e) {
+      // 🔥 FIX — DRF `PageNumberPagination` out-of-range page pe hamesha 404
+      // deta hai. Ye asal error nahi hai, matlab bas "aur purane messages
+      // hain hi nahi" (isse pehle exactly `_kPageSize` messages waale page
+      // ke baad `_hasMoreMessages` galat `true` reh jaata tha aur wahi
+      // failing request baar-baar retry hoti thi — yahi "purani stickers
+      // load nahi hote" wale case ka asli bug tha).
+      if (mounted) {
+        setState(() {
+          _isLoadingMore = false;
+          if (e.statusCode == 404) {
+            _hasMoreMessages = false;
+          }
+        });
+        if (e.statusCode != 404) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(content: Text("Failed to load older messages: $e")),
+          );
+        }
+      }
     } catch (e) {
       if (mounted) {
         setState(() => _isLoadingMore = false);
@@ -854,6 +1428,25 @@ class _ChatScreenState extends State<ChatScreen> {
         break;
       case 'reaction':
         _onReactionEvent(event);
+        break;
+      // 🔥 NAYA — POLLS
+      case 'poll_created':
+        _onPollCreatedEvent(event);
+        break;
+      case 'poll_voted':
+        _onPollVotedEvent(event);
+        break;
+      // 🔥 NAYA — PINNED MESSAGES: koi bhi participant pin/unpin kare, sab
+      // ke liye banner turant sync ho jaaye. Poori list refresh karna hi
+      // simplest/consistent tarika hai (list chhoti hoti hai, max 3).
+      case 'message_pinned':
+      case 'message_unpinned':
+        _loadPinnedMessages();
+        break;
+      // 🔥 NAYA — khud apne doosre connected device se chat wallpaper
+      // set/remove hone par yahan turant sync ho jaaye.
+      case 'conversation_wallpaper_updated':
+        _onWallpaperEvent(event);
         break;
       case 'presence':
         // 🔥 NAYA: online/last-seen status ab AppBar me dikhega
@@ -1144,6 +1737,340 @@ class _ChatScreenState extends State<ChatScreen> {
     });
   }
 
+  // 🔥 NAYA — POLLS
+  // ============================================================
+
+  void _onPollCreatedEvent(Map<String, dynamic> event) {
+    final messageId = event['message_id']?.toString();
+    final pollJson = event['poll'] as Map<String, dynamic>?;
+    if (messageId == null || pollJson == null) return;
+    if (_messages.any((m) => m.id == messageId)) return; // hum khud sender the, already insert ho chuka
+    final poll = PollModel.fromJson(pollJson);
+    final msg = MessageModel(
+      id: messageId,
+      conversationId: widget.conversation.id,
+      sender: UserMini(id: event['by_user_id']?.toString() ?? '', displayName: ''),
+      type: MessageType.poll,
+      text: poll.question,
+      meta: {'poll': poll.toJson()},
+      createdAt: DateTime.now(),
+    );
+    setState(() => _messages.add(msg));
+    _scrollToBottom();
+  }
+
+  void _onPollVotedEvent(Map<String, dynamic> event) {
+    final pollId = event['poll_id']?.toString();
+    if (pollId == null) return;
+    final idx = _messages.indexWhere((m) => (m.meta?['poll'] as Map?)?['id']?.toString() == pollId);
+    if (idx == -1) return;
+    // Live results refresh — poore counts ek baar me le aate hain
+    // (`voted_by_me` bhi sirf apne liye hi meaningful hai, isliye poll
+    // GET karna hi sabse simple/consistent tarika hai).
+    MessageApiService.getPoll(pollId).then((updated) {
+      if (!mounted) return;
+      setState(() {
+        _messages[idx].meta = {..._messages[idx].meta ?? {}, 'poll': updated.toJson()};
+      });
+    }).catchError((_) {});
+  }
+
+  // Poll REST se bana (hume apna khud ka response mil gaya) — turant
+  // insert karo. `poll_created` socket broadcast bhi baad me aayega
+  // (auto ya doosre members ko), isliye id-based dedup zaroori hai —
+  // `_onPollCreatedEvent` wahi karta hai.
+  void _insertPollMessage(PollModel poll) {
+    if (_messages.any((m) => m.id == poll.messageId)) return;
+    final msg = MessageModel(
+      id: poll.messageId,
+      conversationId: widget.conversation.id,
+      sender: UserMini(id: _myUserId ?? '', displayName: 'You'),
+      type: MessageType.poll,
+      text: poll.question,
+      meta: {'poll': poll.toJson()},
+      createdAt: DateTime.now(),
+    );
+    setState(() => _messages.add(msg));
+    _scrollToBottom();
+  }
+
+  Future<void> _votePoll(MessageModel msg, List<String> optionIds) async {
+    final pollJson = msg.meta?['poll'] as Map<String, dynamic>?;
+    if (pollJson == null) return;
+    final pollId = pollJson['id'].toString();
+    try {
+      final updated = await MessageApiService.votePoll(pollId, optionIds);
+      if (!mounted) return;
+      setState(() {
+        final idx = _messages.indexWhere((m) => m.id == msg.id);
+        if (idx != -1) _messages[idx].meta = {..._messages[idx].meta ?? {}, 'poll': updated.toJson()};
+      });
+    } on MessageApiException catch (e) {
+      if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(e.message)));
+    }
+  }
+
+  void _showCreatePollSheet() {
+    final questionCtrl = TextEditingController();
+    final optionCtrls = <TextEditingController>[TextEditingController(), TextEditingController()];
+    bool allowsMultiple = false;
+    bool isAnonymous = false;
+    bool isSubmitting = false;
+
+    showModalBottomSheet(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: Colors.white,
+      shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(18))),
+      builder: (sheetCtx) => StatefulBuilder(builder: (sheetCtx, setSheetState) {
+        return Padding(
+          padding: EdgeInsets.only(
+            left: 16, right: 16, top: 16,
+            bottom: MediaQuery.of(sheetCtx).viewInsets.bottom + 16,
+          ),
+          child: SingleChildScrollView(
+            child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children: [
+              const Text("Create poll", style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
+              const SizedBox(height: 12),
+              TextField(
+                controller: questionCtrl,
+                decoration: const InputDecoration(hintText: "Question", border: OutlineInputBorder()),
+                maxLength: 300,
+              ),
+              const SizedBox(height: 8),
+              ...List.generate(optionCtrls.length, (i) => Padding(
+                    padding: const EdgeInsets.only(bottom: 8),
+                    child: Row(children: [
+                      Expanded(
+                        child: TextField(
+                          controller: optionCtrls[i],
+                          decoration: InputDecoration(hintText: "Option ${i + 1}", border: const OutlineInputBorder()),
+                          maxLength: 200,
+                        ),
+                      ),
+                      if (optionCtrls.length > 2)
+                        IconButton(
+                          icon: const Icon(Icons.remove_circle_outline),
+                          onPressed: () => setSheetState(() => optionCtrls.removeAt(i)),
+                        ),
+                    ]),
+                  )),
+              if (optionCtrls.length < 12)
+                TextButton.icon(
+                  onPressed: () => setSheetState(() => optionCtrls.add(TextEditingController())),
+                  icon: const Icon(Icons.add),
+                  label: const Text("Add option"),
+                ),
+              SwitchListTile(
+                contentPadding: EdgeInsets.zero,
+                value: allowsMultiple,
+                title: const Text("Allow multiple answers"),
+                onChanged: (v) => setSheetState(() => allowsMultiple = v),
+              ),
+              SwitchListTile(
+                contentPadding: EdgeInsets.zero,
+                value: isAnonymous,
+                title: const Text("Anonymous voting"),
+                onChanged: (v) => setSheetState(() => isAnonymous = v),
+              ),
+              const SizedBox(height: 8),
+              SizedBox(
+                width: double.infinity,
+                child: ElevatedButton(
+                  onPressed: isSubmitting ? null : () async {
+                    final question = questionCtrl.text.trim();
+                    final options = optionCtrls.map((c) => c.text.trim()).where((t) => t.isNotEmpty).toList();
+                    if (question.isEmpty || options.length < 2) {
+                      ScaffoldMessenger.of(sheetCtx).showSnackBar(
+                        const SnackBar(content: Text("Question aur kam se kam 2 options chahiye")),
+                      );
+                      return;
+                    }
+                    setSheetState(() => isSubmitting = true);
+                    try {
+                      final poll = await MessageApiService.createPoll(
+                        widget.conversation.id,
+                        question: question,
+                        options: options,
+                        allowsMultipleAnswers: allowsMultiple,
+                        isAnonymous: isAnonymous,
+                      );
+                      _insertPollMessage(poll);
+                      if (mounted) Navigator.pop(sheetCtx);
+                    } on MessageApiException catch (e) {
+                      setSheetState(() => isSubmitting = false);
+                      ScaffoldMessenger.of(sheetCtx).showSnackBar(SnackBar(content: Text(e.message)));
+                    }
+                  },
+                  child: isSubmitting
+                      ? const SizedBox(width: 18, height: 18, child: CircularProgressIndicator(strokeWidth: 2))
+                      : const Text("Send poll"),
+                ),
+              ),
+            ]),
+          ),
+        );
+      }),
+    );
+  }
+
+  // ============================================================
+  // 🔥 NAYA — SCHEDULED MESSAGES
+  // ============================================================
+
+  void _showScheduleMessageSheet() {
+    final textCtrl = TextEditingController(text: _textController.text);
+    DateTime selected = DateTime.now().add(const Duration(hours: 1));
+    bool isSubmitting = false;
+
+    showModalBottomSheet(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: Colors.white,
+      shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(18))),
+      builder: (sheetCtx) => StatefulBuilder(builder: (sheetCtx, setSheetState) {
+        return Padding(
+          padding: EdgeInsets.only(
+            left: 16, right: 16, top: 16,
+            bottom: MediaQuery.of(sheetCtx).viewInsets.bottom + 16,
+          ),
+          child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children: [
+            const Text("Schedule message", style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
+            const SizedBox(height: 12),
+            TextField(
+              controller: textCtrl,
+              minLines: 1, maxLines: 4,
+              decoration: const InputDecoration(hintText: "Message", border: OutlineInputBorder()),
+            ),
+            const SizedBox(height: 12),
+            ListTile(
+              contentPadding: EdgeInsets.zero,
+              leading: const Icon(Icons.event),
+              title: Text("${selected.day}/${selected.month}/${selected.year} • "
+                  "${selected.hour.toString().padLeft(2, '0')}:${selected.minute.toString().padLeft(2, '0')}"),
+              trailing: const Icon(Icons.edit_calendar_outlined),
+              onTap: () async {
+                final date = await showDatePicker(
+                  context: sheetCtx,
+                  initialDate: selected,
+                  firstDate: DateTime.now(),
+                  lastDate: DateTime.now().add(const Duration(days: 365)),
+                );
+                if (date == null) return;
+                final time = await showTimePicker(context: sheetCtx, initialTime: TimeOfDay.fromDateTime(selected));
+                if (time == null) return;
+                setSheetState(() => selected = DateTime(date.year, date.month, date.day, time.hour, time.minute));
+              },
+            ),
+            const SizedBox(height: 8),
+            Row(children: [
+              Expanded(
+                child: OutlinedButton(
+                  onPressed: () {
+                    Navigator.pop(sheetCtx);
+                    _showManageScheduledSheet();
+                  },
+                  child: const Text("View scheduled"),
+                ),
+              ),
+              const SizedBox(width: 10),
+              Expanded(
+                child: ElevatedButton(
+                  onPressed: isSubmitting ? null : () async {
+                    if (textCtrl.text.trim().isEmpty) return;
+                    if (selected.isBefore(DateTime.now())) {
+                      ScaffoldMessenger.of(sheetCtx).showSnackBar(
+                        const SnackBar(content: Text("Future ka time chuno")),
+                      );
+                      return;
+                    }
+                    setSheetState(() => isSubmitting = true);
+                    try {
+                      await MessageApiService.scheduleMessage(
+                        widget.conversation.id,
+                        text: textCtrl.text.trim(),
+                        scheduledFor: selected,
+                      );
+                      if (mounted) {
+                        Navigator.pop(sheetCtx);
+                        ScaffoldMessenger.of(context).showSnackBar(
+                          const SnackBar(content: Text("Message schedule ho gaya")),
+                        );
+                      }
+                    } on MessageApiException catch (e) {
+                      setSheetState(() => isSubmitting = false);
+                      ScaffoldMessenger.of(sheetCtx).showSnackBar(SnackBar(content: Text(e.message)));
+                    }
+                  },
+                  child: isSubmitting
+                      ? const SizedBox(width: 18, height: 18, child: CircularProgressIndicator(strokeWidth: 2))
+                      : const Text("Schedule"),
+                ),
+              ),
+            ]),
+          ]),
+        );
+      }),
+    );
+  }
+
+  void _showManageScheduledSheet() {
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: Colors.white,
+      shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(18))),
+      builder: (sheetCtx) => FutureBuilder<List<ScheduledMessageModel>>(
+        future: MessageApiService.getScheduledMessages(widget.conversation.id),
+        builder: (context, snap) {
+          if (!snap.hasData) {
+            return const SizedBox(height: 120, child: Center(child: CircularProgressIndicator()));
+          }
+          final items = snap.data!;
+          return StatefulBuilder(builder: (sheetCtx, setSheetState) {
+            return SafeArea(
+              child: Column(mainAxisSize: MainAxisSize.min, children: [
+                const Padding(
+                  padding: EdgeInsets.all(14),
+                  child: Text("Scheduled messages", style: TextStyle(fontWeight: FontWeight.bold, fontSize: 15)),
+                ),
+                if (items.isEmpty)
+                  const Padding(padding: EdgeInsets.all(20), child: Text("Koi scheduled message nahi hai")),
+                ...items.map((s) => ListTile(
+                      leading: const Icon(Icons.schedule_send_outlined),
+                      title: Text(s.text ?? '', maxLines: 2, overflow: TextOverflow.ellipsis),
+                      subtitle: Text(
+                        "${s.scheduledFor.day}/${s.scheduledFor.month} • "
+                        "${s.scheduledFor.hour.toString().padLeft(2, '0')}:${s.scheduledFor.minute.toString().padLeft(2, '0')}",
+                      ),
+                      trailing: IconButton(
+                        icon: const Icon(Icons.delete_outline, color: Colors.red),
+                        onPressed: () async {
+                          try {
+                            await MessageApiService.cancelScheduledMessage(s.id);
+                            items.removeWhere((e) => e.id == s.id);
+                            setSheetState(() {});
+                          } catch (_) {}
+                        },
+                      ),
+                    )),
+              ]),
+            );
+          });
+        },
+      ),
+    );
+  }
+
+  // 🔥 NAYA — backend `conversation_wallpaper_updated` group_send event
+  // (khud apne user-channel pe aata hai, taaki wallpaper doosre connected
+  // device pe bhi turant sync ho jaaye).
+  void _onWallpaperEvent(Map<String, dynamic> event) {
+    final conversationId = event['conversation_id']?.toString();
+    if (conversationId != widget.conversation.id) return;
+    final wallpaperUrl = event['wallpaper_url']?.toString();
+    setState(() => _wallpaperUrl = (wallpaperUrl != null && wallpaperUrl.isNotEmpty) ? wallpaperUrl : null);
+  }
+
   // 🔥 NAYA
   void _onReadEvent(Map<String, dynamic> event) {
     final userId = event['user_id']?.toString();
@@ -1234,9 +2161,57 @@ class _ChatScreenState extends State<ChatScreen> {
     } else {
       MessageApiService.sendMessageRest(widget.conversation.id, type: MessageType.text, text: text, replyTo: replyToId, clientId: clientId).then((sent) {
         if (mounted) setState(() { final idx = _messages.indexWhere((m) => m.clientId == clientId); if (idx != -1) _messages[idx] = sent; });
+        _bumpSentTodayCounter(); // 🔥 NAYA
       }).catchError((e) {
         if (mounted) setState(() { final idx = _messages.indexWhere((m) => m.clientId == clientId); if (idx != -1) _messages[idx].sendFailed = true; });
+        _maybeShowGroupSendBlockedDialog(e); // 🔥 NAYA
       });
+    }
+  }
+
+  // 🔥 NAYA — day rollover pe local "aaj bheje messages" counter reset.
+  void _bumpSentTodayCounter() {
+    final now = DateTime.now();
+    if (now.day != _messagesCounterDay.day || now.month != _messagesCounterDay.month || now.year != _messagesCounterDay.year) {
+      _myMessagesSentToday = 0;
+      _messagesCounterDay = now;
+    }
+    _myMessagesSentToday++;
+  }
+
+  // 🔥 NAYA — group send REST se fail hua (403 + `code` — exact values
+  // `group_rules.check_group_send_permission()` se: 'admins_only',
+  // 'daily_limit_reached', 'not_a_member') to generic "sendFailed" tick ke
+  // bajaye ek clear dialog dikhao: kyun nahi gaya, aur agla step kya hai.
+  // Non-group ya non-permission errors (network, validation, etc.) me
+  // chup-chaap sirf failed-tick hi dikhta hai jaisa pehle tha — dialog
+  // spam nahi hota.
+  void _maybeShowGroupSendBlockedDialog(Object e) {
+    if (!widget.conversation.isGroup || !mounted) return;
+    if (e is! MessageApiException) return;
+    if (e.code != 'admins_only' && e.code != 'daily_limit_reached' && e.code != 'not_a_member') return;
+
+    final isLimitBlock = e.code == 'daily_limit_reached';
+    final isRemoved = e.code == 'not_a_member';
+
+    showDialog(
+      context: context,
+      builder: (_) => AlertDialog(
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+        icon: Icon(
+          isLimitBlock ? Icons.hourglass_bottom : (isRemoved ? Icons.person_off_outlined : Icons.lock_outline),
+          color: const Color(0xFF3D7EFF),
+        ),
+        title: Text(isLimitBlock ? "Daily limit khatam" : (isRemoved ? "Ab member nahi hain" : "Message allowed nahi")),
+        content: Text(e.message),
+        actions: [TextButton(onPressed: () => Navigator.pop(context), child: const Text("OK"))],
+      ),
+    );
+    // 🔥 NAYA — agar admin ne beech me hi hata diya (`not_a_member`), to
+    // apni local admin/moderator flags bhi reset kar do — warna stale
+    // "Message permissions" jaisa admin-only menu galti se dikhta rahega.
+    if (isRemoved && mounted) {
+      setState(() { _isGroupAdmin = false; _isGroupModerator = false; });
     }
   }
 
@@ -1302,7 +2277,11 @@ class _ChatScreenState extends State<ChatScreen> {
       final sent = await MessageApiService.sendMessageRest(widget.conversation.id, type: messageType, text: text, fileUrl: uploaded.fileUrl, meta: {'file_name': uploaded.fileName, 'size': uploaded.fileSize, 'mime_type': uploaded.mimeType, ...?extraMeta}, clientId: clientId);
       if (mounted) setState(() { final idx = _messages.indexWhere((m) => m.clientId == clientId); if (idx != -1) _messages[idx] = sent; });
     } catch (e) {
-      if (mounted) { setState(() { final idx = _messages.indexWhere((m) => m.clientId == clientId); if (idx != -1) _messages[idx].sendFailed = true; }); ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text("Upload failed: $e"))); }
+      if (mounted) {
+        setState(() { final idx = _messages.indexWhere((m) => m.clientId == clientId); if (idx != -1) _messages[idx].sendFailed = true; });
+        _maybeShowGroupSendBlockedDialog(e); // 🔥 NAYA
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text("Upload failed: $e")));
+      }
     }
   }
 
@@ -1407,6 +2386,9 @@ class _ChatScreenState extends State<ChatScreen> {
       _attachmentTile(Icons.insert_drive_file, "File", const Color(0xFF3F51B5), () => _pickAndSendAttachment(MessageType.file)),
       _attachmentTile(Icons.slideshow, "Presentation", const Color(0xFF00897B), () => _pickAndSendAttachment(MessageType.presentation)),
       _attachmentTile(Icons.location_on, "Location", const Color(0xFF4CAF50), _sendLocation),
+      // 🔥 NAYA
+      _attachmentTile(Icons.poll, "Poll", const Color(0xFF6A4CE0), _showCreatePollSheet),
+      _attachmentTile(Icons.schedule_send, "Schedule message", const Color(0xFF2E7D32), _showScheduleMessageSheet),
     ])));
   }
 
@@ -1595,6 +2577,21 @@ class _ChatScreenState extends State<ChatScreen> {
       // NEW — forward just this one message straight to a picker.
       ListTile(leading: const Icon(Icons.forward), title: const Text("Forward"), onTap: () { Navigator.pop(context); _forwardOne(msg); }),
       ListTile(leading: const Icon(Icons.emoji_emotions_outlined), title: const Text("React"), onTap: () { Navigator.pop(context); _showReactionPicker(msg); }),
+      // 🔥 NAYA — Pin/Unpin (backend max 3 pinned/conversation — limit
+      // cross hone par _pinMessage() snackbar me error dikha dega).
+      ListTile(
+        leading: Icon(_pinnedMessages.any((p) => p.message.id == msg.id) ? Icons.push_pin : Icons.push_pin_outlined),
+        title: Text(_pinnedMessages.any((p) => p.message.id == msg.id) ? "Unpin" : "Pin"),
+        onTap: () {
+          Navigator.pop(context);
+          final alreadyPinned = _pinnedMessages.any((p) => p.message.id == msg.id);
+          if (alreadyPinned) {
+            _unpinMessage(msg.id);
+          } else {
+            _pinMessage(msg);
+          }
+        },
+      ),
       // NEW — enter multi-select mode (starting with this message already
       // checked) so several messages can be picked and forwarded together.
       ListTile(leading: const Icon(Icons.check_circle_outline), title: const Text("Select"), onTap: () { Navigator.pop(context); _enterSelectionMode(msg); }),
@@ -1906,11 +2903,16 @@ class _ChatScreenState extends State<ChatScreen> {
             onSelected: (value) {
               if (value == 'toggle_mute') _toggleMuteNotifications();
               if (value == 'filter') _showFilterSheet();
+              if (value == 'wallpaper') _showWallpaperSheet();
               if (value == 'toggle_block') _toggleBlockUser();
               if (value == 'disappearing_messages') _showDisappearingMessagesSheet();
               if (value == 'group_info') _openGroupProfile();
+              if (value == 'access_control') _showAccessControlSheet();
+              if (value == 'change_group_photo') _changeGroupPhoto();
+              if (value == 'join_requests') _showJoinRequestsSheet();
               if (value == 'leave_group') _leaveGroup();
               if (value == 'delete_group') _deleteGroup();
+              if (value == 'scheduled_messages') _showManageScheduledSheet(); // 🔥 NAYA
             },
             itemBuilder: (context) => [
               PopupMenuItem<String>(
@@ -1934,6 +2936,27 @@ class _ChatScreenState extends State<ChatScreen> {
                   Icon(Icons.filter_list, color: _chatFilter != 'all' ? const Color(0xFF3D7EFF) : Colors.black87, size: 20),
                   const SizedBox(width: 10),
                   Text(_chatFilter == 'all' ? "Filter messages" : "Filter: ${_filterLabel(_chatFilter)}"),
+                ]),
+              ),
+              // 🔥 NAYA — poori chat screen ka wallpaper (WhatsApp jaisa),
+              // sirf apne account ke liye — dusre participant/group
+              // members ko nahi dikhega.
+              PopupMenuItem<String>(
+                value: 'wallpaper',
+                child: Row(children: [
+                  Icon(Icons.wallpaper, color: _wallpaperUrl != null ? const Color(0xFF3D7EFF) : Colors.black87, size: 20),
+                  const SizedBox(width: 10),
+                  Text(_wallpaperUrl != null ? "Change wallpaper" : "Chat wallpaper"),
+                ]),
+              ),
+              // 🔥 NAYA — apne scheduled (abhi bheje nahi gaye) messages
+              // dekho / reschedule / cancel karo.
+              const PopupMenuItem<String>(
+                value: 'scheduled_messages',
+                child: Row(children: [
+                  Icon(Icons.schedule_send_outlined, color: Colors.black87, size: 20),
+                  SizedBox(width: 10),
+                  Text("Scheduled messages"),
                 ]),
               ),
               // 🔥 NAYA — Block / Unblock user (sirf 1-to-1 chat me dikhta
@@ -1984,6 +3007,44 @@ class _ChatScreenState extends State<ChatScreen> {
                     Text("Group info"),
                   ]),
                 ),
+              // 🔥 NAYA — ACCESS CONTROL: "kaun message bhej sakta hai" +
+              // daily limit — sirf admin/moderator ko dikhta hai (backend
+              // `IsGroupAdminOrModerator` bhi wahi enforce karta hai).
+              if (widget.conversation.isGroup && _isGroupAdminOrMod)
+                PopupMenuItem<String>(
+                  value: 'access_control',
+                  child: Row(children: [
+                    Icon(
+                      _groupMessagePermission == 'admins_mods' ? Icons.admin_panel_settings : Icons.groups_outlined,
+                      color: _groupMessagePermission == 'admins_mods' ? const Color(0xFF3D7EFF) : Colors.black87,
+                      size: 20,
+                    ),
+                    const SizedBox(width: 10),
+                    const Text("Message permissions"),
+                  ]),
+                ),
+              // 🔥 NAYA — Change group photo seedha yahin se, bina group
+              // info screen khole (admin/moderator only).
+              if (widget.conversation.isGroup && _isGroupAdminOrMod)
+                const PopupMenuItem<String>(
+                  value: 'change_group_photo',
+                  child: Row(children: [
+                    Icon(Icons.add_a_photo_outlined, color: Colors.black87, size: 20),
+                    SizedBox(width: 10),
+                    Text("Change group photo"),
+                  ]),
+                ),
+              // 🔥 NAYA — Pending join requests (private group, admin/mod
+              // only) — badge count ke saath.
+              if (widget.conversation.isGroup && _isGroupAdminOrMod)
+                PopupMenuItem<String>(
+                  value: 'join_requests',
+                  child: Row(children: [
+                    const Icon(Icons.person_add_alt_1_outlined, color: Colors.black87, size: 20),
+                    const SizedBox(width: 10),
+                    Text(_pendingJoinRequestsCount > 0 ? "Join requests ($_pendingJoinRequestsCount)" : "Join requests"),
+                  ]),
+                ),
               // 🔥 NAYA — Leave group (sirf group chat me dikhta hai).
               if (widget.conversation.isGroup)
                 const PopupMenuItem<String>(
@@ -2011,14 +3072,48 @@ class _ChatScreenState extends State<ChatScreen> {
           const SizedBox(width: 6),
         ],
       ),
-      // 🔥 NAYA — halka doodle-pattern wallpaper, WhatsApp jaisa flat rang nahi
+      // 🔥 NAYA — poori chat screen ka background: agar user ne apna custom
+      // wallpaper set kiya hai (`_wallpaperUrl`) to wahi image poori screen
+      // pe (message bubbles ke peeche) dikhta hai — WhatsApp jaisa. Nahi to
+      // default halka doodle-pattern (`_ChatWallpaperPainter`) dikhta hai.
+      // `CachedNetworkImage` use kiya hai (raw Image nahi) taaki agar URL
+      // expire/404 ho jaaye (broken link), to crash/blank screen ki jagah
+      // wapas default pattern par gracefully fallback ho jaaye.
       body: Stack(children: [
-        Positioned.fill(child: CustomPaint(painter: _ChatWallpaperPainter())),
+        Positioned.fill(
+          child: _wallpaperUrl != null
+              ? CachedNetworkImage(
+                  imageUrl: _wallpaperUrl!,
+                  fit: BoxFit.cover,
+                  placeholder: (_, __) => CustomPaint(painter: _ChatWallpaperPainter()),
+                  errorWidget: (_, __, ___) => CustomPaint(painter: _ChatWallpaperPainter()),
+                )
+              : CustomPaint(painter: _ChatWallpaperPainter()),
+        ),
         Column(children: [
+          if (_pinnedMessages.isNotEmpty) _buildPinnedBanner(), // 🔥 NAYA
           Expanded(child: _buildMessageList()),
           _buildReplyPreview(),
-          _isBlocked ? _buildBlockedBanner() : _buildInputBar(),
+          _isBlocked
+              ? _buildBlockedBanner()
+              : (_isMessagingRestrictedForMe ? _buildRestrictedBanner() : _buildInputBar()),
         ]),
+        // 🔥 NAYA — wallpaper upload chalte waqt chhota top banner
+        if (_wallpaperUploading)
+          Positioned(
+            top: 10, left: 0, right: 0,
+            child: Center(
+              child: Container(
+                padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+                decoration: BoxDecoration(color: Colors.black87, borderRadius: BorderRadius.circular(20)),
+                child: const Row(mainAxisSize: MainAxisSize.min, children: [
+                  SizedBox(width: 14, height: 14, child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white)),
+                  SizedBox(width: 10),
+                  Text("Setting wallpaper…", style: TextStyle(color: Colors.white, fontSize: 12.5)),
+                ]),
+              ),
+            ),
+          ),
       ]),
     );
   }
@@ -2074,6 +3169,34 @@ class _ChatScreenState extends State<ChatScreen> {
     );
   }
 
+  // 🔥 NAYA — jab group ka `message_permission` "admins_mods" ho aur main
+  // sirf ek normal member hoon, to composer ki jagah ye locked banner
+  // dikhta hai — WhatsApp announcement-group jaisa. Real block backend pe
+  // (`check_group_send_permission`) already hai, ye sirf UI-level clarity
+  // hai taaki member confuse na ho ki uska message kyun nahi ja raha.
+  Widget _buildRestrictedBanner() {
+    return SafeArea(
+      top: false,
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
+        decoration: BoxDecoration(
+          color: Colors.white,
+          border: Border(top: BorderSide(color: Colors.grey[300]!)),
+        ),
+        child: Row(children: [
+          Icon(Icons.lock_outline, color: Colors.grey[600], size: 18),
+          const SizedBox(width: 10),
+          const Expanded(
+            child: Text(
+              "Sirf admins aur moderators is group me message bhej sakte hain.",
+              style: TextStyle(fontSize: 13, color: Colors.black54),
+            ),
+          ),
+        ]),
+      ),
+    );
+  }
+
   // 🔥 NAYA — reply-compose preview jo input bar ke upar dikhta hai
   Widget _buildReplyPreview() {
     if (_replyingTo == null) return const SizedBox.shrink();
@@ -2102,6 +3225,7 @@ class _ChatScreenState extends State<ChatScreen> {
       case MessageType.presentation: return "📊 Presentation";
       case MessageType.location: return "📍 Location";
       case MessageType.studyRoom: return "🧑‍🎓 Study Room";
+      case MessageType.poll: return "📊 Poll"; // 🔥 NAYA
       default: return msg.text ?? '';
     }
   }
@@ -2210,6 +3334,7 @@ class _ChatScreenState extends State<ChatScreen> {
                         isUrlDownloaded: (url) => _downloadedIds.contains('${msg.id}::$url'), // 🔥 NAYA
                         onReplyTap: replyPreview != null ? () => _scrollToMessage(replyPreview.id) : null,
                         onJoinStudyRoom: _enterStudyRoom, // 🔥 NAYA — card pe tap = seedha room me entry, dobara invite nahi
+                        onVotePoll: _votePoll, // 🔥 NAYA
                       ),
                     );
 
@@ -2530,6 +3655,7 @@ class _MessageBubble extends StatelessWidget {
   final bool Function(String url)? isUrlDownloaded; // 🔥 NAYA
   final VoidCallback? onReplyTap; // 🔥 NAYA
   final VoidCallback? onJoinStudyRoom; // 🔥 NAYA — study room invite card ke "Tap to Join" ke liye
+  final void Function(MessageModel msg, List<String> optionIds)? onVotePoll; // 🔥 NAYA — poll option tap
   const _MessageBubble({
     required this.message,
     required this.isMe,
@@ -2546,6 +3672,7 @@ class _MessageBubble extends StatelessWidget {
     this.isUrlDownloaded,
     this.onReplyTap,
     this.onJoinStudyRoom,
+    this.onVotePoll,
   });
 
   @override
@@ -2561,6 +3688,7 @@ class _MessageBubble extends StatelessWidget {
 
     final bubbleColor = isMe ? const Color(0xFF16325C) : Colors.white; // 🔥 WhatsApp jaisa dark-teal sent bubble
     final textColor = isMe ? Colors.white : Colors.black87;
+    final timeColor = isMe ? Colors.white60 : Colors.grey;
 
     // 🔥 NAYA — bubble tail: last-in-group bubble ka ek corner chhota
     // (~4px) rehta hai, jaisa WhatsApp me "pointer" hota hai.
@@ -2580,8 +3708,13 @@ class _MessageBubble extends StatelessWidget {
             margin: EdgeInsets.only(top: isFirstInGroup ? 6 : 2),
             padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 7),
             constraints: BoxConstraints(maxWidth: MediaQuery.of(context).size.width * 0.75),
-            decoration: BoxDecoration(color: bubbleColor, borderRadius: radius, boxShadow: [BoxShadow(color: Colors.black.withOpacity(0.07), blurRadius: 6, offset: const Offset(0, 2))]),
-            child: Column(crossAxisAlignment: CrossAxisAlignment.start, mainAxisSize: MainAxisSize.min, children: [
+            decoration: BoxDecoration(
+              color: bubbleColor,
+              borderRadius: radius,
+              boxShadow: [BoxShadow(color: Colors.black.withOpacity(0.07), blurRadius: 6, offset: const Offset(0, 2))],
+            ),
+            child: Stack(children: [
+              Column(crossAxisAlignment: CrossAxisAlignment.start, mainAxisSize: MainAxisSize.min, children: [
               // 🔥 NAYA — group chat me, apne khud ke message ko chhod ke,
               // har naye sender-block ke pehle bubble ke upar naam dikhao
               // (WhatsApp jaisa) — taaki pata chale kisne msg bheja.
@@ -2600,11 +3733,12 @@ class _MessageBubble extends StatelessWidget {
               Padding(
                 padding: const EdgeInsets.only(right: 2, left: 4),
                 child: Row(mainAxisSize: MainAxisSize.min, children: [
-                  if (message.isEdited) Text("edited ", style: TextStyle(fontSize: 10, color: isMe ? Colors.white60 : Colors.grey)),
-                  Text("${message.createdAt.hour.toString().padLeft(2, '0')}:${message.createdAt.minute.toString().padLeft(2, '0')}", style: TextStyle(fontSize: 10.5, color: isMe ? Colors.white60 : Colors.grey)),
+                  if (message.isEdited) Text("edited ", style: TextStyle(fontSize: 10, color: timeColor)),
+                  Text("${message.createdAt.hour.toString().padLeft(2, '0')}:${message.createdAt.minute.toString().padLeft(2, '0')}", style: TextStyle(fontSize: 10.5, color: timeColor)),
                   if (isMe) ...[const SizedBox(width: 3), _buildTick()],
                 ]),
               ),
+            ]),
             ]),
           ),
           if (message.reactions.isNotEmpty) _buildReactionRow(),
@@ -2729,6 +3863,7 @@ class _MessageBubble extends StatelessWidget {
       case MessageType.presentation: preview = "📊 Presentation"; break;
       case MessageType.location: preview = "📍 Location"; break;
       case MessageType.studyRoom: preview = "🧑‍🎓 Study Room"; break;
+      case MessageType.poll: preview = "📊 Poll"; break; // 🔥 NAYA
       default: preview = r.text ?? '';
     }
     return GestureDetector(
@@ -2759,6 +3894,7 @@ class _MessageBubble extends StatelessWidget {
       case MessageType.file: media = _fileLikeContent(context, textColor, Icons.insert_drive_file, "File"); break;
       case MessageType.location: return _locationContent(context, textColor);
       case MessageType.studyRoom: return _studyRoomCard(context); // 🔥 NAYA
+      case MessageType.poll: return _pollContent(context, textColor); // 🔥 NAYA
       // 🔥 NAYA — plain text ab _LinkifiedText se render hota hai, taaki
       // agar message me koi URL (http/https/www.) ho to wo clickable
       // link ki tarah dikhe (blue + underline) aur tap karne par khul
@@ -2833,6 +3969,26 @@ class _MessageBubble extends StatelessWidget {
           ],
         ),
       ),
+    );
+  }
+
+  // 🔥 NAYA — POLL bubble
+  Widget _pollContent(BuildContext context, Color textColor) {
+    final pollJson = message.meta?['poll'] as Map<String, dynamic>?;
+    if (pollJson == null) {
+      // Purana poll, jiska poora data history API me nahi aata (dekho
+      // model file ka note) — question-only, read-only fallback.
+      return Row(mainAxisSize: MainAxisSize.min, children: [
+        Icon(Icons.poll_outlined, color: textColor, size: 18),
+        const SizedBox(width: 6),
+        Flexible(child: Text(message.text ?? 'Poll', style: TextStyle(color: textColor, fontWeight: FontWeight.w600))),
+      ]);
+    }
+    final poll = PollModel.fromJson(pollJson);
+    return _PollBubbleContent(
+      poll: poll,
+      textColor: textColor,
+      onVote: (optionIds) => onVotePoll?.call(message, optionIds),
     );
   }
 
@@ -3075,6 +4231,107 @@ class _MessageBubble extends StatelessWidget {
   Widget _locationContent(BuildContext context, Color textColor) {
     final lat = message.meta?['lat']; final lng = message.meta?['lng'];
     return GestureDetector(onTap: (lat != null && lng != null) ? () => launchUrl(Uri.parse("https://maps.google.com/?q=$lat,$lng"), mode: LaunchMode.externalApplication) : null, child: Row(mainAxisSize: MainAxisSize.min, children: [Icon(Icons.location_on, color: textColor), const SizedBox(width: 6), Text("Location shared", style: TextStyle(color: textColor, fontSize: 14))]));
+  }
+}
+
+// ============================================================
+// 🔥 NAYA — POLL BUBBLE (options + live vote bars + tap to vote)
+// ============================================================
+class _PollBubbleContent extends StatefulWidget {
+  final PollModel poll;
+  final Color textColor;
+  final void Function(List<String> optionIds) onVote;
+
+  const _PollBubbleContent({required this.poll, required this.textColor, required this.onVote});
+
+  @override
+  State<_PollBubbleContent> createState() => _PollBubbleContentState();
+}
+
+class _PollBubbleContentState extends State<_PollBubbleContent> {
+  final Set<String> _selected = {};
+
+  @override
+  void initState() {
+    super.initState();
+    _selected.addAll(widget.poll.options.where((o) => o.votedByMe).map((o) => o.id));
+  }
+
+  @override
+  void didUpdateWidget(covariant _PollBubbleContent oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    // 🔥 NAYA — dusra live poll update (socket `poll_voted`) aane par
+    // apna hi selection state bhi fresh server data se resync karo.
+    if (oldWidget.poll.id != widget.poll.id || oldWidget.poll.totalVotes != widget.poll.totalVotes) {
+      _selected
+        ..clear()
+        ..addAll(widget.poll.options.where((o) => o.votedByMe).map((o) => o.id));
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final poll = widget.poll;
+    return Column(crossAxisAlignment: CrossAxisAlignment.start, mainAxisSize: MainAxisSize.min, children: [
+      Row(children: [
+        Icon(Icons.poll, size: 16, color: widget.textColor),
+        const SizedBox(width: 6),
+        Flexible(child: Text(poll.question, style: TextStyle(color: widget.textColor, fontWeight: FontWeight.bold, fontSize: 14))),
+      ]),
+      const SizedBox(height: 6),
+      ...poll.options.map((opt) {
+        final selected = _selected.contains(opt.id);
+        final pct = poll.totalVotes == 0 ? 0.0 : opt.voteCount / poll.totalVotes;
+        return GestureDetector(
+          onTap: poll.isClosed ? null : () {
+            setState(() {
+              if (poll.allowsMultipleAnswers) {
+                selected ? _selected.remove(opt.id) : _selected.add(opt.id);
+              } else {
+                _selected
+                  ..clear()
+                  ..add(opt.id);
+              }
+            });
+            widget.onVote(_selected.toList());
+          },
+          child: Container(
+            margin: const EdgeInsets.only(bottom: 5),
+            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
+            decoration: BoxDecoration(
+              border: Border.all(color: widget.textColor.withOpacity(0.25)),
+              borderRadius: BorderRadius.circular(8),
+            ),
+            child: Stack(children: [
+              if (poll.totalVotes > 0)
+                Positioned.fill(
+                  child: FractionallySizedBox(
+                    alignment: Alignment.centerLeft,
+                    widthFactor: pct.clamp(0.0, 1.0),
+                    child: Container(
+                      decoration: BoxDecoration(
+                        color: widget.textColor.withOpacity(0.12),
+                        borderRadius: BorderRadius.circular(8),
+                      ),
+                    ),
+                  ),
+                ),
+              Row(children: [
+                Icon(selected ? Icons.check_circle : Icons.circle_outlined, size: 16, color: widget.textColor),
+                const SizedBox(width: 6),
+                Expanded(child: Text(opt.text, style: TextStyle(color: widget.textColor, fontSize: 13))),
+                if (!poll.isAnonymous || poll.totalVotes > 0)
+                  Text("${opt.voteCount}", style: TextStyle(color: widget.textColor.withOpacity(0.7), fontSize: 12)),
+              ]),
+            ]),
+          ),
+        );
+      }),
+      Text(
+        "${poll.totalVotes} vote${poll.totalVotes == 1 ? '' : 's'}${poll.isClosed ? ' • Closed' : ''}",
+        style: TextStyle(color: widget.textColor.withOpacity(0.6), fontSize: 11),
+      ),
+    ]);
   }
 }
 

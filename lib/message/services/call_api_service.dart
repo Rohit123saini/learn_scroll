@@ -6,7 +6,7 @@ class CallApiService {
   // TESTING (abhi): LAN IP hi rakho - dono phone same WiFi pe hone chahiye
   // PRODUCTION (backend deploy hone ke baad): sirf ye ek line badalni hai, jaise:
   //   static const String baseUrl = "https://api.yourdomain.com";
-  static const String baseUrl = "http://10.191.152.189:8000";
+  static const String baseUrl = "http://10.224.54.189:8000";
 
   static Future<Map<String, String>> _getHeaders() async {
     final prefs = await SharedPreferences.getInstance();

@@ -314,6 +314,11 @@ class _CallScreenState extends State<CallScreen> with SingleTickerProviderStateM
   // ============================================================
   Widget _buildTopBar() {
     final isError = _cm.error != null;
+    // 🔥 FIX — "Line busy" (dusri taraf ne call cut ki) / "No answer" ko
+    // muted white text ki jagah red-ish tint dete hain, taaki turant nazar
+    // aaye ki call clearly reject/undelivered hui — sirf normal ringing
+    // status jaisa na lage.
+    final isDeclinedOrMissed = _cm.status == "Line busy" || _cm.status == "No answer";
     return Padding(
       padding: const EdgeInsets.fromLTRB(4, 8, 16, 0),
       child: Row(
@@ -363,7 +368,9 @@ class _CallScreenState extends State<CallScreen> with SingleTickerProviderStateM
                           style: TextStyle(
                             color: isError
                                 ? Colors.redAccent.shade100
-                                : (_cm.onHold ? Colors.orangeAccent : Colors.white.withOpacity(0.75)),
+                                : (isDeclinedOrMissed
+                                    ? Colors.redAccent.shade100
+                                    : (_cm.onHold ? Colors.orangeAccent : Colors.white.withOpacity(0.75))),
                             fontSize: 14,
                             fontWeight: FontWeight.w400,
                           ),

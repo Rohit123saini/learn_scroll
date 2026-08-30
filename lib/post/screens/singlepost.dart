@@ -1,4 +1,3 @@
-
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
@@ -108,7 +107,16 @@ class _SinglePostPageState extends State<SinglePostPage> {
           Positioned(top:10,right:10, child:InkWell(onTap:_openFullScreen, child:Container(padding:const EdgeInsets.all(6), decoration:BoxDecoration(color:Colors.black54, borderRadius:BorderRadius.circular(20)), child:const Icon(Icons.fullscreen, color:Colors.white, size:20)))),
         ])),
         Padding(padding:const EdgeInsets.symmetric(horizontal:8, vertical:6), child:Row(children:[IconButton(icon:Icon(isLiked?Icons.favorite:Icons.favorite_border, color:isLiked?Colors.red:Colors.black87), onPressed:()=>setState(()=>isLiked=!isLiked)), Text("${post!['likes_count']??0}"), const SizedBox(width:12), IconButton(icon:const Icon(Icons.chat_bubble_outline), onPressed:(){}), Text("${post!['comments_count']??0}"), const Spacer(), IconButton(icon:const Icon(Icons.share_outlined), onPressed:()=>Share.share("${post!['title']??''}\n${post!['content']??''}"))])),
-        Padding(padding:const EdgeInsets.symmetric(horizontal:16), child:Text(post!['title']??'', style:const TextStyle(fontWeight:FontWeight.bold))), const SizedBox(height:20),
+        Padding(padding:const EdgeInsets.symmetric(horizontal:16), child:Text(post!['title']??'', style:const TextStyle(fontWeight:FontWeight.bold))),
+        // 🔥 Category + Subcategory - pehle subcategory kabhi render hi nahi hota tha
+        if((post!['category_label']??post!['category']??'').toString().isNotEmpty || (post!['subcategory_label']??post!['subcategory']??'').toString().isNotEmpty)
+          Padding(padding:const EdgeInsets.symmetric(horizontal:16, vertical:4), child:Wrap(spacing:8, children:[
+            if((post!['category_label']??post!['category']??'').toString().isNotEmpty)
+              Chip(label:Text((post!['category_label']??post!['category']).toString()), backgroundColor:Colors.grey.shade200),
+            if((post!['subcategory_label']??post!['subcategory']??'').toString().isNotEmpty)
+              Chip(label:Text((post!['subcategory_label']??post!['subcategory']).toString()), backgroundColor:Colors.grey.shade200),
+          ])),
+        const SizedBox(height:20),
       ])),
     );
   }

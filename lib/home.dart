@@ -27,6 +27,7 @@ import '../services/home_api_model_service.dart';
 import '../services/comment_service.dart';
 import '../services/auth_service.dart';
 import '../message/screens/conversations_screen.dart';
+import '../liveclass/screens/explore_screen.dart';
 
 class HomeScreen extends StatefulWidget {
   // 🔥 NAYA — optional starting tab (0=Home, 1=Search, 2=Profile), default
@@ -149,6 +150,11 @@ class _HomeScreenState extends State<HomeScreen> {
   Widget _homePage() {
     return Container(color: const Color(0xFFF0F2F5), child: RefreshIndicator(onRefresh: () => _loadFeed(refresh: true), child: CustomScrollView(controller: _scrollController, slivers: [
       SliverAppBar(automaticallyImplyLeading: false, backgroundColor: const Color(0xFF030F27), toolbarHeight: 70, floating: true, snap: true, title: Row(children: [Image.asset('assets/slogo1.png', height: 42, errorBuilder: (_, __, ___) => const Text("LearnScroll", style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold, fontSize: 22)))]), actions: [
+        IconButton(
+          onPressed: () => Navigator.push(context, MaterialPageRoute(builder: (_) => const ExploreScreen())),
+          icon: const Icon(Icons.cast_for_education_rounded, color: Colors.white, size: 24),
+          tooltip: 'Live Classes',
+        ),
         IconButton(
           onPressed: () => Navigator.push(context, MaterialPageRoute(builder: (_) => const ConversationsScreen())),
           icon: const Icon(Icons.chat_bubble_outline_rounded, color: Colors.white, size: 24),

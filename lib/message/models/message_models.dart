@@ -20,6 +20,10 @@ class MessageType {
   // liye. Backend me is naye MessageType choice ko allow karna hoga
   // (Django `MessageType` choices me 'study_room' add karo).
   static const studyRoom = 'study_room';
+  // 🔥 NAYA — poll message (backend `MessageType.POLL` = 'poll'). Poll ka
+  // poora data (question/options/votes) is message ke `meta['poll']` ke
+  // andar rehta hai — dekho neeche PollModel.
+  static const poll = 'poll';
 }
 
 // ======================================================================
@@ -417,6 +421,14 @@ class MessageModel {
       thumbnailUrl: json['thumbnail_url']?.toString(),
       meta: json['meta'] is Map<String, dynamic> ? json['meta'] : null,
       replyTo: json['reply_to']?.toString(),
+      // FIX: `forward()` in views.py broadcasts the chat_message socket
+      // event with 'is_forwarded': True for forwarded copies, but this
+      // factory never read that key — so a forwarded message delivered
+      // live (chat already open) always showed isForwarded=false, and
+      // only picked up the correct "Forwarded" label after a reload from
+      // the REST endpoint (MessageSerializer). Now reads it like every
+      // other broadcast field.
+      isForwarded: json['is_forwarded'] ?? false,
       clientId: json['client_id']?.toString(),
       createdAt: DateTime.tryParse(json['created_at']?.toString() ?? '') ??
           DateTime.now(),
@@ -451,4 +463,186 @@ class MessageModel {
         'created_at': createdAt.toIso8601String(),
         'updated_at': updatedAt?.toIso8601String(),
       };
+}
+
+// ======================================================================
+// 🔥 NAYA — POLL
+// ======================================================================
+// Design decision: poll ka poora data (id, question, options, vote
+// counts, voted_by_me...) `MessageModel.meta['poll']` ke andar raw Map
+// ki tarah store hota hai — bilkul waise hi jaise location message
+// `meta['lat']/['lng']` use karta hai. Isse `MessageModel` ki shape
+// disturb nahi hoti, aur poll data easily message ke saath travel karta
+// hai (optimistic insert ho, socket event se aaye, ya history se — sab
+// jagah same `meta['poll']` shape use hoga).
+//
+// NOTE — poll ka HISTORICAL data (pagination se load hui purani
+// messages): backend `MessageSerializer` `type=poll` wale message ke
+// saath poll ka data (options/votes) abhi return NAHI karta — sirf
+// normal fields (id, text=question, meta={}) aate hain. Poll ka poora
+// data sirf `poll_created` / `poll_voted` socket events me milta hai
+// (live), ya seedha `GET /message/polls/<id>/` se. Isliye purane poll
+// (jo scroll karke history se load hue) read-only "📊 <question>"
+// dikhte hain jab tak `MessageApiService.getPoll()` se fresh data na
+// mangwaya jaaye.
+class PollOptionModel {
+  final String id;
+  final String text;
+  final int order;
+  final int voteCount;
+  final bool votedByMe;
+
+  PollOptionModel({
+    required this.id,
+    required this.text,
+    required this.order,
+    required this.voteCount,
+    required this.votedByMe,
+  });
+
+  factory PollOptionModel.fromJson(Map<String, dynamic> json) {
+    return PollOptionModel(
+      id: json['id'].toString(),
+      text: json['text']?.toString() ?? '',
+      order: (json['order'] as num?)?.toInt() ?? 0,
+      voteCount: (json['vote_count'] as num?)?.toInt() ?? 0,
+      votedByMe: json['voted_by_me'] == true,
+    );
+  }
+
+  Map<String, dynamic> toJson() => {
+        'id': id,
+        'text': text,
+        'order': order,
+        'vote_count': voteCount,
+        'voted_by_me': votedByMe,
+      };
+}
+
+class PollModel {
+  final String id;
+  final String messageId;
+  final String question;
+  final bool allowsMultipleAnswers;
+  final bool isAnonymous;
+  final DateTime? closedAt;
+  final List<PollOptionModel> options;
+  final int totalVotes;
+
+  PollModel({
+    required this.id,
+    required this.messageId,
+    required this.question,
+    required this.allowsMultipleAnswers,
+    required this.isAnonymous,
+    required this.options,
+    required this.totalVotes,
+    this.closedAt,
+  });
+
+  bool get isClosed => closedAt != null;
+
+  factory PollModel.fromJson(Map<String, dynamic> json) {
+    return PollModel(
+      id: json['id'].toString(),
+      messageId: json['message'].toString(),
+      question: json['question']?.toString() ?? '',
+      allowsMultipleAnswers: json['allows_multiple_answers'] == true,
+      isAnonymous: json['is_anonymous'] == true,
+      closedAt: json['closed_at'] != null
+          ? DateTime.tryParse(json['closed_at'].toString())
+          : null,
+      options: (json['options'] as List? ?? [])
+          .map((o) => PollOptionModel.fromJson(o as Map<String, dynamic>))
+          .toList(),
+      totalVotes: (json['total_votes'] as num?)?.toInt() ?? 0,
+    );
+  }
+
+  Map<String, dynamic> toJson() => {
+        'id': id,
+        'message': messageId,
+        'question': question,
+        'allows_multiple_answers': allowsMultipleAnswers,
+        'is_anonymous': isAnonymous,
+        'closed_at': closedAt?.toIso8601String(),
+        'options': options.map((o) => o.toJson()).toList(),
+        'total_votes': totalVotes,
+      };
+}
+
+// ======================================================================
+// 🔥 NAYA — PINNED MESSAGE — GET /message/conversations/<id>/pins/
+// ======================================================================
+class PinnedMessageModel {
+  final String id;
+  final MessageModel message;
+  final UserMini pinnedBy;
+  final DateTime createdAt;
+
+  PinnedMessageModel({
+    required this.id,
+    required this.message,
+    required this.pinnedBy,
+    required this.createdAt,
+  });
+
+  factory PinnedMessageModel.fromJson(Map<String, dynamic> json) {
+    return PinnedMessageModel(
+      id: json['id'].toString(),
+      message: MessageModel.fromJson(json['message'] as Map<String, dynamic>),
+      pinnedBy: UserMini.fromJson(json['pinned_by'] as Map<String, dynamic>),
+      createdAt: DateTime.tryParse(json['created_at']?.toString() ?? '') ??
+          DateTime.now(),
+    );
+  }
+}
+
+// ======================================================================
+// 🔥 NAYA — SCHEDULED MESSAGE — /message/conversations/<id>/scheduled/
+// and /message/scheduled/<id>/
+// ======================================================================
+class ScheduledMessageModel {
+  final String id;
+  final String conversationId;
+  final String type; // MessageType.* string (text/image/poll/...)
+  final String? text;
+  final String? fileUrl;
+  final List<dynamic>? fileUrls;
+  final Map<String, dynamic>? meta;
+  final String? replyTo;
+  final DateTime scheduledFor;
+  final bool isSent;
+  final bool isCancelled;
+
+  ScheduledMessageModel({
+    required this.id,
+    required this.conversationId,
+    required this.type,
+    required this.scheduledFor,
+    required this.isSent,
+    required this.isCancelled,
+    this.text,
+    this.fileUrl,
+    this.fileUrls,
+    this.meta,
+    this.replyTo,
+  });
+
+  factory ScheduledMessageModel.fromJson(Map<String, dynamic> json) {
+    return ScheduledMessageModel(
+      id: json['id'].toString(),
+      conversationId: json['conversation'].toString(),
+      type: json['type']?.toString() ?? MessageType.text,
+      text: json['text']?.toString(),
+      fileUrl: json['file_url']?.toString(),
+      fileUrls: json['file_urls'] as List?,
+      meta: json['meta'] as Map<String, dynamic>?,
+      replyTo: json['reply_to']?.toString(),
+      scheduledFor: DateTime.tryParse(json['scheduled_for']?.toString() ?? '') ??
+          DateTime.now(),
+      isSent: json['is_sent'] == true,
+      isCancelled: json['is_cancelled'] == true,
+    );
+  }
 }

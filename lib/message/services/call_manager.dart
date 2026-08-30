@@ -468,6 +468,14 @@ class CallManager extends ChangeNotifier {
       if (isCaller) {
         await _playRingtone();
         _startNoAnswerTimer();
+        // 🔥 FIX — "receiver ne call cut ki par meri taraf se call chalti
+        // rehti thi" bug. Jab tak callee 'Accept' na kare, wo LiveKit room
+        // me kabhi join hi nahi hota — isliye reject hone par koi
+        // RoomEvent/DataChannel signal caller tak pahunchta hi nahi (room
+        // khud khaali padha rehta hai). Ab jab tak caller ring kar raha hai,
+        // backend se turant poochte rehte hain ki dusri taraf ne cut to
+        // nahi ki.
+        _startCallStatusPoll();
       } else {
         ringtoneDebugStatus = "Ringtone: skipped (callee — CallKit native popup rings)";
         notifyListeners();
@@ -731,6 +739,90 @@ class CallManager extends ChangeNotifier {
   }
 
   // ============================================================
+  // 🔥 FIX — CALLEE REJECT DETECTION (caller side).
+  // ------------------------------------------------------------
+  // Bug tha: caller call laga ke ring karta rehta tha chahe dusri taraf
+  // ne turant "Decline" daba diya ho — kyunki reject hone par callee
+  // (IncomingCallScreen._reject) sirf backend ko `action: reject` bhejta
+  // hai, LiveKit room me KABHI join nahi hota. Isliye caller ki taraf
+  // koi RoomEvent/data-channel signal aata hi nahi — sirf 30s wala
+  // `_noAnswerTimer` hi ek din chalta tha (bahut slow + galat "No
+  // answer" message dikhata, jabki asal me turant reject hua tha).
+  //
+  // Fix: jab tak caller "ringing" state me hai (remoteConnected==false),
+  // har 2 second me backend se is call ka current status poochte hain.
+  // Reject/decline detect hote hi turant apni taraf se bhi connection
+  // off kar dete hain aur "Line busy" dikhate hain — WhatsApp jaisa hi
+  // turant feedback, 30 second ka wait nahi.
+  //
+  // ⚠️ Backend contract: `CallApiService.getCallStatus()` (GET
+  // .../calls/<id>/) ke response me ek status field hona chahiye jisme
+  // reject hone par "rejected"/"declined"/"busy" jaisi value ho — agar
+  // backend ka field/value naam isse alag hai to `_isRejectedStatus()`
+  // me match update kar lena.
+  Timer? _callStatusPollTimer;
+
+  void _startCallStatusPoll() {
+    _callStatusPollTimer?.cancel();
+    _callStatusPollTimer = Timer.periodic(const Duration(seconds: 2), (timer) async {
+      final id = callId;
+      if (!isActive || remoteConnected || id == null) {
+        timer.cancel();
+        return;
+      }
+      try {
+        final data = await CallApiService.getCallStatus(id);
+        final rawStatus = (data['status'] ?? data['call_status'] ?? '').toString().toLowerCase();
+        if (_isRejectedStatus(rawStatus)) {
+          timer.cancel();
+          await _endAsLineBusy();
+        }
+      } catch (e) {
+        // Best-effort — poll fail ho to bhi call chalti rahegi, 30s wala
+        // `_noAnswerTimer` hamesha ek fallback ki tarah maujood hai.
+        developer.log("Call status poll failed (non-fatal): $e");
+      }
+    });
+  }
+
+  bool _isRejectedStatus(String status) {
+    return status == 'rejected' ||
+        status == 'declined' ||
+        status == 'decline' ||
+        status == 'reject' ||
+        status == 'busy';
+  }
+
+  /// Dusri taraf ne call cut kar di — apni taraf se bhi turant connection
+  /// off karo, "Line busy" thodi der dikhao (WhatsApp jaisa), phir screen
+  /// khud band ho jaaye.
+  Future<void> _endAsLineBusy() async {
+    if (!isActive) return;
+    _noAnswerTimer?.cancel();
+    _noAnswerTimer = null;
+    _callStatusPollTimer?.cancel();
+    _callStatusPollTimer = null;
+    await _stopRingtone();
+    status = "Line busy";
+    notifyListeners();
+
+    final id = callId;
+    if (id != null) {
+      try {
+        await CallApiService.callAction(id, 'end');
+      } catch (e) {
+        developer.log("_endAsLineBusy backend notify failed (non-fatal): $e");
+      }
+    }
+
+    // "Line busy" thodi der dikhne do, phir hi screen band ho — turant
+    // pop hoga to user ko message padhne ka mauka hi nahi milega.
+    await Future.delayed(const Duration(milliseconds: 1600));
+    if (!isActive) return; // already cleaned up (e.g. user backed out)
+    await _cleanup();
+  }
+
+  // ============================================================
   // IN-CALL CONTROLS
   // ============================================================
   Future<void> toggleMic() async {
@@ -942,6 +1034,8 @@ class CallManager extends ChangeNotifier {
     _reconnectTimer?.cancel();
     _noAnswerTimer?.cancel();
     _noAnswerTimer = null;
+    _callStatusPollTimer?.cancel();
+    _callStatusPollTimer = null;
     await _stopRingtone();
 
     // 🔥 FIX — peer ko TURANT batao ki maine call end kar di, LiveKit ke
@@ -1012,6 +1106,8 @@ class CallManager extends ChangeNotifier {
     _peerEndedCall = false;
     _noAnswerTimer?.cancel();
     _noAnswerTimer = null;
+    _callStatusPollTimer?.cancel();
+    _callStatusPollTimer = null;
 
     WakelockPlus.disable();
     await _disableBackgroundExecution();

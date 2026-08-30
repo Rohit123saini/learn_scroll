@@ -32,10 +32,29 @@
 // Multiple admins bhi ho sakte hain — ek admin doosre kisi bhi member ko
 // "Make admin" kar sakta hai, ye simple role-reassign hai
 // (`updateGroupMember(role: 'admin')`), koi limit nahi.
+//
+// 🔥 NAYA (this pass):
+//   • Public <-> Private ab yahin se toggle ho sakta hai (Switch on the
+//     privacy card) — admin/moderator only.
+//   • "Who can send messages": Everyone / Admins & moderators only.
+//   • "Daily message limit per member": No limit / 1 / 2 / 5 / 10 / 20 —
+//     admin/moderator hamesha exempt hain. Enforced on the BACKEND
+//     (`group_rules.check_group_send_permission`, called from both the
+//     REST send endpoint and the WebSocket consumer) — this UI is just
+//     the settings surface, the actual rule can't be bypassed by editing
+//     the app.
+//   • Group photo: tap the avatar (admin/moderator only) to change or
+//     remove it.
+//   • Name & description: tap the text itself (admin/moderator only) —
+//     it turns into a live text field right there (WhatsApp/Instagram
+//     style inline edit), with tick/cross to save/cancel. No dialog, no
+//     separate "Edit" screen.
 
+import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart'; // Clipboard — invite link copy
 import 'package:cached_network_image/cached_network_image.dart';
+import 'package:image_picker/image_picker.dart'; // 🔧 FIX — group photo pick ke liye chahiye tha, missing tha
 
 import '../services/message_api_service.dart';
 import '../../services/auth_service.dart';
@@ -66,6 +85,18 @@ class _GroupProfileScreenState extends State<GroupProfileScreen> {
   String? _inviteCode;
   List<Map<String, dynamic>> _members = []; // normalized: {id, name, username, avatar, role, is_muted, is_banned}
 
+  // 🔥 NAYA — "kaun message bhej sakta hai" aur "daily message limit"
+  String _messagePermission = 'everyone'; // 'everyone' | 'admins_mods'
+  int? _dailyMessageLimit; // null = unlimited
+  bool _savingSettings = false;
+
+  // 🔥 NAYA — "kaun call start kar sakta hai" / "kaun study room start kar
+  // sakta hai". Same shape as `_messagePermission` — 'everyone' | 'admins_mods'.
+  // Backend enforce karta hai (`group_rules.check_group_call_permission` /
+  // `check_group_study_room_permission`), ye UI sirf settings surface hai.
+  String _callPermission = 'everyone';
+  String _studyRoomPermission = 'everyone';
+
   String? _myRole; // 'admin' | 'moderator' | 'member' | null
   bool get _isAdmin => _myRole == 'admin';
   bool get _isAdminOrMod => _myRole == 'admin' || _myRole == 'moderator';
@@ -77,7 +108,28 @@ class _GroupProfileScreenState extends State<GroupProfileScreen> {
   List<Map<String, dynamic>> _joinRequests = [];
   bool _loadingRequests = false;
 
+  // 🔥 NAYA — inline tap-to-edit for name/description (WhatsApp/Instagram
+  // style — tap the text itself, it turns into a live text field right
+  // there, tick/cross to save/cancel). Replaces the old "Edit" dialog.
+  bool _editingName = false;
+  bool _editingDescription = false;
+  bool _savingName = false;
+  bool _savingDescription = false;
+  final TextEditingController _nameCtrl = TextEditingController();
+  final TextEditingController _descCtrl = TextEditingController();
+  final FocusNode _nameFocus = FocusNode();
+  final FocusNode _descFocus = FocusNode();
+
   bool _busy = false; // leave/delete/promote jaisi actions ke waqt double-tap se bachne ke liye
+
+  @override
+  void dispose() {
+    _nameCtrl.dispose();
+    _descCtrl.dispose();
+    _nameFocus.dispose();
+    _descFocus.dispose();
+    super.dispose();
+  }
 
   @override
   void initState() {
@@ -137,6 +189,12 @@ class _GroupProfileScreenState extends State<GroupProfileScreen> {
         _photoUrl = data['photo_url']?.toString();
         _isPrivate = data['is_private'] == true;
         _inviteCode = data['invite_code']?.toString();
+        _messagePermission = data['message_permission']?.toString() ?? 'everyone';
+        _dailyMessageLimit = data['daily_message_limit'] is int
+            ? data['daily_message_limit'] as int
+            : int.tryParse(data['daily_message_limit']?.toString() ?? '');
+        _callPermission = data['call_permission']?.toString() ?? 'everyone';
+        _studyRoomPermission = data['study_room_permission']?.toString() ?? 'everyone';
         _members = normalized;
         _myRole = myRole;
         _loading = false;
@@ -206,43 +264,287 @@ class _GroupProfileScreenState extends State<GroupProfileScreen> {
   }
 
   // ------------------------------------------------------------------
-  // EDIT NAME / DESCRIPTION (admin + moderator)
+  // INLINE EDIT — NAME (tap the name itself, admin + moderator only)
   // ------------------------------------------------------------------
-  Future<void> _editGroupInfo() async {
-    final nameCtrl = TextEditingController(text: _name);
-    final descCtrl = TextEditingController(text: _description);
-    final saved = await showDialog<bool>(
-      context: context,
-      builder: (ctx) => AlertDialog(
-        title: const Text("Edit group"),
-        content: Column(mainAxisSize: MainAxisSize.min, children: [
-          TextField(controller: nameCtrl, decoration: const InputDecoration(labelText: "Group name")),
-          const SizedBox(height: 10),
-          TextField(controller: descCtrl, decoration: const InputDecoration(labelText: "Description"), maxLines: 3),
-        ]),
-        actions: [
-          TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text("Cancel")),
-          ElevatedButton(onPressed: () => Navigator.pop(ctx, true), child: const Text("Save")),
-        ],
-      ),
-    );
-    if (saved != true) return;
-    final newName = nameCtrl.text.trim();
-    if (newName.isEmpty) return;
+  void _startEditName() {
+    if (!_isAdminOrMod || _busy || _editingName) return;
+    _nameCtrl.text = _name;
+    _nameCtrl.selection = TextSelection(baseOffset: 0, extentOffset: _nameCtrl.text.length);
+    setState(() => _editingName = true);
+    WidgetsBinding.instance.addPostFrameCallback((_) => _nameFocus.requestFocus());
+  }
+
+  void _cancelEditName() {
+    if (_savingName) return;
+    setState(() => _editingName = false);
+  }
+
+  Future<void> _saveName() async {
+    final newName = _nameCtrl.text.trim();
+    if (newName.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text("Group name khali nahi ho sakta")),
+      );
+      return;
+    }
+    if (newName == _name) {
+      setState(() => _editingName = false);
+      return;
+    }
+    setState(() => _savingName = true);
     try {
-      await MessageApiService.updateGroup(widget.groupId, {
-        'name': newName,
-        'description': descCtrl.text.trim(),
-      });
+      await MessageApiService.updateGroup(widget.groupId, {'name': newName});
       if (!mounted) return;
       setState(() {
         _name = newName;
-        _description = descCtrl.text.trim();
+        _editingName = false;
+        _savingName = false;
       });
     } catch (e) {
       if (!mounted) return;
+      setState(() => _savingName = false);
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text("Name update fail: $e")));
+    }
+  }
+
+  // ------------------------------------------------------------------
+  // INLINE EDIT — DESCRIPTION (tap the description itself, admin + moderator only)
+  // ------------------------------------------------------------------
+  void _startEditDescription() {
+    if (!_isAdminOrMod || _busy || _editingDescription) return;
+    _descCtrl.text = _description;
+    setState(() => _editingDescription = true);
+    WidgetsBinding.instance.addPostFrameCallback((_) => _descFocus.requestFocus());
+  }
+
+  void _cancelEditDescription() {
+    if (_savingDescription) return;
+    setState(() => _editingDescription = false);
+  }
+
+  Future<void> _saveDescription() async {
+    final newDesc = _descCtrl.text.trim();
+    if (newDesc == _description) {
+      setState(() => _editingDescription = false);
+      return;
+    }
+    setState(() => _savingDescription = true);
+    try {
+      await MessageApiService.updateGroup(widget.groupId, {'description': newDesc});
+      if (!mounted) return;
+      setState(() {
+        _description = newDesc;
+        _editingDescription = false;
+        _savingDescription = false;
+      });
+    } catch (e) {
+      if (!mounted) return;
+      setState(() => _savingDescription = false);
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text("Description update fail: $e")));
+    }
+  }
+
+  // ------------------------------------------------------------------
+  // PRIVACY TOGGLE — public <-> private (admin + moderator)
+  // ------------------------------------------------------------------
+  Future<void> _togglePrivacy(bool makePrivate) async {
+    if (_savingSettings) return;
+    final prev = _isPrivate;
+    setState(() {
+      _isPrivate = makePrivate;
+      _savingSettings = true;
+    });
+    try {
+      await MessageApiService.updateGroup(widget.groupId, {'is_private': makePrivate});
+      if (mounted) setState(() => _savingSettings = false);
+      // private ho gaya to admin/moderator ke liye join-requests card bhi
+      // relevant ho sakta hai, refresh kar lo.
+      if (makePrivate && _isAdminOrMod) _loadJoinRequests();
+    } catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _isPrivate = prev; // rollback
+        _savingSettings = false;
+      });
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text("Privacy update fail: $e")));
+    }
+  }
+
+  // ------------------------------------------------------------------
+  // MESSAGE PERMISSION — 'everyone' | 'admins_mods' (admin + moderator)
+  // ------------------------------------------------------------------
+  Future<void> _updateMessagePermission(String value) async {
+    if (_savingSettings || value == _messagePermission) return;
+    final prev = _messagePermission;
+    setState(() {
+      _messagePermission = value;
+      _savingSettings = true;
+    });
+    try {
+      await MessageApiService.updateGroup(widget.groupId, {'message_permission': value});
+      if (mounted) setState(() => _savingSettings = false);
+    } catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _messagePermission = prev;
+        _savingSettings = false;
+      });
       ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text("Update fail: $e")));
     }
+  }
+
+  // ------------------------------------------------------------------
+  // DAILY MESSAGE LIMIT — null (unlimited) | 1 | 2 | 5 | 10 | 20 (admin + moderator)
+  // ------------------------------------------------------------------
+  Future<void> _updateDailyLimit(int? value) async {
+    if (_savingSettings || value == _dailyMessageLimit) return;
+    final prev = _dailyMessageLimit;
+    setState(() {
+      _dailyMessageLimit = value;
+      _savingSettings = true;
+    });
+    try {
+      await MessageApiService.updateGroup(widget.groupId, {'daily_message_limit': value});
+      if (mounted) setState(() => _savingSettings = false);
+    } catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _dailyMessageLimit = prev;
+        _savingSettings = false;
+      });
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text("Update fail: $e")));
+    }
+  }
+
+  // ------------------------------------------------------------------
+  // CALL PERMISSION — 'everyone' | 'admins_mods' (admin + moderator)
+  // ------------------------------------------------------------------
+  Future<void> _updateCallPermission(String value) async {
+    if (_savingSettings || value == _callPermission) return;
+    final prev = _callPermission;
+    setState(() {
+      _callPermission = value;
+      _savingSettings = true;
+    });
+    try {
+      await MessageApiService.updateGroup(widget.groupId, {'call_permission': value});
+      if (mounted) setState(() => _savingSettings = false);
+    } catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _callPermission = prev;
+        _savingSettings = false;
+      });
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text("Update fail: $e")));
+    }
+  }
+
+  // ------------------------------------------------------------------
+  // STUDY ROOM PERMISSION — 'everyone' | 'admins_mods' (admin + moderator)
+  // ------------------------------------------------------------------
+  Future<void> _updateStudyRoomPermission(String value) async {
+    if (_savingSettings || value == _studyRoomPermission) return;
+    final prev = _studyRoomPermission;
+    setState(() {
+      _studyRoomPermission = value;
+      _savingSettings = true;
+    });
+    try {
+      await MessageApiService.updateGroup(widget.groupId, {'study_room_permission': value});
+      if (mounted) setState(() => _savingSettings = false);
+    } catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _studyRoomPermission = prev;
+        _savingSettings = false;
+      });
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text("Update fail: $e")));
+    }
+  }
+
+  // ------------------------------------------------------------------
+  // GROUP PHOTO — change (upload + set) / remove (admin + moderator)
+  // ------------------------------------------------------------------
+  Future<void> _changeGroupPhoto() async {
+    if (_busy) return;
+    // Tumhare app me jo bhi image-picker already use ho raha hai (jaise
+    // profile photo screen me) wahi yahan use karo — placeholder call:
+    // final picked = await ImagePickerService.pickImage();
+    // Neeche generic pattern hai jo tumhare `MessageApiService.uploadFile`
+    // ke saath already-existing media-send flow jaisa hi hai.
+    final File? pickedFile = await _pickImageFile(); // tumhare project ka image-picker helper
+    if (pickedFile == null) return;
+
+    setState(() => _busy = true);
+    try {
+      final uploaded = await MessageApiService.uploadFile(pickedFile);
+      await MessageApiService.updateGroup(widget.groupId, {'photo_url': uploaded.fileUrl});
+      if (!mounted) return;
+      setState(() {
+        _photoUrl = uploaded.fileUrl;
+        _busy = false;
+      });
+    } catch (e) {
+      if (!mounted) return;
+      setState(() => _busy = false);
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text("Photo update fail: $e")));
+    }
+  }
+
+  Future<void> _removeGroupPhoto() async {
+    if (_busy || _photoUrl == null || _photoUrl!.isEmpty) return;
+    setState(() => _busy = true);
+    try {
+      await MessageApiService.removeGroupPhoto(widget.groupId);
+      if (!mounted) return;
+      setState(() {
+        _photoUrl = null;
+        _busy = false;
+      });
+    } catch (e) {
+      if (!mounted) return;
+      setState(() => _busy = false);
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text("Photo remove fail: $e")));
+    }
+  }
+
+  Future<void> _showPhotoOptions() async {
+    if (!_isAdminOrMod || _busy) return;
+    final action = await showModalBottomSheet<String>(
+      context: context,
+      builder: (ctx) => SafeArea(
+        child: Column(mainAxisSize: MainAxisSize.min, children: [
+          ListTile(
+            leading: const Icon(Icons.photo_camera_rounded, color: _kAccent),
+            title: const Text("Change group photo"),
+            onTap: () => Navigator.pop(ctx, 'change'),
+          ),
+          if (_photoUrl != null && _photoUrl!.isNotEmpty)
+            ListTile(
+              leading: const Icon(Icons.delete_outline_rounded, color: Colors.red),
+              title: const Text("Remove photo", style: TextStyle(color: Colors.red)),
+              onTap: () => Navigator.pop(ctx, 'remove'),
+            ),
+        ]),
+      ),
+    );
+    if (action == 'change') await _changeGroupPhoto();
+    if (action == 'remove') await _removeGroupPhoto();
+  }
+
+  // 🔧 FIX — ye pehle `UnimplementedError()` throw karta tha, isiliye
+  // avatar pe tap karke photo change karna kabhi kaam hi nahi karta tha
+  // (har baar seedha catch block me gir ke "Photo update fail" dikhata
+  // tha). Ab wahi `ImagePicker` pattern use kiya hai jo chat wallpaper
+  // (`chat_screen.dart` -> `_pickChatWallpaper`) me already kaam kar raha
+  // hai — gallery se pick karo, imageQuality thoda compress kar do.
+  Future<File?> _pickImageFile() async {
+    final picked = await ImagePicker().pickImage(
+      source: ImageSource.gallery,
+      imageQuality: 85,
+    );
+    if (picked == null) return null;
+    return File(picked.path);
   }
 
   // ------------------------------------------------------------------
@@ -409,10 +711,6 @@ class _GroupProfileScreenState extends State<GroupProfileScreen> {
         elevation: 0,
         foregroundColor: Colors.white,
         title: const Text("Group info", style: TextStyle(fontWeight: FontWeight.w700)),
-        actions: [
-          if (!_loading && _isAdminOrMod)
-            IconButton(icon: const Icon(Icons.edit_rounded), tooltip: "Edit", onPressed: _editGroupInfo),
-        ],
       ),
       body: _loading
           ? const Center(child: CircularProgressIndicator(color: _kNavy))
@@ -424,11 +722,11 @@ class _GroupProfileScreenState extends State<GroupProfileScreen> {
                     padding: const EdgeInsets.only(bottom: 24),
                     children: [
                       _buildHeader(),
-                      const SizedBox(height: 10),
                       _buildPrivacyCard(),
+                      _buildMessageRulesCard(),
                       if (_canSeeMembersAndLink && _inviteCode != null) _buildInviteLinkCard(),
                       if (_isPrivate && _isAdminOrMod) _buildJoinRequestsCard(),
-                      const SizedBox(height: 10),
+                      const SizedBox(height: 14),
                       _buildMembersSection(),
                       const SizedBox(height: 16),
                       _buildDangerZone(),
@@ -438,34 +736,298 @@ class _GroupProfileScreenState extends State<GroupProfileScreen> {
     );
   }
 
+  // 🎨 NAYA — Hero-style gradient header. Avatar + name + description sab
+  // yahin inline-editable hain (admin/moderator only) — WhatsApp/
+  // Instagram jaisa "tap on the text itself" pattern, koi separate
+  // dialog/screen nahi. Har field ka apna save/cancel state hai taaki
+  // dono ek saath bhi edit ho sakein.
   Widget _buildHeader() {
     return Container(
       width: double.infinity,
-      color: Colors.white,
-      padding: const EdgeInsets.symmetric(vertical: 24),
-      child: Column(children: [
-        CircleAvatar(
-          radius: 44,
-          backgroundColor: Colors.grey[200],
-          backgroundImage: (_photoUrl != null && _photoUrl!.isNotEmpty) ? CachedNetworkImageProvider(_photoUrl!) : null,
-          child: (_photoUrl == null || _photoUrl!.isEmpty) ? Icon(Icons.group_rounded, size: 40, color: Colors.grey[500]) : null,
+      decoration: BoxDecoration(
+        gradient: const LinearGradient(
+          begin: Alignment.topLeft,
+          end: Alignment.bottomRight,
+          colors: [_kNavy, Color(0xFF10214F)],
         ),
-        const SizedBox(height: 12),
-        Text(_name, style: const TextStyle(fontSize: 19, fontWeight: FontWeight.w700, color: _kNavy), textAlign: TextAlign.center),
-        if (_description.isNotEmpty)
-          Padding(
-            padding: const EdgeInsets.only(top: 6, left: 24, right: 24),
-            child: Text(_description, style: TextStyle(fontSize: 13, color: Colors.grey[600]), textAlign: TextAlign.center),
+        borderRadius: const BorderRadius.only(
+          bottomLeft: Radius.circular(28),
+          bottomRight: Radius.circular(28),
+        ),
+        boxShadow: [
+          BoxShadow(color: _kNavy.withOpacity(0.25), blurRadius: 18, offset: const Offset(0, 8)),
+        ],
+      ),
+      padding: const EdgeInsets.fromLTRB(24, 28, 24, 26),
+      child: Column(children: [
+        // ---------------- AVATAR ----------------
+        Material(
+          color: Colors.transparent,
+          shape: const CircleBorder(),
+          clipBehavior: Clip.antiAlias,
+          child: InkWell(
+            onTap: _isAdminOrMod ? _showPhotoOptions : null,
+            child: Stack(children: [
+              Container(
+                padding: const EdgeInsets.all(3),
+                decoration: BoxDecoration(
+                  shape: BoxShape.circle,
+                  border: Border.all(color: Colors.white.withOpacity(0.85), width: 2.5),
+                  boxShadow: [
+                    BoxShadow(color: Colors.black.withOpacity(0.25), blurRadius: 14, offset: const Offset(0, 6)),
+                  ],
+                ),
+                child: CircleAvatar(
+                  radius: 46,
+                  backgroundColor: Colors.white.withOpacity(0.12),
+                  backgroundImage: (_photoUrl != null && _photoUrl!.isNotEmpty) ? CachedNetworkImageProvider(_photoUrl!) : null,
+                  child: (_photoUrl == null || _photoUrl!.isEmpty) ? const Icon(Icons.group_rounded, size: 42, color: Colors.white70) : null,
+                ),
+              ),
+              if (_isAdminOrMod)
+                Positioned(
+                  bottom: 2,
+                  right: 2,
+                  child: Container(
+                    padding: const EdgeInsets.all(6),
+                    decoration: BoxDecoration(
+                      color: _kAccent,
+                      shape: BoxShape.circle,
+                      border: Border.all(color: _kNavy, width: 2),
+                      boxShadow: [BoxShadow(color: _kAccent.withOpacity(0.5), blurRadius: 8)],
+                    ),
+                    child: const Icon(Icons.camera_alt_rounded, size: 14, color: Colors.white),
+                  ),
+                ),
+            ]),
           ),
+        ),
+        const SizedBox(height: 18),
+
+        // ---------------- NAME (inline editable) ----------------
+        _buildInlineEditableField(
+          isEditing: _editingName,
+          isSaving: _savingName,
+          canEdit: _isAdminOrMod,
+          controller: _nameCtrl,
+          focusNode: _nameFocus,
+          onTapToEdit: _startEditName,
+          onSave: _saveName,
+          onCancel: _cancelEditName,
+          maxLines: 1,
+          textAlign: TextAlign.center,
+          emptyPlaceholder: null,
+          viewStyle: const TextStyle(fontSize: 20, fontWeight: FontWeight.w800, color: Colors.white, height: 1.25),
+          editStyle: const TextStyle(fontSize: 20, fontWeight: FontWeight.w800, color: Colors.white, height: 1.25),
+          displayText: _name,
+          hintText: "Group name",
+        ),
+
+        const SizedBox(height: 8),
+
+        // ---------------- ROLE BADGE ----------------
+        if (_myRole != null)
+          Container(
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
+            decoration: BoxDecoration(
+              color: Colors.white.withOpacity(0.12),
+              borderRadius: BorderRadius.circular(20),
+              border: Border.all(color: Colors.white.withOpacity(0.18)),
+            ),
+            child: Row(mainAxisSize: MainAxisSize.min, children: [
+              Icon(
+                _myRole == 'admin' ? Icons.shield_rounded : (_myRole == 'moderator' ? Icons.verified_user_rounded : Icons.person_rounded),
+                size: 13, color: Colors.white70,
+              ),
+              const SizedBox(width: 5),
+              Text(
+                _myRole == 'admin' ? "You're an admin" : (_myRole == 'moderator' ? "You're a moderator" : "Member"),
+                style: const TextStyle(fontSize: 11, fontWeight: FontWeight.w600, color: Colors.white70),
+              ),
+            ]),
+          ),
+
+        const SizedBox(height: 14),
+
+        // ---------------- DESCRIPTION (inline editable) ----------------
+        _buildInlineEditableField(
+          isEditing: _editingDescription,
+          isSaving: _savingDescription,
+          canEdit: _isAdminOrMod,
+          controller: _descCtrl,
+          focusNode: _descFocus,
+          onTapToEdit: _startEditDescription,
+          onSave: _saveDescription,
+          onCancel: _cancelEditDescription,
+          maxLines: 4,
+          minLines: 1,
+          textAlign: TextAlign.center,
+          emptyPlaceholder: _isAdminOrMod ? "Add group description" : null,
+          viewStyle: TextStyle(fontSize: 13, color: Colors.white.withOpacity(0.75), height: 1.4),
+          editStyle: TextStyle(fontSize: 13, color: Colors.white.withOpacity(0.95), height: 1.4),
+          displayText: _description,
+          hintText: "Group description",
+        ),
+      ]),
+    );
+  }
+
+  // 🎨 NAYA — reusable "tap text -> becomes live text field -> tick/cross
+  // to save/cancel" widget. View mode me hover/tap par halka pencil icon
+  // dikhta hai (sirf editable ho to), edit mode me AnimatedSwitcher se
+  // smooth cross-fade + scale ke saath text field aata hai, saath me
+  // ek chhota pill me tick (save) aur cross (cancel) icon — save ke waqt
+  // pill ke andar hi chhota spinner dikhta hai.
+  Widget _buildInlineEditableField({
+    required bool isEditing,
+    required bool isSaving,
+    required bool canEdit,
+    required TextEditingController controller,
+    required FocusNode focusNode,
+    required VoidCallback onTapToEdit,
+    required Future<void> Function() onSave,
+    required VoidCallback onCancel,
+    required String displayText,
+    required TextStyle viewStyle,
+    required TextStyle editStyle,
+    required String hintText,
+    String? emptyPlaceholder,
+    int maxLines = 1,
+    int? minLines,
+    TextAlign textAlign = TextAlign.start,
+  }) {
+    final hasText = displayText.trim().isNotEmpty;
+
+    return AnimatedSwitcher(
+      duration: const Duration(milliseconds: 220),
+      switchInCurve: Curves.easeOutCubic,
+      switchOutCurve: Curves.easeInCubic,
+      transitionBuilder: (child, animation) => FadeTransition(
+        opacity: animation,
+        child: ScaleTransition(scale: Tween(begin: 0.97, end: 1.0).animate(animation), child: child),
+      ),
+      child: isEditing
+          ? Padding(
+              key: const ValueKey('editing'),
+              padding: const EdgeInsets.symmetric(horizontal: 8),
+              child: Column(mainAxisSize: MainAxisSize.min, children: [
+                Container(
+                  padding: EdgeInsets.symmetric(horizontal: 14, vertical: maxLines > 1 ? 8 : 4),
+                  decoration: BoxDecoration(
+                    color: Colors.white.withOpacity(0.14),
+                    borderRadius: BorderRadius.circular(14),
+                    border: Border.all(color: _kAccent.withOpacity(0.7), width: 1.4),
+                  ),
+                  child: TextField(
+                    controller: controller,
+                    focusNode: focusNode,
+                    maxLines: maxLines,
+                    minLines: minLines,
+                    textAlign: textAlign,
+                    style: editStyle,
+                    cursorColor: _kAccent,
+                    enabled: !isSaving,
+                    textInputAction: maxLines > 1 ? TextInputAction.newline : TextInputAction.done,
+                    onSubmitted: maxLines > 1 ? null : (_) => onSave(),
+                    decoration: InputDecoration(
+                      isDense: true,
+                      border: InputBorder.none,
+                      hintText: hintText,
+                      hintStyle: editStyle.copyWith(color: Colors.white38),
+                    ),
+                  ),
+                ),
+                const SizedBox(height: 8),
+                Row(mainAxisSize: MainAxisSize.min, children: [
+                  _InlinePillButton(
+                    icon: Icons.close_rounded,
+                    color: Colors.white70,
+                    background: Colors.white.withOpacity(0.1),
+                    onTap: isSaving ? null : onCancel,
+                  ),
+                  const SizedBox(width: 10),
+                  _InlinePillButton(
+                    icon: Icons.check_rounded,
+                    color: Colors.white,
+                    background: _kAccent,
+                    isLoading: isSaving,
+                    onTap: isSaving ? null : onSave,
+                  ),
+                ]),
+              ]),
+            )
+          : GestureDetector(
+              key: const ValueKey('viewing'),
+              onTap: canEdit ? onTapToEdit : null,
+              behavior: HitTestBehavior.opaque,
+              child: Container(
+                padding: EdgeInsets.symmetric(horizontal: canEdit ? 10 : 0, vertical: 4),
+                decoration: canEdit
+                    ? BoxDecoration(borderRadius: BorderRadius.circular(10), color: Colors.white.withOpacity(0.0))
+                    : null,
+                child: Row(mainAxisSize: MainAxisSize.min, children: [
+                  Flexible(
+                    child: Text(
+                      hasText ? displayText : (emptyPlaceholder ?? ''),
+                      textAlign: textAlign,
+                      maxLines: maxLines,
+                      overflow: TextOverflow.ellipsis,
+                      style: hasText
+                          ? viewStyle
+                          : viewStyle.copyWith(fontStyle: FontStyle.italic, color: Colors.white38),
+                    ),
+                  ),
+                  if (canEdit) ...[
+                    const SizedBox(width: 6),
+                    Icon(Icons.edit_rounded, size: 13, color: Colors.white.withOpacity(0.45)),
+                  ],
+                ]),
+              ),
+            ),
+    );
+  }
+
+  // 🎨 NAYA — shared "grouped settings" card shell (rounded corners, soft
+  // shadow, margin around it) — WhatsApp/iOS Settings jaisa look, flat
+  // full-bleed white bars ki jagah. Optional `label` upar ek small caps
+  // section heading ke tor pe (jaise "PRIVACY", "PERMISSIONS") dikhta hai.
+  Widget _cardShell({required Widget child, String? label, EdgeInsetsGeometry? padding}) {
+    return Padding(
+      padding: const EdgeInsets.only(top: 14),
+      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        if (label != null)
+          Padding(
+            padding: const EdgeInsets.only(left: 20, bottom: 6),
+            child: Text(
+              label.toUpperCase(),
+              style: TextStyle(
+                fontSize: 11.5,
+                fontWeight: FontWeight.w700,
+                letterSpacing: 0.6,
+                color: Colors.grey[500],
+              ),
+            ),
+          ),
+        Container(
+          width: double.infinity,
+          margin: const EdgeInsets.symmetric(horizontal: 12),
+          padding: padding ?? const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
+          decoration: BoxDecoration(
+            color: Colors.white,
+            borderRadius: BorderRadius.circular(16),
+            boxShadow: [
+              BoxShadow(color: Colors.black.withOpacity(0.045), blurRadius: 10, offset: const Offset(0, 3)),
+            ],
+          ),
+          child: child,
+        ),
       ]),
     );
   }
 
   Widget _buildPrivacyCard() {
-    return Container(
-      width: double.infinity,
-      color: Colors.white,
-      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+    return _cardShell(
+      label: 'Privacy',
       child: Row(children: [
         Icon(_isPrivate ? Icons.lock_rounded : Icons.public_rounded, color: _kNavy, size: 20),
         const SizedBox(width: 12),
@@ -480,15 +1042,123 @@ class _GroupProfileScreenState extends State<GroupProfileScreen> {
             ),
           ]),
         ),
+        // 🔥 NAYA — sirf admin/moderator hi public<->private switch kar
+        // sakte hain, baaki members ko sirf read-only dikhta hai (icon+text).
+        if (_isAdminOrMod)
+          Switch(
+            value: _isPrivate,
+            activeColor: _kAccent,
+            onChanged: _savingSettings ? null : _togglePrivacy,
+          ),
+      ]),
+    );
+  }
+
+  // 🔥 "Kaun message bhej sakta hai" (Everyone / sirf Admin & Moderator)
+  // aur "Daily message limit" (Unlimited / 1 / 2 / 5 / 10 / 20) — dono
+  // sirf admin/moderator ko dikhte/change karne layak hain, baaki members
+  // ke liye ye card poori tarah hidden rehta hai.
+  Widget _buildMessageRulesCard() {
+    if (!_isAdminOrMod) return const SizedBox.shrink();
+    return _cardShell(
+      label: 'Permissions',
+      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        const Text("Messaging", style: TextStyle(fontWeight: FontWeight.w700, fontSize: 13.5, color: _kNavy)),
+        const SizedBox(height: 10),
+        Row(children: [
+          Icon(Icons.forum_outlined, color: _kNavy, size: 19),
+          const SizedBox(width: 12),
+          const Expanded(child: Text("Who can send messages", style: TextStyle(fontSize: 13.5))),
+          DropdownButton<String>(
+            value: _messagePermission,
+            underline: const SizedBox.shrink(),
+            items: const [
+              DropdownMenuItem(value: 'everyone', child: Text("Everyone", style: TextStyle(fontSize: 13))),
+              DropdownMenuItem(value: 'admins_mods', child: Text("Admins & mods", style: TextStyle(fontSize: 13))),
+            ],
+            onChanged: _savingSettings ? null : (v) { if (v != null) _updateMessagePermission(v); },
+          ),
+        ]),
+        const Divider(height: 22),
+        Row(children: [
+          Icon(Icons.timer_outlined, color: _kNavy, size: 19),
+          const SizedBox(width: 12),
+          const Expanded(child: Text("Daily message limit per member", style: TextStyle(fontSize: 13.5))),
+          DropdownButton<int?>(
+            value: _dailyMessageLimit,
+            underline: const SizedBox.shrink(),
+            items: const [
+              DropdownMenuItem(value: null, child: Text("No limit", style: TextStyle(fontSize: 13))),
+              DropdownMenuItem(value: 1, child: Text("1 / day", style: TextStyle(fontSize: 13))),
+              DropdownMenuItem(value: 2, child: Text("2 / day", style: TextStyle(fontSize: 13))),
+              DropdownMenuItem(value: 5, child: Text("5 / day", style: TextStyle(fontSize: 13))),
+              DropdownMenuItem(value: 10, child: Text("10 / day", style: TextStyle(fontSize: 13))),
+              DropdownMenuItem(value: 20, child: Text("20 / day", style: TextStyle(fontSize: 13))),
+            ],
+            onChanged: _savingSettings ? null : (v) => _updateDailyLimit(v),
+          ),
+        ]),
+        Padding(
+          padding: const EdgeInsets.only(top: 6),
+          child: Text(
+            "Admins & moderators are always exempt from the daily limit.",
+            style: TextStyle(fontSize: 11, color: Colors.grey[500]),
+          ),
+        ),
+
+        const Divider(height: 26),
+
+        // ---------------- CALLS ----------------
+        const Text("Calls", style: TextStyle(fontWeight: FontWeight.w700, fontSize: 13.5, color: _kNavy)),
+        const SizedBox(height: 10),
+        Row(children: [
+          Icon(Icons.call_outlined, color: _kNavy, size: 19),
+          const SizedBox(width: 12),
+          const Expanded(child: Text("Who can start a call", style: TextStyle(fontSize: 13.5))),
+          DropdownButton<String>(
+            value: _callPermission,
+            underline: const SizedBox.shrink(),
+            items: const [
+              DropdownMenuItem(value: 'everyone', child: Text("Everyone", style: TextStyle(fontSize: 13))),
+              DropdownMenuItem(value: 'admins_mods', child: Text("Admins & mods", style: TextStyle(fontSize: 13))),
+            ],
+            onChanged: _savingSettings ? null : (v) { if (v != null) _updateCallPermission(v); },
+          ),
+        ]),
+
+        const Divider(height: 26),
+
+        // ---------------- STUDY ROOM ----------------
+        const Text("Study room", style: TextStyle(fontWeight: FontWeight.w700, fontSize: 13.5, color: _kNavy)),
+        const SizedBox(height: 10),
+        Row(children: [
+          Icon(Icons.school_outlined, color: _kNavy, size: 19),
+          const SizedBox(width: 12),
+          const Expanded(child: Text("Who can start the study room", style: TextStyle(fontSize: 13.5))),
+          DropdownButton<String>(
+            value: _studyRoomPermission,
+            underline: const SizedBox.shrink(),
+            items: const [
+              DropdownMenuItem(value: 'everyone', child: Text("Everyone", style: TextStyle(fontSize: 13))),
+              DropdownMenuItem(value: 'admins_mods', child: Text("Admins & mods", style: TextStyle(fontSize: 13))),
+            ],
+            onChanged: _savingSettings ? null : (v) { if (v != null) _updateStudyRoomPermission(v); },
+          ),
+        ]),
+        if (_isPrivate)
+          Padding(
+            padding: const EdgeInsets.only(top: 10),
+            child: Text(
+              "This group is private — messages, calls and the study room default to admins & moderators only until you change them here.",
+              style: TextStyle(fontSize: 11, color: Colors.grey[500]),
+            ),
+          ),
       ]),
     );
   }
 
   Widget _buildInviteLinkCard() {
-    return Container(
-      width: double.infinity,
-      color: Colors.white,
-      margin: const EdgeInsets.only(top: 1),
+    return _cardShell(
       padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
       child: Row(children: [
         const Icon(Icons.link_rounded, color: _kAccent, size: 20),
@@ -504,29 +1174,33 @@ class _GroupProfileScreenState extends State<GroupProfileScreen> {
     );
   }
 
-  // 🔥 NAYA — private group me pending join-requests (sirf admin/moderator
-  // ko dikhta hai). Har request ke saath ek chhota Approve/Reject action
-  // hai — approve karte hi requester turant member ban jaata hai aur
-  // members list/count apne-aap refresh ho jaati hai.
+  // 🔥 private group me pending join-requests (sirf admin/moderator ko
+  // dikhta hai). Har request ke saath ek chhota Approve/Reject action hai —
+  // approve karte hi requester turant member ban jaata hai aur members
+  // list/count apne-aap refresh ho jaati hai.
   Widget _buildJoinRequestsCard() {
     if (_loadingRequests) {
-      return Container(
-        width: double.infinity,
-        color: Colors.white,
-        margin: const EdgeInsets.only(top: 1),
+      return _cardShell(
         padding: const EdgeInsets.all(16),
         child: const Center(child: SizedBox(width: 18, height: 18, child: CircularProgressIndicator(strokeWidth: 2, color: _kNavy))),
       );
     }
     if (_joinRequests.isEmpty) return const SizedBox.shrink();
-    return Container(
-      width: double.infinity,
-      color: Colors.white,
-      margin: const EdgeInsets.only(top: 1),
+    return _cardShell(
+      label: 'Pending requests',
+      padding: const EdgeInsets.symmetric(vertical: 6),
       child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
         Padding(
-          padding: const EdgeInsets.fromLTRB(16, 12, 16, 4),
-          child: Text("Join requests (${_joinRequests.length})", style: const TextStyle(fontWeight: FontWeight.w700, fontSize: 13.5, color: _kNavy)),
+          padding: const EdgeInsets.fromLTRB(4, 6, 4, 4),
+          child: Row(children: [
+            const Text("Join requests", style: TextStyle(fontWeight: FontWeight.w700, fontSize: 13.5, color: _kNavy)),
+            const SizedBox(width: 8),
+            Container(
+              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+              decoration: BoxDecoration(color: _kAccent.withOpacity(0.12), borderRadius: BorderRadius.circular(20)),
+              child: Text('${_joinRequests.length}', style: const TextStyle(fontSize: 11.5, fontWeight: FontWeight.w700, color: _kAccent)),
+            ),
+          ]),
         ),
         ..._joinRequests.map((r) => ListTile(
               leading: CircleAvatar(
@@ -549,9 +1223,7 @@ class _GroupProfileScreenState extends State<GroupProfileScreen> {
   Widget _buildMembersSection() {
     if (!_canSeeMembersAndLink) {
       // Private group + main sirf ek regular member — list/count hide.
-      return Container(
-        width: double.infinity,
-        color: Colors.white,
+      return _cardShell(
         padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 16),
         child: Row(children: [
           Icon(Icons.visibility_off_rounded, color: Colors.grey[500], size: 18),
@@ -566,12 +1238,11 @@ class _GroupProfileScreenState extends State<GroupProfileScreen> {
       );
     }
 
-    return Container(
-      width: double.infinity,
-      color: Colors.white,
+    return _cardShell(
+      padding: const EdgeInsets.symmetric(vertical: 6),
       child: Column(children: [
         Padding(
-          padding: const EdgeInsets.fromLTRB(16, 12, 16, 6),
+          padding: const EdgeInsets.fromLTRB(4, 6, 4, 6),
           child: Row(children: [
             Expanded(
               child: Text("${_members.length} Members", style: const TextStyle(fontWeight: FontWeight.w700, fontSize: 13.5, color: _kNavy)),
@@ -623,9 +1294,8 @@ class _GroupProfileScreenState extends State<GroupProfileScreen> {
   }
 
   Widget _buildDangerZone() {
-    return Container(
-      width: double.infinity,
-      color: Colors.white,
+    return _cardShell(
+      padding: const EdgeInsets.symmetric(vertical: 4),
       child: Column(children: [
         ListTile(
           leading: const Icon(Icons.exit_to_app_rounded, color: Colors.red),
@@ -641,6 +1311,50 @@ class _GroupProfileScreenState extends State<GroupProfileScreen> {
             onTap: _busy ? null : _deleteGroup,
           ),
       ]),
+    );
+  }
+}
+
+// ========================================================================
+// Small circular pill button used by the inline-edit tick/cross controls.
+// Own tiny widget so the ripple + loading-spinner swap is self-contained.
+// ========================================================================
+class _InlinePillButton extends StatelessWidget {
+  final IconData icon;
+  final Color color;
+  final Color background;
+  final VoidCallback? onTap;
+  final bool isLoading;
+  const _InlinePillButton({
+    required this.icon,
+    required this.color,
+    required this.background,
+    required this.onTap,
+    this.isLoading = false,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Material(
+      color: background,
+      shape: const CircleBorder(),
+      clipBehavior: Clip.antiAlias,
+      child: InkWell(
+        onTap: onTap,
+        child: SizedBox(
+          width: 34,
+          height: 34,
+          child: Center(
+            child: isLoading
+                ? SizedBox(
+                    width: 15,
+                    height: 15,
+                    child: CircularProgressIndicator(strokeWidth: 2, color: color),
+                  )
+                : Icon(icon, size: 18, color: color),
+          ),
+        ),
+      ),
     );
   }
 }

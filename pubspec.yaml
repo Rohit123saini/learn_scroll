@@ -56,7 +56,6 @@ dependencies:
   mime: ^2.0.0
   image: ^4.9.1
   background_downloader: ^9.5.6
-  workmanager: ^0.9.0+3
   flutter_image_compress: ^2.5.0
   video_compress: ^3.1.4
   wakelock_plus: ^1.5.2
@@ -79,9 +78,21 @@ dependencies:
   flutter_callkit_incoming: ^2.5.0 
   google_sign_in: ^7.2.0
   firebase_auth: ^6.5.7
+  intl: ^0.20.3
+  image_cropper: ^12.2.1
+  ffmpeg_kit_flutter_new: ^4.6.2
+  google_mlkit_selfie_segmentation: ^0.11.0
+  google_mlkit_face_detection: ^0.14.0
+  battery_plus: ^7.1.1
+  google_fonts: ^8.2.1
+  crypto: ^3.0.7
+  speech_to_text: ^7.4.0
+  timezone: ^0.11.1
+ 
 dependency_overrides:
   # flutter_callkit_incoming: 2.0.4+2
   flutter_callkit_incoming: ^2.5.0
+  file_picker: 10.3.8
 dev_dependencies:
   flutter_test:
     sdk: flutter
