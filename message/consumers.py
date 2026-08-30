@@ -19,6 +19,7 @@ from .models import (
     UserPresence,
 )
 from .user_display import build_user_mini, get_display_name
+from .mentions import extract_mentioned_user_ids
 
 logger = logging.getLogger(__name__)
 
@@ -37,6 +38,7 @@ class ChatConsumer(AsyncWebsocketConsumer):
         {"type": "read", "message_id": "..."}
         {"type": "delete", "message_id": "...", "for_everyone": false}
         {"type": "reaction", "message_id": "...", "emoji": "🔥"}
+        {"type": "pin", "message_id": "...", "pin": true}
         {"type": "study_room_event", "action": "draw_point", "data": {...}}
 
     Server -> Client events: same "type" field, plus "error" type on failure.
@@ -144,6 +146,7 @@ class ChatConsumer(AsyncWebsocketConsumer):
             'read': self.handle_read_receipt,
             'delete': self.handle_delete_message,
             'reaction': self.handle_reaction,
+            'pin': self.handle_pin_message,  # 🔥 NAYA
             'study_room_event': self.handle_study_room_event,  # 🔥 NAYA
         }
         handler = handler_map.get(event_type)
@@ -177,6 +180,10 @@ class ChatConsumer(AsyncWebsocketConsumer):
                 "blocked", "Block hone ki wajah se message nahi bheja ja sakta"
             )
 
+        allowed, reason = await self.check_group_message_rules(self.conversation_id, self.user)
+        if not allowed:
+            return await self.send_error("group_rule_blocked", reason)
+
         message = await self.save_message(
             conversation_id=self.conversation_id,
             sender_id=self.user.id,
@@ -209,6 +216,8 @@ class ChatConsumer(AsyncWebsocketConsumer):
             'text': text,
             'reply_to': reply_to,
             'client_id': client_id,
+            # 🔥 NAYA — @mentions (REST path ke `mentioned_user_ids` jaisa hi field).
+            'mentioned_user_ids': [str(uid) for uid in message['mentioned_ids']],
             'created_at': message['created_at'],
         }
         await self.channel_layer.group_send(self.room_group_name, payload)
@@ -224,8 +233,12 @@ class ChatConsumer(AsyncWebsocketConsumer):
         await self.broadcast_inbox_update(message, sender, text, message_type)
 
         # 🔥 NAYA: doosre participants ko push notification (agar wo app
-        # band karke baithe hain to unhe pata chale)
-        await self.send_push_for_message(message, text, message_type)
+        # band karke baithe hain to unhe pata chale) — @mention wale
+        # members ko normal push se exclude karke unhe alag "mention"
+        # push milta hai (mute state ko override karta hai).
+        await self.send_push_for_message(message, text, message_type, exclude_ids=message['mentioned_ids'])
+        if message['mentioned_ids']:
+            await self.send_mention_push_notification(message, text)
 
     async def handle_typing(self, data):
         # DB me kuch save nahi karte, sirf broadcast — high frequency event
@@ -287,6 +300,33 @@ class ChatConsumer(AsyncWebsocketConsumer):
             },
         )
 
+    # 🔥 NAYA — Message pin/unpin (REST `MessageViewSet.pin` jaisa hi
+    # permission rule: group me sirf admin/mod, private chat me dono me
+    # se koi bhi). WhatsApp jaisa max-3-pinned limit REST wale
+    # `MAX_PINNED_PER_CONVERSATION` constant jaisa hi yahan bhi hai.
+    MAX_PINNED_PER_CONVERSATION = 3
+
+    async def handle_pin_message(self, data):
+        message_id = data.get('message_id')
+        pin = bool(data.get('pin', True))
+        if not message_id:
+            return await self.send_error("missing_field", "message_id required hai")
+
+        ok, reason = await self.pin_or_unpin_message(message_id, self.user.id, pin)
+        if not ok:
+            return await self.send_error("not_allowed", reason)
+
+        await self.channel_layer.group_send(
+            self.room_group_name,
+            {
+                'type': 'pin_event',
+                'event': 'pinned' if pin else 'unpinned',
+                'message_id': message_id,
+                'conversation_id': str(self.conversation_id),
+                'actor_id': str(self.user.id),
+            },
+        )
+
     # 🔥 NAYA — Study Room ke saare realtime events (whiteboard strokes,
     # shapes, text, sticky notes, floating windows, timer sync, clear-board)
     # isi ek generic passthrough se aate hain: Flutter side
@@ -327,6 +367,9 @@ class ChatConsumer(AsyncWebsocketConsumer):
 
     async def reaction_event(self, event):
         await self.send(text_data=json.dumps({'type': 'reaction', **event}))
+
+    async def pin_event(self, event):
+        await self.send(text_data=json.dumps({'type': 'pin', **event}))
 
     async def presence_update(self, event):
         await self.send(text_data=json.dumps({'type': 'presence', **event}))
@@ -383,6 +426,29 @@ class ChatConsumer(AsyncWebsocketConsumer):
             Q(blocker_id=other_id, blocked_id=user_id)
         ).exists()
 
+    # 🔥 NAYA — REST `messages` action jaisa hi group access-control
+    # (message_permission + daily_message_limit) yahan bhi enforce karo.
+    # Pehle WS path se ye settings bilkul bypass ho jaati thi kyunki
+    # backend me poori feature hi missing thi.
+    @database_sync_to_async
+    def check_group_message_rules(self, conversation_id, user):
+        from .models import Conversation
+        from .group_rules import check_group_permission, check_daily_message_limit
+
+        conversation = Conversation.objects.filter(id=conversation_id).first()
+        if conversation is None or conversation.type != ConversationType.GROUP:
+            return True, ""
+
+        group = getattr(conversation, 'group_detail', None)
+        if not group:
+            return True, ""
+
+        allowed, reason = check_group_permission(group, user.id, 'message_permission')
+        if not allowed:
+            return False, reason
+
+        return check_daily_message_limit(group, user, conversation)
+
     @database_sync_to_async
     def save_message(self, conversation_id, sender_id, text, message_type, client_id, reply_to_id):
         from django.db import IntegrityError
@@ -419,7 +485,16 @@ class ChatConsumer(AsyncWebsocketConsumer):
         ])
         other_members.update(unread_count=models_f_increment())
 
-        return {'id': message.id, 'created_at': message.created_at.isoformat()}
+        # 🔥 NAYA — @mentions resolve karke message pe attach karo (REST
+        # `ConversationViewSet.messages` POST jaisa hi logic — dono jagah
+        # `mentions.extract_mentioned_user_ids` hi use karte hain).
+        conversation = Conversation.objects.get(id=conversation_id)
+        mentioned_ids = extract_mentioned_user_ids(text, conversation)
+        mentioned_ids = [uid for uid in mentioned_ids if str(uid) != str(sender_id)]
+        if mentioned_ids:
+            message.mentioned_users.set(mentioned_ids)
+
+        return {'id': message.id, 'created_at': message.created_at.isoformat(), 'mentioned_ids': mentioned_ids}
 
     @database_sync_to_async
     def mark_undelivered_as_delivered(self, conversation_id, user_id):
@@ -452,7 +527,7 @@ class ChatConsumer(AsyncWebsocketConsumer):
             .values_list('user_id', flat=True)
         )
 
-    async def send_push_for_message(self, message, text, message_type):
+    async def send_push_for_message(self, message, text, message_type, exclude_ids=None):
         # yaha import karte hain taaki firebase_admin ki dependency sirf
         # tab load ho jab actually zaroorat ho (aur circular import se bache)
         #
@@ -468,6 +543,8 @@ class ChatConsumer(AsyncWebsocketConsumer):
         from .push_utils import send_chat_message_push
 
         recipient_ids = await self._other_participant_ids(self.conversation_id, self.user.id)
+        exclude_set = {str(uid) for uid in (exclude_ids or [])}
+        recipient_ids = [uid for uid in recipient_ids if str(uid) not in exclude_set]
         if not recipient_ids:
             return
 
@@ -478,6 +555,18 @@ class ChatConsumer(AsyncWebsocketConsumer):
             sender_name,
             text,
             message_type,
+            self.conversation_id,
+            message['id'],
+        )
+
+    async def send_mention_push_notification(self, message, text):
+        from .push_utils import send_mention_push
+
+        sender_name = get_display_name(self.user)
+        await database_sync_to_async(send_mention_push)(
+            message['mentioned_ids'],
+            sender_name,
+            text,
             self.conversation_id,
             message['id'],
         )
@@ -514,6 +603,46 @@ class ChatConsumer(AsyncWebsocketConsumer):
         MessageReaction.objects.update_or_create(
             message_id=message_id, user_id=user_id, defaults={'emoji': emoji}
         )
+
+    @database_sync_to_async
+    def pin_or_unpin_message(self, message_id, user_id, pin):
+        from .group_rules import is_group_admin_or_mod
+        from django.contrib.auth import get_user_model
+
+        try:
+            message = Message.objects.select_related('conversation', 'conversation__group_detail').get(
+                id=message_id, conversation_id=self.conversation_id,
+            )
+        except Message.DoesNotExist:
+            return False, "Message nahi mila"
+
+        conversation = message.conversation
+        if conversation.type == ConversationType.GROUP:
+            group = getattr(conversation, 'group_detail', None)
+            if group and not is_group_admin_or_mod(group, user_id):
+                return False, "Sirf group admin/moderator message pin/unpin kar sakte hain"
+
+        if not pin:
+            message.is_pinned = False
+            message.pinned_at = None
+            message.pinned_by = None
+            message.save(update_fields=['is_pinned', 'pinned_at', 'pinned_by'])
+            return True, ""
+
+        if message.deleted_for_everyone:
+            return False, "Delete kiya hua message pin nahi ho sakta"
+
+        if not message.is_pinned:
+            pinned_count = conversation.all_messages.filter(is_pinned=True).count()
+            if pinned_count >= self.MAX_PINNED_PER_CONVERSATION:
+                return False, f"Ek chat me max {self.MAX_PINNED_PER_CONVERSATION} messages hi pin ho sakte hain"
+
+            User = get_user_model()
+            message.is_pinned = True
+            message.pinned_at = timezone.now()
+            message.pinned_by = User.objects.get(id=user_id)
+            message.save(update_fields=['is_pinned', 'pinned_at', 'pinned_by'])
+        return True, ""
 
     @database_sync_to_async
     def set_presence(self, online):

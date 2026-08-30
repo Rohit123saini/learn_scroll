@@ -226,6 +226,8 @@ from .views import (
     TeacherEarningsView,
 )
 
+from . import chunked_upload_views
+
 router = DefaultRouter()
 router.register(r"classrooms", ClassroomViewSet, basename="classroom")
 router.register(r"classroom-reports", ClassroomReportViewSet, basename="classroomreport")
@@ -268,6 +270,12 @@ urlpatterns = [
     # for Render's health check / an uptime monitor / a k8s readiness
     # probe. See HealthCheckView in views.py for exactly what it checks.
     path("healthz/", HealthCheckView.as_view(), name="liveclass-healthz"),
+    # --- Chunked upload (large files split into pieces — see
+    #     chunked_upload_views.py for why these exist) ---
+    path("uploads/chunked/init/", chunked_upload_views.chunked_upload_init, name="chunked-upload-init"),
+    path("uploads/chunked/chunk/", chunked_upload_views.chunked_upload_chunk, name="chunked-upload-chunk"),
+    path("uploads/chunked/complete/", chunked_upload_views.chunked_upload_complete, name="chunked-upload-complete"),
+    path("uploads/chunked/abort/", chunked_upload_views.chunked_upload_abort, name="chunked-upload-abort"),
     path("", include(router.urls)),
 ]
 

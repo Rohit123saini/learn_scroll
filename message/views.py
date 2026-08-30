@@ -1,12 +1,14 @@
 import uuid
 import os
 import secrets
+from datetime import timedelta
 from django.contrib.auth import get_user_model
 from django.db import transaction
 from django.db.models import F, Q
 from django.http import Http404
 from django.shortcuts import get_object_or_404
 from django.utils import timezone
+from django.utils.dateparse import parse_datetime
 from rest_framework import generics, mixins, status, viewsets
 from rest_framework.decorators import action
 from rest_framework.exceptions import PermissionDenied, ValidationError
@@ -51,12 +53,19 @@ from .serializers import (
     GroupSerializer,
     MessageCreateSerializer,
     MessageReactionSerializer,
+    MessageSearchResultSerializer,
     MessageSerializer,
+    UserMiniSerializer,
     UserPresenceSerializer,
 )
-from .push_utils import send_push_to_users, send_chat_message_push, send_incoming_call_push
+from .push_utils import (
+    send_push_to_users, send_chat_message_push, send_incoming_call_push,
+    send_call_cancelled_push, send_mention_push,
+)
 from .livekit_utils import generate_livekit_token
 from .user_display import build_user_mini, get_display_name, get_profile_photo_url
+from .group_rules import check_group_permission, check_daily_message_limit, is_group_admin_or_mod
+from .mentions import extract_mentioned_user_ids
 
 # LiveKit URL env se lo, nahi to default
 LIVEKIT_WS_URL = os.getenv("LIVEKIT_WS_URL", "ws://10.93.221.189:7880")
@@ -77,6 +86,30 @@ def is_blocked_pair(user_a_id, user_b_id):
         Q(blocker_id=user_a_id, blocked_id=user_b_id) |
         Q(blocker_id=user_b_id, blocked_id=user_a_id)
     ).exists()
+
+
+# 🔥 FIX — `ConversationParticipant.objects.get_or_create(conversation=..,
+# user=..)` alone is NOT enough to re-add someone who previously left / was
+# removed from a conversation. `unique_together = ('conversation', 'user')`
+# means get_or_create() finds their OLD row (with `left_at` still set to a
+# past timestamp) and returns it AS-IS — it never resets `left_at` back to
+# None. Every membership check in this app (`ConversationViewSet.get_queryset`,
+# `ChatConsumer.is_conversation_member`, message/call permission checks, the
+# chat-list query, ...) filters on `left_at__isnull=True`, so that user would
+# be "added" (a `GroupMember` row exists, `add_members`/`join`/
+# `approve_join_request`/`add_participant_to_conversation` all return success)
+# but stay silently locked out — no error is ever shown, the conversation
+# just never appears for them and every membership check keeps failing. This
+# helper is used everywhere a user is (re-)added to a conversation so access
+# is actually restored.
+def add_or_reactivate_participant(conversation, user):
+    participant, created = ConversationParticipant.objects.get_or_create(
+        conversation=conversation, user=user,
+    )
+    if not created and participant.left_at is not None:
+        participant.left_at = None
+        participant.save(update_fields=['left_at'])
+    return participant, created
 
 
 class MessagePagination(PageNumberPagination):
@@ -236,6 +269,46 @@ class ConversationViewSet(viewsets.ReadOnlyModelViewSet):
             'conversation_ids': conversation_ids,
         })
 
+    # 🔥 NAYA — existing conversation me naya member add karne ke liye.
+    # Sirf GROUP conversations ke liye valid hai (private 1-1 chat me
+    # teesra banda add nahi ho sakta — usके liye group hi banao). Group
+    # ke apne `/groups/<id>/members/` action jaisa hi behavior hai, bas
+    # yahan conversation_id se entry point diya gaya hai jaisa frontend
+    # ka `Participants` API contract expect karta hai.
+    @action(detail=True, methods=['post'], url_path='participants')
+    def add_participant_to_conversation(self, request, pk=None):
+        conversation = self.get_object()
+        if conversation.type != ConversationType.GROUP:
+            return Response(
+                {'detail': 'Sirf group conversation me participant add ho sakta hai.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        user_id = request.data.get('user_id')
+        if not user_id:
+            return Response({'detail': "'user_id' required hai."}, status=status.HTTP_400_BAD_REQUEST)
+
+        group = getattr(conversation, 'group_detail', None)
+        if group and group.is_private:
+            is_admin = GroupMember.objects.filter(
+                group=group, user=request.user, role__in=['admin', 'moderator'], is_banned=False,
+            ).exists()
+            if not is_admin:
+                raise PermissionDenied('Sirf group admin/moderator member add kar sakte hain.')
+
+        target_user = get_object_or_404(User, id=user_id)
+
+        with transaction.atomic():
+            add_or_reactivate_participant(conversation, target_user)
+            if group:
+                GroupMember.objects.get_or_create(group=group, user=target_user, defaults={'added_by': request.user})
+                Group.objects.filter(id=group.id).update(
+                    members_count=group.group_members.filter(is_banned=False).count()
+                )
+
+        serializer = self.get_serializer(conversation)
+        return Response(serializer.data, status=status.HTTP_201_CREATED)
+
     @action(detail=True, methods=['get', 'post'], url_path='messages')
     def messages(self, request, pk=None):
         conversation = self.get_object()
@@ -272,6 +345,18 @@ class ConversationViewSet(viewsets.ReadOnlyModelViewSet):
                     {'detail': 'Block hone ki wajah se message nahi bheja ja sakta.'},
                     status=status.HTTP_403_FORBIDDEN,
                 )
+        else:
+            # 🔥 NAYA — group ka message_permission + daily_message_limit
+            # enforce karo (pehle in settings ka backend pe koi asar hi
+            # nahi padta tha).
+            group = getattr(conversation, 'group_detail', None)
+            if group:
+                allowed, reason = check_group_permission(group, request.user.id, 'message_permission')
+                if not allowed:
+                    return Response({'detail': reason}, status=status.HTTP_403_FORBIDDEN)
+                allowed, reason = check_daily_message_limit(group, request.user, conversation)
+                if not allowed:
+                    return Response({'detail': reason}, status=status.HTTP_429_TOO_MANY_REQUESTS)
 
         serializer = MessageCreateSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
@@ -303,6 +388,13 @@ class ConversationViewSet(viewsets.ReadOnlyModelViewSet):
                 user=request.user
             ).update(unread_count=F('unread_count') + 1)
 
+            # 🔥 NAYA — @mentions resolve karke message pe attach karo.
+            # Sirf conversation ke ACTIVE members hi mention ho sakte hain.
+            mentioned_ids = extract_mentioned_user_ids(message.text, conversation)
+            mentioned_ids = [uid for uid in mentioned_ids if uid != request.user.id]
+            if mentioned_ids:
+                message.mentioned_users.set(mentioned_ids)
+
         # NOTE: this payload must carry the same sender_* fields as
         # ChatConsumer.handle_new_message's websocket payload. This REST
         # endpoint is the path used for every media/location message and
@@ -332,6 +424,7 @@ class ConversationViewSet(viewsets.ReadOnlyModelViewSet):
                 'meta': message.meta,
                 'reply_to': str(message.reply_to.id) if message.reply_to else None,
                 'client_id': client_id,
+                'mentioned_user_ids': [str(uid) for uid in mentioned_ids],
                 'created_at': message.created_at.isoformat(),
             }
         )
@@ -376,7 +469,14 @@ class ConversationViewSet(viewsets.ReadOnlyModelViewSet):
                 conversation=conversation, user_id__in=other_recipients, is_muted=True,
             ).values_list('user_id', flat=True)
         )
-        push_recipients = [uid for uid in other_recipients if uid not in muted_user_ids]
+        # 🔥 NAYA — mention hone waale members ko ALAG "mention" push
+        # milta hai (mute state ko override karta hai — WhatsApp isi
+        # tarah karta hai), isliye unhe generic chat-message push ki
+        # list se nikaal dete hain taaki double notification na jaaye.
+        mentioned_set = set(mentioned_ids)
+        push_recipients = [
+            uid for uid in other_recipients if uid not in muted_user_ids and uid not in mentioned_set
+        ]
 
         if push_recipients:
             send_chat_message_push(
@@ -386,6 +486,15 @@ class ConversationViewSet(viewsets.ReadOnlyModelViewSet):
                 message_type=message.type,
                 conversation_id=conversation.id,
                 message_id=message.id
+            )
+
+        if mentioned_ids:
+            send_mention_push(
+                recipient_ids=mentioned_ids,
+                sender_name=sender_name,
+                message_text=message.text,
+                conversation_id=conversation.id,
+                message_id=message.id,
             )
 
         return Response(MessageSerializer(message, context={'request': request}).data, status=status.HTTP_201_CREATED)
@@ -446,6 +555,90 @@ class ConversationViewSet(viewsets.ReadOnlyModelViewSet):
             ).update(unread_count=0, last_read_at=now)
 
         return Response({'detail': 'Saare messages read mark ho gaye.'})
+
+    # ==================================================================
+    # SEARCH — ek conversation ke andar text search
+    # ==================================================================
+    # GET /message/conversations/<id>/search/?q=...
+    #
+    # Simple `icontains` search hai (poore chat-app ka scale abhi itna
+    # bada nahi ki Postgres full-text-search / Elasticsearch chahiye ho —
+    # `conversation` FK pe already index hai to query chhoti si conversation
+    # ke andar hi rehti hai). Deleted/expired messages exclude karte hain,
+    # jaisa normal message-list me hota hai.
+    @action(detail=True, methods=['get'], url_path='search')
+    def search(self, request, pk=None):
+        conversation = self.get_object()
+        query = (request.query_params.get('q') or '').strip()
+        if not query:
+            return Response({'detail': "'q' query param required hai."}, status=status.HTTP_400_BAD_REQUEST)
+        if len(query) < 2:
+            return Response({'detail': 'Search kam se kam 2 characters ka hona chahiye.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        qs = conversation.all_messages.filter(
+            text__icontains=query,
+        ).filter(
+            Q(expires_at__isnull=True) | Q(expires_at__gt=timezone.now())
+        ).exclude(
+            deleted_for_everyone=True,
+        ).exclude(
+            deleted_for_users=request.user,
+        ).select_related('sender', 'reply_to').order_by('-created_at')
+
+        paginator = MessagePagination()
+        page = paginator.paginate_queryset(qs, request, view=self)
+        serializer = MessageSerializer(page, many=True, context={'request': request})
+        return paginator.get_paginated_response(serializer.data)
+
+    # ==================================================================
+    # SEARCH — sabhi conversations me ek saath (global chat search)
+    # ==================================================================
+    # GET /message/conversations/search_all/?q=...
+    #
+    # Ye `detail=False` hai isliye alag URL `search_all/` par baithta hai
+    # (router `search/` already `search` action ke through detail route
+    # pe bana chuka hai). Sirf un conversations ke messages aate hain jinka
+    # user abhi ACTIVE member hai (chat delete/leave kar chuka ho to us
+    # conversation ke results nahi aayenge).
+    @action(detail=False, methods=['get'], url_path='search_all')
+    def search_all(self, request):
+        query = (request.query_params.get('q') or '').strip()
+        if not query:
+            return Response({'detail': "'q' query param required hai."}, status=status.HTTP_400_BAD_REQUEST)
+        if len(query) < 2:
+            return Response({'detail': 'Search kam se kam 2 characters ka hona chahiye.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        qs = Message.objects.filter(
+            conversation__memberships__user=request.user,
+            conversation__memberships__left_at__isnull=True,
+            text__icontains=query,
+        ).filter(
+            Q(expires_at__isnull=True) | Q(expires_at__gt=timezone.now())
+        ).exclude(
+            deleted_for_everyone=True,
+        ).exclude(
+            deleted_for_users=request.user,
+        ).select_related(
+            'sender', 'conversation', 'conversation__group_detail',
+        ).distinct().order_by('-created_at')
+
+        paginator = MessagePagination()
+        page = paginator.paginate_queryset(qs, request, view=self)
+        serializer = MessageSearchResultSerializer(page, many=True, context={'request': request})
+        return paginator.get_paginated_response(serializer.data)
+
+    # ==================================================================
+    # PINNED MESSAGES — is conversation ke saare currently-pinned messages
+    # ==================================================================
+    # GET /message/conversations/<id>/pinned/
+    @action(detail=True, methods=['get'], url_path='pinned')
+    def pinned(self, request, pk=None):
+        conversation = self.get_object()
+        qs = conversation.all_messages.filter(is_pinned=True).select_related(
+            'sender', 'pinned_by',
+        ).order_by('-pinned_at')
+        serializer = MessageSerializer(qs, many=True, context={'request': request})
+        return Response(serializer.data)
 
 
 # ======================================================================
@@ -535,6 +728,73 @@ class MessageViewSet(mixins.RetrieveModelMixin, mixins.UpdateModelMixin,
         return Response({'detail': 'Read mark ho gaya.'})
 
     # ==================================================================
+    # PIN / UNPIN — WhatsApp/Telegram-style important-message pin
+    # ==================================================================
+    # POST   /message/messages/<id>/pin/    -> pin
+    # DELETE /message/messages/<id>/pin/    -> unpin
+    #
+    # Permission: group me sirf admin/moderator pin/unpin kar sakte hain
+    # (`group_rules.is_group_admin_or_mod` — jaisa baaki group-wide
+    # actions me hai). Private 1-1 chat me koi bhi hierarchy nahi hoti,
+    # isliye dono participants me se koi bhi pin/unpin kar sakta hai
+    # (WhatsApp isi tarah karta hai).
+    #
+    # Max-3-pinned limit (WhatsApp jaisa) enforce karte hain taaki chat
+    # "pinned messages" list bemaani zyada lambi na ho jaaye — limit
+    # cross ho to naya pin karne se pehle purana unpin karne ko kaha
+    # jaata hai (auto-replace nahi karte, taaki accidental unpin na ho).
+    MAX_PINNED_PER_CONVERSATION = 3
+
+    @action(detail=True, methods=['post', 'delete'], url_path='pin')
+    def pin(self, request, pk=None):
+        message = self.get_object()
+        conversation = message.conversation
+
+        if conversation.type == ConversationType.GROUP:
+            group = getattr(conversation, 'group_detail', None)
+            if group and not is_group_admin_or_mod(group, request.user.id):
+                raise PermissionDenied('Sirf group admin/moderator message pin/unpin kar sakte hain.')
+
+        if request.method == 'DELETE':
+            message.is_pinned = False
+            message.pinned_at = None
+            message.pinned_by = None
+            message.save(update_fields=['is_pinned', 'pinned_at', 'pinned_by'])
+            event = 'unpinned'
+        else:
+            if message.deleted_for_everyone:
+                return Response({'detail': 'Delete kiya hua message pin nahi ho sakta.'}, status=status.HTTP_400_BAD_REQUEST)
+            if not message.is_pinned:
+                pinned_count = conversation.all_messages.filter(is_pinned=True).count()
+                if pinned_count >= self.MAX_PINNED_PER_CONVERSATION:
+                    return Response(
+                        {'detail': f'Ek chat me max {self.MAX_PINNED_PER_CONVERSATION} messages hi pin ho sakte hain. Pehle koi purana unpin karo.'},
+                        status=status.HTTP_400_BAD_REQUEST,
+                    )
+                message.is_pinned = True
+                message.pinned_at = timezone.now()
+                message.pinned_by = request.user
+                message.save(update_fields=['is_pinned', 'pinned_at', 'pinned_by'])
+            event = 'pinned'
+
+        # 🔥 Live update — sabhi connected participants ko turant pin/unpin
+        # dikhe, chat re-open kiye bina (jaisa disappearing_messages
+        # update ka pattern hai).
+        channel_layer = get_channel_layer()
+        async_to_sync(channel_layer.group_send)(
+            f'chat_{conversation.id}',
+            {
+                'type': 'pin_event',
+                'event': event,
+                'message_id': str(message.id),
+                'conversation_id': str(conversation.id),
+                'actor_id': str(request.user.id),
+            }
+        )
+
+        return Response(MessageSerializer(message, context={'request': request}).data)
+
+    # ==================================================================
     # FORWARD — one or many messages, to one or many target conversations
     # ==================================================================
     #
@@ -565,8 +825,14 @@ class MessageViewSet(mixins.RetrieveModelMixin, mixins.UpdateModelMixin,
         # Only messages from conversations the user is actually a member
         # of can be forwarded — silently drops any id that doesn't exist,
         # was deleted, or belongs to a chat the user isn't in.
+        # 🔥 FIX — also excludes messages whose disappearing-messages
+        # `expires_at` has already passed. They were still forwardable
+        # before this, which defeated the point of "disappearing" — a
+        # message that vanished from the chat could be resurrected in a
+        # brand new chat with a fresh (non-expiring) copy.
         source_messages = list(
             Message.objects.filter(id__in=message_ids, conversation__memberships__user=request.user)
+            .filter(Q(expires_at__isnull=True) | Q(expires_at__gt=timezone.now()))
             .exclude(deleted_for_everyone=True)
             .exclude(deleted_for_users=request.user)
             .select_related('conversation')
@@ -839,7 +1105,7 @@ class GroupViewSet(viewsets.ModelViewSet):
 
         with transaction.atomic():
             for user in users:
-                ConversationParticipant.objects.get_or_create(conversation=group.conversation, user=user)
+                add_or_reactivate_participant(group.conversation, user)
                 GroupMember.objects.get_or_create(group=group, user=user, defaults={'added_by': request.user})
             Group.objects.filter(id=group.id).update(
                 members_count=group.group_members.filter(is_banned=False).count()
@@ -872,7 +1138,7 @@ class GroupViewSet(viewsets.ModelViewSet):
         if not group.is_private:
             # Public group — koi approval nahi chahiye, turant member.
             with transaction.atomic():
-                ConversationParticipant.objects.get_or_create(conversation=group.conversation, user=request.user)
+                add_or_reactivate_participant(group.conversation, request.user)
                 GroupMember.objects.get_or_create(group=group, user=request.user)
                 Group.objects.filter(id=group.id).update(
                     members_count=group.group_members.filter(is_banned=False).count()
@@ -924,7 +1190,7 @@ class GroupViewSet(viewsets.ModelViewSet):
         )
 
         with transaction.atomic():
-            ConversationParticipant.objects.get_or_create(conversation=group.conversation, user=join_request.user)
+            add_or_reactivate_participant(group.conversation, join_request.user)
             GroupMember.objects.get_or_create(group=group, user=join_request.user, defaults={'added_by': request.user})
             join_request.status = GroupJoinRequest.Status.APPROVED
             join_request.responded_by = request.user
@@ -988,10 +1254,29 @@ class GroupViewSet(viewsets.ModelViewSet):
             return Response(status=status.HTTP_204_NO_CONTENT)
 
         self._require_admin(group.id, request.user)
+        was_banned = membership.is_banned
         for field in ('role', 'is_muted', 'is_banned'):
             if field in request.data:
                 setattr(membership, field, request.data[field])
         membership.save()
+
+        # 🔥 FIX — pehle sirf `GroupMember.is_banned` set hota tha.
+        # Har permission check (`IsConversationParticipant`, chat list
+        # queryset, message-send) `ConversationParticipant.left_at` pe
+        # depend karta hai, `is_banned` pe nahi — isliye "banned" user
+        # ban hone ke baad bhi normally chat kar/dekh pa raha tha. Ab
+        # ban hote hi (jaisa DELETE/remove me already hota hai) left_at
+        # set karo taaki access turant revoke ho; unban pe wapas active
+        # karo.
+        if membership.is_banned and not was_banned:
+            ConversationParticipant.objects.filter(
+                conversation=group.conversation, user_id=user_id
+            ).update(left_at=timezone.now())
+        elif was_banned and not membership.is_banned:
+            ConversationParticipant.objects.filter(
+                conversation=group.conversation, user_id=user_id
+            ).update(left_at=None)
+
         return Response(GroupMemberSerializer(membership, context={'request': request}).data)
 
     @action(detail=True, methods=['get'], url_path='media')
@@ -1119,6 +1404,13 @@ class CallInitiateView(APIView):
                     {"detail": "Block hone ki wajah se call nahi ho sakti."},
                     status=status.HTTP_403_FORBIDDEN,
                 )
+        else:
+            # 🔥 NAYA — group ka call_permission enforce karo.
+            group = getattr(conversation, 'group_detail', None)
+            if group:
+                allowed, reason = check_group_permission(group, request.user.id, 'call_permission')
+                if not allowed:
+                    return Response({"detail": reason}, status=status.HTTP_403_FORBIDDEN)
 
         CallSession.objects.filter(
             conversation_id=conversation_id,
@@ -1138,7 +1430,17 @@ class CallInitiateView(APIView):
         )
         CallParticipant.objects.create(call=call, user=request.user, status=CallStatus.ONGOING)
 
-        other_members = list(conversation.memberships.exclude(user=request.user).values_list('user_id', flat=True))
+        # 🔥 FIX — was missing `left_at__isnull=True`. Without it, a user who
+        # left the group/conversation (or was removed) still had a stale
+        # `ConversationParticipant` row and kept getting rung for every new
+        # call on that conversation — an incoming-call push + a
+        # `CallParticipant` row — long after they had no business being
+        # invited. Every other membership lookup in this view already
+        # filters on `left_at__isnull=True`; this one didn't.
+        other_members = list(
+            conversation.memberships.filter(left_at__isnull=True)
+            .exclude(user=request.user).values_list('user_id', flat=True)
+        )
         for uid in other_members:
             CallParticipant.objects.create(call=call, user_id=uid, status=CallStatus.RINGING)
 
@@ -1190,11 +1492,42 @@ class CallInitiateView(APIView):
 class CallActionView(APIView):
     permission_classes = [IsAuthenticated]
 
+    VALID_ACTIONS = ('accept', 'reject', 'end')
+
     def post(self, request, call_id):
         action = request.data.get('action')
+        # 🔥 FIX — `action` was never validated against a known set. A
+        # missing/typo'd value used to fall through every `if/elif` silently
+        # (no token generated, no error either) and still broadcast a
+        # `call_<action>` signal — e.g. `call_None` — to both sockets,
+        # which the frontend has no handler for. Reject anything unexpected
+        # up front with a clear 400 instead.
+        if action not in self.VALID_ACTIONS:
+            return Response(
+                {"detail": f"'action' must be one of {self.VALID_ACTIONS}."},
+                status=400,
+            )
+
         call = CallSession.objects.filter(id=call_id).first()
         if not call:
             return Response({"detail": "Call not found"}, status=404)
+
+        # 🔥 FIX — pehle yahan koi check nahi tha ki request bhejne wala
+        # is call ka invited participant hai ya nahi. `CallParticipant`
+        # filter 0 rows match karke bhi silently aage badh jaata tha aur
+        # neeche ek VALID LiveKit token bana ke de deta tha — matlab koi
+        # bhi authenticated user kisi bhi call_id pe 'accept' bhej ke us
+        # call ke room me ghus sakta tha. Ab explicit membership check.
+        is_participant = CallParticipant.objects.filter(call=call, user=request.user).exists()
+        if not is_participant:
+            return Response({"detail": "Aap is call ka hissa nahi hain."}, status=403)
+
+        # 🔥 FIX — an 'accept' racing against a call the caller already
+        # cancelled/ended would still mint a valid LiveKit token for a room
+        # nobody else is in. The push/WS 'call_cancelled' event usually beats
+        # this, but it's not guaranteed, so guard explicitly.
+        if action == 'accept' and call.status == CallStatus.ENDED:
+            return Response({"detail": "Ye call already end ho chuki hai."}, status=400)
 
         livekit_token = None
 
@@ -1217,13 +1550,49 @@ class CallActionView(APIView):
                 call.ended_at = timezone.now()
                 call.save(update_fields=['status', 'ended_at'])
         elif action == 'end':
-            CallParticipant.objects.filter(call=call, user=request.user).update(left_at=timezone.now(), status=CallStatus.ENDED)
-            if not CallParticipant.objects.filter(call=call, left_at__isnull=True).exists():
-                call.status = CallStatus.ENDED
-                call.ended_at = timezone.now()
+            now = timezone.now()
+            CallParticipant.objects.filter(call=call, user=request.user).update(left_at=now, status=CallStatus.ENDED)
+
+            # 🔥 FIX (asli root-cause) — jo participants abhi bhi RINGING
+            # hain (kabhi answer hi nahi kiya) unhe MISSED maro. Pehle
+            # neeche wala check saare participants ka `left_at` set hone
+            # ka wait karta tha — agar dusra banda kabhi answer/reject/end
+            # hi nahi karta (jo caller-cancels-before-answer ka bilkul
+            # normal case hai), to `left_at` kabhi set hi nahi hota aur
+            # call.status HAMESHA 'ringing' pada rehta tha DB me — is
+            # wajah se missed-call history/detection kabhi kaam hi nahi
+            # karti thi.
+            never_answered = CallParticipant.objects.filter(call=call, status=CallStatus.RINGING)
+            missed_user_ids = list(
+                never_answered.exclude(user=request.user).values_list('user_id', flat=True)
+            )
+            never_answered.update(status=CallStatus.MISSED, left_at=now)
+
+            # Call sirf tab khatam maano jab koi bhi participant abhi
+            # ONGOING (active) na ho — RINGING (jo kabhi jawab hi nahi
+            # denge) ka wait nahi karna, warna group call bhi kabhi
+            # 'ended' state me nahi jaati agar kuch invited log ignore
+            # kar dein.
+            still_active = CallParticipant.objects.filter(
+                call=call, status=CallStatus.ONGOING, left_at__isnull=True
+            ).exists()
+            if not still_active:
+                call.status = CallStatus.ENDED if call.connected_at else CallStatus.MISSED
+                call.ended_at = now
                 if call.connected_at:
-                    call.duration_seconds = int((call.ended_at - call.connected_at).total_seconds())
+                    call.duration_seconds = int((now - call.connected_at).total_seconds())
                 call.save(update_fields=['status', 'ended_at', 'duration_seconds'])
+
+            # 🔥 NAYA — jinhone kabhi answer hi nahi kiya unhe explicit
+            # 'call_cancelled' push, taaki unka native incoming-call popup
+            # (background/killed state me bhi) turant dismiss ho jaaye,
+            # ringtone hamesha ke liye bajti na rahe.
+            if missed_user_ids:
+                send_call_cancelled_push(
+                    recipient_ids=missed_user_ids,
+                    call_id=call.id,
+                    conversation_id=call.conversation_id,
+                )
 
         channel_layer = get_channel_layer()
         async_to_sync(channel_layer.group_send)(
@@ -1260,6 +1629,116 @@ class CallHistoryViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, views
             Q(caller=user) | Q(call_participants__user=user) | Q(group__group_members__user=user)
         ).distinct().select_related('caller').order_by('-created_at')
 
+    # 🔥 NAYA — `MissedCallWatcher` (offline→online transition) ye
+    # endpoint call karta hai. "Missed" ka matlab: user ko call me invite
+    # kiya gaya tha (`CallParticipant` row exists), usne kabhi accept
+    # nahi kiya (status abhi bhi RINGING), aur call khatam ho chuka hai.
+    # Frontend errors ko silently swallow karta hai (returns []), isliye
+    # pehle ye feature chup-chaap kabhi kaam hi nahi karta tha.
+    @action(detail=False, methods=['get'], url_path='missed')
+    def missed(self, request):
+        since = request.query_params.get('since')
+        # 🔥 FIX — pehle `status=RINGING` check karta tha, jo `CallActionView`
+        # ke purane bug ki wajah se theek kaam nahi karta tha (never-answered
+        # participants hamesha RINGING pade rehte the, call kabhi ENDED hoti
+        # hi nahi thi). Ab `CallActionView.end` explicitly `MISSED` status
+        # set karta hai jab koi jawab nahi deta, isliye seedha wahi check karo.
+        qs = CallParticipant.objects.filter(
+            user=request.user,
+            status=CallStatus.MISSED,
+        ).exclude(call__caller=request.user).select_related('call', 'call__caller')
+
+        if since:
+            parsed = parse_datetime(since)
+            if parsed is None:
+                return Response({'detail': "'since' valid ISO datetime honi chahiye."}, status=400)
+            qs = qs.filter(call__created_at__gte=parsed)
+
+        calls = [cp.call for cp in qs.order_by('-call__created_at')]
+        serializer = CallSessionSerializer(calls, many=True, context={'request': request})
+        return Response(serializer.data)
+
+    # 🔥 NAYA — `_AddParticipantSheet` conversation ke members me se jo
+    # abhi call me nahi hain unhe list karta hai (khud ko aur already-
+    # invited/participating logon ko exclude karke).
+    @action(detail=True, methods=['get'], url_path='addable-participants')
+    def addable_participants(self, request, pk=None):
+        call = get_object_or_404(CallSession, id=pk)
+
+        if call.is_group_call and call.group_id:
+            member_ids = set(
+                call.group.group_members.filter(is_banned=False).values_list('user_id', flat=True)
+            )
+        elif call.conversation_id:
+            member_ids = set(
+                call.conversation.memberships.filter(left_at__isnull=True).values_list('user_id', flat=True)
+            )
+        else:
+            member_ids = set()
+
+        already_in_call = set(
+            CallParticipant.objects.filter(call=call).values_list('user_id', flat=True)
+        )
+        addable_ids = member_ids - already_in_call - {request.user.id}
+
+        users = User.objects.filter(id__in=addable_ids)
+        serializer = UserMiniSerializer(users, many=True, context={'request': request})
+        return Response(serializer.data)
+
+    # 🔥 NAYA — ongoing (group) call me naya banda add karta hai: uska
+    # `CallParticipant` (RINGING) banata hai, normal `incoming_call` push
+    # + WS event bhejta hai SAME `call_id` ke saath, taaki accept karne
+    # par wo isi LiveKit room me join ho jaaye.
+    @action(detail=True, methods=['post'], url_path='add-participant')
+    def add_participant(self, request, pk=None):
+        call = get_object_or_404(CallSession, id=pk)
+        user_id = request.data.get('user_id')
+        if not user_id:
+            return Response({'detail': "'user_id' required hai."}, status=400)
+
+        if call.status not in [CallStatus.RINGING, CallStatus.ONGOING]:
+            return Response({'detail': 'Ye call ab active nahi hai.'}, status=400)
+
+        target_user = get_object_or_404(User, id=user_id)
+        participant, created = CallParticipant.objects.get_or_create(
+            call=call, user=target_user, defaults={'status': CallStatus.RINGING},
+        )
+        if not created and participant.status not in [CallStatus.RINGING]:
+            return Response({'detail': 'User already is/was in this call.'}, status=400)
+
+        if not call.is_group_call:
+            call.is_group_call = True
+            call.save(update_fields=['is_group_call'])
+
+        caller_name = get_display_name(request.user)
+
+        channel_layer = get_channel_layer()
+        async_to_sync(channel_layer.group_send)(
+            f'chat_{call.conversation_id}' if call.conversation_id else f'call_{call.id}',
+            {
+                'type': 'call_event',
+                'event': 'incoming_call',
+                'call_id': str(call.id),
+                'call_type': call.type,
+                'caller_id': str(request.user.id),
+                'caller_name': caller_name,
+                'caller_photo': get_profile_photo_url(request.user, request=request),
+                'conversation_id': str(call.conversation_id) if call.conversation_id else None,
+                'channel_name': call.channel_name,
+            }
+        )
+
+        send_incoming_call_push(
+            recipient_ids=[target_user.id],
+            caller_name=caller_name,
+            call_type=call.type,
+            call_id=call.id,
+            conversation_id=call.conversation_id,
+            channel_name=call.channel_name,
+        )
+
+        return Response(CallSessionSerializer(call, context={'request': request}).data, status=201)
+
 
 # ======================================================================
 # STUDY ROOM
@@ -1281,12 +1760,26 @@ class StudyRoomJoinView(APIView):
         if not conversation:
             return Response({"detail": "Conversation not found"}, status=404)
 
+        # 🔥 NAYA — group ka study_room_permission enforce karo.
+        if conversation.type == ConversationType.GROUP:
+            group = getattr(conversation, 'group_detail', None)
+            if group:
+                allowed, reason = check_group_permission(group, request.user.id, 'study_room_permission')
+                if not allowed:
+                    return Response({"detail": reason}, status=403)
+
         room_name = f"study_{conversation_id}"
         user_name = get_display_name(request.user)
+        # 🔥 FIX — study rooms are long-running Meet-style sessions, unlike
+        # calls; give them a much longer-lived token (8h) so an active
+        # session doesn't get silently disconnected when the default 2h
+        # call-token TTL runs out. Frontend should still re-join/refresh on
+        # reconnect for sessions that outlive even this.
         token = generate_livekit_token(
             room_name=room_name,
             user_id=request.user.id,
             user_name=user_name,
+            ttl=timedelta(hours=8),
         )
 
         # 🔥 NAYA — conversation ke saare members (naam + profile photo)
@@ -1345,6 +1838,17 @@ class StudyRoomStateView(APIView):
             defaults={"state": request.data, "updated_by": request.user},
         )
         return Response({"detail": "saved"})
+
+    # 🔥 NAYA — `endStudyRoomState()` (frontend) is par depend karta hai
+    # taaki room close hote hi poora whiteboard clear ho jaaye. Pehle ye
+    # method hi missing tha, isliye DELETE call 405 deta tha.
+    def delete(self, request, conversation_id):
+        conversation = self._get_conversation(request, conversation_id)
+        if not conversation:
+            return Response({"detail": "Conversation not found"}, status=404)
+
+        StudyRoomState.objects.filter(conversation=conversation).delete()
+        return Response({"detail": "cleared"})
 
 
 # ======================================================================

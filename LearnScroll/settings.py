@@ -537,6 +537,14 @@ MEDIA_URL = '/media/'
 MEDIA_ROOT = BASE_DIR / 'media'
 os.makedirs(MEDIA_ROOT, exist_ok=True)
 
+# Chunked-upload temp storage — deliberately OUTSIDE MEDIA_ROOT. MEDIA_ROOT
+# is served (directly by Django in DEBUG via serve_media_with_range in
+# urls.py, and by nginx/S3 in production) — keeping partial chunks out of
+# it means a half-uploaded (unvalidated) file can never become reachable
+# mid-upload. See liveclass/chunked_upload_views.py.
+CHUNKED_UPLOAD_TMP_ROOT = BASE_DIR / 'tmp' / 'chunked_uploads'
+os.makedirs(CHUNKED_UPLOAD_TMP_ROOT, exist_ok=True)
+
 # ADD (missing): WhiteNoiseMiddleware was already wired into MIDDLEWARE
 # above, but without this it just serves STATIC_ROOT as-is — no gzip/brotli
 # compression and no content-hashed filenames, so browsers can never safely
@@ -660,6 +668,14 @@ REST_FRAMEWORK = {
         "session_token": "30/min",
         "coupon_validate": "20/min",
         "chat_message_create": "20/min",
+        # Chunked upload (liveclass/chunked_upload_views.py) — starting a
+        # lot of uploads fast is the abuse signal for init/complete; chunk
+        # itself is rated higher since one real upload fires it dozens of
+        # times in quick succession (~3/sec covers a fast client on an
+        # 8MB chunk size).
+        "chunked_upload_init": "20/min",
+        "chunked_upload_chunk": "180/min",
+        "chunked_upload_complete": "20/min",
     },
     # NOTE (fix — production breaking gap): NOT having this meant every
     # list endpoint (classrooms, sessions, chat-messages, notices, etc.)
@@ -828,5 +844,13 @@ CELERY_BEAT_SCHEDULE = {
     "liveclass-expire-and-refund-passes": {
         "task": "liveclass.expire_and_refund_passes",
         "schedule": crontab(minute="*/15"),
+    },
+    # Sweeps abandoned chunked uploads (client crashed/closed mid-upload)
+    # and reclaims their temp disk usage — see
+    # liveclass/tasks.py:cleanup_stale_chunked_uploads for exactly what it
+    # checks. Hourly is enough since the staleness window itself is 6h.
+    "liveclass-cleanup-stale-chunked-uploads": {
+        "task": "liveclass.cleanup_stale_chunked_uploads",
+        "schedule": crontab(minute=0),
     },
 }

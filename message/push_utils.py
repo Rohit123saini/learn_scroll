@@ -146,3 +146,55 @@ def send_incoming_call_push(recipient_ids, caller_name, call_type, call_id, conv
         },
         android_priority='high',
     )
+
+
+def send_mention_push(recipient_ids, sender_name, message_text, conversation_id, message_id):
+    """
+    🔥 NAYA — @mention push. Normal `send_chat_message_push` sabhi
+    (non-muted) participants ko generic "naya message" push deta hai;
+    isse ALAG rakha hai kyunki jinhe @mention kiya gaya hai unhe hamesha
+    (chat mute ho tab bhi — WhatsApp isi tarah karta hai, mention normal
+    mute se override karta hai) ek specific "X ne aapko mention kiya"
+    notification milna chahiye, generic "naya message" nahi.
+
+    Data-only rakha hai (jaisa baaki chat pushes) taaki duplicate
+    notification na bane — client apna khud ka local notification banata
+    hai `type: 'mention'` dekh kar.
+    """
+    body = (message_text or '')[:200]
+    tokens = _tokens_for_users(recipient_ids)
+    _send_multicast(
+        tokens,
+        notification=None,
+        data={
+            'type': 'mention',
+            'conversation_id': str(conversation_id),
+            'message_id': str(message_id),
+            'sender_name': sender_name or '',
+            'text': body,
+        },
+        android_priority='high',
+    )
+
+
+def send_call_cancelled_push(recipient_ids, call_id, conversation_id):
+    """
+    🔥 NAYA — Caller answer se PEHLE hi call cancel/end kar de to jo log
+    abhi tak answer nahi kar paaye unhe ye push milta hai. Data-only rakha
+    hai jaisa `send_incoming_call_push` — background/killed state me bhi
+    `firebaseBackgroundHandler` trigger karke `CallKitService.
+    endCallUiByCallId(call_id)` call kare taaki native incoming-call popup
+    turant dismiss ho jaaye (warna ringtone/popup bajta reh jaata jab tak
+    khud-ba-khud timeout na ho).
+    """
+    tokens = _tokens_for_users(recipient_ids)
+    _send_multicast(
+        tokens,
+        notification=None,
+        data={
+            'type': 'call_cancelled',
+            'call_id': str(call_id),
+            'conversation_id': str(conversation_id) if conversation_id else '',
+        },
+        android_priority='high',
+    )

@@ -24,6 +24,8 @@ Design discipline (same as views.py/signals.py):
 """
 
 import logging
+import os
+import shutil
 import zoneinfo
 from datetime import date, datetime, timedelta
 
@@ -57,6 +59,18 @@ REFRESH_ENROLLED_COUNT_LOOKBACK_MINUTES = 60
 # beat interval (with slack) so a slow/delayed beat tick can never let a
 # batch of expiries fall in the gap between two runs and get missed.
 EXPIRE_REFUND_LOOKBACK_MINUTES = 60
+
+# How long a ChunkedUpload can sit with no chunk activity before
+# cleanup_stale_chunked_uploads treats it as abandoned (client crashed,
+# closed the app, or lost network mid-upload) and reclaims its temp disk
+# usage. Keyed off updated_at, not created_at, so a slow-but-alive upload
+# that's still actively sending chunks is never swept mid-flight.
+CHUNKED_UPLOAD_STALE_AFTER = timedelta(hours=6)
+
+# How long to keep terminal-status (COMPLETED/ABORTED/EXPIRED/FAILED)
+# ChunkedUpload rows around for audit/debugging before
+# cleanup_stale_chunked_uploads purges them outright.
+CHUNKED_UPLOAD_ROW_RETENTION_DAYS = 14
 
 _WEEKDAY_CODE = {0: "mon", 1: "tue", 2: "wed", 3: "thu", 4: "fri", 5: "sat", 6: "sun"}
 
@@ -923,3 +937,113 @@ def notify_query_answered(query_id):
             "classroom_id": str(classroom.id),
         },
     )
+
+
+@shared_task(name="liveclass.cleanup_stale_chunked_uploads")
+def cleanup_stale_chunked_uploads():
+    """Sweeps abandoned ChunkedUpload rows (liveclass/chunked_upload_views.py)
+    and reclaims their temp disk usage. Three passes, each isolated in its
+    own try/except (same one-bad-row-never-blocks-the-rest discipline as
+    every other task in this file):
+
+    1. Any row still IN_PROGRESS/PROCESSING with no chunk activity for
+       CHUNKED_UPLOAD_STALE_AFTER gets its temp chunk directory deleted and
+       flipped to EXPIRED.
+    2. Old terminal rows (COMPLETED/ABORTED/EXPIRED/FAILED) older than
+       CHUNKED_UPLOAD_ROW_RETENTION_DAYS get deleted outright — pure DB
+       cleanup, no disk I/O (COMPLETED rows already had their temp files
+       removed at complete()-time).
+    3. Defensive sweep: any directory under CHUNKED_UPLOAD_TMP_ROOT with no
+       matching ChunkedUpload row at all (e.g. the row got deleted by
+       something else, or a directory was created but the DB write failed)
+       and is older than the staleness window gets removed too — this is
+       what actually guarantees disk usage can't grow unbounded even if
+       pass 1 ever misses a case.
+    """
+    from django.conf import settings as dj_settings
+
+    from .models import ChunkedUpload
+
+    tmp_root = str(getattr(dj_settings, "CHUNKED_UPLOAD_TMP_ROOT", ""))
+    cutoff = timezone.now() - CHUNKED_UPLOAD_STALE_AFTER
+    expired_count, freed_bytes = 0, 0
+
+    # ---- 1. Expire stale in-flight uploads --------------------------------
+    stale_qs = ChunkedUpload.objects.filter(
+        status__in=[ChunkedUpload.Status.IN_PROGRESS, ChunkedUpload.Status.PROCESSING],
+        updated_at__lt=cutoff,
+    )
+    for upload in stale_qs.iterator():
+        try:
+            upload_dir = os.path.join(tmp_root, str(upload.upload_id)) if tmp_root else None
+            if upload_dir and os.path.isdir(upload_dir):
+                freed_bytes += _chunked_upload_dir_size(upload_dir)
+                shutil.rmtree(upload_dir, ignore_errors=True)
+            ChunkedUpload.objects.filter(pk=upload.pk).update(
+                status=ChunkedUpload.Status.EXPIRED,
+                error_message="Expired — no chunk activity for over 6 hours.",
+            )
+            expired_count += 1
+        except Exception:
+            logger.exception(
+                "cleanup_stale_chunked_uploads: failed to expire upload_id=%s", upload.upload_id
+            )
+
+    # ---- 2. Purge old terminal rows ----------------------------------------
+    purged_count = 0
+    try:
+        old_cutoff = timezone.now() - timedelta(days=CHUNKED_UPLOAD_ROW_RETENTION_DAYS)
+        purged_count, _ = ChunkedUpload.objects.filter(
+            status__in=[
+                ChunkedUpload.Status.COMPLETED,
+                ChunkedUpload.Status.ABORTED,
+                ChunkedUpload.Status.EXPIRED,
+                ChunkedUpload.Status.FAILED,
+            ],
+            updated_at__lt=old_cutoff,
+        ).delete()
+    except Exception:
+        logger.exception("cleanup_stale_chunked_uploads: failed to purge old rows")
+
+    # ---- 3. Defensive orphan-directory sweep -------------------------------
+    orphan_count = 0
+    try:
+        if tmp_root and os.path.isdir(tmp_root):
+            known_ids = set(str(u) for u in ChunkedUpload.objects.values_list("upload_id", flat=True))
+            for entry in os.scandir(tmp_root):
+                if not entry.is_dir() or entry.name in known_ids:
+                    continue
+                try:
+                    mtime = timezone.datetime.fromtimestamp(
+                        entry.stat().st_mtime, tz=timezone.get_current_timezone()
+                    )
+                except OSError:
+                    continue
+                if mtime < cutoff:
+                    freed_bytes += _chunked_upload_dir_size(entry.path)
+                    shutil.rmtree(entry.path, ignore_errors=True)
+                    orphan_count += 1
+    except Exception:
+        logger.exception("cleanup_stale_chunked_uploads: orphan directory sweep failed")
+
+    logger.info(
+        "cleanup_stale_chunked_uploads: expired=%s purged_rows=%s orphan_dirs=%s freed_mb=%.1f",
+        expired_count, purged_count, orphan_count, freed_bytes / (1024 * 1024),
+    )
+    return {
+        "expired": expired_count,
+        "purged_rows": purged_count,
+        "orphan_dirs": orphan_count,
+        "freed_mb": round(freed_bytes / (1024 * 1024), 1),
+    }
+
+
+def _chunked_upload_dir_size(path: str) -> int:
+    total = 0
+    for root, _dirs, files in os.walk(path):
+        for name in files:
+            try:
+                total += os.path.getsize(os.path.join(root, name))
+            except OSError:
+                pass
+    return total

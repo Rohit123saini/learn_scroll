@@ -14,8 +14,9 @@ scheduled jobs). Consumed by a Flutter app.
 **Files in scope:** `models.py`, `views.py`, `serializers.py`,
 `urls.py`, `admin.py`, `signals.py`, `tasks.py`, `notifications.py`,
 `exceptions.py`, `apps.py`, `livekit_utils.py`, `tests.py`,
-`__init__.py`. (`settings.py` is referenced throughout but was never
-part of this upload — see §8.)
+`__init__.py`, **`chunked_upload_views.py`** (added in Pass 3 — see
+§11). (`settings.py` is referenced throughout but was never part of
+this upload — see §8.)
 
 ---
 
@@ -292,6 +293,46 @@ reviewed_by(FK), admin_note, reviewed_at, created_at`
 `classroom(FK), student(FK), certificate_id(UUID), certificate_file(File),
 issued_at`
 
+### `ChunkedUpload` — large-file uploads assembled in pieces (Pass 3)
+`upload_id(UUID, unique), user(FK), purpose, original_file_name,
+file_extension, total_chunks, total_size, extra_data(JSON), status,
+error_message, created_at, updated_at`
+- **Why it exists:** `DATA_UPLOAD_MAX_MEMORY_SIZE` is 10MB (see §10), but
+  `ClassMaterial.file` allows up to 100MB and `Assignment.attachment` /
+  `AssignmentSubmission.file` allow up to 50MB — all three would be
+  rejected outright as a single request. A client splits the file into
+  small pieces, uploads them one at a time via
+  `chunked_upload_views.py`, and the server assembles + validates the
+  final file only once every piece has arrived.
+- `Purpose`: `cover_image` (updates `Classroom.cover_image`) /
+  `material` (creates a `ClassMaterial` row) / `assignment_attachment`
+  (updates `Assignment.attachment`) / `submission_file` (creates an
+  `AssignmentSubmission` row).
+- `Status`: `IN_PROGRESS → PROCESSING → COMPLETED`, or `→ FAILED` /
+  `ABORTED` / `EXPIRED`. `PROCESSING` is a short-lived atomic-claim
+  state (`chunked_upload_complete` conditionally
+  `UPDATE ... WHERE status=IN_PROGRESS` before doing any file I/O) that
+  stops two concurrent `complete()` calls for the same `upload_id` from
+  double-assembling the file or double-creating the target row.
+- `extra_data` (JSON) — carries whatever the target model needs at
+  completion time (e.g. `{"classroom_id": 5}` for `cover_image`,
+  `{"assignment_id": 9}` for `submission_file`) — captured once at
+  `init()` and permission-checked again at `complete()` (access can
+  legitimately change mid-upload, e.g. a pass expiring).
+- The assembled file is re-validated through the SAME
+  `MaxFileSizeValidator`/`FileExtensionValidator` the target field
+  already declares (via `full_clean()`) — chunking never bypasses
+  those, it only spreads one upload across many small requests.
+  `cover_image` additionally gets a Pillow decode check at completion,
+  since assembly writes straight to disk and bypasses `ImageField`'s
+  normal upload-time image validation.
+- Temp chunks live under `settings.CHUNKED_UPLOAD_TMP_ROOT` —
+  deliberately outside `MEDIA_ROOT` so a half-uploaded, not-yet-
+  validated file can never become reachable via the `/media/` URL
+  mid-upload.
+- Swept by `tasks.cleanup_stale_chunked_uploads` (see §7) — see that
+  entry for the staleness/retention rules.
+
 ### `ClassReminder`
 `session(FK), user(FK), remind_at, channel, is_sent`
 - `Channel`: `push / email / sms`
@@ -377,10 +418,12 @@ own header comment for the authoritative, always-in-sync version**
 | LiveKit webhook | `livekit-webhook/` (plain path) | unauthenticated, own signature check |
 | Health check | `healthz/` (plain path) | unauthenticated, DB+cache probe |
 | Schema/docs | `schema/`, `schema/docs/` | only if `drf-spectacular` installed |
+| **Chunked upload** (Pass 3) | `uploads/chunked/` (plain paths, not a router basename — see `chunked_upload_views.py`) | `init/`, `chunk/`, `complete/`, `abort/` — see §2 `ChunkedUpload` for the 4 supported `purpose` values |
 
 **Throttle scopes in use** (must have matching rates in
 `DEFAULT_THROTTLE_RATES`): `session_join`, `session_token`,
-`coupon_validate`, `chat_message_create`.
+`coupon_validate`, `chat_message_create`, and (Pass 3)
+`chunked_upload_init`, `chunked_upload_chunk`, `chunked_upload_complete`.
 
 **Explore/listing query params** on `classrooms/` (GET, list): `?search=`
 (free text across title/subject/description/teacher name), `?language=`,
@@ -505,8 +548,8 @@ commit, and avoids side effects surviving a rolled-back transaction.
 
 ## 7. Celery tasks
 
-22 tasks total in `tasks.py`, all `@shared_task(name="liveclass....")`.
-**5 are on `CELERY_BEAT_SCHEDULE`** (cron jobs); **17 are fire-and-forget
+23 tasks total in `tasks.py`, all `@shared_task(name="liveclass....")`.
+**6 are on `CELERY_BEAT_SCHEDULE`** (cron jobs); **17 are fire-and-forget
 `.delay()` notification dispatchers** called from views.py/signals.py.
 
 ### Scheduled (beat) jobs
@@ -517,9 +560,10 @@ commit, and avoids side effects surviving a rolled-back transaction.
 | `send_due_reminders` | Fires every due, unsent `ClassReminder`. Marks `is_sent` regardless of delivery success — never double-processes a row. |
 | `refresh_stale_enrolled_counts` | Sweeps classrooms whose `enrolled_count` has drifted stale from passes quietly *expiring* (expiry never triggers a save, so the normal signal never fires). |
 | `expire_and_refund_passes` | The actual "student loses money" gap-closer — sweeps purchases past `expires_at` with leftover `remaining_balance` and reverses them (nothing else ever calls `reverse()` on a purely-expired row). |
+| `cleanup_stale_chunked_uploads` (Pass 3) | Sweeps `ChunkedUpload` rows stuck `IN_PROGRESS`/`PROCESSING` with no chunk activity for 6h (`CHUNKED_UPLOAD_STALE_AFTER`) → deletes their temp chunk dir, marks `EXPIRED`. Also purges terminal-status rows older than 14 days (`CHUNKED_UPLOAD_ROW_RETENTION_DAYS`), and defensively removes any orphan directory under `CHUNKED_UPLOAD_TMP_ROOT` with no matching DB row at all. Runs hourly. |
 
-All 5 have intervals shorter than their own lookback windows (no gap
-where a batch could be missed).
+All 6 have intervals shorter than their own lookback/staleness windows
+(no gap where a batch could be missed).
 
 ### Notification dispatchers (all `.delay()`'d, never called inline)
 `notify_waitlist_promotion`, `notify_purchase_refunded`,
@@ -634,7 +678,14 @@ confirm these exist with real values before deploy:
 
 - `REST_FRAMEWORK["EXCEPTION_HANDLER"] = "liveclass.exceptions.liveclass_exception_handler"`
 - `REST_FRAMEWORK["DEFAULT_THROTTLE_RATES"]` — needs `session_join`,
-  `session_token`, `coupon_validate`, `chat_message_create` entries
+  `session_token`, `coupon_validate`, `chat_message_create`, and
+  (Pass 3) `chunked_upload_init`, `chunked_upload_chunk`,
+  `chunked_upload_complete` entries
+- `CHUNKED_UPLOAD_TMP_ROOT` (Pass 3) — filesystem path for in-progress
+  chunk assembly, deliberately outside `MEDIA_ROOT` (see §2
+  `ChunkedUpload`). Local-disk only as written; a multi-instance
+  deployment needs this on a shared volume or sticky-routed to one
+  instance per `upload_id` — see §12 item 9.
 - `REST_FRAMEWORK["DEFAULT_PERMISSION_CLASSES"] = ["IsAuthenticated"]`
   (fail-closed floor)
 - `REST_FRAMEWORK["PAGE_SIZE"] = 20` (via `LiveClassPagination`)
@@ -644,8 +695,8 @@ confirm these exist with real values before deploy:
 - `AUTO_FLAG_THRESHOLD` (constant on `ClassroomReport`)
 - `SESSION_GENERATION_WINDOW_DAYS` (used by `generate_upcoming_sessions`)
 - `LIVEKIT_API_KEY`, `LIVEKIT_API_SECRET`, `LIVEKIT_WS_URL`
-- `CELERY_BEAT_SCHEDULE` — 5 entries matching the tasks in §7, each
-  interval shorter than its own lookback window
+- `CELERY_BEAT_SCHEDULE` — 6 entries matching the tasks in §7, each
+  interval shorter than its own lookback/staleness window
 - `DEBUG`, `ALLOWED_HOSTS`, `DATABASE_URL` (Postgres — SQLite has no
   real concurrent-write story for this multi-user platform), `REDIS_URL`
   (Channels + Celery broker + cache), `CORS_ALLOWED_ORIGINS`,
@@ -656,7 +707,10 @@ confirm these exist with real values before deploy:
   `SECURE_HSTS_*`, `SECURE_PROXY_SSL_HEADER`) gated on `not DEBUG`
 - `DATA_UPLOAD_MAX_MEMORY_SIZE` — should be 10MB, not Django's 500MB
   default (DoS vector on plain text/JSON fields; actual file uploads are
-  separately bounded by `MaxFileSizeValidator`)
+  separately bounded by `MaxFileSizeValidator`). This is exactly why
+  `ChunkedUpload` (Pass 3) exists — `ClassMaterial.file` (100MB) and
+  the 50MB attachment/submission fields would be rejected outright as
+  a single request under this cap.
 
 **Packages required** (no `requirements.txt` in this upload):
 `psycopg2-binary`, `channels_redis`, `django-redis`, `sentry-sdk`,
@@ -764,6 +818,38 @@ for the full reasoning if needed.)
   §9 for exact coverage.
 - **This reference doc created/redesigned** — consolidating everything
   above into one file.
+
+### Pass 3 — chunked upload for large files
+- **New file `chunked_upload_views.py`** — `chunked_upload_init` /
+  `chunked_upload_chunk` / `chunked_upload_complete` /
+  `chunked_upload_abort`, function-based views wired at
+  `uploads/chunked/{init,chunk,complete,abort}/` in `urls.py`. Built
+  from scratch for this app (not copied from another project's
+  reference implementation) — see §2 `ChunkedUpload` for the full
+  design (purpose-based permission checks at both init and complete,
+  atomic PROCESSING claim against double-completion, re-validation
+  through the target field's own `MaxFileSizeValidator`/
+  `FileExtensionValidator`, Pillow decode check for `cover_image`,
+  temp storage outside `MEDIA_ROOT`).
+- **`models.py`** — new `ChunkedUpload` model (see §2), inserted just
+  above the SIGNALS section at the bottom of the file. No changes to
+  `Classroom`/`ClassMaterial`/`Assignment`/`AssignmentSubmission`
+  themselves — chunked upload is additive; the old single-request
+  upload path for small files still works exactly as before.
+- **`tasks.py`** — new `cleanup_stale_chunked_uploads` cron task (see
+  §7), plus two new module-level constants,
+  `CHUNKED_UPLOAD_STALE_AFTER` (6h) and
+  `CHUNKED_UPLOAD_ROW_RETENTION_DAYS` (14d).
+- **`urls.py`** — 4 new plain `path()` entries (not router-registered —
+  these aren't a ViewSet) plus the `chunked_upload_views` import.
+- **`settings.py`** — `CHUNKED_UPLOAD_TMP_ROOT` added, 3 new throttle
+  scopes added to `DEFAULT_THROTTLE_RATES`, 1 new
+  `CELERY_BEAT_SCHEDULE` entry added.
+- **Not yet done (see §12 items 9–10):** no migration generated/run
+  against a real project (no live Django project in this environment,
+  same limitation as the rest of this doc — see §13), and no test
+  coverage added for the new endpoints (`tests.py` untouched this
+  pass).
 
 ---
 

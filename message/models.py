@@ -38,6 +38,10 @@ class MessageType(models.TextChoices):
     PRESENTATION = 'presentation', 'Presentation'
     LOCATION = 'location', 'Location'
     SYSTEM = 'system', 'System Message'
+    STUDY_ROOM = 'study_room', 'Study Room Invite'  # 🔥 NAYA — frontend §7.14
+    # ki tappable invite CARD (`type: 'study_room'`) is choice ke bina
+    # serializer validation pe 400 deta tha, kyunki ye pehle choices me
+    # hi nahi tha.
 
 
 class ConversationType(models.TextChoices):
@@ -198,6 +202,15 @@ class Group(BaseModel):
     """
     Group Chat ka data
     """
+    # 🔥 NAYA — Access-control settings (`group_profile_screen.dart`'s
+    # access-control sheet in par depend karti hai; pehle ye poori
+    # feature backend me bilkul missing thi — `group_rules.py` isi ke
+    # liye banayi gayi thi par khaali reh gayi thi). ADMINS_ONLY ka
+    # matlab: sirf admin/moderator role wale members allowed hain.
+    class PermissionLevel(models.TextChoices):
+        EVERYONE = 'everyone', 'Everyone'
+        ADMINS_ONLY = 'admins_only', 'Admins/Moderators Only'
+
     conversation = models.OneToOneField(Conversation, on_delete=models.CASCADE, related_name='group_detail')
     name = models.CharField(max_length=100, db_index=True)
     description = models.TextField(blank=True)
@@ -207,6 +220,18 @@ class Group(BaseModel):
 
     invite_code = models.CharField(max_length=20, unique=True, blank=True, null=True, db_index=True)
     is_private = models.BooleanField(default=False)
+
+    message_permission = models.CharField(
+        max_length=20, choices=PermissionLevel.choices, default=PermissionLevel.EVERYONE
+    )
+    call_permission = models.CharField(
+        max_length=20, choices=PermissionLevel.choices, default=PermissionLevel.EVERYONE
+    )
+    study_room_permission = models.CharField(
+        max_length=20, choices=PermissionLevel.choices, default=PermissionLevel.EVERYONE
+    )
+    # null/blank = koi limit nahi. Admin/moderator is limit se hamesha exempt.
+    daily_message_limit = models.PositiveIntegerField(null=True, blank=True)
 
     # Fast count ke liye (signal se update karo, query se mat gino)
     members_count = models.PositiveIntegerField(default=0)
@@ -310,6 +335,28 @@ class Message(BaseModel):
     # expire nahi hoga (duration "none" thi jab bheja gaya tha).
     expires_at = models.DateTimeField(null=True, blank=True, db_index=True)
 
+    # 🔥 NAYA — Message pin. Ek conversation me kai messages pin ho sakte
+    # hain (WhatsApp jaisa max-3 limit `MessageViewSet.pin` action me
+    # enforce hota hai, model pe koi hard limit nahi taaki future me limit
+    # badalna sirf ek jagah, view me, badalna pade). `pinned_by` = kisne
+    # pin kiya — group me sirf admin/mod, private chat me dono me se koi.
+    is_pinned = models.BooleanField(default=False, db_index=True)
+    pinned_at = models.DateTimeField(null=True, blank=True)
+    pinned_by = models.ForeignKey(
+        User, null=True, blank=True, on_delete=models.SET_NULL, related_name='+'
+    )
+
+    # 🔥 NAYA — @mentions. Message text me "@username" likhne par us
+    # conversation ke member(s) resolve karke yahan store karte hain
+    # (`message/mentions.py` ka `extract_mentioned_user_ids` isko fill
+    # karta hai — REST aur WebSocket dono message-send path se). Isse
+    # (a) mention ko highlight karna client-side aasan hota hai (ID pata
+    # hai, sirf regex-guess nahi), aur (b) mentioned user ko alag "you
+    # were mentioned" push bheja ja sakta hai.
+    mentioned_users = models.ManyToManyField(
+        User, blank=True, related_name='mentioned_in_messages'
+    )
+
     class Meta(BaseModel.Meta):
         indexes = [
             models.Index(fields=['conversation', '-created_at']),
@@ -317,6 +364,7 @@ class Message(BaseModel):
             models.Index(fields=['type']),
             models.Index(fields=['reply_to']),
             models.Index(fields=['expires_at']),
+            models.Index(fields=['conversation', 'is_pinned']),
         ]
         constraints = [
             # same sender ek hi client_id do baar submit kare to DB level pe hi block

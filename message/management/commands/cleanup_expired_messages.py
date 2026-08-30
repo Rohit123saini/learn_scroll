@@ -1,75 +1,71 @@
-# chat/management/commands/cleanup_expired_messages.py
+# message/management/commands/cleanup_expired_messages.py
 #
-# 🔥 NAYA — Temporary chat (disappearing messages) ka actual cleanup.
-# `expires_at` set karne se message list se chhup to jaata hai (views.py
-# me query filter hai), lekin DB me row/media pada rehta hai. Ye command
-# expire ho chuke messages ko hard-delete karta hai (media ke saath, kyunki
-# `Message` delete hote hi `Presentation`/`GroupMedia`/`MessageStatus`/
-# `MessageReaction` sab CASCADE se apne aap delete ho jaate hain).
+# 🔥 NAYA — models.py aur views.py ke comments me is command ka zikr tha
+# ("hard delete cleanup ke liye alag se `cleanup_expired_messages` command
+# chalta hai") lekin ye file uploaded files me kahin nahi thi — disappearing
+# messages ka sirf "half" implement tha: expiry snapshot save ho raha tha
+# aur expired messages GET response se hide ho rahe the, par unhe DB se
+# hata kar actually "disappear" karne wala hissa missing tha. Ye command
+# wahi kaam poora karta hai.
 #
-# Chalane ka tareeka (cron ya celery beat se, roz ek baar kaafi hai):
-#   python manage.py cleanup_expired_messages
+# USAGE (cron ya Celery beat se schedule karo, e.g. har 15 min):
+#     python manage.py cleanup_expired_messages
+#     python manage.py cleanup_expired_messages --batch-size 500 --dry-run
 #
-# Celery beat schedule example (settings.py me):
-#   CELERY_BEAT_SCHEDULE = {
-#       "cleanup-expired-messages": {
-#           "task": "chat.tasks.cleanup_expired_messages_task",
-#           "schedule": crontab(hour=3, minute=0),  # roz raat 3 baje
-#       },
-#   }
+# Batches me delete karta hai taaki ek call me lakhon rows pe DB lock na
+# lage (WhatsApp-scale chat app me ye table sabse bada hota hai).
+
+import logging
 
 from django.core.management.base import BaseCommand
 from django.db import transaction
 from django.utils import timezone
 
-from chat.models import Conversation, Message
+from message.models import Message
+
+logger = logging.getLogger(__name__)
 
 
 class Command(BaseCommand):
-    help = "Disappearing-messages jinki expiry nikal chuki hai unhe hard-delete karta hai."
+    help = "Disappearing-messages ki expiry nikal chuki Message rows ko hard-delete karta hai."
 
     def add_arguments(self, parser):
         parser.add_argument(
-            '--batch-size', type=int, default=500,
-            help="Ek baar me kitne messages delete karne hain (default 500) — bada dataset pe DB lock lambe time ke liye na pakde isliye chunks me delete karte hain.",
+            '--batch-size', type=int, default=1000,
+            help="Ek iteration me max kitne messages delete karne hain (default: 1000).",
+        )
+        parser.add_argument(
+            '--dry-run', action='store_true',
+            help="Kuch delete mat karo, sirf count batao.",
         )
 
     def handle(self, *args, **options):
         batch_size = options['batch_size']
+        dry_run = options['dry_run']
         now = timezone.now()
-        total_deleted = 0
-        touched_conversations = set()
 
+        base_qs = Message.objects.filter(expires_at__isnull=False, expires_at__lte=now)
+        total = base_qs.count()
+
+        if total == 0:
+            self.stdout.write(self.style.SUCCESS("Koi expired message nahi mila."))
+            return
+
+        if dry_run:
+            self.stdout.write(f"{total} expired message(s) milein — dry-run hai, delete nahi kiya.")
+            return
+
+        deleted_total = 0
+        # `.delete()` sabhi matching rows ek saath uthata hai isliye chunk
+        # karne ke liye id-batch nikal ke alag-alag delete calls karte hain.
         while True:
-            expired_ids = list(
-                Message.objects.filter(expires_at__lte=now)
-                .values_list('id', flat=True)[:batch_size]
-            )
-            if not expired_ids:
+            ids = list(base_qs.values_list('id', flat=True)[:batch_size])
+            if not ids:
                 break
-
             with transaction.atomic():
-                touched_conversations.update(
-                    Message.objects.filter(id__in=expired_ids)
-                    .values_list('conversation_id', flat=True).distinct()
-                )
-                deleted_count, _ = Message.objects.filter(id__in=expired_ids).delete()
+                deleted_count, _ = Message.objects.filter(id__in=ids).delete()
+            deleted_total += len(ids)
+            self.stdout.write(f"Deleted batch of {len(ids)} message(s)...")
 
-            total_deleted += deleted_count
-
-        # 🔥 Jin conversations me delete hua wahan `last_message_*` denormalized
-        # fields ko sabse latest bache hue message se refresh kar do, warna
-        # chat list me delete ho chuka message hi "last message" dikhta rahega.
-        for conversation in Conversation.objects.filter(id__in=touched_conversations):
-            latest = conversation.all_messages.order_by('-created_at').first()
-            conversation.last_message_text = (latest.text or '')[:500] if latest else ''
-            conversation.last_message_at = latest.created_at if latest else None
-            conversation.last_message_sender = latest.sender if latest else None
-            conversation.last_message_type = latest.type if latest else None
-            conversation.save(update_fields=[
-                'last_message_text', 'last_message_at', 'last_message_sender', 'last_message_type',
-            ])
-
-        self.stdout.write(self.style.SUCCESS(
-            f"{total_deleted} expired message(s) delete ho gaye ({len(touched_conversations)} conversation(s) me)."
-        ))
+        logger.info("cleanup_expired_messages: deleted %s expired message(s)", deleted_total)
+        self.stdout.write(self.style.SUCCESS(f"Total {deleted_total} expired message(s) delete ho gaye."))

@@ -145,6 +145,9 @@ class MessageSerializer(serializers.ModelSerializer):
     reply_to_detail = ReplyPreviewSerializer(source='reply_to', read_only=True)
     reactions = MessageReactionSerializer(source='all_reactions', many=True, read_only=True)
     is_read_by_me = serializers.SerializerMethodField()
+    # 🔥 NAYA — pin info (kisne pin kiya, dikhane ke liye) + @mentions.
+    pinned_by = UserMiniSerializer(read_only=True)
+    mentioned_users = UserMiniSerializer(many=True, read_only=True)
 
     class Meta:
         model = Message
@@ -153,11 +156,13 @@ class MessageSerializer(serializers.ModelSerializer):
             'file_url', 'file_urls', 'thumbnail_url', 'meta',
             'reply_to', 'reply_to_detail', 'is_edited', 'is_forwarded',
             'is_system_message', 'deleted_for_everyone', 'client_id',
-            'reactions', 'is_read_by_me', 'created_at', 'updated_at',
+            'reactions', 'is_read_by_me', 'is_pinned', 'pinned_at', 'pinned_by',
+            'mentioned_users', 'created_at', 'updated_at',
         ]
         read_only_fields = [
             'id', 'conversation', 'sender', 'is_edited', 'is_forwarded',
-            'is_system_message', 'deleted_for_everyone', 'created_at', 'updated_at',
+            'is_system_message', 'deleted_for_everyone', 'is_pinned',
+            'pinned_at', 'pinned_by', 'mentioned_users', 'created_at', 'updated_at',
         ]
 
     def get_is_read_by_me(self, obj):
@@ -177,6 +182,34 @@ class MessageSerializer(serializers.ModelSerializer):
         return data
 
 
+# 🔥 NAYA — global search (`ConversationViewSet.search_all`) ke results
+# ke liye. `MessageSerializer` jaisa hi hai, bas ek chhota `conversation_
+# preview` add karta hai taaki result list me "ye message KIS chat me
+# mila" bhi pata chale — single-conversation search
+# (`ConversationViewSet.search`) me ye zaroorat nahi (conversation to
+# request se hi pata hai), isliye wahan plain `MessageSerializer` hi use
+# hota hai.
+class MessageSearchResultSerializer(MessageSerializer):
+    conversation_preview = serializers.SerializerMethodField()
+
+    class Meta(MessageSerializer.Meta):
+        fields = MessageSerializer.Meta.fields + ['conversation_preview']
+
+    def get_conversation_preview(self, obj):
+        conversation = obj.conversation
+        if conversation.type == ConversationType.GROUP:
+            detail = getattr(conversation, 'group_detail', None)
+            name = detail.name if detail else None
+            photo = detail.photo_url if detail else None
+        else:
+            request = self.context.get('request')
+            other = conversation.memberships.exclude(user=request.user).select_related('user').first() \
+                if request else None
+            name = get_display_name(other.user) if other else None
+            photo = get_profile_photo_url(other.user, request=request) if other else None
+        return {'type': conversation.type, 'name': name, 'photo_url': photo}
+
+
 class MessageCreateSerializer(serializers.ModelSerializer):
     """Naya message bhejne ke liye (REST fallback — realtime delivery websocket se hoti hai)."""
 
@@ -188,11 +221,30 @@ class MessageCreateSerializer(serializers.ModelSerializer):
         ]
         read_only_fields = ['id']
 
+    # Message types that carry a file/media and need somewhere to point to
+    # it. LOCATION and SYSTEM/STUDY_ROOM messages carry their payload in
+    # `meta`/`text` instead, so they're excluded here.
+    _MEDIA_TYPES = (
+        MessageType.IMAGE, MessageType.VIDEO, MessageType.AUDIO,
+        MessageType.FILE, MessageType.PRESENTATION,
+    )
+
     def validate(self, attrs):
         msg_type = attrs.get('type', MessageType.TEXT)
         text = attrs.get('text')
         if msg_type == MessageType.TEXT and not (text and text.strip()):
             raise serializers.ValidationError("Text message ke liye 'text' field required hai.")
+
+        # 🔥 FIX — image/video/audio/file/presentation messages had no
+        # requirement to actually carry a `file_url` (or `file_urls` for
+        # multi-image). Nothing stopped a client from posting a media
+        # message with no file attached, which then rendered as a blank/
+        # broken attachment for every recipient with no way to tell what
+        # went wrong.
+        if msg_type in self._MEDIA_TYPES and not (attrs.get('file_url') or attrs.get('file_urls')):
+            raise serializers.ValidationError(
+                f"'{msg_type}' message ke liye 'file_url' ya 'file_urls' required hai."
+            )
         return attrs
 
 
@@ -231,6 +283,10 @@ class GroupSerializer(serializers.ModelSerializer):
             'id', 'conversation_id', 'name', 'description', 'photo_url',
             'created_by', 'invite_code', 'is_private', 'members_count',
             'messages_count', 'members', 'created_at',
+            # 🔥 NAYA — group_profile_screen.dart ke access-control sheet
+            # ke liye (message/call/study-room permission + daily limit).
+            'message_permission', 'call_permission', 'study_room_permission',
+            'daily_message_limit',
         ]
         read_only_fields = [
             'id', 'conversation_id', 'created_by', 'invite_code',
