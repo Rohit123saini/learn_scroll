@@ -1,3 +1,11 @@
 .env
 db.sqlite3
 firebase-service-account.json
+/media
+media/
+staticfiles/
+db.sqlite3
+__pycache__/
+*.pyc
+celerybeat-schedule.bak
+celerybeat-schedule.dat
