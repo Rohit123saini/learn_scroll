@@ -901,16 +901,26 @@ def _has_room_access_no_pass(classroom, user) -> bool:
     """Who gets into the room WITHOUT needing a pass, beyond the teacher
     (Classroom.has_access already covers teacher + valid PassPurchase).
 
-    Organisation classrooms: ANY staff row (TA included) is the
-    organisation's own staff, not a paying student — they shouldn't need to
-    buy a pass to enter their own org's class. Individual (solo teacher)
-    classrooms keep the tighter rule: only CO_TEACHER/MODERATOR get
-    host-tier treatment (see _resolve_session_roles); a plain TA on an
-    individual classroom still needs a pass like any student.
+    CO_TEACHER/MODERATOR are host-tier staff on ANY classroom type — this
+    must match _can_manage_classroom()'s ADMIN grant (which _access_level
+    already hands out on any classroom type), otherwise my-pass's
+    can_enter_class lies to the frontend for a co-teacher/moderator on an
+    individual classroom: it shows "Enter Class" but the actual join()/
+    token() gate below used to reject them, since this function used to
+    bail out to False for anything not ORGANISATION before ever looking at
+    the staff role.
+
+    Plain TA stays the tighter, org-only rule: they're the organisation's
+    own staff (not a paying student) on an ORGANISATION classroom, but on
+    an INDIVIDUAL (solo teacher) classroom a plain TA still needs a pass
+    like any student.
     """
-    if classroom.classroom_type != Classroom.ClassroomType.ORGANISATION:
+    staff_role = _org_staff_role(classroom, user)
+    if staff_role is None:
         return False
-    return _org_staff_role(classroom, user) is not None
+    if staff_role in (ClassroomStaff.Role.CO_TEACHER, ClassroomStaff.Role.MODERATOR):
+        return True
+    return classroom.classroom_type == Classroom.ClassroomType.ORGANISATION
 
 
 def _has_room_access(classroom, user) -> bool:

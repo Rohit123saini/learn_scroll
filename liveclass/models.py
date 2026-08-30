@@ -527,28 +527,25 @@ class ClassSession(models.Model):
         return f"{self.classroom.title} @ {self.scheduled_start:%d-%b-%Y %H:%M}"
 
     def is_joinable(self, is_host: bool = False) -> bool:
-        """Allow joining a bit before start till the class ends.
+        """Allow joining as long as the session itself is still a live
+        occurrence (not explicitly ended/cancelled).
 
-        NOTE (fix): the time-window check below is meant for STUDENTS —
-        a student shouldn't be able to open a class that hasn't started or
-        has already finished. It was previously applied to EVERY caller,
-        including the classroom's own teacher/co-teacher/moderator, which
-        meant a host running a few minutes late (past scheduled_end) or
-        starting early got the exact same "not joinable right now" 400 as
-        anyone else — locked out of their own class. A host may still enter
-        as long as the session itself hasn't been explicitly ended/cancelled
-        (status check still applies to everyone); only the time-window is
-        skipped for is_host=True. Callers resolve is_host via
-        _resolve_session_roles()/SessionParticipant.Role.HOST before calling
-        this.
+        NOTE (fix — time-window entry restriction removed): this used to
+        block a student from entering more than 10 minutes before
+        scheduled_start or after scheduled_end, and only exempted the
+        host/staff from that window. Product decision: everyone should be
+        able to open the room at any time while the session is still
+        SCHEDULED/LIVE — a student arriving early or a bit late should
+        still get in, not a "not joinable right now" wall. The actual
+        scheduled_start/scheduled_end are still sent to the client on
+        every session payload (ClassSessionSerializer), so the frontend
+        can show "Session starts at <local time>" / "Scheduled to end at
+        <local time>" as an informational banner instead of a hard block.
+        `is_host` is kept as a parameter (unused now) so existing call
+        sites (_perform_join, ClassSessionViewSet.join()) don't need to
+        change their calls.
         """
-        if self.status not in (self.Status.SCHEDULED, self.Status.LIVE):
-            return False
-        if is_host:
-            return True
-        buffer = timezone.timedelta(minutes=10)
-        now = timezone.now()
-        return self.scheduled_start - buffer <= now <= self.scheduled_end
+        return self.status in (self.Status.SCHEDULED, self.Status.LIVE)
 
 
 # ---------------------------------------------------------------------------
