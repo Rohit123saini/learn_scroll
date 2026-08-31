@@ -35,6 +35,7 @@ they created):
 
 import logging
 import uuid
+from decimal import ROUND_HALF_UP, Decimal
 
 from django.core.cache import cache
 from django.core.exceptions import ValidationError
@@ -251,6 +252,45 @@ class Classroom(models.Model):
         default=0, help_text="Total number of times this classroom has been shared, any channel."
     )
 
+    # ---------------------------------------------------------------------
+    # FEATURE (refer & earn — class-level referral commission): distinct
+    # from the flat, one-time signup Referral model below (13B) — that one
+    # pays a fixed bonus for bringing a brand-new USER onto the platform.
+    # This one pays out on a per-CLASSROOM basis, ongoing, for as long as
+    # the referred student's pass keeps getting charged.
+    #
+    # Off by default and fully opt-in per classroom: the teacher turns it
+    # on and sets the cut (see referral_commission_percent) from their own
+    # classroom settings (ClassroomSerializer exposes both as normal
+    # writable fields, gated by the existing "only the teacher can edit
+    # this classroom" check in ClassroomViewSet.perform_update — no new
+    # endpoint needed for that half). Once on, ClassroomViewSet.refer_link
+    # (views.py) hands out a shareable link to ANY authenticated user —
+    # reusing the same referral_code_for_user()/referral_code_to_user_id()
+    # helpers the signup-referral feature already has (13B below), just
+    # combined with this classroom's id in the link instead of a bare
+    # code. See ClassJoinRequest.referred_by for how that link is turned
+    # back into an attributed purchase, and PassPurchase.charge_for_session
+    # for how the actual coins get paid out.
+    # ---------------------------------------------------------------------
+    referral_enabled = models.BooleanField(
+        default=False,
+        help_text=(
+            "When on, any authenticated user can generate a shareable referral link for this "
+            "classroom (see classrooms/{id}/refer-link/) and earn a daily commission on any "
+            "pass purchase that comes in through it."
+        ),
+    )
+    referral_commission_percent = models.DecimalField(
+        max_digits=5, decimal_places=2, default=0,
+        validators=[MinValueValidator(0), MaxValueValidator(100)],
+        help_text=(
+            "% of each day's released class-earning charge (see PassPurchase.charge_for_session) "
+            "that also gets paid to whoever referred the student, on top of the teacher's own "
+            "share — not deducted from it. Only takes effect while referral_enabled=True."
+        ),
+    )
+
     is_active = models.BooleanField(default=True)
 
     # ---------------------------------------------------------------------
@@ -299,7 +339,7 @@ class Classroom(models.Model):
             # cost once the platform has thousands. A trigram GIN index lets
             # Postgres use an index scan for icontains/substring matches
             # instead. Requires the `pg_trgm` extension (enabled via a
-            # migration — see migrations/0012_trigram_search_indexes.py in
+            # migration — see migrations/0XXX_trigram_search_indexes.py in
             # the same change) and Postgres as the DB backend; this index is
             # silently ignored (not an error) on any other backend, so it's
             # safe to leave in Meta.indexes even if a non-Postgres DB is
@@ -510,6 +550,20 @@ class Classroom(models.Model):
         deep_link = f"{deep_link_scheme}://classroom/{self.id}"
         return web_url, deep_link
 
+    def referral_urls(self, referrer: User) -> tuple[str, str]:
+        """(web_url, deep_link) variants of share_urls() above, tagged with
+        `referrer`'s referral code as a `?ref=` param — used by
+        ClassroomViewSet.refer_link, and read back by
+        ClassJoinRequestViewSet.perform_create (via referral_code_to_user_id)
+        to attribute the resulting join request/purchase to `referrer`. Only
+        meaningful while referral_enabled=True; callers are responsible for
+        that check (this method doesn't raise on it, so it stays cheap and
+        side-effect-free to call from anywhere, including a notification
+        template)."""
+        web_url, deep_link = self.share_urls()
+        code = referral_code_for_user(referrer.id)
+        return f"{web_url}?ref={code}", f"{deep_link}?ref={code}"
+
 
 # ---------------------------------------------------------------------------
 # 2. SCHEDULE (recurrence rule -> generates ClassSession rows)
@@ -613,6 +667,22 @@ class ClassSession(models.Model):
     # recording.
     egress_id = models.CharField(max_length=64, blank=True)
     whiteboard_snapshot = models.JSONField(null=True, blank=True)
+
+    # FEATURE (captions, scaffolding only — see tasks.transcribe_recording):
+    # once recording_url is filled in by the egress webhook above, a
+    # transcription job can be queued against that file. This just holds
+    # the job's state/result — the actual speech-to-text provider call is
+    # a stub (see tasks.py) pending a provider decision (AWS Transcribe /
+    # Google STT / Whisper API are all drop-in candidates here since none
+    # of this model cares which one produced caption_url).
+    class CaptionStatus(models.TextChoices):
+        NONE = "none", "Not Requested"
+        PROCESSING = "processing", "Processing"
+        READY = "ready", "Ready"
+        FAILED = "failed", "Failed"
+
+    caption_status = models.CharField(max_length=12, choices=CaptionStatus.choices, default=CaptionStatus.NONE)
+    caption_url = models.URLField(blank=True)  # points at a .vtt/.srt file once READY
 
     created_at = models.DateTimeField(auto_now_add=True)
 
@@ -767,10 +837,51 @@ class PassPurchase(models.Model):
     per_day_rate = models.DecimalField(max_digits=8, decimal_places=4, default=0)
     coins_released = models.PositiveIntegerField(default=0)
     last_charge_date = models.DateField(null=True, blank=True)
+    # NOTE (visibility fix): once reverse() runs, remaining_balance drops to
+    # 0 immediately (that coin has already moved to the student's wallet) —
+    # so "how much did I actually get refunded?" became unanswerable from
+    # the purchase row after the fact, only reconstructable by cross-
+    # referencing CoinTransaction.reference_id. Snapshot it here instead so
+    # a student's purchase-history card can show the number directly.
+    refunded_amount = models.PositiveIntegerField(default=0)
+    refunded_at = models.DateTimeField(null=True, blank=True)
+
+    # -----------------------------------------------------------------
+    # FEATURE (refer & earn): the same per-day escrow release that pays
+    # the teacher (see charge_for_session below) also pays a commission
+    # to whoever referred this student — IF they came in through a
+    # referral link and the classroom had referrals on at accept()-time.
+    # Set once, at purchase-creation time, from ClassJoinRequest.referred_by
+    # + Classroom.referral_commission_percent — see
+    # _charge_and_create_purchase in views.py.
+    #
+    #   referred_by                 — who gets the commission. Null =
+    #                                  no referral on this purchase.
+    #   referral_commission_percent — snapshot of the classroom's rate at
+    #                                  purchase time, same "frozen so a
+    #                                  later settings change never
+    #                                  retroactively changes an existing
+    #                                  purchase" reasoning as per_day_rate.
+    #   referral_per_day_rate       — per_day_rate's cut, at that snapshot
+    #                                  percent, pre-computed so
+    #                                  charge_for_session doesn't have to
+    #                                  redo the percentage math every day.
+    #   referral_coins_released     — running total already paid to the
+    #                                  referrer, mirrors coins_released.
+    # -----------------------------------------------------------------
+    referred_by = models.ForeignKey(
+        User, on_delete=models.SET_NULL, null=True, blank=True, related_name="referred_purchases",
+    )
+    referral_commission_percent = models.DecimalField(max_digits=5, decimal_places=2, default=0)
+    referral_per_day_rate = models.DecimalField(max_digits=8, decimal_places=4, default=0)
+    referral_coins_released = models.PositiveIntegerField(default=0)
 
     class Meta:
         ordering = ["-purchased_at"]
-        indexes = [models.Index(fields=["student", "status", "expires_at"])]
+        indexes = [
+            models.Index(fields=["student", "status", "expires_at"]),
+            models.Index(fields=["referred_by"]),
+        ]
 
     def __str__(self):
         return f"{self.student} - {self.class_pass} (expires {self.expires_at:%d-%b-%Y})"
@@ -793,6 +904,26 @@ class PassPurchase(models.Model):
         walks away with what they've actually earned one class at a time
         (coins_released), never with days nobody taught."""
         return max(int(self.coins_spent) - int(self.coins_released), 0)
+
+    @property
+    def referral_total_amount(self) -> int:
+        """Lifetime commission cap for this purchase's referral — the same
+        proportion of coins_spent that referral_per_day_rate is of
+        per_day_rate, so the referrer's total never exceeds
+        referral_commission_percent of what the student actually paid,
+        no matter how many days end up being charged."""
+        if not self.referred_by_id or not self.referral_commission_percent:
+            return 0
+        return int(
+            (Decimal(self.coins_spent) * self.referral_commission_percent / 100)
+            .to_integral_value(rounding=ROUND_HALF_UP)
+        )
+
+    @property
+    def referral_remaining_balance(self) -> int:
+        """Mirrors remaining_balance, but for the referral commission
+        escrow — how much is still left to release to the referrer."""
+        return max(self.referral_total_amount - int(self.referral_coins_released), 0)
 
     def charge_for_session(self, session: "ClassSession") -> "PassDailyCharge | None":
         """Release this purchase's per-day charge to the teacher for the
@@ -862,7 +993,48 @@ class PassPurchase(models.Model):
 
         self.coins_released = min(self.coins_released + charge.amount, self.coins_spent)
         self.last_charge_date = charge_date
-        self.save(update_fields=["coins_released", "last_charge_date"])
+        update_fields = ["coins_released", "last_charge_date"]
+
+        # -------------------------------------------------------------
+        # FEATURE (refer & earn): same day, same trigger, separate payout
+        # — the referrer's cut is NOT taken out of charge.amount (the
+        # teacher gets their full per-day release regardless of whether
+        # this purchase was referred), it's an additional platform-funded
+        # credit sized off referral_per_day_rate. Only fires once per
+        # date thanks to the `created` guard above (this whole block is
+        # already inside the `if not created: return charge` early-out),
+        # and only while there's still commission left in
+        # referral_remaining_balance — a purchase that's already paid out
+        # its full referral_total_amount (e.g. every validity day ended
+        # up chargeable) simply stops crediting the referrer from here on,
+        # same "capped, never over-released" contract remaining_balance
+        # already gives the teacher's side.
+        # -------------------------------------------------------------
+        if self.referred_by_id and self.referral_remaining_balance > 0:
+            referral_amount = min(
+                int(self.referral_per_day_rate.to_integral_value(rounding="ROUND_HALF_UP")),
+                self.referral_remaining_balance,
+            )
+            if referral_amount > 0:
+                referrer = type(self.referred_by).objects.select_for_update().get(pk=self.referred_by_id)
+                referrer.coin += referral_amount
+                referrer.save(update_fields=["coin"])
+                CoinTransaction.objects.create(
+                    user=referrer,
+                    txn_type=CoinTransaction.TxnType.CREDIT,
+                    reason=CoinTransaction.Reason.CLASS_REFERRAL_COMMISSION,
+                    amount=referral_amount,
+                    balance_after=referrer.coin,
+                    reference_id=f"passpurchase:{self.id}:referral:day:{charge_date.isoformat()}",
+                )
+                self.referral_coins_released = min(
+                    self.referral_coins_released + referral_amount, self.referral_total_amount
+                )
+                update_fields.append("referral_coins_released")
+                charge.referral_amount = referral_amount
+                charge.save(update_fields=["referral_amount"])
+
+        self.save(update_fields=update_fields)
         return charge
 
     def sync_missed_charges(self) -> int:
@@ -933,7 +1105,9 @@ class PassPurchase(models.Model):
 
         self.status = self.Status.REFUNDED
         self.is_active = False
-        self.save(update_fields=["status", "is_active"])
+        self.refunded_amount = refund
+        self.refunded_at = timezone.now()
+        self.save(update_fields=["status", "is_active", "refunded_amount", "refunded_at"])
 
         # NOTE (fix — coupon slot permanently burned by an unused pass):
         # _charge_and_create_purchase() increments Coupon.used_count the
@@ -986,6 +1160,12 @@ class PassDailyCharge(models.Model):
     )
     date = models.DateField()
     amount = models.PositiveIntegerField()
+    # FEATURE (refer & earn): commission paid to purchase.referred_by for
+    # this same date, alongside `amount` going to the teacher — 0 when the
+    # purchase wasn't referred, or once its referral commission is fully
+    # released. Kept on this same ledger row rather than a parallel table
+    # since it's the same trigger, same date, same idempotency guard.
+    referral_amount = models.PositiveIntegerField(default=0)
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
@@ -1026,6 +1206,18 @@ class ClassJoinRequest(models.Model):
     coupon_code = models.CharField(max_length=30, blank=True)
     message = models.CharField(
         max_length=255, blank=True, help_text="Optional note from the student to the teacher."
+    )
+
+    # FEATURE (refer & earn): who the student's ?ref= code resolved to when
+    # they raised this request — see ClassJoinRequestViewSet.perform_create,
+    # which decodes it via referral_code_to_user_id() and only sets this at
+    # all when the classroom had referral_enabled=True at request time.
+    # Carried onto the resulting PassPurchase (see referred_by there) by
+    # accept() so the actual per-day commission has something to key off;
+    # SET_NULL rather than CASCADE so a referrer's account being deleted
+    # later doesn't take the join-request/purchase history down with it.
+    referred_by = models.ForeignKey(
+        User, on_delete=models.SET_NULL, null=True, blank=True, related_name="referred_join_requests",
     )
 
     status = models.CharField(max_length=10, choices=Status.choices, default=Status.PENDING)
@@ -1415,6 +1607,13 @@ class CoinTransaction(models.Model):
         PASS_PURCHASE = "pass_purchase", "Pass Purchase"
         CLASS_EARNING = "class_earning", "Class Earning"
         REFERRAL_BONUS = "referral_bonus", "Referral Bonus"
+        # FEATURE (refer & earn — class-level, see Classroom.referral_enabled
+        # above): distinct from REFERRAL_BONUS, which is a flat one-time
+        # payout for bringing a brand-new USER onto the platform (see the
+        # Referral model, 13B below). This one is the ongoing, per-day cut
+        # of a specific classroom's escrow release — see
+        # PassPurchase.charge_for_session.
+        CLASS_REFERRAL_COMMISSION = "class_referral_commission", "Class Referral Commission"
         REFUND = "refund", "Refund"
         ADMIN_ADJUSTMENT = "admin_adjustment", "Admin Adjustment"
         TOPUP = "topup", "Wallet Top-up"
@@ -1436,6 +1635,92 @@ class CoinTransaction(models.Model):
 
     def __str__(self):
         return f"{self.user} {self.txn_type} {self.amount} ({self.reason})"
+
+
+# ---------------------------------------------------------------------------
+# 13A2. COIN PURCHASE (real-money -> coin top-up)
+#
+# GAP THIS CLOSES: CoinTransaction.Reason.TOPUP has existed as an enum
+# choice since the ledger was first written, but nothing anywhere ever
+# created one — there was no payment gateway integration, no order/verify
+# flow, and critically no way to RETRY a failed top-up (a student whose
+# payment failed had no recovery path except contacting support). This is
+# that missing feature: a gateway-agnostic order -> verify -> credit flow,
+# modeled closely on how Razorpay/similar Indian PGs work (order created
+# server-side, client completes payment, gateway posts a signed
+# confirmation back), but the actual `_verify_signature`/`_create_order`
+# calls are provider stubs — wire in real Razorpay/Cashfree/etc. keys via
+# settings before going live (see CoinPurchaseViewSet in views.py).
+# ---------------------------------------------------------------------------
+class CoinPurchase(models.Model):
+    class Status(models.TextChoices):
+        PENDING = "pending", "Pending"
+        SUCCESS = "success", "Success"
+        FAILED = "failed", "Failed"
+
+    user = models.ForeignKey(User, on_delete=models.CASCADE, related_name="coin_purchases")
+    coins = models.PositiveIntegerField()
+    amount_inr = models.DecimalField(max_digits=8, decimal_places=2)
+    status = models.CharField(max_length=10, choices=Status.choices, default=Status.PENDING)
+
+    # Gateway-side identifiers. order_id is ours (created up front, always
+    # present); gateway_payment_id/gateway_signature only get filled in once
+    # the client actually completes payment and we verify it.
+    order_id = models.CharField(max_length=100, unique=True)
+    gateway_payment_id = models.CharField(max_length=100, blank=True)
+    gateway_signature = models.CharField(max_length=255, blank=True)
+
+    # NOTE: a FAILED purchase is never mutated back to PENDING/SUCCESS —
+    # retrying creates a brand-new CoinPurchase row (new order_id) that
+    # points back here, so the failure stays on the record instead of
+    # being overwritten. See CoinPurchaseViewSet.retry in views.py.
+    retry_of = models.ForeignKey(
+        "self", on_delete=models.SET_NULL, null=True, blank=True, related_name="retries"
+    )
+    failure_reason = models.CharField(max_length=255, blank=True)
+
+    created_at = models.DateTimeField(auto_now_add=True)
+    verified_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+        indexes = [models.Index(fields=["user", "status", "-created_at"])]
+
+    def __str__(self):
+        return f"{self.user} - {self.coins} coins ({self.get_status_display()})"
+
+    def mark_success(self, gateway_payment_id: str, gateway_signature: str) -> None:
+        """Credits the wallet exactly once. Idempotent by construction: a
+        gateway webhook can legitimately fire more than once for the same
+        payment (retries on their side, or the client's own verify call
+        racing a webhook) — only ever act if this row is still PENDING,
+        inside a row lock, so a duplicate call is a safe no-op rather than
+        a double-credit."""
+        if self.status != self.Status.PENDING:
+            return
+        user = type(self.user).objects.select_for_update().get(pk=self.user_id)
+        user.coin += self.coins
+        user.save(update_fields=["coin"])
+        CoinTransaction.objects.create(
+            user=user,
+            txn_type=CoinTransaction.TxnType.CREDIT,
+            reason=CoinTransaction.Reason.TOPUP,
+            amount=self.coins,
+            balance_after=user.coin,
+            reference_id=f"coinpurchase:{self.id}",
+        )
+        self.status = self.Status.SUCCESS
+        self.gateway_payment_id = gateway_payment_id
+        self.gateway_signature = gateway_signature
+        self.verified_at = timezone.now()
+        self.save(update_fields=["status", "gateway_payment_id", "gateway_signature", "verified_at"])
+
+    def mark_failed(self, reason: str = "") -> None:
+        if self.status != self.Status.PENDING:
+            return
+        self.status = self.Status.FAILED
+        self.failure_reason = reason[:255]
+        self.save(update_fields=["status", "failure_reason"])
 
 
 # ---------------------------------------------------------------------------
@@ -1844,6 +2129,12 @@ class ClassReminder(models.Model):
         PUSH = "push", "Push Notification"
         SMS = "sms", "SMS"
         EMAIL = "email", "Email"
+        # NOTE (Pass 7): WhatsApp is India's highest-open-rate channel —
+        # added the moment notifications.py actually had a working
+        # _send_whatsapp sender behind it (see that file). No migration
+        # concern here beyond the usual new-choice-value one: existing
+        # rows keep whatever channel they were created with.
+        WHATSAPP = "whatsapp", "WhatsApp"
 
     session = models.ForeignKey(ClassSession, on_delete=models.CASCADE, related_name="reminders")
     user = models.ForeignKey(User, on_delete=models.CASCADE, related_name="class_reminders")

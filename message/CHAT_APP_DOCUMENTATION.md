@@ -32,22 +32,23 @@ Auth model: `AUTH_USER_MODEL` is a **custom `User`** (app `login`), primary key 
 | `user_display.py` | Shared display-name / profile-photo-URL helper (REST + WS) |
 | `upload_view.py` | Generic file-upload endpoint (returns a URL to attach to a message) |
 | `ai_service.py` | Gemini calls for whiteboard summary/quiz (with caching) |
-| `views_ai.py` | REST endpoint wrapping `ai_service.py` |
-| `media_utils.py` *(NEW)* | `create_group_media_for_message(message)` — populates the `GroupMedia` gallery table; shared by REST + WS message-send |
-| `constants.py` *(NEW)* | Single shared source for cross-file constants (currently `MAX_PINNED_PER_CONVERSATION`) |
+| `views_ai.py` | REST endpoints wrapping `ai_service.py` (`AiStudyRoomView`) + voice-message transcription (`VoiceTranscribeView`) |
+| `media_utils.py` | `create_group_media_for_message(message)` — populates the `GroupMedia` gallery table; shared by REST + WS message-send |
+| `constants.py` | Single shared source for cross-file constants (currently `MAX_PINNED_PER_CONVERSATION`) |
+| `cache_utils.py` | Django-cache helpers: group-role cache (`get_group_role_cached`/`invalidate_group_role_cache`, 60s TTL) behind `group_rules.is_group_admin_or_mod`, and presence cache (`get_presence_cached`/`set_presence_cache`, 15s TTL) behind `UserPresenceView` + `ChatConsumer` |
+| `throttles.py` | DRF `UserRateThrottle` subclasses for REST writes (`MessageSendThrottle`, `CallInitiateThrottle`, `GroupCreateThrottle`, `ReactionThrottle`) + `WSMessageRateLimiter` (cache-backed sliding window) for the WS `message` event, since DRF throttles don't apply to Channels consumers |
+| `scheduled_messages.py` | "Send later" delivery half — `finalize_scheduled_message(message)`, called by a `send_scheduled_messages` management command (cron/Celery-beat) |
 | `admin.py` | Django admin registrations |
 | `apps.py` | App config (`name = 'message'`) |
 
-**⚠️ Note on `urls.py`:** the uploaded `urls.py` file's content was actually a duplicate of
-`Middleware.py` (upload mistake) — the *real* URL routing file was never seen. This doc
-assumes `ConversationViewSet`, `MessageViewSet`, `GroupViewSet`, `BlockedUserViewSet`,
-`CallHistoryViewSet` are registered on a DRF `DefaultRouter`/`SimpleRouter` (this is
-required for the `@action`-based URLs below to resolve, and matches all evidence in
-`views.py`), and that `CallInitiateView`, `CallActionView`, `StudyRoomJoinView`,
-`StudyRoomStateView`, `DeviceTokenView`, `AiStudyRoomView`, `MessageUploadAPIView`,
-`UserPresenceView` are wired as plain `path()` entries. **Get the real `urls.py` from the
-project before assuming exact URL prefixes** — endpoint paths below are given relative to
-wherever the router/paths are mounted (commonly `/message/...`).
+**Note on `urls.py`:** an earlier upload of this file was accidentally a duplicate of
+`Middleware.py`, so this doc used to assume the router/paths rather than confirm them.
+The real `urls.py` has since been reconstructed from `views.py`'s actual class/action
+names — router-registered ViewSets (`ConversationViewSet`, `MessageViewSet`,
+`GroupViewSet`, `BlockedUserViewSet`, `CallHistoryViewSet`) plus plain `path()` entries
+for `UserPresenceView`, `CallInitiateView`, `CallActionView`, `StudyRoomJoinView`,
+`StudyRoomStateView`, `DeviceTokenView`, `AiStudyRoomView`, `VoiceTranscribeView`, and
+`MessageUploadAPIView`. All endpoint paths below are confirmed against it.
 
 ---
 
@@ -198,12 +199,12 @@ max 50).
 | `GET /<id>/` | retrieve | |
 | `POST /start_private/` | `start_private` | body `{"user_id": ...}`. Creates or returns existing 1-1 conversation. 403 if either side has blocked the other. |
 | `PATCH /<id>/settings/` | `update_settings` | Per-user mute/archive/pin. Body = subset of `{is_archived, is_muted, is_pinned}` |
-| `PATCH /<id>/disappearing_messages/` | `disappearing_messages` | Body `{"duration": "..."}`. Group: admin/mod only. Broadcasts `disappearing_messages_updated` to the room (**⚠️ see §9 Known Issues — no consumer handler for this event type**) |
+| `PATCH /<id>/disappearing_messages/` | `disappearing_messages` | Body `{"duration": "..."}`. Group: admin/mod only. Broadcasts `disappearing_messages_updated` to the room (handled by `ChatConsumer.disappearing_messages_updated`, see §8) |
 | `PATCH /<id>/label/` | `update_label` | Per-user custom chat nickname. Empty string clears it. Max 100 chars |
 | `POST /bulk_delete/` | `bulk_delete` | Body `{"conversation_ids": [...]}`. "Delete chat" for the requesting user only (sets `left_at`) |
 | `POST /<id>/participants/` | `add_participant_to_conversation` | Groups only. Body `{"user_id": ...}`. Private group: admin/mod only |
 | `GET /<id>/messages/` | `messages` (GET) | Paginated (`MessagePagination`, 30/page, max 100), excludes expired-disappearing messages |
-| `POST /<id>/messages/` | `messages` (POST) | Send a message. See §6 "Message send flow" below |
+| `POST /<id>/messages/` | `messages` (POST) | Send a message. Throttled 60/min/user (`MessageSendThrottle`). See §6 "Message send flow" below |
 | `POST /<id>/read_all/` | `read_all` | Bulk-mark all messages read + `unread_count = 0` |
 | `GET /<id>/search/` *(NEW)* | `search` | `?q=...`, min 2 chars. Text search within this conversation |
 | `GET /search_all/` *(NEW)* | `search_all` | `?q=...`. Global search across every conversation the user is active in. Returns `MessageSearchResultSerializer` (adds `conversation_preview`) |
@@ -251,7 +252,7 @@ Permissions (`get_permissions`):
 | `GET /<id>/` | retrieve | |
 | `PATCH /<id>/` | `partial_update` (edit) | Text messages only, not `deleted_for_everyone`. Sets `is_edited=True` |
 | `DELETE /<id>/?for_everyone=true\|false` | `destroy` | `for_everyone=true`: sender-only, blanks text/file_url, sets `deleted_for_everyone`. Else: adds requester to `deleted_for_users` ("delete for me") |
-| `POST /<id>/react/` `DELETE /<id>/react/` | `react` | Body `{"emoji": "..."}`. One reaction per user (upsert) |
+| `POST /<id>/react/` `DELETE /<id>/react/` | `react` | Body `{"emoji": "..."}`. One reaction per user (upsert). Throttled 120/min/user (`ReactionThrottle`) |
 | `POST /<id>/read/` | `mark_read` | Marks read + decrements `unread_count` |
 | `POST /messages/forward/` | `forward` | Body `{"message_ids": [...], "conversation_ids": [...]}`. Creates NEW `Message` rows (copy, not pointer) with `is_forwarded=True`. Silently drops any message/conversation the user isn't a member of. Excludes expired-disappearing and deleted messages |
 | `POST /<id>/pin/` `DELETE /<id>/pin/` *(NEW)* | `pin` | Group: admin/mod only (via `group_rules.is_group_admin_or_mod`). Private: either participant. Max **3** pinned per conversation (`MAX_PINNED_PER_CONVERSATION`). Broadcasts `pin_event` to the chat room |
@@ -264,10 +265,10 @@ Queryset: groups where the user has a non-banned `GroupMember` row.
 
 | Method & path | Action | Notes |
 |---|---|---|
-| `POST /` | `create` | Uses `GroupCreateSerializer`. Creates `Conversation` + `Group` + creator as admin + given `member_ids` (integers, not UUIDs) |
+| `POST /` | `create` | Uses `GroupCreateSerializer`. Creates `Conversation` + `Group` + creator as admin + given `member_ids` (integers, not UUIDs). Throttled 5/min/user (`GroupCreateThrottle`) |
 | `GET /`, `GET /<id>/` | list/retrieve | |
 | `PATCH /<id>/` | `partial_update` | Admin/mod only (`IsGroupAdminOrModerator`) |
-| `DELETE /<id>/` | `destroy` | **Admin role only** (not moderator). Broadcasts `group_deleted` *before* deleting (**⚠️ see §9 — no consumer handler**), then cascades delete via `Conversation.delete()` |
+| `DELETE /<id>/` | `destroy` | **Admin role only** (not moderator). Broadcasts `group_deleted` *before* deleting (handled by `ChatConsumer.group_deleted`, see §8), then cascades delete via `Conversation.delete()` |
 | `POST /<id>/members/` | `add_members` | Body `{"user_ids": [...]}`. Public group: any member can add. Private group: admin/mod only |
 | `POST /join/` | `join` | Body `{"invite_code": "..."}`. Public: instant join. Private: creates/resets a `GroupJoinRequest` (pending) |
 | `GET /<id>/join-requests/` | `join_requests` | Admin/mod only. Lists pending requests |
@@ -288,12 +289,15 @@ Queryset: groups where the user has a non-banned `GroupMember` row.
   OR the target user's id directly
 
 ### `UserPresenceView` (Retrieve)
-- `GET /presence/<user_id>/` — online/offline + last_seen (auto-creates a `UserPresence`
-  row if missing)
+- `GET /presence/<user_id>/` — online/offline + last_seen. Read-through cached
+  (`cache_utils.get_presence_cached`, 15s TTL) — auto-creates a `UserPresence` row only
+  on a cache miss.
 
 ### Calls
 - `POST /calls/initiate/` (`CallInitiateView`) — body `{"conversation_id", "type":
-  "audio"|"video"}`. Block-check (private) / `call_permission` check (group). Creates
+  "audio"|"video"}`. Throttled 10/min/user (`CallInitiateThrottle` — calls are costlier
+  than a message: an FCM push + a LiveKit room each). Block-check (private) /
+  `call_permission` check (group). Creates
   `CallSession` + `CallParticipant` rows (caller=ongoing, others=ringing). Broadcasts
   `incoming_call` `call_event` + sends `send_incoming_call_push`. Returns caller's
   LiveKit token immediately.
@@ -339,11 +343,21 @@ Queryset: groups where the user has a non-banned `GroupMember` row.
   image/video/audio/presentation/file.
 
 ### AI Study Room (`views_ai.py` → `AiStudyRoomView`)
-- `POST /ai/study-room/` — body `{"mode": "summary"|"quiz", "content": "<whiteboard
+- `POST /ai-study-room/` — body `{"mode": "summary"|"quiz", "content": "<whiteboard
   text, 20–10000 chars>"}`. Throttled 20/min/user (`AiStudyThrottle`). Delegates to
   `ai_service.py` (Gemini, cached 24h by content hash). Returns `{"summary": "..."}` or
   `{"questions": [...]}`. 503 if `AI_ENABLED` is False (Gemini client failed to init),
   500 with a generic message on any other failure (real error is `logger.exception`'d).
+
+### AI Voice-message transcription (`views_ai.py` → `VoiceTranscribeView`)
+- `POST /ai/transcribe/` — body `{"file_url": "<voice message file_url>", "mime_type":
+  "audio/ogg"}`. Throttled 15/min/user (`AiTranscribeThrottle` — tighter than the study
+  room's, since it downloads audio bytes before calling Gemini). Returns
+  `{"transcript": "..."}`. `file_url` is whatever `upload_view.py` returned for an audio
+  upload, or an already-sent voice message's `Message.file_url`. Stateless — doesn't
+  write the transcript back onto the `Message` itself (caller can save it into
+  `Message.meta["transcript"]` if it wants to avoid re-transcribing). 503 if
+  `AI_ENABLED` is False, 500 with a generic message on any other failure.
 
 ---
 
@@ -369,7 +383,7 @@ Queryset: groups where the user has a non-banned `GroupMember` row.
   private chat → either participant
 - **Limit: 3 pinned messages per conversation** (`MAX_PINNED_PER_CONVERSATION`, defined
   in both `MessageViewSet` and `ChatConsumer` — kept in sync manually, no shared
-  constant yet — see §9)
+  constant yet — see §9.2)
 - `GET /message/conversations/<id>/pinned/` lists current pins
 
 ### 7.3 @Mentions
@@ -438,8 +452,8 @@ disconnect indefinitely (Daphne force-kills stuck disconnects otherwise).
 | `presence_update` | `presence_update` | |
 | `call_event` | `call_event` | Relayed call notifications (incoming/accept/reject/end) |
 | `study_room_broadcast` | `study_room_broadcast` | Echoes back to everyone except the sender's own channel |
-| `disappearing_messages_updated` | **none — see §9** | Sent from `views.py` but `ChatConsumer` has no handler |
-| `group_deleted` | **none — see §9** | Sent from `views.py` but `ChatConsumer` has no handler |
+| `disappearing_messages_updated` | `disappearing_messages_updated` | `{conversation_id, duration, updated_by}` — matches `ConversationViewSet.disappearing_messages`'s `group_send()` |
+| `group_deleted` | `group_deleted` | `{group_id, conversation_id, deleted_by}` — matches `GroupViewSet.destroy`'s `group_send()`, sent *before* the cascade delete |
 
 **⚠️→✅ FIXED this session — WS media messages.** `handle_new_message`/`save_message`
 previously only accepted `text`; there was no way to send an image/video/audio/file/
@@ -456,7 +470,7 @@ it had been saved).
 - `save_message()` — creates the `Message` (now including media fields — see above),
   updates conversation denorm fields, bulk-creates `MessageStatus` for other members,
   increments their `unread_count`, resolves and sets `mentioned_users` *(NEW)*, calls
-  `create_group_media_for_message()` *(NEW this session — see §9)*, returns
+  `create_group_media_for_message()` *(see §9.2)*, returns
   `{'id', 'created_at', 'mentioned_ids'}`
 - `pin_or_unpin_message()` *(NEW)* — mirrors `MessageViewSet.pin`'s permission + limit
   logic for the WS path
@@ -494,14 +508,46 @@ computes `duration_seconds` and marks the whole `CallSession` `ENDED`.
 
 ## 9. Known Issues / Follow-ups
 
-### 9.1 Fixed this session
+### 9.1 Fixed in this review
+
+1. **`throttles.py` was never actually wired into `views.py`.** The file itself already
+   had full setup instructions in its own docstring, but no view ever imported
+   `MessageSendThrottle` / `CallInitiateThrottle` / `GroupCreateThrottle` /
+   `ReactionThrottle` — every REST write those were meant to guard (message send, call
+   initiate, group create, react) was unthrottled; only the WS message path
+   (`WSMessageRateLimiter`) was actually protected. Added `get_throttles()` to
+   `ConversationViewSet` (messages POST), `MessageViewSet` (react), `GroupViewSet`
+   (create), and `throttle_classes` to `CallInitiateView` — exactly per the file's own
+   setup comment.
+2. **Presence caching was written but never read from or written to.**
+   `cache_utils.get_presence_cached` / `set_presence_cache` existed with a docstring
+   naming `UserPresenceView` and `ChatConsumer`'s presence update as the two intended
+   call-sites, but both still hit the DB directly on every check. Wired both up:
+   `ChatConsumer.set_presence()` now refreshes the cache on every connect/disconnect;
+   `UserPresenceView.get_object()` now reads the cache first and only falls back to
+   `UserPresence.objects.get_or_create(...)` on a miss (warming the cache after).
+3. **`VoiceTranscribeView` was fully implemented but never routed.** `views_ai.py` had a
+   complete, throttled endpoint whose own docstring documents its intended route
+   (`POST /message/ai/transcribe/`), but `urls.py` only ever imported `AiStudyRoomView`
+   — the transcribe endpoint 404'd. Added the import and a `path('ai/transcribe/', ...)`
+   entry.
+4. **Group-role cache invalidation gaps at `add_members` / `approve_join_request` /
+   `join`.** `cache_utils.py`'s own setup docstring explicitly names `add_members` and
+   `approve_join_request` (alongside `update_member`, which *was* already doing it) as
+   required `invalidate_group_role_cache` call-sites — neither of those two, nor the
+   public-group instant-`join` path, actually called it. Low-severity in practice (a
+   newly added regular member reading as "not yet a member" for up to the 60s TTL
+   doesn't change what they're allowed to do), but now consistent with the documented
+   contract. All three sites now invalidate the cache for the newly (re)added user(s).
+
+### 9.2 Fixed in an earlier session
 
 1. **`media_utils.py` was missing entirely.** `views.py` line 69 already did
    `from .media_utils import create_group_media_for_message`, but the file itself was
    never created/uploaded — this was an import-time crash waiting to happen (the whole
    app would fail to boot the moment `views.py` got imported, since a missing module on
    a top-level `from .x import y` is a hard `ModuleNotFoundError`, not something that
-   fails gracefully at request time). **Root cause of §9 item 2 below** — this is why
+   fails gracefully at request time). **Root cause of §9.2 item 2 below** — this is why
    the gallery was "never populated": the function that was supposed to do it didn't
    exist as a file. Created `media_utils.py` with `create_group_media_for_message
    (message)`: no-ops unless conversation is a group AND message type is a gallery type
@@ -512,7 +558,7 @@ computes `duration_seconds` and marks the whole `CallSession` `ENDED`.
 2. **`GroupMedia` gallery table was never populated** — direct consequence of #1.
    `create_group_media_for_message()` is now called from **both** message-creation
    paths: REST (`ConversationViewSet.messages`, was already calling it — it just had
-   nowhere to call *into*) and WS (`ChatConsumer.save_message`, newly wired this
+   nowhere to call *into*) and WS (`ChatConsumer.save_message`, newly wired that
    session). `/groups/<id>/media/` should now populate correctly regardless of which
    path the media message came in through.
 3. **WS could not actually send media messages at all** (found while fixing #2 — to
@@ -526,26 +572,34 @@ computes `duration_seconds` and marks the whole `CallSession` `ENDED`.
    `MessageViewSet` (views.py) and `ChatConsumer` (consumers.py), manually kept in sync.
    Moved to a new shared `constants.py`; both files now import the single module-level
    constant instead of redefining it.
-5. **Missing WS handlers for two server-sent event types** — *(this was already fixed
-   in the code before this session; documenting for the record since an earlier version
-   of this doc still listed it as open)*. `ChatConsumer.disappearing_messages_updated`
-   and `ChatConsumer.group_deleted` both exist as plain passthrough methods (same
-   pattern as `presence_update`), matching the `group_send()` calls in `views.py`'s
-   `ConversationViewSet.disappearing_messages` and `GroupViewSet.destroy`.
+5. **Missing WS handlers for two server-sent event types** — *(already fixed in the
+   code before that session; documented for the record)*. `ChatConsumer.
+   disappearing_messages_updated` and `ChatConsumer.group_deleted` both exist as plain
+   passthrough methods (same pattern as `presence_update`), matching the `group_send()`
+   calls in `views.py`'s `ConversationViewSet.disappearing_messages` and
+   `GroupViewSet.destroy`.
+6. **`urls.py` was a duplicate of `Middleware.py`** — the real routing file didn't
+   exist, so nothing past the ViewSet defaults (search, pin, star, schedule, media,
+   ...) actually resolved. Reconstructed from `views.py`'s confirmed class/action names
+   — see the §1 file-map note.
 
-### 9.2 Still open
+### 9.3 Still open
 
 1. **`is_deleted` on `BaseModel`** exists but nothing in the read code ever sets it or
    filters by it — either dead field or a soft-delete feature that was never finished.
 2. **`CallSession.token` / Agora fields** (`is_recording`, `recording_url`) exist on the
    model but the app has fully moved to LiveKit — `token` looks unused;
    recording start/stop code was not found anywhere.
-3. **`urls.py` was not actually available** (see §1 note) — before adding new frontend
-   calls to the search/pin/media endpoints, confirm the real router prefix.
-4. **`media_utils.py`'s `file_size`** is read from `message.meta.get("size")` — this
+3. **`media_utils.py`'s `file_size`** is read from `message.meta.get("size")` — this
    depends on the client populating `meta.size` correctly for every media message
    (both REST and WS paths). Worth a follow-up check that every upload client path
    actually sets it; if not, `GroupMedia.file_size` will silently stay `null`.
+4. **No management-command file for `send_scheduled_messages` was seen** — only
+   `scheduled_messages.py`'s delivery half (`finalize_scheduled_message`) was reviewed.
+   Confirm the actual cron/Celery-beat command exists and is scheduled to run
+   frequently enough (the module's own docstring suggests ~every 1 minute); without it,
+   `ConversationViewSet.schedule_message` only ever creates the row and nothing ever
+   delivers it.
 
 ---
 
@@ -600,11 +654,51 @@ computes `duration_seconds` and marks the whole `CallSession` `ENDED`.
 - `create_group_media_for_message(message) -> GroupMedia | None`
 - Called from both `ConversationViewSet.messages` (REST) and `ChatConsumer.save_message`
   (WS) right after a `Message` is created. No-ops for private chats, non-media message
-  types, or messages with no file. See §9.1 for why this file didn't exist before.
+  types, or messages with no file. See §9.2 for why this file didn't exist before.
 
 ### `constants.py` *(NEW this session)*
 - `MAX_PINNED_PER_CONVERSATION = 3` — single shared source, imported by both
   `MessageViewSet.pin` (views.py) and `ChatConsumer.pin_or_unpin_message` (consumers.py).
+
+### `cache_utils.py`
+- Django's default cache backend (should be Redis in production — check `settings.py`;
+  it's the same backend `ai_service.py` already uses for its 24h summary/quiz cache).
+- Group-role cache: `get_group_role_cached(group_id, user_id)` / `invalidate_group_role_cache
+  (group_id, user_id)` — 60s TTL, sits behind `group_rules.is_group_admin_or_mod` (by far
+  the highest-hit query in the app — runs on every pin/message/call/study-room/
+  member-management action). Also caches the "not a member" case as a sentinel, so a
+  non-member repeatedly probing an admin-only action doesn't hit the DB every time
+  either. Invalidated on every `GroupMember.role`/`is_banned` write:
+  `GroupViewSet.update_member`, `add_members`, `approve_join_request`, and the public
+  instant-`join` path.
+- Presence cache: `get_presence_cached(user_id)` / `set_presence_cache(user_id,
+  is_online, last_seen_at)` — 15s TTL (presence changes far more often than a role
+  does). Read from `UserPresenceView`, written from `ChatConsumer.set_presence()` on
+  every connect/disconnect.
+
+### `throttles.py`
+- REST (DRF `UserRateThrottle` subclasses, per-authenticated-user, cache-backed):
+  `MessageSendThrottle` (60/min, `ConversationViewSet.messages` POST),
+  `CallInitiateThrottle` (10/min — calls are costlier: an FCM push + a LiveKit room
+  each), `GroupCreateThrottle` (5/min), `ReactionThrottle` (120/min,
+  `MessageViewSet.react`).
+- WS: `WSMessageRateLimiter` — DRF throttles don't apply to Channels consumers, so this
+  is a small dependency-free fixed-window counter (60 messages/60s per user) on the same
+  cache backend, used in `ChatConsumer.handle_new_message`. Not billing-grade precision,
+  just abuse-prevention.
+
+### `scheduled_messages.py`
+- `finalize_scheduled_message(message)` — the delivery half of "Send Later". A scheduled
+  `Message` row (created by `ConversationViewSet.schedule_message`) sits invisible to
+  everyone but the sender until this runs: flips `is_scheduled=False`, recomputes
+  disappearing-message `expires_at` and `created_at` off the *current* moment (not the
+  original schedule time, so it lands in the right spot in the chat-list order),
+  updates conversation denorm fields/unread counts/`MessageStatus` rows/@mentions/
+  `GroupMedia`, then broadcasts `chat_message` + `inbox_update` and sends the same
+  mute/mention-aware pushes a normal send does.
+- Only ever called by a `send_scheduled_messages` management command (cron/Celery-beat,
+  intended to run about every minute) — **that command file itself was not part of this
+  review; confirm it exists and is actually scheduled (see §9.3).**
 
 ---
 
@@ -660,16 +754,21 @@ computes `duration_seconds` and marks the whole `CallSession` `ENDED`.
 
 ## 14. Suggested Next Facilities (not yet implemented)
 
-Carried over from the earlier review — still open:
-- Scheduled messages (send later)
 - Chat/media export
 - Read-receipt privacy toggle (per-user "don't show my read receipts")
-- Voice-message transcription (could reuse `ai_service.py`'s Gemini client)
 - Poll messages in groups
 
-Plus the "Still open" items in §9.2 — smaller than the above, but worth clearing before
+*(Scheduled messages and voice-message transcription were previously listed here as
+"not yet implemented" — both actually exist in code now: `scheduled_messages.py` +
+`ConversationViewSet.schedule_message`/`MessageViewSet.manage_schedule` for the former,
+`VoiceTranscribeView` for the latter. This list was stale and has been corrected — see
+§9.1/§9.3 for what's still genuinely open on each.)*
+
+Plus the "Still open" items in §9.3 — smaller than the above, but worth clearing before
 new facilities are stacked on top. The higher-priority bugs from the previous version of
-this doc (§9.1 now) were fixed this session: the missing `media_utils.py` module (which
-meant the app couldn't even boot cleanly), the never-populated `GroupMedia` gallery, the
-inability to send media messages over WebSocket at all, and the duplicated
-`MAX_PINNED_PER_CONVERSATION` constant.
+this doc (§9.2 now) were fixed in that session: the missing `media_utils.py` module
+(which meant the app couldn't even boot cleanly), the never-populated `GroupMedia`
+gallery, the inability to send media messages over WebSocket at all, and the duplicated
+`MAX_PINNED_PER_CONVERSATION` constant. This session's fixes are in §9.1: throttle
+wiring, presence caching, the unrouted transcription endpoint, and the group-role cache
+invalidation gaps.

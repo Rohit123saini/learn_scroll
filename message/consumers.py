@@ -23,6 +23,7 @@ from .mentions import extract_mentioned_user_ids
 from .media_utils import create_group_media_for_message
 from .constants import MAX_PINNED_PER_CONVERSATION
 from .throttles import WSMessageRateLimiter
+from .cache_utils import set_presence_cache
 
 logger = logging.getLogger(__name__)
 
@@ -542,6 +543,21 @@ class ChatConsumer(AsyncWebsocketConsumer):
         from django.db import IntegrityError
         from .models import Conversation
 
+        # 🔥 BUG FIX — disappearing-messages parity with REST. `Conversation
+        # Viewset.messages` (views.py) snapshots `expires_at` from the
+        # conversation's current `disappearing_messages_duration` at
+        # send-time; this WS path created the `Message` row with no
+        # `expires_at` at all (field stayed NULL — "never expires") no
+        # matter what the conversation's setting was. A message sent over
+        # WebSocket (the normal text-message path) in a disappearing-
+        # messages-enabled chat silently never disappeared, while the same
+        # message sent via REST would. Fetching the conversation up front
+        # (was previously only fetched later, for @mentions) so the same
+        # snapshot logic can run before create().
+        conversation = Conversation.objects.get(id=conversation_id)
+        disappearing_delta = conversation.get_disappearing_timedelta()
+        expires_at = (timezone.now() + disappearing_delta) if disappearing_delta else None
+
         try:
             message = Message.objects.create(
                 conversation_id=conversation_id,
@@ -557,6 +573,7 @@ class ChatConsumer(AsyncWebsocketConsumer):
                 file_urls=file_urls or [],
                 thumbnail_url=thumbnail_url or None,
                 meta=meta or {},
+                expires_at=expires_at,
             )
         except IntegrityError:
             # duplicate client_id -> retry of an already-saved message
@@ -583,7 +600,6 @@ class ChatConsumer(AsyncWebsocketConsumer):
         # 🔥 NAYA — @mentions resolve karke message pe attach karo (REST
         # `ConversationViewSet.messages` POST jaisa hi logic — dono jagah
         # `mentions.extract_mentioned_user_ids` hi use karte hain).
-        conversation = Conversation.objects.get(id=conversation_id)
         mentioned_ids = extract_mentioned_user_ids(text, conversation)
         mentioned_ids = [uid for uid in mentioned_ids if str(uid) != str(sender_id)]
         if mentioned_ids:
@@ -675,12 +691,28 @@ class ChatConsumer(AsyncWebsocketConsumer):
 
     @database_sync_to_async
     def mark_message_read(self, message_id, user_id):
-        MessageStatus.objects.filter(message_id=message_id, user_id=user_id).update(
-            is_read=True, is_delivered=True, read_at=timezone.now()
-        )
+        # 🐛 BUG FIX — pehle yahan `unread_count=0` seedha set ho jaata tha
+        # sirf EK message read-mark hone par bhi. REST wala equivalent
+        # (`MessageViewSet.mark_read`, views.py) sahi tarike se sirf 1 se
+        # decrement karta hai — matlab agar chat me 5 unread messages the
+        # aur user ne sirf 1 khola (WS `read` event isi ek message ke liye
+        # trigger hota hai), badge turant "0" dikhata tha jabki asal me 4
+        # aur unread the. Ab dono paths consistent hain: sirf tab hi
+        # decrement karo jab wo message pehli baar is user ke liye
+        # read-mark ho raha ho (already-read message dobara mark karne se
+        # count dobara na ghate).
+        updated = MessageStatus.objects.filter(
+            message_id=message_id, user_id=user_id, is_read=False,
+        ).update(is_read=True, is_delivered=True, read_at=timezone.now())
+
         ConversationParticipant.objects.filter(
-            conversation_id=self.conversation_id, user_id=user_id
-        ).update(unread_count=0, last_read_at=timezone.now())
+            conversation_id=self.conversation_id, user_id=user_id,
+        ).update(last_read_at=timezone.now())
+
+        if updated:
+            ConversationParticipant.objects.filter(
+                conversation_id=self.conversation_id, user_id=user_id, unread_count__gt=0,
+            ).update(unread_count=models_f_decrement())
 
     @database_sync_to_async
     def delete_message(self, message_id, user_id, for_everyone):
@@ -694,7 +726,27 @@ class ChatConsumer(AsyncWebsocketConsumer):
                 return False  # sirf sender hi "delete for everyone" kar sakta hai
             message.deleted_for_everyone = True
             message.text = ''
-            message.save(update_fields=['deleted_for_everyone', 'text'])
+            # 🔥 BUG FIX — parity with `MessageViewSet.destroy` (views.py).
+            # This WS path only ever cleared `text`, leaving `file_url`,
+            # `file_urls` (multi-image), and `thumbnail_url` fully intact
+            # in the DB — a message "deleted for everyone" over WebSocket
+            # (the default in-chat delete path) still exposed the original
+            # file to every participant via those fields. Now clears the
+            # same set REST does.
+            message.file_url = None
+            message.file_urls = []
+            message.thumbnail_url = None
+            message.save(update_fields=[
+                'deleted_for_everyone', 'text', 'file_url', 'file_urls', 'thumbnail_url',
+            ])
+            # 🔥 BUG FIX — same gallery-cleanup gap as REST `destroy()`:
+            # `GroupMedia` keeps its own independent `file_url` copy from
+            # send-time, so blanking the `Message` row above never removed
+            # it from the group's shared media gallery. Without this, the
+            # WS delete path (the default in-chat delete) left every
+            # deleted photo/video permanently visible in `/groups/<id>/media/`.
+            from .models import GroupMedia
+            GroupMedia.objects.filter(message=message).delete()
         else:
             message.deleted_for_users.add(user_id)
         return True
@@ -762,12 +814,25 @@ class ChatConsumer(AsyncWebsocketConsumer):
             if not presence.is_online:
                 presence.last_seen_at = timezone.now()
         presence.save(update_fields=['active_connections', 'is_online', 'last_seen_at'])
+
+        # 🔥 FIX — cache_utils.py's own docstring says this presence cache
+        # is meant to be kept warm from exactly this spot ("`ChatConsumer`'s
+        # presence update"), but it was never actually called here — every
+        # `UserPresenceView` read was hitting the DB directly regardless of
+        # the cache existing. Refresh the cache on every connect/disconnect
+        # so reads can be served from it.
+        set_presence_cache(self.user.id, presence.is_online, presence.last_seen_at)
         return presence.is_online
 
 
 def models_f_increment():
     from django.db.models import F
     return F('unread_count') + 1
+
+
+def models_f_decrement():
+    from django.db.models import F
+    return F('unread_count') - 1
 
 
 # ======================================================================

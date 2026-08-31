@@ -1,52 +1,143 @@
 # message/urls.py
 """
-NOTE FROM THIS REBUILD:
-    Yeh file poori tarah reconstruct nahi ho payi hai kyunki `message` app
-    ka core `views.py` (jisme Conversation/Message ViewSets hongi) abhi
-    tak upload nahi hui — jo files milin unme baar-baar `middleware.py`
-    (JWTAuthMiddleware) ya `liveclass/views.py` galti se aa gayi.
+🔧 GAP FIX — pehle is file ki jagah galti se `Middleware.py` ka duplicate
+upload ho gaya tha, isliye real routing kabhi exist hi nahi karti thi
+(saare naye endpoints — search, pin, star, schedule, media — resolve
+hi nahi hote). Ye ab `views.py` ke actual confirmed class/action names se
+poori tarah reconstruct ki gayi hai.
 
-    Jo cheez CONFIRM ho chuki hai aur isme daal di gayi hai:
-        - AiStudyRoomView (message/views_ai.py) -> POST /ai-study-room/
+Router-based ViewSets (list/detail + @action sub-routes automatically
+banti hain):
+    - ConversationViewSet -> /conversations/...
+    - MessageViewSet      -> /messages/...
+    - GroupViewSet        -> /groups/...
+    - BlockedUserViewSet  -> /blocked-users/...
+    - CallHistoryViewSet  -> /calls/history/...
 
-    Jo abhi TODO hai (neeche saaf marked hai):
-        - Conversation list/detail
-        - Message list/create/send
-        - DeviceToken registration (push ke liye, notifications.py me
-          reference hai message.push_utils.send_push_to_users ka, jiska
-          matlab kahin DeviceToken register karne ka endpoint zaroor
-          hoga)
+Plain APIViews (@action-based nahi, isliye manual path()):
+    - UserPresenceView, CallInitiateView, CallActionView,
+      StudyRoomJoinView, StudyRoomStateView, DeviceTokenView,
+      AiStudyRoomView (views_ai.py), MessageUploadAPIView (upload_view.py)
 
-    Jab asli `message/views.py` mil jaye, TODO wale section me sirf apne
-    real ViewSet/View class names daal dena — structure yeh raise-ready
-    hai.
+NOTE: `views_ai.py` aur `upload_view.py` is review me upload nahi hui
+thi — sirf documentation aur `views.py`'s existing import se naam
+confirm hote hain. Agar unke andar class/function names alag hain to
+sirf neeche wale 2 import lines badalne padenge, baaki sab already
+`views.py` se verified hai.
 """
-
 from django.urls import path, include
 from rest_framework.routers import DefaultRouter
 
-from .views_ai import AiStudyRoomView
-
-# -----------------------------------------------------------------------
-# TODO: yahan apne asli message/views.py se imports daalo, jaise:
-# from .views import ConversationViewSet, MessageViewSet, DeviceTokenViewSet
-# -----------------------------------------------------------------------
+from .views import (
+    BlockedUserViewSet,
+    CallActionView,
+    CallHistoryViewSet,
+    CallInitiateView,
+    ConversationViewSet,
+    DeviceTokenView,
+    GroupViewSet,
+    MessageViewSet,
+    ReadReceiptSettingsView,
+    StudyRoomJoinView,
+    StudyRoomStateView,
+    UserPresenceView,
+)
+# 🔥 FIX — `VoiceTranscribeView` (views_ai.py) is fully implemented, has
+# its own throttle class, and its docstring even documents its intended
+# route (`POST /message/ai/transcribe/`) — but only `AiStudyRoomView` was
+# ever imported/routed here, so the transcribe endpoint was unreachable
+# (404) despite being complete. Wiring it in below.
+from .views_ai import AiStudyRoomView, VoiceTranscribeView
+from .upload_view import MessageUploadAPIView
 
 router = DefaultRouter()
-
-# TODO: apne real ViewSets yahan register karo, jaise:
-# router.register(r"conversations", ConversationViewSet, basename="conversation")
-# router.register(r"messages", MessageViewSet, basename="message")
-# router.register(r"device-tokens", DeviceTokenViewSet, basename="device-token")
+router.register(r'conversations', ConversationViewSet, basename='conversation')
+router.register(r'messages', MessageViewSet, basename='message')
+router.register(r'groups', GroupViewSet, basename='group')
+router.register(r'blocked-users', BlockedUserViewSet, basename='blocked-user')
+router.register(r'calls/history', CallHistoryViewSet, basename='call-history')
 
 urlpatterns = [
-    path("", include(router.urls)),
+    path('', include(router.urls)),
 
-    # --- CONFIRMED: AI Study Room (summary/quiz generation from board content) ---
-    path("ai-study-room/", AiStudyRoomView.as_view(), name="ai-study-room"),
+    # --- Presence ---
+    path('presence/<int:user_id>/', UserPresenceView.as_view(), name='user-presence'),
+    # User model ka PK integer hai (custom `login.User`), UUID nahi —
+    # isliye `<int:user_id>` (Conversation/Message/Group/Call sab UUID
+    # PK hain, wo router se auto-wire hote hain).
 
-    # TODO: koi bhi plain APIView (router se auto-wire nahi hoti) yahan
-    # manually add karo, jaise teacher-earnings ko liveclass/urls.py me
-    # kiya gaya tha:
-    # path("some-plain-view/", SomePlainView.as_view(), name="some-plain-view"),
+    # --- Read-receipt privacy toggle (NAYA) ---
+    path('presence/read-receipts/', ReadReceiptSettingsView.as_view(), name='read-receipt-settings'),
+
+    # --- Calls ---
+    path('calls/initiate/', CallInitiateView.as_view(), name='call-initiate'),
+    path('calls/<uuid:call_id>/action/', CallActionView.as_view(), name='call-action'),
+
+    # --- Study Room ---
+    path('study-room/<uuid:conversation_id>/join/', StudyRoomJoinView.as_view(), name='study-room-join'),
+    path('study-room/<uuid:conversation_id>/state/', StudyRoomStateView.as_view(), name='study-room-state'),
+
+    # --- Device tokens (push notifications) ---
+    path('device-token/', DeviceTokenView.as_view(), name='device-token'),
+
+    # --- AI Study Room (Gemini summary/quiz) ---
+    path('ai-study-room/', AiStudyRoomView.as_view(), name='ai-study-room'),
+
+    # --- AI Voice-message transcription (🔥 FIX — was implemented but unrouted) ---
+    path('ai/transcribe/', VoiceTranscribeView.as_view(), name='ai-transcribe'),
+
+    # --- Generic file upload (returns a URL to attach to a message) ---
+    path('upload/', MessageUploadAPIView.as_view(), name='message-upload'),
 ]
+
+# ==============================================================================
+# Router se auto-generate hone waale (isliye yahan manually likhne ki zaroorat
+# nahi) — sirf reference/documentation ke liye, taaki naya kaam karne wala
+# turant dekh sake kya already available hai:
+#
+#   GET/POST   /conversations/
+#   GET        /conversations/<id>/
+#   POST       /conversations/start_private/
+#   PATCH      /conversations/<id>/settings/
+#   PATCH      /conversations/<id>/disappearing_messages/
+#   PATCH      /conversations/<id>/label/
+#   POST       /conversations/bulk_delete/
+#   POST       /conversations/<id>/participants/
+#   GET/POST   /conversations/<id>/messages/
+#   POST       /conversations/<id>/read_all/
+#   GET        /conversations/<id>/search/?q=...
+#   GET        /conversations/search_all/?q=...
+#   GET        /conversations/<id>/pinned/
+#   POST       /conversations/<id>/schedule-message/        (NAYA)
+#   GET        /conversations/<id>/scheduled-messages/       (NAYA)
+#
+#   GET        /messages/<id>/
+#   PATCH      /messages/<id>/
+#   DELETE     /messages/<id>/?for_everyone=true|false
+#   POST/DELETE /messages/<id>/react/
+#   GET        /messages/<id>/read-status/                       (NAYA)
+#   POST       /messages/<id>/read/
+#   POST       /messages/forward/
+#   POST/DELETE /messages/<id>/pin/
+#   POST/DELETE /messages/<id>/star/                          (NAYA)
+#   GET        /messages/starred/                             (NAYA)
+#   PATCH/DELETE /messages/<id>/schedule/                     (NAYA)
+#
+#   POST       /groups/
+#   GET        /groups/, /groups/<id>/
+#   PATCH/DELETE /groups/<id>/
+#   POST       /groups/<id>/members/
+#   POST       /groups/join/
+#   GET        /groups/<id>/join-requests/
+#   POST       /groups/<id>/join-requests/<request_id>/approve/
+#   POST       /groups/<id>/join-requests/<request_id>/reject/
+#   PATCH/DELETE /groups/<id>/members/<user_id>/
+#   GET        /groups/<id>/media/
+#
+#   GET/POST/DELETE /blocked-users/, /blocked-users/<lookup>/
+#
+#   GET        /calls/history/
+#   GET        /calls/history/missed/?since=<iso>
+#   GET        /calls/history/<call_id>/addable-participants/
+#   POST       /calls/history/<call_id>/add-participant/
+# ==============================================================================

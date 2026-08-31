@@ -15,6 +15,7 @@ Design notes:
 """
 
 import hashlib
+import hmac
 import logging
 import uuid
 from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
@@ -24,7 +25,7 @@ from django.contrib.auth import get_user_model
 from django.core.cache import cache
 from django.core.exceptions import ValidationError as DjangoValidationError
 from django.db import IntegrityError, connection, transaction
-from django.db.models import Count, F, Q, Sum
+from django.db.models import Case, Count, F, IntegerField, Q, Sum, Value, When
 from django.utils import timezone
 from rest_framework import mixins, pagination, status, viewsets
 from rest_framework.decorators import action
@@ -57,6 +58,7 @@ from .models import (
     ClassroomShare,
     ClassroomStaff,
     ClassroomWishlist,
+    CoinPurchase,
     CoinTransaction,
     CoinWithdrawal,
     Coupon,
@@ -88,6 +90,7 @@ from .livekit_utils import (
     stop_room_recording,
     verify_webhook_event,
 )
+from .realtime import broadcast_to_session
 from .serializers import (
     AssignmentGradeSerializer,
     AssignmentSerializer,
@@ -110,12 +113,16 @@ from .serializers import (
     ClassroomReportSerializer,
     ClassroomReviewSerializer,
     ClassroomSerializer,
+    ClassroomMyShareSerializer,
     ClassroomShareLogSerializer,
     ClassroomShareResultSerializer,
     ClassroomShareSerializer,
     ClassroomStaffSerializer,
     ClassroomStatsSerializer,
     ClassroomWishlistSerializer,
+    CoinPurchaseInitiateSerializer,
+    CoinPurchaseSerializer,
+    CoinPurchaseVerifySerializer,
     CoinTransactionSerializer,
     CoinWithdrawalSerializer,
     CouponSerializer,
@@ -125,11 +132,13 @@ from .serializers import (
     NotificationSerializer,
     PassPurchaseSerializer,
     PollResponseSerializer,
+    ReferLinkResultSerializer,
     ReferralRedeemSerializer,
     ReferralSerializer,
     SessionParticipantSerializer,
     SessionRecordingSerializer,
     SessionWaitlistSerializer,
+    StudentProgressSerializer,
     TeacherEarningsSerializer,
 )
 
@@ -222,7 +231,12 @@ class ClassroomViewSet(viewsets.ModelViewSet):
     # opt-in ?ordering=rating_avg / ?ordering=-enrolled_count / etc. without
     # touching the default behavior for existing callers that don't pass it.
     filter_backends = [OrderingFilter]
-    ordering_fields = ["created_at", "rating_avg", "enrolled_count", "title"]
+    # NOTE (feature): share_count added as a sort option — flagged as a
+    # deliberately-excluded follow-up in the Pass 6 audit note ("share_count
+    # as an Explore sort option"). ?ordering=-share_count surfaces the
+    # most-shared/trending classrooms; ?ordering=share_count is rarely
+    # useful but kept symmetric with every other field here.
+    ordering_fields = ["created_at", "rating_avg", "enrolled_count", "share_count", "title"]
     ordering = ["-created_at"]
 
     # How long a cached Explore/search page can live even without any
@@ -632,6 +646,21 @@ class ClassroomViewSet(viewsets.ModelViewSet):
     # Either way, one ClassroomShare row is logged and Classroom.share_count
     # is bumped — see share-stats below for the teacher-facing view of that.
     # -----------------------------------------------------------------
+    # NOTE (fix — abuse/spam protection): share() had no rate limit at all,
+    # unlike every other write action in this file (session join/token,
+    # coupon validate, chat message create). A script could hammer this
+    # endpoint to inflate share_count / spam in-app share notifications to
+    # arbitrary to_user_id targets — flagged as a deliberately-excluded
+    # follow-up in the Pass 6 audit note ("per-user share-rate limiting").
+    # Scoped so it only throttles this one action, same pattern as
+    # ChatMessageViewSet.get_throttles(). Add "classroom_share": "<rate>"
+    # to DEFAULT_THROTTLE_RATES in settings.py for this to take effect.
+    def get_throttles(self):
+        if self.action == "share":
+            self.throttle_scope = "classroom_share"
+            return [ScopedRateThrottle()]
+        return super().get_throttles()
+
     @action(detail=True, methods=["post"])
     def share(self, request, pk=None):
         # get_object() already applies get_queryset()'s visibility rules
@@ -711,6 +740,106 @@ class ClassroomViewSet(viewsets.ModelViewSet):
                 "recent": recent,
             }
         )
+
+    # -----------------------------------------------------------------
+    # FEATURE (my-shares): share-stats above is teacher/staff-facing (who's
+    # sharing MY classroom). This is the other side — a student/sharer's
+    # own history across every classroom they've ever shared, e.g. for a
+    # personal "your shares" screen or a referral-credit reconciliation
+    # view. Flagged as a deliberately-excluded Pass 6 follow-up ("a 'my
+    # shares' endpoint").
+    # -----------------------------------------------------------------
+    @action(detail=False, methods=["get"], url_path="my-shares")
+    def my_shares(self, request):
+        qs = ClassroomShare.objects.filter(shared_by=request.user).select_related(
+            "classroom", "shared_with"
+        )
+        page = self.paginate_queryset(qs)
+        serializer = ClassroomMyShareSerializer(page if page is not None else qs, many=True)
+        if page is not None:
+            return self.get_paginated_response(serializer.data)
+        return Response(serializer.data)
+
+    # -----------------------------------------------------------------
+    # FEATURE (refer & earn): the class-level counterpart to share() above
+    # — share() just logs word-of-mouth, this hands back a link that
+    # ClassJoinRequestViewSet.perform_create can trace back to whoever
+    # generated it, and that PassPurchase.charge_for_session then pays a
+    # daily commission against (see Classroom.referral_enabled /
+    # referral_commission_percent for the on/off + rate the teacher
+    # controls). Deliberately open to ANY authenticated user who can see
+    # this classroom, not just its enrolled students — same "teacher
+    # decides once, anyone can then refer" model requested for this
+    # feature; get_object() already applies get_queryset()'s visibility
+    # rule (public+active+unflagged, or the requester's own), so a
+    # classroom nobody can browse to can't be referred either.
+    # -----------------------------------------------------------------
+    @action(detail=True, methods=["get"], url_path="refer-link")
+    def refer_link(self, request, pk=None):
+        classroom = self.get_object()
+        if not classroom.referral_enabled:
+            raise ValidationError("This classroom doesn't have referrals enabled.")
+
+        web_url, deep_link = classroom.referral_urls(request.user)
+        return Response(
+            ReferLinkResultSerializer(
+                {
+                    "referral_code": referral_code_for_user(request.user.id),
+                    "web_url": web_url,
+                    "deep_link": deep_link,
+                    "share_text": (
+                        f"Join '{classroom.title}' using my link — {web_url}"
+                    ),
+                    "commission_percent": classroom.referral_commission_percent,
+                }
+            ).data
+        )
+
+    # -----------------------------------------------------------------
+    # FEATURE (personalized discovery): Explore used to be pure manual
+    # filtering (search/language/subject/price/rating — see get_queryset)
+    # with no signal from what THIS user actually likes. Content-based,
+    # not ML — scores every visible classroom the caller hasn't already
+    # purchased a pass for by how well its subject/language match the
+    # caller's own purchase + wishlist history, with a small boost for
+    # generally well-performing classrooms so a brand-new user with no
+    # history still gets a sensible (rating/enrollment-led) list instead
+    # of an empty one.
+    # -----------------------------------------------------------------
+    @action(detail=False, methods=["get"])
+    def recommended(self, request):
+        user = request.user
+        limit = min(int(request.query_params.get("limit", 10) or 10), 50)
+
+        purchased_classroom_ids = PassPurchase.objects.filter(student=user).values_list(
+            "class_pass__classroom_id", flat=True
+        )
+        interest_qs = Classroom.objects.filter(
+            Q(pk__in=purchased_classroom_ids) | Q(wishlisted_by__user=user)
+        )
+        subjects = set(interest_qs.values_list("subject", flat=True))
+        languages = set(interest_qs.values_list("language", flat=True))
+
+        candidates = self.get_queryset().exclude(pk__in=purchased_classroom_ids)
+        candidates = candidates.annotate(
+            _subject_match=(
+                Case(When(subject__in=subjects, then=Value(1)), default=Value(0), output_field=IntegerField())
+                if subjects else Value(0, output_field=IntegerField())
+            ),
+            _language_match=(
+                Case(When(language__in=languages, then=Value(1)), default=Value(0), output_field=IntegerField())
+                if languages else Value(0, output_field=IntegerField())
+            ),
+        )
+        candidates = candidates.order_by(
+            "-_subject_match", "-_language_match", "-rating_avg", "-enrolled_count"
+        )[:limit]
+
+        page = self.paginate_queryset(candidates)
+        serializer = self.get_serializer(page if page is not None else candidates, many=True)
+        if page is not None:
+            return self.get_paginated_response(serializer.data)
+        return Response(serializer.data)
 
     # -----------------------------------------------------------------
     # FEATURE (classroom-wide ban): see ClassroomBan in models.py for why
@@ -1493,6 +1622,10 @@ class ClassSessionViewSet(viewsets.ModelViewSet):
 
         participant.hand_raised_at = timezone.now() if raised else None
         participant.save(update_fields=["hand_raised_at"])
+        broadcast_to_session(
+            session.id, "hand.raised" if raised else "hand.lowered",
+            {"user_id": request.user.id, "hand_raised": raised},
+        )
         return Response({"detail": "Hand raised." if raised else "Hand lowered.", "hand_raised": raised})
 
     @action(detail=True, methods=["post"], url_path="hand/(?P<user_id>[^/.]+)/lower")
@@ -1511,6 +1644,7 @@ class ClassSessionViewSet(viewsets.ModelViewSet):
         ).update(hand_raised_at=None)
         if not updated:
             raise NotFound("That participant's hand wasn't raised.")
+        broadcast_to_session(session.id, "hand.lowered", {"user_id": int(user_id), "hand_raised": False})
         return Response({"detail": "Hand lowered."})
 
     @action(detail=True, methods=["post"], url_path="start-recording")
@@ -2256,8 +2390,36 @@ class PassPurchaseViewSet(
 
         return Response(PassPurchaseSerializer(purchase).data)
 
+    # -----------------------------------------------------------------
+    # FEATURE (refer & earn): the referrer's own view of what their links
+    # have brought in — every purchase currently crediting them a
+    # commission, plus a running total so they don't have to sum
+    # CoinTransaction rows themselves. Own referrals only (referred_by=
+    # request.user) — deliberately NOT reachable via the ?classroom= path
+    # above, which is scoped to classroom managers, not referrers.
+    # -----------------------------------------------------------------
+    @action(detail=False, methods=["get"], url_path="referral-earnings")
+    def referral_earnings(self, request):
+        qs = PassPurchase.objects.filter(referred_by=request.user).select_related(
+            "student", "coupon", "class_pass__classroom"
+        )
+        total_earned = CoinTransaction.objects.filter(
+            user=request.user, reason=CoinTransaction.Reason.CLASS_REFERRAL_COMMISSION
+        ).aggregate(total=Sum("amount"))["total"] or 0
 
-def _charge_and_create_purchase(student, class_pass, coupon_code):
+        page = self.paginate_queryset(qs)
+        serializer = PassPurchaseSerializer(page if page is not None else qs, many=True)
+        results = serializer.data
+        if page is not None:
+            response = self.get_paginated_response(results)
+            response.data["total_earned"] = total_earned
+            return response
+        return Response({"total_earned": total_earned, "results": results})
+
+
+def _charge_and_create_purchase(
+    student, class_pass, coupon_code, referred_by=None, referral_commission_percent=Decimal("0")
+):
     """Shared coin-debit + PassPurchase-creation logic, used ONLY by
     ClassJoinRequestViewSet.accept() below. Coin-only marketplace: the
     student is charged out of their User.coin balance, and the
@@ -2360,6 +2522,19 @@ def _charge_and_create_purchase(student, class_pass, coupon_code):
     else:
         payment_method = PassPurchase.PaymentMethod.FREE
 
+    # FEATURE (refer & earn): same "frozen at purchase time" treatment as
+    # per_day_rate just above — referral_per_day_rate is pre-computed here
+    # (percent-of-per-day-rate) so charge_for_session() never has to redo
+    # the percentage math, and so a later change to the classroom's rate
+    # can never retroactively change what an already-accepted purchase
+    # pays a referrer. No referral on this purchase at all (referred_by is
+    # None, or the classroom had referrals off at accept-time — see the
+    # caller) just leaves these at their zero defaults.
+    per_day_rate = Decimal(coins_spent) / class_pass.validity_days
+    referral_per_day_rate = Decimal("0")
+    if referred_by is not None and referral_commission_percent:
+        referral_per_day_rate = per_day_rate * referral_commission_percent / 100
+
     purchase = PassPurchase.objects.create(
         student=student,
         class_pass=class_pass,
@@ -2377,7 +2552,10 @@ def _charge_and_create_purchase(student, class_pass, coupon_code):
         # division here (not int) is deliberate: charge_for_session()
         # rounds each day's charge itself, and hands the final day
         # whatever fractional remainder is left rather than stranding it.
-        per_day_rate=Decimal(coins_spent) / class_pass.validity_days,
+        per_day_rate=per_day_rate,
+        referred_by=referred_by,
+        referral_commission_percent=referral_commission_percent if referred_by is not None else Decimal("0"),
+        referral_per_day_rate=referral_per_day_rate,
         status=PassPurchase.Status.SUCCESS,
         expires_at=timezone.now() + timezone.timedelta(days=class_pass.validity_days),
     )
@@ -2502,6 +2680,31 @@ class ClassJoinRequestViewSet(
         ).exists():
             raise ValidationError("You already have a pending request for this classroom.")
 
+        # -------------------------------------------------------------
+        # FEATURE (refer & earn): decode the ?ref= code the student's link
+        # carried (see ClassroomViewSet.refer_link / referral_code field on
+        # the serializer) into the referring user, right here at request
+        # time — not at accept() time — so a teacher later flipping
+        # referral_enabled off can't retroactively erase who actually sent
+        # this student. accept() re-checks referral_enabled itself before
+        # deciding whether to actually pay out (see _charge_and_create_purchase),
+        # this is just about correctly recording who gets credit if it's
+        # still on when that happens.
+        # -------------------------------------------------------------
+        referral_code = serializer.validated_data.pop("referral_code", "")
+        referred_by = None
+        if referral_code:
+            if not classroom.referral_enabled:
+                raise ValidationError({"referral_code": "This classroom doesn't have referrals enabled."})
+            referrer_id = referral_code_to_user_id(referral_code)
+            if referrer_id is None:
+                raise ValidationError({"referral_code": "Invalid referral code."})
+            if referrer_id == user.id:
+                raise ValidationError({"referral_code": "You can't refer yourself."})
+            referred_by = get_user_model().objects.filter(pk=referrer_id).first()
+            if referred_by is None:
+                raise ValidationError({"referral_code": "Invalid referral code."})
+
         # NOTE (fix — race): the exists() check above and serializer.save()
         # below aren't atomic against each other — two identical "raise a
         # join request" calls fired at the same instant (double-tap on a
@@ -2512,7 +2715,7 @@ class ClassJoinRequestViewSet(
         # clean "you already have a pending request" 400 the first caller
         # would have gotten. Caught and converted here.
         try:
-            join_request = serializer.save(student=user)
+            join_request = serializer.save(student=user, referred_by=referred_by)
         except IntegrityError:
             raise ValidationError("You already have a pending request for this classroom.")
 
@@ -2591,10 +2794,22 @@ class ClassJoinRequestViewSet(
             if not classroom.is_active or classroom.is_deleted:
                 raise ValidationError("This classroom is no longer active — the request can't be accepted.")
 
+            # FEATURE (refer & earn): only actually pay a commission if the
+            # classroom STILL has referrals on right now — re-checked here
+            # (not just trusted from request time) for the same reason
+            # is_active is re-checked above: a teacher turning referrals
+            # off between the request and the accept shouldn't obligate
+            # them to a rate they've since disabled. join_request.referred_by
+            # itself is untouched either way — see the NOTE above where
+            # it's set in perform_create for why that's recorded regardless.
             purchase = _charge_and_create_purchase(
                 student=join_request.student,
                 class_pass=class_pass,
                 coupon_code=join_request.coupon_code,
+                referred_by=join_request.referred_by if classroom.referral_enabled else None,
+                referral_commission_percent=(
+                    classroom.referral_commission_percent if classroom.referral_enabled else Decimal("0")
+                ),
             )
             join_request.status = ClassJoinRequest.Status.ACCEPTED
             join_request.pass_purchase = purchase
@@ -2826,6 +3041,11 @@ class ChatMessageViewSet(
         if not session or not _has_room_access(session.classroom, self.request.user):
             raise PermissionDenied("A valid pass is required to chat in this session.")
         serializer.save(sender=self.request.user)
+        # Realtime push (see realtime.py) — REST create() is still the
+        # only write path (validation/throttling stays here); this just
+        # fans the already-saved message out so listeners don't have to
+        # poll for it.
+        broadcast_to_session(session.id, "chat.message", ChatMessageSerializer(serializer.instance).data)
 
     def perform_destroy(self, instance):
         # Sender can remove their own message; a host can moderate anyone's.
@@ -2835,6 +3055,7 @@ class ChatMessageViewSet(
             raise PermissionDenied("You can only delete your own messages.")
         instance.is_deleted = True  # soft delete
         instance.save(update_fields=["is_deleted"])
+        broadcast_to_session(instance.session_id, "chat.message_deleted", {"id": instance.id})
 
 
 # ---------------------------------------------------------------------------
@@ -2893,6 +3114,7 @@ class LivePollViewSet(viewsets.ModelViewSet):
         if not _can_moderate_session(session, self.request.user):
             raise PermissionDenied("Only the classroom's teacher, co-teacher, or moderator can start a poll.")
         serializer.save(created_by=self.request.user)
+        broadcast_to_session(session.id, "poll.created", LivePollSerializer(serializer.instance).data)
 
     def perform_update(self, serializer):
         if not _can_moderate_session(serializer.instance.session, self.request.user):
@@ -2931,6 +3153,13 @@ class LivePollViewSet(viewsets.ModelViewSet):
             student=request.user,
             defaults={"selected_option_index": serializer.validated_data["selected_option_index"]},
         )
+        # Push fresh result_counts (a SerializerMethodField on
+        # LivePollSerializer, recomputed from the DB below) rather than
+        # just the one vote — every listening client's tally stays
+        # correct even if it missed an earlier vote event.
+        broadcast_to_session(
+            poll.session_id, "poll.updated", LivePollSerializer(LivePoll.objects.get(pk=poll.pk)).data
+        )
         return Response(PollResponseSerializer(response).data, status=201)
 
     @action(detail=True, methods=["post"])
@@ -2956,6 +3185,7 @@ class LivePollViewSet(viewsets.ModelViewSet):
         poll.is_active = False
         poll.closed_at = timezone.now()
         poll.save(update_fields=["is_active", "closed_at"])
+        broadcast_to_session(poll.session_id, "poll.closed", LivePollSerializer(poll).data)
         return Response(LivePollSerializer(poll).data)
 
 
@@ -3536,6 +3766,143 @@ class CoinWithdrawalViewSet(
 
 
 # ---------------------------------------------------------------------------
+# 13D. COIN PURCHASE — real-money -> coin top-up. See CoinPurchase in
+# models.py for why this exists (TOPUP was a dead enum value until now).
+#
+# GATEWAY INTEGRATION: the two functions below are the ONLY places a real
+# payment gateway needs to be wired in. Written against Razorpay's shape
+# (order-create + HMAC-signature verify) since it's the most common choice
+# for an Indian platform, but nothing else in this feature (the model, the
+# viewset actions, retry logic) is Razorpay-specific — swap these two
+# functions for a different gateway's SDK calls and everything above them
+# keeps working unchanged.
+# ---------------------------------------------------------------------------
+def _create_gateway_order(amount_inr, receipt: str) -> str:
+    """STUB — replace with a real order-create call, e.g.:
+        client = razorpay.Client(auth=(settings.RAZORPAY_KEY_ID, settings.RAZORPAY_KEY_SECRET))
+        order = client.order.create({"amount": int(amount_inr * 100), "currency": "INR", "receipt": receipt})
+        return order["id"]
+    Returns a locally-unique id for now so the initiate/verify/retry flow
+    (and its tests) is fully exercisable without a live gateway account —
+    verify() will simply always fail signature checking until the real
+    call + RAZORPAY_KEY_SECRET (see §10) are both in place.
+    """
+    return f"order_{uuid.uuid4().hex[:20]}"
+
+
+def _verify_gateway_signature(order_id: str, payment_id: str, signature: str) -> bool:
+    """STUB (partially real) — this IS Razorpay's actual verification
+    algorithm (HMAC-SHA256 of "{order_id}|{payment_id}" keyed with your
+    key secret), so once RAZORPAY_KEY_SECRET is set in settings and
+    `_create_gateway_order` above is calling the real API, this function
+    needs no further changes. Fails closed (returns False) if the secret
+    isn't configured, rather than silently trusting an unverifiable
+    payload."""
+    secret = getattr(django_settings, "RAZORPAY_KEY_SECRET", None)
+    if not secret:
+        logging.getLogger(__name__).warning(
+            "RAZORPAY_KEY_SECRET not configured — coin purchase verification "
+            "cannot succeed until it is set (see settings §10)."
+        )
+        return False
+    expected = hmac.new(
+        secret.encode(), f"{order_id}|{payment_id}".encode(), hashlib.sha256
+    ).hexdigest()
+    return hmac.compare_digest(expected, signature)
+
+
+class CoinPurchaseViewSet(
+    mixins.CreateModelMixin, mixins.ListModelMixin, mixins.RetrieveModelMixin, viewsets.GenericViewSet
+):
+    """Own purchases only. Three-step flow, matching how every Indian PG's
+    checkout SDK actually works client-side:
+      1. `POST .../initiate/` `{"coins": N}` — creates a PENDING
+         `CoinPurchase` + a gateway order server-side (amount is always
+         derived from `coins * CoinWithdrawal.COIN_TO_INR_RATE`, NEVER
+         trusted from the client), returns `order_id` for the client's
+         checkout SDK to open.
+      2. Client completes payment inside the gateway's own checkout UI —
+         nothing on this server is involved in that step.
+      3. `POST .../{id}/verify/` with the gateway's checkout callback
+         payload — signature checked, wallet credited exactly once
+         (`CoinPurchase.mark_success` is idempotent, so a retried verify
+         call or a webhook arriving on top of it is a safe no-op).
+    If verification fails (or the client never calls verify at all and a
+    reconciliation sweep — see `tasks.reconcile_stuck_coin_purchases` —
+    times it out), the row ends up FAILED. `POST .../{id}/retry/` then
+    creates a fresh PENDING row (new order_id, linked via `retry_of`) for
+    the same coins/amount, so a failed payment is never a dead end for
+    the student — this is the actual "payment retry" gap being closed.
+    """
+
+    serializer_class = CoinPurchaseSerializer
+    permission_classes = [IsAuthenticated]
+    pagination_class = LiveClassPagination
+    throttle_scope = "coin_purchase"
+    throttle_classes = [ScopedRateThrottle]
+
+    def get_queryset(self):
+        return CoinPurchase.objects.filter(user=self.request.user)
+
+    @action(detail=False, methods=["post"])
+    def initiate(self, request):
+        serializer = CoinPurchaseInitiateSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        coins = serializer.validated_data["coins"]
+        # Reuses the withdrawal side's conversion constant so buy/sell rate
+        # stays in one place — if the product wants a different (e.g.
+        # marked-up) buy rate later, split this into its own
+        # COIN_TOPUP_RATE constant rather than overloading this one.
+        amount_inr = coins * CoinWithdrawal.COIN_TO_INR_RATE
+        order_id = _create_gateway_order(amount_inr, receipt=f"user{request.user.id}-{uuid.uuid4().hex[:8]}")
+        purchase = CoinPurchase.objects.create(
+            user=request.user, coins=coins, amount_inr=amount_inr, order_id=order_id,
+        )
+        return Response(CoinPurchaseSerializer(purchase).data, status=status.HTTP_201_CREATED)
+
+    @action(detail=True, methods=["post"])
+    def verify(self, request, pk=None):
+        purchase = get_object_or_404(CoinPurchase, pk=pk, user=request.user)
+        if purchase.status != CoinPurchase.Status.PENDING:
+            raise ValidationError("This purchase has already been resolved.")
+
+        serializer = CoinPurchaseVerifySerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        data = serializer.validated_data
+
+        if data["razorpay_order_id"] != purchase.order_id:
+            raise ValidationError("order_id does not match this purchase.")
+
+        if not _verify_gateway_signature(
+            data["razorpay_order_id"], data["razorpay_payment_id"], data["razorpay_signature"]
+        ):
+            with transaction.atomic():
+                locked = CoinPurchase.objects.select_for_update().get(pk=purchase.pk)
+                locked.mark_failed("Signature verification failed.")
+            raise ValidationError("Payment could not be verified. You can retry this purchase.")
+
+        with transaction.atomic():
+            locked = CoinPurchase.objects.select_for_update().get(pk=purchase.pk)
+            locked.mark_success(data["razorpay_payment_id"], data["razorpay_signature"])
+        locked.refresh_from_db()
+        return Response(CoinPurchaseSerializer(locked).data)
+
+    @action(detail=True, methods=["post"])
+    def retry(self, request, pk=None):
+        failed = get_object_or_404(CoinPurchase, pk=pk, user=request.user)
+        if failed.status != CoinPurchase.Status.FAILED:
+            raise ValidationError("Only a failed purchase can be retried.")
+        order_id = _create_gateway_order(
+            failed.amount_inr, receipt=f"user{request.user.id}-retry-{uuid.uuid4().hex[:8]}"
+        )
+        retry_purchase = CoinPurchase.objects.create(
+            user=request.user, coins=failed.coins, amount_inr=failed.amount_inr,
+            order_id=order_id, retry_of=failed,
+        )
+        return Response(CoinPurchaseSerializer(retry_purchase).data, status=status.HTTP_201_CREATED)
+
+
+# ---------------------------------------------------------------------------
 # 13B. REFERRAL PROGRAM
 #
 # GAP THIS CLOSES: CoinTransaction.Reason.REFERRAL_BONUS existed as an enum
@@ -3729,6 +4096,88 @@ class TeacherEarningsView(APIView):
 
 
 # ---------------------------------------------------------------------------
+# STUDENT PROGRESS DASHBOARD
+#
+# GAP THIS CLOSES: everything a student's activity produces
+# (SessionParticipant rows, AssignmentSubmission grades, Certificate
+# issuance) lived scattered per-classroom with nowhere pulling it together
+# into "how am I doing overall" — the retention-relevant view a student
+# actually wants to open regularly. This is a read-only aggregate, same
+# "APIView wrapping a dict from several queries" pattern as
+# TeacherEarningsView above.
+# ---------------------------------------------------------------------------
+class StudentProgressView(APIView):
+    """GET /liveclass/my-progress/ — the calling user's own activity only;
+    there's no "view another student's progress" concept here (a teacher
+    wanting per-student insight already has AssignmentSubmissionViewSet /
+    CertificateViewSet scoped to their own classrooms for that)."""
+
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        user = request.user
+
+        classes_attended = SessionParticipant.objects.filter(
+            user=user, role=SessionParticipant.Role.STUDENT
+        ).count()
+        classrooms_enrolled = (
+            PassPurchase.objects.filter(student=user).values("class_pass__classroom_id").distinct().count()
+        )
+        assignments_submitted = AssignmentSubmission.objects.filter(student=user).count()
+        certificates_earned = Certificate.objects.filter(student=user).count()
+
+        current_streak, longest_streak = self._attendance_streaks(user)
+
+        data = {
+            "classes_attended": classes_attended,
+            "classrooms_enrolled": classrooms_enrolled,
+            "assignments_submitted": assignments_submitted,
+            "certificates_earned": certificates_earned,
+            "current_streak_days": current_streak,
+            "longest_streak_days": longest_streak,
+        }
+        return Response(StudentProgressSerializer(data).data)
+
+    @staticmethod
+    def _attendance_streaks(user) -> tuple[int, int]:
+        """Current + longest run of CONSECUTIVE CALENDAR DAYS on which this
+        user attended at least one session, across every classroom. A day
+        with no attendance breaks the streak — matching how every
+        habit-streak feature (Duolingo etc.) actually counts, not just
+        "days since first class"."""
+        dates = sorted(
+            set(
+                SessionParticipant.objects.filter(user=user, role=SessionParticipant.Role.STUDENT)
+                .values_list("joined_at__date", flat=True)
+            )
+        )
+        if not dates:
+            return 0, 0
+
+        longest = run = 1
+        for prev, curr in zip(dates, dates[1:]):
+            if (curr - prev).days == 1:
+                run += 1
+            else:
+                run = 1
+            longest = max(longest, run)
+
+        today = timezone.now().date()
+        if dates[-1] not in (today, today - timezone.timedelta(days=1)):
+            # Most recent attended day is neither today nor yesterday —
+            # the streak has already lapsed, whatever its past length was.
+            current = 0
+        else:
+            current = 1
+            for i in range(len(dates) - 1, 0, -1):
+                if (dates[i] - dates[i - 1]).days == 1:
+                    current += 1
+                else:
+                    break
+        return current, longest
+
+
+# ---------------------------------------------------------------------------
 # 14. CLASSROOM STAFF
 # ---------------------------------------------------------------------------
 class ClassroomStaffViewSet(viewsets.ModelViewSet):
@@ -3887,6 +4336,10 @@ class SessionWaitlistViewSet(
 
         _safe_delay(notify_waitlist_promotion, entry.student_id, session.id)
         entry.delete()
+        broadcast_to_session(
+            session.id, "waitlist.promoted",
+            {"user_id": participant.user_id, "seats_remaining": session.classroom.max_participants - current_count - 1},
+        )
         return Response(SessionParticipantSerializer(participant).data, status=status.HTTP_201_CREATED)
 
 

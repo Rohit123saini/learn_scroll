@@ -36,6 +36,7 @@ from .models import (
     ClassroomShare,
     ClassroomStaff,
     ClassroomWishlist,
+    CoinPurchase,
     CoinTransaction,
     CoinWithdrawal,
     Coupon,
@@ -96,6 +97,19 @@ class UserMiniSerializer(serializers.ModelSerializer):
 # ---------------------------------------------------------------------------
 # 1. CLASSROOM
 # ---------------------------------------------------------------------------
+class ClassroomMiniSerializer(serializers.ModelSerializer):
+    """Lightweight nested classroom summary — for lists that reference a
+    classroom in passing (e.g. ClassroomMyShareSerializer, where the full
+    ClassroomSerializer's field set would be unnecessary weight repeated
+    on every row of someone's share history)."""
+
+    teacher = UserMiniSerializer(read_only=True)
+
+    class Meta:
+        model = Classroom
+        fields = ["id", "title", "subject", "cover_image", "teacher"]
+
+
 class ClassroomSerializer(serializers.ModelSerializer):
     teacher = UserMiniSerializer(read_only=True)
 
@@ -111,6 +125,14 @@ class ClassroomSerializer(serializers.ModelSerializer):
             # can show a star rating per card without an extra request per
             # classroom (that's what classrooms/{id}/stats/ is for instead).
             "rating_avg", "rating_count", "share_count",
+            # FEATURE (refer & earn): both writable by the classroom's own
+            # teacher, same as every other setting in this Meta.fields list
+            # — ClassroomViewSet.perform_update already restricts writes on
+            # this serializer to the teacher, so no extra gating is needed
+            # here. referral_commission_percent's 0-100 bound comes for
+            # free from the model field's MinValueValidator/MaxValueValidator
+            # (DRF derives it automatically for a ModelSerializer).
+            "referral_enabled", "referral_commission_percent",
             "is_active", "is_flagged", "created_at", "updated_at",
         ]
         # is_flagged is set automatically once enough reports come in (see
@@ -298,6 +320,14 @@ class PassPurchaseSerializer(serializers.ModelSerializer):
     # so it needs to be visible on every purchase card, not just derivable
     # by the backend.
     remaining_balance = serializers.IntegerField(read_only=True)
+    # FEATURE (refer & earn): visible on the purchase card so a student can
+    # see who they were referred by (if anyone), and so that same referrer
+    # can see, on their own "purchases I referred" view (see
+    # PassPurchaseViewSet.referral_earnings), exactly how much of this
+    # purchase's commission has been released vs. still outstanding —
+    # same remaining/released pairing already given for the teacher's side.
+    referred_by = UserMiniSerializer(read_only=True)
+    referral_remaining_balance = serializers.IntegerField(read_only=True)
 
     class Meta:
         model = PassPurchase
@@ -308,11 +338,14 @@ class PassPurchaseSerializer(serializers.ModelSerializer):
             "status", "purchased_at", "expires_at", "classes_attended",
             "is_active", "is_valid",
             "per_day_rate", "coins_released", "remaining_balance", "last_charge_date",
+            "referred_by", "referral_commission_percent", "referral_coins_released",
+            "referral_remaining_balance",
         ]
         read_only_fields = [
             "id", "purchased_at", "expires_at", "status", "classes_attended",
             "amount_paid", "coins_spent", "payment_method",
             "per_day_rate", "coins_released", "last_charge_date",
+            "referred_by", "referral_commission_percent", "referral_coins_released",
         ]
         # amount_paid / coins_spent / expires_at / status / payment_method are
         # all computed server-side in ClassJoinRequestViewSet.accept() (based
@@ -343,12 +376,21 @@ class ClassJoinRequestSerializer(serializers.ModelSerializer):
     class_pass_price = serializers.DecimalField(
         source="class_pass.price", max_digits=8, decimal_places=2, read_only=True
     )
+    # FEATURE (refer & earn): write-only input — the ?ref= code from a
+    # classrooms/{id}/refer-link/ link, e.g. copied out of the query string
+    # by the client before POSTing here. Never stored verbatim; decoded to
+    # a user in ClassJoinRequestViewSet.perform_create and stored as
+    # referred_by below. Optional — omit entirely for a normal, unreferred
+    # join request.
+    referral_code = serializers.CharField(write_only=True, required=False, allow_blank=True)
+    referred_by = UserMiniSerializer(read_only=True)
 
     class Meta:
         model = ClassJoinRequest
         fields = [
             "id", "classroom", "classroom_title", "class_pass", "class_pass_title",
             "class_pass_price", "student", "coupon_code", "message",
+            "referral_code", "referred_by",
             "status", "decision_note", "decided_by", "decided_at", "pass_purchase",
             "requested_at",
         ]
@@ -701,6 +743,19 @@ class ClassroomShareResultSerializer(serializers.Serializer):
     share_count = serializers.IntegerField()
 
 
+class ReferLinkResultSerializer(serializers.Serializer):
+    """Response shape for ClassroomViewSet.refer_link — the caller's own
+    referral link for this classroom, plus the commission rate they're
+    referring at right now (so the client can show "earn X%" without a
+    second call to fetch the classroom)."""
+
+    referral_code = serializers.CharField()
+    web_url = serializers.URLField()
+    deep_link = serializers.CharField()
+    share_text = serializers.CharField()
+    commission_percent = serializers.DecimalField(max_digits=5, decimal_places=2)
+
+
 class ClassroomShareLogSerializer(serializers.ModelSerializer):
     """Read-only history row — used by ClassroomViewSet.share-stats so a
     teacher can see who's sharing their classroom and how, not just the
@@ -712,6 +767,22 @@ class ClassroomShareLogSerializer(serializers.ModelSerializer):
     class Meta:
         model = ClassroomShare
         fields = ["id", "shared_by", "shared_with", "channel", "created_at"]
+
+
+class ClassroomMyShareSerializer(serializers.ModelSerializer):
+    """Read-only history row for ClassroomViewSet.my_shares — the sharer's
+    own view, across every classroom they've shared (share-stats above is
+    the opposite direction: one classroom's teacher looking at everyone
+    who shared IT). Includes a classroom mini-summary since, unlike
+    share-stats which is already scoped to one classroom, this list spans
+    many."""
+
+    classroom = ClassroomMiniSerializer(read_only=True)
+    shared_with = UserMiniSerializer(read_only=True)
+
+    class Meta:
+        model = ClassroomShare
+        fields = ["id", "classroom", "shared_with", "channel", "created_at"]
 
 
 # ---------------------------------------------------------------------------
@@ -760,6 +831,55 @@ class CoinTransactionSerializer(serializers.ModelSerializer):
             "balance_after", "reference_id", "created_at",
         ]
         read_only_fields = fields  # entirely system-generated, never client-writable
+
+
+# ---------------------------------------------------------------------------
+# 13A2. COIN PURCHASE (real-money -> coin top-up). See CoinPurchase in
+# models.py and CoinPurchaseViewSet in views.py.
+#
+# NOTE (fix — CRITICAL, app failed to import at all): views.py has always
+# imported CoinPurchaseSerializer/CoinPurchaseInitiateSerializer/
+# CoinPurchaseVerifySerializer from this module, and CoinPurchaseViewSet
+# uses all three — but none of the three classes (nor the CoinPurchase
+# model itself) were ever actually defined/imported here. That's not a
+# "feature missing" gap, it's an `ImportError` the very first time
+# liveclass.views is imported (i.e. the moment urls.py is loaded) — the
+# entire app, not just coin purchases, failed to boot. Added below,
+# following the same shape as CoinWithdrawalSerializer just below.
+# ---------------------------------------------------------------------------
+class CoinPurchaseSerializer(serializers.ModelSerializer):
+    """Output-only — a CoinPurchase row is always created server-side
+    (CoinPurchaseViewSet.initiate/retry build it directly via
+    CoinPurchase.objects.create()), so every field here is just reporting
+    state back to the client, never accepting client-supplied values."""
+
+    class Meta:
+        model = CoinPurchase
+        fields = [
+            "id", "coins", "amount_inr", "status", "order_id",
+            "gateway_payment_id", "retry_of", "failure_reason",
+            "created_at", "verified_at",
+        ]
+        read_only_fields = fields
+
+
+class CoinPurchaseInitiateSerializer(serializers.Serializer):
+    """Input for `POST coin-purchases/initiate/`. `coins` is the only
+    client-supplied value in the whole purchase flow — amount_inr is
+    always derived server-side from CoinWithdrawal.COIN_TO_INR_RATE (see
+    CoinPurchaseViewSet.initiate), never trusted from the request."""
+
+    coins = serializers.IntegerField(min_value=1)
+
+
+class CoinPurchaseVerifySerializer(serializers.Serializer):
+    """Input for `POST coin-purchases/{id}/verify/` — the gateway
+    checkout callback payload, in Razorpay's field-naming shape (see
+    _verify_gateway_signature in views.py)."""
+
+    razorpay_order_id = serializers.CharField()
+    razorpay_payment_id = serializers.CharField()
+    razorpay_signature = serializers.CharField()
 
 
 # ---------------------------------------------------------------------------

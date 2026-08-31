@@ -60,6 +60,13 @@ REFRESH_ENROLLED_COUNT_LOOKBACK_MINUTES = 60
 # batch of expiries fall in the gap between two runs and get missed.
 EXPIRE_REFUND_LOOKBACK_MINUTES = 60
 
+# How long a CoinPurchase can sit PENDING (order created, gateway
+# checkout never completed/verified — the client crashed, the user
+# closed the checkout without paying, or a webhook never arrived) before
+# reconcile_stuck_coin_purchases below gives up on it and marks it
+# FAILED, so it becomes retry-able instead of hanging forever in limbo.
+COIN_PURCHASE_PENDING_TIMEOUT = timedelta(hours=2)
+
 # How long a ChunkedUpload can sit with no chunk activity before
 # cleanup_stale_chunked_uploads treats it as abandoned (client crashed,
 # closed the app, or lost network mid-upload) and reclaims its temp disk
@@ -357,6 +364,50 @@ def expire_and_refund_passes():
     if refunded_count:
         logger.info("expire_and_refund_passes: refunded %s expired purchase(s).", refunded_count)
     return refunded_count
+
+
+@shared_task(name="liveclass.reconcile_stuck_coin_purchases")
+def reconcile_stuck_coin_purchases():
+    """Beat job (Pass 7) — closes the actual "payment retry" gap alongside
+    CoinPurchaseViewSet.retry: a purchase can go PENDING and then just
+    never resolve (client crashed after redirect to the gateway, user
+    closed the tab, a webhook silently never arrived) with no FAILED/
+    SUCCESS transition ever happening on our side. Left alone that
+    purchase sits invisible to the student forever — retry() only works
+    on a FAILED row, so a stuck PENDING row is neither usable nor
+    recoverable without this sweep.
+
+    Deliberately conservative: does NOT call the gateway to check real
+    status (no gateway is actually wired in yet — see
+    _create_gateway_order's docstring in views.py). Once a real gateway
+    client exists, replace the straight mark_failed() call below with an
+    actual "fetch payment status" API call first, and only mark_failed()
+    if the gateway also reports it as failed/expired — a purchase that
+    actually succeeded on the gateway's side but whose webhook was just
+    slow should never be marked FAILED out from under a student.
+    """
+    from django.db import transaction
+
+    from .models import CoinPurchase
+
+    cutoff = timezone.now() - COIN_PURCHASE_PENDING_TIMEOUT
+    stuck = CoinPurchase.objects.filter(status=CoinPurchase.Status.PENDING, created_at__lt=cutoff)
+
+    reconciled = 0
+    for purchase in stuck:
+        try:
+            with transaction.atomic():
+                locked = CoinPurchase.objects.select_for_update().get(pk=purchase.pk)
+                if locked.status != CoinPurchase.Status.PENDING:
+                    continue  # resolved by a verify() call that raced this sweep
+                locked.mark_failed("Payment not completed within the expected window.")
+            reconciled += 1
+        except Exception:
+            logger.exception("Failed to reconcile stuck coin purchase %s", purchase.pk)
+
+    if reconciled:
+        logger.info("reconcile_stuck_coin_purchases: marked %s stuck purchase(s) as failed.", reconciled)
+    return reconciled
 
 
 @shared_task(name="liveclass.notify_waitlist_promotion")
@@ -1087,3 +1138,45 @@ def _chunked_upload_dir_size(path: str) -> int:
             except OSError:
                 pass
     return total
+
+@shared_task(name="liveclass.transcribe_recording")
+def transcribe_recording(session_id):
+    """SCAFFOLD (Pass 7) — the queueing/state-machine half of captions is
+    real; the actual speech-to-text call is a stub pending a provider
+    decision (AWS Transcribe / Google Speech-to-Text / a hosted Whisper
+    API all fit here equally — none of ClassSession.caption_status/
+    caption_url care which one produced the result).
+
+    Intended trigger: queue this via `.delay(session.id)` right after
+    LiveKitWebhookView's egress_ended handling fills in recording_url
+    (see views.py) — NOT wired up automatically in this pass, since
+    firing it unconditionally would mean paying for transcription on
+    every single recorded session whether or not captions were ever
+    asked for. Wire the `.delay()` call in once a provider is chosen and
+    a product decision is made on whether captions are opt-in
+    (Classroom-level toggle, mirroring recording_enabled) or default-on.
+    """
+    from .models import ClassSession
+
+    session = ClassSession.objects.filter(pk=session_id).select_related("classroom").first()
+    if session is None or not session.recording_url:
+        logger.warning("transcribe_recording: session %s has no recording to transcribe.", session_id)
+        return False
+
+    session.caption_status = ClassSession.CaptionStatus.PROCESSING
+    session.save(update_fields=["caption_status"])
+
+    try:
+        # STUB — replace with a real call, e.g.:
+        #   caption_url = transcribe_provider.transcribe(session.recording_url)
+        # Left unimplemented deliberately (see docstring) rather than
+        # faked, so this task fails loudly/visibly instead of silently
+        # "succeeding" with no real captions.
+        raise NotImplementedError(
+            "No speech-to-text provider wired in yet — see transcribe_recording's docstring."
+        )
+    except Exception:
+        logger.exception("transcribe_recording failed for session %s", session_id)
+        session.caption_status = ClassSession.CaptionStatus.FAILED
+        session.save(update_fields=["caption_status"])
+        return False

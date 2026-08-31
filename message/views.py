@@ -4,7 +4,7 @@ import secrets
 from datetime import timedelta
 from django.contrib.auth import get_user_model
 from django.db import transaction
-from django.db.models import F, Q
+from django.db.models import F, Prefetch, Q, Sum
 from django.http import Http404
 from django.shortcuts import get_object_or_404
 from django.utils import timezone
@@ -33,6 +33,7 @@ from .models import (
     DisappearingDuration,
     Group,
     GroupJoinRequest,
+    GroupMedia,
     GroupMember,
     Message,
     MessageReaction,
@@ -53,10 +54,13 @@ from .serializers import (
     GroupSerializer,
     MessageCreateSerializer,
     MessageReactionSerializer,
+    MessageReadStatusSerializer,
     MessageSearchResultSerializer,
     MessageSerializer,
+    ScheduleMessageSerializer,
     UserMiniSerializer,
     UserPresenceSerializer,
+    ReadReceiptSettingsSerializer,
 )
 from .push_utils import (
     send_push_to_users, send_chat_message_push, send_incoming_call_push,
@@ -65,10 +69,20 @@ from .push_utils import (
 from .livekit_utils import generate_livekit_token
 from .user_display import build_user_mini, get_display_name, get_profile_photo_url
 from .group_rules import check_group_permission, check_daily_message_limit, is_group_admin_or_mod
-from .cache_utils import invalidate_group_role_cache
+from .cache_utils import invalidate_group_role_cache, get_presence_cached, set_presence_cache
 from .mentions import extract_mentioned_user_ids
 from .media_utils import create_group_media_for_message
 from .constants import MAX_PINNED_PER_CONVERSATION
+# 🔥 FIX — throttles.py already existed with full "how to wire this up"
+# instructions in its own docstring (MessageSendThrottle /
+# CallInitiateThrottle / GroupCreateThrottle / ReactionThrottle), but none
+# of it was ever actually imported/used in views.py — every REST write
+# endpoint it was meant to protect stayed unthrottled. Only the WS path
+# (`WSMessageRateLimiter`, in consumers.py) was ever wired up. Doing the
+# REST half now, exactly per that file's own setup comment.
+from .throttles import (
+    MessageSendThrottle, CallInitiateThrottle, GroupCreateThrottle, ReactionThrottle,
+)
 
 # LiveKit URL env se lo, nahi to default
 LIVEKIT_WS_URL = os.getenv("LIVEKIT_WS_URL", "ws://10.93.221.189:7880")
@@ -136,14 +150,98 @@ class ConversationViewSet(viewsets.ReadOnlyModelViewSet):
     pagination_class = StandardPagination
 
     def get_queryset(self):
-        return Conversation.objects.filter(
+        qs = Conversation.objects.filter(
             memberships__user=self.request.user, memberships__left_at__isnull=True,
-        ).distinct().select_related('group_detail', 'last_message_sender').order_by(
-            '-last_message_at', '-created_at'
-        )
+        ).distinct().select_related('group_detail', 'last_message_sender').prefetch_related(
+            # 🔥 FIX (N+1) — see `ConversationListSerializer._membership`'s
+            # own comment: this used to be re-queried (twice!) per row by
+            # the serializer. One prefetch here = one extra query for the
+            # WHOLE page instead of up to 2*N.
+            Prefetch(
+                'memberships',
+                queryset=ConversationParticipant.objects.filter(user=self.request.user),
+                to_attr='my_membership_list',
+            )
+        ).order_by('-last_message_at', '-created_at')
+
+        # ⚠️ IMPORTANT: filters below apply ONLY to `list` — every detail
+        # action (`messages`, `settings`, `disappearing_messages`, ...)
+        # also resolves through `get_object()` -> this same `get_queryset()`.
+        # If the archived-exclude default applied there too, opening an
+        # archived chat's messages (or any detail action on it) would 404
+        # for its own owner — a real regression, not just an unused filter.
+        if self.action != 'list':
+            return qs
+
+        # 🔥 NAYA — chat-list ab filterable hai. Pehle `is_archived`/
+        # `is_pinned`/`is_muted` sirf per-user settings the (PATCH
+        # `/settings/` se set hote the) par list endpoint unhe kabhi filter
+        # nahi karta tha — matlab "Archived Chats" jaisi standard chat-app
+        # screen backend me possible hi nahi thi (frontend ko client-side
+        # poore list se chhaanna padta, jo scale pe galat/inefficient hai).
+        # Default behavior WhatsApp jaisa: archived chats normal list se
+        # bahar (jab tak explicitly `?archived=true` na maanga jaaye).
+        #
+        #   GET /conversations/                -> archived chhod ke sab
+        #   GET /conversations/?archived=true   -> sirf archived
+        #   GET /conversations/?pinned=true     -> sirf pinned
+        #   GET /conversations/?muted=true      -> sirf muted
+        #   GET /conversations/?unread=true     -> sirf jinme unread > 0
+        # NOTE: `unique_together = ('conversation', 'user')` on
+        # ConversationParticipant means there's at most one membership row
+        # per (conversation, me) pair — so scoping every extra condition
+        # below with `memberships__user=self.request.user` in its own
+        # `.filter()` call still lands on that same single row even though
+        # each call is its own join; kept as separate calls for readable
+        # optional filters instead of one big conditional dict.
+        params = self.request.query_params
+        me = self.request.user
+        archived_param = params.get('archived')
+        if archived_param is not None:
+            qs = qs.filter(memberships__user=me, memberships__is_archived=(archived_param.lower() == 'true'))
+        else:
+            qs = qs.exclude(memberships__user=me, memberships__is_archived=True)
+
+        if (pinned := params.get('pinned')) is not None:
+            qs = qs.filter(memberships__user=me, memberships__is_pinned=(pinned.lower() == 'true'))
+
+        if (muted := params.get('muted')) is not None:
+            qs = qs.filter(memberships__user=me, memberships__is_muted=(muted.lower() == 'true'))
+
+        if params.get('unread') == 'true':
+            qs = qs.filter(memberships__user=me, memberships__unread_count__gt=0)
+
+        return qs
 
     def get_serializer_context(self):
         return {'request': self.request}
+
+    # 🔥 FIX — see throttles.py's own setup comment: message-send spam/abuse
+    # guard was written but never actually applied here.
+    def get_throttles(self):
+        if self.action == 'messages' and self.request.method == 'POST':
+            return [MessageSendThrottle()]
+        return super().get_throttles()
+
+    # 🔥 NAYA — GET /conversations/unread-count/
+    # App-icon/bottom-nav badge ke liye ek hi lightweight number chahiye
+    # hota hai — pehle iske liye frontend ko poori paginated chat-list
+    # fetch karke client-side sum karna padta (galat approach: page size
+    # se bada total ho to ye ganit hi galat aa jaata, aur ek extra bhaari
+    # request hai sirf ek number ke liye). Ye single aggregate query hai —
+    # koi row-level data wapas nahi jaati.
+    #   GET /conversations/unread-count/               -> muted included
+    #   GET /conversations/unread-count/?exclude_muted=true -> muted skip
+    @action(detail=False, methods=['get'], url_path='unread-count')
+    def unread_count(self, request):
+        # `left_at__isnull=True` is the app's actual "still in this chat"
+        # signal (see `bulk_delete`/leave-group above — a deleted/left chat
+        # sets `left_at`, `Conversation` itself is never soft-deleted).
+        qs = ConversationParticipant.objects.filter(user=request.user, left_at__isnull=True)
+        if str(request.query_params.get('exclude_muted', '')).lower() == 'true':
+            qs = qs.exclude(is_muted=True)
+        total = qs.aggregate(total=Sum('unread_count'))['total'] or 0
+        return Response({'unread_count': total})
 
     @action(detail=False, methods=['post'], url_path='start_private')
     def start_private(self, request):
@@ -325,6 +423,15 @@ class ConversationViewSet(viewsets.ReadOnlyModelViewSet):
             # user ko expired message na dikhe).
             qs = conversation.all_messages.filter(
                 Q(expires_at__isnull=True) | Q(expires_at__gt=timezone.now())
+            ).exclude(
+                # 🔧 GAP FIX — `is_scheduled`/`scheduled_for` fields already
+                # existed on the model, but nothing filtered them out of the
+                # normal timeline — a "send later" message would've shown up
+                # to every participant immediately, defeating the whole
+                # point. Scheduled-but-not-yet-sent messages are visible
+                # only via `schedule_message`/`scheduled_messages_list`
+                # (sender-only) until `send_scheduled_messages` delivers them.
+                is_scheduled=True,
             ).select_related(
                 'sender', 'reply_to', 'reply_to__sender'
             ).prefetch_related('all_reactions', 'all_reactions__user')
@@ -610,6 +717,8 @@ class ConversationViewSet(viewsets.ReadOnlyModelViewSet):
             deleted_for_everyone=True,
         ).exclude(
             deleted_for_users=request.user,
+        ).exclude(
+            is_scheduled=True,  # 🔧 GAP FIX — see note in `messages` GET above
         ).select_related('sender', 'reply_to').order_by('-created_at')
 
         paginator = MessagePagination()
@@ -645,6 +754,8 @@ class ConversationViewSet(viewsets.ReadOnlyModelViewSet):
             deleted_for_everyone=True,
         ).exclude(
             deleted_for_users=request.user,
+        ).exclude(
+            is_scheduled=True,  # 🔧 GAP FIX — see note in `messages` GET above
         ).select_related(
             'sender', 'conversation', 'conversation__group_detail',
         ).distinct().order_by('-created_at')
@@ -667,6 +778,82 @@ class ConversationViewSet(viewsets.ReadOnlyModelViewSet):
         serializer = MessageSerializer(qs, many=True, context={'request': request})
         return Response(serializer.data)
 
+    # ==================================================================
+    # 🔥 NAYA (ADVANCED FEATURE) — SCHEDULED MESSAGES / "SEND LATER"
+    # ==================================================================
+    # Model pe `Message.is_scheduled` / `scheduled_for` fields already the
+    # (kisi purani session me add hue the) lekin end-to-end kahin bhi wire
+    # nahi the — na koi endpoint inhe set karta tha, na koi job inhe
+    # actually deliver karta tha, na normal message-list inhe hide karta
+    # tha. Ye poora feature ab yahan complete hai:
+    #
+    #   POST /message/conversations/<id>/schedule-message/
+    #        body = MessageCreateSerializer ke saare fields + "scheduled_for"
+    #        (future ISO datetime). Message DB me ban jaata hai lekin
+    #        `is_scheduled=True` ke saath — is wajah se `messages` GET /
+    #        `search` / `search_all` me kisi ko bhi (sender samet, dusre
+    #        screen pe) nahi dikhta jab tak bhej na diya jaaye. Koi
+    #        broadcast/push/unread-count yahan NAHI hota — wo sab
+    #        `scheduled_messages.finalize_scheduled_message()` karta hai,
+    #        jab `send_scheduled_messages` management command (cron/
+    #        Celery-beat se har minute chalao) isko pick karta hai.
+    #   GET  /message/conversations/<id>/scheduled-messages/
+    #        sirf apne bheje hue, abhi tak pending scheduled messages is
+    #        chat ke — taaki UI me "Scheduled" tab dikha sako.
+    #   DELETE/PATCH /message/messages/<id>/schedule/ (MessageViewSet)
+    #        cancel karo ya reschedule/text-edit karo, jab tak bhej na
+    #        diya ho.
+    #
+    # Permission checks (block / group message_permission) yahan bhi
+    # utni hi lagti hain jitni normal send me — lekin `daily_message_limit`
+    # ka count actual-send-time pe stale ho sakta hai (schedule karte
+    # waqt limit ke andar tha, ab tak limit cross ho chuki ho) — ye ek
+    # chhota known edge-case hai, WhatsApp/Gmail bhi isi tarah handle
+    # karte hain (schedule-time pe hi check, deliver-time pe nahi).
+    @action(detail=True, methods=['post'], url_path='schedule-message')
+    def schedule_message(self, request, pk=None):
+        conversation = self.get_object()
+
+        if conversation.type != ConversationType.GROUP:
+            other_id = conversation.memberships.filter(
+                left_at__isnull=True
+            ).exclude(user_id=request.user.id).values_list('user_id', flat=True).first()
+            if other_id and is_blocked_pair(request.user.id, other_id):
+                return Response(
+                    {'detail': 'Block hone ki wajah se message schedule nahi ho sakta.'},
+                    status=status.HTTP_403_FORBIDDEN,
+                )
+        else:
+            group = getattr(conversation, 'group_detail', None)
+            if group:
+                allowed, reason = check_group_permission(group, request.user.id, 'message_permission')
+                if not allowed:
+                    return Response({'detail': reason}, status=status.HTTP_403_FORBIDDEN)
+
+        serializer = ScheduleMessageSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+
+        message = serializer.save(
+            conversation=conversation,
+            sender=request.user,
+            is_scheduled=True,
+            # `expires_at` (disappearing messages) jaan-boojh kar yahan
+            # NAHI compute karte — conversation ki duration setting badal
+            # sakti hai schedule aur actual-send ke beech; asli send-time
+            # (finalize_scheduled_message) pe hi snapshot lena sahi hai,
+            # jaisa normal messages ke liye already hota hai.
+        )
+        return Response(MessageSerializer(message, context={'request': request}).data, status=status.HTTP_201_CREATED)
+
+    @action(detail=True, methods=['get'], url_path='scheduled-messages')
+    def scheduled_messages_list(self, request, pk=None):
+        conversation = self.get_object()
+        qs = conversation.all_messages.filter(
+            is_scheduled=True, sender=request.user,
+        ).order_by('scheduled_for')
+        serializer = MessageSerializer(qs, many=True, context={'request': request})
+        return Response(serializer.data)
+
 
 # ======================================================================
 # MESSAGES
@@ -680,14 +867,41 @@ class MessageViewSet(mixins.RetrieveModelMixin, mixins.UpdateModelMixin,
         return {'request': self.request}
 
     def get_permissions(self):
-        if self.action in ('update', 'partial_update', 'destroy'):
+        # `manage_schedule` sender-only hai (cancel/reschedule apne hi
+        # "send later" message ka), isliye `update`/`destroy` jaisa hi
+        # `IsMessageSender` bhi laga dete hain.
+        if self.action in ('update', 'partial_update', 'destroy', 'manage_schedule'):
             return [IsAuthenticated(), IsConversationParticipant(), IsMessageSender()]
-        # 'forward' is a list-level action (no single pk/object) — it
-        # checks conversation membership itself for every source message
-        # and every target conversation, so it only needs authentication.
-        if self.action == 'forward':
+        # 'forward' and 'starred' are list-level actions (no single
+        # pk/object) — 'forward' checks conversation membership itself
+        # for every source message and every target conversation;
+        # 'starred' filters by the requester's own active conversations
+        # inside the query itself. Both only need authentication here.
+        if self.action in ('forward', 'starred'):
             return [IsAuthenticated()]
         return [IsAuthenticated(), IsConversationParticipant()]
+
+    # 🔥 FIX — reaction-spam guard (`ReactionThrottle`) existed in
+    # throttles.py but was never wired in; rapid emoji toggling on the
+    # `react` action was unbounded on the REST side.
+    def get_throttles(self):
+        if self.action == 'react':
+            return [ReactionThrottle()]
+        return super().get_throttles()
+
+    def get_object(self):
+        # 🔧 GAP FIX (part of Scheduled Messages) — a scheduled-but-not-
+        # yet-sent message must never be reachable through the *normal*
+        # single-message actions (react/read/pin/edit/delete/etc.) by
+        # anyone, including the sender — it hasn't been "sent" yet, so
+        # none of those actions make sense on it. Only `manage_schedule`
+        # (cancel/reschedule) may touch it, and only the sender.
+        obj = super().get_object()
+        if obj.is_scheduled and self.action != 'manage_schedule':
+            if obj.sender_id != self.request.user.id:
+                raise Http404
+            raise PermissionDenied("Ye message abhi schedule hai, bheja nahi gaya — pehle schedule cancel/send karo.")
+        return obj
 
     def partial_update(self, request, *args, **kwargs):
         message = self.get_object()
@@ -714,8 +928,34 @@ class MessageViewSet(mixins.RetrieveModelMixin, mixins.UpdateModelMixin,
                 return Response({'detail': 'Sirf sender hi sabke liye delete kar sakta hai.'}, status=status.HTTP_403_FORBIDDEN)
             message.deleted_for_everyone = True
             message.text = ''
+            # 🔥 BUG FIX — sirf `file_url` clear ho raha tha. Multi-image
+            # messages ka asli data `file_urls` (JSON list) me hota hai
+            # (`file_url` unke liye khaali/None hi rehta hai — models.py ka
+            # comment dekho), aur video/pdf ka `thumbnail_url` bhi alag
+            # field hai. In dono ko clear na karne se "delete for everyone"
+            # ke baad bhi wo files serializer response me poori tarah
+            # accessible reh jaati thin — delete ka poora point hi defeat
+            # ho jaata (khaaskar multi-image posts ke liye, jahan file_url
+            # hamesha khaali hota hai to sirf ise clear karna kuch bhi
+            # nahi chhupata).
             message.file_url = None
-            message.save(update_fields=['deleted_for_everyone', 'text', 'file_url'])
+            message.file_urls = []
+            message.thumbnail_url = None
+            message.save(update_fields=[
+                'deleted_for_everyone', 'text', 'file_url', 'file_urls', 'thumbnail_url',
+            ])
+            # 🔥 BUG FIX — `GroupMedia` (group gallery, `/groups/<id>/media/`)
+            # stores its OWN copy of `file_url` at creation time
+            # (`media_utils.create_group_media_for_message`), separate from
+            # the `Message` row — it's a `OneToOne` with `on_delete=CASCADE`,
+            # which only cascades if the `Message` itself is hard-deleted.
+            # A "delete for everyone" never deletes the `Message` row (it
+            # just blanks the fields above), so nothing here ever cleaned up
+            # the gallery copy — a photo/video deleted "for everyone" stayed
+            # permanently visible and downloadable in the group's shared
+            # media gallery, defeating the delete entirely for anyone
+            # browsing that tab instead of the chat itself.
+            GroupMedia.objects.filter(message=message).delete()
         else:
             message.deleted_for_users.add(request.user)
 
@@ -738,6 +978,91 @@ class MessageViewSet(mixins.RetrieveModelMixin, mixins.UpdateModelMixin,
         )
         return Response(MessageReactionSerializer(reaction).data)
 
+    # ==================================================================
+    # 🔥 NAYA (ADVANCED FEATURE) — STARRED MESSAGES (personal save/bookmark)
+    # ==================================================================
+    # `Message.starred_by` M2M field already model pe tha lekin kahin bhi
+    # expose/wire nahi kiya gaya tha. Pin se ALAG hai: pin group-wide
+    # "important message" hai (§ MessageViewSet.pin), star sirf PERSONAL
+    # bookmark hai — kisi aur participant ko pata bhi nahi chalta ki
+    # tumne kya star kiya hai (WhatsApp ke "Starred Messages" jaisa),
+    # isliye koi broadcast/notification yahan zaroori nahi.
+    @action(detail=True, methods=['post', 'delete'], url_path='star')
+    def star(self, request, pk=None):
+        message = self.get_object()
+        if request.method == 'DELETE':
+            message.starred_by.remove(request.user)
+            return Response(status=status.HTTP_204_NO_CONTENT)
+        message.starred_by.add(request.user)
+        return Response(MessageSerializer(message, context={'request': request}).data)
+
+    # GET /message/messages/starred/ — sabhi conversations me se apne
+    # saare starred messages, jahan abhi bhi active member ho (chat
+    # leave/delete kar chuka ho to us conversation ke star results nahi
+    # aayenge — global-search wala hi pattern). `conversation_preview`
+    # taaki UI dikha sake "ye kis chat me star kiya tha".
+    @action(detail=False, methods=['get'], url_path='starred')
+    def starred(self, request):
+        qs = Message.objects.filter(
+            starred_by=request.user,
+            conversation__memberships__user=request.user,
+            conversation__memberships__left_at__isnull=True,
+        ).exclude(
+            deleted_for_everyone=True,
+        ).exclude(
+            deleted_for_users=request.user,
+        ).select_related(
+            'sender', 'conversation', 'conversation__group_detail',
+        ).distinct().order_by('-created_at')
+
+        paginator = MessagePagination()
+        page = paginator.paginate_queryset(qs, request, view=self)
+        serializer = MessageSearchResultSerializer(page, many=True, context={'request': request})
+        return paginator.get_paginated_response(serializer.data)
+
+    # ==================================================================
+    # 🔥 NAYA — SCHEDULED MESSAGE MANAGEMENT (cancel / reschedule / edit)
+    # ==================================================================
+    # DELETE /message/messages/<id>/schedule/ -> cancel (hard-delete theek
+    #        hai kyunki ye kabhi kisi ko dikha hi nahi — send hua hi nahi)
+    # PATCH  /message/messages/<id>/schedule/ -> text aur/ya scheduled_for
+    #        badlo, jab tak `send_scheduled_messages` isko pick na kare
+    @action(detail=True, methods=['patch', 'delete'], url_path='schedule')
+    def manage_schedule(self, request, pk=None):
+        message = self.get_object()
+        if not message.is_scheduled:
+            return Response({'detail': 'Ye message scheduled nahi hai (ya already bhej diya gaya).'},
+                             status=status.HTTP_400_BAD_REQUEST)
+
+        if request.method == 'DELETE':
+            message.delete()
+            return Response(status=status.HTTP_204_NO_CONTENT)
+
+        update_fields = []
+        if 'text' in request.data:
+            text = (request.data.get('text') or '').strip()
+            if not text:
+                return Response({'detail': "'text' khali nahi ho sakta."}, status=status.HTTP_400_BAD_REQUEST)
+            message.text = text
+            update_fields.append('text')
+
+        if 'scheduled_for' in request.data:
+            parsed = parse_datetime(request.data.get('scheduled_for') or '')
+            if parsed is None or parsed <= timezone.now():
+                return Response(
+                    {'detail': "'scheduled_for' future ka valid ISO datetime hona chahiye."},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            message.scheduled_for = parsed
+            update_fields.append('scheduled_for')
+
+        if not update_fields:
+            return Response({'detail': "Kam se kam 'text' ya 'scheduled_for' me se ek dena zaroori hai."},
+                             status=status.HTTP_400_BAD_REQUEST)
+
+        message.save(update_fields=update_fields + ['updated_at'])
+        return Response(MessageSerializer(message, context={'request': request}).data)
+
     @action(detail=True, methods=['post'], url_path='read')
     def mark_read(self, request, pk=None):
         message = self.get_object()
@@ -753,6 +1078,64 @@ class MessageViewSet(mixins.RetrieveModelMixin, mixins.UpdateModelMixin,
             ).update(unread_count=F('unread_count') - 1)
 
         return Response({'detail': 'Read mark ho gaya.'})
+
+    # 🔥 NAYA — "Message info" / seen-by detail.
+    #   GET /message/messages/<id>/read-status/
+    # Response: {"delivered_to": [...], "read_by": [...]}
+    # Har entry: {"user": {...}, "is_delivered", "delivered_at", "is_read", "read_at"}
+    #
+    # Privacy (see `UserPresence.show_read_receipts` docstring — mutual,
+    # WhatsApp-style):
+    #   - Jis user ne khud apna `show_read_receipts=False` kar rakha hai,
+    #     uska `read_at`/`is_read` kisi ko bhi (group members samet) nahi
+    #     dikhta — us row me `is_read` False aur `read_at` None kar diya
+    #     jaata hai chahe DB me actually True/set ho (internal bookkeeping
+    #     hamesha sahi rehti hai, sirf ye endpoint gate karta hai).
+    #   - Agar DEKHNE waala khud bhi `show_read_receipts=False` par hai, to
+    #     use bhi kisi ka bhi read-status nahi dikhta — poori `read_by`
+    #     list khaali aa jaati hai (sirf `delivered_to` dikhta hai).
+    # `is_delivered`/`delivered_at` is toggle se kabhi affect nahi hota.
+    @action(detail=True, methods=['get'], url_path='read-status')
+    def read_status(self, request, pk=None):
+        from .models import UserPresence
+
+        message = self.get_object()
+
+        viewer_receipts_off = UserPresence.objects.filter(
+            user=request.user, show_read_receipts=False,
+        ).exists()
+
+        statuses = list(
+            MessageStatus.objects.filter(message=message)
+            .exclude(user_id=message.sender_id)
+            .select_related('user')
+        )
+
+        # Sender ke saamne bhi apna khud ka receipt-off toggle apply hota
+        # hai — sender khud bhi ek "viewer" hai jab wo apne message ka
+        # status dekh raha hai.
+        hidden_user_ids = set(
+            UserPresence.objects.filter(
+                user_id__in=[s.user_id for s in statuses], show_read_receipts=False,
+            ).values_list('user_id', flat=True)
+        )
+
+        delivered_to, read_by = [], []
+        for s in statuses:
+            if s.is_delivered:
+                delivered_to.append(s)
+            show_read = s.is_read and not viewer_receipts_off and s.user_id not in hidden_user_ids
+            if show_read:
+                read_by.append(s)
+            elif s.is_delivered:
+                # read_at/is_read is response se hide karo, delivered info bacha rehne do
+                s.is_read = False
+                s.read_at = None
+
+        return Response({
+            'delivered_to': MessageReadStatusSerializer(delivered_to, many=True, context={'request': request}).data,
+            'read_by': MessageReadStatusSerializer(read_by, many=True, context={'request': request}).data,
+        })
 
     # ==================================================================
     # PIN / UNPIN — WhatsApp/Telegram-style important-message pin
@@ -1025,6 +1408,13 @@ class GroupViewSet(viewsets.ModelViewSet):
             return [IsAuthenticated(), IsGroupAdminOrModerator()]
         return [IsAuthenticated()]
 
+    # 🔥 FIX — mass-group-creation spam guard (`GroupCreateThrottle`)
+    # existed in throttles.py but was never wired in.
+    def get_throttles(self):
+        if self.action == 'create':
+            return [GroupCreateThrottle()]
+        return super().get_throttles()
+
     # 🔥 NAYA — Delete group (ADMIN ONLY — moderator bhi nahi, sirf role
     # exactly 'admin' wale). Pehle ye action `ModelViewSet` ke default
     # `DestroyModelMixin` se bina kisi restriction ke chal raha tha —
@@ -1141,6 +1531,16 @@ class GroupViewSet(viewsets.ModelViewSet):
                 members_count=group.group_members.filter(is_banned=False).count()
             )
 
+        # 🔥 FIX — cache_utils.py's own setup docstring explicitly names
+        # `add_members` as a required invalidation call-site (alongside
+        # `update_member`/`approve_join_request`/member-remove), but it was
+        # never added here. Without it, a user who was checked (and cached
+        # as "not a member") just before being added here — e.g. by trying
+        # an admin-only action — could keep reading as a non-member for up
+        # to the 60s TTL.
+        for user in users:
+            invalidate_group_role_cache(group.id, user.id)
+
         return Response(GroupSerializer(group, context={'request': request}).data)
 
     # 🔥 NAYA — invite-code se group join karna. Public group me turant
@@ -1173,6 +1573,8 @@ class GroupViewSet(viewsets.ModelViewSet):
                 Group.objects.filter(id=group.id).update(
                     members_count=group.group_members.filter(is_banned=False).count()
                 )
+            # 🔥 FIX — same class of gap as `add_members`/`approve_join_request`.
+            invalidate_group_role_cache(group.id, request.user.id)
             return Response(
                 {'status': 'joined', 'group': GroupSerializer(group, context={'request': request}).data},
                 status=status.HTTP_201_CREATED,
@@ -1229,6 +1631,10 @@ class GroupViewSet(viewsets.ModelViewSet):
             Group.objects.filter(id=group.id).update(
                 members_count=group.group_members.filter(is_banned=False).count()
             )
+
+        # 🔥 FIX — same gap as `add_members` above; cache_utils.py's setup
+        # docstring names `approve_join_request` explicitly too.
+        invalidate_group_role_cache(group.id, join_request.user_id)
 
         member = GroupMember.objects.select_related('user').get(group=group, user=join_request.user)
         return Response(GroupMemberSerializer(member, context={'request': request}).data)
@@ -1423,10 +1829,56 @@ class UserPresenceView(generics.RetrieveAPIView):
     serializer_class = UserPresenceSerializer
     permission_classes = [IsAuthenticated]
 
+    # 🔥 FIX — cache_utils.py's own docstring says this view is meant to be
+    # one of the two read sites for `get_presence_cached` (the other being
+    # `ChatConsumer`'s presence update), but it was never wired in — every
+    # single presence check (chat header "online"/"last seen", opening a
+    # user's profile, etc.) was hitting the DB directly, defeating the
+    # point of a 15s-TTL cache for a value that changes this often.
     def get_object(self):
         from .models import UserPresence
-        presence, _ = UserPresence.objects.select_related('user').get_or_create(user_id=self.kwargs['user_id'])
+        user_id = self.kwargs['user_id']
+
+        cached = get_presence_cached(user_id)
+        if cached is not None:
+            # Build a lightweight, unsaved UserPresence so the existing
+            # ModelSerializer (which needs `.user` for the nested
+            # UserMiniSerializer) can render it without writing to the DB
+            # just to serve a read.
+            user = get_object_or_404(User, id=user_id)
+            return UserPresence(
+                user=user,
+                is_online=cached['is_online'],
+                last_seen_at=parse_datetime(cached['last_seen_at']) if cached['last_seen_at'] else None,
+            )
+
+        presence, _ = UserPresence.objects.select_related('user').get_or_create(user_id=user_id)
+        set_presence_cache(user_id, presence.is_online, presence.last_seen_at)
         return presence
+
+
+# 🔥 NAYA — apni read-receipt privacy setting dekhna/badalna.
+#   GET   /message/presence/read-receipts/  -> {"show_read_receipts": true|false}
+#   PATCH /message/presence/read-receipts/  body: {"show_read_receipts": false}
+# Hamesha `request.user` par operate karta hai — koi `user_id` param nahi,
+# isliye koi bhi doosre ka toggle change nahi kar sakta. Effect turant
+# `MessageViewSet.read_status` pe lagu ho jaata hai (koi cache invalidate
+# karne ki zaroorat nahi — wo action hamesha live query karta hai).
+class ReadReceiptSettingsView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        from .models import UserPresence
+        presence, _ = UserPresence.objects.get_or_create(user=request.user)
+        return Response(ReadReceiptSettingsSerializer(presence).data)
+
+    def patch(self, request):
+        from .models import UserPresence
+        presence, _ = UserPresence.objects.get_or_create(user=request.user)
+        serializer = ReadReceiptSettingsSerializer(presence, data=request.data, partial=True)
+        serializer.is_valid(raise_exception=True)
+        serializer.save()
+        return Response(serializer.data)
 
 
 # ======================================================================
@@ -1434,6 +1886,10 @@ class UserPresenceView(generics.RetrieveAPIView):
 # ======================================================================
 class CallInitiateView(APIView):
     permission_classes = [IsAuthenticated]
+    # 🔥 FIX — `CallInitiateThrottle` existed in throttles.py (calls are
+    # more "costly" than a normal message: each one creates an FCM push +
+    # a LiveKit room) but was never applied here.
+    throttle_classes = [CallInitiateThrottle]
 
     def post(self, request):
         conversation_id = request.data.get('conversation_id')

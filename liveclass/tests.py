@@ -35,6 +35,8 @@ Notes on fixtures:
       design documented across models.py/views.py.
 """
 
+import hashlib
+import hmac
 from datetime import timedelta
 from decimal import Decimal
 from unittest.mock import patch
@@ -56,6 +58,7 @@ from .models import (
     Classroom,
     ClassroomBan,
     ClassroomShare,
+    CoinPurchase,
     CoinTransaction,
     CoinWithdrawal,
     Coupon,
@@ -66,6 +69,7 @@ from .models import (
     SessionParticipant,
     SessionWaitlist,
     referral_code_for_user,
+    referral_code_to_user_id,
 )
 from .views import _charge_and_create_purchase, _try_promote_from_waitlist
 
@@ -567,6 +571,250 @@ class EscrowChargeForSessionTests(LiveClassTestBase):
 
         self.assertEqual(charged, 0)  # nothing NEW charged
         self.assertEqual(purchase.coins_released, 10)
+
+
+# ===========================================================================
+# 3B. REFER & EARN — class-level referral commission (recurring, per-day,
+#     same trigger as the teacher's own escrow release — see
+#     Classroom.referral_enabled / PassPurchase.referred_by / models.py's
+#     charge_for_session for the design).
+# ===========================================================================
+@TEST_REST_FRAMEWORK_THROTTLES
+class ClassReferralCommissionTests(LiveClassTestBase):
+    def setUp(self):
+        super().setUp()
+        self.referrer = User.objects.create_user(
+            username="referrer1", password="pass12345", email="referrer1@example.com"
+        )
+        # 20% referral commission, 10-day / 100-coin pass (same fixture pass
+        # as the base class) -> per_day_rate=10, referral_per_day_rate=2.
+        self.classroom.referral_enabled = True
+        self.classroom.referral_commission_percent = Decimal("20")
+        self.classroom.save(update_fields=["referral_enabled", "referral_commission_percent"])
+
+    def _buy_referred(self):
+        return _charge_and_create_purchase(
+            self.student,
+            self.class_pass,
+            coupon_code="",
+            referred_by=self.referrer,
+            referral_commission_percent=self.classroom.referral_commission_percent,
+        )
+
+    # --- model-level: charge_for_session pays the referrer alongside the teacher ---
+
+    def test_completed_session_pays_referrer_alongside_teacher(self):
+        purchase = self._buy_referred()
+        session = self.make_session(status_=ClassSession.Status.COMPLETED, actual_end=timezone.now())
+
+        charge = purchase.charge_for_session(session)
+        purchase.refresh_from_db()
+        self.teacher.refresh_from_db()
+        self.referrer.refresh_from_db()
+
+        self.assertEqual(charge.amount, 10)  # teacher's cut unchanged by the referral
+        self.assertEqual(charge.referral_amount, 2)  # 20% of 10
+        self.assertEqual(self.teacher.coin, 10)
+        self.assertEqual(self.referrer.coin, 2)
+        self.assertEqual(purchase.referral_coins_released, 2)
+
+        txn = CoinTransaction.objects.get(user=self.referrer)
+        self.assertEqual(txn.reason, CoinTransaction.Reason.CLASS_REFERRAL_COMMISSION)
+        self.assertEqual(txn.amount, 2)
+
+    def test_referral_payout_is_idempotent_per_date(self):
+        purchase = self._buy_referred()
+        session = self.make_session(status_=ClassSession.Status.COMPLETED, actual_end=timezone.now())
+
+        purchase.charge_for_session(session)
+        purchase.charge_for_session(session)  # simulate the signal firing twice
+        self.referrer.refresh_from_db()
+
+        self.assertEqual(self.referrer.coin, 2)  # not 4
+        self.assertEqual(
+            CoinTransaction.objects.filter(
+                user=self.referrer, reason=CoinTransaction.Reason.CLASS_REFERRAL_COMMISSION
+            ).count(),
+            1,
+        )
+
+    def test_referral_commission_capped_at_total_amount(self):
+        # 10 chargeable days at 2/day = 20 total, exactly
+        # referral_total_amount (20% of 100) — nothing released beyond it.
+        purchase = self._buy_referred()
+        self.assertEqual(purchase.referral_total_amount, 20)
+
+        base = timezone.now()
+        for i in range(10):
+            day = self.make_session(
+                status_=ClassSession.Status.COMPLETED,
+                scheduled_start=base + timedelta(days=i),
+                actual_end=base + timedelta(days=i),
+            )
+            purchase.charge_for_session(day)
+
+        purchase.refresh_from_db()
+        self.referrer.refresh_from_db()
+        self.assertEqual(purchase.referral_coins_released, 20)
+        self.assertEqual(purchase.referral_remaining_balance, 0)
+        self.assertEqual(self.referrer.coin, 20)
+
+    def test_unreferred_purchase_pays_no_commission(self):
+        purchase = _charge_and_create_purchase(self.student, self.class_pass, coupon_code="")
+        session = self.make_session(status_=ClassSession.Status.COMPLETED, actual_end=timezone.now())
+
+        charge = purchase.charge_for_session(session)
+        self.assertEqual(charge.referral_amount, 0)
+        self.assertFalse(
+            CoinTransaction.objects.filter(reason=CoinTransaction.Reason.CLASS_REFERRAL_COMMISSION).exists()
+        )
+
+    def test_referral_disabled_at_accept_time_pays_nothing_even_if_requested_with_a_code(self):
+        # Mirrors ClassJoinRequestViewSet.accept()'s re-check: when the
+        # classroom's referral_enabled is False at accept-time, the caller
+        # passes referred_by=None regardless of what the join request had
+        # recorded (see accept()'s `referred_by=... if classroom.referral_enabled
+        # else None`) — so the purchase itself never gets a referrer.
+        purchase = _charge_and_create_purchase(
+            self.student, self.class_pass, coupon_code="",
+            referred_by=None, referral_commission_percent=Decimal("0"),
+        )
+        self.assertIsNone(purchase.referred_by_id)
+        self.assertEqual(purchase.referral_commission_percent, Decimal("0"))
+        session = self.make_session(status_=ClassSession.Status.COMPLETED, actual_end=timezone.now())
+        charge = purchase.charge_for_session(session)
+        self.assertEqual(charge.referral_amount, 0)
+
+    # --- API-level: refer-link -> join request with referral_code -> accept ---
+
+    def test_refer_link_requires_referral_enabled(self):
+        self.classroom.referral_enabled = False
+        self.classroom.save(update_fields=["referral_enabled"])
+        client = APIClient()
+        client.force_authenticate(self.referrer)
+        url = reverse("classroom-refer-link", args=[self.classroom.pk])
+        resp = client.get(url)
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_refer_link_returns_code_and_rate(self):
+        client = APIClient()
+        client.force_authenticate(self.referrer)
+        url = reverse("classroom-refer-link", args=[self.classroom.pk])
+        resp = client.get(url)
+
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(resp.data["referral_code"], referral_code_for_user(self.referrer.id))
+        self.assertEqual(Decimal(resp.data["commission_percent"]), Decimal("20"))
+        self.assertIn(f"ref={referral_code_for_user(self.referrer.id)}", resp.data["web_url"])
+
+    def test_join_request_with_valid_referral_code_records_referrer(self):
+        client = APIClient()
+        client.force_authenticate(self.student)
+        url = reverse("classjoinrequest-list")
+        code = referral_code_for_user(self.referrer.id)
+        resp = client.post(
+            url,
+            {"classroom": self.classroom.id, "class_pass": self.class_pass.id, "referral_code": code},
+            format="json",
+        )
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
+        join_request = ClassJoinRequest.objects.get(pk=resp.data["id"])
+        self.assertEqual(join_request.referred_by_id, self.referrer.id)
+
+    def test_join_request_referral_code_rejected_when_referrals_disabled(self):
+        self.classroom.referral_enabled = False
+        self.classroom.save(update_fields=["referral_enabled"])
+        client = APIClient()
+        client.force_authenticate(self.student)
+        url = reverse("classjoinrequest-list")
+        code = referral_code_for_user(self.referrer.id)
+        resp = client.post(
+            url,
+            {"classroom": self.classroom.id, "class_pass": self.class_pass.id, "referral_code": code},
+            format="json",
+        )
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_self_referral_is_rejected(self):
+        client = APIClient()
+        client.force_authenticate(self.student)
+        url = reverse("classjoinrequest-list")
+        code = referral_code_for_user(self.student.id)
+        resp = client.post(
+            url,
+            {"classroom": self.classroom.id, "class_pass": self.class_pass.id, "referral_code": code},
+            format="json",
+        )
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_accept_carries_referral_onto_purchase_and_pays_out_on_completed_session(self):
+        client = APIClient()
+        client.force_authenticate(self.student)
+        code = referral_code_for_user(self.referrer.id)
+        create_resp = client.post(
+            reverse("classjoinrequest-list"),
+            {"classroom": self.classroom.id, "class_pass": self.class_pass.id, "referral_code": code},
+            format="json",
+        )
+        join_request_id = create_resp.data["id"]
+
+        client.force_authenticate(self.teacher)
+        accept_resp = client.post(reverse("classjoinrequest-accept", args=[join_request_id]), {}, format="json")
+        self.assertEqual(accept_resp.status_code, status.HTTP_200_OK)
+
+        join_request = ClassJoinRequest.objects.get(pk=join_request_id)
+        purchase = join_request.pass_purchase
+        self.assertEqual(purchase.referred_by_id, self.referrer.id)
+        self.assertEqual(purchase.referral_commission_percent, Decimal("20"))
+        self.assertEqual(purchase.referral_per_day_rate, Decimal("2"))  # 10 * 20%
+
+        session = self.make_session(status_=ClassSession.Status.COMPLETED, actual_end=timezone.now())
+        purchase.charge_for_session(session)
+        self.referrer.refresh_from_db()
+        self.assertEqual(self.referrer.coin, 2)
+
+    def test_accept_ignores_referral_when_disabled_between_request_and_accept(self):
+        client = APIClient()
+        client.force_authenticate(self.student)
+        code = referral_code_for_user(self.referrer.id)
+        create_resp = client.post(
+            reverse("classjoinrequest-list"),
+            {"classroom": self.classroom.id, "class_pass": self.class_pass.id, "referral_code": code},
+            format="json",
+        )
+        join_request_id = create_resp.data["id"]
+
+        # Teacher turns referrals off before accepting.
+        self.classroom.referral_enabled = False
+        self.classroom.save(update_fields=["referral_enabled"])
+
+        client.force_authenticate(self.teacher)
+        client.post(reverse("classjoinrequest-accept", args=[join_request_id]), {}, format="json")
+
+        join_request = ClassJoinRequest.objects.get(pk=join_request_id)
+        purchase = join_request.pass_purchase
+        # referred_by stays recorded on the join request itself (who
+        # actually sent the student), but the purchase pays nothing since
+        # referrals were off at the moment coins actually moved.
+        self.assertEqual(join_request.referred_by_id, self.referrer.id)
+        self.assertIsNone(purchase.referred_by_id)
+        self.assertEqual(purchase.referral_commission_percent, Decimal("0"))
+
+    def test_referral_earnings_endpoint_lists_own_referrals_only(self):
+        purchase = self._buy_referred()
+        session = self.make_session(status_=ClassSession.Status.COMPLETED, actual_end=timezone.now())
+        purchase.charge_for_session(session)
+
+        client = APIClient()
+        client.force_authenticate(self.referrer)
+        resp = client.get(reverse("passpurchase-referral-earnings"))
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(resp.data["total_earned"], 2)
+
+        # A different user has no referrals -> empty list, zero total.
+        client.force_authenticate(self.other_teacher)
+        resp2 = client.get(reverse("passpurchase-referral-earnings"))
+        self.assertEqual(resp2.data["total_earned"], 0)
 
 
 # ===========================================================================
@@ -1553,6 +1801,134 @@ class CoinWithdrawalTests(LiveClassTestBase):
         staff_resp = self._client_for(staff_user).get(reverse("coinwithdrawal-list"))
         staff_ids = {row["id"] for row in staff_resp.data.get("results", staff_resp.data)}
         self.assertIn(other_teacher_withdrawal.id, staff_ids)
+
+
+class CoinPurchaseTests(LiveClassTestBase):
+    """New (fix — this feature had zero coverage until now, same as every
+    other money-moving surface in this file per the module docstring).
+    Covers the initiate -> verify -> credit flow, the fail-closed signature
+    check, and the retry-on-failure path CoinPurchase exists to provide."""
+
+    def _client_for(self, user):
+        client = APIClient()
+        client.force_authenticate(user)
+        return client
+
+    def _sign(self, secret, order_id, payment_id):
+        return hmac.new(secret.encode(), f"{order_id}|{payment_id}".encode(), hashlib.sha256).hexdigest()
+
+    def test_initiate_creates_pending_purchase_with_derived_amount(self):
+        client = self._client_for(self.student)
+        resp = client.post(reverse("coinpurchase-initiate"), {"coins": 300}, format="json")
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(resp.data["status"], CoinPurchase.Status.PENDING)
+        self.assertEqual(Decimal(resp.data["amount_inr"]), 300 * CoinWithdrawal.COIN_TO_INR_RATE)
+        self.assertTrue(resp.data["order_id"])
+
+    def test_initiate_rejects_non_positive_coins(self):
+        client = self._client_for(self.student)
+        resp = client.post(reverse("coinpurchase-initiate"), {"coins": 0}, format="json")
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+
+    @override_settings(RAZORPAY_KEY_SECRET="")
+    def test_verify_fails_closed_when_gateway_secret_not_configured(self):
+        client = self._client_for(self.student)
+        initiate_resp = client.post(reverse("coinpurchase-initiate"), {"coins": 100}, format="json")
+        purchase_id, order_id = initiate_resp.data["id"], initiate_resp.data["order_id"]
+
+        resp = client.post(
+            reverse("coinpurchase-verify", args=[purchase_id]),
+            {"razorpay_order_id": order_id, "razorpay_payment_id": "pay_x", "razorpay_signature": "bogus"},
+            format="json",
+        )
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+        purchase = CoinPurchase.objects.get(pk=purchase_id)
+        self.assertEqual(purchase.status, CoinPurchase.Status.FAILED)
+        self.student.refresh_from_db()
+        self.assertEqual(self.student.coin, 1000)  # untouched — base fixture starting balance
+
+    @override_settings(RAZORPAY_KEY_SECRET="test-secret-key")
+    def test_verify_with_correct_signature_credits_wallet_exactly_once(self):
+        client = self._client_for(self.student)
+        initiate_resp = client.post(reverse("coinpurchase-initiate"), {"coins": 100}, format="json")
+        purchase_id, order_id = initiate_resp.data["id"], initiate_resp.data["order_id"]
+        payment_id = "pay_abc123"
+        signature = self._sign("test-secret-key", order_id, payment_id)
+
+        resp = client.post(
+            reverse("coinpurchase-verify", args=[purchase_id]),
+            {"razorpay_order_id": order_id, "razorpay_payment_id": payment_id, "razorpay_signature": signature},
+            format="json",
+        )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(resp.data["status"], CoinPurchase.Status.SUCCESS)
+        self.student.refresh_from_db()
+        self.assertEqual(self.student.coin, 1100)  # base 1000 + 100 topped up
+        self.assertTrue(
+            CoinTransaction.objects.filter(
+                user=self.student, reason=CoinTransaction.Reason.TOPUP, amount=100
+            ).exists()
+        )
+
+        # A second verify call on an already-resolved purchase (a retried
+        # client call, or a duplicate gateway webhook) must never double-credit.
+        second_resp = client.post(
+            reverse("coinpurchase-verify", args=[purchase_id]),
+            {"razorpay_order_id": order_id, "razorpay_payment_id": payment_id, "razorpay_signature": signature},
+            format="json",
+        )
+        self.assertEqual(second_resp.status_code, status.HTTP_400_BAD_REQUEST)
+        self.student.refresh_from_db()
+        self.assertEqual(self.student.coin, 1100)
+
+    def test_verify_rejects_order_id_mismatch(self):
+        client = self._client_for(self.student)
+        initiate_resp = client.post(reverse("coinpurchase-initiate"), {"coins": 50}, format="json")
+        purchase_id = initiate_resp.data["id"]
+
+        resp = client.post(
+            reverse("coinpurchase-verify", args=[purchase_id]),
+            {"razorpay_order_id": "order_not_this_one", "razorpay_payment_id": "pay_x", "razorpay_signature": "x"},
+            format="json",
+        )
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+
+    @override_settings(RAZORPAY_KEY_SECRET="")
+    def test_failed_purchase_can_be_retried_as_a_new_pending_row(self):
+        client = self._client_for(self.student)
+        initiate_resp = client.post(reverse("coinpurchase-initiate"), {"coins": 100}, format="json")
+        purchase_id, order_id = initiate_resp.data["id"], initiate_resp.data["order_id"]
+        client.post(
+            reverse("coinpurchase-verify", args=[purchase_id]),
+            {"razorpay_order_id": order_id, "razorpay_payment_id": "pay_x", "razorpay_signature": "bogus"},
+            format="json",
+        )
+
+        retry_resp = client.post(reverse("coinpurchase-retry", args=[purchase_id]), {}, format="json")
+        self.assertEqual(retry_resp.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(retry_resp.data["status"], CoinPurchase.Status.PENDING)
+        self.assertNotEqual(retry_resp.data["order_id"], order_id)
+        new_purchase = CoinPurchase.objects.get(pk=retry_resp.data["id"])
+        self.assertEqual(new_purchase.retry_of_id, purchase_id)
+
+    def test_cannot_retry_a_still_pending_purchase(self):
+        client = self._client_for(self.student)
+        initiate_resp = client.post(reverse("coinpurchase-initiate"), {"coins": 100}, format="json")
+        resp = client.post(reverse("coinpurchase-retry", args=[initiate_resp.data["id"]]), {}, format="json")
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_cannot_verify_or_retry_someone_elses_purchase(self):
+        purchase = CoinPurchase.objects.create(
+            user=self.student, coins=100, amount_inr=100, order_id="order_other_student"
+        )
+        other_client = self._client_for(self.other_teacher)
+        verify_resp = other_client.post(
+            reverse("coinpurchase-verify", args=[purchase.pk]),
+            {"razorpay_order_id": purchase.order_id, "razorpay_payment_id": "p", "razorpay_signature": "s"},
+            format="json",
+        )
+        self.assertEqual(verify_resp.status_code, status.HTTP_404_NOT_FOUND)
+
 
 # ===========================================================================
 # 16. CLASSROOM SHARE — in-app (notifies a specific user) vs outside-the-app

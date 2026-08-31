@@ -602,9 +602,11 @@ commit, and avoids side effects surviving a rolled-back transaction.
 
 ## 7. Celery tasks
 
-24 tasks total in `tasks.py`, all `@shared_task(name="liveclass....")`.
-**6 are on `CELERY_BEAT_SCHEDULE`** (cron jobs); **18 are fire-and-forget
-`.delay()` notification dispatchers** called from views.py/signals.py.
+26 tasks total in `tasks.py`, all `@shared_task(name="liveclass....")`.
+**7 are on `CELERY_BEAT_SCHEDULE`** (cron jobs); **18 are fire-and-forget
+`.delay()` notification dispatchers** called from views.py/signals.py;
+**1 (`transcribe_recording`, Pass 7) is a deliberately-not-yet-wired
+scaffold** — see below.
 
 ### Scheduled (beat) jobs
 | Task | What it does |
@@ -615,8 +617,9 @@ commit, and avoids side effects surviving a rolled-back transaction.
 | `refresh_stale_enrolled_counts` | Sweeps classrooms whose `enrolled_count` has drifted stale from passes quietly *expiring* (expiry never triggers a save, so the normal signal never fires). |
 | `expire_and_refund_passes` | The actual "student loses money" gap-closer — sweeps purchases past `expires_at` with leftover `remaining_balance` and reverses them (nothing else ever calls `reverse()` on a purely-expired row). |
 | `cleanup_stale_chunked_uploads` (Pass 3) | Sweeps `ChunkedUpload` rows stuck `IN_PROGRESS`/`PROCESSING` with no chunk activity for 6h (`CHUNKED_UPLOAD_STALE_AFTER`) → deletes their temp chunk dir, marks `EXPIRED`. Also purges terminal-status rows older than 14 days (`CHUNKED_UPLOAD_ROW_RETENTION_DAYS`), and defensively removes any orphan directory under `CHUNKED_UPLOAD_TMP_ROOT` with no matching DB row at all. Runs hourly. |
+| `reconcile_stuck_coin_purchases` (Pass 7) | The actual "payment retry" gap-closer for coin top-ups — sweeps `CoinPurchase` rows stuck `PENDING` past `COIN_PURCHASE_PENDING_TIMEOUT` (2h) and `mark_failed()`s them, so a client that crashed/closed mid-payment always eventually becomes retry-able instead of sitting invisible forever. **Was written in Pass 7 but never actually added to `CELERY_BEAT_SCHEDULE` — fixed in Pass 8 (see §11); until that fix this task existed but never ran.** |
 
-All 6 have intervals shorter than their own lookback/staleness windows
+All 7 have intervals shorter than their own lookback/staleness windows
 (no gap where a batch could be missed).
 
 ### Notification dispatchers (all `.delay()`'d, never called inline)
@@ -633,6 +636,18 @@ All 6 have intervals shorter than their own lookback/staleness windows
 value and calls `notifications.send_notification()`. (Withdrawal
 notifications are in-app only, via `create_notification()` directly in
 `views.py` — no matching Celery push task exists for those three.)
+
+### Scaffold, not wired (Pass 7)
+`transcribe_recording(session_id)` — the queue/state-machine half of
+captions (`ClassSession.caption_status`/`caption_url`) is real, but the
+actual speech-to-text call is a deliberate `NotImplementedError` stub
+pending a provider decision (AWS Transcribe / Google Speech-to-Text /
+hosted Whisper all fit). **Not** called from anywhere yet (not from
+`LiveKitWebhookView`'s egress-ended handling, not from beat) — firing it
+unconditionally on every recording would mean paying for transcription
+whether or not captions were ever asked for. Wire the `.delay()` call in
+once a provider is chosen and it's decided whether captions are opt-in
+(a `Classroom`-level toggle, mirroring `recording_enabled`) or default-on.
 
 ---
 
@@ -723,50 +738,69 @@ LiveKit calls and `_safe_delay` (Celery dispatch) are patched module-wide
 | 13 | **`ClassroomPriceRatingFilterTests`** *(added this pass)* | `min_rating`, `min_price`, `max_price`, range matching, malformed-param graceful handling |
 | 14 | `CoinWithdrawalTests` *(Pass 5 — row was missing from this table until now)* | debit-at-request, minimum-amount rejection, insufficient-balance rejection, payout_details validation (bank/UPI), self-cancel + refund, cross-user cancel forbidden, non-staff approve forbidden, full approve→mark-paid happy path, reject-requires-a-reason + refund, cannot cancel an already-approved request, staff-sees-all vs self-sees-own |
 | 15 | **`ClassroomShareTests`** *(Pass 6)* | outside-the-app share returns link + bumps `share_count` + notifies nobody, in-app share notifies target + forces `channel="in_app"`, self-share rejected, `channel="in_app"` without `to_user_id` rejected, sharing a classroom you can't see 404s, `share-stats` visible to teacher / 403 for a student |
+| 16 | **`CoinPurchaseTests`** *(Pass 7 feature; test class itself added in Pass 8 — this whole feature had zero coverage until now)* | initiate creates `PENDING` with server-derived `amount_inr`, rejects non-positive `coins`, signature check fails closed when `RAZORPAY_KEY_SECRET` unset, correct-signature verify credits wallet exactly once (and a second verify/duplicate webhook never double-credits), `order_id` mismatch rejected, a `FAILED` purchase can be retried as a fresh linked `PENDING` row, cannot retry a still-`PENDING` purchase, cannot verify/retry someone else's purchase (404) |
 
 **Deliberately NOT covered** (per `tests.py`'s own module docstring):
 scheduling/recurrence generation, chat, polls, assignments grading flow
-end-to-end.
+end-to-end. Also still uncovered: the SMS/WhatsApp notification channels
+themselves (Pass 7) and the `transcribe_recording` scaffold (Pass 7,
+not wired to anything yet — see §7).
 
 ---
 
-## 10. Settings this app requires (NOT in this upload)
+## 10. Settings this app requires
 
-Referenced throughout the code but `settings.py` was never uploaded —
-confirm these exist with real values before deploy:
+`settings.py` **is** part of this upload as of this pass (earlier passes
+never had it and had to infer requirements from usage alone — that
+inference is now cross-checked against the real file below):
 
-- `REST_FRAMEWORK["EXCEPTION_HANDLER"] = "liveclass.exceptions.liveclass_exception_handler"`
-- `REST_FRAMEWORK["DEFAULT_THROTTLE_RATES"]` — needs `session_join`,
-  `session_token`, `coupon_validate`, `chat_message_create`, and
-  (Pass 3) `chunked_upload_init`, `chunked_upload_chunk`,
-  `chunked_upload_complete` entries, and (Pass 5 — see §11)
-  `coin_withdrawal` (a low rate, e.g. `5/day`, is enough — this is a
-  real-money-adjacent action, not a browsing endpoint)
+- `REST_FRAMEWORK["EXCEPTION_HANDLER"] = "liveclass.exceptions.liveclass_exception_handler"` — ✅ present.
+- `REST_FRAMEWORK["DEFAULT_THROTTLE_RATES"]` — `session_join`,
+  `session_token`, `coupon_validate`, `chat_message_create`,
+  `chunked_upload_init/chunk/complete` — ✅ all present. **`coin_withdrawal`
+  and `coin_purchase` were BOTH missing** (verified against actual
+  `throttle_scope = "coin_withdrawal"` / `"coin_purchase"` in views.py) —
+  same `ImproperlyConfigured`-on-first-hit bug class documented for the
+  original four scopes, silently reintroduced twice (Pass 5, Pass 7) and
+  never caught until this pass. **Fixed in Pass 8** — see §11.
+- `RAZORPAY_KEY_ID` / `RAZORPAY_KEY_SECRET` *(Pass 7, added to settings.py
+  in Pass 8)* — coin-purchase gateway. Was completely absent from
+  settings.py even as a documented placeholder; `_verify_gateway_signature`
+  (views.py) already fails closed without it, so nothing crashes, but no
+  real top-up can ever succeed until real Razorpay keys are set.
+- `MSG91_AUTH_KEY`, `MSG91_SMS_SENDER_ID`,
+  `MSG91_WHATSAPP_INTEGRATED_NUMBER`, `MSG91_WHATSAPP_TEMPLATE_NAME`
+  *(Pass 7, added to settings.py in Pass 8)* — SMS/WhatsApp notification
+  channels. Same story as Razorpay above: `notifications.py` degrades to
+  a logged no-op without these, so nothing crashes, but SMS/WhatsApp
+  silently do nothing until real MSG91 credentials are set.
 - `LIVECLASS_WEB_BASE_URL` *(Pass 6, optional)* — base web URL used by
-  `Classroom.share_urls()` to build `.../classroom/{id}` links; falls
-  back to a placeholder (`https://app.example.com`) via `getattr` if
-  unset, so this works out of the box in dev but MUST be set to the real
-  domain before any share link reaches an actual user.
-- `LIVECLASS_DEEP_LINK_SCHEME` *(Pass 6, optional)* — URL scheme used for
-  the in-app deep link half of `share_urls()` (e.g. `liveclass://...`);
-  falls back to `"liveclass"` via `getattr` if unset — should match
-  whatever custom scheme the Flutter app actually registers.
+  `Classroom.share_urls()` to build `.../classroom/{id}` links. **Confirmed
+  NOT set in settings.py** — falls back to the placeholder
+  (`https://app.example.com`) via `getattr`, so this works out of the box
+  in dev but MUST be set to the real domain before any share link reaches
+  an actual user.
+- `LIVECLASS_DEEP_LINK_SCHEME` *(Pass 6, optional)* — same story, falls
+  back to `"liveclass"`. Not set in settings.py either; fine as a default.
 - `CHUNKED_UPLOAD_TMP_ROOT` (Pass 3) — filesystem path for in-progress
   chunk assembly, deliberately outside `MEDIA_ROOT` (see §2
   `ChunkedUpload`). Local-disk only as written; a multi-instance
   deployment needs this on a shared volume or sticky-routed to one
   instance per `upload_id` — see §12 item 9.
 - `REST_FRAMEWORK["DEFAULT_PERMISSION_CLASSES"] = ["IsAuthenticated"]`
-  (fail-closed floor)
-- `REST_FRAMEWORK["PAGE_SIZE"] = 20` (via `LiveClassPagination`)
-- `REFERRAL_BONUS_COINS`, `REFERRAL_REDEEM_WINDOW_DAYS`
+  (fail-closed floor) — ✅ present.
+- `REST_FRAMEWORK["PAGE_SIZE"] = 20` (via `LiveClassPagination`) — ✅ present.
+- `REFERRAL_BONUS_COINS`, `REFERRAL_REDEEM_WINDOW_DAYS` — ✅ present.
 - `MIN_AGE_BEFORE_DELETE_DAYS` (constant on `Classroom`, may be
   settings-driven or hardcoded — verify)
 - `AUTO_FLAG_THRESHOLD` (constant on `ClassroomReport`)
 - `SESSION_GENERATION_WINDOW_DAYS` (used by `generate_upcoming_sessions`)
 - `LIVEKIT_API_KEY`, `LIVEKIT_API_SECRET`, `LIVEKIT_WS_URL`
-- `CELERY_BEAT_SCHEDULE` — 6 entries matching the tasks in §7, each
-  interval shorter than its own lookback/staleness window
+- `CELERY_BEAT_SCHEDULE` — 7 entries matching the tasks in §7, each
+  interval shorter than its own lookback/staleness window. **Confirmed
+  `reconcile_stuck_coin_purchases` (Pass 7) was missing from this dict** —
+  the task existed but had never actually been scheduled. **Fixed in
+  Pass 8** — see §11.
 - `DEBUG`, `ALLOWED_HOSTS`, `DATABASE_URL` (Postgres — SQLite has no
   real concurrent-write story for this multi-user platform), `REDIS_URL`
   (Channels + Celery broker + cache), `CORS_ALLOWED_ORIGINS`,
@@ -780,7 +814,7 @@ confirm these exist with real values before deploy:
   separately bounded by `MaxFileSizeValidator`). This is exactly why
   `ChunkedUpload` (Pass 3) exists — `ClassMaterial.file` (100MB) and
   the 50MB attachment/submission fields would be rejected outright as
-  a single request under this cap.
+  a single request under this cap. ✅ confirmed set to 10MB in settings.py.
 
 **Packages required** (no `requirements.txt` in this upload):
 `psycopg2-binary`, `channels_redis`, `django-redis`, `sentry-sdk`,
@@ -1130,12 +1164,175 @@ for the full reasoning if needed.)
   `OrderingFilter` (`ordering_fields` currently stops at `created_at`/
   `rating_avg`/`enrolled_count`/`title`).
 
+### Pass 7 — coin top-up (gateway-agnostic order→verify→credit flow),
+SMS + WhatsApp notification channels, captions scaffold
+*(This section was written retroactively in Pass 8. The code for all
+three features already existed in the uploaded source going into Pass 8
+— e.g. `notifications.py`'s own header already said "sms: WIRED (Pass 7)"
+— but this document never got updated to match, breaking the maintenance
+rule at the bottom of this file. Documenting what already shipped here,
+then Pass 8 below covers the bugs discovered while doing so.)*
+
+- **`models.py`** — new `CoinPurchase` model (§13A2 in-file). Closes the
+  actual gap behind `CoinTransaction.Reason.TOPUP`: that enum value has
+  existed since the coin ledger was first written, but nothing ever
+  created a transaction with it — there was no gateway integration, no
+  order/verify flow, and no way to retry a failed top-up. `mark_success()`
+  is idempotent by construction (only acts if still `PENDING`, inside a
+  row lock) so a duplicate gateway webhook or a retried client verify call
+  can never double-credit a wallet. `mark_failed()` never mutates a row
+  back out of `FAILED` — retrying creates a fresh linked row (`retry_of`)
+  instead, so the failure stays on the record. Also added
+  `NotificationChannel.WHATSAPP` (referenced from `notifications.py`).
+- **`views.py`** — new `CoinPurchaseViewSet` (`initiate`/`verify`/`retry`,
+  own-purchases-only). `_create_gateway_order`/`_verify_gateway_signature`
+  are the only two functions that know about a real payment gateway —
+  written against Razorpay's order-create + HMAC-signature-verify shape;
+  `_verify_gateway_signature` fails closed (returns `False`) if
+  `RAZORPAY_KEY_SECRET` isn't configured, rather than trusting an
+  unverifiable payload. `amount_inr` is always derived server-side from
+  `coins * CoinWithdrawal.COIN_TO_INR_RATE`, never trusted from the client.
+- **`urls.py`** — new `coin-purchases/` route
+  (`router.register(r"coin-purchases", CoinPurchaseViewSet, basename="coinpurchase")`).
+- **`tasks.py`** — new `reconcile_stuck_coin_purchases` beat job: sweeps
+  `CoinPurchase` rows stuck `PENDING` past `COIN_PURCHASE_PENDING_TIMEOUT`
+  (2h) and `mark_failed()`s them, so a client that crashes/closes mid-
+  payment (or a webhook that never arrives) always eventually becomes
+  retry-able instead of sitting invisible forever — this is the actual
+  "payment retry" gap being closed, since `retry()` only ever works on an
+  already-`FAILED` row. Deliberately conservative: does NOT call the
+  gateway to check real status (no gateway client is actually wired in
+  yet) — once one exists, this should fetch real payment status first and
+  only `mark_failed()` if the gateway also reports failure/expiry, so a
+  payment that actually succeeded but whose webhook was just slow is
+  never marked `FAILED` out from under a student.
+- **`notifications.py`** — `sms`/`whatsapp` channels wired to MSG91 (India-
+  focused, plain HTTP APIs, no SDK dependency). Both share one
+  `_phone_for(user)` lookup (`user.phone_number` or `user.mobile`) so the
+  two channels can't drift on which attribute they trust. Both degrade to
+  a logged warning + no-op — never raise — if their settings aren't fully
+  configured, same contract as every other channel in this file.
+  WhatsApp specifically requires a pre-approved message template
+  (`MSG91_WHATSAPP_TEMPLATE_NAME`) since WhatsApp Business rules forbid
+  free-form business-initiated messages outside a 24h user-initiated
+  session window — every liveclass notification falls outside that
+  window, so this is not optional.
+- **`tasks.py`** — new `transcribe_recording` task (captions). SCAFFOLD,
+  not a finished feature: the queueing/state-machine half
+  (`ClassSession.caption_status` → `PROCESSING`/`FAILED`) is real, but the
+  actual speech-to-text call is a deliberate `NotImplementedError` pending
+  a provider decision (AWS Transcribe / Google Speech-to-Text / hosted
+  Whisper all fit equally). Not wired to fire automatically from anywhere
+  (not from `LiveKitWebhookView`'s egress-ended handling) — see §7 for why.
+- **Settings needed (added to §10 above in Pass 8 — were completely
+  absent from `settings.py`, not even as placeholders):**
+  `RAZORPAY_KEY_ID`, `RAZORPAY_KEY_SECRET`, `MSG91_AUTH_KEY`,
+  `MSG91_SMS_SENDER_ID`, `MSG91_WHATSAPP_INTEGRATED_NUMBER`,
+  `MSG91_WHATSAPP_TEMPLATE_NAME`.
+- **New migration needed** — one new model (`CoinPurchase`) + one new
+  `NotificationChannel` choice value (no schema change for a `TextChoices`
+  addition, but confirm no separate `Notification.Channel` duplicate enum
+  needs the same value — see §2 for where `Channel`/`NotificationChannel`
+  are each defined). Not generated/run in this pass — same reason as every
+  other migration note in this doc (no live Django project in this
+  sandbox, see §13).
+- **Not documented anywhere until Pass 8:** this entire Pass 7 changeset
+  — see Pass 8 immediately below for what that omission actually caused.
+
+### Pass 8 — this pass: fixing what Pass 7 shipped without ever wiring
+in or documenting
+*(Full re-check of every file against every other file, specifically
+looking for exactly this class of problem: code that references
+something another file was supposed to provide, but doesn't. Found three
+real defects, all introduced in Pass 7 and none caught until now.)*
+
+- **CRITICAL — the entire app failed to import.** `views.py` has always
+  imported `CoinPurchaseSerializer`, `CoinPurchaseInitiateSerializer`, and
+  `CoinPurchaseVerifySerializer` from `.serializers` (needed by
+  `CoinPurchaseViewSet`), and `serializers.py` never defined any of the
+  three — nor imported the `CoinPurchase` model it would need to. This is
+  not a "coin purchase doesn't work" bug; it's an `ImportError` the moment
+  `liveclass.views` is imported, i.e. the moment `urls.py` loads, i.e.
+  Django's app loading itself. **Every endpoint in this app was broken**,
+  not just coin purchases. Fixed: added `CoinPurchase` to the model
+  import block and added all three serializer classes to `serializers.py`
+  (§13A2 in-file), following the exact same shape as the neighboring
+  `CoinWithdrawalSerializer` — `CoinPurchaseSerializer` is entirely
+  read-only (a `CoinPurchase` row is always built server-side, never from
+  client input), `CoinPurchaseInitiateSerializer` validates `coins`
+  (`min_value=1`), `CoinPurchaseVerifySerializer` validates the three
+  Razorpay callback fields.
+- **CRITICAL — first request to either endpoint would 500.** Same bug
+  class as the one already fixed once for `session_join`/`session_token`/
+  `coupon_validate`/`chat_message_create` (see the `DEFAULT_THROTTLE_RATES`
+  comment in settings.py) — a `throttle_scope` set on a viewset with no
+  matching entry in `DEFAULT_THROTTLE_RATES` makes DRF's
+  `ScopedRateThrottle.get_rate()` raise `ImproperlyConfigured` on the very
+  first hit. `coin_withdrawal` (Pass 5) and `coin_purchase` (Pass 7) were
+  BOTH missing — the same mistake reintroduced twice after being fixed
+  once, and never caught since neither had a test that actually exercised
+  a live HTTP call through `APIClient` (which would have surfaced it
+  immediately). Fixed: added both to `settings.py` at `10/min` each
+  (money-moving actions, rated tighter than the general browsing scopes).
+- **Silent scheduling gap.** `tasks.reconcile_stuck_coin_purchases` (Pass
+  7) — written specifically to close the "a payment gets stuck PENDING
+  forever" gap — was never added to `CELERY_BEAT_SCHEDULE`. Same failure
+  mode the file already had to fix once before for
+  `refresh_stale_enrolled_counts` ("just never existed as a scheduled
+  job"). The task existed, would have worked if called, and simply never
+  ran. Fixed: added a `*/30`-minute entry to `CELERY_BEAT_SCHEDULE` in
+  `settings.py` (shorter than the 2h `COIN_PURCHASE_PENDING_TIMEOUT`, same
+  no-gap reasoning as every other lookback-window job in that schedule).
+- **`settings.py`** — added `RAZORPAY_KEY_ID`/`RAZORPAY_KEY_SECRET` and
+  `MSG91_AUTH_KEY`/`MSG91_SMS_SENDER_ID`/
+  `MSG91_WHATSAPP_INTEGRATED_NUMBER`/`MSG91_WHATSAPP_TEMPLATE_NAME` as
+  `os.environ.get(...)`-backed settings (previously absent even as
+  documented placeholders, despite both `views.py` and `notifications.py`
+  already reading them via `getattr`). Both code paths already degrade
+  safely without real values (fail-closed signature check; logged no-op
+  channel), so this isn't a crash fix — it's closing the gap where ops
+  had no settings.py line to actually go fill in.
+- **`tests.py`** — new `CoinPurchaseTests` (this feature had zero test
+  coverage of any kind before this pass, despite being real-money-adjacent
+  code — the exact category `tests.py`'s own module docstring says this
+  file exists to cover): initiate creates a `PENDING` row with a
+  server-derived `amount_inr` (never client-trusted), rejects non-positive
+  `coins`, signature check fails closed when `RAZORPAY_KEY_SECRET` is
+  unset (purchase ends `FAILED`, wallet untouched), a correctly-signed
+  verify credits the wallet exactly once — including a second verify call
+  or duplicate webhook on the same purchase (already resolved →
+  `ValidationError`, no double-credit), `order_id` mismatch rejected,
+  a `FAILED` purchase can be retried into a fresh `PENDING` row linked via
+  `retry_of`, a still-`PENDING` purchase cannot be retried, and a user
+  cannot verify or retry someone else's purchase (404, not 403 — same
+  own-queryset-scoping pattern as every other "own resources only"
+  viewset in this app).
+- **Documentation-only fixes, this file:** §7 (added
+  `reconcile_stuck_coin_purchases` to the beat-job table and
+  `transcribe_recording` as a documented not-yet-wired scaffold), §9
+  (added the `CoinPurchaseTests` row), §10 (rewritten — `settings.py` is
+  now actually part of the upload, so every line below is a confirmed
+  presence/absence check against the real file, not an inference from
+  usage), §12 (below — removed the now-false "SMS channel unimplemented"
+  item, added the real remaining gaps).
+- **Not done this pass (real gateway/provider wiring, deliberately out of
+  scope — see each stub's own docstring for exactly where to plug in):**
+  an actual Razorpay (or other gateway) SDK call in
+  `_create_gateway_order`/`_verify_gateway_signature`; real MSG91
+  credentials; a speech-to-text provider for `transcribe_recording`, and
+  the product decision (opt-in vs default-on) plus the `.delay()` wiring
+  from `LiveKitWebhookView` that would actually trigger it; the
+  `CoinPurchase` migration (see Pass 7 above — still not generated, same
+  reason as every other migration note in this file).
+
 ---
 
 ## 12. Open action items before deploy
 
-Config/deployment only — **no known code defects remain** (see §13 for
-what "known" means here).
+Config/deployment only, as of Pass 8 — the three genuine code defects
+found this pass (see §11 Pass 8: the `serializers.py` `ImportError`, the
+two missing throttle-rate entries, the unregistered beat job) are already
+fixed in the source, not just noted here.
 
 1. **Fill real `.env` values** — see §10 for the full list; the code
    already supports every one of these via env vars, they just need
@@ -1145,22 +1342,28 @@ what "known" means here).
 3. **Confirm `message.push_utils.send_push_to_users` import path** —
    `notifications.py._send_push` degrades gracefully (logs a warning,
    never crashes) if wrong, but push silently no-ops until corrected.
-4. **SMS channel unimplemented** — `_send_sms` always no-ops; fine
-   unless the product needs it, but don't assume
-   `send_notification(..., channel="sms")` does anything until a
-   provider is wired in.
+4. **Set real `RAZORPAY_KEY_ID`/`RAZORPAY_KEY_SECRET` and `MSG91_*`
+   credentials** (Pass 7) — SMS/WhatsApp/coin-top-up are all fully wired
+   in code as of Pass 7 (§11) and no longer crash (Pass 8 fixed the two
+   `ImportError`/`ImproperlyConfigured` bugs that made them unusable —
+   see §11), but none of the three can actually move real money or send
+   a real message until these are real values. Until then:
+   `send_notification(..., channel="sms"/"whatsapp")` silently no-ops,
+   and `CoinPurchaseViewSet.verify` fails closed on every attempt.
 5. **Celery worker + beat must both actually run as long-lived
-   processes** — the 5 scheduled jobs in §7 are inert DB config
-   otherwise.
+   processes** — the 7 scheduled jobs in §7 (was 5; Pass 6 and Pass 8
+   each added one) are inert DB config otherwise.
 6. **Run `python manage.py check --deploy`** once real `.env` values
    are set — flags anything environment-specific a static read can't.
 7. **Run `python manage.py makemigrations --check`** — this
    audit read source only, never migration files.
 8. **Run `python manage.py test liveclass` for real** — see §13; the
-   new tests from Pass 2 were verified by static cross-reference and by
-   resolving the DRF router's actual generated URL names, but never
-   actually executed, since this environment has no `settings.py` or
-   the `login`/`message` apps.
+   new tests from Pass 2 onward (including Pass 8's `CoinPurchaseTests`)
+   were verified by static cross-reference and by resolving the DRF
+   router's actual generated URL names, but never actually executed,
+   since this environment has no `settings.py` wired to a real project
+   (it has the settings.py *file* as of this pass — see §10 — but not a
+   full installable Django project) or the `login`/`message` apps.
 9. **Rename and run the Pass 4 trigram migration** — see Pass 4 above;
    requires Postgres and `CREATE EXTENSION` privilege (or a DBA to run
    `CREATE EXTENSION IF NOT EXISTS pg_trgm;` once beforehand on a
@@ -1171,7 +1374,10 @@ what "known" means here).
 11. **Set `CoinWithdrawal.COIN_TO_INR_RATE` correctly** (Pass 5) — the
     placeholder value of `1` is almost certainly wrong; set it to match
     whatever real-money rate coins are actually sold at elsewhere in the
-    platform before any withdrawal is approved for real.
+    platform before any withdrawal is approved for real. Note this same
+    constant is now also reused as the coin-purchase (buy) rate in
+    `CoinPurchaseViewSet.initiate` (Pass 7) — if buy and sell rates need
+    to differ, split out a separate `COIN_TOPUP_RATE` before going live.
 12. **Generate and run the Pass 6 `ClassroomShare`/`share_count`
     migration** — see Pass 6 above; plain new field + new table, no
     extension needed, safe on any DB backend.
@@ -1179,15 +1385,29 @@ what "known" means here).
     `getattr` default is a placeholder (`https://app.example.com`) that
     will silently produce dead/wrong links in every share response until
     overridden.
-14. **Consider, but not yet built:** DB connection pooling
+14. **Generate and run the Pass 7 `CoinPurchase` migration** — see Pass 7
+    above; plain new table, no extension needed, safe on any DB backend.
+15. **Wire a real payment gateway** (Pass 7) — `_create_gateway_order`
+    and `_verify_gateway_signature` in views.py are the only two
+    functions that need a real Razorpay (or equivalent) SDK call; the
+    signature-verification algorithm is already correct, it just needs
+    a real secret (item 4 above) and a real order-create call.
+16. **Decide on and wire a speech-to-text provider for captions**
+    (Pass 7) — `tasks.transcribe_recording` is a scaffold with a
+    deliberate `NotImplementedError` stub; also needs a product decision
+    (opt-in `Classroom` toggle vs default-on) and the `.delay()` call
+    wired in from `LiveKitWebhookView`'s egress-ended handling — neither
+    exists yet, deliberately (see §7/§11).
+17. **Consider, but not yet built:** DB connection pooling
     (`CONN_MAX_AGE`/PgBouncer), a CDN in front of media/recording URLs,
     and a Channels/WebSocket layer for chat/raise-hand/live-poll if
     REST-polling latency becomes a real user complaint — all flagged in
-    Pass 4 as bigger-scope follow-ups, not done in this pass. Coin
-    top-up (buying coins with real money) — flagged in Pass 5,
-    deliberately excluded from that pass. Per-user share-rate limiting,
-    a "my shares" endpoint, and `share_count` as an `Explore` sort
-    option — flagged in Pass 6, deliberately excluded from that pass.
+    Pass 4 as bigger-scope follow-ups, not done in this pass. Per-user
+    share-rate limiting, a "my shares" endpoint, and `share_count` as an
+    `Explore` sort option — flagged in Pass 6, deliberately excluded from
+    that pass. A per-user daily rate cap on coin-purchase `initiate`
+    calls beyond the blanket `10/min` scope rate — flagged in Pass 8,
+    deliberately excluded from that pass.
 
 ---
 
@@ -1223,11 +1443,19 @@ what "known" means here).
 - Anything that depends on actual `.env` values, a real Postgres/Redis
   instance, or a live LiveKit project.
 
-**Bottom line:** no unresolved logic bugs, unwired dead code, unhandled
-money-path race conditions, or open permission gaps were found in the
-code itself across either pass. What remains is standard pre-launch
-deployment hygiene (§12) plus actually running the test suite against
-the real project once it's assembled.
+**Bottom line (through Pass 6):** no unresolved logic bugs, unwired dead
+code, unhandled money-path race conditions, or open permission gaps were
+found in the code itself across passes 1–6. **Pass 7 broke that record**
+(shipped without ever being run against this document's own checks) and
+Pass 8 found and fixed it: an `ImportError` that would have failed the
+entire app's import, two missing throttle-rate entries that would have
+500'd the first request to either coin endpoint, and a written-but-never-
+scheduled beat job. All three are fixed in the source as of this pass —
+see §11 Pass 8. What remains is standard pre-launch deployment hygiene
+(§12) plus actually running the test suite against the real project once
+it's assembled — which, per the note above, would have caught all three
+Pass 7 defects immediately, since none of them can survive a single real
+HTTP request through `APIClient` or a real Django app boot.
 
 ---
 

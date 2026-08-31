@@ -10,14 +10,35 @@ logger = logging.getLogger(__name__)
 
 _FIREBASE_CRED_PATH = os.getenv("FIREBASE_CREDENTIALS_PATH")
 
-if not firebase_admin._apps:
+# 🔥 FIX (production readiness) — same class of bug as `livekit_utils.py`:
+# this used to raise at IMPORT time, and `push_utils` gets imported by
+# `views.py` at Django startup — so a missing FIREBASE_CREDENTIALS_PATH
+# used to crash the entire process, including plain chat/REST endpoints
+# that never touch push notifications at all. Init is now lazy: it only
+# runs the first time a push actually needs to be sent, and any failure
+# there is logged + swallowed by `_send_multicast`'s own try/except
+# instead of taking the whole app down.
+_firebase_init_error = None
+
+
+def _ensure_firebase_initialized():
+    global _firebase_init_error
+    if firebase_admin._apps:
+        return
+    if _firebase_init_error is not None:
+        raise _firebase_init_error
     if not _FIREBASE_CRED_PATH:
-        raise RuntimeError(
+        _firebase_init_error = RuntimeError(
             "FIREBASE_CREDENTIALS_PATH set nahi hai. Firebase service-account "
             "JSON ka path .env me daalo, warna push notifications kaam nahi karengi."
         )
-    cred = credentials.Certificate(_FIREBASE_CRED_PATH)
-    firebase_admin.initialize_app(cred)
+        raise _firebase_init_error
+    try:
+        cred = credentials.Certificate(_FIREBASE_CRED_PATH)
+        firebase_admin.initialize_app(cred)
+    except Exception as e:
+        _firebase_init_error = e
+        raise
 
 
 def _tokens_for_users(recipient_ids):
@@ -35,6 +56,12 @@ def _send_multicast(tokens, *, notification=None, data=None, android_priority='h
         `firebaseBackgroundHandler` (Flutter) trigger karte hain).
     """
     if not tokens:
+        return
+
+    try:
+        _ensure_firebase_initialized()
+    except Exception as e:
+        logger.error("Firebase not initialized, push skipped: %s", e)
         return
 
     # data ke saare values FCM me STRING hone chahiye

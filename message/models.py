@@ -12,6 +12,27 @@ User = get_user_model()
 
 
 # ================= BASE MODEL =================
+# 🔧 GAP FIX — `is_deleted` field pehle bhi model pe tha, lekin koi bhi
+# queryset/manager isko filter nahi karta tha, matlab isse "delete" karne
+# ka koi real effect hi nahi tha — dead field. Ab do managers hain:
+#   - `objects` (default): `is_deleted=True` rows KABHI normal query me
+#     nahi aayenge — Conversation/Message/Group sab isi manager se query
+#     hote hain (reverse-FK/M2M relations jaise `.memberships`,
+#     `.all_messages` bhi isi manager class ko inherit karte hain, isliye
+#     ye automatically har jagah lagu ho jaata hai, alag se har jagah
+#     `.exclude(is_deleted=True)` likhne ki zaroorat nahi).
+#   - `all_objects`: poora data (soft-deleted rows samet) — sirf admin
+#     panel / cleanup management-commands ke liye.
+# Abhi kahin bhi `is_deleted=True` set nahi hota, isliye ye change
+# zero-risk hai (behaviour bilkul same rehta hai) — bas ab is field ka
+# istemaal karke groundwork ready hai (e.g. group/message moderation
+# "soft delete" future me `obj.soft_delete()` call karke turant kaam
+# karega, migration ki zaroorat nahi padegi).
+class SoftDeleteManager(models.Manager):
+    def get_queryset(self):
+        return super().get_queryset().filter(is_deleted=False)
+
+
 class BaseModel(models.Model):
     """
     Har table ka baap. UUID = scaling ke liye best hai (multi-region / sharding me
@@ -23,9 +44,17 @@ class BaseModel(models.Model):
     updated_at = models.DateTimeField(auto_now=True)
     is_deleted = models.BooleanField(default=False, db_index=True)
 
+    objects = SoftDeleteManager()
+    all_objects = models.Manager()
+
     class Meta:
         abstract = True
         ordering = ['-created_at']
+
+    def soft_delete(self):
+        """Row ko hide karo bina hard-delete kiye (moderation/cleanup ke liye)."""
+        self.is_deleted = True
+        self.save(update_fields=['is_deleted', 'updated_at'])
 
 
 # ================= ENUMS / CHOICES =================
@@ -486,15 +515,26 @@ class CallSession(BaseModel):
 
     caller = models.ForeignKey(User, on_delete=models.CASCADE, related_name='calls_initiated')
 
-    # Agora / LiveKit
+    # LiveKit — room name doubles as the join key for both calls (2h token
+    # TTL) and study rooms (8h token TTL), see livekit_utils.py
     channel_name = models.CharField(max_length=150, unique=True, db_index=True)
-    token = models.TextField(blank=True, null=True)  # Agora token
+
+    # ⚠️ DEPRECATED — legacy Agora field, kept only so existing rows don't
+    # break/need a migration. App LiveKit pe fully migrate ho chuka hai
+    # (`livekit_utils.generate_livekit_token`); is field ko ab kahin bhi
+    # likha/padha nahi jaata. Naya code isko use NA kare — future cleanup
+    # migration me hata dena.
+    token = models.TextField(blank=True, null=True)  # Agora token (unused)
 
     started_at = models.DateTimeField(default=timezone.now)
     connected_at = models.DateTimeField(null=True, blank=True)
     ended_at = models.DateTimeField(null=True, blank=True)
     duration_seconds = models.PositiveIntegerField(default=0)
 
+    # ⚠️ DEPRECATED — inke liye koi trigger/record code kahin nahi milta
+    # (na REST na WS). Ya to LiveKit recording feature implement karo aur
+    # inhe wire karo, ya inhe hata do — abhi ye sirf "recording ho rahi
+    # hai" ka jhoota signal de sakte hain agar frontend inhe read karta hai.
     is_recording = models.BooleanField(default=False)
     recording_url = models.URLField(blank=True, null=True)
 
@@ -535,6 +575,22 @@ class UserPresence(BaseModel):
     is_online = models.BooleanField(default=False, db_index=True)
     active_connections = models.PositiveIntegerField(default=0)
     last_seen_at = models.DateTimeField(null=True, blank=True)
+
+    # 🔥 NAYA — Read-receipt privacy toggle (WhatsApp-style mutual switch).
+    # `MessageStatus.is_read`/`read_at` (upar) hamesha internally record hote
+    # rehte hain (message ke apne "unread" badge/`is_read_by_me` logic ko
+    # kabhi affect nahi karna chahiye — wo sirf "maine padha ya nahi" hai).
+    # Ye field sirf VISIBILITY control karta hai jab koi DOOSRE ka read
+    # status dekhna chahe (naya `MessageViewSet.read_status` action):
+    #   - False rakhne wale ka apna `read_at` kisi ko bhi (group members
+    #     samet) nahi dikhta.
+    #   - Isi tarah, agar DEKHNE waale ne khud ye False kar rakha hai, to
+    #     use bhi doosron ka `read_at` nahi dikhta (mutual — jaisa WhatsApp
+    #     karta hai: turn off both sending and seeing).
+    # `is_delivered`/`delivered_at` is toggle se kabhi affect nahi hota
+    # (WhatsApp me bhi delivery/double-tick hamesha visible rehta hai, sirf
+    # "read"/blue-tick hi is switch se control hota hai).
+    show_read_receipts = models.BooleanField(default=True)
 
     class Meta(BaseModel.Meta):
         indexes = [models.Index(fields=['is_online'])]

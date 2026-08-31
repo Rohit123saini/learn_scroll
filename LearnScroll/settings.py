@@ -1,4 +1,3 @@
-
 from pathlib import Path
 import os
 from dotenv import load_dotenv
@@ -425,6 +424,23 @@ REST_FRAMEWORK = {
         "chunked_upload_init": "20/min",
         "chunked_upload_chunk": "180/min",
         "chunked_upload_complete": "20/min",
+        # NOTE (fix — CRITICAL, same bug class as the four scopes documented
+        # above, reintroduced twice since): CoinWithdrawalViewSet (Pass 5)
+        # and CoinPurchaseViewSet (Pass 7) both set throttle_scope =
+        # "coin_withdrawal" / "coin_purchase" with ScopedRateThrottle, but
+        # neither scope had a rate here — ImproperlyConfigured on the very
+        # first withdrawal request or coin top-up. Money-movement endpoints,
+        # so rated tighter than the general chunked-upload scopes above.
+        "coin_withdrawal": "10/min",
+        "coin_purchase": "10/min",
+        # NOTE (fix — same bug class as the scopes documented above):
+        # ClassroomViewSet.share now sets throttle_scope="classroom_share"
+        # via ScopedRateThrottle (see views.py) but had no rate here —
+        # would ImproperlyConfigured on the first share request. 10/min
+        # covers real sharing behavior (a user sharing a class a couple
+        # times to different contacts) while stopping a script from
+        # inflating share_count or spamming in-app share notifications.
+        "classroom_share": "10/min",
     },
     # NOTE (fix — production breaking gap): NOT having this meant every
     # list endpoint (classrooms, sessions, chat-messages, notices, etc.)
@@ -508,6 +524,30 @@ FREESOUND_API_KEY = os.environ.get('FREESOUND_API_KEY')
 # ---------------------------------------------------------------------------
 REFERRAL_BONUS_COINS = int(os.environ.get("REFERRAL_BONUS_COINS", 50))
 REFERRAL_REDEEM_WINDOW_DAYS = int(os.environ.get("REFERRAL_REDEEM_WINDOW_DAYS", 7))
+
+# ---------------------------------------------------------------------------
+# Coin purchase gateway (see CoinPurchase in liveclass/models.py,
+# CoinPurchaseViewSet + _verify_gateway_signature in views.py). Written
+# against Razorpay's order-create + HMAC-signature-verify shape. Both
+# _create_gateway_order and _verify_gateway_signature already degrade
+# safely (stub order id / fails-closed signature check) if this isn't set
+# — but no real coin top-up can ever succeed until it is.
+# ---------------------------------------------------------------------------
+RAZORPAY_KEY_ID = os.environ.get("RAZORPAY_KEY_ID", "")
+RAZORPAY_KEY_SECRET = os.environ.get("RAZORPAY_KEY_SECRET", "")
+
+# ---------------------------------------------------------------------------
+# MSG91 (see liveclass/notifications.py _send_sms / _send_whatsapp).
+# MSG91_AUTH_KEY is shared by both channels. SMS additionally needs a
+# DLT-registered sender id; WhatsApp additionally needs the integrated
+# number and a pre-approved template name (WhatsApp Business rule, not
+# an MSG91 one — see _send_whatsapp's docstring). Any channel no-ops with
+# a logged warning, never raises, if its settings aren't fully set.
+# ---------------------------------------------------------------------------
+MSG91_AUTH_KEY = os.environ.get("MSG91_AUTH_KEY", "")
+MSG91_SMS_SENDER_ID = os.environ.get("MSG91_SMS_SENDER_ID", "")
+MSG91_WHATSAPP_INTEGRATED_NUMBER = os.environ.get("MSG91_WHATSAPP_INTEGRATED_NUMBER", "")
+MSG91_WHATSAPP_TEMPLATE_NAME = os.environ.get("MSG91_WHATSAPP_TEMPLATE_NAME", "")
 
 EMAIL_BACKEND = "django.core.mail.backends.smtp.EmailBackend"
 EMAIL_HOST = os.environ.get("EMAIL_HOST")
@@ -601,5 +641,37 @@ CELERY_BEAT_SCHEDULE = {
     "liveclass-cleanup-stale-chunked-uploads": {
         "task": "liveclass.cleanup_stale_chunked_uploads",
         "schedule": crontab(minute=0),
+    },
+    # NOTE (fix — same "written but never registered" bug the
+    # refresh-stale-enrolled-counts entry above already had to fix once):
+    # tasks.reconcile_stuck_coin_purchases (Pass 7) exists specifically to
+    # close the "payment retry" gap — a PENDING CoinPurchase whose client
+    # never called verify/ (crash, closed tab, webhook lost) needs this
+    # sweep to ever become retry-able. Without this entry it never ran,
+    # so any stuck top-up sat invisible to the student forever. Interval
+    # matches COIN_PURCHASE_PENDING_TIMEOUT in tasks.py (2h) with a
+    # shorter run cadence than the timeout, same reasoning as every other
+    # lookback-window job in this schedule.
+    "liveclass-reconcile-stuck-coin-purchases": {
+        "task": "liveclass.reconcile_stuck_coin_purchases",
+        "schedule": crontab(minute="*/30"),
+    },
+    # 🔥 NAYA — message app ka is Celery beat me pehle ZERO entry tha,
+    # jabki dono tasks (message/tasks.py) ek poore feature ke liye zaroori
+    # hain aur zero-risk / idempotent hain, same pattern jo liveclass ke
+    # entries upar already follow karte hain.
+    "message-send-scheduled-messages": {
+        "task": "message.send_scheduled_messages",
+        # scheduled_for minute-precision hai, isliye har minute chalna
+        # zaroori hai (query sasti hai - is_scheduled+scheduled_for pe
+        # composite index already model pe hai, aur bounded 200/run batch).
+        "schedule": crontab(minute="*"),
+    },
+    "message-cleanup-expired-messages": {
+        "task": "message.cleanup_expired_messages",
+        # Disappearing-messages ka sabse chhota duration option bhi
+        # "1_month" hai, isliye 15 min sweep lag bilkul invisible hai
+        # users ko - same cadence liveclass ke lookback-window jobs jaisa.
+        "schedule": crontab(minute="*/15"),
     },
 }

@@ -1,5 +1,6 @@
 # message/serializers.py
 from django.contrib.auth import get_user_model
+from django.utils import timezone
 from rest_framework import serializers
 
 from .models import (
@@ -92,6 +93,21 @@ class ConversationListSerializer(serializers.ModelSerializer):
         ]
 
     def _membership(self, obj):
+        # 🔥 FIX (N+1) — this used to run a fresh DB query every time it was
+        # called, and it's called TWICE per row (`get_unread_count` +
+        # `get_my_settings`) — for a paginated list of 20 conversations
+        # that's up to 40 extra queries just for this, on top of
+        # `get_other_participant`'s own per-row query for private chats.
+        # `ConversationViewSet.get_queryset()` now prefetches "my"
+        # membership per conversation as `my_membership_list` (a `Prefetch`
+        # with `to_attr`, filtered to `request.user` — exactly 0 or 1 row
+        # per conversation, cheap regardless of group size) — when that's
+        # present we use it directly (zero extra queries for the whole
+        # page). Falls back to a live query when the prefetch isn't there,
+        # so this serializer stays correct even if used somewhere that
+        # doesn't set it up (e.g. a single-object `retrieve`).
+        if hasattr(obj, 'my_membership_list'):
+            return obj.my_membership_list[0] if obj.my_membership_list else None
         request = self.context.get('request')
         if not request:
             return None
@@ -139,6 +155,19 @@ class MessageReactionSerializer(serializers.ModelSerializer):
         read_only_fields = ['id', 'created_at']
 
 
+# 🔥 NAYA — "Seen by" / message-info detail (`MessageViewSet.read_status`).
+# `MessageSerializer.is_read_by_me` (neeche) sirf "maine ye padha ya nahi"
+# batata hai (ek boolean, apne liye) — ye alag serializer poore
+# `MessageStatus` row ko expose karta hai (kisne, kab dekha/deliver hua),
+# jo group chats me "message info" jaisi screen ke liye chahiye hota hai.
+class MessageReadStatusSerializer(serializers.ModelSerializer):
+    user = UserMiniSerializer(read_only=True)
+
+    class Meta:
+        model = MessageStatus
+        fields = ['user', 'is_delivered', 'delivered_at', 'is_read', 'read_at']
+
+
 class MessageSerializer(serializers.ModelSerializer):
     """Full message representation — GET responses ke liye."""
     sender = UserMiniSerializer(read_only=True)
@@ -148,6 +177,11 @@ class MessageSerializer(serializers.ModelSerializer):
     # 🔥 NAYA — pin info (kisne pin kiya, dikhane ke liye) + @mentions.
     pinned_by = UserMiniSerializer(read_only=True)
     mentioned_users = UserMiniSerializer(many=True, read_only=True)
+    # 🔥 NAYA (advanced feature) — starred (saved) messages, WhatsApp-style
+    # personal bookmark. `starred_by` field pehle se model pe tha lekin
+    # kahin bhi expose/wire nahi kiya gaya tha — ab dikhta bhi hai
+    # (`is_starred`) aur `MessageViewSet.star` se toggle bhi ho sakta hai.
+    is_starred = serializers.SerializerMethodField()
 
     class Meta:
         model = Message
@@ -157,12 +191,22 @@ class MessageSerializer(serializers.ModelSerializer):
             'reply_to', 'reply_to_detail', 'is_edited', 'is_forwarded',
             'is_system_message', 'deleted_for_everyone', 'client_id',
             'reactions', 'is_read_by_me', 'is_pinned', 'pinned_at', 'pinned_by',
-            'mentioned_users', 'created_at', 'updated_at',
+            'mentioned_users', 'is_starred',
+            # 🔥 NAYA (advanced feature) — scheduled ("send later") messages.
+            # Ye fields sirf tab dikhte hain jab requester khud sender ho
+            # (see ConversationViewSet.messages / search / search_all —
+            # wahan is_scheduled=True messages already exclude hote hain
+            # sabke liye, isliye ye field normal chat me kabhi kisi aur ko
+            # nahi dikhega — sirf schedule-message/scheduled-messages
+            # endpoints se, jo sender-only hain).
+            'is_scheduled', 'scheduled_for',
+            'created_at', 'updated_at',
         ]
         read_only_fields = [
             'id', 'conversation', 'sender', 'is_edited', 'is_forwarded',
             'is_system_message', 'deleted_for_everyone', 'is_pinned',
-            'pinned_at', 'pinned_by', 'mentioned_users', 'created_at', 'updated_at',
+            'pinned_at', 'pinned_by', 'mentioned_users', 'is_scheduled',
+            'scheduled_for', 'created_at', 'updated_at',
         ]
 
     def get_is_read_by_me(self, obj):
@@ -170,6 +214,16 @@ class MessageSerializer(serializers.ModelSerializer):
         if not request:
             return False
         return MessageStatus.objects.filter(message=obj, user=request.user, is_read=True).exists()
+
+    def get_is_starred(self, obj):
+        request = self.context.get('request')
+        if not request:
+            return False
+        # `starred_by` prefetch nahi kiya gaya har jagah (personal bookmark
+        # hai, list view me sabke liye alag hota), isliye chhota per-row
+        # EXISTS query — indexed M2M pe fast hai, message list-size (30-100
+        # per page) ke liye theek hai.
+        return obj.starred_by.filter(id=request.user.id).exists()
 
     def to_representation(self, instance):
         data = super().to_representation(instance)
@@ -246,6 +300,24 @@ class MessageCreateSerializer(serializers.ModelSerializer):
                 f"'{msg_type}' message ke liye 'file_url' ya 'file_urls' required hai."
             )
         return attrs
+
+
+# 🔥 NAYA (advanced feature) — "Send Later" / scheduled messages.
+# `MessageCreateSerializer` ke saare validations reuse karta hai (media
+# type ke liye file_url required, text ke liye non-empty text, etc.) aur
+# bas ek required future `scheduled_for` add karta hai. Sirf
+# `ConversationViewSet.schedule_message` isko use karta hai — normal send
+# `MessageCreateSerializer` hi use karta rehta hai.
+class ScheduleMessageSerializer(MessageCreateSerializer):
+    scheduled_for = serializers.DateTimeField()
+
+    class Meta(MessageCreateSerializer.Meta):
+        fields = MessageCreateSerializer.Meta.fields + ['scheduled_for']
+
+    def validate_scheduled_for(self, value):
+        if value <= timezone.now():
+            raise serializers.ValidationError("'scheduled_for' future ka time hona chahiye.")
+        return value
 
 
 # ======================================================================
@@ -354,6 +426,20 @@ class UserPresenceSerializer(serializers.ModelSerializer):
     class Meta:
         model = UserPresence
         fields = ['user', 'is_online', 'last_seen_at']
+
+
+# 🔥 NAYA — sirf apni read-receipt privacy setting dekhne/badalne ke liye
+# (`ReadReceiptSettingsView`, GET/PATCH, hamesha `request.user` par hi
+# operate karta hai). Jaan-boojh kar `UserPresenceSerializer` se ALAG
+# rakha hai — wo doosron ka bhi presence dikhata hai (`UserPresenceView`
+# by `user_id`), aur `show_read_receipts` kisi aur ka expose karna iska
+# maksad nahi hai (khud ka toggle-state doosron ko dikhna, arms-race
+# jaisa signal ban sakta hai — WhatsApp bhi ye field kabhi seedha expose
+# nahi karta, sirf effect dikhata hai).
+class ReadReceiptSettingsSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = UserPresence
+        fields = ['show_read_receipts']
 
 
 class BlockedUserSerializer(serializers.ModelSerializer):
