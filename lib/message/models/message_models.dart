@@ -81,11 +81,21 @@ class ConversationSettings {
   final bool isArchived;
   final bool isMuted;
   final bool isPinned;
+  // 🔥 NAYA (Phase 1, §3 — server-side draft autosave) — `chat_screen.dart`
+  // compose-box debounce-save isi field ko PATCH karta hai (via
+  // `MessageApiService.updateSettings(draftText: ...)`), aur
+  // `conversations_screen.dart` list row me last-message ki jagah
+  // "Draft: <text>" dikhane ke liye isi ko padhta hai. Dono READ-ONLY
+  // client se nahi banaye jaate — server hi `draftUpdatedAt` set karta hai.
+  final String? draftText;
+  final DateTime? draftUpdatedAt;
 
   ConversationSettings({
     this.isArchived = false,
     this.isMuted = false,
     this.isPinned = false,
+    this.draftText,
+    this.draftUpdatedAt,
   });
 
   factory ConversationSettings.fromJson(Map<String, dynamic>? json) {
@@ -94,6 +104,10 @@ class ConversationSettings {
       isArchived: json['is_archived'] ?? false,
       isMuted: json['is_muted'] ?? false,
       isPinned: json['is_pinned'] ?? false,
+      draftText: json['draft_text']?.toString(),
+      draftUpdatedAt: json['draft_updated_at'] != null
+          ? DateTime.tryParse(json['draft_updated_at'].toString())
+          : null,
     );
   }
 
@@ -101,6 +115,8 @@ class ConversationSettings {
         'is_archived': isArchived,
         'is_muted': isMuted,
         'is_pinned': isPinned,
+        'draft_text': draftText,
+        'draft_updated_at': draftUpdatedAt?.toIso8601String(),
       };
 }
 
@@ -289,6 +305,43 @@ class ReplyPreviewModel {
 }
 
 // ======================================================================
+// 🔥 NAYA (Phase 1, §3) — LINK PREVIEW
+// ======================================================================
+// `MessageModel.meta['link_preview']` ke andar isi shape ka raw Map aata
+// hai (backend background job se generate hoke, message ke pehle-hi-bheje
+// jaane ke BAAD attach hota hai — isliye ye hamesha `meta_update` WS event
+// se bhi live update ho sakta hai, dekho `MessageModel.linkPreview` getter).
+class LinkPreviewModel {
+  final String url;
+  final String? title;
+  final String? description;
+  final String? image;
+
+  LinkPreviewModel({
+    required this.url,
+    this.title,
+    this.description,
+    this.image,
+  });
+
+  factory LinkPreviewModel.fromJson(Map<String, dynamic> json) {
+    return LinkPreviewModel(
+      url: json['url']?.toString() ?? '',
+      title: json['title']?.toString(),
+      description: json['description']?.toString(),
+      image: json['image']?.toString(),
+    );
+  }
+
+  Map<String, dynamic> toJson() => {
+        'url': url,
+        'title': title,
+        'description': description,
+        'image': image,
+      };
+}
+
+// ======================================================================
 // MESSAGE — GET /message/conversations/<id>/messages/  +  WebSocket events
 // ======================================================================
 class MessageModel {
@@ -313,6 +366,22 @@ class MessageModel {
   bool isReadByMe;
   final DateTime createdAt;
   DateTime? updatedAt;
+
+  // 🔥 NAYA (Phase 1, §3) — @Mentions. REST/history me backend
+  // `mentioned_users` ke andar poori nested `UserMini` list bhejta hai;
+  // WS `chat_message` event me sirf `mentioned_user_ids` (id-only) aata
+  // hai, isliye `fromSocketEvent` se aane wale entries me sirf `id` bhara
+  // hota hai — bubble-highlight (`u.id == myUserId`) ke liye itna hi kaafi
+  // hai. Backend text se khud @username resolve karta hai, isliye send
+  // karte waqt frontend ko alag se kuch bhejna nahi padta.
+  List<UserMini> mentionedUsers;
+
+  // 🔥 NAYA (Phase 1, §3 — model fix) — poll ka poora data backend me ab
+  // TOP-LEVEL `Message.poll` field hai (`MessageSerializer.poll`), NAHI
+  // `meta['poll']` ke andar (purana/galat assumption). Mutable rakha hai
+  // taaki `poll_update` WS event pe (`msg.poll = PollModel.fromJson(...)`)
+  // seedha replace ho sake bina poori message list reload kiye.
+  PollModel? poll;
 
   // Local-only UI state (offline retry / upload progress ke liye) — server
   // se nahi aata, sirf frontend ke andar use hota hai.
@@ -349,7 +418,10 @@ class MessageModel {
     this.uploadProgress,
     this.localFilePath,
     this.localFilePaths,
-  }) : reactions = reactions ?? [];
+    List<UserMini>? mentionedUsers,
+    this.poll,
+  })  : reactions = reactions ?? [],
+        mentionedUsers = mentionedUsers ?? [];
 
   /// Mera hi reaction (agar hai to) nikaalne ke liye — reaction picker me
   /// currently selected emoji highlight karna ho to kaam aata hai.
@@ -359,6 +431,21 @@ class MessageModel {
     }
     return null;
   }
+
+  // 🔥 NAYA (Phase 1, §3) — `meta['link_preview']` se derive, koi extra
+  // parsing state store nahi karni padti — `meta_update` se `meta` replace
+  // hote hi ye getter khud naya result dega.
+  LinkPreviewModel? get linkPreview {
+    final raw = meta?['link_preview'];
+    if (raw is Map<String, dynamic>) return LinkPreviewModel.fromJson(raw);
+    return null;
+  }
+
+  // 🔥 NAYA (Phase 1, §3) — `meta['transcript']` se derive (auto voice
+  // transcription). Null jab tak backend background job complete na kare
+  // — us waqt tak UI "View transcript" (manual tap-to-transcribe) button
+  // dikhati rahe.
+  String? get transcript => meta?['transcript']?.toString();
 
   factory MessageModel.fromJson(Map<String, dynamic> json) {
     return MessageModel(
@@ -389,6 +476,17 @@ class MessageModel {
           DateTime.now(),
       updatedAt: json['updated_at'] != null
           ? DateTime.tryParse(json['updated_at'].toString())
+          : null,
+      // 🔥 NAYA (Phase 1, §3) — REST/history me poori nested UserMini list.
+      mentionedUsers: (json['mentioned_users'] as List<dynamic>? ?? [])
+          .map((e) => UserMini.fromJson(e as Map<String, dynamic>))
+          .toList(),
+      // 🔧 FIX (Phase 1 model fix, §3) — poll ab TOP-LEVEL `poll` key se
+      // parse hota hai, `meta['poll']` se nahi. History (pagination) me
+      // backend abhi bhi poll data nahi bhejta (§ note) — tab ye null hi
+      // rahega jab tak `poll_update` se live na aa jaaye.
+      poll: json['poll'] != null
+          ? PollModel.fromJson(json['poll'] as Map<String, dynamic>)
           : null,
     );
   }
@@ -432,6 +530,19 @@ class MessageModel {
       clientId: json['client_id']?.toString(),
       createdAt: DateTime.tryParse(json['created_at']?.toString() ?? '') ??
           DateTime.now(),
+      // 🔥 NAYA (Phase 1, §3/§6) — socket payload me sirf id-only
+      // `mentioned_user_ids` aata hai (poori nested UserMini list nahi) —
+      // bubble-highlight ke liye itna hi kaafi hai (`u.id == myUserId`
+      // check), displayName yahan khaali/'Unknown' rehta hai.
+      mentionedUsers: (json['mentioned_user_ids'] as List<dynamic>? ?? [])
+          .map((id) => UserMini(id: id.toString(), displayName: 'Unknown'))
+          .toList(),
+      // 🔧 FIX (backend mismatch, §0) — naya poll ek normal `chat_message`
+      // event se hi aata hai, poll field nested hoti hai (`poll_created`
+      // naam ka alag event kabhi nahi aata).
+      poll: json['poll'] != null
+          ? PollModel.fromJson(json['poll'] as Map<String, dynamic>)
+          : null,
     );
   }
 
@@ -462,6 +573,8 @@ class MessageModel {
         'is_read_by_me': isReadByMe,
         'created_at': createdAt.toIso8601String(),
         'updated_at': updatedAt?.toIso8601String(),
+        'mentioned_users': mentionedUsers.map((u) => u.toJson()).toList(),
+        'poll': poll?.toJson(),
       };
 }
 
@@ -643,6 +756,139 @@ class ScheduledMessageModel {
           DateTime.now(),
       isSent: json['is_sent'] == true,
       isCancelled: json['is_cancelled'] == true,
+    );
+  }
+}
+
+// ======================================================================
+// 🔥 NAYA (Phase 1, §3) — MESSAGE SEARCH
+// GET /message/conversations/<id>/search/?q=...   (single conversation)
+// GET /message/search_all/?q=...                  (search across all chats)
+// ======================================================================
+
+/// Query params banane ke liye — `message_search_screen.dart` isse hi
+/// `Map<String,String>` query-params generate karta hai. Sab fields
+/// optional hain, `q` isme nahi (wo alag se pass hota hai kyunki dono
+/// endpoints me required hai, filters optional).
+class SearchFilterModel {
+  final String? sender; // user id
+  final DateTime? dateFrom;
+  final DateTime? dateTo;
+  final bool? hasMedia;
+  final String? mediaType; // image/video/audio/file/presentation
+
+  SearchFilterModel({
+    this.sender,
+    this.dateFrom,
+    this.dateTo,
+    this.hasMedia,
+    this.mediaType,
+  });
+
+  bool get isEmpty =>
+      sender == null &&
+      dateFrom == null &&
+      dateTo == null &&
+      hasMedia == null &&
+      mediaType == null;
+
+  Map<String, String> toQueryParams() {
+    final params = <String, String>{};
+    if (sender != null && sender!.isNotEmpty) params['sender'] = sender!;
+    if (dateFrom != null) {
+      params['date_from'] = dateFrom!.toIso8601String().split('T').first;
+    }
+    if (dateTo != null) {
+      params['date_to'] = dateTo!.toIso8601String().split('T').first;
+    }
+    if (hasMedia != null) params['has_media'] = hasMedia! ? 'true' : 'false';
+    if (mediaType != null && mediaType!.isNotEmpty) {
+      params['media_type'] = mediaType!;
+    }
+    return params;
+  }
+
+  SearchFilterModel copyWith({
+    String? sender,
+    bool clearSender = false,
+    DateTime? dateFrom,
+    bool clearDateFrom = false,
+    DateTime? dateTo,
+    bool clearDateTo = false,
+    bool? hasMedia,
+    bool clearHasMedia = false,
+    String? mediaType,
+    bool clearMediaType = false,
+  }) {
+    return SearchFilterModel(
+      sender: clearSender ? null : (sender ?? this.sender),
+      dateFrom: clearDateFrom ? null : (dateFrom ?? this.dateFrom),
+      dateTo: clearDateTo ? null : (dateTo ?? this.dateTo),
+      hasMedia: clearHasMedia ? null : (hasMedia ?? this.hasMedia),
+      mediaType: clearMediaType ? null : (mediaType ?? this.mediaType),
+    );
+  }
+}
+
+/// Ek chhota preview jo `search_all` (global search) response ke andar,
+/// har result ke saath aata hai — konsi conversation me ye message mila,
+/// wo dikhane ke liye (WhatsApp global-search jaisa).
+class ConversationPreviewModel {
+  final String id;
+  final String type; // "private" | "group"
+  final String name;
+  final String? photoUrl;
+
+  ConversationPreviewModel({
+    required this.id,
+    required this.type,
+    required this.name,
+    this.photoUrl,
+  });
+
+  factory ConversationPreviewModel.fromJson(Map<String, dynamic> json) {
+    return ConversationPreviewModel(
+      id: json['id']?.toString() ?? '',
+      type: json['type']?.toString() ?? 'private',
+      name: json['name']?.toString() ?? 'Unknown',
+      photoUrl: json['photo_url']?.toString(),
+    );
+  }
+}
+
+/// Ek search result — underlying message wahi `MessageModel` hai (single-
+/// conversation search me bas yehi kaafi hai), global (`search_all`) me
+/// iske saath `conversationPreview` bhi aata hai jisse result-row me
+/// "kaunsi chat me mila" dikhaya jaata hai.
+class SearchResultModel {
+  final MessageModel message;
+  final ConversationPreviewModel? conversationPreview;
+
+  SearchResultModel({required this.message, this.conversationPreview});
+
+  factory SearchResultModel.fromJson(Map<String, dynamic> json) {
+    return SearchResultModel(
+      message: MessageModel.fromJson(json),
+      conversationPreview: json['conversation_preview'] != null
+          ? ConversationPreviewModel.fromJson(
+              json['conversation_preview'] as Map<String, dynamic>)
+          : null,
+    );
+  }
+}
+
+// ======================================================================
+// 🔥 NAYA (Phase 1, §3) — SMART REPLY — POST /message/ai/smart-replies/
+// ======================================================================
+class SmartReplyModel {
+  final List<String> suggestions;
+
+  SmartReplyModel({required this.suggestions});
+
+  factory SmartReplyModel.fromJson(Map<String, dynamic> json) {
+    final raw = json['suggestions'];
+    return SmartReplyModel(
+      suggestions: raw is List ? raw.map((e) => e.toString()).toList() : [],
     );
   }
 }

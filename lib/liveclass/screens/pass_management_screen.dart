@@ -355,6 +355,10 @@ class _PassEditorSheetState extends State<_PassEditorSheet> {
   late final TextEditingController _validityCtrl;
   late final TextEditingController _maxClassesCtrl;
   bool _isActive = true;
+  // NEW (Pass 14 frontend catch-up §1.3) — per-pass "allow gifting" gate.
+  // See liveclass_models.dart's ClassPass.allowGifting note on the
+  // unconfirmed default.
+  bool _allowGifting = true;
   bool _saving = false;
 
   bool get _isEdit => widget.existing != null;
@@ -369,6 +373,7 @@ class _PassEditorSheetState extends State<_PassEditorSheet> {
     _validityCtrl = TextEditingController(text: e?.validityDays.toString() ?? '30');
     _maxClassesCtrl = TextEditingController(text: e?.maxClasses?.toString() ?? '');
     _isActive = e?.isActive ?? true;
+    _allowGifting = e?.allowGifting ?? true;
   }
 
   @override
@@ -396,6 +401,7 @@ class _PassEditorSheetState extends State<_PassEditorSheet> {
       validityDays: validity,
       maxClasses: maxClasses,
       isActive: _isActive,
+      allowGifting: _allowGifting,
     );
     try {
       if (_isEdit) {
@@ -490,6 +496,17 @@ class _PassEditorSheetState extends State<_PassEditorSheet> {
                 value: _isActive,
                 onChanged: (v) => setState(() => _isActive = v),
                 title: const Text('Active', style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600)),
+                activeColor: _kNavy,
+              ),
+              // NEW (Pass 14 frontend catch-up §1.3) — "allow gifting"
+              // toggle per ClassPass, see liveclass_models.dart's
+              // ClassPass.allowGifting note.
+              SwitchListTile(
+                contentPadding: EdgeInsets.zero,
+                value: _allowGifting,
+                onChanged: (v) => setState(() => _allowGifting = v),
+                title: const Text('Allow gifting', style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600)),
+                subtitle: Text('Students can send this pass as a gift to someone else', style: TextStyle(fontSize: 11.5, color: Colors.grey.shade600)),
                 activeColor: _kNavy,
               ),
               const SizedBox(height: 8),

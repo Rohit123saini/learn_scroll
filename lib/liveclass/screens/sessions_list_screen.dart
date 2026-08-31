@@ -118,6 +118,14 @@ class _SessionsListScreenState extends State<SessionsListScreen> {
   // pattern as the unread-notifications bell on LiveClassHomeScreen.
   final Map<int, ClassReminder> _reminders = {};
 
+  // NEW (Pass 13 frontend catch-up §1.10) — chat/poll unread counts per
+  // session, `SessionUnreadCount` (`{"chat": N, "polls": N}`). Only
+  // fetched for sessions the user could plausibly have activity in
+  // (live or completed — a still-scheduled/never-joined session has
+  // nothing to be unread), and only best-effort: a failure here just
+  // means no badge shows, same non-fatal spirit as _loadReminders below.
+  final Map<int, SessionUnreadCount> _unread = {};
+
   String? _statusFilter; // null == All
   DateTime? _selectedDate; // null == no date filter (show all matching status)
 
@@ -157,6 +165,7 @@ class _SessionsListScreenState extends State<SessionsListScreen> {
         _loading = false;
       });
       _loadReminders();
+      _loadUnread();
     } catch (e) {
       if (!mounted) return;
       setState(() {
@@ -186,6 +195,22 @@ class _SessionsListScreenState extends State<SessionsListScreen> {
       });
     } catch (_) {
       // Non-fatal — bell just falls back to "no reminder set" state.
+    }
+  }
+
+  // NEW (Pass 13 §1.10) — best-effort, one call per live/completed session
+  // currently shown. Not paginated/batched since sessions/{id}/unread/ has
+  // no bulk variant documented — fine at this screen's usual list sizes.
+  Future<void> _loadUnread() async {
+    final targets = _all.where((s) => s.status == SessionStatus.live || s.status == SessionStatus.completed).toList();
+    for (final s in targets) {
+      try {
+        final res = await LiveClassApi.sessions.unread(s.id);
+        if (!mounted) return;
+        setState(() => _unread[s.id] = res);
+      } catch (_) {
+        // Non-fatal — that session's card just shows no badge.
+      }
     }
   }
 
@@ -490,6 +515,8 @@ class _SessionsListScreenState extends State<SessionsListScreen> {
                 ),
               ),
               const Spacer(),
+              // NEW (Pass 13 §1.10) — unread chat/poll badges.
+              if (_unread[s.id] != null) _unreadBadges(_unread[s.id]!),
               if (s.status == SessionStatus.scheduled) _reminderBell(s),
               if (widget.canManage && s.status == SessionStatus.scheduled)
                 PopupMenuButton<String>(
@@ -571,6 +598,24 @@ class _SessionsListScreenState extends State<SessionsListScreen> {
                     ),
                   ),
                 ),
+              // NEW (Pass 15 frontend catch-up §1.7) — post-session
+              // engagement report entry point. Host/co-teacher/moderator
+              // only, same canManage threading as every other management
+              // action on this screen.
+              if (widget.canManage && s.status == SessionStatus.completed) ...[
+                const SizedBox(width: 8),
+                SizedBox(
+                  height: 38,
+                  child: OutlinedButton.icon(
+                    onPressed: () => Navigator.push(
+                      context,
+                      MaterialPageRoute(builder: (_) => SessionEngagementReportScreen(sessionId: s.id, classroomTitle: widget.classroomTitle)),
+                    ),
+                    icon: const Icon(Icons.insights_rounded, size: 16),
+                    label: const Text('View Report', style: TextStyle(fontSize: 12)),
+                  ),
+                ),
+              ],
               if (widget.canManage && s.status == SessionStatus.live) ...[
                 const SizedBox(width: 8),
                 SizedBox(

@@ -48,6 +48,8 @@ import 'forward_message_screen.dart'; // NEW — pick chat(s) to forward selecte
 import 'group_profile_screen.dart'; // 🔥 NAYA — Group info screen (public/private, members, admin roles, invite link)
 import 'media_viewer_screen.dart'; // 🔥 NAYA — fullscreen swipeable image viewer (zoom + auto-hide thumbnail strip)
 import '../../widgets/sticker_picker_sheet.dart'; // 🔥 NAYA — apne PNG stickers ka picker (assets/stickers/), chat & comments dono me reusable
+import 'message_search_screen.dart'; // 🔥 NAYA (Phase 4, §2.1) — in-chat message search
+import '../widgets/mention_suggestions_overlay.dart'; // 🔥 NAYA (Phase 3, §2.2) — @mention autocomplete
 
 const _kEmojis = ['👍', '❤', '😂', '😮', '😢', '🙏'];
 
@@ -127,6 +129,96 @@ class _LinkifiedText extends StatelessWidget {
   }
 }
 
+// 🔥 NAYA (Phase 2, §7.5/§4.1) — link-preview card jo text message ke
+// neeche render hota hai jab backend ne message.linkPreview generate ki
+// ho (`meta['link_preview']` → `LinkPreviewModel`, message_models.dart).
+// Tap karne pe wahi URL externally khulta hai (jaisa `_LinkifiedText` me
+// hota hai). Image na ho ya load na ho paaye to bhi title/description
+// dikhte rehte hain — card kabhi crash/blank nahi hota.
+class _LinkPreviewCard extends StatelessWidget {
+  final LinkPreviewModel preview;
+  final Color textColor;
+  const _LinkPreviewCard({required this.preview, required this.textColor});
+
+  Future<void> _open() async {
+    final uri = Uri.tryParse(preview.url);
+    if (uri == null) return;
+    try {
+      await launchUrl(uri, mode: LaunchMode.externalApplication);
+    } catch (_) {
+      // link open nahi ho paaya — chat UI break nahi hona chahiye.
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final onDark = textColor == Colors.white;
+    final hasImage = preview.image != null && preview.image!.isNotEmpty;
+    return GestureDetector(
+      onTap: _open,
+      child: Container(
+        constraints: const BoxConstraints(maxWidth: 240),
+        decoration: BoxDecoration(
+          color: onDark ? Colors.white.withOpacity(0.08) : const Color(0xFFF3F5FA),
+          borderRadius: BorderRadius.circular(8),
+          border: Border.all(color: onDark ? Colors.white24 : Colors.black12),
+        ),
+        clipBehavior: Clip.antiAlias,
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            if (hasImage)
+              CachedNetworkImage(
+                imageUrl: preview.image!,
+                height: 110,
+                width: double.infinity,
+                fit: BoxFit.cover,
+                placeholder: (_, __) => const SizedBox(height: 110, child: Center(child: CircularProgressIndicator(strokeWidth: 2))),
+                errorWidget: (_, __, ___) => const SizedBox.shrink(),
+              ),
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  if (preview.title != null && preview.title!.isNotEmpty)
+                    Text(
+                      preview.title!,
+                      maxLines: 2,
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(color: textColor, fontWeight: FontWeight.w600, fontSize: 12.5),
+                    ),
+                  if (preview.description != null && preview.description!.isNotEmpty)
+                    Padding(
+                      padding: const EdgeInsets.only(top: 2),
+                      child: Text(
+                        preview.description!,
+                        maxLines: 2,
+                        overflow: TextOverflow.ellipsis,
+                        style: TextStyle(color: textColor.withOpacity(0.7), fontSize: 11.5),
+                      ),
+                    ),
+                  Padding(
+                    padding: const EdgeInsets.only(top: 3),
+                    child: Text(
+                      preview.url,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(color: textColor.withOpacity(0.5), fontSize: 10.5),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
 // 🔥 NAYA — FIX: gallery se pick kiya gaya media hamesha ek normal file
 // path nahi hota. Kuch sources — jaise DOOSRE app ka media (misaal:
 // WhatsApp ke apne "WhatsApp Images/Video" folder se koi photo/video
@@ -167,7 +259,12 @@ Future<List<XFile>> _ensureRealFiles(List<XFile> files) =>
 
 class ChatScreen extends StatefulWidget {
   final ConversationModel conversation;
-  const ChatScreen({super.key, required this.conversation});
+  // 🔥 NAYA (Phase 4, §2.1) — MessageSearchScreen se ek specific message
+  // pe seedha jump karke aana ho to iska id diya jaata hai. Screen khulte
+  // hi history load hoke, zaroorat pade to purana pagination bhi chalke,
+  // us message tak scroll + flash-highlight karega.
+  final String? jumpToMessageId;
+  const ChatScreen({super.key, required this.conversation, this.jumpToMessageId});
 
   @override
   State<ChatScreen> createState() => _ChatScreenState();
@@ -296,6 +393,37 @@ class _ChatScreenState extends State<ChatScreen> {
   // cap). Top banner isi list se render hota hai — dekho _buildPinnedBanner().
   List<PinnedMessageModel> _pinnedMessages = [];
 
+  // 🔥 NAYA (Phase 4, §2.1) — MessageSearchScreen se "jump to message" karke
+  // aane par, ya reply-quote pe tap karne par, us message ko thodi der ke
+  // liye flash-highlight karna. `_highlightTimer` purana highlight clear
+  // karta hai jab naya trigger ho ya duration khatam ho jaaye.
+  String? _highlightedMessageId;
+  Timer? _highlightTimer;
+
+  // 🔥 NAYA (Phase 3, §2.2) — @Mention autocomplete: group ke active
+  // members (sirf group chat me load hote hain, private chat me hamesha
+  // khaali rehti hai — mention private chat me possible hi nahi hai).
+  // `_mentionQuery` non-null hote hi overlay render hota hai (empty string
+  // = "@" abhi-abhi type hua hai, sab members dikhao).
+  List<UserMini> _groupMembers = [];
+  String? _mentionQuery;
+
+  // 🔥 NAYA (Phase 3, §7.10) — server-side draft autosave: text change
+  // hone par debounce (1-2s) karke PATCH karta hai. `_lastSavedDraft` se
+  // compare karte hain taaki same text baar-baar save na ho (harmless hai
+  // par unnecessary API calls bachate hain).
+  Timer? _draftSaveTimer;
+  String? _lastSavedDraft;
+
+  // 🔥 NAYA (Phase 3, §1 #11) — Smart-reply suggestion chips. Sirf tab
+  // fetch hota hai jab last message requester ka apna na ho (matlab
+  // dusre ne bheja ho) — throttle scope `ai_smart_reply` 30/min hai,
+  // isliye client bhi `_kSmartReplyCooldown` ka reasonable cooldown
+  // rakhta hai taaki har naye incoming message pe call na ho.
+  List<String> _smartReplies = [];
+  DateTime? _lastSmartReplyFetch;
+  static const Duration _kSmartReplyCooldown = Duration(seconds: 15);
+
   Future<void> _loadPinnedMessages() async {
     try {
       final pins = await MessageApiService.getPinnedMessages(widget.conversation.id);
@@ -306,9 +434,102 @@ class _ChatScreenState extends State<ChatScreen> {
     }
   }
 
+  // 🔥 NAYA (Phase 3, §2.2) — group hi ho to active members load karo
+  // (mention suggestion list ke liye). Private chat me no-op.
+  Future<void> _loadGroupMembers() async {
+    if (!widget.conversation.isGroup) return;
+    final groupId = widget.conversation.group?.id;
+    if (groupId == null || groupId.isEmpty) return;
+    try {
+      final members = await MessageApiService.getGroupActiveMembers(groupId);
+      if (mounted) setState(() => _groupMembers = members);
+    } catch (_) {
+      // silent — overlay bas nahi dikhega, "@" typing normal text jaisa hi rahega
+    }
+  }
+
+  // 🔥 NAYA (Phase 4, §2.1) — MessageSearchScreen se select hue message tak
+  // pahochne ke liye: pehle jo already-loaded `_messages` me maujood hai
+  // wahi scroll+highlight karo. Agar nahi mila (purana message, abhi tak
+  // pagination se load nahi hua) to `_loadMoreMessages()` baar-baar call
+  // karke aur purana history laate raho (max 25 pages tak — safety cap,
+  // taaki koi corrupt/missing id infinite loop na bana de).
+  Future<void> _tryJumpToInitialMessage() async {
+    final targetId = widget.jumpToMessageId;
+    if (targetId == null) return;
+    await _tryJumpToMessageId(targetId);
+  }
+
+  // 🔥 NAYA (Phase 4, §2.1) — reusable: pehle jo already-loaded `_messages`
+  // me maujood hai wahi scroll+highlight karo. Agar nahi mila (purana
+  // message, abhi tak pagination se load nahi hua) to `_loadMoreMessages()`
+  // baar-baar call karke aur purana history laate raho (max 25 pages tak —
+  // safety cap, taaki koi corrupt/missing id infinite loop na bana de).
+  Future<void> _tryJumpToMessageId(String targetId) async {
+    int attempts = 0;
+    while (mounted && attempts < 25) {
+      if (_messages.any((m) => m.id == targetId)) {
+        // ListView ko ek frame build hone do taaki naye-load hue purane
+        // items ka layout ready ho, warna scroll offset galat calculate hoga.
+        await Future.delayed(const Duration(milliseconds: 150));
+        if (mounted) _scrollToMessage(targetId, highlight: true);
+        return;
+      }
+      if (!_hasMoreMessages) break;
+      await _loadMoreMessages();
+      attempts++;
+    }
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text("Us message tak scroll nahi ho paya (bahut purana ho sakta hai)")),
+      );
+    }
+  }
+
+  // 🔥 NAYA (Phase 3, §1 #11) — throttle scope respect karte hue smart-reply
+  // suggestions fetch karo. Sirf tab call karo jab: (a) last message current
+  // user ka na ho, (b) cooldown khatam ho chuka ho.
+  Future<void> _maybeLoadSmartReplies() async {
+    if (_messages.isEmpty) return;
+    final last = _messages.last;
+    if (last.sender?.id == _myUserId) {
+      if (mounted && _smartReplies.isNotEmpty) setState(() => _smartReplies = []);
+      return;
+    }
+    final now = DateTime.now();
+    if (_lastSmartReplyFetch != null && now.difference(_lastSmartReplyFetch!) < _kSmartReplyCooldown) {
+      return;
+    }
+    _lastSmartReplyFetch = now;
+    try {
+      final result = await MessageApiService.getSmartReplies(widget.conversation.id);
+      if (mounted) setState(() => _smartReplies = result.suggestions);
+    } catch (_) {
+      // silent — chips bas nahi dikhenge
+    }
+  }
+
+  // 🔥 NAYA (Phase 3, §7.10) — debounce (1.5s) karke server pe draft save
+  // karta hai. Text khaali ho gaya (message send ho gaya ya user ne clear
+  // kar diya) to bhi call hota hai taaki server-side draft bhi clear ho
+  // jaaye — warna purana draft list-preview me atka reh jaayega.
+  void _scheduleDraftSave(String text) {
+    _draftSaveTimer?.cancel();
+    _draftSaveTimer = Timer(const Duration(milliseconds: 1500), () {
+      if (!mounted || text == _lastSavedDraft) return;
+      _lastSavedDraft = text;
+      MessageApiService.updateSettings(widget.conversation.id, draftText: text).catchError((_) {
+        // silent — draft save fail hone se chat use karna nahi rukna chahiye
+        return ConversationSettings();
+      });
+    });
+  }
+
+  // 🔧 FIX (backend mismatch) — pin/unpin ab message-level endpoint hai,
+  // `conversationId` pass karne ki zaroorat nahi (§0 backend doc).
   Future<void> _pinMessage(MessageModel msg) async {
     try {
-      final pin = await MessageApiService.pinMessage(widget.conversation.id, msg.id);
+      final pin = await MessageApiService.pinMessage(msg.id);
       if (!mounted) return;
       setState(() => _pinnedMessages = [pin, ..._pinnedMessages]);
     } on MessageApiException catch (e) {
@@ -322,7 +543,7 @@ class _ChatScreenState extends State<ChatScreen> {
     final prev = _pinnedMessages;
     setState(() => _pinnedMessages = _pinnedMessages.where((p) => p.message.id != messageId).toList());
     try {
-      await MessageApiService.unpinMessage(widget.conversation.id, messageId);
+      await MessageApiService.unpinMessage(messageId);
     } catch (_) {
       if (mounted) setState(() => _pinnedMessages = prev); // rollback on failure
     }
@@ -572,6 +793,13 @@ class _ChatScreenState extends State<ChatScreen> {
     // ka naya message aane par duplicate push notification popup na dikhe
     // (PushNotificationService.init() me ye check hota hai).
     PushNotificationService.currentOpenConversationId = widget.conversation.id;
+    // 🔥 NAYA (Phase 3, §7.10) — screen open hote hi agar server pe koi
+    // saved draft hai to compose box usi se prefill ho jaaye.
+    final savedDraft = widget.conversation.mySettings.draftText;
+    if (savedDraft != null && savedDraft.trim().isNotEmpty) {
+      _textController.text = savedDraft;
+      _lastSavedDraft = savedDraft;
+    }
     _scrollController.addListener(_onScroll); // 🔥 NAYA — top tak scroll hone par purane messages load karne ke liye
     _init();
     _loadMuteStatus(); // 🔥 NAYA
@@ -579,6 +807,7 @@ class _ChatScreenState extends State<ChatScreen> {
     _loadDisappearingStatus(); // 🔥 NAYA
     _loadWallpaper(); // 🔥 NAYA — poori chat screen ka background image (agar set hai)
     _loadPinnedMessages(); // 🔥 NAYA — pinned messages banner
+    _loadGroupMembers(); // 🔥 NAYA (Phase 3, §2.2) — @mention suggestion list ke liye
   }
 
   // 🔥 NAYA — jab user list ko top ke paas scroll kare (chat me sabse
@@ -602,6 +831,11 @@ class _ChatScreenState extends State<ChatScreen> {
     await _connectSocket();
     await MessageApiService.readAll(widget.conversation.id);
     _loadGroupRole(); // 🔥 NAYA — "Delete group" ke liye apni admin-status pata karo
+    // 🔥 NAYA (Phase 4, §2.1) — search se aaye ho to us message tak jump karo.
+    if (widget.jumpToMessageId != null) _tryJumpToInitialMessage();
+    // 🔥 NAYA (Phase 3, §1 #11) — history load hote hi, agar last message
+    // dusre ka hai, smart-reply chips fetch kar lo.
+    _maybeLoadSmartReplies();
   }
 
   // 🔥 NAYA — bilkul home.dart ke _loadMyUsername jaisa: pehle profile API
@@ -1429,18 +1663,31 @@ class _ChatScreenState extends State<ChatScreen> {
       case 'reaction':
         _onReactionEvent(event);
         break;
-      // 🔥 NAYA — POLLS
-      case 'poll_created':
-        _onPollCreatedEvent(event);
+      // 🔧 FIX (backend mismatch) — backend `poll_created`/`poll_voted`
+      // naam se KUCH nahi bhejta. Naya poll ek normal `chat_message` event
+      // se aata hai (poll field nested hoti hai — `_onIncomingMessage` /
+      // `MessageModel.fromSocketEvent` isko already handle karta hai, agar
+      // model me `poll` field parse ho rahi hai to alag se kuch nahi
+      // karna). Vote/close dono ek hi event se aate hain: `poll_update`.
+      case 'poll_update':
+        _onPollUpdateEvent(event);
         break;
-      case 'poll_voted':
-        _onPollVotedEvent(event);
+      // 🔥 NAYA (Phase 2, §7.7) — link preview aur voice transcript dono
+      // isi event se live aate hain (backend background job se generate
+      // hoke baad me attach hote hain — message pehle bina inke insert
+      // hota hai). Payload: `{message_id, meta: {...}}` — us message ka
+      // `.meta` poora replace karo (poori list reload nahi), `linkPreview`/
+      // `transcript` getters (message_models.dart) khud-ba-khud naye
+      // `meta` se re-derive ho jaate hain.
+      case 'meta_update':
+        _onMetaUpdateEvent(event);
         break;
-      // 🔥 NAYA — PINNED MESSAGES: koi bhi participant pin/unpin kare, sab
-      // ke liye banner turant sync ho jaaye. Poori list refresh karna hi
-      // simplest/consistent tarika hai (list chhoti hoti hai, max 3).
-      case 'message_pinned':
-      case 'message_unpinned':
+      // 🔧 FIX (backend mismatch) — backend `message_pinned`/
+      // `message_unpinned` naam se nahi, single `pin_event` bhejta hai:
+      // `{event: "pinned"|"unpinned", message_id, conversation_id, actor_id}`.
+      // Poori list refresh karna hi simplest/consistent tarika hai (list
+      // chhoti hoti hai, max 3).
+      case 'pin_event':
         _loadPinnedMessages();
         break;
       // 🔥 NAYA — khud apne doosre connected device se chat wallpaper
@@ -1702,6 +1949,12 @@ class _ChatScreenState extends State<ChatScreen> {
     _scrollToBottom();
     if (incoming.sender?.id != _myUserId) {
       _socket.sendReadReceipt(incoming.id);
+      // 🔥 NAYA (Phase 3, §1 #11) — naya incoming message dusre ka hai,
+      // smart-reply chips refresh karo (cooldown internally respect hota hai).
+      _maybeLoadSmartReplies();
+    } else if (_smartReplies.isNotEmpty) {
+      // Maine khud reply bhej diya (kisi aur device se ho sakta hai) — chips hata do.
+      setState(() => _smartReplies = []);
     }
   }
 
@@ -1740,45 +1993,58 @@ class _ChatScreenState extends State<ChatScreen> {
   // 🔥 NAYA — POLLS
   // ============================================================
 
-  void _onPollCreatedEvent(Map<String, dynamic> event) {
+  // 🔧 FIX (backend mismatch) — `poll_created` naam ka koi event backend
+  // nahi bhejta (isliye purana `_onPollCreatedEvent` yahan se hata diya).
+  // Naya poll ek normal `chat_message` event se hi aata hai — agar
+  // `MessageModel.fromSocketEvent` (message_models.dart) `event['poll']`
+  // ko parse karke `MessageModel.poll`/`meta['poll']` set karta hai to
+  // `_onIncomingMessage()` already sahi se handle kar raha hai, kuch alag
+  // se karne ki zaroorat nahi. (Ye confirm kar lena model file me.)
+
+  // 🔧 FIX (backend mismatch) — `poll_voted` nahi, backend `poll_update`
+  // bhejta hai (vote AUR close dono ke liye same event), payload
+  // `{message_id, poll: {...full updated Poll...}, voted_by | closed_by}`.
+  // Standalone `GET /polls/<id>/` endpoint exist hi nahi karta (purana
+  // `getPoll()` call isiliye hata diya gaya — §0 backend doc), poori
+  // updated poll object seedha isi event ke payload me mil jaati hai,
+  // extra REST call ki zaroorat nahi.
+  //
+  // 🔧 FIX (Phase 1 model fix) — poll ab `MessageModel.meta['poll']` me
+  // nahi, TOP-LEVEL `.poll` field me store hota hai (`message_models.dart`
+  // §3 fix) — is handler ko bhi usi ke hisaab se update kiya, purana
+  // `meta['poll']` merge hata diya (poora object replace karo, partial
+  // merge mat karo — jaisa doc kehta hai).
+  void _onPollUpdateEvent(Map<String, dynamic> event) {
     final messageId = event['message_id']?.toString();
     final pollJson = event['poll'] as Map<String, dynamic>?;
     if (messageId == null || pollJson == null) return;
-    if (_messages.any((m) => m.id == messageId)) return; // hum khud sender the, already insert ho chuka
-    final poll = PollModel.fromJson(pollJson);
-    final msg = MessageModel(
-      id: messageId,
-      conversationId: widget.conversation.id,
-      sender: UserMini(id: event['by_user_id']?.toString() ?? '', displayName: ''),
-      type: MessageType.poll,
-      text: poll.question,
-      meta: {'poll': poll.toJson()},
-      createdAt: DateTime.now(),
-    );
-    setState(() => _messages.add(msg));
-    _scrollToBottom();
+    final idx = _messages.indexWhere((m) => m.id == messageId);
+    if (idx == -1) return;
+    setState(() {
+      _messages[idx].poll = PollModel.fromJson(pollJson);
+    });
   }
 
-  void _onPollVotedEvent(Map<String, dynamic> event) {
-    final pollId = event['poll_id']?.toString();
-    if (pollId == null) return;
-    final idx = _messages.indexWhere((m) => (m.meta?['poll'] as Map?)?['id']?.toString() == pollId);
+  // 🔥 NAYA (Phase 2, §7.7) — link preview + transcript live update.
+  // `.meta` poora replace karte hain (backend jo bhi naya `meta` bhejta
+  // hai wahi source of truth hai) — in-place update, poori list reload
+  // nahi, taaki scroll position/keyboard focus disturb na ho.
+  void _onMetaUpdateEvent(Map<String, dynamic> event) {
+    final messageId = event['message_id']?.toString();
+    final metaJson = event['meta'] as Map<String, dynamic>?;
+    if (messageId == null || metaJson == null) return;
+    final idx = _messages.indexWhere((m) => m.id == messageId);
     if (idx == -1) return;
-    // Live results refresh — poore counts ek baar me le aate hain
-    // (`voted_by_me` bhi sirf apne liye hi meaningful hai, isliye poll
-    // GET karna hi sabse simple/consistent tarika hai).
-    MessageApiService.getPoll(pollId).then((updated) {
-      if (!mounted) return;
-      setState(() {
-        _messages[idx].meta = {..._messages[idx].meta ?? {}, 'poll': updated.toJson()};
-      });
-    }).catchError((_) {});
+    setState(() {
+      _messages[idx].meta = metaJson;
+    });
   }
 
   // Poll REST se bana (hume apna khud ka response mil gaya) — turant
-  // insert karo. `poll_created` socket broadcast bhi baad me aayega
-  // (auto ya doosre members ko), isliye id-based dedup zaroori hai —
-  // `_onPollCreatedEvent` wahi karta hai.
+  // insert karo. Backend group ke baaki members ko normal `chat_message`
+  // event se hi ye poll bhejega (`poll` field nested hoga) — us event ka
+  // `_onIncomingMessage` clientId/id based dedup already sambhal leta hai,
+  // yahan alag se kuch nahi karna.
   void _insertPollMessage(PollModel poll) {
     if (_messages.any((m) => m.id == poll.messageId)) return;
     final msg = MessageModel(
@@ -1787,23 +2053,25 @@ class _ChatScreenState extends State<ChatScreen> {
       sender: UserMini(id: _myUserId ?? '', displayName: 'You'),
       type: MessageType.poll,
       text: poll.question,
-      meta: {'poll': poll.toJson()},
+      poll: poll,
       createdAt: DateTime.now(),
     );
     setState(() => _messages.add(msg));
     _scrollToBottom();
   }
 
+  // 🔧 FIX (backend mismatch) — vote/close backend me POLL id se nahi,
+  // us poll ke underlying MESSAGE id se hote hain
+  // (`POST /messages/<message_id>/poll/vote/`). Pehle `pollJson['id']`
+  // bheja jaa raha tha, jo backend `Message` id expect karta hai — 404
+  // deta raha hoga. Ab seedha `msg.id` bhejo.
   Future<void> _votePoll(MessageModel msg, List<String> optionIds) async {
-    final pollJson = msg.meta?['poll'] as Map<String, dynamic>?;
-    if (pollJson == null) return;
-    final pollId = pollJson['id'].toString();
     try {
-      final updated = await MessageApiService.votePoll(pollId, optionIds);
+      final updated = await MessageApiService.votePoll(msg.id, optionIds);
       if (!mounted) return;
       setState(() {
         final idx = _messages.indexWhere((m) => m.id == msg.id);
-        if (idx != -1) _messages[idx].meta = {..._messages[idx].meta ?? {}, 'poll': updated.toJson()};
+        if (idx != -1) _messages[idx].poll = updated;
       });
     } on MessageApiException catch (e) {
       if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(e.message)));
@@ -1814,7 +2082,6 @@ class _ChatScreenState extends State<ChatScreen> {
     final questionCtrl = TextEditingController();
     final optionCtrls = <TextEditingController>[TextEditingController(), TextEditingController()];
     bool allowsMultiple = false;
-    bool isAnonymous = false;
     bool isSubmitting = false;
 
     showModalBottomSheet(
@@ -1867,12 +2134,11 @@ class _ChatScreenState extends State<ChatScreen> {
                 title: const Text("Allow multiple answers"),
                 onChanged: (v) => setSheetState(() => allowsMultiple = v),
               ),
-              SwitchListTile(
-                contentPadding: EdgeInsets.zero,
-                value: isAnonymous,
-                title: const Text("Anonymous voting"),
-                onChanged: (v) => setSheetState(() => isAnonymous = v),
-              ),
+              // 🔧 FIX (backend mismatch) — "Anonymous voting" switch hata
+              // diya: backend `Poll` model me `is_anonymous` field hai hi
+              // nahi (sirf allow_multiple_answers/is_closed/closed_at/
+              // closed_by hain) — pehle ye silently ignore ho raha tha,
+              // user ko galat expectation deta tha ki votes anonymous hain.
               const SizedBox(height: 8),
               SizedBox(
                 width: double.infinity,
@@ -1893,7 +2159,6 @@ class _ChatScreenState extends State<ChatScreen> {
                         question: question,
                         options: options,
                         allowsMultipleAnswers: allowsMultiple,
-                        isAnonymous: isAnonymous,
                       );
                       _insertPollMessage(poll);
                       if (mounted) Navigator.pop(sheetCtx);
@@ -2154,7 +2419,21 @@ class _ChatScreenState extends State<ChatScreen> {
     final clientId = _newClientId();
     final replyToId = _replyingTo?.id; // 🔥 NAYA
     final optimistic = MessageModel(id: clientId, conversationId: widget.conversation.id, sender: UserMini(id: _myUserId ?? '', displayName: 'You'), type: MessageType.text, text: text, replyTo: replyToId, clientId: clientId, createdAt: DateTime.now(), isSending: true);
-    setState(() { _messages.add(optimistic); _textController.clear(); _replyingTo = null; });
+    setState(() {
+      _messages.add(optimistic);
+      _textController.clear();
+      _replyingTo = null;
+      _mentionQuery = null; // 🔥 NAYA (Phase 3, §2.2) — send hote hi overlay band
+      _smartReplies = []; // 🔥 NAYA (Phase 3, §1 #11) — apna hi reply bhej diya, chips hata do
+    });
+    // 🔥 NAYA (Phase 3, §7.10) — send ho gaya, server-side draft turant clear
+    // karo (1.5s debounce ka intezaar mat karo — warna send + turant-band-
+    // karna ki race me purana draft list-preview me reh sakta hai).
+    _draftSaveTimer?.cancel();
+    _lastSavedDraft = '';
+    MessageApiService.updateSettings(widget.conversation.id, draftText: '').catchError((_) {
+      return ConversationSettings();
+    });
     _scrollToBottom();
     if (_isSocketConnected) {
       _socket.sendMessage(text: text, clientId: clientId, replyTo: replyToId);
@@ -2555,7 +2834,32 @@ class _ChatScreenState extends State<ChatScreen> {
     return ListTile(leading: CircleAvatar(backgroundColor: color, child: Icon(icon, color: Colors.white)), title: Text(label), onTap: () { Navigator.pop(context); onTap(); });
   }
 
-  void _onTypingChanged(String value) => _socket.sendTyping(value.isNotEmpty);
+  // 🔥 EXTENDED (Phase 3, §2.2/§7.10) — typing indicator ke saath-saath ab
+  // ye 2 aur cheezein bhi karta hai: (1) `@` mention query detect karke
+  // overlay show/hide karna, (2) debounced server-side draft autosave.
+  void _onTypingChanged(String value) {
+    _socket.sendTyping(value.isNotEmpty);
+
+    // 🔥 NAYA (Phase 3, §2.2) — group chat me hi mention possible hai.
+    if (widget.conversation.isGroup) {
+      final cursor = _textController.selection.baseOffset;
+      final query = extractMentionQuery(value, cursor < 0 ? value.length : cursor);
+      if (query != _mentionQuery) {
+        setState(() => _mentionQuery = query);
+      }
+    }
+
+    // 🔥 NAYA (Phase 3, §7.10) — debounced draft autosave.
+    _scheduleDraftSave(value);
+  }
+
+  // 🔥 NAYA (Phase 3, §2.2) — suggestion list se ek member select kiya —
+  // text me `@username ` insert karo aur overlay band karo.
+  void _onMentionSelected(UserMini user) {
+    final updated = insertMention(_textController.value, user);
+    _textController.value = updated;
+    setState(() => _mentionQuery = null);
+  }
 
   void _showReactionPicker(MessageModel msg) {
     final myCurrent = msg.myReaction(_myUserId ?? '');
@@ -2575,7 +2879,11 @@ class _ChatScreenState extends State<ChatScreen> {
     showModalBottomSheet(context: context, backgroundColor: Colors.white, shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(18))), builder: (_) => SafeArea(child: Column(mainAxisSize: MainAxisSize.min, children: [
       ListTile(leading: const Icon(Icons.reply), title: const Text("Reply"), onTap: () { Navigator.pop(context); _startReply(msg); }),
       // NEW — forward just this one message straight to a picker.
-      ListTile(leading: const Icon(Icons.forward), title: const Text("Forward"), onTap: () { Navigator.pop(context); _forwardOne(msg); }),
+      // 🔧 FIX (Phase 3, §4.3) — poll messages forward nahi ho sakte
+      // (backend silently drop karta hai) — is item ko hi hide kar do,
+      // UI me pehle hi rok dena better UX hai.
+      if (msg.type != MessageType.poll)
+        ListTile(leading: const Icon(Icons.forward), title: const Text("Forward"), onTap: () { Navigator.pop(context); _forwardOne(msg); }),
       ListTile(leading: const Icon(Icons.emoji_emotions_outlined), title: const Text("React"), onTap: () { Navigator.pop(context); _showReactionPicker(msg); }),
       // 🔥 NAYA — Pin/Unpin (backend max 3 pinned/conversation — limit
       // cross hone par _pinMessage() snackbar me error dikha dega).
@@ -2645,22 +2953,27 @@ class _ChatScreenState extends State<ChatScreen> {
     });
   }
 
-  Future<void> _forwardOne(MessageModel msg) => _openForwardPicker([msg.id]);
+  Future<void> _forwardOne(MessageModel msg) => _openForwardPicker([msg]);
 
   Future<void> _forwardSelected() async {
-    final ids = _selectedMessageIds.toList();
+    final selected = _messages.where((m) => _selectedMessageIds.contains(m.id)).toList();
     _exitSelectionMode();
-    await _openForwardPicker(ids);
+    await _openForwardPicker(selected);
   }
 
-  Future<void> _openForwardPicker(List<String> messageIds) async {
-    if (messageIds.isEmpty) return;
+  // 🔧 FIX (Phase 3, §4.3) — pehle sirf message ids pass hote the, isliye
+  // `ForwardMessageScreen` ko pata hi nahi chalta tha ki selection me
+  // koi text-message hai ya poll — caption field ka "text-only hide"
+  // aur "polls excluded" wala UI logic (§4.3) implement hi nahi ho pa
+  // raha tha. Ab poore `MessageModel` bhejte hain.
+  Future<void> _openForwardPicker(List<MessageModel> messages) async {
+    if (messages.isEmpty) return;
     final ok = await Navigator.of(context).push<bool>(
-      MaterialPageRoute(builder: (_) => ForwardMessageScreen(messageIds: messageIds)),
+      MaterialPageRoute(builder: (_) => ForwardMessageScreen(messages: messages)),
     );
     if (ok == true && mounted) {
       ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-        content: Text(messageIds.length == 1 ? "Message forwarded" : "${messageIds.length} messages forwarded"),
+        content: Text(messages.length == 1 ? "Message forwarded" : "${messages.length} messages forwarded"),
       ));
     }
   }
@@ -2851,6 +3164,8 @@ class _ChatScreenState extends State<ChatScreen> {
     _scrollController.dispose();
     _recordTimer?.cancel();
     _recorder.dispose(); // 🔥 NAYA
+    _highlightTimer?.cancel(); // 🔥 NAYA (Phase 4, §2.1)
+    _draftSaveTimer?.cancel(); // 🔥 NAYA (Phase 3, §7.10)
     super.dispose();
   }
 
@@ -2893,6 +3208,24 @@ class _ChatScreenState extends State<ChatScreen> {
         ]),
         ),
         actions: [
+          // 🔥 NAYA (Phase 4, §2.1) — is conversation ke andar search.
+          // Result tap karne pe MessageSearchScreen us message ka id le kar
+          // pop hota hai — jise pakad ke seedha wahan scroll+highlight karo.
+          IconButton(
+            icon: const Icon(Icons.search, color: Colors.white),
+            tooltip: "Search in chat",
+            onPressed: () async {
+              final selectedId = await Navigator.push<String>(
+                context,
+                MaterialPageRoute(
+                  builder: (_) => MessageSearchScreen(conversationId: widget.conversation.id),
+                ),
+              );
+              if (selectedId != null && mounted) {
+                await _tryJumpToMessageId(selectedId);
+              }
+            },
+          ),
           IconButton(icon: const Icon(Icons.cast_for_education, color: Colors.white), tooltip: "Study Room", onPressed: _openStudyRoom),
           IconButton(icon: const Icon(Icons.call, color: Colors.white), tooltip: "Audio Call", onPressed: () => _startCall('audio')),
           IconButton(icon: const Icon(Icons.videocam, color: Colors.white), tooltip: "Video Call", onPressed: () => _startCall('video')),
@@ -3094,6 +3427,47 @@ class _ChatScreenState extends State<ChatScreen> {
           if (_pinnedMessages.isNotEmpty) _buildPinnedBanner(), // 🔥 NAYA
           Expanded(child: _buildMessageList()),
           _buildReplyPreview(),
+          // 🔥 NAYA (Phase 3, §2.2) — @mention suggestion overlay, compose
+          // box ke bilkul upar. Sirf group chat me aur jab `@query` active
+          // ho tab dikhta hai; text field ke upar "floating card" jaisa.
+          if (!_isBlocked && !_isMessagingRestrictedForMe && _mentionQuery != null)
+            Padding(
+              padding: const EdgeInsets.only(bottom: 4),
+              child: MentionSuggestionsOverlay(
+                members: _groupMembers,
+                query: _mentionQuery!,
+                onSelected: _onMentionSelected,
+              ),
+            ),
+          // 🔥 NAYA (Phase 3, §1 #11) — smart-reply suggestion chips, tap
+          // karne se chip ka text seedha compose box me daal deta hai
+          // (send NAHI hota — WhatsApp/Gmail jaisa hi, user chahe to edit
+          // kar sakta hai bhejne se pehle).
+          if (!_isBlocked && !_isMessagingRestrictedForMe && _smartReplies.isNotEmpty)
+            Padding(
+              padding: const EdgeInsets.only(left: 10, right: 10, bottom: 6),
+              child: SizedBox(
+                height: 34,
+                child: ListView.separated(
+                  scrollDirection: Axis.horizontal,
+                  itemCount: _smartReplies.length,
+                  separatorBuilder: (_, __) => const SizedBox(width: 8),
+                  itemBuilder: (context, i) {
+                    final suggestion = _smartReplies[i];
+                    return ActionChip(
+                      label: Text(suggestion, style: const TextStyle(fontSize: 12.5)),
+                      backgroundColor: Colors.white,
+                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20), side: BorderSide(color: Colors.grey[300]!)),
+                      onPressed: () {
+                        _textController.text = suggestion;
+                        _textController.selection = TextSelection.collapsed(offset: suggestion.length);
+                        setState(() => _smartReplies = []);
+                      },
+                    );
+                  },
+                ),
+              ),
+            ),
           _isBlocked
               ? _buildBlockedBanner()
               : (_isMessagingRestrictedForMe ? _buildRestrictedBanner() : _buildInputBar()),
@@ -3332,9 +3706,13 @@ class _ChatScreenState extends State<ChatScreen> {
                         onDownload: () => _downloadMedia(context, msg),
                         onDownloadUrl: (url) => _downloadMediaUrl(context, msg, url), // 🔥 NAYA — multi-image grid ke ek specific photo ke liye
                         isUrlDownloaded: (url) => _downloadedIds.contains('${msg.id}::$url'), // 🔥 NAYA
-                        onReplyTap: replyPreview != null ? () => _scrollToMessage(replyPreview.id) : null,
+                        onReplyTap: replyPreview != null ? () => _scrollToMessage(replyPreview.id, highlight: true) : null,
                         onJoinStudyRoom: _enterStudyRoom, // 🔥 NAYA — card pe tap = seedha room me entry, dobara invite nahi
                         onVotePoll: _votePoll, // 🔥 NAYA
+                        // 🔥 NAYA (Phase 2, §7.3) — current user mentioned hai to highlight
+                        isMentioned: _myUserId != null && msg.mentionedUsers.any((u) => u.id == _myUserId),
+                        // 🔥 NAYA (Phase 4, §2.1) — search-jump/reply-tap flash highlight
+                        isJumpHighlighted: _highlightedMessageId == msg.id,
                       ),
                     );
 
@@ -3347,18 +3725,22 @@ class _ChatScreenState extends State<ChatScreen> {
                       // in AbsorbPointer while selection mode is active.
                       GestureDetector(
                         behavior: HitTestBehavior.translucent,
-                        onTap: _selectionMode ? () => _toggleMessageSelected(msg) : null,
+                        // 🔧 FIX (Phase 3, §4.3) — poll messages ko forward
+                        // selection se exclude karo, checkbox tap disabled.
+                        onTap: (_selectionMode && msg.type != MessageType.poll) ? () => _toggleMessageSelected(msg) : null,
                         child: Container(
                           color: isSelected ? const Color(0xFF3D7EFF).withOpacity(0.12) : null,
                           child: Row(crossAxisAlignment: CrossAxisAlignment.center, children: [
                             if (_selectionMode)
                               Padding(
                                 padding: const EdgeInsets.only(left: 6, right: 2),
-                                child: Icon(
-                                  isSelected ? Icons.check_circle : Icons.radio_button_unchecked,
-                                  size: 20,
-                                  color: isSelected ? const Color(0xFF3D7EFF) : Colors.grey,
-                                ),
+                                child: msg.type == MessageType.poll
+                                    ? Icon(Icons.block, size: 18, color: Colors.grey[300])
+                                    : Icon(
+                                        isSelected ? Icons.check_circle : Icons.radio_button_unchecked,
+                                        size: 20,
+                                        color: isSelected ? const Color(0xFF3D7EFF) : Colors.grey,
+                                      ),
                               ),
                             Expanded(
                               child: AbsorbPointer(absorbing: _selectionMode, child: bubble),
@@ -3404,12 +3786,22 @@ class _ChatScreenState extends State<ChatScreen> {
   bool _isSameDay(DateTime a, DateTime b) => a.year == b.year && a.month == b.month && a.day == b.day;
 
   // 🔥 NAYA — quoted reply pe tap karke us original message tak scroll/highlight
-  void _scrollToMessage(String id) {
+  // 🔥 NAYA (Phase 4, §2.1) — ab `highlight: true` dene par message ko
+  // thodi der ke liye amber flash bhi karta hai (search-jump aur reply-tap
+  // dono isi ek method ko reuse karte hain).
+  void _scrollToMessage(String id, {bool highlight = false}) {
     final idx = _messages.indexWhere((m) => m.id == id);
     if (idx == -1 || !_scrollController.hasClients) return;
     // approx: har message ~70px, list top se offset nikaal ke scroll karo
     final approxOffset = (idx * 70.0).clamp(0.0, _scrollController.position.maxScrollExtent);
     _scrollController.animateTo(approxOffset, duration: const Duration(milliseconds: 300), curve: Curves.easeOut);
+    if (highlight) {
+      _highlightTimer?.cancel();
+      setState(() => _highlightedMessageId = id);
+      _highlightTimer = Timer(const Duration(milliseconds: 1300), () {
+        if (mounted) setState(() => _highlightedMessageId = null);
+      });
+    }
   }
 
   String _fmtRecordDuration(Duration d) {
@@ -3656,6 +4048,16 @@ class _MessageBubble extends StatelessWidget {
   final VoidCallback? onReplyTap; // 🔥 NAYA
   final VoidCallback? onJoinStudyRoom; // 🔥 NAYA — study room invite card ke "Tap to Join" ke liye
   final void Function(MessageModel msg, List<String> optionIds)? onVotePoll; // 🔥 NAYA — poll option tap
+  // 🔥 NAYA (Phase 2, §7.3/§4.1) — true jab current user
+  // `message.mentionedUsers` me ho, taaki bubble WhatsApp jaisa subtle
+  // highlight kare.
+  final bool isMentioned;
+  // 🔥 NAYA (Phase 4, §2.1) — "search se jump karke aaya" ya "reply-tap se
+  // scroll hua" message ko ek pal ke liye flash-highlight karne ke liye.
+  // One-shot fade-out animation (TweenAnimationBuilder) — jaise hi parent
+  // ye flag reset karega (ek chhoti Timer ke baad), bubble apni normal
+  // background pe wapas aa jaayega.
+  final bool isJumpHighlighted;
   const _MessageBubble({
     required this.message,
     required this.isMe,
@@ -3673,6 +4075,8 @@ class _MessageBubble extends StatelessWidget {
     this.onReplyTap,
     this.onJoinStudyRoom,
     this.onVotePoll,
+    this.isMentioned = false,
+    this.isJumpHighlighted = false,
   });
 
   @override
@@ -3699,19 +4103,37 @@ class _MessageBubble extends StatelessWidget {
       bottomRight: Radius.circular(isMe && isLastInGroup ? 3 : 14),
     );
 
+    // 🔥 NAYA (Phase 4, §2.1) — search-jump / reply-tap flash highlight:
+    // one-shot tween se amber se wapas normal bubble-color pe fade hota
+    // hai. `isJumpHighlighted=false` ho to bilkul normal (koi extra
+    // rebuild/cost nahi) — tween sirf tab chalta hai jab parent ye flag
+    // thodi der ke liye true karta hai.
+    final Color highlightStart = const Color(0xFFFFE082);
+
     return GestureDetector(
       onLongPress: message.deletedForEveryone ? null : onLongPress,
       child: Align(
         alignment: isMe ? Alignment.centerRight : Alignment.centerLeft,
         child: Column(crossAxisAlignment: isMe ? CrossAxisAlignment.end : CrossAxisAlignment.start, children: [
-          Container(
+          TweenAnimationBuilder<Color?>(
+            tween: ColorTween(
+              begin: isJumpHighlighted ? highlightStart : bubbleColor,
+              end: bubbleColor,
+            ),
+            duration: const Duration(milliseconds: 1200),
+            curve: Curves.easeOut,
+            builder: (context, animatedColor, child) => Container(
             margin: EdgeInsets.only(top: isFirstInGroup ? 6 : 2),
             padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 7),
             constraints: BoxConstraints(maxWidth: MediaQuery.of(context).size.width * 0.75),
             decoration: BoxDecoration(
-              color: bubbleColor,
+              color: animatedColor ?? bubbleColor,
               borderRadius: radius,
-              boxShadow: [BoxShadow(color: Colors.black.withOpacity(0.07), blurRadius: 6, offset: const Offset(0, 2))],
+              // 🔥 NAYA (Phase 2, §7.3) — @mention highlight: agar current
+              // user is message me mentioned hai, subtle amber border +
+              // thoda alag shadow (WhatsApp jaisa "you were mentioned" look).
+              border: isMentioned ? Border.all(color: const Color(0xFFFFC107), width: 1.4) : null,
+              boxShadow: [BoxShadow(color: (isMentioned ? const Color(0xFFFFC107) : Colors.black).withOpacity(isMentioned ? 0.18 : 0.07), blurRadius: 6, offset: const Offset(0, 2))],
             ),
             child: Stack(children: [
               Column(crossAxisAlignment: CrossAxisAlignment.start, mainAxisSize: MainAxisSize.min, children: [
@@ -3740,6 +4162,7 @@ class _MessageBubble extends StatelessWidget {
               ),
             ]),
             ]),
+          ),
           ),
           if (message.reactions.isNotEmpty) _buildReactionRow(),
         ]),
@@ -3899,7 +4322,24 @@ class _MessageBubble extends StatelessWidget {
       // agar message me koi URL (http/https/www.) ho to wo clickable
       // link ki tarah dikhe (blue + underline) aur tap karne par khul
       // jaaye. URL na ho to ye bilkul normal Text jaisa hi behave karta hai.
-      default: return _LinkifiedText(text: message.text ?? '', color: textColor);
+      // 🔥 NAYA (Phase 2, §7.5) — agar backend ne is text me se URL ke
+      // liye link-preview generate kar di hai (`message.linkPreview`,
+      // `meta['link_preview']` se derive hota hai — turant ho sakta hai
+      // ya thodi der baad `meta_update` event se live aaye), text ke
+      // neeche ek preview card bhi dikhao.
+      default:
+        if (message.linkPreview != null) {
+          return Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              _LinkifiedText(text: message.text ?? '', color: textColor),
+              const SizedBox(height: 6),
+              _LinkPreviewCard(preview: message.linkPreview!, textColor: textColor),
+            ],
+          );
+        }
+        return _LinkifiedText(text: message.text ?? '', color: textColor);
     }
 
     // 🔥 NAYA: media ke saath caption ho (gallery-preview screen se) to
@@ -3973,9 +4413,14 @@ class _MessageBubble extends StatelessWidget {
   }
 
   // 🔥 NAYA — POLL bubble
+  // 🔧 FIX (Phase 1 model fix) — `message.poll` ab top-level field hai
+  // (§3), `message.meta?['poll']` nahi. Purana poll (jo history se scroll
+  // karke load hua) abhi bhi `poll == null` ho sakta hai agar backend
+  // list/detail response me poll data nahi bhejta — wahi read-only
+  // fallback neeche as-is rakha hai.
   Widget _pollContent(BuildContext context, Color textColor) {
-    final pollJson = message.meta?['poll'] as Map<String, dynamic>?;
-    if (pollJson == null) {
+    final poll = message.poll;
+    if (poll == null) {
       // Purana poll, jiska poora data history API me nahi aata (dekho
       // model file ka note) — question-only, read-only fallback.
       return Row(mainAxisSize: MainAxisSize.min, children: [
@@ -3984,7 +4429,6 @@ class _MessageBubble extends StatelessWidget {
         Flexible(child: Text(message.text ?? 'Poll', style: TextStyle(color: textColor, fontWeight: FontWeight.w600))),
       ]);
     }
-    final poll = PollModel.fromJson(pollJson);
     return _PollBubbleContent(
       poll: poll,
       textColor: textColor,
@@ -4260,7 +4704,7 @@ class _PollBubbleContentState extends State<_PollBubbleContent> {
   @override
   void didUpdateWidget(covariant _PollBubbleContent oldWidget) {
     super.didUpdateWidget(oldWidget);
-    // 🔥 NAYA — dusra live poll update (socket `poll_voted`) aane par
+    // 🔥 NAYA — dusra live poll update (socket `poll_update`) aane par
     // apna hi selection state bhi fresh server data se resync karo.
     if (oldWidget.poll.id != widget.poll.id || oldWidget.poll.totalVotes != widget.poll.totalVotes) {
       _selected
@@ -4702,50 +5146,120 @@ class _AudioBubbleState extends State<_AudioBubble> {
     final total = _duration.inMilliseconds > 0 ? _duration : Duration(seconds: (msg.meta?['duration_seconds'] as num?)?.toInt() ?? 0);
     final progress = total.inMilliseconds > 0 ? (_position.inMilliseconds / total.inMilliseconds).clamp(0.0, 1.0) : 0.0;
 
-    return SizedBox(
-      width: 220,
-      child: Row(mainAxisSize: MainAxisSize.min, children: [
-        GestureDetector(
-          onTap: (url != null && url.isNotEmpty) ? _togglePlay : null,
-          onLongPress: (url != null && url.isNotEmpty) ? widget.onDownload : null,
-          child: Container(
-            padding: const EdgeInsets.all(8),
-            decoration: BoxDecoration(color: textColor == Colors.white ? Colors.white24 : Colors.grey[200], shape: BoxShape.circle),
-            child: _loading
-                ? SizedBox(width: 20, height: 20, child: CircularProgressIndicator(strokeWidth: 2, color: textColor))
-                : Icon(_state == PlayerState.playing ? Icons.pause : Icons.play_arrow, color: textColor),
-          ),
-        ),
-        const SizedBox(width: 8),
-        Expanded(
-          child: Column(crossAxisAlignment: CrossAxisAlignment.start, mainAxisSize: MainAxisSize.min, children: [
-            SliderTheme(
-              data: SliderTheme.of(context).copyWith(
-                trackHeight: 2.5,
-                thumbShape: const RoundSliderThumbShape(enabledThumbRadius: 5),
-                overlayShape: SliderComponentShape.noOverlay,
-                activeTrackColor: textColor,
-                inactiveTrackColor: textColor.withOpacity(0.25),
-                thumbColor: textColor,
-              ),
-              child: Slider(
-                value: progress,
-                onChanged: (url == null || url.isEmpty || total.inMilliseconds == 0) ? null : (v) {
-                  final seekTo = Duration(milliseconds: (v * total.inMilliseconds).round());
-                  _player.seek(seekTo);
-                },
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        SizedBox(
+          width: 220,
+          child: Row(mainAxisSize: MainAxisSize.min, children: [
+            GestureDetector(
+              onTap: (url != null && url.isNotEmpty) ? _togglePlay : null,
+              onLongPress: (url != null && url.isNotEmpty) ? widget.onDownload : null,
+              child: Container(
+                padding: const EdgeInsets.all(8),
+                decoration: BoxDecoration(color: textColor == Colors.white ? Colors.white24 : Colors.grey[200], shape: BoxShape.circle),
+                child: _loading
+                    ? SizedBox(width: 20, height: 20, child: CircularProgressIndicator(strokeWidth: 2, color: textColor))
+                    : Icon(_state == PlayerState.playing ? Icons.pause : Icons.play_arrow, color: textColor),
               ),
             ),
-            Padding(
-              padding: const EdgeInsets.only(left: 4),
-              child: Text(
-                total.inMilliseconds > 0 ? "${_fmt(_position)} / ${_fmt(total)}" : "Audio message",
-                style: TextStyle(color: textColor.withOpacity(0.8), fontSize: 11),
-              ),
+            const SizedBox(width: 8),
+            Expanded(
+              child: Column(crossAxisAlignment: CrossAxisAlignment.start, mainAxisSize: MainAxisSize.min, children: [
+                SliderTheme(
+                  data: SliderTheme.of(context).copyWith(
+                    trackHeight: 2.5,
+                    thumbShape: const RoundSliderThumbShape(enabledThumbRadius: 5),
+                    overlayShape: SliderComponentShape.noOverlay,
+                    activeTrackColor: textColor,
+                    inactiveTrackColor: textColor.withOpacity(0.25),
+                    thumbColor: textColor,
+                  ),
+                  child: Slider(
+                    value: progress,
+                    onChanged: (url == null || url.isEmpty || total.inMilliseconds == 0) ? null : (v) {
+                      final seekTo = Duration(milliseconds: (v * total.inMilliseconds).round());
+                      _player.seek(seekTo);
+                    },
+                  ),
+                ),
+                Padding(
+                  padding: const EdgeInsets.only(left: 4),
+                  child: Text(
+                    total.inMilliseconds > 0 ? "${_fmt(_position)} / ${_fmt(total)}" : "Audio message",
+                    style: TextStyle(color: textColor.withOpacity(0.8), fontSize: 11),
+                  ),
+                ),
+              ]),
             ),
           ]),
         ),
-      ]),
+        // 🔥 NAYA (Phase 2, §7.6) — auto voice transcription. Backend
+        // ab transcript background me generate karke `meta['transcript']`
+        // me daal deta hai (`_onMetaUpdateEvent` se live update hota hai
+        // agar screen already open hai). Jab tak transcript nahi aaya,
+        // kuch nahi dikhta — koi manual "transcribe" REST endpoint is
+        // session ke `message_api_service.dart` me nahi hai, isliye
+        // manual trigger button abhi add nahi kiya (⚠️ open item — agar
+        // backend manual on-demand transcribe endpoint bhi deta hai to
+        // wahi endpoint confirm karke yahan button add karna).
+        if (msg.transcript != null && msg.transcript!.trim().isNotEmpty)
+          Padding(
+            padding: const EdgeInsets.only(top: 4),
+            child: _TranscriptText(text: msg.transcript!.trim(), textColor: textColor),
+          ),
+      ],
+    );
+  }
+}
+
+// 🔥 NAYA (Phase 2, §7.6) — collapsible "Transcript" text neeche audio
+// bubble ke, WhatsApp/Telegram jaisa. Chhoti transcript ek line me hi
+// dikh jaati hai; lambi ho to "View transcript" tap karke poori khulti hai.
+class _TranscriptText extends StatefulWidget {
+  final String text;
+  final Color textColor;
+  const _TranscriptText({required this.text, required this.textColor});
+
+  @override
+  State<_TranscriptText> createState() => _TranscriptTextState();
+}
+
+class _TranscriptTextState extends State<_TranscriptText> {
+  bool _expanded = false;
+
+  @override
+  Widget build(BuildContext context) {
+    final color = widget.textColor;
+    return GestureDetector(
+      onTap: () => setState(() => _expanded = !_expanded),
+      child: Container(
+        constraints: const BoxConstraints(maxWidth: 220),
+        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
+        decoration: BoxDecoration(
+          color: color == Colors.white ? Colors.white.withOpacity(0.08) : Colors.black.withOpacity(0.04),
+          borderRadius: BorderRadius.circular(6),
+        ),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Row(children: [
+              Icon(Icons.subtitles_outlined, size: 13, color: color.withOpacity(0.7)),
+              const SizedBox(width: 4),
+              Text("Transcript", style: TextStyle(color: color.withOpacity(0.7), fontSize: 10.5, fontWeight: FontWeight.w600)),
+            ]),
+            const SizedBox(height: 2),
+            Text(
+              widget.text,
+              maxLines: _expanded ? null : 2,
+              overflow: _expanded ? TextOverflow.visible : TextOverflow.ellipsis,
+              style: TextStyle(color: color.withOpacity(0.85), fontSize: 12),
+            ),
+          ],
+        ),
+      ),
     );
   }
 }

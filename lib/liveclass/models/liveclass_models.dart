@@ -405,6 +405,16 @@ class ClassPass {
   final bool isActive;
   final DateTime? createdAt;
 
+  // NEW (Pass 14 frontend catch-up §1.3) — "allow gifting" gate. The
+  // frontend doc flags this as "if backend gates gifting per-pass —
+  // confirm" (§0 module map, pass_management_screen.dart row); modeled
+  // here defaulting to true (opt-out) rather than false (opt-in) only
+  // because that matches this codebase's general bias of defaulting new
+  // boolean flags to whatever preserves prior behavior for existing rows
+  // — confirm the actual server-side default against ClassPass.models.py
+  // before relying on it, and flip the default here if wrong.
+  final bool allowGifting;
+
   ClassPass({
     required this.id,
     required this.classroomId,
@@ -415,6 +425,7 @@ class ClassPass {
     this.maxClasses,
     this.isActive = true,
     this.createdAt,
+    this.allowGifting = true,
   });
 
   factory ClassPass.fromJson(Map<String, dynamic> j) => ClassPass(
@@ -427,6 +438,7 @@ class ClassPass {
         maxClasses: _intN(j['max_classes']),
         isActive: j['is_active'] ?? true,
         createdAt: _dt(j['created_at']),
+        allowGifting: j['allow_gifting'] ?? true,
       );
 
   Map<String, dynamic> toJson() => {
@@ -437,7 +449,21 @@ class ClassPass {
         'validity_days': validityDays,
         if (maxClasses != null) 'max_classes': maxClasses,
         'is_active': isActive,
+        'allow_gifting': allowGifting,
       };
+
+  ClassPass copyWith({bool? allowGifting}) => ClassPass(
+        id: id,
+        classroomId: classroomId,
+        passType: passType,
+        title: title,
+        price: price,
+        validityDays: validityDays,
+        maxClasses: maxClasses,
+        isActive: isActive,
+        createdAt: createdAt,
+        allowGifting: allowGifting ?? this.allowGifting,
+      );
 }
 
 // ---------------------------------------------------------------------------
@@ -476,6 +502,23 @@ class PassPurchase {
   final int coinsReleased;
   final double perDayRate;
   final DateTime? lastChargeDate;
+  // NEW (Pass 15 frontend catch-up §1.8) — auto-renew. ⚠️ ARCHITECTURE
+  // SKELETON, same caveat as PassGift/SessionEngagementReport further
+  // down: Pass 15 was never written up in the backend doc's own §2–§6.
+  // `renewedInto` in particular is flagged by the frontend doc as
+  // "confirm this field exists" — kept nullable/best-effort so a missing
+  // key just parses to null rather than throwing.
+  final bool autoRenew;
+  final int? renewedFrom; // this purchase's id, if it IS a renewal result
+  final int? renewedInto; // the purchase that superseded this one, if any
+  final DateTime? renewalFailedAt;
+  // NEW (Pass 14 frontend catch-up §1.3) — gift back-reference, so a
+  // purchase created by claiming a PassGift can show "Gifted to you by
+  // X" instead of the normal purchase-flow copy. ⚠️ Field existence
+  // unconfirmed against PassPurchaseSerializer — confirm before relying
+  // on it; null/absent just means "not a gifted purchase" either way.
+  final int? giftId;
+  final UserMini? giftedBy;
 
   PassPurchase({
     required this.id,
@@ -501,6 +544,12 @@ class PassPurchase {
     this.coinsReleased = 0,
     this.perDayRate = 0,
     this.lastChargeDate,
+    this.autoRenew = false,
+    this.renewedFrom,
+    this.renewedInto,
+    this.renewalFailedAt,
+    this.giftId,
+    this.giftedBy,
   });
 
   factory PassPurchase.fromJson(Map<String, dynamic> j) => PassPurchase(
@@ -532,6 +581,12 @@ class PassPurchase {
         coinsReleased: _int(j['coins_released']),
         perDayRate: _num(j['per_day_rate']),
         lastChargeDate: j['last_charge_date'] != null ? DateTime.parse(j['last_charge_date']) : null,
+        autoRenew: j['auto_renew'] ?? false,
+        renewedFrom: _intN(j['renewed_from']),
+        renewedInto: _intN(j['renewed_into']),
+        renewalFailedAt: _dt(j['renewal_failed_at']),
+        giftId: _intN(j['gift']),
+        giftedBy: j['gifted_by'] != null ? UserMini.fromJson(j['gifted_by']) : null,
       );
 }
 
@@ -738,6 +793,20 @@ class ChatMessage {
   final String message;
   final DateTime sentAt;
   final bool isDeleted;
+  // FIX (Pass 12/13 frontend catch-up): backend's `ChatMessageSerializer`
+  // gained `reaction_counts`/`my_reaction` in Pass 12 (new `ChatReaction`
+  // model, upsertable one-row-per-(message,user), same "changing your
+  // answer" shape as `PollResponse`), and `ChatMessage` itself gained
+  // `is_pinned`/`pinned_by`/`pinned_at` in Pass 13 (at most one pinned
+  // message per session, enforced by `ChatMessageViewSet.pin()` unpinning
+  // whichever was pinned before in the same call). See backend doc §11
+  // Pass 12/13 — this is the exact, confirmed field set (unlike the
+  // Pass 14/15 models further down, which are architecture skeletons).
+  final Map<String, int> reactionCounts; // emoji -> count
+  final String? myReaction; // emoji the CURRENT user picked, or null
+  final bool isPinned;
+  final UserMini? pinnedBy;
+  final DateTime? pinnedAt;
 
   ChatMessage({
     required this.id,
@@ -746,6 +815,11 @@ class ChatMessage {
     required this.message,
     required this.sentAt,
     this.isDeleted = false,
+    this.reactionCounts = const {},
+    this.myReaction,
+    this.isPinned = false,
+    this.pinnedBy,
+    this.pinnedAt,
   });
 
   factory ChatMessage.fromJson(Map<String, dynamic> j) => ChatMessage(
@@ -755,8 +829,44 @@ class ChatMessage {
         message: j['message'] ?? '',
         sentAt: DateTime.parse(j['sent_at']),
         isDeleted: j['is_deleted'] ?? false,
+        reactionCounts: (j['reaction_counts'] as Map? ?? {})
+            .map((k, v) => MapEntry(k.toString(), _int(v))),
+        myReaction: j['my_reaction'],
+        isPinned: j['is_pinned'] ?? false,
+        pinnedBy: j['pinned_by'] != null ? UserMini.fromJson(j['pinned_by']) : null,
+        pinnedAt: _dt(j['pinned_at']),
+      );
+
+  /// Convenience for optimistic local updates (see live_session_screen.dart's
+  /// `_reactToChat`/`_removeChatReaction`/pin handlers) — returns a copy with
+  /// only the given fields swapped, so a tap can update the UI immediately
+  /// and get corrected on the next `chat.reaction`/`chat.pinned` WS event or
+  /// `_loadChat` refresh.
+  ChatMessage copyWith({
+    Map<String, int>? reactionCounts,
+    Object? myReaction = _unset,
+    bool? isPinned,
+    Object? pinnedBy = _unset,
+    Object? pinnedAt = _unset,
+  }) =>
+      ChatMessage(
+        id: id,
+        sessionId: sessionId,
+        sender: sender,
+        message: message,
+        sentAt: sentAt,
+        isDeleted: isDeleted,
+        reactionCounts: reactionCounts ?? this.reactionCounts,
+        myReaction: identical(myReaction, _unset) ? this.myReaction : myReaction as String?,
+        isPinned: isPinned ?? this.isPinned,
+        pinnedBy: identical(pinnedBy, _unset) ? this.pinnedBy : pinnedBy as UserMini?,
+        pinnedAt: identical(pinnedAt, _unset) ? this.pinnedAt : pinnedAt as DateTime?,
       );
 }
+
+/// Sentinel so `copyWith` above can tell "not passed" apart from
+/// "explicitly passed null" (needed to clear `myReaction`/`pinnedBy`/`pinnedAt`).
+const Object _unset = Object();
 
 // ---------------------------------------------------------------------------
 // 9. LIVE POLL + RESPONSE
@@ -825,6 +935,63 @@ class PollResponse {
         student: UserMini.fromJson(j['student']),
         selectedOptionIndex: _int(j['selected_option_index']),
         answeredAt: DateTime.parse(j['answered_at']),
+      );
+}
+
+// ---------------------------------------------------------------------------
+// 9B. QUICK-POLL TEMPLATES (Pass 13) — classroom-scoped, CRUD gated behind
+// `_can_manage_classroom` on the backend (same boundary as Assignment/
+// Notice/ClassHoliday). `LivePollViewSet.quick_create()` fires a saved
+// template into a live session in one call — see `PollApi.quickCreate`.
+// ---------------------------------------------------------------------------
+class PollTemplate {
+  final int id;
+  final int classroomId;
+  final UserMini? createdBy;
+  final String question;
+  final List<String> options;
+  final DateTime? createdAt;
+
+  PollTemplate({
+    required this.id,
+    required this.classroomId,
+    this.createdBy,
+    required this.question,
+    required this.options,
+    this.createdAt,
+  });
+
+  factory PollTemplate.fromJson(Map<String, dynamic> j) => PollTemplate(
+        id: _int(j['id']),
+        classroomId: _int(j['classroom']),
+        createdBy: j['created_by'] != null ? UserMini.fromJson(j['created_by']) : null,
+        question: j['question'] ?? '',
+        options: (j['options'] as List? ?? []).map((e) => e.toString()).toList(),
+        createdAt: _dt(j['created_at']),
+      );
+
+  // For create/update — mirrors _CreatePollSheet's option-list UI pattern
+  // (live_session_screen.dart) so both flows can share the same widget.
+  Map<String, dynamic> toJson() => {
+        'classroom': classroomId,
+        'question': question,
+        'options': options,
+      };
+}
+
+/// Response shape of GET sessions/{id}/unread/ — `{"chat": N, "polls": N}`.
+/// Deliberately a real DB count against the caller's `SessionReadState`
+/// watermark, not derived from the (capped, 50 events/15 min) WS replay
+/// buffer — see backend doc §11 Pass 13.
+class SessionUnreadCount {
+  final int chat;
+  final int polls;
+
+  SessionUnreadCount({required this.chat, required this.polls});
+
+  factory SessionUnreadCount.fromJson(Map<String, dynamic> j) => SessionUnreadCount(
+        chat: _int(j['chat']),
+        polls: _int(j['polls']),
       );
 }
 
@@ -1025,6 +1192,68 @@ class ClassroomReport {
 
   Map<String, dynamic> toJson() => {
         'classroom': classroomId,
+        'reason': reason,
+        'description': description,
+      };
+}
+
+// ---------------------------------------------------------------------------
+// 11B. CHAT MESSAGE REPORT (Pass 14) — ⚠️ ARCHITECTURE SKELETON, same
+// caveat as PassGift/NotificationPreference: Pass 14 was never written up
+// in the backend doc's own §2–§6. Shape below mirrors ClassroomReport
+// above (same reason/description/status/adminNote/reviewedBy shape) just
+// scoped to a chat message instead of a classroom, per the frontend doc
+// §1.4 — confirm exact field names against ChatMessageReportSerializer
+// before trusting fromJson on real data. Reuses ReportStatus above (same
+// pending/reviewed/action_taken/dismissed set) since the change log gives
+// no indication message reports have a different status vocabulary.
+// ---------------------------------------------------------------------------
+class ChatMessageReport {
+  final int id;
+  final int messageId;
+  final String messagePreview; // denormalized snippet, if backend sends one
+  final int sessionId;
+  final UserMini reportedBy;
+  final String reason;
+  final String description;
+  final String status;
+  final int? reviewedById;
+  final String adminNote;
+  final DateTime? reviewedAt;
+  final DateTime createdAt;
+
+  ChatMessageReport({
+    required this.id,
+    required this.messageId,
+    this.messagePreview = '',
+    this.sessionId = 0,
+    required this.reportedBy,
+    required this.reason,
+    this.description = '',
+    this.status = ReportStatus.pending,
+    this.reviewedById,
+    this.adminNote = '',
+    this.reviewedAt,
+    required this.createdAt,
+  });
+
+  factory ChatMessageReport.fromJson(Map<String, dynamic> j) => ChatMessageReport(
+        id: _int(j['id']),
+        messageId: _int(j['message']),
+        messagePreview: j['message_preview'] ?? j['message_text'] ?? '',
+        sessionId: _int(j['session'] ?? j['session_id']),
+        reportedBy: UserMini.fromJson(j['reported_by']),
+        reason: j['reason'] ?? '',
+        description: j['description'] ?? '',
+        status: j['status'] ?? ReportStatus.pending,
+        reviewedById: _intN(j['reviewed_by']),
+        adminNote: j['admin_note'] ?? '',
+        reviewedAt: _dt(j['reviewed_at']),
+        createdAt: DateTime.parse(j['created_at']),
+      );
+
+  Map<String, dynamic> toJson() => {
+        'message': messageId,
         'reason': reason,
         'description': description,
       };
@@ -1524,6 +1753,12 @@ class NotifType {
   static const staffAdded = 'staff_added';
   static const reviewPosted = 'review_posted';
   static const reportReviewed = 'report_reviewed';
+  // NEW (Pass 16, frontend catch-up §1.8) — 3 more types added alongside
+  // auto-renew (Pass 15) and pass gifting (Pass 14). Same "constants +
+  // icon map + handler _handledTypes" gap-fix shape as the 7 types above.
+  static const passAutoRenewed = 'pass_auto_renewed';
+  static const autoRenewFailed = 'auto_renew_failed';
+  static const passGiftExpired = 'pass_gift_expired';
   static const generic = 'generic';
 }
 
@@ -1565,6 +1800,85 @@ class AppNotification {
         readAt: _dt(j['read_at']),
       );
 }
+
+// ---------------------------------------------------------------------------
+// 21A. NOTIFICATION PREFERENCES (Pass 14) — per-notification-type channel
+// toggles. ⚠️ ARCHITECTURE SKELETON, not a confirmed field mirror like the
+// Pass 12/13 models above — Pass 14 was never written up in the backend
+// doc's own §2–§6 (see that doc's top-of-file warning and §11 Pass 16).
+// Shape assumed here: ONE settings object keyed by notif-type string, each
+// with independent push/email toggles — CONFIRM against
+// `NotificationPreferenceSerializer` before shipping; the alternative shape
+// (one row per (user, notifType)) would need a list-based model instead.
+// sms has no toggle here since notifications.py documents it as a no-op.
+// ---------------------------------------------------------------------------
+class NotifChannelPref {
+  final bool push;
+  final bool email;
+
+  const NotifChannelPref({this.push = true, this.email = true});
+
+  factory NotifChannelPref.fromJson(Map<String, dynamic> j) => NotifChannelPref(
+        push: j['push'] ?? true,
+        email: j['email'] ?? true,
+      );
+
+  Map<String, dynamic> toJson() => {'push': push, 'email': email};
+
+  NotifChannelPref copyWith({bool? push, bool? email}) =>
+      NotifChannelPref(push: push ?? this.push, email: email ?? this.email);
+}
+
+class NotificationPreference {
+  /// notifType string (see `NotifType`) -> that type's channel toggles. A
+  /// type missing from the map is treated as opted-in on every channel by
+  /// [forType] below — confirm this default matches the backend's own
+  /// "opted in unless explicitly turned off" behavior.
+  final Map<String, NotifChannelPref> perType;
+
+  NotificationPreference({required this.perType});
+
+  factory NotificationPreference.fromJson(Map<String, dynamic> j) => NotificationPreference(
+        perType: j.map((k, v) => MapEntry(k, NotifChannelPref.fromJson(v as Map<String, dynamic>))),
+      );
+
+  Map<String, dynamic> toJson() => perType.map((k, v) => MapEntry(k, v.toJson()));
+
+  NotifChannelPref forType(String notifType) => perType[notifType] ?? const NotifChannelPref();
+
+  /// Returns a copy with one type's prefs replaced — for a single row's
+  /// toggle flipping without resending the whole map from scratch.
+  NotificationPreference withType(String notifType, NotifChannelPref pref) {
+    final updated = Map<String, NotifChannelPref>.from(perType)..[notifType] = pref;
+    return NotificationPreference(perType: updated);
+  }
+}
+
+/// Every `NotifType` value the preferences screen shows a row for. Dart has
+/// no enum reflection, so this list is maintained by hand — add an entry
+/// here whenever `NotifType` above gains one (including the 3 Pass 16
+/// auto-renew/gift types once those constants exist).
+const List<String> kAllNotifTypesForPreferences = [
+  NotifType.joinRequestReceived,
+  NotifType.joinRequestAccepted,
+  NotifType.joinRequestRejected,
+  NotifType.passRefunded,
+  NotifType.sessionReminder,
+  NotifType.sessionLive,
+  NotifType.sessionCancelled,
+  NotifType.assignmentPosted,
+  NotifType.assignmentGraded,
+  NotifType.submissionReceived,
+  NotifType.queryAnswered,
+  NotifType.certificateIssued,
+  NotifType.waitlistPromoted,
+  NotifType.classroomFlagged,
+  NotifType.noticePosted,
+  NotifType.staffAdded,
+  NotifType.reviewPosted,
+  NotifType.reportReviewed,
+  NotifType.generic,
+];
 
 // ---------------------------------------------------------------------------
 // 21B. REFERRAL PROGRAM
@@ -1697,6 +2011,119 @@ class LiveClassDashboard {
         wishlistCount: _int(j['wishlist_count']),
         pendingJoinRequestsCount: _int(j['pending_join_requests_count']),
         unreadNotificationsCount: _int(j['unread_notifications_count']),
+      );
+}
+
+// ---------------------------------------------------------------------------
+// 22. PASS GIFTING (Pass 14) — `PassGift`. ⚠️ ARCHITECTURE SKELETON — Pass 14
+// was never written up in the backend doc's own §2–§6 (see that doc's
+// top-of-file warning). Field names below are the frontend-doc's best-guess
+// (§1.3) from the change-log description only — CONFIRM against
+// `PassGiftSerializer` in serializers.py before trusting `fromJson` on real
+// data. `giftedTo` is modeled as a nullable `UserMini` with a raw string
+// fallback since the doc flags "email/username string — confirm" as open.
+// ---------------------------------------------------------------------------
+class PassGiftStatus {
+  static const pending = 'pending';
+  static const claimed = 'claimed';
+  static const expired = 'expired';
+  static const refunded = 'refunded';
+}
+
+class PassGift {
+  final int id;
+  final int classPassId;
+  final String classPassTitle;
+  final String classroomTitle;
+  final UserMini gifter;
+  final UserMini? giftedTo; // null if backend only ever returns raw identifier below
+  final String? giftedToRaw; // email/username as sent, if giftedTo couldn't be resolved
+  final String status;
+  final DateTime claimWindowExpiresAt;
+  final DateTime createdAt;
+
+  PassGift({
+    required this.id,
+    required this.classPassId,
+    this.classPassTitle = '',
+    this.classroomTitle = '',
+    required this.gifter,
+    this.giftedTo,
+    this.giftedToRaw,
+    this.status = PassGiftStatus.pending,
+    required this.claimWindowExpiresAt,
+    required this.createdAt,
+  });
+
+  bool get isPending => status == PassGiftStatus.pending;
+  Duration get timeLeft => claimWindowExpiresAt.difference(DateTime.now());
+
+  factory PassGift.fromJson(Map<String, dynamic> j) {
+    final giftedToJson = j['gifted_to'];
+    return PassGift(
+      id: _int(j['id']),
+      classPassId: _int(j['class_pass'] ?? j['class_pass_id']),
+      classPassTitle: j['class_pass_title'] ?? '',
+      classroomTitle: j['classroom_title'] ?? '',
+      gifter: UserMini.fromJson(j['gifter']),
+      giftedTo: (giftedToJson is Map<String, dynamic>) ? UserMini.fromJson(giftedToJson) : null,
+      giftedToRaw: (giftedToJson is String) ? giftedToJson : j['gifted_to_email'] ?? j['gifted_to_username'],
+      status: j['status'] ?? PassGiftStatus.pending,
+      claimWindowExpiresAt: DateTime.parse(j['claim_window_expires_at']),
+      createdAt: DateTime.parse(j['created_at']),
+    );
+  }
+}
+
+// ---------------------------------------------------------------------------
+// 23. SESSION ENGAGEMENT REPORT (Pass 15) — ⚠️ ARCHITECTURE SKELETON, name
+// and fields TBC (frontend doc §1.7). Read `serializers.py` before shipping;
+// this shape (attendance list + a handful of aggregate numbers) is the
+// frontend doc's best guess from the change-log description only.
+// ---------------------------------------------------------------------------
+class SessionAttendanceRow {
+  final UserMini student;
+  final int watchDurationSeconds;
+  final bool raisedHand;
+
+  SessionAttendanceRow({required this.student, this.watchDurationSeconds = 0, this.raisedHand = false});
+
+  factory SessionAttendanceRow.fromJson(Map<String, dynamic> j) => SessionAttendanceRow(
+        student: UserMini.fromJson(j['student']),
+        watchDurationSeconds: _int(j['watch_duration_seconds']),
+        raisedHand: j['raised_hand'] ?? false,
+      );
+}
+
+class SessionEngagementReport {
+  final int sessionId;
+  final int attendanceCount;
+  final double avgWatchDurationSeconds;
+  final int chatMessageCount;
+  final double pollParticipationRate; // 0.0–1.0
+  final int handRaiseCount;
+  final List<SessionAttendanceRow> attendance;
+
+  SessionEngagementReport({
+    required this.sessionId,
+    this.attendanceCount = 0,
+    this.avgWatchDurationSeconds = 0,
+    this.chatMessageCount = 0,
+    this.pollParticipationRate = 0,
+    this.handRaiseCount = 0,
+    this.attendance = const [],
+  });
+
+  factory SessionEngagementReport.fromJson(Map<String, dynamic> j) => SessionEngagementReport(
+        sessionId: _int(j['session'] ?? j['session_id']),
+        attendanceCount: _int(j['attendance_count']),
+        avgWatchDurationSeconds: _num(j['avg_watch_duration_seconds']),
+        chatMessageCount: _int(j['chat_message_count']),
+        pollParticipationRate: _num(j['poll_participation_rate']),
+        handRaiseCount: _int(j['hand_raise_count']),
+        attendance: (j['attendance'] as List? ?? [])
+            .map((e) => SessionAttendanceRow.fromJson(e as Map<String, dynamic>))
+            .toList(),
       );
 }
 

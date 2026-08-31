@@ -176,16 +176,25 @@ class MessageApiService {
   }
 
   /// PATCH /message/conversations/<id>/settings/
+  ///
+  /// 🔥 NAYA (Phase 1, §4.4) — `draftText` bhi isi PATCH ka ek naya
+  /// optional param hai (alag method nahi banaya, jaisa integration doc
+  /// §4.4 me suggest kiya gaya hai). `chat_screen.dart` compose-box se
+  /// debounce (1-2s) karke isko call karta hai jab text change ho aur
+  /// user ne send na kiya ho. Empty string bhejne se draft clear ho
+  /// jaata hai (server-side).
   static Future<ConversationSettings> updateSettings(
     String conversationId, {
     bool? isMuted,
     bool? isArchived,
     bool? isPinned,
+    String? draftText,
   }) async {
     final body = <String, dynamic>{};
     if (isMuted != null) body['is_muted'] = isMuted;
     if (isArchived != null) body['is_archived'] = isArchived;
     if (isPinned != null) body['is_pinned'] = isPinned;
+    if (draftText != null) body['draft_text'] = draftText;
     final res = await http.patch(
       Uri.parse("$_base/conversations/$conversationId/settings/"),
       headers: await _headers(),
@@ -411,33 +420,40 @@ class MessageApiService {
   // 🔥 NAYA — PINNED MESSAGES
   // ==================================================================
 
-  /// GET /message/conversations/<id>/pins/
+  /// 🔧 FIX (backend mismatch) — asli backend endpoint
+  /// `GET /message/conversations/<id>/pinned/` hai, `/pins/` nahi tha.
   static Future<List<PinnedMessageModel>> getPinnedMessages(String conversationId) async {
     final res = await http.get(
-      Uri.parse("$_base/conversations/$conversationId/pins/"),
+      Uri.parse("$_base/conversations/$conversationId/pinned/"),
       headers: await _headers(),
     );
     final data = _decode(res) as List;
     return data.map((e) => PinnedMessageModel.fromJson(e as Map<String, dynamic>)).toList();
   }
 
-  /// POST /message/conversations/<id>/pins/  {"message_id"}
+  /// 🔧 FIX (backend mismatch) — pin/unpin CONVERSATION-level resource nahi
+  /// hai, ye MESSAGE-level action hai: `POST /message/messages/<id>/pin/`.
+  /// `conversationId` ab URL me chahiye hi nahi (isliye param se hata diya —
+  /// har call-site bhi update karna hai, ab sirf `messageId` do).
   /// Backend max 3 pinned/conversation allow karta hai — 400 aayega agar
   /// limit cross ho ya message pehle se pinned ho, dono `MessageApiException`
   /// me readable `.message` ke saath aate hain (UI seedha snackbar me dikha sakta hai).
-  static Future<PinnedMessageModel> pinMessage(String conversationId, String messageId) async {
+  /// ⚠️ Response ab standalone "Pinned" object nahi, updated `Message` object
+  /// hai (is_pinned/pinned_at/pinned_by nested usi ke andar) — `PinnedMessageModel
+  /// .fromJson()` ka shape isi ke against confirm/adjust karna model file me.
+  static Future<PinnedMessageModel> pinMessage(String messageId) async {
     final res = await http.post(
-      Uri.parse("$_base/conversations/$conversationId/pins/"),
+      Uri.parse("$_base/messages/$messageId/pin/"),
       headers: await _headers(),
-      body: jsonEncode({"message_id": messageId}),
     );
     return PinnedMessageModel.fromJson(_decode(res));
   }
 
-  /// DELETE /message/conversations/<id>/pins/<message_id>/
-  static Future<void> unpinMessage(String conversationId, String messageId) async {
+  /// 🔧 FIX (backend mismatch) — `DELETE /message/messages/<id>/pin/`
+  /// (message-level, conversationId URL me nahi chahiye).
+  static Future<void> unpinMessage(String messageId) async {
     final res = await http.delete(
-      Uri.parse("$_base/conversations/$conversationId/pins/$messageId/"),
+      Uri.parse("$_base/messages/$messageId/pin/"),
       headers: await _headers(),
     );
     _decode(res);
@@ -447,57 +463,64 @@ class MessageApiService {
   // 🔥 NAYA — POLLS
   // ==================================================================
 
-  /// POST /message/conversations/<id>/polls/
-  /// Ek naya poll message banata hai. Response ka `PollModel.messageId`
-  /// wahi naya `Message.id` hai jo chat list me insert karna hai.
+  /// 🔧 FIX (backend mismatch) — path singular hai: `/poll/` not `/polls/`.
+  /// Body field bhi `allow_multiple_answers` hai (backend `PollCreateSerializer`),
+  /// `allows_multiple_answers` nahi. `is_anonymous` backend me support hi
+  /// nahi karta (Poll model me aisa field nahi hai) — isliye param hata
+  /// diya; agar UI me "Anonymous voting" switch tha to usko bhi hata do
+  /// (nahi to param silently ignore ho ke user ko galat expectation dega).
+  /// Response ka `PollModel.messageId` wahi naya `Message.id` hai jo chat
+  /// list me insert karna hai.
   static Future<PollModel> createPoll(
     String conversationId, {
     required String question,
     required List<String> options,
     bool allowsMultipleAnswers = false,
-    bool isAnonymous = false,
   }) async {
     final res = await http.post(
-      Uri.parse("$_base/conversations/$conversationId/polls/"),
+      Uri.parse("$_base/conversations/$conversationId/poll/"),
       headers: await _headers(),
       body: jsonEncode({
         "question": question,
         "options": options,
-        "allows_multiple_answers": allowsMultipleAnswers,
-        "is_anonymous": isAnonymous,
+        "allow_multiple_answers": allowsMultipleAnswers,
       }),
     );
     return PollModel.fromJson(_decode(res));
   }
 
-  /// GET /message/polls/<poll_id>/  — live results (counts + apna vote)
-  static Future<PollModel> getPoll(String pollId) async {
-    final res = await http.get(
-      Uri.parse("$_base/polls/$pollId/"),
-      headers: await _headers(),
-    );
-    return PollModel.fromJson(_decode(res));
-  }
+  // 🔧 FIX (backend mismatch) — `getPoll(pollId)` standalone endpoint
+  // backend me EXIST HI NAHI karta (`GET /message/polls/<id>/` kabhi nahi
+  // tha). Poll ka latest data 2 jagah se milta hai:
+  //   1. Message payload ke andar `MessageSerializer.poll` (jab message
+  //      list/detail fetch karo)
+  //   2. Live update: WS `poll_update` event `{message_id, poll: {...}}`
+  //      (§ socket event handler me `poll_update` case dekho)
+  // Isliye method yahan se hata diya — caller ab in dono me se lo, kabhi
+  // bhi seedha "GET poll by id" call mat karo.
 
-  /// POST /message/polls/<poll_id>/vote/  {"option_ids": [...]}
+  /// 🔧 FIX (backend mismatch) — vote/close POLL id se nahi, us poll ke
+  /// underlying MESSAGE id se hote hain: `POST /message/messages/<id>/poll/vote/`.
+  /// Isliye param ka naam bhi `messageId` kar diya — caller `msg.id` bheje,
+  /// `poll.id`/`pollJson['id']` NAHI.
   /// Re-vote automatically switch ho jaata hai (backend purana vote
   /// hataake naya save karta hai) — isliye single-select poll me bas
   /// naya `option_id` bhej do, dobara call karna hi "switch" hai.
-  static Future<PollModel> votePoll(String pollId, List<String> optionIds) async {
+  static Future<PollModel> votePoll(String messageId, List<String> optionIds) async {
     final res = await http.post(
-      Uri.parse("$_base/polls/$pollId/vote/"),
+      Uri.parse("$_base/messages/$messageId/poll/vote/"),
       headers: await _headers(),
       body: jsonEncode({"option_ids": optionIds}),
     );
     return PollModel.fromJson(_decode(res));
   }
 
-  /// POST /message/polls/<poll_id>/close/  — sirf poll creator ya group
-  /// admin/mod kar sakta hai (backend `IsPollCreatorOrGroupAdmin`), warna
-  /// 403 aayega.
-  static Future<PollModel> closePoll(String pollId) async {
+  /// 🔧 FIX (backend mismatch) — `POST /message/messages/<id>/poll/close/`
+  /// (message id, poll id nahi). Poll creator, ya group admin/mod kar
+  /// sakta hai — warna 403.
+  static Future<PollModel> closePoll(String messageId) async {
     final res = await http.post(
-      Uri.parse("$_base/polls/$pollId/close/"),
+      Uri.parse("$_base/messages/$messageId/poll/close/"),
       headers: await _headers(),
     );
     return PollModel.fromJson(_decode(res));
@@ -704,6 +727,33 @@ class MessageApiService {
     return _decode(res);
   }
 
+  /// 🔥 NAYA (Phase 1, §2.2) — group ke ACTIVE members ki `UserMini` list,
+  /// `@` mention-autocomplete overlay ke liye. Backend `getGroup()` ka
+  /// raw response reuse karta hai (same defensive `members`/
+  /// `group_members` key-fallback jo `chat_screen.dart._loadGroupRole()`
+  /// already use karta hai) — koi naya endpoint nahi chahiye. Removed/left
+  /// members ko exclude karta hai (`is_active`/`left_at` dono defensively
+  /// check kiye hain, jo bhi backend response me ho) taaki suggestion list
+  /// me sirf wahi log aaye jinka backend `@username` regex bhi match
+  /// karega.
+  static Future<List<UserMini>> getGroupActiveMembers(String groupId) async {
+    final data = await getGroup(groupId);
+    final membersRaw = data['members'] ?? data['group_members'] ?? [];
+    if (membersRaw is! List) return [];
+    final result = <UserMini>[];
+    for (final m in membersRaw) {
+      if (m is! Map) continue;
+      final isActive = m['is_active'] ?? (m['left_at'] == null);
+      if (isActive == false) continue;
+      final userField = m['user'];
+      final userJson = userField is Map ? userField : m;
+      try {
+        result.add(UserMini.fromJson(userJson.cast<String, dynamic>()));
+      } catch (_) {}
+    }
+    return result;
+  }
+
   /// PATCH /message/groups/<id>/  (admin/mod only)
   static Future<Map<String, dynamic>> updateGroup(
       String groupId, Map<String, dynamic> updates) async {
@@ -905,6 +955,93 @@ class MessageApiService {
     } catch (_) {
       return false;
     }
+  }
+
+  // ==================================================================
+  // 🔥 NAYA (Phase 1/4, §1 #1, §2.1, §4.4) — MESSAGE SEARCH
+  // ==================================================================
+
+  /// GET /message/conversations/<id>/search/?q=...&<filters>
+  /// Single-conversation search — `message_search_screen.dart` isko tab
+  /// call karta hai jab ek specific `conversationId` diya gaya ho.
+  /// `query` kam se kam 2 chars ka hona chahiye (client-side bhi check
+  /// karo, backend 400 dega warna).
+  static Future<List<MessageModel>> searchMessages(
+    String conversationId,
+    String query, {
+    SearchFilterModel? filters,
+  }) async {
+    final params = <String, String>{'q': query, ...?filters?.toQueryParams()};
+    final uri = Uri.parse("$_base/conversations/$conversationId/search/")
+        .replace(queryParameters: params);
+    final res = await http.get(uri, headers: await _headers());
+    final data = _decode(res);
+    final List list = data is Map && data.containsKey('results')
+        ? data['results']
+        : data as List;
+    return list.map((e) => MessageModel.fromJson(e)).toList();
+  }
+
+  /// GET /message/search_all/?q=...&<filters>
+  /// Global search — saari conversations me dhoondta hai, har result ke
+  /// saath `conversation_preview` (name/photo/type) bhi aata hai taaki
+  /// tap karke us conversation me jump kiya ja sake.
+  static Future<List<SearchResultModel>> searchAllMessages(
+    String query, {
+    SearchFilterModel? filters,
+  }) async {
+    final params = <String, String>{'q': query, ...?filters?.toQueryParams()};
+    final uri = Uri.parse("$_base/search_all/").replace(queryParameters: params);
+    final res = await http.get(uri, headers: await _headers());
+    final data = _decode(res);
+    final List list = data is Map && data.containsKey('results')
+        ? data['results']
+        : data as List;
+    return list.map((e) => SearchResultModel.fromJson(e)).toList();
+  }
+
+  // ==================================================================
+  // 🔥 NAYA (Phase 1, §1 #11, §4.4) — SMART-REPLY SUGGESTIONS
+  // ==================================================================
+
+  /// POST /message/ai/smart-replies/  {"conversation_id"}
+  /// Throttle scope `ai_smart_reply` hai (backend §9.4) — client bhi ek
+  /// reasonable cooldown rakhe (chat_screen.dart me har naye incoming
+  /// message pe nahi, debounce se), warna 429 aayega.
+  static Future<SmartReplyModel> getSmartReplies(String conversationId) async {
+    final res = await http.post(
+      Uri.parse("$_base/ai/smart-replies/"),
+      headers: await _headers(),
+      body: jsonEncode({"conversation_id": conversationId}),
+    );
+    return SmartReplyModel.fromJson(_decode(res));
+  }
+
+  // ==================================================================
+  // 🔥 NAYA (Phase 1/4, §1 #10, §2.3) — READ-RECEIPT PRIVACY
+  // ==================================================================
+
+  /// GET /message/presence/read-receipts/  -> {"show_read_receipts": bool}
+  static Future<bool> getReadReceiptSetting() async {
+    final res = await http.get(
+      Uri.parse("$_base/presence/read-receipts/"),
+      headers: await _headers(),
+    );
+    final data = _decode(res);
+    return data is Map && data['show_read_receipts'] == true;
+  }
+
+  /// PATCH /message/presence/read-receipts/  {"show_read_receipts"}
+  /// Mutual switch hai — off karne se tumhara read_at dusro ko nahi
+  /// dikhega, AUR dusro ka read_at tumhe bhi nahi dikhega.
+  static Future<bool> setReadReceiptSetting(bool showReadReceipts) async {
+    final res = await http.patch(
+      Uri.parse("$_base/presence/read-receipts/"),
+      headers: await _headers(),
+      body: jsonEncode({"show_read_receipts": showReadReceipts}),
+    );
+    final data = _decode(res);
+    return data is Map && data['show_read_receipts'] == true;
   }
 
   // ==================================================================

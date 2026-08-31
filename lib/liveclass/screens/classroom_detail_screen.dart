@@ -67,6 +67,7 @@ import 'coupons_screen.dart';
 import 'holidays_screen.dart';
 import 'materials_screen.dart';
 import 'notice_board_screen.dart';
+import 'poll_templates_screen.dart';
 import 'doubts_screen.dart';
 import 'assignments_screen.dart';
 import 'classroom_purchases_screen.dart';
@@ -462,6 +463,7 @@ class _ClassroomDetailScreenState extends State<ClassroomDetailScreen> {
               _manageTile(ctx, Icons.groups_outlined, 'Staff', _openStaffManagement),
               _manageTile(ctx, Icons.mail_outline_rounded, 'Join Requests', _openJoinRequestsInbox, badgeCount: _pendingRequestCount),
               _manageTile(ctx, Icons.workspace_premium_outlined, 'Certificates', _openCertificates),
+              _manageTile(ctx, Icons.quiz_outlined, 'Poll Templates', _openPollTemplates),
               _manageTile(ctx, Icons.video_library_outlined, 'Recordings', _openRecordings),
               _manageTile(ctx, Icons.person_off_outlined, 'Banned Students', _openBannedStudents),
               const Divider(height: 8),
@@ -545,6 +547,17 @@ class _ClassroomDetailScreenState extends State<ClassroomDetailScreen> {
       context,
       MaterialPageRoute(
         builder: (_) => HolidaysScreen(classroomId: widget.classroomId, classroomTitle: _classroom?.title ?? ''),
+      ),
+    );
+  }
+
+  // NEW (frontend integration architecture v3, §1.11): quick-poll templates
+  // manage entry point, alongside the other classroom-scoped manage tiles.
+  void _openPollTemplates() {
+    Navigator.push(
+      context,
+      MaterialPageRoute(
+        builder: (_) => PollTemplatesScreen(classroomId: widget.classroomId, classroomTitle: _classroom?.title ?? ''),
       ),
     );
   }
@@ -726,7 +739,22 @@ class _ClassroomDetailScreenState extends State<ClassroomDetailScreen> {
 
     return Scaffold(
       backgroundColor: _kBg,
+      // NOTE (fix — '_dependents.isEmpty' crash): tabs.length isn't fixed —
+      // it flips between 2 ('About'/'Reviews') and 7 depending on
+      // _hasFullAccess/_canManage, and _load() (which can change those) is
+      // called again after several in-place actions (accepting a join
+      // request, buying a pass, etc. — see the .then((_) => _load()) call
+      // sites above), not just once in initState. Without a key, Flutter
+      // tries to update the SAME DefaultTabController element in place when
+      // `length` changes on a later build, while the old TabBar/TabBarView
+      // underneath are still mid-detach from it — that race is exactly
+      // what throws the framework's '_dependents.isEmpty' assertion. Keying
+      // on the tab set forces Flutter to tear down and remount just this
+      // subtree as a new one instead of updating the old controller in
+      // place, so there's nothing left with stale dependents when the tab
+      // count changes.
       body: DefaultTabController(
+        key: ValueKey('tabs-${tabs.length}'),
         length: tabs.length,
         child: NestedScrollView(
           headerSliverBuilder: (context, innerBoxIsScrolled) => [

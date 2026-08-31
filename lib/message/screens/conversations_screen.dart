@@ -18,6 +18,7 @@ import '../services/inbox_socket_service.dart';
 import 'chat_screen.dart';
 import 'create_group_screen.dart';
 import 'app_bottom_nav.dart'; // 🔥 NAYA
+import 'message_search_screen.dart'; // 🔥 NAYA (Phase 4, §2.1/§4.2) — global message search
 
 const _kNavy = Color(0xFF030F27);
 const _kAccent = Color(0xFFEE0979);
@@ -441,8 +442,22 @@ class _ConversationsScreenState extends State<ConversationsScreen> {
       actions: [
         IconButton(
           icon: Icon(_isSearchExpanded ? Icons.close : Icons.search_rounded, color: Colors.white),
-          tooltip: _isSearchExpanded ? 'Close search' : 'Search',
+          tooltip: _isSearchExpanded ? 'Close search' : 'Search people to start a chat',
           onPressed: _toggleSearch,
+        ),
+        // 🔥 NAYA (Phase 4, §1 #1, §2.1, §4.2) — ye "search users to start
+        // a new chat" (upar wala icon) se ALAG hai — ye MESSAGE CONTENT
+        // search hai, saari existing conversations ke andar (global
+        // `search_all`). Alag icon isliye taaki dono confuse na ho.
+        IconButton(
+          icon: const Icon(Icons.manage_search_rounded, color: Colors.white),
+          tooltip: 'Search messages',
+          onPressed: () {
+            Navigator.push(
+              context,
+              MaterialPageRoute(builder: (_) => const MessageSearchScreen()),
+            );
+          },
         ),
         IconButton(
           icon: const Icon(Icons.group_add_rounded, color: Colors.white),
@@ -736,16 +751,40 @@ class _ConversationTile extends StatelessWidget {
                     ],
                   ),
                   const SizedBox(height: 3),
-                  Text(
-                    _lastMessagePreview(),
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: TextStyle(
-                      color: hasUnread ? Colors.black87 : Colors.grey[600],
-                      fontWeight: hasUnread ? FontWeight.w600 : FontWeight.normal,
-                      fontSize: 13.5,
-                    ),
-                  ),
+                  // 🔥 NAYA (Phase 3, §7.10/§4.2) — agar is conversation ka
+                  // server-saved draft hai (`mySettings.draftText`), last
+                  // message ki jagah "Draft: <text>" dikhao (WhatsApp jaisa)
+                  // — data already `ConversationListSerializer.my_settings`
+                  // se aata hai, koi extra call nahi chahiye.
+                  Builder(builder: (context) {
+                    final draft = conversation.mySettings.draftText;
+                    if (draft != null && draft.trim().isNotEmpty) {
+                      return RichText(
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        text: TextSpan(
+                          style: TextStyle(fontSize: 13.5, color: Colors.grey[600]),
+                          children: [
+                            const TextSpan(
+                              text: "Draft: ",
+                              style: TextStyle(color: Color(0xFFE53935), fontStyle: FontStyle.italic, fontWeight: FontWeight.w600),
+                            ),
+                            TextSpan(text: draft.trim(), style: const TextStyle(fontStyle: FontStyle.italic)),
+                          ],
+                        ),
+                      );
+                    }
+                    return Text(
+                      _lastMessagePreview(),
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(
+                        color: hasUnread ? Colors.black87 : Colors.grey[600],
+                        fontWeight: hasUnread ? FontWeight.w600 : FontWeight.normal,
+                        fontSize: 13.5,
+                      ),
+                    );
+                  }),
                 ],
               ),
             ),

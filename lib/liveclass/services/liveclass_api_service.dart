@@ -67,6 +67,7 @@ Never _throwFrom(DioException e) {
 class LiveClassApi {
   static final classrooms = ClassroomApi();
   static final classroomReports = ClassroomReportApi();
+  static final chatMessageReports = ChatMessageReportApi();
   static final schedules = ScheduleApi();
   static final sessions = SessionApi();
   static final breakoutRooms = BreakoutRoomApi();
@@ -77,6 +78,7 @@ class LiveClassApi {
   static final materials = MaterialApi();
   static final chatMessages = ChatMessageApi();
   static final polls = PollApi();
+  static final pollTemplates = PollTemplateApi();
   static final assignments = AssignmentApi();
   static final submissions = SubmissionApi();
   static final reviews = ReviewApi();
@@ -91,7 +93,9 @@ class LiveClassApi {
   static final notices = NoticeApi();
   static final queries = QueryApi();
   static final notifications = NotificationApi();
+  static final notificationPreferences = NotificationPreferenceApi();
   static final referrals = ReferralApi();
+  static final passGifts = PassGiftApi();
 
   /// GET /liveclass/dashboard/ — single-call home-screen summary.
   static Future<LiveClassDashboard> dashboard() async {
@@ -422,6 +426,58 @@ class ClassroomReportApi {
 }
 
 // ---------------------------------------------------------------------------
+// 1B. CHAT MESSAGE REPORTS (Pass 14) — ⚠️ ARCHITECTURE SKELETON, endpoint
+// paths unconfirmed against urls.py (frontend doc §1.4). Mirrors
+// ClassroomReportApi above's shape/convention as the best guess.
+// ---------------------------------------------------------------------------
+class ChatMessageReportApi {
+  /// POST chat-message-reports/ — any participant who's seen the message
+  /// can file one (unlike ClassroomReport-style moderation actions, this
+  /// is not host-only).
+  Future<ChatMessageReport> create({required int messageId, required String reason, String description = ''}) async {
+    try {
+      final dio = await _Http.client();
+      final res = await dio.post('chat-message-reports/', data: {
+        'message': messageId,
+        'reason': reason,
+        'description': description,
+      });
+      return ChatMessageReport.fromJson(res.data);
+    } on DioException catch (e) {
+      _throwFrom(e);
+    }
+  }
+
+  /// GET chat-message-reports/ — own filed reports, or (platform staff)
+  /// every report, filterable by [status].
+  Future<PaginatedList<ChatMessageReport>> list({String? status}) async {
+    try {
+      final dio = await _Http.client();
+      final res = await dio.get('chat-message-reports/', queryParameters: {
+        if (status != null) 'status': status,
+      });
+      return PaginatedList.fromJson(res.data, ChatMessageReport.fromJson);
+    } on DioException catch (e) {
+      _throwFrom(e);
+    }
+  }
+
+  /// POST chat-message-reports/{id}/review/ — platform staff only.
+  Future<ChatMessageReport> review(int id, {required String status, String adminNote = ''}) async {
+    try {
+      final dio = await _Http.client();
+      final res = await dio.post('chat-message-reports/$id/review/', data: {
+        'status': status,
+        'admin_note': adminNote,
+      });
+      return ChatMessageReport.fromJson(res.data);
+    } on DioException catch (e) {
+      _throwFrom(e);
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
 // 2. SCHEDULES
 // ---------------------------------------------------------------------------
 class ScheduleApi {
@@ -479,6 +535,19 @@ class SessionApi {
         if (status != null) 'status': status,
       });
       return PaginatedList.fromJson(res.data, ClassSession.fromJson);
+    } on DioException catch (e) {
+      _throwFrom(e);
+    }
+  }
+
+  /// GET sessions/{id}/engagement-report/ — teacher/co-teacher/moderator
+  /// only. ⚠️ Path + shape unconfirmed (Pass 15 architecture skeleton, see
+  /// frontend doc §1.7) — confirm exact URL against urls.py before shipping.
+  Future<SessionEngagementReport> engagementReport(int sessionId) async {
+    try {
+      final dio = await _Http.client();
+      final res = await dio.get('sessions/$sessionId/engagement-report/');
+      return SessionEngagementReport.fromJson(res.data);
     } on DioException catch (e) {
       _throwFrom(e);
     }
@@ -622,6 +691,35 @@ class SessionApi {
     try {
       final dio = await _Http.client();
       await dio.post('sessions/$sessionId/stop-recording/');
+    } on DioException catch (e) {
+      _throwFrom(e);
+    }
+  }
+
+  /// GET sessions/{id}/unread/ — `{"chat": N, "polls": N}`, a real DB count
+  /// against the caller's `SessionReadState` watermark (Pass 13). Only
+  /// meaningful for a session the caller has already joined at least once.
+  Future<SessionUnreadCount> unread(int sessionId) async {
+    try {
+      final dio = await _Http.client();
+      final res = await dio.get('sessions/$sessionId/unread/');
+      return SessionUnreadCount.fromJson(res.data);
+    } on DioException catch (e) {
+      _throwFrom(e);
+    }
+  }
+
+  /// POST sessions/{id}/mark-read/ — advances the caller's read watermark.
+  /// Omit both ids to mark everything that currently exists as read (the
+  /// backend's documented default); pass either id to advance just that
+  /// half, since chat and polls are tracked independently.
+  Future<void> markRead(int sessionId, {int? lastReadChatMessageId, int? lastSeenPollId}) async {
+    try {
+      final dio = await _Http.client();
+      await dio.post('sessions/$sessionId/mark-read/', data: {
+        if (lastReadChatMessageId != null) 'last_read_chat_message_id': lastReadChatMessageId,
+        if (lastSeenPollId != null) 'last_seen_poll_id': lastSeenPollId,
+      });
     } on DioException catch (e) {
       _throwFrom(e);
     }
@@ -893,6 +991,22 @@ class PassPurchaseApi {
   /// nobody's taught yet; coins already released to the teacher for
   /// classes actually held stay with the teacher). No dedicated screen
   /// called this before — see MyPassesScreen's Cancel Pass action.
+  /// PATCH pass-purchases/{id}/ (auto_renew field) — ⚠️ endpoint shape
+  /// unconfirmed (Pass 15 architecture skeleton, frontend doc §1.8): may
+  /// turn out to be its own `.../set-auto-renew/` action instead of a
+  /// plain field PATCH. Using the plain-PATCH form here since it matches
+  /// this file's default convention and nothing in the change log
+  /// suggests a dedicated action was added.
+  Future<PassPurchase> setAutoRenew(int id, bool autoRenew) async {
+    try {
+      final dio = await _Http.client();
+      final res = await dio.patch('pass-purchases/$id/', data: {'auto_renew': autoRenew});
+      return PassPurchase.fromJson(res.data);
+    } on DioException catch (e) {
+      _throwFrom(e);
+    }
+  }
+
   Future<void> cancel(int id) async {
     try {
       final dio = await _Http.client();
@@ -1040,6 +1154,62 @@ class ChatMessageApi {
       _throwFrom(e);
     }
   }
+
+  // -- Pass 12: reactions ---------------------------------------------------
+  // POST chat-messages/{id}/react/ — sets/changes the caller's reaction
+  // (upsertable, same "changing your answer" shape as PollApi.vote).
+  // Gated behind the same room-access boundary as sending a chat message;
+  // its own `chat_reaction` throttle scope (60/min, more generous than
+  // `chat_message_create`'s 20/min since a reaction is a single tap).
+  // Returns the updated message with the recomputed `reaction_counts`.
+  Future<ChatMessage> react(int messageId, String emoji) async {
+    try {
+      final dio = await _Http.client();
+      final res = await dio.post('chat-messages/$messageId/react/', data: {'emoji': emoji});
+      return ChatMessage.fromJson(res.data);
+    } on DioException catch (e) {
+      _throwFrom(e);
+    }
+  }
+
+  /// DELETE chat-messages/{id}/react/ — removes the caller's own reaction.
+  Future<ChatMessage> unreact(int messageId) async {
+    try {
+      final dio = await _Http.client();
+      final res = await dio.delete('chat-messages/$messageId/react/');
+      return ChatMessage.fromJson(res.data);
+    } on DioException catch (e) {
+      _throwFrom(e);
+    }
+  }
+
+  // -- Pass 13: pinning ------------------------------------------------------
+  // POST chat-messages/{id}/pin/ — host-only (_can_moderate_session, same
+  // boundary as poll create/close). At most ONE pinned message per session
+  // by construction: the backend unpins whichever was pinned before in the
+  // same call, so a successful pin() here always fully replaces the prior
+  // pin — no separate unpin() call needed for the message being replaced.
+  Future<ChatMessage> pin(int messageId) async {
+    try {
+      final dio = await _Http.client();
+      final res = await dio.post('chat-messages/$messageId/pin/');
+      return ChatMessage.fromJson(res.data);
+    } on DioException catch (e) {
+      _throwFrom(e);
+    }
+  }
+
+  /// POST chat-messages/{id}/unpin/ — host-only, clears the pin with no
+  /// replacement.
+  Future<ChatMessage> unpin(int messageId) async {
+    try {
+      final dio = await _Http.client();
+      final res = await dio.post('chat-messages/$messageId/unpin/');
+      return ChatMessage.fromJson(res.data);
+    } on DioException catch (e) {
+      _throwFrom(e);
+    }
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -1081,6 +1251,66 @@ class PollApi {
       final dio = await _Http.client();
       final res = await dio.post('polls/$pollId/close/');
       return LivePoll.fromJson(res.data);
+    } on DioException catch (e) {
+      _throwFrom(e);
+    }
+  }
+
+  /// POST polls/quick-create/ — fires a saved `PollTemplate` into a live
+  /// session in one call (Pass 13). Validates the template belongs to the
+  /// session's own classroom and requires the same host-tier check as a
+  /// regular create; broadcasts `poll.created` exactly like a manual create,
+  /// so no separate handling is needed beyond the usual post-create refresh.
+  Future<LivePoll> quickCreate({required int templateId, required int sessionId}) async {
+    try {
+      final dio = await _Http.client();
+      final res = await dio.post('polls/quick-create/', data: {'template': templateId, 'session': sessionId});
+      return LivePoll.fromJson(res.data);
+    } on DioException catch (e) {
+      _throwFrom(e);
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// 9B. QUICK-POLL TEMPLATES (Pass 13) — classroom-scoped CRUD, gated behind
+// `_can_manage_classroom` (same boundary as Assignment/Notice/ClassHoliday).
+// ---------------------------------------------------------------------------
+class PollTemplateApi {
+  Future<PaginatedList<PollTemplate>> list(int classroomId) async {
+    try {
+      final dio = await _Http.client();
+      final res = await dio.get('poll-templates/', queryParameters: {'classroom': classroomId});
+      return PaginatedList.fromJson(res.data, PollTemplate.fromJson);
+    } on DioException catch (e) {
+      _throwFrom(e);
+    }
+  }
+
+  Future<PollTemplate> create(PollTemplate template) async {
+    try {
+      final dio = await _Http.client();
+      final res = await dio.post('poll-templates/', data: template.toJson());
+      return PollTemplate.fromJson(res.data);
+    } on DioException catch (e) {
+      _throwFrom(e);
+    }
+  }
+
+  Future<PollTemplate> update(int id, PollTemplate template) async {
+    try {
+      final dio = await _Http.client();
+      final res = await dio.patch('poll-templates/$id/', data: template.toJson());
+      return PollTemplate.fromJson(res.data);
+    } on DioException catch (e) {
+      _throwFrom(e);
+    }
+  }
+
+  Future<void> delete(int id) async {
+    try {
+      final dio = await _Http.client();
+      await dio.delete('poll-templates/$id/');
     } on DioException catch (e) {
       _throwFrom(e);
     }
@@ -1645,6 +1875,103 @@ class NotificationApi {
     try {
       final dio = await _Http.client();
       await dio.post('notifications/mark-all-read/');
+    } on DioException catch (e) {
+      _throwFrom(e);
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// NOTIFICATION PREFERENCES (Pass 14) — ⚠️ endpoint path assumed
+// (`notification-preferences/`, singular resource, no id — one settings
+// object per caller). Confirm against `urls.py` before shipping; same
+// architecture-skeleton caveat as the `NotificationPreference` model itself.
+// ---------------------------------------------------------------------------
+class NotificationPreferenceApi {
+  /// GET notification-preferences/ — the caller's current settings. If the
+  /// caller has never saved any, expect either an empty object (client
+  /// falls back to `NotificationPreference.forType`'s all-on default) or a
+  /// pre-populated object with every `NotifType` already present —
+  /// `fromJson` handles both since missing keys just fall through to the
+  /// same default.
+  Future<NotificationPreference> get() async {
+    try {
+      final dio = await _Http.client();
+      final res = await dio.get('notification-preferences/');
+      return NotificationPreference.fromJson(res.data);
+    } on DioException catch (e) {
+      _throwFrom(e);
+    }
+  }
+
+  /// PATCH notification-preferences/ — partial update; send only the
+  /// `perType` entries that changed rather than the whole object where
+  /// possible, to avoid clobbering a concurrent change from another device.
+  Future<NotificationPreference> update(NotificationPreference prefs) async {
+    try {
+      final dio = await _Http.client();
+      final res = await dio.patch('notification-preferences/', data: prefs.toJson());
+      return NotificationPreference.fromJson(res.data);
+    } on DioException catch (e) {
+      _throwFrom(e);
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// PASS GIFTING (Pass 14) — ⚠️ ARCHITECTURE SKELETON. Exact endpoint paths
+// need confirming against urls.py (frontend doc §1.3) — the shapes below
+// follow this file's own detail-action convention (`.../claim/`) used
+// elsewhere (`.../join/`, `.../token/`, etc.) as the best guess.
+// ---------------------------------------------------------------------------
+class PassGiftApi {
+  /// POST pass-gifts/ — gift a pass you own/can buy to someone else.
+  /// [recipient] is a raw identifier (username or email) — this module has
+  /// no user-search endpoint anywhere (frontend doc §8), same limitation
+  /// reused here rather than inventing one.
+  Future<PassGift> send({required int classPassId, required String recipient}) async {
+    try {
+      final dio = await _Http.client();
+      final res = await dio.post('pass-gifts/', data: {
+        'class_pass': classPassId,
+        'recipient': recipient,
+      });
+      return PassGift.fromJson(res.data);
+    } on DioException catch (e) {
+      _throwFrom(e);
+    }
+  }
+
+  /// GET pass-gifts/?direction=sent — gifts the caller has sent.
+  Future<PaginatedList<PassGift>> myGiftsSent() async {
+    try {
+      final dio = await _Http.client();
+      final res = await dio.get('pass-gifts/', queryParameters: {'direction': 'sent'});
+      return PaginatedList.fromJson(res.data, PassGift.fromJson);
+    } on DioException catch (e) {
+      _throwFrom(e);
+    }
+  }
+
+  /// GET pass-gifts/?direction=received — gifts sent to the caller.
+  Future<PaginatedList<PassGift>> myGiftsReceived() async {
+    try {
+      final dio = await _Http.client();
+      final res = await dio.get('pass-gifts/', queryParameters: {'direction': 'received'});
+      return PaginatedList.fromJson(res.data, PassGift.fromJson);
+    } on DioException catch (e) {
+      _throwFrom(e);
+    }
+  }
+
+  /// POST pass-gifts/{id}/claim/ — claims the gift; on success this is what
+  /// actually creates the PassPurchase on the backend (mirrors how
+  /// ClassJoinRequest.accept() does it elsewhere in this app).
+  Future<PassGift> claim(int giftId) async {
+    try {
+      final dio = await _Http.client();
+      final res = await dio.post('pass-gifts/$giftId/claim/');
+      return PassGift.fromJson(res.data);
     } on DioException catch (e) {
       _throwFrom(e);
     }

@@ -27,6 +27,7 @@ import '../models/liveclass_models.dart';
 import '../services/liveclass_api_service.dart';
 import '../theme/liveclass_theme.dart';
 import 'classroom_detail_screen.dart';
+import 'notification_preferences_screen.dart';
 
 String _fmtRelative(DateTime d) {
   final diff = DateTime.now().difference(d);
@@ -79,6 +80,14 @@ IconData _notifIcon(String type) {
       return Icons.star_outline_rounded;
     case NotifType.reportReviewed:
       return Icons.fact_check_outlined;
+    // NEW (Pass 16 frontend catch-up §1.8) — same "constants existed,
+    // icon mapping missed" gap as the 7 types fixed above.
+    case NotifType.passAutoRenewed:
+      return Icons.autorenew_rounded;
+    case NotifType.autoRenewFailed:
+      return Icons.error_outline_rounded;
+    case NotifType.passGiftExpired:
+      return Icons.card_giftcard_outlined;
     default:
       return Icons.notifications_none_rounded;
   }
@@ -190,7 +199,20 @@ class _NotificationsScreenState extends State<NotificationsScreen> {
       backgroundColor: LiveClassColors.bg,
       appBar: liveClassAppBar(
         'Notifications',
-        actions: [IconButton(tooltip: 'Mark all read', onPressed: _markAllRead, icon: const Icon(Icons.done_all_rounded))],
+        actions: [
+          // NEW (Pass 14 frontend catch-up §1.6) — entry point into the new
+          // per-notification-type push/email settings screen. Placed before
+          // "mark all read" since it's a settings action, not a list action.
+          IconButton(
+            tooltip: 'Notification settings',
+            onPressed: () => Navigator.push(
+              context,
+              MaterialPageRoute(builder: (_) => const NotificationPreferencesScreen()),
+            ),
+            icon: const Icon(Icons.settings_outlined),
+          ),
+          IconButton(tooltip: 'Mark all read', onPressed: _markAllRead, icon: const Icon(Icons.done_all_rounded)),
+        ],
       ),
       body: Column(
         children: [

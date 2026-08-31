@@ -73,6 +73,7 @@ class _MyPassesScreenState extends State<MyPassesScreen> {
   String? _error;
   bool _activeOnly = false;
   final Set<int> _busyIds = {}; // cancel in flight per-purchase
+  final Set<int> _autoRenewBusyIds = {}; // auto-renew toggle in flight per-purchase
 
   @override
   void initState() {
@@ -152,6 +153,78 @@ class _MyPassesScreenState extends State<MyPassesScreen> {
     }
   }
 
+  // NEW (Pass 15 frontend catch-up §1.8) — toggle auto_renew on a purchase.
+  // Optimistic swap first (this list is read via LiveClassApi.passPurchases
+  // .myPurchases(), which has no per-item copyWith exposed here, so the
+  // simplest correct approach is to just replace the whole item with the
+  // server's response once it lands, same as _confirmCancel's _load()
+  // refresh but without a full-list reload for a single-field flip).
+  Future<void> _toggleAutoRenew(PassPurchase p, bool next) async {
+    setState(() => _autoRenewBusyIds.add(p.id));
+    try {
+      final updated = await LiveClassApi.passPurchases.setAutoRenew(p.id, next);
+      if (!mounted) return;
+      setState(() {
+        final idx = _all.indexWhere((x) => x.id == p.id);
+        if (idx != -1) _all[idx] = updated;
+      });
+    } catch (e) {
+      _snack(e is LiveClassApiException ? e.message : 'Could not update auto-renew.');
+    } finally {
+      if (mounted) setState(() => _autoRenewBusyIds.remove(p.id));
+    }
+  }
+
+  // NEW (Pass 14 frontend catch-up §1.3) — "Gift this pass" entry point 1
+  // (frontend doc §1.3). Reuses the module's "ID-only, no user-search"
+  // limitation (frontend doc §8) — same pattern PassGiftApi.send already
+  // documents.
+  Future<void> _openGiftSheet(PassPurchase p) async {
+    final ctrl = TextEditingController();
+    final recipient = await showModalBottomSheet<String>(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: Colors.transparent,
+      builder: (sheetCtx) => Padding(
+        padding: EdgeInsets.only(bottom: MediaQuery.of(sheetCtx).viewInsets.bottom),
+        child: Container(
+          decoration: const BoxDecoration(color: Colors.white, borderRadius: BorderRadius.vertical(top: Radius.circular(20))),
+          padding: const EdgeInsets.fromLTRB(20, 20, 20, 24),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              const Text('Gift this pass', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
+              const SizedBox(height: 6),
+              Text(
+                'Enter the recipient\'s username or email. They\'ll have 7 days to claim it.',
+                style: TextStyle(fontSize: 12.5, color: Colors.grey.shade600),
+              ),
+              const SizedBox(height: 16),
+              TextField(controller: ctrl, decoration: liveClassInputDecoration('Username or email')),
+              const SizedBox(height: 16),
+              SizedBox(
+                width: double.infinity,
+                child: ElevatedButton(
+                  style: ElevatedButton.styleFrom(backgroundColor: LiveClassColors.navy, foregroundColor: Colors.white),
+                  onPressed: () => Navigator.pop(sheetCtx, ctrl.text.trim()),
+                  child: const Text('Send Gift'),
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+    if (recipient == null || recipient.isEmpty) return;
+    try {
+      await LiveClassApi.passGifts.send(classPassId: p.classPassId, recipient: recipient);
+      _snack('Gift sent to $recipient.');
+    } catch (e) {
+      _snack(e is LiveClassApiException ? e.message : 'Could not send gift.');
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -222,6 +295,22 @@ class _MyPassesScreenState extends State<MyPassesScreen> {
               LiveClassStatusChip(label: _statusLabel(p.status).toUpperCase(), color: color, background: color.withValues(alpha: 0.12)),
             ],
           ),
+          // NEW (Pass 14 frontend catch-up §1.3) — "Gifted to you by X"
+          // badge. Only shown when the backend actually resolved a
+          // gifter (giftId/giftedBy on PassPurchase — unconfirmed field,
+          // see liveclass_models.dart), so a normal purchase shows
+          // nothing extra here.
+          if (p.giftId != null && p.giftedBy != null) ...[
+            const SizedBox(height: 8),
+            Row(
+              children: [
+                Icon(Icons.card_giftcard_rounded, size: 14, color: Colors.pink.shade300),
+                const SizedBox(width: 6),
+                Text('Gifted to you by ${p.giftedBy!.fullName}',
+                    style: TextStyle(fontSize: 11.5, color: Colors.pink.shade400, fontWeight: FontWeight.w600)),
+              ],
+            ),
+          ],
           const Divider(height: 22),
           Row(
             children: [
@@ -294,6 +383,53 @@ class _MyPassesScreenState extends State<MyPassesScreen> {
               ],
             ),
           ],
+          // NEW (Pass 15 frontend catch-up §1.8) — auto-renew failure
+          // banner. Shown instead of letting a failed renewal read as a
+          // plain "expired" pass with no explanation.
+          if (p.renewalFailedAt != null) ...[
+            const SizedBox(height: 10),
+            Container(
+              padding: const EdgeInsets.all(10),
+              decoration: BoxDecoration(color: LiveClassColors.dangerBg, borderRadius: BorderRadius.circular(10)),
+              child: Row(
+                children: [
+                  const Icon(Icons.error_outline_rounded, size: 16, color: LiveClassColors.danger),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: Text(
+                      'Auto-renew failed on ${liveClassFmtDate(p.renewalFailedAt!)} — renew manually to keep access.',
+                      style: const TextStyle(fontSize: 11.5, color: LiveClassColors.danger),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ],
+          // NEW (Pass 15 §1.8) — renewal-chain provenance footnote.
+          if (p.renewedFrom != null) ...[
+            const SizedBox(height: 6),
+            Text('Renewed from purchase #${p.renewedFrom}', style: TextStyle(fontSize: 10.5, color: Colors.grey.shade500)),
+          ],
+          // NEW (Pass 15 §1.8) — auto-renew toggle, only on an active,
+          // unexpired, non-free purchase (nothing to renew on a free pass).
+          if (p.status == 'success' && !expired) ...[
+            const SizedBox(height: 10),
+            Row(
+              children: [
+                Expanded(
+                  child: Text('Auto-renew', style: TextStyle(fontSize: 12.5, fontWeight: FontWeight.w600, color: Colors.grey.shade800)),
+                ),
+                _autoRenewBusyIds.contains(p.id)
+                    ? const SizedBox(
+                        width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2, color: LiveClassColors.navy))
+                    : Switch(
+                        value: p.autoRenew,
+                        onChanged: (v) => _toggleAutoRenew(p, v),
+                        activeThumbColor: LiveClassColors.navy,
+                      ),
+              ],
+            ),
+          ],
           // NOTE (fix — no self-service cancel existed on this screen):
           // only offered while the pass is still SUCCESS and unexpired —
           // an already-expired pass's leftover escrow is handled
@@ -303,16 +439,32 @@ class _MyPassesScreenState extends State<MyPassesScreen> {
           // race against that same sweep for no benefit).
           if (p.status == 'success' && !expired) ...[
             const SizedBox(height: 12),
-            SizedBox(
-              width: double.infinity,
-              child: OutlinedButton.icon(
-                onPressed: _busyIds.contains(p.id) ? null : () => _confirmCancel(p),
-                style: OutlinedButton.styleFrom(foregroundColor: Colors.red, side: const BorderSide(color: Colors.red)),
-                icon: _busyIds.contains(p.id)
-                    ? const SizedBox(width: 14, height: 14, child: CircularProgressIndicator(strokeWidth: 2, color: Colors.red))
-                    : const Icon(Icons.cancel_outlined, size: 16),
-                label: Text(_busyIds.contains(p.id) ? 'Cancelling…' : 'Cancel Pass'),
-              ),
+            Row(
+              children: [
+                // NEW (Pass 14 §1.3) — "Gift this pass" entry point 1.
+                Expanded(
+                  child: OutlinedButton.icon(
+                    onPressed: () => _openGiftSheet(p),
+                    style: OutlinedButton.styleFrom(
+                      foregroundColor: LiveClassColors.navy,
+                      side: const BorderSide(color: LiveClassColors.navy),
+                    ),
+                    icon: const Icon(Icons.card_giftcard_outlined, size: 16),
+                    label: const Text('Gift'),
+                  ),
+                ),
+                const SizedBox(width: 10),
+                Expanded(
+                  child: OutlinedButton.icon(
+                    onPressed: _busyIds.contains(p.id) ? null : () => _confirmCancel(p),
+                    style: OutlinedButton.styleFrom(foregroundColor: Colors.red, side: const BorderSide(color: Colors.red)),
+                    icon: _busyIds.contains(p.id)
+                        ? const SizedBox(width: 14, height: 14, child: CircularProgressIndicator(strokeWidth: 2, color: Colors.red))
+                        : const Icon(Icons.cancel_outlined, size: 16),
+                    label: Text(_busyIds.contains(p.id) ? 'Cancelling…' : 'Cancel Pass'),
+                  ),
+                ),
+              ],
             ),
           ],
         ],

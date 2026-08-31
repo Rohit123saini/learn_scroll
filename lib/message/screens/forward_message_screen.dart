@@ -12,8 +12,12 @@ import '../models/message_models.dart';
 import '../services/message_api_service.dart';
 
 class ForwardMessageScreen extends StatefulWidget {
-  final List<String> messageIds;
-  const ForwardMessageScreen({super.key, required this.messageIds});
+  // 🔧 FIX (Phase 3, §4.3) — pehle sirf `messageIds` liya jaata tha, jisse
+  // is screen ko pata hi nahi chalta tha ki selected messages me se koi
+  // text-type hai ya poll — caption UI logic ke liye poore `MessageModel`
+  // objects chahiye the.
+  final List<MessageModel> messages;
+  const ForwardMessageScreen({super.key, required this.messages});
 
   @override
   State<ForwardMessageScreen> createState() => _ForwardMessageScreenState();
@@ -26,6 +30,13 @@ class _ForwardMessageScreenState extends State<ForwardMessageScreen> {
   String _search = '';
   final Set<String> _selectedConversationIds = {};
   bool _isSending = false;
+  // 🔥 NAYA (Phase 3, §4.3/§7.9) — optional caption jo forward ke saath
+  // jaata hai. Backend text-wale messages ka apna text overwrite nahi
+  // karta — isliye jab tak koi non-text (media/location) message
+  // selection me nahi hai, caption field dikhane ka koi matlab nahi
+  // (§4.3 UI hint), isliye niche `_captionApplicable` getter se decide
+  // hota hai.
+  final TextEditingController _captionController = TextEditingController();
 
   @override
   void initState() {
@@ -54,6 +65,20 @@ class _ForwardMessageScreenState extends State<ForwardMessageScreen> {
     }
   }
 
+  // 🔥 NAYA (Phase 3, §4.3) — caption sirf tab dikhana hai jab selection
+  // me kam se kam ek non-text message (media/location/etc.) ho. Sab
+  // messages text-type hain to caption field hide/disable kar do —
+  // backend text wale message ka apna text overwrite nahi karta, UI me
+  // confusion na ho isliye.
+  bool get _captionApplicable =>
+      widget.messages.any((m) => m.type != MessageType.text);
+
+  @override
+  void dispose() {
+    _captionController.dispose();
+    super.dispose();
+  }
+
   List<ConversationModel> get _filtered {
     if (_search.trim().isEmpty) return _conversations;
     final q = _search.trim().toLowerCase();
@@ -76,9 +101,17 @@ class _ForwardMessageScreenState extends State<ForwardMessageScreen> {
     if (_selectedConversationIds.isEmpty || _isSending) return;
     setState(() => _isSending = true);
     try {
+      // 🔧 FIX (Phase 3, §4.3) — poll messages backend silently drop
+      // karta hai; defensively yahan bhi exclude kar diya, chahe caller
+      // (chat_screen.dart) already selection se rok chuka ho.
+      final ids = widget.messages
+          .where((m) => m.type != MessageType.poll)
+          .map((m) => m.id)
+          .toList();
       await MessageApiService.forwardMessages(
-        messageIds: widget.messageIds,
+        messageIds: ids,
         conversationIds: _selectedConversationIds.toList(),
+        caption: _captionApplicable ? _captionController.text : null,
       );
       if (mounted) Navigator.of(context).pop(true);
     } catch (e) {
@@ -93,7 +126,7 @@ class _ForwardMessageScreenState extends State<ForwardMessageScreen> {
 
   @override
   Widget build(BuildContext context) {
-    final count = widget.messageIds.length;
+    final count = widget.messages.length;
     return Scaffold(
       backgroundColor: Colors.white,
       appBar: AppBar(
@@ -105,6 +138,24 @@ class _ForwardMessageScreenState extends State<ForwardMessageScreen> {
         ),
       ),
       body: Column(children: [
+        // 🔥 NAYA (Phase 3, §4.3) — caption input, sirf tab dikhta hai jab
+        // selection me koi non-text message ho.
+        if (_captionApplicable)
+          Padding(
+            padding: const EdgeInsets.fromLTRB(14, 12, 14, 0),
+            child: TextField(
+              controller: _captionController,
+              maxLines: 3,
+              minLines: 1,
+              decoration: InputDecoration(
+                hintText: "Add a caption (optional)",
+                filled: true,
+                fillColor: const Color(0xFFF3F5FA),
+                contentPadding: const EdgeInsets.symmetric(vertical: 10, horizontal: 12),
+                border: OutlineInputBorder(borderRadius: BorderRadius.circular(10), borderSide: BorderSide.none),
+              ),
+            ),
+          ),
         Padding(
           padding: const EdgeInsets.fromLTRB(14, 12, 14, 6),
           child: TextField(

@@ -76,6 +76,29 @@ Future<void> firebaseBackgroundHandler(RemoteMessage message) async {
     return;
   }
 
+  // 🔥 NAYA (Phase 4, §1 #12, §4.6) — @Mentions push. Backend
+  // `send_mention_push` normal chat-mute suppression ko BYPASS karke bhejta
+  // hai (frontend doc §4.6) — isliye apna khud ka distinct "mentions"
+  // channel (Importance.max) use karte hain taaki muted chat me mention
+  // aane par bhi dikhe/sunai de, generic chat-message notification jaisa
+  // silently na dab jaaye.
+  if (data['type'] == 'mention') {
+    await _showBackgroundMentionNotification(data);
+    return;
+  }
+
+  // 🔥 NAYA (Phase 4, §1 #12, §4.6) — Chat push digest/batching. Backend
+  // pehle se hi pre-formatted "X sent N messages" jaisa text bhejta hai —
+  // koi single `message_id` nahi hota isme (kai messages ka batch hai),
+  // isliye tap sirf conversation open karta hai — jump-to-message possible
+  // nahi (generic tap-handler, `_handleNotificationResponse` neeche, sirf
+  // `conversation_id` dekhta hai — wahi behaviour yahan bhi apne aap milta
+  // hai, alag se kuch karne ki zaroorat nahi).
+  if (data['type'] == 'chat_digest') {
+    await _showBackgroundDigestNotification(data);
+    return;
+  }
+
   // 🔥 NAYA: chat message ho to background/killed isolate me bhi hamara
   // apna Reply-action wala local notification dikhao — pehle ye sirf
   // foreground `onMessage` listener me hota tha.
@@ -126,6 +149,114 @@ Future<void> _showBackgroundReactionNotification(Map<String, dynamic> data) asyn
     );
   } catch (e) {
     developer.log("Background reaction notification failed: $e");
+  }
+}
+
+// 🔥 NAYA (Phase 4, §1 #12, §4.6) — @mention ka background/killed
+// notification. Apna khud ka "mentions" channel (Importance.max) — normal
+// "chat_messages" channel se jaan-bujh kar alag rakha hai, taaki ye
+// dusri chat-message notifications se distinct dikhe/sunai de, chahe wo
+// chat mute hi kyun na ho (backend already sirf mention ke liye mute
+// bypass karke push bhejta hai).
+@pragma('vm:entry-point')
+Future<void> _showBackgroundMentionNotification(Map<String, dynamic> data) async {
+  try {
+    final senderName = data['sender_name']?.toString() ?? 'Someone';
+    final text = data['text']?.toString();
+    final convId = data['conversation_id']?.toString();
+
+    final fln = FlutterLocalNotificationsPlugin();
+    const androidInit = AndroidInitializationSettings('@mipmap/ic_launcher');
+    await fln.initialize(
+      settings: const InitializationSettings(android: androidInit),
+      onDidReceiveNotificationResponse: notificationTapBackground,
+      onDidReceiveBackgroundNotificationResponse: notificationTapBackground,
+    );
+
+    const channel = AndroidNotificationChannel(
+      'mentions',
+      'Mentions',
+      description: 'Someone mentioned you in a group chat',
+      importance: Importance.max,
+    );
+    await fln
+        .resolvePlatformSpecificImplementation<AndroidFlutterLocalNotificationsPlugin>()
+        ?.createNotificationChannel(channel);
+
+    await fln.show(
+      id: data.hashCode,
+      title: '$senderName mentioned you',
+      body: (text != null && text.trim().isNotEmpty) ? text.trim() : 'Tap to view the message',
+      notificationDetails: const NotificationDetails(
+        android: AndroidNotificationDetails(
+          'mentions',
+          'Mentions',
+          importance: Importance.max,
+          priority: Priority.max,
+          category: AndroidNotificationCategory.message,
+        ),
+      ),
+      // 🔥 Generic tap-handler (`_handleNotificationResponse` neeche) ko
+      // sirf `conversation_id` chahiye — koi alag mention-specific tap
+      // logic banane ki zaroorat nahi.
+      payload: jsonEncode({'conversation_id': convId ?? ''}),
+    );
+  } catch (e) {
+    developer.log("Background mention notification failed: $e");
+  }
+}
+
+// 🔥 NAYA (Phase 4, §1 #12, §4.6) — chat push digest/batching ka
+// background/killed notification. Backend ka pehle-se-formatted digest
+// text (`text`/`body`) seedha dikha dete hain — koi per-message Reply
+// action jaan-bujh kar NAHI diya (ye ek specific message ka reply nahi
+// hai, poore batch ka summary hai).
+@pragma('vm:entry-point')
+Future<void> _showBackgroundDigestNotification(Map<String, dynamic> data) async {
+  try {
+    final title = data['conversation_name']?.toString() ??
+        data['title']?.toString() ??
+        'New messages';
+    final body = data['text']?.toString() ?? data['body']?.toString() ?? 'You have new messages';
+    final convId = data['conversation_id']?.toString();
+
+    final fln = FlutterLocalNotificationsPlugin();
+    const androidInit = AndroidInitializationSettings('@mipmap/ic_launcher');
+    await fln.initialize(
+      settings: const InitializationSettings(android: androidInit),
+      onDidReceiveNotificationResponse: notificationTapBackground,
+      onDidReceiveBackgroundNotificationResponse: notificationTapBackground,
+    );
+
+    const channel = AndroidNotificationChannel(
+      'chat_messages',
+      'Chat Messages',
+      description: 'New message notifications',
+      importance: Importance.high,
+    );
+    await fln
+        .resolvePlatformSpecificImplementation<AndroidFlutterLocalNotificationsPlugin>()
+        ?.createNotificationChannel(channel);
+
+    await fln.show(
+      // Fixed id per-conversation (na ki message.hashCode) — taaki agar
+      // ek hi conversation ke liye digest thodi der me phir aaye, purani
+      // notification ko UPDATE kare, stack karke spam na kare.
+      id: convId?.hashCode ?? data.hashCode,
+      title: title,
+      body: body,
+      notificationDetails: const NotificationDetails(
+        android: AndroidNotificationDetails(
+          'chat_messages',
+          'Chat Messages',
+          importance: Importance.high,
+          priority: Priority.high,
+        ),
+      ),
+      payload: jsonEncode({'conversation_id': convId ?? ''}),
+    );
+  } catch (e) {
+    developer.log("Background digest notification failed: $e");
   }
 }
 

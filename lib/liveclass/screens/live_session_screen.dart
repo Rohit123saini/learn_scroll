@@ -637,6 +637,15 @@ class _LiveSessionScreenState extends State<LiveSessionScreen> with WidgetsBindi
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
+    // NEW (Pass 13 §1.10): safety-net mark-read in case the caller leaves
+    // the session with the chat/polls panel still open (the tab-open
+    // handlers above already cover the normal case) — best-effort, same
+    // fire-and-forget contract as _markSessionRead itself.
+    if (_openPanel == _PanelTab.chat) {
+      _markSessionRead(chat: true);
+    } else if (_openPanel == _PanelTab.polls) {
+      _markSessionRead(polls: true);
+    }
     _chatCtrl.dispose();
     _queryCtrl.dispose();
     _chatPollTimer?.cancel();
@@ -2088,6 +2097,27 @@ class _LiveSessionScreenState extends State<LiveSessionScreen> with WidgetsBindi
     }
   }
 
+  // -- Pass 13: unread chat/poll counts ------------------------------------
+  // Advances the caller's SessionReadState watermark. Fire-and-forget by
+  // design (mirrors _refreshSessionRecordingState's "never surface an
+  // error for a background bookkeeping call" spirit) — a failed mark-read
+  // just means the badge in sessions_list_screen.dart stays stale a bit
+  // longer, not something worth interrupting this screen for. Passing no
+  // explicit id marks "everything that currently exists" as read, per the
+  // backend's documented default — good enough here since this screen
+  // doesn't need to track a precise per-item watermark itself, only to
+  // clear the badge once the caller has actually looked.
+  void _markSessionRead({bool chat = false, bool polls = false}) {
+    if (!chat && !polls) return;
+    unawaited(LiveClassApi.sessions
+        .markRead(
+          widget.sessionId,
+          lastReadChatMessageId: chat && _chatMessages.isNotEmpty ? _chatMessages.last.id : null,
+          lastSeenPollId: polls && _polls.isNotEmpty ? _polls.last.id : null,
+        )
+        .catchError((_) {}));
+  }
+
   // -------------------------------------------------------------------
   // Chat
   // -------------------------------------------------------------------
@@ -2121,10 +2151,34 @@ class _LiveSessionScreenState extends State<LiveSessionScreen> with WidgetsBindi
         _chatCtrl.clear();
         _sendingChat = false;
       });
-    } catch (e) {
+    } on LiveClassApiException catch (e) {
       if (!mounted) return;
       setState(() => _sendingChat = false);
-      _snack(e is LiveClassApiException ? e.message : 'Could not send message.');
+      // NEW (Pass 14 §1.5): moderation.py runs inside
+      // ChatMessageViewSet.perform_create, so a filtered message comes
+      // back as an error response, not a silent drop — this is a new
+      // failure branch on the existing send call, nothing else changes.
+      // ⚠️ Pass 14 was never written up in the backend doc's own §2–§6
+      // (see that doc's top-of-file warning), so the exact `code` value
+      // `exceptions.py` returns for a blocked message is UNCONFIRMED —
+      // 'message_blocked' below is a guess at the obvious name. Confirm
+      // against `exceptions.py`/`moderation.py` source and adjust the
+      // string if it differs; until then this branch silently falls
+      // through to the generic snackbar below for any other code, so a
+      // wrong guess here degrades gracefully rather than breaking sending.
+      final code = (e.body is Map) ? e.body['code'] : null;
+      if (code == 'message_blocked' || code == 'profanity_blocked') {
+        // Do NOT retry and do NOT add the message to the local optimistic
+        // list (it already isn't, since we only add on success above) —
+        // the text stays in the field so the user can edit and resend.
+        _snack('Message blocked — please keep chat respectful.');
+        return;
+      }
+      _snack(e.message);
+    } catch (_) {
+      if (!mounted) return;
+      setState(() => _sendingChat = false);
+      _snack('Could not send message.');
     }
   }
 
@@ -2136,6 +2190,155 @@ class _LiveSessionScreenState extends State<LiveSessionScreen> with WidgetsBindi
     } catch (e) {
       _snack(e is LiveClassApiException ? e.message : 'Could not delete.');
     }
+  }
+
+  // -- Pass 12: reactions -----------------------------------------------
+  // Long-press (or the small reaction row under) a chat bubble -> emoji
+  // picker -> here. Tapping an already-selected reaction removes it
+  // instead (see _chatPanel's onTap wiring below). Optimistic local
+  // update via ChatMessage.copyWith, corrected on the next `_loadChat`
+  // poll tick (4s — see _startPolling) since there's no WebSocket wired
+  // up in this file to carry a live `chat.reaction` event (see the
+  // "Lightweight polling" comment above _startPolling).
+  Future<void> _reactToChat(ChatMessage msg, String emoji) async {
+    final idx = _chatMessages.indexWhere((m) => m.id == msg.id);
+    if (idx == -1) return;
+    final previous = _chatMessages[idx];
+    final optimisticCounts = Map<String, int>.from(previous.reactionCounts);
+    if (previous.myReaction != null) {
+      optimisticCounts[previous.myReaction!] = (optimisticCounts[previous.myReaction!] ?? 1) - 1;
+      if ((optimisticCounts[previous.myReaction!] ?? 0) <= 0) optimisticCounts.remove(previous.myReaction!);
+    }
+    optimisticCounts[emoji] = (optimisticCounts[emoji] ?? 0) + 1;
+    setState(() {
+      _chatMessages[idx] = previous.copyWith(reactionCounts: optimisticCounts, myReaction: emoji);
+    });
+    try {
+      final updated = await LiveClassApi.chatMessages.react(msg.id, emoji);
+      if (!mounted) return;
+      final i2 = _chatMessages.indexWhere((m) => m.id == msg.id);
+      if (i2 != -1) setState(() => _chatMessages[i2] = updated);
+    } catch (e) {
+      if (!mounted) return;
+      final i2 = _chatMessages.indexWhere((m) => m.id == msg.id);
+      if (i2 != -1) setState(() => _chatMessages[i2] = previous);
+      _snack(e is LiveClassApiException ? e.message : 'Could not react.');
+    }
+  }
+
+  Future<void> _removeChatReaction(ChatMessage msg) async {
+    final idx = _chatMessages.indexWhere((m) => m.id == msg.id);
+    if (idx == -1 || msg.myReaction == null) return;
+    final previous = _chatMessages[idx];
+    final optimisticCounts = Map<String, int>.from(previous.reactionCounts);
+    if (previous.myReaction != null) {
+      optimisticCounts[previous.myReaction!] = (optimisticCounts[previous.myReaction!] ?? 1) - 1;
+      if ((optimisticCounts[previous.myReaction!] ?? 0) <= 0) optimisticCounts.remove(previous.myReaction!);
+    }
+    setState(() {
+      _chatMessages[idx] = previous.copyWith(reactionCounts: optimisticCounts, myReaction: null);
+    });
+    try {
+      final updated = await LiveClassApi.chatMessages.unreact(msg.id);
+      if (!mounted) return;
+      final i2 = _chatMessages.indexWhere((m) => m.id == msg.id);
+      if (i2 != -1) setState(() => _chatMessages[i2] = updated);
+    } catch (e) {
+      if (!mounted) return;
+      final i2 = _chatMessages.indexWhere((m) => m.id == msg.id);
+      if (i2 != -1) setState(() => _chatMessages[i2] = previous);
+      _snack(e is LiveClassApiException ? e.message : 'Could not remove reaction.');
+    }
+  }
+
+  void _showChatReactionPicker(ChatMessage msg) {
+    // Small emoji row — deliberately a DIFFERENT method from the existing
+    // _showReactionPicker()/_sendReaction() pair used for the live-session
+    // floating reaction burst (video-call emoji, see that feature
+    // elsewhere in this file) — this one is per-chat-message, not
+    // per-session, so it can't share a name (Dart has no overloading) or
+    // an implementation. NOT merged with that feature per the frontend
+    // integration doc §1.1's explicit warning.
+    const emojis = ['👍', '❤️', '😂', '😮', '👏'];
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: const Color(0xFF20232B),
+      shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(16))),
+      builder: (sheetContext) => SafeArea(
+        child: Padding(
+          padding: const EdgeInsets.symmetric(vertical: 18, horizontal: 12),
+          child: Row(
+            mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+            children: emojis
+                .map((e) => InkWell(
+                      borderRadius: BorderRadius.circular(24),
+                      onTap: () {
+                        Navigator.pop(sheetContext);
+                        if (msg.myReaction == e) {
+                          _removeChatReaction(msg);
+                        } else {
+                          _reactToChat(msg, e);
+                        }
+                      },
+                      child: Padding(
+                        padding: const EdgeInsets.all(8),
+                        child: Text(e, style: const TextStyle(fontSize: 26)),
+                      ),
+                    ))
+                .toList(),
+          ),
+        ),
+      ),
+    );
+  }
+
+  // -- Pass 13: pinning ----------------------------------------------------
+  // Host-only (reuses the same _isHost gate this file already uses for
+  // _deleteChat, kick, mute, etc.). At most one pinned message per session
+  // by construction on the backend — pin() there unpins whichever was
+  // pinned before, so a successful pin() call here always fully replaces
+  // any prior pinned banner; no separate unpin() needed for the old one.
+  Future<void> _pinChat(ChatMessage msg) async {
+    try {
+      final updated = await LiveClassApi.chatMessages.pin(msg.id);
+      if (!mounted) return;
+      setState(() {
+        // Locally clear any other message's isPinned flag (the backend
+        // already did this server-side; mirror it here so the old pinned
+        // banner disappears immediately instead of waiting for the next
+        // 4s chat poll to correct it).
+        for (var i = 0; i < _chatMessages.length; i++) {
+          if (_chatMessages[i].id != updated.id && _chatMessages[i].isPinned) {
+            _chatMessages[i] = _chatMessages[i].copyWith(isPinned: false, pinnedBy: null, pinnedAt: null);
+          }
+        }
+        final idx = _chatMessages.indexWhere((m) => m.id == msg.id);
+        if (idx != -1) _chatMessages[idx] = updated;
+      });
+    } catch (e) {
+      _snack(e is LiveClassApiException ? e.message : 'Could not pin message.');
+    }
+  }
+
+  Future<void> _unpinChat(ChatMessage msg) async {
+    try {
+      final updated = await LiveClassApi.chatMessages.unpin(msg.id);
+      if (!mounted) return;
+      final idx = _chatMessages.indexWhere((m) => m.id == msg.id);
+      if (idx != -1) setState(() => _chatMessages[idx] = updated);
+    } catch (e) {
+      _snack(e is LiveClassApiException ? e.message : 'Could not unpin message.');
+    }
+  }
+
+  /// Whichever message is currently pinned, or null. At most one by
+  /// backend construction (see _pinChat above) — `firstWhere` orElse is
+  /// just defensive against a stale/inconsistent local list mid-poll.
+  ChatMessage? get _pinnedChatMessage {
+    for (final m in _chatMessages) {
+      if (m.isPinned) return m;
+    }
+    return null;
   }
 
   // -------------------------------------------------------------------
@@ -2762,6 +2965,7 @@ class _LiveSessionScreenState extends State<LiveSessionScreen> with WidgetsBindi
                   // spirit as the pinned-notice banner elsewhere in this
                   // file.
                   if (_myBreakoutRoom != null) _breakoutRoomBanner(),
+                  if (_showSessionTimeBanner) _sessionTimeBanner(),
                   Expanded(child: _videoArea()),
                   // FEATURE: live captions -- sits just above the control
                   // bar so it never covers the video itself.
@@ -2818,6 +3022,48 @@ class _LiveSessionScreenState extends State<LiveSessionScreen> with WidgetsBindi
     return const ColoredBox(
       color: Color(0xFF1B1E26),
       child: Center(child: Icon(Icons.videocam_off_rounded, color: Colors.white38, size: 28)),
+    );
+  }
+
+  /// FEATURE (time-window entry relaxed — see ClassSession.is_joinable() in
+  /// models.py): a student can now open the room anytime the session is
+  /// SCHEDULED/LIVE, not just in the old 10-min-before-to-end window. Since
+  /// there's no hard block anymore, show the actual scheduled time instead
+  /// — so someone who walked in early or late still knows when the class
+  /// is really meant to run. `_session.scheduledStart`/`scheduledEnd` are
+  /// UTC instants from the API; `.toLocal()` converts to the viewer's own
+  /// device timezone (same convention as the rest of the module — see
+  /// liveclass_datetime.dart's header comment).
+  bool get _showSessionTimeBanner {
+    if (_isHost || _session == null) return false;
+    final now = DateTime.now();
+    final start = _session!.scheduledStart.toLocal();
+    final end = _session!.scheduledEnd.toLocal();
+    return now.isBefore(start) || now.isAfter(end);
+  }
+
+  Widget _sessionTimeBanner() {
+    final start = _session!.scheduledStart.toLocal();
+    final end = _session!.scheduledEnd.toLocal();
+    final now = DateTime.now();
+    final isUpcoming = now.isBefore(start);
+    final fmt = DateFormat('d MMM, h:mm a');
+    final label = isUpcoming
+        ? 'This class is scheduled for ${fmt.format(start)}'
+        : 'This class was scheduled to end at ${fmt.format(end)}';
+    return Container(
+      width: double.infinity,
+      color: Colors.amber.withOpacity(0.14),
+      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 9),
+      child: Row(
+        children: [
+          const Icon(Icons.schedule_rounded, color: Colors.amberAccent, size: 17),
+          const SizedBox(width: 8),
+          Expanded(
+            child: Text(label, style: const TextStyle(color: Colors.white, fontSize: 12.5, fontWeight: FontWeight.w500)),
+          ),
+        ],
+      ),
     );
   }
 
@@ -3623,12 +3869,25 @@ class _LiveSessionScreenState extends State<LiveSessionScreen> with WidgetsBindi
                 icon: Icons.chat_bubble_outline_rounded,
                 active: _openPanel == _PanelTab.chat,
                 badge: _chatMessages.isNotEmpty ? _chatMessages.length : null,
-                onTap: () => setState(() => _openPanel = _openPanel == _PanelTab.chat ? null : _PanelTab.chat),
+                onTap: () {
+                  final opening = _openPanel != _PanelTab.chat;
+                  setState(() => _openPanel = _openPanel == _PanelTab.chat ? null : _PanelTab.chat);
+                  // NEW (Pass 13 §1.10): advance the caller's chat
+                  // read-watermark on entering the tab (not on closing it),
+                  // independently of the polls watermark below.
+                  if (opening) _markSessionRead(chat: true);
+                },
               ),
               _controlButton(
                 icon: Icons.bar_chart_rounded,
                 active: _openPanel == _PanelTab.polls,
-                onTap: () => setState(() => _openPanel = _openPanel == _PanelTab.polls ? null : _PanelTab.polls),
+                onTap: () {
+                  final opening = _openPanel != _PanelTab.polls;
+                  setState(() => _openPanel = _openPanel == _PanelTab.polls ? null : _PanelTab.polls);
+                  // NEW (Pass 13 §1.10): same as chat above, tracked
+                  // independently on the backend (SessionReadState).
+                  if (opening) _markSessionRead(polls: true);
+                },
               ),
               if (_isHost)
                 _controlButton(
@@ -3863,8 +4122,42 @@ class _LiveSessionScreenState extends State<LiveSessionScreen> with WidgetsBindi
   }
 
   Widget _chatPanel() {
+    final pinned = _pinnedChatMessage;
     return Column(
       children: [
+        // NEW (Pass 13 §1.9): pinned-message banner. At most one by
+        // backend construction (see _pinnedChatMessage/_pinChat above).
+        // Not the existing Notice model — this is session-live-chat
+        // scoped and tied to an actual message row, deliberately separate
+        // from the classroom-wide Notice board elsewhere in this app.
+        if (pinned != null)
+          Container(
+            width: double.infinity,
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+            color: Colors.amber.withValues(alpha: 0.12),
+            child: Row(
+              children: [
+                const Icon(Icons.push_pin_rounded, size: 14, color: Colors.amberAccent),
+                const SizedBox(width: 6),
+                Expanded(
+                  child: Text(
+                    pinned.message,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(color: Colors.white, fontSize: 12.5),
+                  ),
+                ),
+                if (_isHost)
+                  InkWell(
+                    onTap: () => _unpinChat(pinned),
+                    child: const Padding(
+                      padding: EdgeInsets.only(left: 6),
+                      child: Icon(Icons.close_rounded, size: 14, color: Colors.white54),
+                    ),
+                  ),
+              ],
+            ),
+          ),
         Expanded(
           child: _chatLoading
               ? const Center(child: CircularProgressIndicator(color: Colors.white54))
@@ -3877,29 +4170,86 @@ class _LiveSessionScreenState extends State<LiveSessionScreen> with WidgetsBindi
                         final m = _chatMessages[i];
                         return Padding(
                           padding: const EdgeInsets.only(bottom: 10),
-                          child: Row(
-                            crossAxisAlignment: CrossAxisAlignment.start,
-                            children: [
-                              Expanded(
-                                child: Column(
-                                  crossAxisAlignment: CrossAxisAlignment.start,
-                                  children: [
-                                    Text(m.sender.fullName,
-                                        style: const TextStyle(color: Colors.white54, fontSize: 11.5, fontWeight: FontWeight.w600)),
-                                    const SizedBox(height: 2),
-                                    Text(m.message, style: const TextStyle(color: Colors.white, fontSize: 13.5)),
-                                  ],
-                                ),
-                              ),
-                              if (_isHost)
-                                InkWell(
-                                  onTap: () => _deleteChat(m),
-                                  child: const Padding(
-                                    padding: EdgeInsets.only(left: 6, top: 2),
-                                    child: Icon(Icons.delete_outline_rounded, size: 16, color: Colors.white24),
+                          child: GestureDetector(
+                            // NEW (Pass 12 §1.1): long-press opens the
+                            // per-message emoji picker. Separate gesture
+                            // from the existing tap-to-delete icon below.
+                            onLongPress: () => _showChatReactionPicker(m),
+                            child: Row(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                Expanded(
+                                  child: Column(
+                                    crossAxisAlignment: CrossAxisAlignment.start,
+                                    children: [
+                                      Row(
+                                        children: [
+                                          Text(m.sender.fullName,
+                                              style: const TextStyle(
+                                                  color: Colors.white54, fontSize: 11.5, fontWeight: FontWeight.w600)),
+                                          if (m.isPinned) ...[
+                                            const SizedBox(width: 4),
+                                            const Icon(Icons.push_pin_rounded, size: 11, color: Colors.amberAccent),
+                                          ],
+                                        ],
+                                      ),
+                                      const SizedBox(height: 2),
+                                      Text(m.message, style: const TextStyle(color: Colors.white, fontSize: 13.5)),
+                                      // NEW (Pass 12 §1.1): reaction chips —
+                                      // only shown once at least one exists.
+                                      // Tapping a chip toggles the caller's
+                                      // own reaction on/off; other emoji are
+                                      // reached via the long-press picker.
+                                      if (m.reactionCounts.isNotEmpty) ...[
+                                        const SizedBox(height: 4),
+                                        Wrap(
+                                          spacing: 4,
+                                          children: m.reactionCounts.entries.map((entry) {
+                                            final mine = m.myReaction == entry.key;
+                                            return InkWell(
+                                              borderRadius: BorderRadius.circular(10),
+                                              onTap: () => mine ? _removeChatReaction(m) : _reactToChat(m, entry.key),
+                                              child: Container(
+                                                padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                                                decoration: BoxDecoration(
+                                                  color: mine ? Colors.white24 : Colors.white10,
+                                                  borderRadius: BorderRadius.circular(10),
+                                                  border: mine ? Border.all(color: Colors.white54, width: 0.5) : null,
+                                                ),
+                                                child: Text('${entry.key} ${entry.value}',
+                                                    style: const TextStyle(color: Colors.white, fontSize: 11)),
+                                              ),
+                                            );
+                                          }).toList(),
+                                        ),
+                                      ],
+                                    ],
                                   ),
                                 ),
-                            ],
+                                if (_isHost) ...[
+                                  // NEW (Pass 13 §1.9): pin/unpin, host-only
+                                  // (same _isHost gate as delete below).
+                                  InkWell(
+                                    onTap: () => m.isPinned ? _unpinChat(m) : _pinChat(m),
+                                    child: Padding(
+                                      padding: const EdgeInsets.only(left: 6, top: 2),
+                                      child: Icon(
+                                        m.isPinned ? Icons.push_pin_rounded : Icons.push_pin_outlined,
+                                        size: 16,
+                                        color: m.isPinned ? Colors.amberAccent : Colors.white24,
+                                      ),
+                                    ),
+                                  ),
+                                  InkWell(
+                                    onTap: () => _deleteChat(m),
+                                    child: const Padding(
+                                      padding: EdgeInsets.only(left: 6, top: 2),
+                                      child: Icon(Icons.delete_outline_rounded, size: 16, color: Colors.white24),
+                                    ),
+                                  ),
+                                ],
+                              ],
+                            ),
                           ),
                         );
                       },

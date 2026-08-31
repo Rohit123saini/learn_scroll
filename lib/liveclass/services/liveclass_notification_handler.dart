@@ -79,6 +79,7 @@ import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 
 import '../screens/live_session_screen.dart';
 import '../screens/classroom_detail_screen.dart';
+import '../screens/my_passes_screen.dart';
 // Reuse the SAME global navigator key calling already uses — set once in
 // main.dart via CallKitService.init(navKey). No need for a second key.
 import '../../message/services/call_kit_service.dart';
@@ -109,6 +110,25 @@ const Set<String> _handledTypes = {
   'staff_added',
   'review_posted',
   'report_reviewed',
+  // NEW (Pass 16 frontend catch-up §1.8) — 3 more types added alongside
+  // auto-renew (Pass 15) and pass gifting (Pass 14). See models.dart's
+  // NotifType for the same gap-fix note.
+  'pass_auto_renewed',
+  'auto_renew_failed',
+  'pass_gift_expired',
+};
+
+/// These 3 aren't classroom-scoped (no `classroom_id` in payload) and
+/// aren't session-scoped either, so neither of `handleTap`'s two existing
+/// branches fits — they route to `MyPassesScreen` instead, which is the
+/// one place a purchase/gift status actually lives. ⚠️ Tap target choice
+/// per frontend doc §4/§1.8 — confirm with product before shipping;
+/// `pass_gift_expired` in particular could arguably open a sent-gifts
+/// view instead once `pass_gift_claim_screen.dart` exists.
+const Set<String> _passLifecycleTapTypes = {
+  'pass_auto_renewed',
+  'auto_renew_failed',
+  'pass_gift_expired',
 };
 
 /// `class_reminder` aur `session_live` dono isi treatment ke hakdaar hain —
@@ -284,6 +304,13 @@ class LiveClassNotificationHandler {
       if (sessionId == null) return;
       navigator.push(MaterialPageRoute(
         builder: (_) => LiveSessionScreen(sessionId: sessionId),
+      ));
+      return;
+    }
+
+    if (_passLifecycleTapTypes.contains(type)) {
+      navigator.push(MaterialPageRoute(
+        builder: (_) => const MyPassesScreen(),
       ));
       return;
     }

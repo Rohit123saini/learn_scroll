@@ -40,14 +40,11 @@ class ChatSocketService {
     final uri = Uri.parse(
         "${_wsBaseUrl()}/ws/chat/$conversationId/?token=${token ?? ''}");
 
-    print("🟣 SOCKET CONNECTING TO: $uri");   // 🔥 DEBUG - hata dena baad me
-
     _channel = WebSocketChannel.connect(uri);
     _isConnected = true;
 
     _sub = _channel!.stream.listen(
       (raw) {
-        print("🔵 SOCKET RECEIVED RAW: $raw");   // 🔥 DEBUG - hata dena baad me
         try {
           final data = jsonDecode(raw) as Map<String, dynamic>;
           _eventController.add(data);
@@ -56,11 +53,9 @@ class ChatSocketService {
         }
       },
       onDone: () {
-        print("🔴 SOCKET CLOSED (onDone)");   // 🔥 DEBUG - hata dena baad me
         _isConnected = false;
       },
       onError: (e) {
-        print("🔴 SOCKET ERROR: $e");   // 🔥 DEBUG - hata dena baad me
         _isConnected = false;
         _eventController.add({'type': 'error', 'code': 'socket_error', 'message': e.toString()});
       },
@@ -68,18 +63,30 @@ class ChatSocketService {
   }
 
   void _send(Map<String, dynamic> payload) {
-    print("🟢 SOCKET SENDING: $payload (isConnected=$_isConnected)");   // 🔥 DEBUG - hata dena baad me
     if (_channel == null || !_isConnected) return;
     _channel!.sink.add(jsonEncode(payload));
   }
 
   /// Naya message bhejo. `clientId` offline-retry idempotency ke liye —
   /// har naye message ke liye unique id do (e.g. uuid ya timestamp).
+  ///
+  /// 🔧 FIX (backend mismatch) — pehle sirf plain-text jaata tha, isliye
+  /// media messages ko REST fallback pe bhejna padta tha. Backend ka
+  /// `ChatConsumer.handle_new_message`/`save_message` ab `file_url`,
+  /// `file_urls`, `thumbnail_url`, `meta` bhi read karta hai (WS media
+  /// send fix, backend doc §8) — isliye ye 4 optional params add kiye.
+  /// Media `message_type` ke liye backend `file_url`/`file_urls` me se
+  /// kam-se-kam ek ke bina 400 dega (REST `MessageCreateSerializer` jaisa
+  /// hi validation) — pehle Dio se upload karke URL le lo, phir yahan bhejo.
   void sendMessage({
     required String text,
     String messageType = 'text',
     required String clientId,
     String? replyTo,
+    String? fileUrl,
+    List<String>? fileUrls,
+    String? thumbnailUrl,
+    Map<String, dynamic>? meta,
   }) {
     _send({
       'type': 'message',
@@ -87,7 +94,20 @@ class ChatSocketService {
       'message_type': messageType,
       'text': text,
       'reply_to': replyTo,
+      if (fileUrl != null) 'file_url': fileUrl,
+      if (fileUrls != null) 'file_urls': fileUrls,
+      if (thumbnailUrl != null) 'thumbnail_url': thumbnailUrl,
+      if (meta != null) 'meta': meta,
     });
+  }
+
+  /// 🔧 NAYA (backend mismatch fix) — backend `ChatConsumer` client→server
+  /// `pin` event accept karta hai (`{message_id, pin: bool}`), frontend me
+  /// pehle sirf REST se pin/unpin hota tha. Ab socket se bhi bhej sakte ho
+  /// (optional — REST call already kaam karta hai, isko use karna zaroori
+  /// nahi, par server → `pin_event` broadcast dono se hi trigger hota hai).
+  void sendPin(String messageId, bool pin) {
+    _send({'type': 'pin', 'message_id': messageId, 'pin': pin});
   }
 
   void sendTyping(bool isTyping) {
