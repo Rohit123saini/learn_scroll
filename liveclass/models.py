@@ -1379,12 +1379,90 @@ class ChatMessage(models.Model):
     sent_at = models.DateTimeField(auto_now_add=True)
     is_deleted = models.BooleanField(default=False)  # soft-delete for moderation
 
+    # NEW (Pass 13) — pin a chat message/announcement so it doesn't get
+    # lost in scroll. Deliberately ONE pinned message per session, not a
+    # list: `ChatMessageViewSet.pin()` unpins any previously-pinned
+    # message for the same session in the same call, so `is_pinned=True`
+    # is never ambiguous about which one is "the" pinned message — a
+    # `unique_together`/partial-unique-index couldn't express "at most
+    # one True per session" portably across DB backends, so this is
+    # enforced in the view instead (see its docstring).
+    is_pinned = models.BooleanField(default=False)
+    pinned_by = models.ForeignKey(
+        User, on_delete=models.SET_NULL, null=True, blank=True, related_name="pinned_chat_messages"
+    )
+    pinned_at = models.DateTimeField(null=True, blank=True)
+
     class Meta:
         ordering = ["sent_at"]
         indexes = [models.Index(fields=["session", "sent_at"])]
 
     def __str__(self):
         return f"{self.sender}: {self.message[:30]}"
+
+
+class ChatReaction(models.Model):
+    """NEW (Pass 12) — lightweight emoji reaction on a chat message. Kept
+    deliberately separate from ChatMessage itself (not e.g. a JSONField
+    counter on the message row) so a reaction can be added/changed/removed
+    without ever touching — or needing a lock on — the message row, and so
+    `unique_together` can cheaply enforce "one reaction per user per
+    message" at the DB level instead of in application code.
+
+    ONE reaction per (message, user), upsertable — matches the same
+    "vote can be changed" shape as PollResponse/LivePollViewSet.vote()
+    above (update_or_create), not a Slack-style "many different emoji per
+    user" model. This app's chat is a lightweight engagement signal, not
+    a full reaction system — deliberately the simplest version that still
+    lets a student's tap reflect their latest reaction rather than
+    silently failing on the unique constraint or stacking duplicates.
+    """
+
+    class Reaction(models.TextChoices):
+        THUMBS_UP = "thumbs_up", "👍"
+        HEART = "heart", "❤️"
+        LAUGH = "laugh", "😂"
+
+    message = models.ForeignKey(ChatMessage, on_delete=models.CASCADE, related_name="reactions")
+    user = models.ForeignKey(User, on_delete=models.CASCADE, related_name="chat_reactions")
+    reaction = models.CharField(max_length=10, choices=Reaction.choices)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        unique_together = ("message", "user")
+        indexes = [models.Index(fields=["message"])]
+
+    def __str__(self):
+        return f"{self.user} reacted {self.reaction} to message {self.message_id}"
+
+
+class SessionReadState(models.Model):
+    """NEW (Pass 13) — one row per (session, user): the watermark this
+    user has "seen up to" for a session's chat and polls. Deliberately
+    ONE row covering both, not two separate models — "I reopened this
+    session's tab" naturally clears both unread badges together, and a
+    single upsert (see ClassSessionViewSet.mark_read below) is cheaper
+    than two.
+
+    NULL on either field means "never seen any" (not "seen the first
+    one") — so `id > NULL` semantics need an explicit `is None` branch
+    in the unread-count query rather than relying on SQL's own NULL
+    comparison, which is always UNKNOWN/false and would otherwise (very
+    subtly) undercount a first-ever visit as zero unread instead of
+    "all of them".
+    """
+
+    session = models.ForeignKey(ClassSession, on_delete=models.CASCADE, related_name="read_states")
+    user = models.ForeignKey(User, on_delete=models.CASCADE, related_name="session_read_states")
+    last_read_chat_message_id = models.PositiveIntegerField(null=True, blank=True)
+    last_seen_poll_id = models.PositiveIntegerField(null=True, blank=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        unique_together = ("session", "user")
+
+    def __str__(self):
+        return f"{self.user} read-state for {self.session}"
 
 
 # ---------------------------------------------------------------------------
@@ -1416,6 +1494,34 @@ class PollResponse(models.Model):
 
     def __str__(self):
         return f"{self.student} -> {self.poll} [{self.selected_option_index}]"
+
+
+class PollTemplate(models.Model):
+    """NEW (Pass 13) — quick-poll templates: a teacher who reuses the same
+    "Samajh aaya? Yes/No"-style poll every session saves it once here and
+    fires it in one tap via LivePollViewSet.quick_create() instead of
+    retyping the question/options each time.
+
+    Scoped to a classroom (not global/platform-wide) — a teacher's poll
+    templates are their own classroom's shorthand, not a shared library
+    across every classroom on the platform; `_can_manage_classroom` (the
+    same boundary already used for Assignment/Notice/ClassHoliday) gates
+    create/update/delete in PollTemplateViewSet.
+    """
+
+    classroom = models.ForeignKey(Classroom, on_delete=models.CASCADE, related_name="poll_templates")
+    created_by = models.ForeignKey(User, on_delete=models.CASCADE, related_name="created_poll_templates")
+
+    question = models.CharField(max_length=255)
+    options = models.JSONField(default=list)
+
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+
+    def __str__(self):
+        return f"{self.question} ({self.classroom.title})"
 
 
 # ---------------------------------------------------------------------------
@@ -1623,7 +1729,7 @@ class CoinTransaction(models.Model):
     user = models.ForeignKey(User, on_delete=models.CASCADE, related_name="coin_transactions")
 
     txn_type = models.CharField(max_length=10, choices=TxnType.choices)
-    reason = models.CharField(max_length=20, choices=Reason.choices)
+    reason = models.CharField(max_length=32, choices=Reason.choices)
     amount = models.PositiveIntegerField()
     balance_after = models.PositiveIntegerField()
 

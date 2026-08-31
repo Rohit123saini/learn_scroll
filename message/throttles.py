@@ -95,6 +95,46 @@ class ReactionThrottle(UserRateThrottle):
 from django.core.cache import cache
 
 
+# ---------------------------------------------------------------
+# 🔥 NAYA — per-IP throttle. Upar wale sab throttles `UserRateThrottle`
+# hain (per-AUTHENTICATED-user). Ye kaafi hai normal abuse ke liye, par
+# agar attacker ke paas multiple accounts/tokens hain (fake signups, leaked
+# tokens, ya ek compromised device se multiple logins) to per-user limit
+# bypass ho jaata hai — IP wahi rehta hai. Ye ek extra safety-net layer
+# hai, per-user throttle ko REPLACE nahi karta — dono ek saath lagao
+# (`get_throttles` me list me dono add kar do, DRF sabko check karta hai).
+# ---------------------------------------------------------------
+from rest_framework.throttling import SimpleRateThrottle
+
+
+class ScopedIPThrottle(SimpleRateThrottle):
+    """
+    Generic per-IP throttle jisme `scope` request ke hisaab se set karo.
+    Usage:
+        class MessageSendIPThrottle(ScopedIPThrottle):
+            scope = 'message_send_ip'
+            rate = '120/min'
+    `X-Forwarded-For` ko respect karta hai (load balancer/nginx ke peeche
+    real client IP ke liye) — agar nginx `X-Forwarded-For` set nahi karta
+    to `REMOTE_ADDR` pe fallback hota hai (DRF ka default `get_ident`).
+    """
+    def get_cache_key(self, request, view):
+        ident = self.get_ident(request)
+        return self.cache_format % {'scope': self.scope, 'ident': ident}
+
+
+class MessageSendIPThrottle(ScopedIPThrottle):
+    """REST message-send ke liye IP-level safety net (per-user throttle ke saath)."""
+    scope = 'message_send_ip'
+    rate = '120/min'
+
+
+class CallInitiateIPThrottle(ScopedIPThrottle):
+    """Call-initiate IP-level safety net — FCM push + LiveKit room, dono costly."""
+    scope = 'call_initiate_ip'
+    rate = '20/min'
+
+
 class WSMessageRateLimiter:
     """
     Usage (ChatConsumer.handle_new_message ke start me):

@@ -71,6 +71,7 @@ class MessageType(models.TextChoices):
     # ki tappable invite CARD (`type: 'study_room'`) is choice ke bina
     # serializer validation pe 400 deta tha, kyunki ye pehle choices me
     # hi nahi tha.
+    POLL = 'poll', 'Poll'  # 🔥 NAYA — group poll messages, see Poll model neeche
 
 
 class ConversationType(models.TextChoices):
@@ -214,6 +215,17 @@ class ConversationParticipant(BaseModel):
         'Message', null=True, blank=True, on_delete=models.SET_NULL, related_name='+'
     )
     last_read_at = models.DateTimeField(null=True, blank=True)
+
+    # 🔥 NAYA — Server-side draft auto-save. `label`/`is_muted`/`is_pinned`
+    # jaisa hi per-user field hai (ye bhi is ChatParticipant row pe hai, na
+    # ki Conversation pe), taaki ek hi half-typed message multi-device pe
+    # carry ho sake (WhatsApp Web jaisa — phone pe kuch type karo, laptop
+    # khol ke wahi text compose-box me mil jaaye). `draft_updated_at` sirf
+    # last-write-wins ke liye — 2 devices se near-simultaneous save ho to
+    # client ise dikha ke merge-conflict decide kar sakta hai; server khud
+    # koi merge nahi karta, seedha overwrite karta hai.
+    draft_text = models.TextField(blank=True, null=True)
+    draft_updated_at = models.DateTimeField(null=True, blank=True)
 
     joined_at = models.DateTimeField(default=timezone.now)
     left_at = models.DateTimeField(null=True, blank=True)  # group leave ke liye
@@ -420,6 +432,61 @@ class Message(BaseModel):
                 name='unique_message_client_id',
                 condition=models.Q(client_id__isnull=False),
             )
+        ]
+
+
+# ================= 3b. POLL (group/private poll messages) =================
+# 🔥 NAYA — WhatsApp-style poll. `Message` khud (`type=MessageType.POLL`)
+# sirf ek normal message row hai (list/search/pin/star/reply — sab wahi
+# machinery Message ke liye already kaam karti hai, poll ko koi special
+# case nahi banana pada). Poll ka apna structured data (question/options/
+# votes) alag models me hai kyunki votes RELATIONAL hone chahiye (kisne
+# vote kiya, kis option ko — `meta` JSONField me isko theek se query/
+# unique-constrain nahi kar sakte the).
+class Poll(BaseModel):
+    message = models.OneToOneField(Message, on_delete=models.CASCADE, related_name='poll')
+    question = models.CharField(max_length=500)
+    # False = single-choice (ek user sirf 1 option choose kar sakta hai —
+    # naya vote purane ko replace karta hai). True = multi-choice.
+    allow_multiple_answers = models.BooleanField(default=False)
+
+    is_closed = models.BooleanField(default=False)
+    closed_at = models.DateTimeField(null=True, blank=True)
+    closed_by = models.ForeignKey(
+        User, null=True, blank=True, on_delete=models.SET_NULL, related_name='+'
+    )
+
+    class Meta(BaseModel.Meta):
+        indexes = [models.Index(fields=['message'])]
+
+    def __str__(self):
+        return self.question
+
+
+class PollOption(BaseModel):
+    poll = models.ForeignKey(Poll, on_delete=models.CASCADE, related_name='options')
+    text = models.CharField(max_length=200)
+    order = models.PositiveSmallIntegerField(default=0)
+
+    class Meta(BaseModel.Meta):
+        ordering = ['order', 'created_at']
+        indexes = [models.Index(fields=['poll'])]
+
+
+class PollVote(BaseModel):
+    option = models.ForeignKey(PollOption, on_delete=models.CASCADE, related_name='votes')
+    user = models.ForeignKey(User, on_delete=models.CASCADE, related_name='poll_votes')
+
+    class Meta(BaseModel.Meta):
+        # Ek user ek hi option ko do baar vote nahi kar sakta. Single-choice
+        # polls me "sirf 1 option" ka rule DB constraint se nahi, view-level
+        # se enforce hota hai (`MessageViewSet.poll_vote` — naya vote se
+        # pehle us poll ke andar user ke saare purane votes clear karta hai),
+        # taaki allow_multiple_answers switch flexible rahe bina migration ke.
+        unique_together = ('option', 'user')
+        indexes = [
+            models.Index(fields=['option']),
+            models.Index(fields=['user']),
         ]
 
 

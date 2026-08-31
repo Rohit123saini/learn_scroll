@@ -22,9 +22,13 @@ from channels.layers import get_channel_layer
 
 from .mentions import extract_mentioned_user_ids
 from .media_utils import create_group_media_for_message
-from .models import ConversationParticipant, MessageStatus
+from .models import ConversationParticipant, MessageStatus, MessageType
 from .push_utils import send_chat_message_push, send_mention_push
 from .user_display import build_user_mini
+# 🔥 NAYE — advanced features (link preview / auto voice-transcription)
+# scheduled ("send later") messages pe bhi lagu hone chahiye, REST/WS
+# messages jaisa hi — consistency.
+from .tasks import generate_link_preview_task, transcribe_voice_message_task
 
 logger = logging.getLogger(__name__)
 
@@ -90,6 +94,13 @@ def finalize_scheduled_message(message):
             message.mentioned_users.set(mentioned_ids)
 
         create_group_media_for_message(message)
+
+    # 🔥 NAYE — commit ke baad enqueue (with-block ke bahar), same reasoning
+    # jaisa `views.py`'s `ConversationViewSet.messages` me hai.
+    if message.type == MessageType.TEXT and message.text:
+        generate_link_preview_task.delay(str(message.id))
+    elif message.type == MessageType.AUDIO and message.file_url:
+        transcribe_voice_message_task.delay(str(message.id))
 
     sender = build_user_mini(message.sender)
     channel_layer = get_channel_layer()

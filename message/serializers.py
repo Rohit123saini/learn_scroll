@@ -17,6 +17,9 @@ from .models import (
     MessageReaction,
     MessageStatus,
     MessageType,
+    Poll,
+    PollOption,
+    PollVote,
     Presentation,
     UserPresence,
 )
@@ -64,11 +67,29 @@ class UserMiniSerializer(serializers.ModelSerializer):
 # CONVERSATION
 # ======================================================================
 class ConversationSettingsSerializer(serializers.ModelSerializer):
-    """Per-user chat settings: mute/archive/pin (ConversationParticipant)."""
+    """
+    Per-user chat settings: mute/archive/pin (ConversationParticipant).
+
+    🔥 NAYA — `draft_text` bhi isi endpoint (`PATCH /conversations/<id>/
+    settings/`) se save hota hai, mute/pin jaisa hi per-user field hai.
+    `draft_updated_at` client set nahi kar sakta (read_only) — jab bhi
+    `draft_text` badalta hai to server khud `timezone.now()` laga deta hai
+    (neeche `update()` override), taaki client ko timestamp khud bhejne ki
+    zaroorat na pade aur clock-skew ka masla na ho.
+    """
 
     class Meta:
         model = ConversationParticipant
-        fields = ['is_archived', 'is_muted', 'is_pinned']
+        fields = [
+            'is_archived', 'is_muted', 'is_pinned',
+            'draft_text', 'draft_updated_at',
+        ]
+        read_only_fields = ['draft_updated_at']
+
+    def update(self, instance, validated_data):
+        if 'draft_text' in validated_data:
+            validated_data['draft_updated_at'] = timezone.now()
+        return super().update(instance, validated_data)
 
 
 class GroupMiniSerializer(serializers.ModelSerializer):
@@ -168,6 +189,83 @@ class MessageReadStatusSerializer(serializers.ModelSerializer):
         fields = ['user', 'is_delivered', 'delivered_at', 'is_read', 'read_at']
 
 
+# ======================================================================
+# POLL (WhatsApp-style group/private poll)
+# ======================================================================
+class PollOptionSerializer(serializers.ModelSerializer):
+    votes_count = serializers.SerializerMethodField()
+    voted_by_me = serializers.SerializerMethodField()
+
+    class Meta:
+        model = PollOption
+        fields = ['id', 'text', 'order', 'votes_count', 'voted_by_me']
+
+    def get_votes_count(self, obj):
+        # `.count()` prefetch_related() ka cache use nahi karta (fresh
+        # query maar deta), `.all()` + `len()` karta hai — jahan
+        # `ConversationViewSet.messages` GET `poll__options__votes`
+        # prefetch kar chuka hota hai, ye 0 extra queries leta hai. Jahan
+        # prefetch nahi hai (e.g. `poll_vote`/`poll_close` ka single-object
+        # response), same call bas 1 chhoti query karti hai — dono jagah
+        # sahi kaam karta hai.
+        return len(obj.votes.all())
+
+    def get_voted_by_me(self, obj):
+        request = self.context.get('request')
+        if not request:
+            return False
+        return any(vote.user_id == request.user.id for vote in obj.votes.all())
+
+
+class PollSerializer(serializers.ModelSerializer):
+    """Full poll representation — nested inside `MessageSerializer.poll`."""
+    options = PollOptionSerializer(many=True, read_only=True)
+    total_voters = serializers.SerializerMethodField()
+    closed_by = UserMiniSerializer(read_only=True)
+
+    class Meta:
+        model = Poll
+        fields = [
+            'id', 'question', 'allow_multiple_answers',
+            'is_closed', 'closed_at', 'closed_by',
+            'options', 'total_voters',
+        ]
+
+    def get_total_voters(self, obj):
+        # distinct users, not distinct votes — a multi-choice voter who
+        # picked 3 options still counts as 1 voter.
+        return PollVote.objects.filter(option__poll=obj).values('user_id').distinct().count()
+
+
+class PollCreateSerializer(serializers.Serializer):
+    """`ConversationViewSet.create_poll` request body."""
+    question = serializers.CharField(max_length=500)
+    options = serializers.ListField(
+        child=serializers.CharField(max_length=200, allow_blank=True),
+        min_length=2, max_length=10,
+    )
+    allow_multiple_answers = serializers.BooleanField(default=False)
+
+    def validate_question(self, value):
+        value = value.strip()
+        if not value:
+            raise serializers.ValidationError("Poll question khali nahi ho sakta.")
+        return value
+
+    def validate_options(self, value):
+        cleaned = [opt.strip() for opt in value if opt and opt.strip()]
+        if len(cleaned) < 2:
+            raise serializers.ValidationError("Poll me kam se kam 2 valid options chahiye.")
+        if len(set(cleaned)) != len(cleaned):
+            raise serializers.ValidationError("Poll options duplicate nahi ho sakte.")
+        return cleaned
+
+
+class PollVoteSerializer(serializers.Serializer):
+    """`MessageViewSet.poll_vote` request body."""
+    option_ids = serializers.ListField(child=serializers.UUIDField(), min_length=1)
+
+
 class MessageSerializer(serializers.ModelSerializer):
     """Full message representation — GET responses ke liye."""
     sender = UserMiniSerializer(read_only=True)
@@ -182,6 +280,11 @@ class MessageSerializer(serializers.ModelSerializer):
     # kahin bhi expose/wire nahi kiya gaya tha — ab dikhta bhi hai
     # (`is_starred`) aur `MessageViewSet.star` se toggle bhi ho sakta hai.
     is_starred = serializers.SerializerMethodField()
+    # 🔥 NAYA — poll data, sirf `type == POLL` messages pe non-null hota
+    # hai. `MessageSerializer` ka hi ek field hai (nayi alag serializer/
+    # endpoint client ko poll dekhne ke liye nahi chahiye — normal message
+    # list/detail me hi mil jaata hai, jaisa `reply_to_detail` ka pattern).
+    poll = serializers.SerializerMethodField()
 
     class Meta:
         model = Message
@@ -191,7 +294,7 @@ class MessageSerializer(serializers.ModelSerializer):
             'reply_to', 'reply_to_detail', 'is_edited', 'is_forwarded',
             'is_system_message', 'deleted_for_everyone', 'client_id',
             'reactions', 'is_read_by_me', 'is_pinned', 'pinned_at', 'pinned_by',
-            'mentioned_users', 'is_starred',
+            'mentioned_users', 'is_starred', 'poll',
             # 🔥 NAYA (advanced feature) — scheduled ("send later") messages.
             # Ye fields sirf tab dikhte hain jab requester khud sender ho
             # (see ConversationViewSet.messages / search / search_all —
@@ -224,6 +327,14 @@ class MessageSerializer(serializers.ModelSerializer):
         # EXISTS query — indexed M2M pe fast hai, message list-size (30-100
         # per page) ke liye theek hai.
         return obj.starred_by.filter(id=request.user.id).exists()
+
+    def get_poll(self, obj):
+        if obj.type != MessageType.POLL:
+            return None
+        poll = getattr(obj, 'poll', None)  # OneToOne reverse accessor
+        if not poll:
+            return None
+        return PollSerializer(poll, context=self.context).data
 
     def to_representation(self, instance):
         data = super().to_representation(instance)

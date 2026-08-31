@@ -15,8 +15,12 @@ scheduled jobs). Consumed by a Flutter app.
 `urls.py`, `admin.py`, `signals.py`, `tasks.py`, `notifications.py`,
 `exceptions.py`, `apps.py`, `livekit_utils.py`, `tests.py`,
 `__init__.py`, **`chunked_upload_views.py`** (added in Pass 3 — see
-§11). (`settings.py` is referenced throughout but was never part of
-this upload — see §8.)
+§11), **`consumers.py`, `realtime.py`, `routing.py`, `ws_auth.py`**
+(the Channels/WebSocket layer flagged as a follow-up in Pass 4 §12 and
+actually built in a later, previously undocumented pass — added to
+this list, and to §11's change log, in Pass 9; see that entry for what
+was found and fixed). (`settings.py` is referenced throughout but was
+never part of this upload — see §8.)
 
 ---
 
@@ -817,10 +821,23 @@ inference is now cross-checked against the real file below):
   a single request under this cap. ✅ confirmed set to 10MB in settings.py.
 
 **Packages required** (no `requirements.txt` in this upload):
-`psycopg2-binary`, `channels_redis`, `django-redis`, `sentry-sdk`,
+`psycopg2-binary`, **`channels`** (Pass 9 — the base package itself was
+missing from this list; `channels_redis` depends on it but listing it
+explicitly here avoids anyone assuming `channels_redis` alone is
+sufficient), `channels_redis`, `django-redis`, `sentry-sdk`,
 `drf-spectacular`, `livekit-api`, `celery`, `django-filter`,
 `django-cors-headers`, `whitenoise`, `daphne`,
 `djangorestframework-simplejwt`, `python-dotenv`.
+
+**Still needs verifying in the real `settings.py` (Pass 9 — could not
+check, `settings.py` wasn't included in the files reviewed this pass):**
+`"channels"` in `INSTALLED_APPS`, `ASGI_APPLICATION` pointing at the
+project's `asgi.py` (see `ws_auth.py`'s own docstring for the exact
+wiring it expects), and `CHANNEL_LAYERS` configured with
+`channels_redis` against `REDIS_URL`. None of `consumers.py` /
+`realtime.py` / `routing.py` / `ws_auth.py` can function without all
+three — worth an explicit `python manage.py check` once `settings.py`
+is available again.
 
 **Other apps this app depends on, not in this upload:** `login` (custom
 `User` model with `.coin`, `.phone_number`/`.mobile`, standard auth
@@ -1325,6 +1342,226 @@ real defects, all introduced in Pass 7 and none caught until now.)*
   `CoinPurchase` migration (see Pass 7 above — still not generated, same
   reason as every other migration note in this file).
 
+**Pass 9 — realtime-layer (`consumers.py`/`realtime.py`/`routing.py`/
+`ws_auth.py`) added to this file's scope for the first time, and two
+real gaps in it fixed:**
+- **`recording.started`/`recording.stopped`/`recording.ready` never
+  actually sent.** `consumers.py`'s own module docstring had promised
+  connected clients these push events since the WebSocket layer was
+  built, but `ClassSessionViewSet.start_recording`/`stop_recording`
+  never called `broadcast_to_session()`, and neither did
+  `LiveKitWebhookView`'s `egress_ended` handling once the final
+  playable URL landed. A connected student's "REC" indicator (and the
+  eventual "recording is ready" moment) never updated live — only the
+  next REST poll would reveal it. Fixed: both actions now broadcast on
+  success; the webhook handler now broadcasts `recording.stopped` for
+  the auto-stop case (`empty_timeout` closed the room without
+  `stop_recording()` ever being called — the only case where the
+  handler's own comment already noted `egress_id` could get cleared by
+  something other than that endpoint) and `recording.ready` with the
+  URL whenever a file result comes back.
+- **Kicked/banned participants kept their live socket.**
+  `ClassSessionViewSet.kick()` and `ClassroomViewSet.ban()` only ever
+  blocked *future* `join()`/`token()` REST calls (via `kicked_at`) —
+  an already-open `ws/liveclass/session/<id>/` connection for that same
+  user kept receiving every chat/poll/hand-raise event for the rest of
+  the session, since `SessionConsumer.connect()` is the only place
+  access was ever checked. Other connected clients also never saw the
+  kicked user leave live. Fixed: both actions now broadcast
+  `participant.kicked`; `SessionConsumer.session_event()` forwards it
+  to everyone in the group as a normal event (so participant lists
+  update live) and additionally closes its own connection when the
+  kicked `user_id` matches the socket it's running on — no second DB
+  query needed, the consumer already has its own user's id from
+  `connect()`.
+- **Documentation-only fixes, this file:** §"Files in scope" (added the
+  4 realtime files, previously undocumented even though Pass 4 §12 had
+  flagged the underlying feature and it was evidently built afterward),
+  §10 (added the missing base `channels` package to the requirements
+  list — only `channels_redis`/`daphne` were listed before; also added
+  an explicit "still needs verifying" note for `INSTALLED_APPS`/
+  `ASGI_APPLICATION`/`CHANNEL_LAYERS` since `settings.py` wasn't part of
+  the files reviewed this pass).
+- **Not done this pass:** actually confirming `CHANNEL_LAYERS`/
+  `ASGI_APPLICATION`/`INSTALLED_APPS` in the real `settings.py` (not
+  available this pass — see §10's new note); a connection-level rate
+  limit on `SessionConsumer.connect()` (REST endpoints all have
+  `ScopedRateThrottle`, this socket has no equivalent); a missed-event
+  replay/catch-up mechanism for a client that reconnects after a drop
+  (events broadcast while it was disconnected are gone for good — no
+  gap-fill, by design of `broadcast_to_session()`'s fire-and-forget
+  contract). All three flagged as follow-ups, not regressions.
+
+**Pass 10 — comfort feature: missed-event catch-up on reconnect.**
+Flagged as an open gap at the end of Pass 9 (no replay/gap-fill for a
+client that reconnects after a drop) — implemented this pass, not just
+noted:
+- **`realtime.py`** — `broadcast_to_session()` now also appends every
+  event to a short, capped, auto-expiring per-session replay buffer
+  (`_HISTORY_MAX_EVENTS=50` entries, `_HISTORY_TTL_SECONDS=15min`),
+  reusing `django-redis`'s raw client (no new dependency — this project
+  already requires `django-redis`, see §10) via one atomic
+  RPUSH+LTRIM+EXPIRE pipeline. New `get_missed_events(session_id,
+  since)` reads that buffer back, filtered to events newer than a
+  client-supplied watermark. Both functions degrade to a silent no-op
+  (`False`/`[]`) on any cache backend without raw Redis access (e.g.
+  local dev on `LocMemCache`) or any Redis error — catch-up is a
+  comfort feature, never allowed to be the reason a broadcast or a
+  connection fails, same contract as everything else in this file.
+- **`consumers.py`** — `connect()` now accepts an optional
+  `?since=<unix_ts>` query param and replays anything the client missed
+  right after `connection.ack` (each replayed entry flagged
+  `"replayed": true`); `connection.ack` itself now also returns a
+  `server_time` so a client's very first connection has a watermark to
+  remember for its next one; `session_event()` now forwards the `ts`
+  Pass 9's live broadcasts already generate, so a client always has an
+  up-to-date "since" value regardless of whether an event arrived live
+  or via replay.
+- **Why this one, not presence/typing/rate-limiting** (the other ideas
+  raised alongside it): this app is consumed by a Flutter mobile client
+  — brief mid-class connectivity drops (elevators, mobile-data handoffs,
+  spotty WiFi) are the normal case, not the edge case, and silently
+  losing a chat message or the current poll result during one of those
+  is the single most noticeable "this app feels unreliable" moment a
+  student can hit. Presence/typing indicators and a WS-connect rate
+  limit are still open — see §12 — but they're polish, not a
+  reliability gap the way missed events were.
+- **Not done this pass:** a client-side reference implementation
+  (Flutter isn't part of this upload); presence tracking; a
+  connection-level rate limit on `SessionConsumer.connect()`.
+
+**Pass 11 — comfort feature: live presence ("who's actually connected
+right now").** Flagged as an open idea alongside Pass 10 (§12 item 17)
+— implemented this pass:
+- **`realtime.py`** — new `mark_present(session_id, user_id)` /
+  `mark_absent(session_id, user_id)` keep a per-session Redis HASH of
+  `user_id -> open-connection count` (same raw-client pattern as the
+  Pass 10 replay buffer, no new dependency), using atomic `HINCRBY` so
+  concurrent connects/disconnects for the same user can't race into an
+  inconsistent count. Each returns a bool for the 0->1 / ->0 transition
+  only — a student's second device connecting/disconnecting updates the
+  count silently rather than re-announcing someone already known to be
+  present. New `get_present_user_ids(session_id)` reads the current
+  set back for a fresh connection's snapshot. TTL'd
+  (`_PRESENCE_TTL_SECONDS=6h`, refreshed on every call) so an abandoned
+  session's key self-cleans instead of leaking forever. Same
+  degrade-to-no-op-never-raise contract as every other function in this
+  file.
+- **`consumers.py`** — `connect()` now calls `mark_present()` after the
+  catch-up replay, broadcasts `presence.joined` only on a genuine first
+  connection, and always sends a `presence.snapshot` (everyone
+  currently present, self included) right after — so a newly-connected
+  client immediately knows who else is in the room instead of only
+  learning about people who join afterward. `disconnect()` mirrors this
+  with `mark_absent()` + `presence.left`, called AFTER `group_discard()`
+  so a disconnecting client never receives its own leave echo.
+- **Known limitation, not solved this pass:** presence reflects
+  `disconnect()` firing, which an ungraceful drop (airplane mode, a
+  phone that loses signal without sending a close frame) can delay
+  until the ASGI server's own transport timeout notices — same
+  inherent limitation as anyone's plain WebSocket connection state, not
+  specific to this implementation. The existing `"ping"`/`"pong"`
+  keepalive in `receive_json()` is the natural place to eventually add
+  an idle-timeout eviction if this staleness window turns out to matter
+  in practice; not built this pass since it's speculative until real
+  usage shows it's needed.
+
+**Pass 12 — the three remaining Channels/WebSocket gaps flagged in §12
+item 17 across Passes 9–11, plus one new engagement feature — all
+implemented this pass:**
+- **Chat reactions (👍❤️😂).** New `ChatReaction` model (`models.py`) —
+  one row per `(message, user)`, upsertable, same "changing your answer"
+  shape as `PollResponse`/`LivePollViewSet.vote()`. New
+  `ChatMessageViewSet.react()` detail action (POST to set/change, DELETE
+  to remove — see `urls.py`), gated behind the same `_has_room_access`
+  boundary as chat create, with its own `chat_reaction` throttle scope
+  (see item 18 below). Broadcasts a recomputed `chat.reaction` event
+  (message id + full `reaction_counts`) via the existing
+  `broadcast_to_session()` — no changes needed to `consumers.py` or
+  `realtime.py` for this one, it reuses Pass 9's infra exactly as
+  designed. `ChatMessageSerializer` gained `reaction_counts`/
+  `my_reaction` fields; `ChatMessageViewSet.get_queryset()` now
+  `prefetch_related("reactions__user")` so this never becomes an N+1 in
+  a chat list response. **Needs a migration** — new model, nothing else
+  in the DB schema changed.
+- **Typing indicator.** Third inbound WebSocket message type (`consumers.
+  py`), alongside `ping`: a client sends `{"type": "typing"}` and every
+  OTHER connected client gets `chat.typing`. Deliberately NOT routed
+  through `broadcast_to_session()` — no DB, no REST endpoint, and
+  specifically no replay-history entry, since a stale "is typing" replayed
+  to a reconnecting client would be actively misleading rather than just
+  late (unlike chat/poll/hand events, where late-but-correct is fine).
+  Uses `channel_layer.group_send()` directly with a `sender_channel` tag
+  so `session_event()` can skip echoing it back to whoever sent it — no
+  other event type in this app needs that (a sender is never in a
+  position to also be a listener of its own REST-triggered broadcasts,
+  since those go out AFTER the DB write completes on a different
+  request/response cycle; a raw WebSocket send doesn't have that natural
+  gap). No "stopped typing" event — client-side auto-clear after a few
+  seconds of silence, same pattern most chat UIs already use.
+- **WS-connect rate limiting** (open since Pass 9, §12 item 17). New
+  `realtime.check_connect_rate_limit(user_id)` — a fixed-window Redis
+  counter (`INCR`+`EXPIRE`, same raw-client pattern as the Pass 10/11
+  functions), `20` connects per `60s` per user, called from `consumers.
+  connect()` right after the auth check and before the DB session/access
+  query. Over the limit closes with `4429`. Same fail-open contract as
+  every other function in `realtime.py`: no raw Redis client, or any
+  Redis error, allows the connection rather than blocking it.
+- **Idle-timeout presence eviction** (open since Pass 11's own
+  docstring). `consumers.py`'s `connect()` now starts a lightweight
+  per-connection watchdog task (`asyncio.sleep` loop, no new
+  infrastructure) that closes the socket itself if no `"ping"` has
+  arrived in 90 seconds (checked every 15s) — this re-enters the normal
+  ASGI teardown path, so `disconnect()`/`mark_absent()`/`presence.left`
+  fire exactly as they would for any other close, just promptly instead
+  of waiting on the ASGI server's own (much longer) transport timeout.
+  `disconnect()` cancels the watchdog on every other close path so it
+  never outlives its own connection.
+- **Not done this pass:** a client-side reference implementation
+  (still no Flutter code in this upload); a per-message profanity/spam
+  filter, session analytics, or any of the other polish/moderation/
+  growth ideas raised alongside this batch — noted as future candidates,
+  out of scope for this pass.
+
+**Pass 13 — the 🟡 "make chat/poll more useful" batch — all three
+implemented this pass:**
+- **Unread chat/poll count per session.** New `SessionReadState` model
+  (`session`, `user`, `last_read_chat_message_id`, `last_seen_poll_id`)
+  — one upsertable row per (session, user), not two separate models,
+  since "reopened this session's tab" naturally clears both badges
+  together. `ClassSessionViewSet.unread()` (GET) returns
+  `{"chat": N, "polls": N}` via a real DB count against the caller's
+  watermark — deliberately NOT derived from the Pass 10 replay buffer
+  (that's capped at 50 events/15 minutes and would badly undercount
+  "away since this morning", despite the original idea suggesting it).
+  `ClassSessionViewSet.mark_read()` (POST) advances the watermark,
+  defaulting to "everything that currently exists" when no explicit id
+  is given. **Needs a migration** — new model.
+- **Pin a chat message / announcement.** `ChatMessage` gained
+  `is_pinned`/`pinned_by`/`pinned_at`. New `ChatMessageViewSet.pin()`/
+  `unpin()` detail actions, host-only (`_can_moderate_session`, same
+  boundary as poll create/close). At most ONE pinned message per
+  session by construction — `pin()` unpins whichever was pinned before
+  in the same call, since a DB constraint can't portably express "at
+  most one True per session" across backends. Broadcasts `chat.pinned`/
+  `chat.unpinned` via the existing `broadcast_to_session()`. Explicitly
+  NOT the existing `Notice` model (see the original idea's own framing:
+  `Notice` is classroom-wide/persistent, this is session-live-chat
+  scoped and tied to an actual message row) — a deliberate new field on
+  `ChatMessage`, not a repurposed `Notice`. **Needs a migration** — 3
+  new columns on an existing table.
+- **Quick-poll templates.** New `PollTemplate` model (`classroom`,
+  `created_by`, `question`, `options`), classroom-scoped, CRUD gated
+  behind `_can_manage_classroom` (same boundary as `Assignment`/
+  `Notice`/`ClassHoliday`) via the new `PollTemplateViewSet` (`/poll-
+  templates/`). New `LivePollViewSet.quick_create()` (list-level POST
+  `/polls/quick-create/`, body `{"template": id, "session": id}`) fires
+  a saved template into a live session in one call — validates the
+  template belongs to the session's own classroom before allowing it,
+  same host-tier check as regular poll `create()`, then broadcasts
+  `poll.created` exactly like a normal create would (a listening client
+  can't tell the difference). **Needs a migration** — new model.
+
 ---
 
 ## 12. Open action items before deploy
@@ -1399,15 +1636,46 @@ fixed in the source, not just noted here.
     wired in from `LiveKitWebhookView`'s egress-ended handling — neither
     exists yet, deliberately (see §7/§11).
 17. **Consider, but not yet built:** DB connection pooling
-    (`CONN_MAX_AGE`/PgBouncer), a CDN in front of media/recording URLs,
-    and a Channels/WebSocket layer for chat/raise-hand/live-poll if
-    REST-polling latency becomes a real user complaint — all flagged in
-    Pass 4 as bigger-scope follow-ups, not done in this pass. Per-user
-    share-rate limiting, a "my shares" endpoint, and `share_count` as an
-    `Explore` sort option — flagged in Pass 6, deliberately excluded from
-    that pass. A per-user daily rate cap on coin-purchase `initiate`
-    calls beyond the blanket `10/min` scope rate — flagged in Pass 8,
-    deliberately excluded from that pass.
+    (`CONN_MAX_AGE`/PgBouncer), a CDN in front of media/recording URLs.
+    (The Channels/WebSocket layer for chat/raise-hand/live-poll flagged
+    here in Pass 4 IS now built — see `consumers.py`/`realtime.py`/
+    `routing.py`/`ws_auth.py`, added to this file's scope in Pass 9.)
+    Per-user share-rate limiting, a "my shares" endpoint, and
+    `share_count` as an `Explore` sort option — flagged in Pass 6,
+    deliberately excluded from that pass. A per-user daily rate cap on
+    coin-purchase `initiate` calls beyond the blanket `10/min` scope
+    rate — flagged in Pass 8, deliberately excluded from that pass.
+    (A connection-level rate limit on `SessionConsumer.connect()`, live
+    presence, and an idle-timeout-based presence eviction — all flagged
+    across Pass 9-11 — ARE now built, see Pass 12 above.)
+    **Still open after Pass 12:** unread chat/poll counts, pinning a
+    chat message, quick-poll templates, a post-session engagement
+    report, per-notification-type channel preferences, a digest email,
+    per-message chat reports, a profanity/spam filter, gifting a pass,
+    and auto-renew passes — all raised as ideas alongside the Pass 12
+    batch, none built yet; candidates for a future pass, roughly in that
+    priority order (safety/moderation items ahead of monetization ones).
+    (Unread chat/poll counts, pinning a chat message, and quick-poll
+    templates — the three flagged first in that list — ARE now built,
+    see Pass 13 above. **Still open after Pass 13:** a post-session
+    engagement report, per-notification-type channel preferences, a
+    digest email, per-message chat reports, a profanity/spam filter,
+    gifting a pass, and auto-renew passes.)
+18. **Add `chat_reaction` to `DEFAULT_THROTTLE_RATES`** (Pass 12) —
+    same class of requirement as `chat_message_create`/`session_join`/
+    etc.: without a matching entry, `ChatMessageViewSet.react()`'s
+    `ScopedRateThrottle` 500s the first request instead of throttling
+    it (same failure mode Pass 8 found and fixed for the two coin
+    endpoints — see §11 Pass 8). A generous rate (e.g. `60/min`) is
+    appropriate since a reaction is a single tap, not a typed message.
+19. **Generate and run the Pass 12 `ChatReaction` migration** — plain
+    new table + index, no extension needed, safe on any DB backend.
+20. **Generate and run the Pass 13 migration** — `SessionReadState`
+    (new table), `PollTemplate` (new table), and 3 new columns
+    (`is_pinned`/`pinned_by`/`pinned_at`) on the existing `ChatMessage`
+    table. Plain schema changes, no extension needed, safe on any DB
+    backend — same as items 9/10/12/14/19 above, just batched into one
+    migration file since they landed in the same pass.
 
 ---
 

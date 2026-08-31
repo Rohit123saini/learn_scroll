@@ -29,7 +29,35 @@ from celery import shared_task
 from django.db import transaction
 from django.utils import timezone
 
+from asgiref.sync import async_to_sync
+from channels.layers import get_channel_layer
+
 logger = logging.getLogger(__name__)
+
+
+def _broadcast_meta_update(message, **extra_fields):
+    """
+    🔥 SHARED HELPER (used by the two new advanced-feature tasks below) —
+    ek message ka `meta` background me (Celery task ke andar) update hone
+    ke baad, khuli hui chat screens ko turant pata chalna chahiye — warna
+    link-preview card ya transcript sirf refresh/reopen karne par dikhega,
+    jo "advanced"/real-time feel ko defeat kar deta hai.
+
+    Naya WS event type `meta_update` use karta hai (consumers.py me
+    handler add kiya gaya hai, `edit_event`/`disappearing_messages_updated`
+    jaisa hi plain-passthrough pattern) — sirf `meta` field diff bhejta hai,
+    poora message dobara nahi.
+    """
+    channel_layer = get_channel_layer()
+    async_to_sync(channel_layer.group_send)(
+        f'chat_{message.conversation_id}',
+        {
+            'type': 'meta_update',
+            'message_id': str(message.id),
+            'meta': message.meta,
+            **extra_fields,
+        },
+    )
 
 
 @shared_task(name="message.send_scheduled_messages")
@@ -121,3 +149,115 @@ def cleanup_expired_messages():
         logger.info("cleanup_expired_messages: hard-deleted %s expired message(s)", deleted_total)
 
     return {"deleted": deleted_total}
+
+
+# ======================================================================
+# 🔥 NAYE — ADVANCED FEATURE #1: Link Previews (background generation)
+# ======================================================================
+@shared_task(
+    name="message.generate_link_preview",
+    bind=True,
+    max_retries=2,
+    default_retry_delay=5,
+)
+def generate_link_preview_task(self, message_id):
+    """
+    `views.py` (REST) aur `consumers.py` (WS) — dono, TEXT message me URL
+    milne par `.delay(message.id)` se ye task enqueue karte hain (message
+    save hone ke turant baad, request ko block kiye bina).
+
+    Fetch fail ho (dead link, timeout, unsafe/internal URL — `link_preview.
+    py` ka SSRF-guard) to bas chup-chaap return ho jaata hai — message
+    bina preview ke normal text message jaisa hi reh jaata hai, koi error
+    user tak nahi jaata.
+    """
+    from .models import Message, MessageType
+    from .link_preview import extract_first_url, fetch_link_preview
+
+    try:
+        message = Message.objects.select_related('conversation').get(id=message_id)
+    except Message.DoesNotExist:
+        return
+
+    if message.type != MessageType.TEXT or not message.text:
+        return
+
+    url = extract_first_url(message.text)
+    if not url:
+        return
+
+    try:
+        preview = fetch_link_preview(url)
+    except Exception:
+        logger.exception("generate_link_preview_task: fetch failed for message=%s", message_id)
+        return
+
+    if not preview:
+        return
+
+    with transaction.atomic():
+        message = Message.objects.select_for_update().get(id=message_id)
+        meta = dict(message.meta or {})
+        meta['link_preview'] = preview
+        message.meta = meta
+        message.save(update_fields=['meta', 'updated_at'])
+
+    _broadcast_meta_update(message)
+
+
+# ======================================================================
+# 🔥 NAYE — ADVANCED FEATURE #2: Auto Voice-Message Transcription
+# ======================================================================
+@shared_task(
+    name="message.transcribe_voice_message",
+    bind=True,
+    max_retries=2,
+    default_retry_delay=10,
+)
+def transcribe_voice_message_task(self, message_id):
+    """
+    `VoiceTranscribeView` (views_ai.py) already existed — par sirf
+    CLIENT-TRIGGERED tha (user ko manually "View transcript" dabana padta
+    tha, jo har voice-note me se recipient ko pata bhi nahi chalta ki
+    dabane layak cheez hai). Ye task wahi `ai_service.transcribe_audio`
+    reuse karta hai, bas AUTOMATICALLY — voice message bhejte hi
+    background me transcript ban jaata hai aur `Message.meta['transcript']`
+    me save ho jaata hai. Client ab bina extra API-call ke seedha
+    message list se transcript dikha sakta hai (agar available ho).
+
+    AI service down/not-configured ho (`AI_ENABLED=False`) to bhi voice
+    message normally deliver ho chuka hota hai already — sirf transcript
+    add nahi hota, poora chat flow unaffected rehta hai.
+    """
+    from .models import Message, MessageType
+    from .ai_service import transcribe_audio, AI_ENABLED
+
+    if not AI_ENABLED:
+        return
+
+    try:
+        message = Message.objects.select_related('conversation').get(id=message_id)
+    except Message.DoesNotExist:
+        return
+
+    if message.type != MessageType.AUDIO or not message.file_url:
+        return
+
+    try:
+        mime_type = (message.meta or {}).get('mime_type', 'audio/ogg')
+        transcript = transcribe_audio(message.file_url, mime_type=mime_type)
+    except Exception as e:
+        logger.warning("transcribe_voice_message_task: failed for message=%s: %s", message_id, e)
+        return
+
+    if not transcript:
+        return
+
+    with transaction.atomic():
+        message = Message.objects.select_for_update().get(id=message_id)
+        meta = dict(message.meta or {})
+        meta['transcript'] = transcript
+        message.meta = meta
+        message.save(update_fields=['meta', 'updated_at'])
+
+    _broadcast_meta_update(message)

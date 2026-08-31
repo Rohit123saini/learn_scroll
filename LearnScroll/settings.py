@@ -441,6 +441,34 @@ REST_FRAMEWORK = {
         # times to different contacts) while stopping a script from
         # inflating share_count or spamming in-app share notifications.
         "classroom_share": "10/min",
+        # ---------------------------------------------------------------
+        # NOTE (fix — CRITICAL, same bug class as every scope documented
+        # above, found in the `message` app this time): `message/throttles.
+        # py` defines 6 custom-scoped throttles (`MessageSendThrottle`,
+        # `CallInitiateThrottle`, `GroupCreateThrottle`, `ReactionThrottle`,
+        # plus the newer `MessageSendIPThrottle`/`CallInitiateIPThrottle`)
+        # and `message/views_ai.py` defines a 7th (`AiTranscribeThrottle`,
+        # scope="ai_transcribe") — none of their scopes had a matching rate
+        # here. `UserRateThrottle`/`SimpleRateThrottle` subclasses look up
+        # their rate the exact same way `ScopedRateThrottle` does
+        # (`DEFAULT_THROTTLE_RATES[self.scope]`), so the very first message
+        # sent, call initiated, group created, reaction added, or voice
+        # note transcribed would raise `ImproperlyConfigured` — a guaranteed
+        # 500 on day one for the single most-used feature in the app (chat
+        # itself), not a rare edge case. Rates match what's already
+        # documented as each throttle class's intended rate in throttles.py
+        # / views_ai.py.
+        # ---------------------------------------------------------------
+        "message_send": "60/min",
+        "call_initiate": "10/min",
+        "group_create": "5/min",
+        "reaction": "120/min",
+        "ai_transcribe": "15/min",
+        # IP-level safety net (used alongside the per-user rates above, not
+        # instead of them — see MessageSendIPThrottle/CallInitiateIPThrottle
+        # in throttles.py for why per-user alone isn't enough).
+        "message_send_ip": "120/min",
+        "call_initiate_ip": "20/min",
     },
     # NOTE (fix — production breaking gap): NOT having this meant every
     # list endpoint (classrooms, sessions, chat-messages, notices, etc.)

@@ -110,10 +110,18 @@ router — list/retrieve/create/update/delete on each, plus the custom
     materials/{id}/                      GET, PUT, PATCH, DELETE
     chat-messages/                       GET, POST
     chat-messages/{id}/                  DELETE           (soft delete)
+    chat-messages/{id}/react/            POST, DELETE     (Pass 12 — reactions)
+    chat-messages/{id}/pin/              POST             (Pass 13)
+    chat-messages/{id}/unpin/            POST             (Pass 13)
     polls/                               GET, POST
     polls/{id}/                          GET, PUT, PATCH, DELETE
     polls/{id}/vote/                     POST
     polls/{id}/close/                    POST
+    polls/quick-create/                  POST             (Pass 13 — from a PollTemplate)
+    poll-templates/                      GET, POST                          (Pass 13)
+    poll-templates/{id}/                 GET, PUT, PATCH, DELETE            (Pass 13)
+    sessions/{id}/unread/                GET                                (Pass 13)
+    sessions/{id}/mark-read/             POST                               (Pass 13)
     assignments/                         GET, POST
     assignments/{id}/                    GET, PUT, PATCH, DELETE
     submissions/                         GET, POST
@@ -249,6 +257,7 @@ from .views import (
     NoticeViewSet,
     NotificationViewSet,
     PassPurchaseViewSet,
+    PollTemplateViewSet,
     ReferralViewSet,
     SessionParticipantViewSet,
     SessionWaitlistViewSet,
@@ -270,6 +279,7 @@ router.register(r"participants", SessionParticipantViewSet, basename="sessionpar
 router.register(r"materials", ClassMaterialViewSet, basename="classmaterial")
 router.register(r"chat-messages", ChatMessageViewSet, basename="chatmessage")
 router.register(r"polls", LivePollViewSet, basename="livepoll")
+router.register(r"poll-templates", PollTemplateViewSet, basename="polltemplate")
 router.register(r"assignments", AssignmentViewSet, basename="assignment")
 router.register(r"submissions", AssignmentSubmissionViewSet, basename="assignmentsubmission")
 router.register(r"reviews", ClassroomReviewViewSet, basename="classroomreview")

@@ -21,6 +21,7 @@ from .models import (
     BreakoutRoom,
     Certificate,
     ChatMessage,
+    ChatReaction,
     ClassHoliday,
     ClassJoinRequest,
     ClassMaterial,
@@ -45,8 +46,10 @@ from .models import (
     Notification,
     PassPurchase,
     PollResponse,
+    PollTemplate,
     Referral,
     SessionParticipant,
+    SessionReadState,
     SessionWaitlist,
 )
 
@@ -514,11 +517,58 @@ class ClassMaterialSerializer(serializers.ModelSerializer):
 # ---------------------------------------------------------------------------
 class ChatMessageSerializer(serializers.ModelSerializer):
     sender = UserMiniSerializer(read_only=True)
+    # NEW (Pass 12 — chat reactions): {"heart": 3, "thumbs_up": 1} — only
+    # reaction types with at least one reaction are included, so the
+    # Flutter client doesn't have to filter zero-counts out itself.
+    # my_reaction is this request's own user's current reaction (or None),
+    # so the client can render an already-tapped emoji as "active" without
+    # a second lookup. Both are cheap: reactions is prefetched by
+    # ChatMessageViewSet.get_queryset() (see views.py), so this never adds
+    # a query per message in a list response.
+    reaction_counts = serializers.SerializerMethodField()
+    my_reaction = serializers.SerializerMethodField()
 
     class Meta:
         model = ChatMessage
-        fields = ["id", "session", "sender", "message", "sent_at", "is_deleted"]
-        read_only_fields = ["id", "sent_at", "is_deleted"]
+        fields = [
+            "id", "session", "sender", "message", "sent_at", "is_deleted",
+            "reaction_counts", "my_reaction", "is_pinned", "pinned_by", "pinned_at",
+        ]
+        read_only_fields = ["id", "sent_at", "is_deleted", "is_pinned", "pinned_by", "pinned_at"]
+
+    def get_reaction_counts(self, obj):
+        counts: dict[str, int] = {}
+        for r in obj.reactions.all():  # .all() so the prefetch_related on
+            # ChatMessageViewSet.get_queryset() is actually reused instead
+            # of firing a fresh filtered query per message.
+            counts[r.reaction] = counts.get(r.reaction, 0) + 1
+        return counts
+
+    def get_my_reaction(self, obj):
+        request = self.context.get("request")
+        user = getattr(request, "user", None)
+        if user is None or not getattr(user, "is_authenticated", False):
+            return None
+        for r in obj.reactions.all():
+            if r.user_id == user.id:
+                return r.reaction
+        return None
+
+
+class ChatReactionSerializer(serializers.ModelSerializer):
+    user = UserMiniSerializer(read_only=True)
+
+    class Meta:
+        model = ChatReaction
+        fields = ["id", "message", "user", "reaction", "created_at"]
+        read_only_fields = ["id", "created_at"]
+
+    def validate_reaction(self, value):
+        if value not in ChatReaction.Reaction.values:
+            raise serializers.ValidationError(
+                f"Unsupported reaction. Choose one of: {', '.join(ChatReaction.Reaction.values)}."
+            )
+        return value
 
 
 # ---------------------------------------------------------------------------
@@ -571,6 +621,29 @@ class PollResponseSerializer(serializers.ModelSerializer):
         if poll and idx is not None and idx >= len(poll.options):
             raise serializers.ValidationError({"selected_option_index": "Out of range for this poll's options."})
         return attrs
+
+
+class PollTemplateSerializer(serializers.ModelSerializer):
+    """NEW (Pass 13) — see PollTemplate's own docstring in models.py.
+    created_by is read-only/server-set, same pattern as LivePollSerializer.
+    """
+
+    created_by = serializers.PrimaryKeyRelatedField(read_only=True)
+
+    class Meta:
+        model = PollTemplate
+        fields = ["id", "classroom", "created_by", "question", "options", "created_at"]
+        read_only_fields = ["id", "created_at"]
+
+    # Reuses LivePollSerializer.validate_options' rule verbatim (at least 2
+    # non-empty string options) — a template with 0/1 options would just
+    # produce an equally-broken LivePoll the moment it's fired.
+    def validate_options(self, value):
+        if not isinstance(value, list) or len(value) < 2:
+            raise serializers.ValidationError("A poll template needs at least 2 options.")
+        if any(not isinstance(opt, str) or not opt.strip() for opt in value):
+            raise serializers.ValidationError("Every option must be a non-empty string.")
+        return value
 
 
 # ---------------------------------------------------------------------------

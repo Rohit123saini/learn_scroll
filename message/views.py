@@ -39,6 +39,9 @@ from .models import (
     MessageReaction,
     MessageStatus,
     MessageType,
+    Poll,
+    PollOption,
+    PollVote,
     StudyRoomState,
 )
 from .permissions import IsConversationParticipant, IsGroupAdminOrModerator, IsMessageSender
@@ -57,6 +60,9 @@ from .serializers import (
     MessageReadStatusSerializer,
     MessageSearchResultSerializer,
     MessageSerializer,
+    PollCreateSerializer,
+    PollSerializer,
+    PollVoteSerializer,
     ScheduleMessageSerializer,
     UserMiniSerializer,
     UserPresenceSerializer,
@@ -73,6 +79,9 @@ from .cache_utils import invalidate_group_role_cache, get_presence_cached, set_p
 from .mentions import extract_mentioned_user_ids
 from .media_utils import create_group_media_for_message
 from .constants import MAX_PINNED_PER_CONVERSATION
+# 🔥 NAYE — advanced features (link preview / auto voice-transcription),
+# dono `tasks.py` ke Celery tasks hain, seedha yahan se `.delay()` hota hai.
+from .tasks import generate_link_preview_task, transcribe_voice_message_task
 # 🔥 FIX — throttles.py already existed with full "how to wire this up"
 # instructions in its own docstring (MessageSendThrottle /
 # CallInitiateThrottle / GroupCreateThrottle / ReactionThrottle), but none
@@ -82,6 +91,7 @@ from .constants import MAX_PINNED_PER_CONVERSATION
 # REST half now, exactly per that file's own setup comment.
 from .throttles import (
     MessageSendThrottle, CallInitiateThrottle, GroupCreateThrottle, ReactionThrottle,
+    MessageSendIPThrottle, CallInitiateIPThrottle,
 )
 
 # LiveKit URL env se lo, nahi to default
@@ -220,7 +230,10 @@ class ConversationViewSet(viewsets.ReadOnlyModelViewSet):
     # guard was written but never actually applied here.
     def get_throttles(self):
         if self.action == 'messages' and self.request.method == 'POST':
-            return [MessageSendThrottle()]
+            # 🔥 NAYA — per-user (`MessageSendThrottle`) ke SAATH per-IP
+            # safety net bhi (`MessageSendIPThrottle`). DRF dono list me hon
+            # to dono check karta hai — jo bhi pehle trip ho, request block.
+            return [MessageSendThrottle(), MessageSendIPThrottle()]
         return super().get_throttles()
 
     # 🔥 NAYA — GET /conversations/unread-count/
@@ -434,7 +447,16 @@ class ConversationViewSet(viewsets.ReadOnlyModelViewSet):
                 is_scheduled=True,
             ).select_related(
                 'sender', 'reply_to', 'reply_to__sender'
-            ).prefetch_related('all_reactions', 'all_reactions__user')
+            ).prefetch_related(
+                'all_reactions', 'all_reactions__user',
+                # 🔥 NAYA — poll messages ke liye. Ek chat me poll rare hote
+                # hain (star/is_read jaisa hi chhota per-row query rehta agar
+                # prefetch na hota), lekin jab hote hain to option/vote count
+                # ke liye har poll message pe 1+N option query lagti, isliye
+                # yahi prefetch kar dena behtar hai (bade groups me poll
+                # zyada options ke saath ho to farak padta hai).
+                'poll', 'poll__options', 'poll__options__votes',
+            )
             paginator = MessagePagination()
             page = paginator.paginate_queryset(qs, request, view=self)
             serializer = MessageSerializer(page, many=True, context={'request': request})
@@ -528,6 +550,15 @@ class ConversationViewSet(viewsets.ReadOnlyModelViewSet):
             # 🔥 BUG FIX — group gallery ke liye GroupMedia row (pehle
             # kahin bhi nahi banti thi, see media_utils.py).
             create_group_media_for_message(message)
+
+        # 🔥 NAYE (ADVANCED FEATURES) — dono background/async chalte hain
+        # (Celery `.delay()`), request ko bilkul block nahi karte. Transaction
+        # commit ho chuke hone ke BAAD enqueue kiye hain (with-block ke bahar)
+        # taaki worker ko guaranteed committed row mile, race condition na ho.
+        if message.type == MessageType.TEXT and message.text:
+            generate_link_preview_task.delay(str(message.id))
+        elif message.type == MessageType.AUDIO and message.file_url:
+            transcribe_voice_message_task.delay(str(message.id))
 
         # NOTE: this payload must carry the same sender_* fields as
         # ChatConsumer.handle_new_message's websocket payload. This REST
@@ -627,6 +658,142 @@ class ConversationViewSet(viewsets.ReadOnlyModelViewSet):
                 recipient_ids=mentioned_ids,
                 sender_name=sender_name,
                 message_text=message.text,
+                conversation_id=conversation.id,
+                message_id=message.id,
+            )
+
+        return Response(MessageSerializer(message, context={'request': request}).data, status=status.HTTP_201_CREATED)
+
+    # ======================================================================
+    # 🔥 NAYA — POLL MESSAGES (WhatsApp-style group poll)
+    # ======================================================================
+    # POST /message/conversations/<id>/poll/
+    #   body: {"question": "...", "options": ["A", "B", ...], "allow_multiple_answers": false}
+    #
+    # Ek poll = ek naya `Message` (type=POLL, text=question) + ek `Poll`
+    # row + N `PollOption` rows. Same permission/block/throttle checks
+    # jaise normal `messages()` POST (group message_permission +
+    # daily_message_limit, private-chat block-check) — koi bhi jo normal
+    # text message nahi bhej sakta, poll bhi nahi bhej sakega.
+    @action(detail=True, methods=['post'], url_path='poll')
+    def create_poll(self, request, pk=None):
+        conversation = self.get_object()
+
+        if conversation.type != ConversationType.GROUP:
+            other_id = conversation.memberships.filter(
+                left_at__isnull=True
+            ).exclude(user_id=request.user.id).values_list('user_id', flat=True).first()
+            if other_id and is_blocked_pair(request.user.id, other_id):
+                return Response(
+                    {'detail': 'Block hone ki wajah se poll nahi bheja ja sakta.'},
+                    status=status.HTTP_403_FORBIDDEN,
+                )
+        else:
+            group = getattr(conversation, 'group_detail', None)
+            if group:
+                allowed, reason = check_group_permission(group, request.user.id, 'message_permission')
+                if not allowed:
+                    return Response({'detail': reason}, status=status.HTTP_403_FORBIDDEN)
+                allowed, reason = check_daily_message_limit(group, request.user, conversation)
+                if not allowed:
+                    return Response({'detail': reason}, status=status.HTTP_429_TOO_MANY_REQUESTS)
+
+        serializer = PollCreateSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        data = serializer.validated_data
+
+        disappearing_delta = conversation.get_disappearing_timedelta()
+        expires_at = (timezone.now() + disappearing_delta) if disappearing_delta else None
+
+        with transaction.atomic():
+            message = Message.objects.create(
+                conversation=conversation, sender=request.user,
+                type=MessageType.POLL, text=data['question'], expires_at=expires_at,
+            )
+            poll = Poll.objects.create(
+                message=message, question=data['question'],
+                allow_multiple_answers=data['allow_multiple_answers'],
+            )
+            PollOption.objects.bulk_create([
+                PollOption(poll=poll, text=opt_text, order=i)
+                for i, opt_text in enumerate(data['options'])
+            ])
+
+            preview_text = f"📊 {data['question']}"[:500]
+            conversation.last_message_text = preview_text
+            conversation.last_message_at = message.created_at
+            conversation.last_message_sender = request.user
+            conversation.last_message_type = message.type
+            conversation.save(update_fields=[
+                'last_message_text', 'last_message_at', 'last_message_sender', 'last_message_type',
+            ])
+
+            other_participant_ids = list(
+                ConversationParticipant.objects.filter(conversation=conversation)
+                .exclude(user=request.user)
+                .values_list('user_id', flat=True)
+            )
+            ConversationParticipant.objects.filter(
+                conversation=conversation, user_id__in=other_participant_ids,
+            ).update(unread_count=F('unread_count') + 1)
+
+            MessageStatus.objects.bulk_create(
+                [MessageStatus(message=message, user_id=uid) for uid in other_participant_ids],
+                ignore_conflicts=True,
+            )
+
+        sender = build_user_mini(request.user)
+        poll_data = PollSerializer(poll, context={'request': request}).data
+        channel_layer = get_channel_layer()
+        async_to_sync(channel_layer.group_send)(
+            f'chat_{conversation.id}',
+            {
+                'type': 'chat_message',
+                'event': 'message',
+                'id': str(message.id),
+                'conversation_id': str(conversation.id),
+                'sender_id': str(request.user.id),
+                'sender_name': sender['display_name'],
+                'sender_username': sender['username'],
+                'sender_first_name': sender['first_name'],
+                'sender_last_name': sender['last_name'],
+                'sender_profile_photo': sender['profile_photo'],
+                'message_type': message.type,
+                'text': message.text,
+                'poll': poll_data,
+                'reply_to': None,
+                'client_id': None,
+                'created_at': message.created_at.isoformat(),
+            }
+        )
+
+        for uid in other_participant_ids:
+            async_to_sync(channel_layer.group_send)(
+                f'user_{uid}',
+                {
+                    'type': 'inbox_update',
+                    'conversation_id': str(conversation.id),
+                    'message_id': str(message.id),
+                    'sender_id': str(request.user.id),
+                    'sender_name': sender['display_name'],
+                    'last_message_text': preview_text,
+                    'last_message_type': message.type,
+                    'created_at': message.created_at.isoformat(),
+                }
+            )
+
+        muted_user_ids = set(
+            ConversationParticipant.objects.filter(
+                conversation=conversation, user_id__in=other_participant_ids, is_muted=True,
+            ).values_list('user_id', flat=True)
+        )
+        push_recipients = [uid for uid in other_participant_ids if uid not in muted_user_ids]
+        if push_recipients:
+            send_chat_message_push(
+                recipient_ids=push_recipients,
+                sender_name=sender['display_name'],
+                message_text=preview_text,
+                message_type=message.type,
                 conversation_id=conversation.id,
                 message_id=message.id,
             )
@@ -917,6 +1084,23 @@ class MessageViewSet(mixins.RetrieveModelMixin, mixins.UpdateModelMixin,
         message.text = text
         message.is_edited = True
         message.save(update_fields=['text', 'is_edited', 'updated_at'])
+
+        # 🔥 NAYA — REST edit ke liye WS broadcast, taaki ye action live
+        # dikhe (see `consumers.py`'s `edit_event` handler docstring — is
+        # se pehle koi WS event hi is app me exist nahi karta tha edit ke
+        # liye, chahe REST se ho ya WS se).
+        async_to_sync(get_channel_layer().group_send)(
+            f'chat_{message.conversation_id}',
+            {
+                'type': 'edit_event',
+                'message_id': str(message.id),
+                'text': message.text,
+                'is_edited': True,
+                'edited_by': str(request.user.id),
+                'updated_at': message.updated_at.isoformat(),
+            },
+        )
+
         return Response(MessageSerializer(message, context={'request': request}).data)
 
     def destroy(self, request, *args, **kwargs):
@@ -956,8 +1140,28 @@ class MessageViewSet(mixins.RetrieveModelMixin, mixins.UpdateModelMixin,
             # media gallery, defeating the delete entirely for anyone
             # browsing that tab instead of the chat itself.
             GroupMedia.objects.filter(message=message).delete()
+
+            # 🔥 NAYA — WS broadcast, sirf `for_everyone=True` ke liye
+            # (`consumers.py`'s `handle_delete_message` bug-fix comment
+            # dekho — "delete for me" KABHI room-wide broadcast nahi hona
+            # chahiye, sirf deleter ke liye private hai). REST path pehle
+            # yahan koi bhi broadcast nahi karta tha — matlab REST se
+            # "delete for everyone" karne par doosron ki khuli chat screen
+            # se message live gayab nahi hota tha, refresh tak wahi rehta.
+            async_to_sync(get_channel_layer().group_send)(
+                f'chat_{message.conversation_id}',
+                {
+                    'type': 'delete_event',
+                    'message_id': str(message.id),
+                    'for_everyone': True,
+                    'deleted_by': str(request.user.id),
+                },
+            )
         else:
             message.deleted_for_users.add(request.user)
+            # "Delete for me" jaan-boojh kar broadcast NAHI hota — sirf
+            # deleter ke liye private hai, dusre participants ko kabhi
+            # pata nahi chalna chahiye.
 
         return Response(status=status.HTTP_204_NO_CONTENT)
 
@@ -967,6 +1171,19 @@ class MessageViewSet(mixins.RetrieveModelMixin, mixins.UpdateModelMixin,
 
         if request.method == 'DELETE':
             MessageReaction.objects.filter(message=message, user=request.user).delete()
+            # 🔥 NAYA — reaction-removed bhi broadcast karo (WS-native path
+            # sirf add karta hai, REST me add aur remove dono ka event
+            # missing tha). `emoji: None` client ko batata hai ki ye ek
+            # removal event hai, add nahi.
+            async_to_sync(get_channel_layer().group_send)(
+                f'chat_{message.conversation_id}',
+                {
+                    'type': 'reaction_event',
+                    'message_id': str(message.id),
+                    'user_id': str(request.user.id),
+                    'emoji': None,
+                },
+            )
             return Response(status=status.HTTP_204_NO_CONTENT)
 
         emoji = request.data.get('emoji')
@@ -976,6 +1193,21 @@ class MessageViewSet(mixins.RetrieveModelMixin, mixins.UpdateModelMixin,
         reaction, _ = MessageReaction.objects.update_or_create(
             message=message, user=request.user, defaults={'emoji': emoji},
         )
+
+        # 🔥 NAYA — REST se react karne par pehle koi WS broadcast nahi
+        # hota tha (sirf WS-native `handle_reaction` broadcast karta tha)
+        # — matlab REST se bheja gaya reaction doosron ki khuli chat
+        # screen pe live nahi dikhta tha, refresh tak nahi.
+        async_to_sync(get_channel_layer().group_send)(
+            f'chat_{message.conversation_id}',
+            {
+                'type': 'reaction_event',
+                'message_id': str(message.id),
+                'user_id': str(request.user.id),
+                'emoji': emoji,
+            },
+        )
+
         return Response(MessageReactionSerializer(reaction).data)
 
     # ==================================================================
@@ -1208,6 +1440,104 @@ class MessageViewSet(mixins.RetrieveModelMixin, mixins.UpdateModelMixin,
         return Response(MessageSerializer(message, context={'request': request}).data)
 
     # ==================================================================
+    # 🔥 NAYA — POLL VOTE / CLOSE
+    # ==================================================================
+    # POST /message/messages/<message_id>/poll/vote/
+    #   body: {"option_ids": ["<uuid>", ...]}
+    #
+    # Single-choice poll (`allow_multiple_answers=False`): sirf 1 option_id
+    # bhejo — naya vote is user ke is poll ke andar ke saare purane votes
+    # replace kar deta hai (WhatsApp jaisa — vote badalna allowed hai, jab
+    # tak poll close na ho). Multi-choice: kai option_ids ek saath bhejo —
+    # ye call "meri poori vote list ye hai" jaisa idempotent hai (purane
+    # saare votes clear karke naye set se replace karta hai), isliye ek
+    # option untick karne ke liye bhi client bas naya (chhota) list bhejta
+    # hai, alag "unvote" endpoint ki zaroorat nahi.
+    @action(detail=True, methods=['post'], url_path='poll/vote')
+    def poll_vote(self, request, pk=None):
+        message = self.get_object()
+        if message.type != MessageType.POLL:
+            return Response({'detail': 'Ye poll message nahi hai.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        poll = getattr(message, 'poll', None)
+        if not poll:
+            return Response({'detail': 'Poll data nahi mila.'}, status=status.HTTP_404_NOT_FOUND)
+        if poll.is_closed:
+            return Response({'detail': 'Ye poll band ho chuka hai, ab vote nahi ho sakta.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        serializer = PollVoteSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        option_ids = serializer.validated_data['option_ids']
+
+        # Sirf isi poll ke apne options hi valid hain — kisi doosre
+        # message/poll ka option_id chupke se bhej ke cross-poll vote
+        # inject karna is filter se hi block ho jaata hai.
+        options = list(poll.options.filter(id__in=option_ids))
+        if not options:
+            return Response({'detail': 'Koi valid option nahi mila.'}, status=status.HTTP_404_NOT_FOUND)
+        if not poll.allow_multiple_answers and len(options) > 1:
+            return Response({'detail': 'Ye poll sirf ek option allow karta hai.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        with transaction.atomic():
+            PollVote.objects.filter(option__poll=poll, user=request.user).delete()
+            PollVote.objects.bulk_create([
+                PollVote(option=opt, user=request.user) for opt in options
+            ])
+
+        poll_data = PollSerializer(poll, context={'request': request}).data
+        async_to_sync(get_channel_layer().group_send)(
+            f'chat_{message.conversation_id}',
+            {
+                'type': 'poll_update',
+                'message_id': str(message.id),
+                'poll': poll_data,
+                'voted_by': str(request.user.id),
+            },
+        )
+        return Response(poll_data)
+
+    # POST /message/messages/<message_id>/poll/close/
+    # Poll banane wala, ya group me admin/moderator, poll ko close kar
+    # sakta hai (results wahin freeze ho jaate hain — vote/re-vote ke liye
+    # ab 400 aayega, existing votes/counts hamesha ke liye visible rehte hain).
+    @action(detail=True, methods=['post'], url_path='poll/close')
+    def poll_close(self, request, pk=None):
+        message = self.get_object()
+        if message.type != MessageType.POLL:
+            return Response({'detail': 'Ye poll message nahi hai.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        poll = getattr(message, 'poll', None)
+        if not poll:
+            return Response({'detail': 'Poll data nahi mila.'}, status=status.HTTP_404_NOT_FOUND)
+
+        conversation = message.conversation
+        if conversation.type == ConversationType.GROUP:
+            group = getattr(conversation, 'group_detail', None)
+            is_admin_or_mod = bool(group and is_group_admin_or_mod(group, request.user.id))
+            if message.sender_id != request.user.id and not is_admin_or_mod:
+                raise PermissionDenied('Sirf poll banane wala ya group admin/moderator poll close kar sakta hai.')
+        elif message.sender_id != request.user.id:
+            raise PermissionDenied('Sirf poll banane wala hi ise close kar sakta hai.')
+
+        if not poll.is_closed:
+            poll.is_closed = True
+            poll.closed_at = timezone.now()
+            poll.closed_by = request.user
+            poll.save(update_fields=['is_closed', 'closed_at', 'closed_by', 'updated_at'])
+
+        poll_data = PollSerializer(poll, context={'request': request}).data
+        async_to_sync(get_channel_layer().group_send)(
+            f'chat_{conversation.id}',
+            {
+                'type': 'poll_update',
+                'message_id': str(message.id),
+                'poll': poll_data,
+                'closed_by': str(request.user.id),
+            },
+        )
+        return Response(poll_data)
+
+    # ==================================================================
     # FORWARD — one or many messages, to one or many target conversations
     # ==================================================================
     #
@@ -1235,6 +1565,15 @@ class MessageViewSet(mixins.RetrieveModelMixin, mixins.UpdateModelMixin,
         if not isinstance(conversation_ids, list) or not conversation_ids:
             return Response({'detail': "'conversation_ids' required hai (non-empty list)."}, status=status.HTTP_400_BAD_REQUEST)
 
+        # 🔥 NAYA — optional caption jo forward ke saath jodi ja sakti hai
+        # (WhatsApp jaisa: forward karte waqt compose box me kuch aur bhi
+        # likh ke bhejna). Sirf un forwarded copies pe apply hoti hai jinke
+        # paas khud koi text nahi tha (media/location messages) — agar
+        # source message pehle se hi text-type hai to uska original text
+        # kabhi silently overwrite/lose nahi karte, caption us case me
+        # ignore ho jaati hai.
+        caption = (request.data.get('caption') or '').strip() or None
+
         # Only messages from conversations the user is actually a member
         # of can be forwarded — silently drops any id that doesn't exist,
         # was deleted, or belongs to a chat the user isn't in.
@@ -1243,11 +1582,19 @@ class MessageViewSet(mixins.RetrieveModelMixin, mixins.UpdateModelMixin,
         # before this, which defeated the point of "disappearing" — a
         # message that vanished from the chat could be resurrected in a
         # brand new chat with a fresh (non-expiring) copy.
+        # 🔥 NAYA — poll messages bhi exclude kiye hain: forward yahan
+        # sirf plain field-copy karta hai (text/file_url/meta), poll ka
+        # asal data alag `Poll`/`PollOption` rows me hota hai jo copy nahi
+        # hote — forward karne se ek "POLL type ka message bina Poll data
+        # ke" ban jaata, jo client pe crash/blank card dikhata. Poll
+        # forward abhi supported nahi hai (future: naya Poll+options
+        # explicitly clone karna padega, sirf Message field-copy se nahi).
         source_messages = list(
             Message.objects.filter(id__in=message_ids, conversation__memberships__user=request.user)
             .filter(Q(expires_at__isnull=True) | Q(expires_at__gt=timezone.now()))
             .exclude(deleted_for_everyone=True)
             .exclude(deleted_for_users=request.user)
+            .exclude(type=MessageType.POLL)
             .select_related('conversation')
         )
         if not source_messages:
@@ -1279,7 +1626,12 @@ class MessageViewSet(mixins.RetrieveModelMixin, mixins.UpdateModelMixin,
                         conversation=conversation,
                         sender=request.user,
                         type=src.type,
-                        text=src.text,
+                        # Caption sirf tab lagti hai jab source ke paas
+                        # khud koi non-empty text nahi tha (media/location
+                        # message) — text message ka apna text hamesha
+                        # priority pe rehta hai, caption tab silently
+                        # ignore ho jaati hai.
+                        text=(caption if (caption and not (src.text or '').strip()) else src.text),
                         file_url=src.file_url,
                         file_urls=src.file_urls,
                         thumbnail_url=src.thumbnail_url,
@@ -1889,7 +2241,7 @@ class CallInitiateView(APIView):
     # 🔥 FIX — `CallInitiateThrottle` existed in throttles.py (calls are
     # more "costly" than a normal message: each one creates an FCM push +
     # a LiveKit room) but was never applied here.
-    throttle_classes = [CallInitiateThrottle]
+    throttle_classes = [CallInitiateThrottle, CallInitiateIPThrottle]
 
     def post(self, request):
         conversation_id = request.data.get('conversation_id')

@@ -24,6 +24,8 @@ from .media_utils import create_group_media_for_message
 from .constants import MAX_PINNED_PER_CONVERSATION
 from .throttles import WSMessageRateLimiter
 from .cache_utils import set_presence_cache
+# 🔥 NAYE — advanced features (link preview / auto voice-transcription)
+from .tasks import generate_link_preview_task, transcribe_voice_message_task
 
 logger = logging.getLogger(__name__)
 
@@ -279,6 +281,15 @@ class ChatConsumer(AsyncWebsocketConsumer):
         }
         await self.channel_layer.group_send(self.room_group_name, payload)
 
+        # 🔥 NAYE (ADVANCED FEATURES) — `views.py`'s REST path jaisa hi,
+        # background/async (Celery `.delay()`), WS `receive()` ko bilkul
+        # block nahi karte. `save_message` already commit kar chuka hota
+        # hai is point tak, isliye row guaranteed available hoga worker ko.
+        if message_type == 'text' and text:
+            await database_sync_to_async(generate_link_preview_task.delay)(str(message['id']))
+        elif message_type == 'audio' and file_url:
+            await database_sync_to_async(transcribe_voice_message_task.delay)(str(message['id']))
+
         # 🔥 NAYA — ConversationsScreen (list) turant update ho, chahe
         # user is specific chat ke andar na ho. `chat_{conversation_id}`
         # group sirf unhi ko milta hai jo abhi ISI chat ke andar hain;
@@ -342,15 +353,26 @@ class ChatConsumer(AsyncWebsocketConsumer):
         if not ok:
             return await self.send_error("not_allowed", "Ye message delete nahi kar sakte")
 
-        await self.channel_layer.group_send(
-            self.room_group_name,
-            {
-                'type': 'delete_event',
-                'message_id': message_id,
-                'for_everyone': for_everyone,
-                'deleted_by': str(self.user.id),
-            },
-        )
+        # 🔧 BUG FIX — pehle ye broadcast `for_everyone` ki value ke bina
+        # bhi UNCONDITIONALLY poore room group ko jaata tha. "Delete for
+        # me" (`for_everyone=False`) sirf DELETER ke liye private hona
+        # chahiye — koi bhi doosra participant ko is baat ka pata bhi nahi
+        # chalna chahiye ki kisi ne kuch delete kiya (WhatsApp isi tarah
+        # kaam karta hai). Agar koi client is event ko blindly "message
+        # hata do" jaisa handle karta (bina `for_everyone` check kiye), to
+        # ek PRIVATE delete-for-me sabke screen se message hata sakta tha
+        # — real correctness bug, sirf missing-feature nahi. Ab sirf
+        # `for_everyone=True` hone par hi poore room ko broadcast hota hai.
+        if for_everyone:
+            await self.channel_layer.group_send(
+                self.room_group_name,
+                {
+                    'type': 'delete_event',
+                    'message_id': message_id,
+                    'for_everyone': for_everyone,
+                    'deleted_by': str(self.user.id),
+                },
+            )
 
     async def handle_reaction(self, data):
         message_id = data.get('message_id')
@@ -435,6 +457,36 @@ class ChatConsumer(AsyncWebsocketConsumer):
 
     async def delete_event(self, event):
         await self.send(text_data=json.dumps({'type': 'delete', **event}))
+
+    # 🔥 NAYA — REST `MessageViewSet.partial_update` (text edit) ke liye
+    # koi WS broadcast pehle nahi tha — is poore app me `edit_event` type
+    # kabhi define hi nahi hua tha (WS se edit karne ka koi raasta bhi
+    # nahi tha, sirf REST se). Matlab agar user A ek message edit karta
+    # (REST se — jo hai hi is app ka intended edit path), to user B ki
+    # khuli chat screen (jo WS se live updates sunti hai) ko kabhi pata hi
+    # nahi chalta — refresh karne tak purana text hi dikhta rehta, poore
+    # "real-time chat" ka point defeat ho jaata sirf isi ek action ke liye.
+    # Ab `views.py`'s `partial_update` yahi event group ko bhejta hai.
+    async def edit_event(self, event):
+        await self.send(text_data=json.dumps({'type': 'edit', **event}))
+
+    # 🔥 NAYA (ADVANCED FEATURES) — link-preview aur voice-transcript dono
+    # `tasks.py` ke background Celery tasks se hi likhe jaate hain (`Message.
+    # meta` update), request-response cycle se bahar. Plain passthrough,
+    # `disappearing_messages_updated` jaisa hi pattern — event me already
+    # `type: 'meta_update'` set hai (`_broadcast_meta_update` helper se).
+    async def meta_update(self, event):
+        await self.send(text_data=json.dumps(event))
+
+    # 🔥 NAYA — poll vote/close dono `views.py` (`MessageViewSet.poll_vote`/
+    # `poll_close`) se hi hote hain (REST-only, `schedule_message` jaisa
+    # hi pattern — poll create/vote WS se nahi hota). Plain passthrough,
+    # `meta_update`/`disappearing_messages_updated` jaisa — event me
+    # already poora updated `poll` object (options + vote counts) hota
+    # hai, taaki khuli hui chat screen live results dekhe bina refresh
+    # kiye.
+    async def poll_update(self, event):
+        await self.send(text_data=json.dumps(event))
 
     async def reaction_event(self, event):
         await self.send(text_data=json.dumps({'type': 'reaction', **event}))

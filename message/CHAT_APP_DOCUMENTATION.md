@@ -36,8 +36,10 @@ Auth model: `AUTH_USER_MODEL` is a **custom `User`** (app `login`), primary key 
 | `media_utils.py` | `create_group_media_for_message(message)` — populates the `GroupMedia` gallery table; shared by REST + WS message-send |
 | `constants.py` | Single shared source for cross-file constants (currently `MAX_PINNED_PER_CONVERSATION`) |
 | `cache_utils.py` | Django-cache helpers: group-role cache (`get_group_role_cached`/`invalidate_group_role_cache`, 60s TTL) behind `group_rules.is_group_admin_or_mod`, and presence cache (`get_presence_cached`/`set_presence_cache`, 15s TTL) behind `UserPresenceView` + `ChatConsumer` |
-| `throttles.py` | DRF `UserRateThrottle` subclasses for REST writes (`MessageSendThrottle`, `CallInitiateThrottle`, `GroupCreateThrottle`, `ReactionThrottle`) + `WSMessageRateLimiter` (cache-backed sliding window) for the WS `message` event, since DRF throttles don't apply to Channels consumers |
-| `scheduled_messages.py` | "Send later" delivery half — `finalize_scheduled_message(message)`, called by a `send_scheduled_messages` management command (cron/Celery-beat) |
+| `throttles.py` | DRF `UserRateThrottle` subclasses for REST writes (`MessageSendThrottle`, `CallInitiateThrottle`, `GroupCreateThrottle`, `ReactionThrottle`) + per-IP safety-net throttles (`MessageSendIPThrottle`, `CallInitiateIPThrottle`, both `SimpleRateThrottle` subclasses via shared `ScopedIPThrottle`) *(NEW this session)* + `WSMessageRateLimiter` (cache-backed sliding window) for the WS `message` event, since DRF throttles don't apply to Channels consumers |
+| `scheduled_messages.py` | "Send later" delivery half — `finalize_scheduled_message(message)`, called by the `message.send_scheduled_messages` Celery task (`tasks.py`, confirmed registered in `CELERY_BEAT_SCHEDULE`, runs every minute). Now also enqueues the link-preview/transcription tasks below for scheduled messages, same as the two live-send paths *(NEW this session)* |
+| `tasks.py` *(NEW this session)* | Celery tasks: `send_scheduled_messages` (delivers due "send later" messages, every minute), `cleanup_expired_messages` (hard-deletes disappearing messages past `expires_at`, every 15 min), `generate_link_preview_task` (background OpenGraph fetch), `transcribe_voice_message_task` (background voice-note transcription) — plus the shared `_broadcast_meta_update()` helper the latter two use to push their result live over WS |
+| `link_preview.py` *(NEW this session)* | `extract_first_url(text)` + `fetch_link_preview(url)` — SSRF-safe OpenGraph fetcher (blocks private/loopback/link-local IPs, manually re-checks every redirect hop, size/time-bounded fetch, 7-day negative+positive cache) used by `generate_link_preview_task` |
 | `admin.py` | Django admin registrations |
 | `apps.py` | App config (`name = 'message'`) |
 
@@ -64,7 +66,7 @@ Every model inherits this.
 
 ### Enums
 - `MessageType`: text, image, video, audio, file, presentation, location, system,
-  study_room
+  study_room, **poll** *(NEW — see `Poll`/`PollOption`/`PollVote` below)*
 - `ConversationType`: private, group
 - `DisappearingDuration`: none, 1_month, 6_months, 1_year (mapped to `timedelta` via
   `DISAPPEARING_DURATION_TIMEDELTA`)
@@ -88,6 +90,12 @@ Every model inherits this.
 - `is_archived`, `is_muted`, `is_pinned` (**conversation-level pin** — pins the *chat* in
   the list, different from message-pin, see below)
 - `label` — custom nickname for this chat, visible only to this user
+- `draft_text`, `draft_updated_at` *(NEW — server-side draft auto-save)* — half-typed
+  compose-box text, per user per conversation, so it carries across devices. Saved
+  through the existing `PATCH /conversations/<id>/settings/` endpoint (no new
+  endpoint), same as mute/pin/archive. `draft_updated_at` is server-set (not
+  client-writable) whenever `draft_text` changes — client should debounce saves
+  (e.g. 1–2s after typing stops) rather than PATCH on every keystroke
 - `unread_count`, `last_read_message`, `last_read_at`
 - `joined_at`, `left_at` (soft-leave; **every membership check in the app filters on
   `left_at__isnull=True`** — this is the actual "is this user in the chat" source of truth)
@@ -123,7 +131,10 @@ Every model inherits this.
 ### `Message`
 - `conversation`, `sender`, `type`, `text`
 - Media: `file_url`, `file_urls` (JSON list, for multi-image), `thumbnail_url`
-- `meta` (JSON — size/duration/width/height/file_name/pages etc.)
+- `meta` (JSON — size/duration/width/height/file_name/pages etc. **Also now used for**
+  `link_preview` (`{url, title, description, image}`, TEXT messages only — see §7.5) and
+  `transcript` (string, AUDIO messages only — see §7.6), both written asynchronously by
+  Celery *after* the message is already sent/visible, never blocking the send itself)
 - `reply_to` (self-FK)
 - Flags: `is_edited`, `is_forwarded`, `is_system_message`
 - Deletion: `deleted_for_everyone` (bool), `deleted_for_users` (M2M — "delete for me")
@@ -135,6 +146,27 @@ Every model inherits this.
 - **`mentioned_users`** *(NEW — M2M, @mentions, see §7)*
 - Indexes: `(conversation, -created_at)`, `(sender, -created_at)`, `(type)`,
   `(reply_to)`, `(expires_at)`, `(conversation, is_pinned)` *(new)*
+
+### `Poll` / `PollOption` / `PollVote` *(NEW — WhatsApp-style poll messages)*
+- A poll is a normal `Message` row with `type=poll` and `text=question` — reply/pin/
+  star/search/disappearing-expiry/forward-block(see below) all work on it through the
+  same `Message` machinery as any other message type. The poll-specific data lives in
+  its own relational tables (not `meta` JSON) so votes can be uniquely constrained and
+  counted efficiently:
+  - `Poll` — `message` (OneToOne), `question`, `allow_multiple_answers` (bool,
+    single-choice vs multi-choice), `is_closed`, `closed_at`, `closed_by`
+  - `PollOption` — `poll` (FK), `text`, `order`
+  - `PollVote` — `option` (FK), `user` (FK), `unique_together = ('option', 'user')` (a
+    user can't vote the same option twice; the "only 1 option" rule for single-choice
+    polls is enforced at the view level, not a DB constraint — see §4)
+- Cascades: deleting the `Message` (e.g. `cleanup_expired_messages` hard-delete sweep
+  for disappearing messages) cascades through `Poll` → `PollOption` → `PollVote`
+  automatically.
+- **Poll forwarding is not supported** — `MessageViewSet.forward` explicitly excludes
+  `type=poll` messages from its source-message queryset, because forward there is a
+  plain field-copy (text/file_url/meta) and has no logic to clone a `Poll` + its
+  `PollOption`s. Attempting to include a poll's id in a forward request silently drops
+  that one message (same as forwarding a message from a chat you're not in).
 
 ### `Presentation`
 PPT/PDF/DOC metadata attached 1-1 to a `Message` — `file_url`, `file_name`, `file_size`,
@@ -198,13 +230,14 @@ max 50).
 | `GET /` | list | Ordered by `-last_message_at, -created_at` |
 | `GET /<id>/` | retrieve | |
 | `POST /start_private/` | `start_private` | body `{"user_id": ...}`. Creates or returns existing 1-1 conversation. 403 if either side has blocked the other. |
-| `PATCH /<id>/settings/` | `update_settings` | Per-user mute/archive/pin. Body = subset of `{is_archived, is_muted, is_pinned}` |
+| `PATCH /<id>/settings/` | `update_settings` | Per-user mute/archive/pin/draft. Body = subset of `{is_archived, is_muted, is_pinned, draft_text}` *(`draft_text` NEW — see `ConversationParticipant` in §2; `draft_updated_at` is returned but server-set, not client-writable)* |
 | `PATCH /<id>/disappearing_messages/` | `disappearing_messages` | Body `{"duration": "..."}`. Group: admin/mod only. Broadcasts `disappearing_messages_updated` to the room (handled by `ChatConsumer.disappearing_messages_updated`, see §8) |
 | `PATCH /<id>/label/` | `update_label` | Per-user custom chat nickname. Empty string clears it. Max 100 chars |
 | `POST /bulk_delete/` | `bulk_delete` | Body `{"conversation_ids": [...]}`. "Delete chat" for the requesting user only (sets `left_at`) |
 | `POST /<id>/participants/` | `add_participant_to_conversation` | Groups only. Body `{"user_id": ...}`. Private group: admin/mod only |
 | `GET /<id>/messages/` | `messages` (GET) | Paginated (`MessagePagination`, 30/page, max 100), excludes expired-disappearing messages |
 | `POST /<id>/messages/` | `messages` (POST) | Send a message. Throttled 60/min/user (`MessageSendThrottle`). See §6 "Message send flow" below |
+| `POST /<id>/poll/` *(NEW)* | `create_poll` | Body `{"question": "...", "options": ["A","B",...] (2–10), "allow_multiple_answers": false}`. Same block-check/group-permission/daily-limit rules as a normal message. Creates a `Message` (`type=poll`) + `Poll` + `PollOption` rows. See §7.8 |
 | `POST /<id>/read_all/` | `read_all` | Bulk-mark all messages read + `unread_count = 0` |
 | `GET /<id>/search/` *(NEW)* | `search` | `?q=...`, min 2 chars. Text search within this conversation |
 | `GET /search_all/` *(NEW)* | `search_all` | `?q=...`. Global search across every conversation the user is active in. Returns `MessageSearchResultSerializer` (adds `conversation_preview`) |
@@ -234,6 +267,13 @@ max 50).
 11. Push notifications: muted users AND mentioned users are excluded from the normal
     `send_chat_message_push`; mentioned users instead get `send_mention_push` *(NEW —
     bypasses mute, like WhatsApp)*
+12. **Enqueue link preview** *(NEW this session)* — if `type == TEXT` and `text` contains
+    a URL: `generate_link_preview_task.delay(message.id)`. Fully async, after the
+    transaction commits (not inside step 6's `atomic()` block) so the worker is
+    guaranteed a committed row.
+13. **Enqueue voice transcription** *(NEW this session)* — if `type == AUDIO`:
+    `transcribe_voice_message_task.delay(message.id)`. Same async/post-commit timing as
+    step 12. See §7.5/§7.6 for what each task does.
 
 ---
 
@@ -245,7 +285,8 @@ Message.objects.select_related('conversation', 'sender')`.
 Permissions (`get_permissions`):
 - `update`/`partial_update`/`destroy` → `IsConversationParticipant` + `IsMessageSender`
 - `forward` → `IsAuthenticated` only (checks membership manually per source/target)
-- everything else (including `pin`, `react`, `read`) → `IsConversationParticipant`
+- everything else (including `pin`, `react`, `read`, `poll_vote`, `poll_close`) →
+  `IsConversationParticipant`
 
 | Method & path | Action | Notes |
 |---|---|---|
@@ -254,8 +295,11 @@ Permissions (`get_permissions`):
 | `DELETE /<id>/?for_everyone=true\|false` | `destroy` | `for_everyone=true`: sender-only, blanks text/file_url, sets `deleted_for_everyone`. Else: adds requester to `deleted_for_users` ("delete for me") |
 | `POST /<id>/react/` `DELETE /<id>/react/` | `react` | Body `{"emoji": "..."}`. One reaction per user (upsert). Throttled 120/min/user (`ReactionThrottle`) |
 | `POST /<id>/read/` | `mark_read` | Marks read + decrements `unread_count` |
-| `POST /messages/forward/` | `forward` | Body `{"message_ids": [...], "conversation_ids": [...]}`. Creates NEW `Message` rows (copy, not pointer) with `is_forwarded=True`. Silently drops any message/conversation the user isn't a member of. Excludes expired-disappearing and deleted messages |
+| `GET /<id>/read-status/` *(existed, undocumented until now)* | `read_status` | "Seen by" / message-info list — full `MessageStatus` per user (`MessageReadStatusSerializer`). Respects the read-receipt privacy toggle (§6/§7.11): a user with `show_read_receipts=False` has their own `read_at` hidden from this response, and if the *requester* has it off too, everyone else's `read_at` is hidden from what they see |
+| `POST /messages/forward/` | `forward` | Body `{"message_ids": [...], "conversation_ids": [...], "caption": "..."}`. Creates NEW `Message` rows (copy, not pointer) with `is_forwarded=True`. Silently drops any message/conversation the user isn't a member of. Excludes expired-disappearing, deleted, **and poll** (`type=poll`) messages. `caption` *(NEW)* is optional — applied as the forwarded copy's text only when the source message had no text of its own (media/location); a text message's own text is never overwritten by it |
 | `POST /<id>/pin/` `DELETE /<id>/pin/` *(NEW)* | `pin` | Group: admin/mod only (via `group_rules.is_group_admin_or_mod`). Private: either participant. Max **3** pinned per conversation (`MAX_PINNED_PER_CONVERSATION`). Broadcasts `pin_event` to the chat room |
+| `POST /<id>/poll/vote/` *(NEW)* | `poll_vote` | Body `{"option_ids": [...]}`. Send the *full* set of options you want recorded — a fresh call replaces all of this user's previous vote(s) in that poll (so un-ticking one option in a multi-choice poll = resend the list without it). Single-choice polls reject more than 1 `option_id` with 400. 400 if the poll is closed. Broadcasts `poll_update` to the chat room. See §7.8 |
+| `POST /<id>/poll/close/` *(NEW)* | `poll_close` | Poll creator, or group admin/mod, freezes the poll (further votes get 400; existing results stay visible). Broadcasts `poll_update`. See §7.8 |
 
 ---
 
@@ -292,6 +336,18 @@ Queryset: groups where the user has a non-banned `GroupMember` row.
 - `GET /presence/<user_id>/` — online/offline + last_seen. Read-through cached
   (`cache_utils.get_presence_cached`, 15s TTL) — auto-creates a `UserPresence` row only
   on a cache miss.
+
+### `ReadReceiptSettingsView` — read-receipt privacy toggle
+*(Existed in code already; documenting here for the first time — see §7.11.)*
+- `GET /presence/read-receipts/` → `{"show_read_receipts": true|false}`
+- `PATCH /presence/read-receipts/` → body `{"show_read_receipts": false}`
+- Backed by `UserPresence.show_read_receipts` (default `True`). Mutual switch, WhatsApp-
+  style: turning it off hides your `read_at` from everyone (including group members),
+  AND — because it's mutual — you also stop seeing anyone else's `read_at` while it's
+  off, even people who left theirs on. `is_delivered`/`delivered_at` (the single
+  "delivered" tick) is never affected by this, only the "read"/blue-tick visibility.
+  Enforced inside `MessageViewSet.read_status` (the "seen by" / message-info action) —
+  see §4.
 
 ### Calls
 - `POST /calls/initiate/` (`CallInitiateView`) — body `{"conversation_id", "type":
@@ -361,7 +417,14 @@ Queryset: groups where the user has a non-banned `GroupMember` row.
 
 ---
 
-## 7. Recently Added Features (this session)
+## 7. Feature History (search / pin / mentions / link previews / auto-transcription /
+polls / draft / read-receipt toggle)
+
+*Subsections below are individually dated — "this session" in 7.1–7.3 refers to an
+earlier review; 7.5–7.7 an older AI-features review; 7.8–7.10 are from the current
+session (poll messages, forward-with-caption, server-side draft, read-receipt privacy
+toggle). Kept as originally written rather than renumbered, so old references
+elsewhere in this doc still point at the right item.*
 
 ### 7.1 Message Search
 - `GET /message/conversations/<id>/search/?q=...` — search within one conversation
@@ -383,7 +446,7 @@ Queryset: groups where the user has a non-banned `GroupMember` row.
   private chat → either participant
 - **Limit: 3 pinned messages per conversation** (`MAX_PINNED_PER_CONVERSATION`, defined
   in both `MessageViewSet` and `ChatConsumer` — kept in sync manually, no shared
-  constant yet — see §9.2)
+  constant yet — see §9.3)
 - `GET /message/conversations/<id>/pinned/` lists current pins
 
 ### 7.3 @Mentions
@@ -402,7 +465,118 @@ Queryset: groups where the user has a non-banned `GroupMember` row.
 
 ### 7.4 Already existed before this session (for completeness)
 - **Message edit** — `PATCH /message/messages/<id>/` (`MessageViewSet.partial_update`)
-- **Message forward** — `POST /message/messages/forward/` (`MessageViewSet.forward`)
+- **Message forward** — `POST /message/messages/forward/` (`MessageViewSet.forward`) —
+  now also accepts an optional `caption` (see §7.9)
+
+### 7.5 Link Previews *(NEW this session)*
+- Text messages containing a URL get an OpenGraph-style preview card (`title`,
+  `description`, `image`) fetched **asynchronously** and stored at
+  `Message.meta["link_preview"]` — no migration needed (`meta` is already `JSONField`).
+- Flow: `views.py` (REST) / `consumers.py` (WS) / `scheduled_messages.py` (send-later) all
+  call `generate_link_preview_task.delay(message.id)` right after the message row is
+  committed. The Celery task (`tasks.py`) calls `link_preview.extract_first_url()` +
+  `link_preview.fetch_link_preview()`, writes the result into `meta`, then broadcasts a
+  `meta_update` WS event (see §8) so an already-open chat screen updates live instead of
+  needing a refresh.
+- **SSRF protection** (`link_preview.py`): only `http`/`https` allowed; hostname is
+  resolved and rejected if the IP is private/loopback/link-local/multicast/reserved;
+  every redirect hop is re-checked the same way (not just the original URL); fetch is
+  time-boxed (4s) and size-boxed (300KB, stops at `</head>`); results (including
+  negative "no preview found" results) are cached 7 days by URL.
+- Fails silently and safely: dead link, timeout, non-HTML response, or an unsafe/internal
+  URL all just mean no preview is added — the message itself was already sent and
+  visible before this task even started, so a preview failure is invisible to the user.
+
+### 7.6 Auto Voice-Message Transcription *(NEW this session)*
+- `VoiceTranscribeView` (§6) already existed but was **client-triggered only** — a user
+  had to tap "View transcript" to even find out a transcript was possible. This makes it
+  automatic: every AUDIO message gets transcribed in the background the moment it's sent,
+  reusing the exact same `ai_service.transcribe_audio()` call `VoiceTranscribeView` uses.
+- Flow: same three call-sites as §7.5 (REST/WS/scheduled), `transcribe_voice_message_task.
+  delay(message.id)`. Result is written to `Message.meta["transcript"]`, then broadcasts
+  the same `meta_update` WS event as the link-preview task.
+- No-ops cleanly if `ai_service.AI_ENABLED` is `False` (Gemini not configured) or the
+  message has no `file_url` — a voice message is never blocked or delayed waiting on
+  this; transcription is purely additive, arrives after the message is already visible.
+- `VoiceTranscribeView` itself is unchanged and still works standalone (e.g. to
+  re-transcribe, or for any voice note sent before this feature existed).
+
+### 7.7 `meta_update` WebSocket event *(NEW this session, supports 7.5 & 7.6)*
+- New server→client WS event type. Plain passthrough handler on `ChatConsumer`, same
+  pattern as `disappearing_messages_updated`/`edit_event`. Payload: `{"type":
+  "meta_update", "message_id": "...", "meta": {...full updated meta dict...}}`.
+- Only ever sent by `tasks._broadcast_meta_update()` (`tasks.py`), i.e. only from the two
+  background tasks above — nothing else broadcasts this event yet, but it's a generic
+  enough shape that a future "any background meta change" feature could reuse it instead
+  of inventing a new event type.
+
+### 7.8 Poll Messages *(NEW this session)*
+- WhatsApp-style poll: `MessageType.POLL` + new `Poll`/`PollOption`/`PollVote` models
+  (see §2). A poll is a real `Message` row (`type=poll`, `text=question`), so it
+  automatically gets reply/pin/star/search/disappearing-expiry the same as any other
+  message — only voting and results are poll-specific.
+- Create: `POST /message/conversations/<id>/poll/` (`ConversationViewSet.create_poll`).
+  Same permission/block/throttle path as a normal message send (group
+  `message_permission` + `daily_message_limit`, private-chat block-check), then creates
+  `Message` + `Poll` + `PollOption` rows inside one `transaction.atomic()` and broadcasts
+  a normal `chat_message` WS event (with a nested `poll` object) + `inbox_update` +
+  `send_chat_message_push` (preview text `"📊 <question>"`) — same fan-out as a normal
+  text message, no separate code path for group members to "discover" a new poll.
+- Vote: `POST /message/messages/<id>/poll/vote/` (`MessageViewSet.poll_vote`). Body
+  `{"option_ids": [...]}` is the requester's **full** desired vote set for that poll — a
+  fresh call deletes their previous `PollVote` row(s) for that poll and re-creates from
+  the new list. Single-choice polls (`allow_multiple_answers=False`) 400 if more than 1
+  `option_id` is sent. Voting on a closed poll 400s.
+- Close: `POST /message/messages/<id>/poll/close/` (`MessageViewSet.poll_close`) — poll
+  creator, or group admin/moderator, can close (further votes rejected, existing results
+  stay visible forever). Private chat: only the creator (no "admin" concept there).
+- Live updates: both `poll_vote` and `poll_close` broadcast a new `poll_update` WS event
+  (plain passthrough handler, same pattern as `meta_update`) carrying the full updated
+  `Poll` (all options + current vote counts) — an open chat screen sees vote counts
+  change live without a refresh.
+- **Not supported yet**: voting via WebSocket (REST-only, same as `schedule_message`);
+  forwarding a poll (`MessageViewSet.forward` explicitly excludes `type=poll` — see §2);
+  a dedicated "clear my vote entirely" call (`option_ids` requires at least 1 — to fully
+  un-vote today, resend the vote list without the option, or the client just doesn't
+  call vote until the user picks something).
+- `MessageSerializer.poll` — new field, a nested `PollSerializer` (question, options
+  with per-option `votes_count`/`voted_by_me`, `total_voters`, `is_closed`) — `null` for
+  every non-poll message type.
+
+### 7.9 Forward with Caption *(NEW this session)*
+- `POST /message/messages/forward/` now accepts an optional `"caption"` string in the
+  body alongside the existing `message_ids`/`conversation_ids`.
+- Applies **only** to forwarded copies whose source message had no text of its own
+  (media/location messages) — a text message's own text is never silently overwritten
+  or appended to. If the caption is set and the source was e.g. an image with no
+  caption, the forwarded copy's `text` becomes the caption (WhatsApp-style "add a note
+  while forwarding").
+- Poll messages (`type=poll`) are now excluded from `forward` entirely (see §2/§7.8) —
+  this was a pre-existing gap made visible while adding polls, not something the
+  caption change itself introduced.
+
+### 7.10 Server-Side Draft Auto-Save *(NEW this session)*
+- `ConversationParticipant.draft_text` + `draft_updated_at` (see §2) — reuses the
+  existing `PATCH /message/conversations/<id>/settings/` endpoint (no new endpoint;
+  `ConversationSettingsSerializer` just gained 2 fields alongside
+  `is_archived`/`is_muted`/`is_pinned`).
+- `draft_updated_at` is server-set on every write where `draft_text` is present in the
+  request (not client-writable) — a simple last-write-wins signal for multi-device
+  clients, no server-side merge logic.
+- Client responsibility: debounce writes (e.g. save 1–2s after the user stops typing),
+  not a PATCH per keystroke — the endpoint has no draft-specific rate limit, only the
+  project-wide `user: 100/min` DRF default (§14).
+- Surfaced in `ConversationListSerializer.my_settings` too (same
+  `ConversationSettingsSerializer`), so the chat list can restore/show a draft without a
+  second request.
+
+### 7.11 Read-Receipt Privacy Toggle
+- **Already existed** before this session — `UserPresence.show_read_receipts` (default
+  `True`) + `ReadReceiptSettingsView` (`GET`/`PATCH /message/presence/read-receipts/`).
+  Included here only so this doc's feature list stays accurate; no code changed for it
+  this session. See §2 (`UserPresence`) and §6 for the full behavior (mutual switch —
+  turning it off hides your `read_at` from others AND hides others' `read_at` from you;
+  `is_delivered`/delivery double-tick is unaffected).
 
 ---
 
@@ -454,6 +628,8 @@ disconnect indefinitely (Daphne force-kills stuck disconnects otherwise).
 | `study_room_broadcast` | `study_room_broadcast` | Echoes back to everyone except the sender's own channel |
 | `disappearing_messages_updated` | `disappearing_messages_updated` | `{conversation_id, duration, updated_by}` — matches `ConversationViewSet.disappearing_messages`'s `group_send()` |
 | `group_deleted` | `group_deleted` | `{group_id, conversation_id, deleted_by}` — matches `GroupViewSet.destroy`'s `group_send()`, sent *before* the cascade delete |
+| `meta_update` *(NEW)* | `meta_update` | `{message_id, meta}` — sent only by the background link-preview/voice-transcription Celery tasks (`tasks._broadcast_meta_update`), see §7.5/§7.6/§7.7 |
+| `poll_update` *(NEW)* | `poll_update` | `{message_id, poll: {...full updated Poll...}, voted_by \| closed_by}` — sent by `MessageViewSet.poll_vote`/`poll_close` (REST-only, no WS trigger). Plain passthrough, same pattern as `meta_update`. See §7.8 |
 
 **⚠️→✅ FIXED this session — WS media messages.** `handle_new_message`/`save_message`
 previously only accepted `text`; there was no way to send an image/video/audio/file/
@@ -470,7 +646,7 @@ it had been saved).
 - `save_message()` — creates the `Message` (now including media fields — see above),
   updates conversation denorm fields, bulk-creates `MessageStatus` for other members,
   increments their `unread_count`, resolves and sets `mentioned_users` *(NEW)*, calls
-  `create_group_media_for_message()` *(see §9.2)*, returns
+  `create_group_media_for_message()` *(see §9.3)*, returns
   `{'id', 'created_at', 'mentioned_ids'}`
 - `pin_or_unpin_message()` *(NEW)* — mirrors `MessageViewSet.pin`'s permission + limit
   logic for the WS path
@@ -510,6 +686,36 @@ computes `duration_seconds` and marks the whole `CallSession` `ENDED`.
 
 ### 9.1 Fixed in this review
 
+1. **`settings.py` was missing `DEFAULT_THROTTLE_RATES` entries for 7 of the `message`
+   app's own throttle scopes** — `message_send`, `call_initiate`, `group_create`,
+   `reaction` (all `throttles.py`), `ai_transcribe` (`views_ai.py`), and the two new
+   `message_send_ip`/`call_initiate_ip` scopes (§9.1 item 2 below). Same failure mode
+   `settings.py` already documents (and had already fixed) for several `liveclass`
+   scopes: DRF's `UserRateThrottle`/`SimpleRateThrottle` look up their rate via
+   `DEFAULT_THROTTLE_RATES[self.scope]` exactly like `ScopedRateThrottle` does — a
+   missing entry raises `ImproperlyConfigured` on the **very first** hit, not a rare
+   edge case. This meant the very first message sent, call initiated, group created,
+   reaction added, or voice note transcribed would 500. Added all 7 rates.
+2. **Per-IP throttling added** (`throttles.py`) — `MessageSendIPThrottle` (120/min) and
+   `CallInitiateIPThrottle` (20/min), both `SimpleRateThrottle` subclasses via a shared
+   `ScopedIPThrottle` base. All existing throttles were per-**authenticated-user**
+   only — fine against normal abuse, but bypassable by anyone with multiple
+   accounts/leaked tokens from one IP. These are a safety-net layer *alongside* the
+   per-user throttles (both apply — DRF checks every throttle in the list), wired into
+   `ConversationViewSet.get_throttles()` (messages POST) and `CallInitiateView.
+   throttle_classes`.
+3. **`CHANNEL_LAYERS`/`CACHES` Redis backends and the `message` app's
+   `CELERY_BEAT_SCHEDULE` entries — confirmed present and correctly env-driven** in
+   `settings.py` (this is the first review pass where `settings.py` itself was
+   available). `REDIS_URL` (falls back to `CELERY_BROKER_URL`) drives both the Channels
+   layer and the cache backend, with a safe `InMemoryChannelLayer`/`LocMemCache`
+   fallback for local dev when neither is set. `message.send_scheduled_messages`
+   (every minute) and `message.cleanup_expired_messages` (every 15 min) are both
+   registered in `CELERY_BEAT_SCHEDULE` — this **resolves §9.4 item 4** below, which was
+   flagged as unconfirmed in an earlier review.
+
+### 9.2 Fixed in a previous review
+
 1. **`throttles.py` was never actually wired into `views.py`.** The file itself already
    had full setup instructions in its own docstring, but no view ever imported
    `MessageSendThrottle` / `CallInitiateThrottle` / `GroupCreateThrottle` /
@@ -540,14 +746,14 @@ computes `duration_seconds` and marks the whole `CallSession` `ENDED`.
    doesn't change what they're allowed to do), but now consistent with the documented
    contract. All three sites now invalidate the cache for the newly (re)added user(s).
 
-### 9.2 Fixed in an earlier session
+### 9.3 Fixed in an earlier session
 
 1. **`media_utils.py` was missing entirely.** `views.py` line 69 already did
    `from .media_utils import create_group_media_for_message`, but the file itself was
    never created/uploaded — this was an import-time crash waiting to happen (the whole
    app would fail to boot the moment `views.py` got imported, since a missing module on
    a top-level `from .x import y` is a hard `ModuleNotFoundError`, not something that
-   fails gracefully at request time). **Root cause of §9.2 item 2 below** — this is why
+   fails gracefully at request time). **Root cause of §9.3 item 2 below** — this is why
    the gallery was "never populated": the function that was supposed to do it didn't
    exist as a file. Created `media_utils.py` with `create_group_media_for_message
    (message)`: no-ops unless conversation is a group AND message type is a gallery type
@@ -583,7 +789,7 @@ computes `duration_seconds` and marks the whole `CallSession` `ENDED`.
    ...) actually resolved. Reconstructed from `views.py`'s confirmed class/action names
    — see the §1 file-map note.
 
-### 9.3 Still open
+### 9.4 Still open
 
 1. **`is_deleted` on `BaseModel`** exists but nothing in the read code ever sets it or
    filters by it — either dead field or a soft-delete feature that was never finished.
@@ -594,12 +800,19 @@ computes `duration_seconds` and marks the whole `CallSession` `ENDED`.
    depends on the client populating `meta.size` correctly for every media message
    (both REST and WS paths). Worth a follow-up check that every upload client path
    actually sets it; if not, `GroupMedia.file_size` will silently stay `null`.
-4. **No management-command file for `send_scheduled_messages` was seen** — only
-   `scheduled_messages.py`'s delivery half (`finalize_scheduled_message`) was reviewed.
-   Confirm the actual cron/Celery-beat command exists and is scheduled to run
-   frequently enough (the module's own docstring suggests ~every 1 minute); without it,
-   `ConversationViewSet.schedule_message` only ever creates the row and nothing ever
-   delivers it.
+4. ~~No management-command file for `send_scheduled_messages` was seen...~~ **Resolved,
+   see §9.1 item 3** — `tasks.py` (Celery, not a management command) plus its
+   `CELERY_BEAT_SCHEDULE` registration in `settings.py` are both now confirmed present.
+5. **`STORAGES["default"]` is still local `FileSystemStorage`** *(NEW note)* —
+   `upload_view.py` uses `default_storage`, so switching the backend (e.g. to S3 via
+   `django-storages`) needs zero code changes, only a `settings.py` change. Not urgent
+   for a single-server deployment, but local disk means uploaded files don't survive a
+   redeploy/scale-out to multiple app servers.
+6. **`link_preview.py`'s OG-tag parser is regex-based, not a real HTML parser**
+   *(NEW)* — works for the vast majority of real-world `<meta property="og:...">` tags
+   but could miss unusual attribute ordering/quoting on some sites. Fine for a
+   best-effort preview feature (fails closed to "no preview" on a parse miss, never
+   crashes); swap for `BeautifulSoup` if preview accuracy becomes a complaint.
 
 ---
 
@@ -654,7 +867,7 @@ computes `duration_seconds` and marks the whole `CallSession` `ENDED`.
 - `create_group_media_for_message(message) -> GroupMedia | None`
 - Called from both `ConversationViewSet.messages` (REST) and `ChatConsumer.save_message`
   (WS) right after a `Message` is created. No-ops for private chats, non-media message
-  types, or messages with no file. See §9.2 for why this file didn't exist before.
+  types, or messages with no file. See §9.3 for why this file didn't exist before.
 
 ### `constants.py` *(NEW this session)*
 - `MAX_PINNED_PER_CONVERSATION = 3` — single shared source, imported by both
@@ -696,9 +909,14 @@ computes `duration_seconds` and marks the whole `CallSession` `ENDED`.
   updates conversation denorm fields/unread counts/`MessageStatus` rows/@mentions/
   `GroupMedia`, then broadcasts `chat_message` + `inbox_update` and sends the same
   mute/mention-aware pushes a normal send does.
-- Only ever called by a `send_scheduled_messages` management command (cron/Celery-beat,
-  intended to run about every minute) — **that command file itself was not part of this
-  review; confirm it exists and is actually scheduled (see §9.3).**
+- Called by the `message.send_scheduled_messages` **Celery task** (`tasks.py`, not a
+  management command — see §10's `tasks.py` entry), registered in `CELERY_BEAT_SCHEDULE`
+  (`settings.py`) to run every minute. **Confirmed present and scheduled — see §9.1
+  item 3** (this was flagged as unconfirmed in an earlier review, before `settings.py`
+  had been reviewed).
+- Now also enqueues `generate_link_preview_task`/`transcribe_voice_message_task` after
+  finalizing a scheduled message, same as the two live-send paths *(NEW this session,
+  see §7.5/§7.6)*.
 
 ---
 
@@ -706,17 +924,28 @@ computes `duration_seconds` and marks the whole `CallSession` `ENDED`.
 
 - `UserMiniSerializer` — id, username, first_name, last_name, display_name (computed),
   profile_photo (computed, absolute URL)
-- `ConversationSettingsSerializer` — is_archived/is_muted/is_pinned (per-user)
+- `ConversationSettingsSerializer` — is_archived/is_muted/is_pinned (per-user), plus
+  `draft_text`/`draft_updated_at` *(NEW — `draft_updated_at` is read-only, server sets
+  it whenever `draft_text` is written; see §7.10)*
 - `GroupMiniSerializer` — id, name, photo_url, members_count
 - `ConversationListSerializer` — full chat-list row shape (other_participant OR group,
   last-message fields, unread_count, my_settings)
 - `ReplyPreviewSerializer` — minimal shape for `reply_to_detail`
 - `MessageReactionSerializer`
-- `MessageSerializer` — the full message shape (GET responses). **Now includes**
-  `is_pinned`, `pinned_at`, `pinned_by` (nested), `mentioned_users` (nested list)
-  *(NEW)*. `to_representation` blanks `text`/`file_url` and adds `deleted_for_me: true`
+- `PollOptionSerializer` *(NEW)* — id, text, order, `votes_count`, `voted_by_me`
+  (per-requester)
+- `PollSerializer` *(NEW)* — question, allow_multiple_answers, is_closed, closed_at,
+  closed_by (nested), options (nested list), total_voters (distinct voters, not votes)
+- `PollCreateSerializer` *(NEW, plain `Serializer` not `ModelSerializer`)* — input for
+  `create_poll`; validates 2–10 non-blank unique options
+- `PollVoteSerializer` *(NEW, plain `Serializer`)* — input for `poll_vote`; `option_ids`
+  list, min 1
+- `MessageSerializer` — the full message shape (GET responses). Includes
+  `is_pinned`, `pinned_at`, `pinned_by` (nested), `mentioned_users` (nested list), and
+  now **`poll`** *(NEW — nested `PollSerializer`, `null` for non-poll messages)*.
+  `to_representation` blanks `text`/`file_url` and adds `deleted_for_me: true`
   when the requester is in `deleted_for_users`
-- `MessageSearchResultSerializer` *(NEW)* — extends `MessageSerializer`, adds
+- `MessageSearchResultSerializer` — extends `MessageSerializer`, adds
   `conversation_preview` (`{type, name, photo_url}`) — used only by `search_all`
 - `MessageCreateSerializer` — input for message send; validates media-type messages
   carry `file_url`/`file_urls`
@@ -749,26 +978,111 @@ computes `duration_seconds` and marks the whole `CallSession` `ENDED`.
 | `LIVEKIT_WS_URL` | `views.py` | Default `ws://10.93.221.189:7880` — looks like a dev/internal IP, confirm for prod |
 | `FIREBASE_CREDENTIALS_PATH` | `push_utils.py` | **Raises at import time** if missing. Path to Firebase service-account JSON |
 | `MEDIA_ABSOLUTE_BASE_URL` (Django setting, not env strictly) | `user_display.py` | Used only when no `request` context is available (WS payloads) |
+| `REDIS_URL` (or `CELERY_BROKER_URL` as fallback) | `settings.py` → `CHANNEL_LAYERS`, `CACHES`, Celery | **Not `message`-specific**, but this app's realtime broadcast, all its caches, and its 4 Celery tasks all depend on it being set in production — see §14 |
 
 ---
 
-## 14. Suggested Next Facilities (not yet implemented)
+## 14. Project Settings (`settings.py`) — Infra This App Depends On
+
+This app doesn't ship its own settings — everything below lives in the project-level
+`settings.py` (project `LearnScroll`, shared with `login`, `user_profile`, `post`, and
+`liveclass`). Documented here because `message`'s realtime (§8) and background-task
+(§7.5/§7.6, `tasks.py`) features are directly load-bearing on these.
+
+### Channels / WebSocket transport
+- `CHANNEL_LAYERS` → `channels_redis.core.RedisChannelLayer` when `REDIS_URL` (or its
+  fallback `CELERY_BROKER_URL`) is set, else `InMemoryChannelLayer`. **The in-memory
+  fallback only works correctly with a single worker process** — with 2+ Daphne/Uvicorn
+  workers (any real deployment), users on different workers silently stop seeing each
+  other's `chat_message`/`meta_update`/etc. broadcasts. Confirm `REDIS_URL` is actually
+  set in production `.env`.
+
+### Cache backend
+- `CACHES` → `django_redis.cache.RedisCache` (same `REDIS_URL`) when set, else
+  `LocMemCache`. Backs: `cache_utils.py`'s group-role (60s TTL) and presence (15s TTL)
+  caches, `ai_service.py`'s 24h summary/quiz cache, `WSMessageRateLimiter` and every
+  `throttles.py` rate counter, and `link_preview.py`'s 7-day preview cache *(NEW)*. Same
+  multi-worker caveat as `CHANNEL_LAYERS` — `LocMemCache` is per-process, so rate limits
+  and cached previews would be inconsistent across workers without Redis.
+
+### Celery — broker, beat schedule
+- `CELERY_BROKER_URL` / `CELERY_RESULT_BACKEND` — default to `redis://localhost:6379/0`
+  if unset (dev-friendly, but production should set `REDIS_URL`/these explicitly).
+- `CELERY_TASK_ACKS_LATE = True` + `CELERY_TASK_REJECT_ON_WORKER_LOST = True` — a task
+  killed mid-run (worker crash/restart) gets redelivered instead of silently lost.
+  Relevant to all 4 of `message/tasks.py`'s tasks.
+- `CELERY_BEAT_SCHEDULE` — the `message` app's 2 periodic entries, confirmed present:
+  - `message-send-scheduled-messages` → `message.send_scheduled_messages`, every minute
+  - `message-cleanup-expired-messages` → `message.cleanup_expired_messages`, every 15 min
+  - `generate_link_preview_task`/`transcribe_voice_message_task` *(NEW)* are **not** in
+    this schedule and don't need to be — they're one-shot, triggered directly via
+    `.delay()` right after a message is created (§7.5/§7.6), not a periodic sweep.
+
+### REST throttle rates (`REST_FRAMEWORK["DEFAULT_THROTTLE_RATES"]`)
+All 7 of the `message` app's custom throttle scopes, confirmed present *(the
+`message_send`/`call_initiate`/`group_create`/`reaction`/`ai_transcribe`/
+`message_send_ip`/`call_initiate_ip` rows were the §9.1 item 1 fix — missing before this
+review)*:
+
+| Scope | Rate | Throttle class | Guards |
+|---|---|---|---|
+| `message_send` | 60/min | `MessageSendThrottle` | `ConversationViewSet.messages` POST |
+| `message_send_ip` *(NEW)* | 120/min | `MessageSendIPThrottle` | same endpoint, per-IP |
+| `call_initiate` | 10/min | `CallInitiateThrottle` | `CallInitiateView` |
+| `call_initiate_ip` *(NEW)* | 20/min | `CallInitiateIPThrottle` | same endpoint, per-IP |
+| `group_create` | 5/min | `GroupCreateThrottle` | `GroupViewSet.create` |
+| `reaction` | 120/min | `ReactionThrottle` | `MessageViewSet.react` |
+| `ai_study` | 20/min | `AiStudyThrottle` | `AiStudyRoomView` |
+| `ai_transcribe` | 15/min | `AiTranscribeThrottle` | `VoiceTranscribeView` |
+
+Project-wide floor (applies to `message`'s views too, on top of the above where set):
+`DEFAULT_THROTTLE_CLASSES = [UserRateThrottle, AnonRateThrottle]`, rates `user: 100/min`,
+`anon: 20/min`. `DEFAULT_PERMISSION_CLASSES = [IsAuthenticated]` (fail-closed default —
+every `message` view already sets its own `permission_classes` explicitly, so this
+doesn't change current behavior, only protects a future view that forgets to).
+
+### Other settings touching this app
+- `AUTH_USER_MODEL = "login.User"` — confirms the integer-PK custom user model assumed
+  throughout this doc (§ intro).
+- `DATA_UPLOAD_MAX_MEMORY_SIZE = 10MB` — caps non-file JSON/form body size (e.g. a very
+  long pasted `text` message); actual file uploads are bounded separately by
+  `upload_view.py`'s own 200MB cap.
+- `SIMPLE_JWT` — `ACCESS_TOKEN_LIFETIME = 1 day`. Relevant to `Middleware.py`'s WS auth
+  (`?token=...`) — a socket connection made with a token near expiry will still work for
+  the life of that connection (JWT is only checked at `connect()`), but a reconnect after
+  expiry needs a refreshed token from the client.
+- `FCM_SERVICE_ACCOUNT_JSON_PATH` is defined here but **`push_utils.py` actually reads
+  `FIREBASE_CREDENTIALS_PATH` from `os.getenv()` directly, not this setting** — worth
+  reconciling (either both should point at the same value, or one is dead).
+- `SENTRY_DSN` — if set, `logger.exception()`/`logger.error()` calls throughout
+  `message` (e.g. `media_utils.py`'s swallowed gallery-write failures,
+  `push_utils.py`'s swallowed FCM failures, the new `generate_link_preview_task`/
+  `transcribe_voice_message_task` failure logs) are captured as Sentry events instead of
+  console-only. `send_default_pii=False` — chat text/message content is not sent to
+  Sentry by default.
+- `STORAGES["default"]` — plain `FileSystemStorage` (local disk). See §9.4 item 5.
+
+---
+
+## 15. Suggested Next Facilities (not yet implemented)
 
 - Chat/media export
-- Read-receipt privacy toggle (per-user "don't show my read receipts")
-- Poll messages in groups
+- Poll "clear my vote entirely" action (currently `option_ids` requires min 1 — see §7.8)
+- Poll forwarding (currently excluded from `forward`, see §2/§7.8/§7.9)
 
-*(Scheduled messages and voice-message transcription were previously listed here as
-"not yet implemented" — both actually exist in code now: `scheduled_messages.py` +
-`ConversationViewSet.schedule_message`/`MessageViewSet.manage_schedule` for the former,
-`VoiceTranscribeView` for the latter. This list was stale and has been corrected — see
-§9.1/§9.3 for what's still genuinely open on each.)*
+*(Scheduled messages, voice-message transcription, link previews, per-IP throttling,
+poll messages, forward-with-caption, server-side draft auto-save, and the read-receipt
+privacy toggle were previously listed here as "not yet implemented" — all now exist in
+code: `scheduled_messages.py` + `tasks.py` for the first, `VoiceTranscribeView` +
+`transcribe_voice_message_task` for the second, `link_preview.py` +
+`generate_link_preview_task` for the third, `ScopedIPThrottle` subclasses for the
+fourth, `Poll`/`PollOption`/`PollVote` + `ConversationViewSet.create_poll` +
+`MessageViewSet.poll_vote`/`poll_close` for the fifth (§7.8), the `caption` param on
+`MessageViewSet.forward` for the sixth (§7.9), `ConversationParticipant.draft_text` for
+the seventh (§7.10), and `UserPresence.show_read_receipts` +
+`ReadReceiptSettingsView` for the eighth (§7.11 — this one existed in code even before
+this session, just wasn't documented until now). This list is corrected as of this
+review — see §9.1/§9.4 for what's still genuinely open.)*
 
-Plus the "Still open" items in §9.3 — smaller than the above, but worth clearing before
-new facilities are stacked on top. The higher-priority bugs from the previous version of
-this doc (§9.2 now) were fixed in that session: the missing `media_utils.py` module
-(which meant the app couldn't even boot cleanly), the never-populated `GroupMedia`
-gallery, the inability to send media messages over WebSocket at all, and the duplicated
-`MAX_PINNED_PER_CONVERSATION` constant. This session's fixes are in §9.1: throttle
-wiring, presence caching, the unrouted transcription endpoint, and the group-role cache
-invalidation gaps.
+Plus the "Still open" items in §9.4 — smaller than the above, but worth clearing before
+new facilities are stacked on top.

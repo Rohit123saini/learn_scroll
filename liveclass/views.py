@@ -43,6 +43,7 @@ from .models import (
     BreakoutRoom,
     Certificate,
     ChatMessage,
+    ChatReaction,
     ClassHoliday,
     ClassJoinRequest,
     ClassMaterial,
@@ -68,8 +69,10 @@ from .models import (
     PassDailyCharge,
     PassPurchase,
     PollResponse,
+    PollTemplate,
     Referral,
     SessionParticipant,
+    SessionReadState,
     SessionWaitlist,
     create_bulk_notifications,
     create_notification,
@@ -99,6 +102,7 @@ from .serializers import (
     CertificateIssueSerializer,
     CertificateSerializer,
     ChatMessageSerializer,
+    ChatReactionSerializer,
     ClassHolidaySerializer,
     ClassJoinRequestDecisionSerializer,
     ClassJoinRequestSerializer,
@@ -132,6 +136,7 @@ from .serializers import (
     NotificationSerializer,
     PassPurchaseSerializer,
     PollResponseSerializer,
+    PollTemplateSerializer,
     ReferLinkResultSerializer,
     ReferralRedeemSerializer,
     ReferralSerializer,
@@ -920,6 +925,13 @@ class ClassroomViewSet(viewsets.ModelViewSet):
                 )
             now = timezone.now()
             SessionParticipant.objects.filter(pk=live_participant.pk).update(left_at=now, kicked_at=now)
+            # NOTE (fix — same realtime gap as ClassSessionViewSet.kick(),
+            # see that action's NOTE): a ban should mean gone from the live
+            # room's socket right now too, not just gone from LiveKit and
+            # blocked from future REST calls.
+            broadcast_to_session(
+                live_participant.session_id, "participant.kicked", {"user_id": student.id, "reason": "banned"}
+            )
 
         return Response(ClassroomBanSerializer(ban).data, status=201)
 
@@ -1559,6 +1571,16 @@ class ClassSessionViewSet(viewsets.ModelViewSet):
         # open the waitlist tab and notices. See _try_promote_from_waitlist's
         # own docstring below for the full reasoning.
         _try_promote_from_waitlist(session)
+        # NOTE (fix — realtime gap): kicking someone only ever blocked their
+        # future /join//token/ REST calls — it never told anyone connected
+        # to ws/liveclass/session/<id>/ right now. Two symptoms this closes:
+        # (1) other clients' participant lists never removed the kicked
+        # user live, and (2) the kicked user's OWN socket kept receiving
+        # chat/poll/hand events indefinitely, since SessionConsumer only
+        # gates access at connect() time. consumers.SessionConsumer's
+        # session_event() special-cases this event type to close the
+        # matching user's own connection when it sees this broadcast.
+        broadcast_to_session(session.id, "participant.kicked", {"user_id": int(user_id)})
         return Response({"detail": "Participant removed and blocked from rejoining this session."})
 
     @action(detail=True, methods=["post"], url_path="mute/(?P<user_id>[^/.]+)")
@@ -1647,6 +1669,74 @@ class ClassSessionViewSet(viewsets.ModelViewSet):
         broadcast_to_session(session.id, "hand.lowered", {"user_id": int(user_id), "hand_raised": False})
         return Response({"detail": "Hand lowered."})
 
+    @action(detail=True, methods=["get"], url_path="unread")
+    def unread(self, request, pk=None):
+        """NEW (Pass 13) — "5 new messages" badge for a student who closed
+        this session's tab and came back. Counts chat messages and polls
+        created AFTER this user's last recorded SessionReadState watermark
+        (see that model's docstring for the "never seen any" NULL
+        handling) — a real DB count, not a read off the Pass 10 replay
+        buffer, which is capped at 50 events / 15 minutes and would badly
+        undercount "away since this morning".
+
+        Own messages never count as unread (nobody needs a badge for
+        their own chat sends); a poll a user already voted on still
+        counts here if it was created after their watermark — "new since
+        you left" is about the poll's existence, not their vote status
+        (LivePollSerializer.result_counts already tells the frontend
+        whether they've voted).
+        """
+        session = self.get_object()
+        if not _has_room_access(session.classroom, request.user):
+            raise PermissionDenied("A valid pass is required to view unread counts for this session.")
+
+        state = SessionReadState.objects.filter(session=session, user=request.user).first()
+
+        chat_qs = ChatMessage.objects.filter(session=session, is_deleted=False).exclude(sender=request.user)
+        poll_qs = LivePoll.objects.filter(session=session)
+        if state and state.last_read_chat_message_id is not None:
+            chat_qs = chat_qs.filter(id__gt=state.last_read_chat_message_id)
+        if state and state.last_seen_poll_id is not None:
+            poll_qs = poll_qs.filter(id__gt=state.last_seen_poll_id)
+
+        return Response({"chat": chat_qs.count(), "polls": poll_qs.count()})
+
+    @action(detail=True, methods=["post"], url_path="mark-read")
+    def mark_read(self, request, pk=None):
+        """Advances the caller's own SessionReadState watermark — call
+        this when the student opens/refreshes this session's chat+poll
+        tab. Defaults to "everything that exists right now" (the latest
+        chat message id / poll id in this session) when no explicit id is
+        given, which covers the common "I opened the tab and saw
+        everything" case in one call; pass {"chat_message_id": ...} and/
+        or {"poll_id": ...} explicitly only if the client wants a
+        narrower watermark (e.g. it only scrolled through some of a long
+        backlog).
+        """
+        session = self.get_object()
+        if not _has_room_access(session.classroom, request.user):
+            raise PermissionDenied("A valid pass is required to update read state for this session.")
+
+        chat_message_id = request.data.get("chat_message_id")
+        if chat_message_id is None:
+            chat_message_id = (
+                ChatMessage.objects.filter(session=session, is_deleted=False).order_by("-id").values_list(
+                    "id", flat=True
+                ).first()
+            )
+        poll_id = request.data.get("poll_id")
+        if poll_id is None:
+            poll_id = LivePoll.objects.filter(session=session).order_by("-id").values_list("id", flat=True).first()
+
+        state, _created = SessionReadState.objects.update_or_create(
+            session=session,
+            user=request.user,
+            defaults={"last_read_chat_message_id": chat_message_id, "last_seen_poll_id": poll_id},
+        )
+        return Response(
+            {"last_read_chat_message_id": state.last_read_chat_message_id, "last_seen_poll_id": state.last_seen_poll_id}
+        )
+
     @action(detail=True, methods=["post"], url_path="start-recording")
     def start_recording(self, request, pk=None):
         """Teacher/co-teacher/moderator: start a LiveKit Room Composite
@@ -1679,6 +1769,11 @@ class ClassSessionViewSet(viewsets.ModelViewSet):
 
         session.egress_id = egress_id
         session.save(update_fields=["egress_id"])
+        # NOTE (fix — realtime gap): consumers.py's module docstring has
+        # always promised connected clients a "recording.started" push —
+        # nothing ever actually sent one, so a student's "REC" indicator
+        # never lit up live; they'd only find out on their next REST call.
+        broadcast_to_session(session.id, "recording.started", {"egress_id": egress_id})
         return Response({"detail": "Recording started.", "egress_id": egress_id})
 
     @action(detail=True, methods=["post"], url_path="stop-recording")
@@ -1703,6 +1798,12 @@ class ClassSessionViewSet(viewsets.ModelViewSet):
 
         session.egress_id = ""
         session.save(update_fields=["egress_id"])
+        # NOTE (fix — realtime gap, same class as start_recording above):
+        # clears the "REC" indicator live for every connected client
+        # instead of only for whoever happens to hit the REST API next.
+        # The eventual recording_url still arrives separately via
+        # LiveKitWebhookView's own broadcast below once the file is ready.
+        broadcast_to_session(session.id, "recording.stopped", {"egress_id": egress_id})
         return Response({"detail": "Recording stopped. The file will appear here once processing finishes."})
 
     # FEATURE: breakout rooms. Backend for live_session_screen.dart's
@@ -2114,7 +2215,13 @@ class LiveKitWebhookView(APIView):
             egress_info = event.egress_info
             session = ClassSession.objects.filter(egress_id=egress_info.egress_id).first()
             if session is not None:
+                # Capture this BEFORE clearing below, so we know whether
+                # stop_recording() already told connected clients "REC" is
+                # off, or whether this webhook is the first anyone hears of
+                # it (the auto-stop case in the comment right below).
+                was_stopped_explicitly = not session.egress_id
                 file_results = list(egress_info.file_results)
+                url = ""
                 if file_results:
                     # `location` is the final playable URL/path for
                     # cloud-storage outputs; some SDK versions instead only
@@ -2130,6 +2237,17 @@ class LiveKitWebhookView(APIView):
                 # closed the room and LiveKit auto-stopped the egress).
                 session.egress_id = ""
                 session.save(update_fields=["recording_url", "egress_id"])
+                # NOTE (fix — realtime gap): connected clients previously
+                # never learned the recording had actually finished
+                # processing and was playable — only the next REST poll of
+                # this session/its /recordings/ list would reveal it. Also
+                # covers the auto-stop path (empty_timeout) where
+                # stop_recording() was never called, so no
+                # "recording.stopped" was ever sent for it until now.
+                if not was_stopped_explicitly:
+                    broadcast_to_session(session.id, "recording.stopped", {"egress_id": egress_info.egress_id})
+                if url:
+                    broadcast_to_session(session.id, "recording.ready", {"recording_url": url})
 
         # 200 with no body is all LiveKit's webhook sender expects — it
         # just needs to know delivery succeeded so it doesn't retry.
@@ -3021,6 +3139,15 @@ class ChatMessageViewSet(
         if self.action == "create":
             self.throttle_scope = "chat_message_create"
             return [ScopedRateThrottle()]
+        if self.action == "react":
+            # NEW (Pass 12): a reaction is a single tap, not a typed
+            # message, so it can legitimately fire more often than chat
+            # sends — but "more often" still isn't "unbounded". Separate,
+            # slightly looser scope than chat_message_create so the two
+            # don't have to share one budget. Add e.g.
+            # {"chat_reaction": "60/min"} to DEFAULT_THROTTLE_RATES.
+            self.throttle_scope = "chat_reaction"
+            return [ScopedRateThrottle()]
         return super().get_throttles()
 
     def _session_or_none(self, session_id):
@@ -3028,6 +3155,13 @@ class ChatMessageViewSet(
 
     def get_queryset(self):
         qs = ChatMessage.objects.filter(is_deleted=False).select_related("sender")
+        # NEW (Pass 12 — chat reactions): ChatMessageSerializer.reaction_counts/
+        # my_reaction iterate obj.reactions.all() per message — without this
+        # prefetch that's one extra query PER message in a list response
+        # (the classic N+1), the same trap get_result_counts() on
+        # LivePollSerializer already avoids via LivePollViewSet's own
+        # prefetch_related("responses").
+        qs = qs.prefetch_related("reactions__user")
         session_id = self.request.query_params.get("session")
         if not session_id:
             return qs.none()
@@ -3056,6 +3190,105 @@ class ChatMessageViewSet(
         instance.is_deleted = True  # soft delete
         instance.save(update_fields=["is_deleted"])
         broadcast_to_session(instance.session_id, "chat.message_deleted", {"id": instance.id})
+
+    @action(detail=True, methods=["post", "delete"])
+    def react(self, request, pk=None):
+        """NEW (Pass 12) — chat reactions (👍❤️😂). Deliberately NOT a
+        separate ChatReactionViewSet: a reaction only ever makes sense in
+        the context of one specific message, so this stays a sub-resource
+        of chat-messages/, same shape as LivePollViewSet.vote()/close()
+        above (a detail action, not its own router entry).
+
+        POST {"reaction": "heart"} — sets or changes the caller's own
+        reaction on this message (upsert, same "changing your answer"
+        shape as PollResponse.update_or_create in LivePollViewSet.vote()).
+        DELETE — removes the caller's own reaction, if any (no-op, not an
+        error, if they hadn't reacted — same "idempotent unreact" contract
+        a toggle button on the frontend wants).
+
+        Looked up directly rather than via get_object()/get_queryset(),
+        same reason as LivePollViewSet.vote()/close(): get_queryset() only
+        applies the ?session= filter for the 'list' action, so routing a
+        detail action through it would 404 every call (no ?session= is
+        sent on a POST to a detail URL).
+        """
+        message = ChatMessage.objects.filter(pk=pk, is_deleted=False).select_related("session__classroom").first()
+        if message is None:
+            raise NotFound("Chat message not found.")
+        if not _has_room_access(message.session.classroom, request.user):
+            raise PermissionDenied("A valid pass is required to react in this session.")
+
+        if request.method == "DELETE":
+            ChatReaction.objects.filter(message=message, user=request.user).delete()
+        else:
+            serializer = ChatReactionSerializer(data=request.data)
+            serializer.is_valid(raise_exception=True)
+            ChatReaction.objects.update_or_create(
+                message=message,
+                user=request.user,
+                defaults={"reaction": serializer.validated_data["reaction"]},
+            )
+
+        # Push the message's full, freshly-recomputed reaction_counts —
+        # same "broadcast the recomputed tally, not just the one delta"
+        # choice LivePollViewSet.vote() makes for poll.updated, so a
+        # client that missed an earlier reaction event still ends up with
+        # a correct count rather than a drifted one.
+        fresh = ChatMessage.objects.prefetch_related("reactions__user").get(pk=message.pk)
+        broadcast_to_session(
+            message.session_id,
+            "chat.reaction",
+            {
+                "message_id": fresh.id,
+                "reaction_counts": ChatMessageSerializer(fresh).data["reaction_counts"],
+            },
+        )
+        return Response(ChatMessageSerializer(fresh, context={"request": request}).data)
+
+    @action(detail=True, methods=["post"])
+    def pin(self, request, pk=None):
+        """NEW (Pass 13) — pin an important message/announcement so it
+        doesn't get lost in live-chat scroll. Host-only (same
+        `_can_moderate_session` boundary as poll create/close), and
+        deliberately AT MOST ONE pinned message per session: pinning a
+        new one unpins whichever was pinned before, in the same call, so
+        `is_pinned=True` on `ChatMessage` is never ambiguous about which
+        message is "the" pin (see the field's own docstring in
+        models.py for why this couldn't just be a DB constraint).
+        """
+        message = ChatMessage.objects.filter(pk=pk, is_deleted=False).select_related("session__classroom").first()
+        if message is None:
+            raise NotFound("Chat message not found.")
+        if not _can_moderate_session(message.session, request.user):
+            raise PermissionDenied("Only the classroom's teacher, co-teacher, or moderator can pin a message.")
+
+        ChatMessage.objects.filter(session_id=message.session_id, is_pinned=True).exclude(pk=message.pk).update(
+            is_pinned=False, pinned_by=None, pinned_at=None
+        )
+        message.is_pinned = True
+        message.pinned_by = request.user
+        message.pinned_at = timezone.now()
+        message.save(update_fields=["is_pinned", "pinned_by", "pinned_at"])
+
+        broadcast_to_session(
+            message.session_id, "chat.pinned", ChatMessageSerializer(message, context={"request": request}).data
+        )
+        return Response(ChatMessageSerializer(message, context={"request": request}).data)
+
+    @action(detail=True, methods=["post"])
+    def unpin(self, request, pk=None):
+        message = ChatMessage.objects.filter(pk=pk, is_deleted=False).select_related("session__classroom").first()
+        if message is None:
+            raise NotFound("Chat message not found.")
+        if not _can_moderate_session(message.session, request.user):
+            raise PermissionDenied("Only the classroom's teacher, co-teacher, or moderator can unpin a message.")
+
+        message.is_pinned = False
+        message.pinned_by = None
+        message.pinned_at = None
+        message.save(update_fields=["is_pinned", "pinned_by", "pinned_at"])
+        broadcast_to_session(message.session_id, "chat.unpinned", {"id": message.id})
+        return Response(ChatMessageSerializer(message, context={"request": request}).data)
 
 
 # ---------------------------------------------------------------------------
@@ -3187,6 +3420,80 @@ class LivePollViewSet(viewsets.ModelViewSet):
         poll.save(update_fields=["is_active", "closed_at"])
         broadcast_to_session(poll.session_id, "poll.closed", LivePollSerializer(poll).data)
         return Response(LivePollSerializer(poll).data)
+
+    @action(detail=False, methods=["post"], url_path="quick-create")
+    def quick_create(self, request):
+        """NEW (Pass 13) — fire a saved PollTemplate into a live session in
+        one tap instead of retyping the same "Samajh aaya? Yes/No"-style
+        question every time. Body: {"template": <id>, "session": <id>}.
+
+        Deliberately its own list-level action (not a kwarg on regular
+        create()) — the client sends a template id + session id, not a
+        question/options payload, so it needs its own request shape and
+        its own validation, same reasoning LivePollViewSet.vote()/close()
+        already use for why those are separate detail actions rather than
+        overloads of update()/destroy().
+        """
+        template_id = request.data.get("template")
+        session_id = request.data.get("session")
+        if not template_id or not session_id:
+            raise ValidationError({"template": "Both `template` and `session` are required."})
+
+        template = PollTemplate.objects.filter(pk=template_id).first()
+        if template is None:
+            raise NotFound("Poll template not found.")
+        session = ClassSession.objects.filter(pk=session_id).select_related("classroom").first()
+        if session is None:
+            raise NotFound("Session not found.")
+        if template.classroom_id != session.classroom_id:
+            raise ValidationError({"template": "This template belongs to a different classroom."})
+        if not _can_moderate_session(session, request.user):
+            raise PermissionDenied("Only the classroom's teacher, co-teacher, or moderator can start a poll.")
+
+        poll = LivePoll.objects.create(
+            session=session, created_by=request.user, question=template.question, options=template.options
+        )
+        broadcast_to_session(session.id, "poll.created", LivePollSerializer(poll).data)
+        return Response(LivePollSerializer(poll).data, status=201)
+
+
+class PollTemplateViewSet(viewsets.ModelViewSet):
+    """NEW (Pass 13) — see PollTemplate's docstring in models.py. Scoped to
+    ?classroom=<id>, same _can_manage_classroom boundary Assignment/
+    Notice/ClassHoliday already use for their own classroom-scoped CRUD —
+    a template is a teacher's own reusable shorthand for their classroom,
+    not something students need to see or list.
+    """
+
+    serializer_class = PollTemplateSerializer
+    permission_classes = [IsAuthenticated]
+    queryset = PollTemplate.objects.select_related("classroom", "created_by")
+
+    def get_queryset(self):
+        qs = super().get_queryset()
+        classroom_id = self.request.query_params.get("classroom")
+        if not classroom_id:
+            return qs.none()
+        classroom = Classroom.objects.filter(pk=classroom_id).first()
+        if not classroom or not _can_manage_classroom(classroom, self.request.user):
+            return qs.none()
+        return qs.filter(classroom_id=classroom_id)
+
+    def perform_create(self, serializer):
+        classroom = serializer.validated_data["classroom"]
+        if not _can_manage_classroom(classroom, self.request.user):
+            raise PermissionDenied("Only the classroom's teacher, co-teacher, or moderator can save a poll template.")
+        serializer.save(created_by=self.request.user)
+
+    def perform_update(self, serializer):
+        if not _can_manage_classroom(serializer.instance.classroom, self.request.user):
+            raise PermissionDenied("Only the classroom's teacher, co-teacher, or moderator can edit this template.")
+        serializer.save()
+
+    def perform_destroy(self, instance):
+        if not _can_manage_classroom(instance.classroom, self.request.user):
+            raise PermissionDenied("Only the classroom's teacher, co-teacher, or moderator can delete this template.")
+        instance.delete()
 
 
 # ---------------------------------------------------------------------------
