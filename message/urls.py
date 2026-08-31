@@ -17,7 +17,8 @@ banti hain):
 Plain APIViews (@action-based nahi, isliye manual path()):
     - UserPresenceView, CallInitiateView, CallActionView,
       StudyRoomJoinView, StudyRoomStateView, DeviceTokenView,
-      AiStudyRoomView (views_ai.py), MessageUploadAPIView (upload_view.py)
+      AiStudyRoomView, VoiceTranscribeView, SmartReplySuggestionsView
+      (all in views_ai.py), MessageUploadAPIView (upload_view.py)
 
 NOTE: `views_ai.py` aur `upload_view.py` is review me upload nahi hui
 thi — sirf documentation aur `views.py`'s existing import se naam
@@ -47,7 +48,7 @@ from .views import (
 # route (`POST /message/ai/transcribe/`) — but only `AiStudyRoomView` was
 # ever imported/routed here, so the transcribe endpoint was unreachable
 # (404) despite being complete. Wiring it in below.
-from .views_ai import AiStudyRoomView, VoiceTranscribeView
+from .views_ai import AiStudyRoomView, VoiceTranscribeView, SmartReplySuggestionsView
 from .upload_view import MessageUploadAPIView
 
 router = DefaultRouter()
@@ -85,6 +86,9 @@ urlpatterns = [
 
     # --- AI Voice-message transcription (🔥 FIX — was implemented but unrouted) ---
     path('ai/transcribe/', VoiceTranscribeView.as_view(), name='ai-transcribe'),
+
+    # --- AI Smart-reply suggestions (NAYA) ---
+    path('ai/smart-replies/', SmartReplySuggestionsView.as_view(), name='ai-smart-replies'),
 
     # --- Generic file upload (returns a URL to attach to a message) ---
     path('upload/', MessageUploadAPIView.as_view(), name='message-upload'),

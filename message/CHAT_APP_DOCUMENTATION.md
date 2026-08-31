@@ -27,18 +27,19 @@ Auth model: `AUTH_USER_MODEL` is a **custom `User`** (app `login`), primary key 
 | `permissions.py` | DRF permission classes |
 | `group_rules.py` | Group access-control (message/call/study-room permission, daily limit) |
 | `mentions.py` | Shared `@mention` text-parsing helper (REST + WS) |
-| `push_utils.py` | Firebase Cloud Messaging (FCM) push helpers |
+| `push_utils.py` | Firebase Cloud Messaging (FCM) push helpers. Firebase init is now **lazy** (only runs the first time a push is actually sent, not at import time) and reads either `FIREBASE_CREDENTIALS_PATH` or `settings.FCM_SERVICE_ACCOUNT_JSON_PATH` *(fix — see §9.0)*. Also now does **notification batching/digest** for normal chat messages — see §7.13 |
 | `livekit_utils.py` | LiveKit JWT token generation (calls + study rooms) |
 | `user_display.py` | Shared display-name / profile-photo-URL helper (REST + WS) |
 | `upload_view.py` | Generic file-upload endpoint (returns a URL to attach to a message) |
 | `ai_service.py` | Gemini calls for whiteboard summary/quiz (with caching) |
-| `views_ai.py` | REST endpoints wrapping `ai_service.py` (`AiStudyRoomView`) + voice-message transcription (`VoiceTranscribeView`) |
+| `views_ai.py` | REST endpoints wrapping `ai_service.py` (`AiStudyRoomView`) + voice-message transcription (`VoiceTranscribeView`) + smart-reply suggestions (`SmartReplySuggestionsView`, *NEW*) |
 | `media_utils.py` | `create_group_media_for_message(message)` — populates the `GroupMedia` gallery table; shared by REST + WS message-send |
 | `constants.py` | Single shared source for cross-file constants (currently `MAX_PINNED_PER_CONVERSATION`) |
+| `search_utils.py` *(NEW this session)* | `MIN_QUERY_LENGTH` (2), `apply_structured_filters(qs, query_params)` (sender/date_from/date_to/has_media/media_type), `search_messages(qs, query)` — Postgres-backed ranked full-text + trigram-typo search, non-Postgres fallback to plain `icontains`. `views.py`'s `ConversationViewSet.search`/`.search_all` already imported and called this module; the file itself didn't exist, so both search endpoints raised `NameError` on every call until this session. See §7.1 |
 | `cache_utils.py` | Django-cache helpers: group-role cache (`get_group_role_cached`/`invalidate_group_role_cache`, 60s TTL) behind `group_rules.is_group_admin_or_mod`, and presence cache (`get_presence_cached`/`set_presence_cache`, 15s TTL) behind `UserPresenceView` + `ChatConsumer` |
 | `throttles.py` | DRF `UserRateThrottle` subclasses for REST writes (`MessageSendThrottle`, `CallInitiateThrottle`, `GroupCreateThrottle`, `ReactionThrottle`) + per-IP safety-net throttles (`MessageSendIPThrottle`, `CallInitiateIPThrottle`, both `SimpleRateThrottle` subclasses via shared `ScopedIPThrottle`) *(NEW this session)* + `WSMessageRateLimiter` (cache-backed sliding window) for the WS `message` event, since DRF throttles don't apply to Channels consumers |
 | `scheduled_messages.py` | "Send later" delivery half — `finalize_scheduled_message(message)`, called by the `message.send_scheduled_messages` Celery task (`tasks.py`, confirmed registered in `CELERY_BEAT_SCHEDULE`, runs every minute). Now also enqueues the link-preview/transcription tasks below for scheduled messages, same as the two live-send paths *(NEW this session)* |
-| `tasks.py` *(NEW this session)* | Celery tasks: `send_scheduled_messages` (delivers due "send later" messages, every minute), `cleanup_expired_messages` (hard-deletes disappearing messages past `expires_at`, every 15 min), `generate_link_preview_task` (background OpenGraph fetch), `transcribe_voice_message_task` (background voice-note transcription) — plus the shared `_broadcast_meta_update()` helper the latter two use to push their result live over WS |
+| `tasks.py` | Celery tasks: `send_scheduled_messages` (delivers due "send later" messages, every minute — beat-scheduled), `cleanup_expired_messages` (hard-deletes disappearing messages past `expires_at`, every 15 min — beat-scheduled), `generate_link_preview_task` (background OpenGraph fetch, one-shot via `.delay()`), `transcribe_voice_message_task` (background voice-note transcription, one-shot via `.delay()`), `flush_chat_push_digest` *(NEW)* (one-shot, `countdown`-scheduled by `push_utils.send_chat_message_push` — flushes the debounced chat-push digest window, see §7.13) — plus the shared `_broadcast_meta_update()` helper the link-preview/transcription tasks use to push their result live over WS |
 | `link_preview.py` *(NEW this session)* | `extract_first_url(text)` + `fetch_link_preview(url)` — SSRF-safe OpenGraph fetcher (blocks private/loopback/link-local IPs, manually re-checks every redirect hop, size/time-bounded fetch, 7-day negative+positive cache) used by `generate_link_preview_task` |
 | `admin.py` | Django admin registrations |
 | `apps.py` | App config (`name = 'message'`) |
@@ -239,8 +240,8 @@ max 50).
 | `POST /<id>/messages/` | `messages` (POST) | Send a message. Throttled 60/min/user (`MessageSendThrottle`). See §6 "Message send flow" below |
 | `POST /<id>/poll/` *(NEW)* | `create_poll` | Body `{"question": "...", "options": ["A","B",...] (2–10), "allow_multiple_answers": false}`. Same block-check/group-permission/daily-limit rules as a normal message. Creates a `Message` (`type=poll`) + `Poll` + `PollOption` rows. See §7.8 |
 | `POST /<id>/read_all/` | `read_all` | Bulk-mark all messages read + `unread_count = 0` |
-| `GET /<id>/search/` *(NEW)* | `search` | `?q=...`, min 2 chars. Text search within this conversation |
-| `GET /search_all/` *(NEW)* | `search_all` | `?q=...`. Global search across every conversation the user is active in. Returns `MessageSearchResultSerializer` (adds `conversation_preview`) |
+| `GET /<id>/search/` *(NEW)* | `search` | `?q=...` (min 2 chars, `search_utils.MIN_QUERY_LENGTH`) + optional structured filters `sender`, `date_from`, `date_to`, `has_media`, `media_type`. Ranked full-text + typo-tolerant search within this conversation — see §7.1 |
+| `GET /search_all/` *(NEW)* | `search_all` | Same `q` + filter params as above. Global search across every conversation the user is active in. Returns `MessageSearchResultSerializer` (adds `conversation_preview`) |
 | `GET /<id>/pinned/` *(NEW)* | `pinned` | List of currently pinned messages in this conversation |
 
 ### Message-send flow (`ConversationViewSet.messages`, POST) — step by step
@@ -415,6 +416,25 @@ Queryset: groups where the user has a non-banned `GroupMember` row.
   `Message.meta["transcript"]` if it wants to avoid re-transcribing). 503 if
   `AI_ENABLED` is False, 500 with a generic message on any other failure.
 
+### AI Smart-Reply Suggestions (`views_ai.py` → `SmartReplySuggestionsView`) *(NEW)*
+- `POST /ai/smart-replies/` — body `{"conversation_id": "<uuid>"}`. Returns
+  `{"suggestions": ["...", "...", "..."]}` (3 short tap-to-send quick-reply chips,
+  Gmail/WhatsApp-Business-style). Throttled 30/min/user (`SmartReplyThrottle`, scope
+  `ai_smart_reply` — looser than the study room's since a client may reasonably call
+  this on every incoming message, but still bounded).
+- Membership is checked the same way search/messages are (`ConversationParticipant`
+  active row) and a non-member gets a plain 404, not 403, so existence of the
+  conversation isn't leaked.
+- Builds its prompt from the last 10 plain-text messages (`type='text'`, excludes
+  deleted-for-everyone / deleted-for-me / scheduled), oldest-first, labelled `Me:`/
+  `<first_name or "Them">:`. 400s if there's no usable context yet, or if the most
+  recent message is the requester's own (nothing to reply to).
+- Delegates to `ai_service.generate_reply_suggestions()`, which reuses the same 24h
+  content-hash cache pattern as `generate_summary`/`generate_quiz`/`transcribe_audio` —
+  repeat calls against the same conversation state don't re-hit Gemini.
+- 503 if `AI_ENABLED` is False, 500 with a generic message (real error
+  `logger.exception`'d) on any other failure — same pattern as the other two AI views.
+
 ---
 
 ## 7. Feature History (search / pin / mentions / link previews / auto-transcription /
@@ -426,15 +446,39 @@ session (poll messages, forward-with-caption, server-side draft, read-receipt pr
 toggle). Kept as originally written rather than renumbered, so old references
 elsewhere in this doc still point at the right item.*
 
-### 7.1 Message Search
+### 7.1 Message Search *(implementation rewritten this session — see `search_utils.py`)*
 - `GET /message/conversations/<id>/search/?q=...` — search within one conversation
 - `GET /message/conversations/search_all/?q=...` — global search across all the user's
   active conversations, results include `conversation_preview` (name/photo/type of the
   chat each hit came from)
-- Implementation: simple `text__icontains` (no full-text-search engine — fine at current
-  scale; revisit with Postgres `SearchVector`/Elasticsearch if message volume grows a
-  lot). Excludes expired-disappearing, `deleted_for_everyone`, and "deleted for me"
-  messages, same as the normal message list.
+- **`search_utils.py` was a missing file** — `views.py`'s `ConversationViewSet.search`/
+  `.search_all` already called `search_utils.MIN_QUERY_LENGTH` /
+  `apply_structured_filters()` / `search_messages()`, but the module didn't exist, so
+  both endpoints raised `NameError` on every request. Now implemented:
+  - `MIN_QUERY_LENGTH = 2` — `q` shorter than this is rejected by the view before
+    reaching `search_utils` (1-char search is noisy/expensive at scale, same reasoning
+    WhatsApp/Instagram use)
+  - **Postgres path** (`connection.vendor == 'postgresql'`): two matches OR'd together —
+    (1) stemmed/ranked match against `Message.search_vector` (a `SearchVectorField`,
+    auto-populated by a DB trigger — see migration `0900_message_search_vector.py`) via
+    `SearchQuery`/`SearchRank`, so "running" also matches "run" and stop-words are
+    ignored; (2) typo-tolerant match via `TrigramSimilarity` directly on the `text`
+    column (threshold `0.25`, slightly looser than Postgres's own `0.3` default since
+    chat messages are short), catching typos step (1) can't (e.g. "helo" vs "hello").
+    Ordered `-rank, -similarity, -created_at` — strongest match first.
+  - **Non-Postgres fallback** (sqlite, common in local dev/tests, where
+    `SearchVectorField`/`pg_trgm` don't exist): unranked `text__icontains`, ordered
+    `-created_at`. Degrades gracefully instead of crashing.
+  - `apply_structured_filters(qs, query_params)` — independent of the text query, applied
+    first to shrink the row set before the (more expensive) text search runs:
+    `sender` (user id), `date_from`/`date_to` (`YYYY-MM-DD`, validated —
+    `date_from > date_to` is a 400), `has_media` (`true`/`false`), `media_type` (must be
+    one of `search_utils.MEDIA_TYPES` = image/video/audio/file/presentation). Returns
+    `(filtered_qs, error_message_or_None)`; both `search` and `search_all` build their
+    own 400 response from the error string so error formatting stays consistent between
+    the two endpoints.
+  - Excludes expired-disappearing, `deleted_for_everyone`, and "deleted for me"
+    messages, same as the normal message list — unchanged from before this session.
 
 ### 7.2 Message Pin (WhatsApp-style)
 - `Message.is_pinned` / `pinned_at` / `pinned_by`
@@ -444,9 +488,9 @@ elsewhere in this doc still point at the right item.*
   everyone in the chat room
 - Permission: group → admin/moderator only (`group_rules.is_group_admin_or_mod`);
   private chat → either participant
-- **Limit: 3 pinned messages per conversation** (`MAX_PINNED_PER_CONVERSATION`, defined
-  in both `MessageViewSet` and `ChatConsumer` — kept in sync manually, no shared
-  constant yet — see §9.3)
+- **Limit: 3 pinned messages per conversation** (`MAX_PINNED_PER_CONVERSATION`, now a
+  single shared constant in `constants.py`, imported by both `MessageViewSet` and
+  `ChatConsumer` — previously duplicated/manually kept in sync, see §9.3 item 4)
 - `GET /message/conversations/<id>/pinned/` lists current pins
 
 ### 7.3 @Mentions
@@ -578,6 +622,48 @@ elsewhere in this doc still point at the right item.*
   turning it off hides your `read_at` from others AND hides others' `read_at` from you;
   `is_delivered`/delivery double-tick is unaffected).
 
+### 7.12 Smart-Reply Suggestions *(NEW this session)*
+- `POST /message/ai/smart-replies/` (`views_ai.py` → `SmartReplySuggestionsView`) — see
+  §6 for the full endpoint contract.
+- Reuses the already-connected Gemini client (`ai_service.py`) that summary/quiz/
+  transcription use, via a new `generate_reply_suggestions(context_text)` function —
+  same 24h content-hash caching convention as the rest of that module.
+- New throttle scope `ai_smart_reply` (30/min, `SmartReplyThrottle`) — **needs a
+  `DEFAULT_THROTTLE_RATES["ai_smart_reply"]` entry in `settings.py`**, same failure mode
+  already documented in §9.1 item 1 for the other 7 scopes (a missing rate entry raises
+  `ImproperlyConfigured` on the very first call). `settings.py` wasn't part of this
+  review, so this isn't confirmed present or absent — flagged in §9.4.
+
+### 7.13 Chat Push Notification Batching / Digest *(NEW this session)*
+- `push_utils.send_chat_message_push` no longer sends an FCM push immediately for every
+  message. It now accumulates a per-`(user, conversation)` counter + "most recent
+  message" snapshot in cache for a debounce window (`CHAT_PUSH_DEBOUNCE_SECONDS`, default
+  30s, env-overridable), and schedules **one** Celery task
+  (`tasks.flush_chat_push_digest`, `countdown=CHAT_PUSH_DEBOUNCE_SECONDS`) to flush it —
+  WhatsApp-style: if the user doesn't open the app for a while and several messages land
+  in the same window, they get a single "X sent N messages" push instead of N separate
+  ones.
+- Race-safety: the "have I already scheduled a flush for this window" flag is set with
+  `cache.add` (not `cache.set`), so only the *first* message in a burst actually enqueues
+  `flush_chat_push_digest` — the rest just increment the counter.
+- `flush_chat_push_digest` (`tasks.py`) reads back the accumulated count + last-message
+  snapshot, explicitly clears the three cache keys (not just left to TTL, so a message
+  arriving mid-flush cleanly starts a *new* window instead of folding into one already
+  in flight), then sends either a normal single-message push (`count == 1`, via the
+  existing `_send_single_chat_push`) or a batched digest push (`count > 1`, via
+  `send_chat_digest_push`, new `type: "chat_digest"` data-only payload — no
+  `message_id`, since a digest isn't about one specific message).
+- **This closes a real bug, not just an enhancement — see §9.1.** `send_chat_message_push`
+  already unconditionally imported and called `tasks.flush_chat_push_digest` before this
+  task existed anywhere in the codebase; every call to it (i.e. every ordinary chat
+  message push, from all three send paths — REST, WS, and scheduled-message delivery)
+  would raise an `ImportError` the instant it tried to schedule the flush. Mentions and
+  calls were unaffected (`send_mention_push`/`send_incoming_call_push` bypass this path
+  entirely and push immediately), but **all ordinary chat-message push notifications were
+  silently broken end-to-end** until `flush_chat_push_digest` was added.
+- Mentions still bypass batching entirely — `send_mention_push` is unchanged, always
+  immediate/priority, even if the chat is muted (§7.3).
+
 ---
 
 ## 8. WebSocket API (`consumers.py`, `routing.py`)
@@ -683,6 +769,44 @@ computes `duration_seconds` and marks the whole `CallSession` `ENDED`.
 ---
 
 ## 9. Known Issues / Follow-ups
+
+### 9.0 Fixed in this session
+
+1. **`flush_chat_push_digest` Celery task was missing entirely, breaking all ordinary
+   chat-message pushes.** See §7.13 for the full explanation — `push_utils.
+   send_chat_message_push` already called it unconditionally as part of the new
+   batching/digest logic, and its absence meant every normal message push (REST, WS,
+   and scheduled-delivery paths alike) raised an `ImportError`. Added the task to
+   `tasks.py`.
+2. **`push_utils.py` used to raise at import time if `FIREBASE_CREDENTIALS_PATH` was
+   unset** (see the now-stale §13 note this replaces) — since `push_utils` is imported
+   by `views.py` at Django startup, a missing credentials path used to crash the entire
+   process, including plain REST/chat endpoints that never touch push at all (same class
+   of bug §9.3 documents for `livekit_utils.py`). Firebase init is now **lazy**: it only
+   runs the first time a push actually needs to be sent, and any failure there is logged
+   + swallowed by `_send_multicast`'s own try/except instead of taking the app down.
+3. **`FIREBASE_CREDENTIALS_PATH` vs. `settings.FCM_SERVICE_ACCOUNT_JSON_PATH` mismatch
+   reconciled** — previously flagged (old §14 note) as `push_utils.py` reading a
+   different env var than the one `settings.py` defines. It now accepts either,
+   preferring the env var (back-compat) and falling back to the Django setting, so
+   neither convention needs a `settings.py`/deploy change to work.
+4. **`search_utils.py` was a missing file, breaking both search endpoints on every
+   call.** `views.py`'s `ConversationViewSet.search`/`.search_all` already imported and
+   called `search_utils.MIN_QUERY_LENGTH` / `apply_structured_filters()` /
+   `search_messages()`, but the module itself was never uploaded/created — both
+   endpoints raised `NameError` 100% of the time. Now implemented with ranked Postgres
+   full-text search (`SearchVector`/`SearchRank`) OR'd with `TrigramSimilarity` for
+   typo tolerance, structured filters (sender/date range/media), and a plain
+   `icontains` fallback for non-Postgres databases. See §7.1 and the `search_utils.py`
+   row in §1.
+5. **`GroupMedia.file_size` could silently stay `null`.** `media_utils.py`'s
+   `_resolve_file_size()` previously only trusted `message.meta.get("size")`, which
+   depended on every client (REST + WS, every attachment type) round-tripping the
+   `file_size` the upload endpoint returned back into `meta.size` at message-send time —
+   any path that missed this left the gallery's file size blank with no error. Now falls
+   back to asking the storage backend for the real size (`default_storage.size(...)`,
+   works for local disk and S3-backed storage alike) whenever the client didn't supply
+   one. See the (now-resolved) §9.4 item 3 for the full before/after.
 
 ### 9.1 Fixed in this review
 
@@ -796,10 +920,15 @@ computes `duration_seconds` and marks the whole `CallSession` `ENDED`.
 2. **`CallSession.token` / Agora fields** (`is_recording`, `recording_url`) exist on the
    model but the app has fully moved to LiveKit — `token` looks unused;
    recording start/stop code was not found anywhere.
-3. **`media_utils.py`'s `file_size`** is read from `message.meta.get("size")` — this
-   depends on the client populating `meta.size` correctly for every media message
-   (both REST and WS paths). Worth a follow-up check that every upload client path
-   actually sets it; if not, `GroupMedia.file_size` will silently stay `null`.
+3. ~~**`media_utils.py`'s `file_size`** is read from `message.meta.get("size")`...~~
+   **Resolved this session** — `_resolve_file_size(message, file_url)` now falls back to
+   asking the storage backend directly (`default_storage.size(relative_path)`, works for
+   local `FileSystemStorage` and S3-via-`django-storages` alike) whenever
+   `meta.get("size")` is missing/unparseable, by stripping `settings.MEDIA_URL` off
+   `file_url` to get the storage-relative path. Client-supplied `meta.size` is still
+   preferred when present (never overridden); the storage lookup is best-effort only —
+   any failure (bad URL, file not found, storage error) is swallowed and logged at
+   `debug`, never blocks the message-send or the `GroupMedia` row from being created.
 4. ~~No management-command file for `send_scheduled_messages` was seen...~~ **Resolved,
    see §9.1 item 3** — `tasks.py` (Celery, not a management command) plus its
    `CELERY_BEAT_SCHEDULE` registration in `settings.py` are both now confirmed present.
@@ -813,6 +942,15 @@ computes `duration_seconds` and marks the whole `CallSession` `ENDED`.
    but could miss unusual attribute ordering/quoting on some sites. Fine for a
    best-effort preview feature (fails closed to "no preview" on a parse miss, never
    crashes); swap for `BeautifulSoup` if preview accuracy becomes a complaint.
+7. **`ai_smart_reply` throttle scope needs a `DEFAULT_THROTTLE_RATES` entry** *(NEW)* —
+   same failure mode as §9.1 item 1 (missing scope → `ImproperlyConfigured` on first
+   call). `settings.py` wasn't re-reviewed this session, so unlike the other 7 scopes
+   this one isn't confirmed present or absent yet — check before `SmartReplySuggestionsView`
+   goes live.
+8. **`CHAT_PUSH_DEBOUNCE_SECONDS` means every ordinary chat push is delayed by design**
+   *(NEW)* — up to 30s (default) between a message being sent and its push notification
+   arriving, even for a single message with no burst. Worth confirming this trade-off
+   (fewer, better-grouped notifications vs. push latency) is the intended UX — see §7.13.
 
 ---
 
@@ -828,14 +966,21 @@ computes `duration_seconds` and marks the whole `CallSession` `ENDED`.
 ### `mentions.py` *(NEW)*
 - `extract_mentioned_user_ids(text, conversation) -> list[int]`
 
-### `push_utils.py` (Firebase Admin SDK, `FIREBASE_CREDENTIALS_PATH` env required)
+### `push_utils.py` (Firebase Admin SDK, `FIREBASE_CREDENTIALS_PATH` **or**
+`settings.FCM_SERVICE_ACCOUNT_JSON_PATH` — lazy init, see §9.0 items 2–3)
 - `send_push_to_users(recipient_ids, title, body, data=None)` — generic, WITH visible
   notification (only used for non-chat pushes)
-- `send_chat_message_push(...)` — data-only (no top-level `notification`, to avoid
-  Android's automatic tray notification double-firing alongside the app's own local one)
+- `send_chat_message_push(...)` — **no longer sends FCM directly.** Accumulates a debounce
+  window per `(user, conversation)` in cache and schedules `tasks.flush_chat_push_digest`
+  once per window — see §7.13 for the full batching/digest flow
+- `_send_single_chat_push(...)` *(NEW, internal)* — the actual single-message FCM call,
+  data-only; called by `flush_chat_push_digest` when a window only accumulated 1 message
+- `send_chat_digest_push(recipient_id, conversation_id, sender_name, count)` *(NEW)* —
+  batched "X sent N messages" push, data-only `type: "chat_digest"`, no `message_id`
 - `send_incoming_call_push(...)` — data-only, `type: incoming_call`
 - `send_call_cancelled_push(...)` — data-only, `type: call_cancelled`
-- `send_mention_push(...)` *(NEW)* — data-only, `type: mention`, bypasses mute
+- `send_mention_push(...)` — data-only, `type: mention`, bypasses mute **and bypasses the
+  chat-push digest/batching above** — always immediate, same as calls
 - All multicast sends clean up `DeviceToken`s that FCM reports as `UnregisteredError`
 
 ### `livekit_utils.py` (env: `LIVEKIT_API_KEY`, `LIVEKIT_API_SECRET`)
@@ -863,15 +1008,41 @@ computes `duration_seconds` and marks the whole `CallSession` `ENDED`.
 - Failures logged at `CRITICAL` (so a retired/invalid model doesn't die silently for
   months — this happened once already, see the file's own comments)
 
-### `media_utils.py` *(NEW this session)*
+### `media_utils.py`
 - `create_group_media_for_message(message) -> GroupMedia | None`
 - Called from both `ConversationViewSet.messages` (REST) and `ChatConsumer.save_message`
   (WS) right after a `Message` is created. No-ops for private chats, non-media message
   types, or messages with no file. See §9.3 for why this file didn't exist before.
+- `_resolve_file_size(message, file_url)` *(NEW this session)* — internal helper for the
+  `GroupMedia.file_size` field. Prefers `message.meta["size"]` (client-supplied) when
+  present; otherwise strips `settings.MEDIA_URL` off `file_url` to get a
+  storage-relative path and asks `default_storage.size(...)` directly (works for local
+  `FileSystemStorage` and S3-via-`django-storages` alike). Best-effort only — any
+  failure is caught and logged at `debug`, never blocks the `GroupMedia` row or the
+  message-send. See §9.0 item 5.
 
-### `constants.py` *(NEW this session)*
+### `constants.py`
 - `MAX_PINNED_PER_CONVERSATION = 3` — single shared source, imported by both
   `MessageViewSet.pin` (views.py) and `ChatConsumer.pin_or_unpin_message` (consumers.py).
+
+### `search_utils.py` *(NEW this session — see §7.1, §9.0 item 4)*
+- `MIN_QUERY_LENGTH = 2` — queries shorter than this should be rejected by the caller
+  before reaching this module
+- `TRIGRAM_SIMILARITY_THRESHOLD = 0.25` — looser than Postgres's own `0.3` default,
+  tuned for short chat messages
+- `MEDIA_TYPES = {'image','video','audio','file','presentation'}` — valid values for the
+  `media_type` filter / what `has_media=true` matches against
+- `apply_structured_filters(qs, query_params) -> (qs, error_message_or_None)` — `sender`,
+  `date_from`/`date_to` (`YYYY-MM-DD`), `has_media` (`true`/`false`), `media_type`
+  filters; independent of the text query, applied first
+- `search_messages(qs, query) -> qs` — Postgres: `SearchRank`-ordered `search_vector`
+  match OR'd with `TrigramSimilarity` on `text`, ordered `-rank, -similarity,
+  -created_at`. Non-Postgres (e.g. sqlite in local dev/tests): unranked
+  `text__icontains`, ordered `-created_at`
+- Depends on `Message.search_vector` (a `SearchVectorField`, auto-populated by a DB
+  trigger — see migration `0900_message_search_vector.py`) and the Postgres `pg_trgm`
+  extension for `TrigramSimilarity`; both are Postgres-only, hence the `connection.vendor`
+  branch
 
 ### `cache_utils.py`
 - Django's default cache backend (should be Redis in production — check `settings.py`;
@@ -899,6 +1070,21 @@ computes `duration_seconds` and marks the whole `CallSession` `ENDED`.
   is a small dependency-free fixed-window counter (60 messages/60s per user) on the same
   cache backend, used in `ChatConsumer.handle_new_message`. Not billing-grade precision,
   just abuse-prevention.
+
+### `tasks.py`
+- `send_scheduled_messages` — beat-scheduled every minute; delivers due "send later"
+  messages via `scheduled_messages.finalize_scheduled_message`. `select_for_update
+  (skip_locked=True)` + bounded 200/run batch so overlapping beat ticks can't
+  double-send. See §10's `scheduled_messages.py` entry below.
+- `cleanup_expired_messages` — beat-scheduled every 15 min; hard-deletes disappearing
+  messages past `expires_at` (bounded 500/batch loop).
+- `generate_link_preview_task` / `transcribe_voice_message_task` — one-shot,
+  `.delay(message_id)`-triggered right after a message is created (REST/WS/scheduled),
+  not beat-scheduled. See §7.5/§7.6. Share `_broadcast_meta_update()` to push their
+  result live over WS once done.
+- `flush_chat_push_digest(user_id, conversation_id)` *(NEW)* — one-shot,
+  `countdown`-scheduled by `push_utils.send_chat_message_push` (not beat-scheduled).
+  Flushes one debounce window into a single push. See §7.13.
 
 ### `scheduled_messages.py`
 - `finalize_scheduled_message(message)` — the delivery half of "Send Later". A scheduled
@@ -976,9 +1162,10 @@ computes `duration_seconds` and marks the whole `CallSession` `ENDED`.
 | `GEMINI_MODEL` | `ai_service.py` | Default `gemini-2.5-flash` |
 | `LIVEKIT_API_KEY`, `LIVEKIT_API_SECRET` | `livekit_utils.py` | **Raises at import time** if missing |
 | `LIVEKIT_WS_URL` | `views.py` | Default `ws://10.93.221.189:7880` — looks like a dev/internal IP, confirm for prod |
-| `FIREBASE_CREDENTIALS_PATH` | `push_utils.py` | **Raises at import time** if missing. Path to Firebase service-account JSON |
+| `FIREBASE_CREDENTIALS_PATH` | `push_utils.py` | Path to Firebase service-account JSON. **Lazy init as of this session (see §9.0)** — no longer raises at import/process-startup time; only raised (and logged, not crashed) the first time a push is actually sent with no path configured. Falls back to `settings.FCM_SERVICE_ACCOUNT_JSON_PATH` if unset |
+| `CHAT_PUSH_DEBOUNCE_SECONDS` *(NEW)* | `push_utils.py` | Default `30`. Debounce window for the chat-message push digest/batching — see §7.13 |
 | `MEDIA_ABSOLUTE_BASE_URL` (Django setting, not env strictly) | `user_display.py` | Used only when no `request` context is available (WS payloads) |
-| `REDIS_URL` (or `CELERY_BROKER_URL` as fallback) | `settings.py` → `CHANNEL_LAYERS`, `CACHES`, Celery | **Not `message`-specific**, but this app's realtime broadcast, all its caches, and its 4 Celery tasks all depend on it being set in production — see §14 |
+| `REDIS_URL` (or `CELERY_BROKER_URL` as fallback) | `settings.py` → `CHANNEL_LAYERS`, `CACHES`, Celery | **Not `message`-specific**, but this app's realtime broadcast, all its caches, and its 5 Celery tasks all depend on it being set in production — see §14 |
 
 ---
 
@@ -1010,30 +1197,33 @@ This app doesn't ship its own settings — everything below lives in the project
   if unset (dev-friendly, but production should set `REDIS_URL`/these explicitly).
 - `CELERY_TASK_ACKS_LATE = True` + `CELERY_TASK_REJECT_ON_WORKER_LOST = True` — a task
   killed mid-run (worker crash/restart) gets redelivered instead of silently lost.
-  Relevant to all 4 of `message/tasks.py`'s tasks.
+  Relevant to all 5 of `message/tasks.py`'s tasks.
 - `CELERY_BEAT_SCHEDULE` — the `message` app's 2 periodic entries, confirmed present:
   - `message-send-scheduled-messages` → `message.send_scheduled_messages`, every minute
   - `message-cleanup-expired-messages` → `message.cleanup_expired_messages`, every 15 min
-  - `generate_link_preview_task`/`transcribe_voice_message_task` *(NEW)* are **not** in
-    this schedule and don't need to be — they're one-shot, triggered directly via
-    `.delay()` right after a message is created (§7.5/§7.6), not a periodic sweep.
+  - `generate_link_preview_task`/`transcribe_voice_message_task`/
+    `flush_chat_push_digest` *(latter NEW this session)* are **not** in this schedule and
+    don't need to be — they're one-shot, triggered directly via `.delay()`/
+    `.apply_async(countdown=...)` right after a message is created or a push window
+    opens (§7.5/§7.6/§7.13), not a periodic sweep.
 
 ### REST throttle rates (`REST_FRAMEWORK["DEFAULT_THROTTLE_RATES"]`)
 All 7 of the `message` app's custom throttle scopes, confirmed present *(the
 `message_send`/`call_initiate`/`group_create`/`reaction`/`ai_transcribe`/
 `message_send_ip`/`call_initiate_ip` rows were the §9.1 item 1 fix — missing before this
-review)*:
+review)*, **plus 1 new scope this session that is NOT yet confirmed** (see §9.4 item 7):
 
 | Scope | Rate | Throttle class | Guards |
 |---|---|---|---|
 | `message_send` | 60/min | `MessageSendThrottle` | `ConversationViewSet.messages` POST |
-| `message_send_ip` *(NEW)* | 120/min | `MessageSendIPThrottle` | same endpoint, per-IP |
+| `message_send_ip` | 120/min | `MessageSendIPThrottle` | same endpoint, per-IP |
 | `call_initiate` | 10/min | `CallInitiateThrottle` | `CallInitiateView` |
-| `call_initiate_ip` *(NEW)* | 20/min | `CallInitiateIPThrottle` | same endpoint, per-IP |
+| `call_initiate_ip` | 20/min | `CallInitiateIPThrottle` | same endpoint, per-IP |
 | `group_create` | 5/min | `GroupCreateThrottle` | `GroupViewSet.create` |
 | `reaction` | 120/min | `ReactionThrottle` | `MessageViewSet.react` |
 | `ai_study` | 20/min | `AiStudyThrottle` | `AiStudyRoomView` |
 | `ai_transcribe` | 15/min | `AiTranscribeThrottle` | `VoiceTranscribeView` |
+| `ai_smart_reply` *(NEW — not confirmed in `settings.py`)* | 30/min | `SmartReplyThrottle` | `SmartReplySuggestionsView` |
 
 Project-wide floor (applies to `message`'s views too, on top of the above where set):
 `DEFAULT_THROTTLE_CLASSES = [UserRateThrottle, AnonRateThrottle]`, rates `user: 100/min`,
@@ -1051,9 +1241,10 @@ doesn't change current behavior, only protects a future view that forgets to).
   (`?token=...`) — a socket connection made with a token near expiry will still work for
   the life of that connection (JWT is only checked at `connect()`), but a reconnect after
   expiry needs a refreshed token from the client.
-- `FCM_SERVICE_ACCOUNT_JSON_PATH` is defined here but **`push_utils.py` actually reads
-  `FIREBASE_CREDENTIALS_PATH` from `os.getenv()` directly, not this setting** — worth
-  reconciling (either both should point at the same value, or one is dead).
+- `FCM_SERVICE_ACCOUNT_JSON_PATH` is defined here — **as of this session `push_utils.py`
+  reads either this setting or the `FIREBASE_CREDENTIALS_PATH` env var** (env var takes
+  precedence for back-compat). Previously flagged as a mismatch (§9.0 item 3) — now
+  resolved, no `settings.py` change needed.
 - `SENTRY_DSN` — if set, `logger.exception()`/`logger.error()` calls throughout
   `message` (e.g. `media_utils.py`'s swallowed gallery-write failures,
   `push_utils.py`'s swallowed FCM failures, the new `generate_link_preview_task`/

@@ -22,6 +22,10 @@
 #   2. consumers.py -> ChatConsumer.save_message (WS)    [is session me wire kiya]
 
 import logging
+from urllib.parse import urlparse
+
+from django.conf import settings
+from django.core.files.storage import default_storage
 
 from .models import ConversationType, GroupMedia, MessageType
 
@@ -36,6 +40,46 @@ _GALLERY_MESSAGE_TYPES = {
     MessageType.FILE,
     MessageType.PRESENTATION,
 }
+
+
+# 🔥 FIX (this session) — §9.4 item 3: `file_size` used to come ONLY from
+# `message.meta.get("size")`, which depends on every client (REST + WS,
+# every attachment type) faithfully round-tripping the `file_size` that
+# `upload_view.MessageUploadAPIView` handed back at upload time into
+# `meta.size` on message-send. If a client path ever misses that, this
+# silently stays NULL forever — no error, just a blank size in the gallery
+# UI. Since our own uploads always land under `settings.MEDIA_URL` via
+# Django storage, we can independently ask the storage backend for the
+# real size as a fallback — works for local `FileSystemStorage` and for
+# remote backends like S3 (`django-storages`) too, since both implement
+# `Storage.size()`. Only used when the client didn't already tell us;
+# never overrides a client-supplied value in `meta.size`.
+def _resolve_file_size(message, file_url) -> "int | None":
+    meta_size = (message.meta or {}).get("size")
+    if meta_size:
+        try:
+            return int(meta_size)
+        except (TypeError, ValueError):
+            pass  # fall through to storage lookup below
+
+    media_url = getattr(settings, "MEDIA_URL", None)
+    if not media_url or not file_url:
+        return None
+
+    try:
+        path = urlparse(file_url).path  # strip scheme/host if it's an absolute URL
+        idx = path.find(media_url)
+        if idx == -1:
+            return None
+        relative_path = path[idx + len(media_url):].lstrip("/")
+        if not relative_path or not default_storage.exists(relative_path):
+            return None
+        return default_storage.size(relative_path)
+    except Exception:
+        # Best-effort only — a size-lookup failure should never block the
+        # gallery row (or the message-send) from succeeding.
+        logger.debug("media_utils: could not resolve file_size for %s", file_url, exc_info=True)
+        return None
 
 
 def create_group_media_for_message(message) -> "GroupMedia | None":
@@ -92,7 +136,7 @@ def create_group_media_for_message(message) -> "GroupMedia | None":
                 "sender": message.sender,
                 "file_url": file_url,
                 "file_type": message.type,
-                "file_size": (message.meta or {}).get("size"),
+                "file_size": _resolve_file_size(message, file_url),
                 "thumbnail_url": message.thumbnail_url or None,
             },
         )

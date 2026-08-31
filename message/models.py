@@ -5,6 +5,15 @@ from datetime import timedelta
 
 from django.conf import settings
 from django.contrib.auth import get_user_model
+# 🔧 GAP FIX — `SearchVectorField`/`GinIndex` neeche `Message` model me
+# already use ho rahe the (full-text search field + its GIN index) lekin
+# yahan import hi missing tha — jis wajah se poori `message` app import
+# time pe `NameError: name 'SearchVectorField' is not defined` deke crash
+# ho jaati (Django app boot hi nahi hota). Ye bug pehle se hi mila,
+# is session ke full-text-search kaam se independent — isko fix karna
+# zaroori tha warna neeche koi bhi naya migration/query bhi nahi chalta.
+from django.contrib.postgres.indexes import GinIndex
+from django.contrib.postgres.search import SearchVectorField
 from django.db import models
 from django.utils import timezone
 
@@ -415,6 +424,29 @@ class Message(BaseModel):
     is_scheduled = models.BooleanField(default=False, db_index=True)
     scheduled_for = models.DateTimeField(null=True, blank=True, db_index=True)
 
+    # 🔥 NAYA (ADVANCED FEATURE) — full-text search. Postgres `to_tsvector`
+    # trigger se auto-populate hota hai (migration: `0900_message_search_
+    # vector.py`), yahan sirf column define hai. `editable=False` — kabhi
+    # bhi form/serializer se direct set nahi hona chahiye. NULL rehna theek
+    # hai on non-Postgres DBs (`search_utils.py` khud `icontains` pe
+    # fallback karta hai agar ye column absent/None ho).
+    search_vector = SearchVectorField(null=True, blank=True, editable=False)
+
+    # ⚠️ NOTE (this review) — E2EE fields. `is_encrypted`/`encryption_iv`
+    # already existed on this model, but `Conversation.is_e2ee_enabled`
+    # (referenced by the comment that used to be here) does NOT exist
+    # anywhere in `Conversation` — nor does `e2ee_utils.py` exist in the
+    # file map (§1 of the doc). So these two columns are currently dead:
+    # nothing sets them, nothing reads them, and no client has anywhere to
+    # turn E2EE on. Full E2EE (per-device keys, Double Ratchet/libsignal,
+    # redesigning search/link-preview/AI-transcribe to skip ciphertext
+    # messages) is a large, separate undertaking — see the response for
+    # scoping. Left as-is here (not removed) since dropping columns is a
+    # destructive migration; just documenting the actual state instead of
+    # the aspirational one.
+    is_encrypted = models.BooleanField(default=False, db_index=True)
+    encryption_iv = models.CharField(max_length=64, blank=True, null=True)
+
     class Meta(BaseModel.Meta):
         indexes = [
             models.Index(fields=['conversation', '-created_at']),
@@ -424,6 +456,14 @@ class Message(BaseModel):
             models.Index(fields=['expires_at']),
             models.Index(fields=['conversation', 'is_pinned']),
             models.Index(fields=['is_scheduled', 'scheduled_for']),
+            GinIndex(fields=['search_vector'], name='message_search_vector_gin'),
+            # 🔥 NAYA (this session) — trigram GIN index on `text` itself,
+            # for typo-tolerant matching. `search_vector` (tsvector) does
+            # stemming/ranking but NOT fuzzy/typo matching — "helo" won't
+            # match "hello" via to_tsquery. `pg_trgm` similarity search
+            # (see `search_utils.py`) is what covers that case, and it
+            # needs its own trigram-ops GIN index to stay fast at scale.
+            GinIndex(fields=['text'], name='message_text_trgm_gin', opclasses=['gin_trgm_ops']),
         ]
         constraints = [
             # same sender ek hi client_id do baar submit kare to DB level pe hi block

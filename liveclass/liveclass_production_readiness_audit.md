@@ -19,8 +19,29 @@ scheduled jobs). Consumed by a Flutter app.
 (the Channels/WebSocket layer flagged as a follow-up in Pass 4 §12 and
 actually built in a later, previously undocumented pass — added to
 this list, and to §11's change log, in Pass 9; see that entry for what
-was found and fixed). (`settings.py` is referenced throughout but was
-never part of this upload — see §8.)
+was found and fixed), **`moderation.py`** (added to this list in Pass
+16 — see below; the profanity/spam-filter module `ChatMessageViewSet.
+perform_create` already imports, present in the codebase since some
+undocumented earlier pass). (`settings.py` is referenced throughout but
+was never part of this upload — see §8.)
+
+> **⚠️ Known gap in this file, as of Pass 16:** the source code contains
+> two full passes' worth of features — **Pass 14** (gifting a pass,
+> per-message chat reports, the automatic profanity/spam filter in
+> `moderation.py`, per-notification-type channel preferences, digest
+> email) and **Pass 15** (auto-renew passes, a post-session engagement
+> report) — that were built directly in the source without ever being
+> written up here, breaking this file's own "update in the same pass"
+> rule. **Pass 16 (below) does NOT retroactively document either of
+> those two passes' models/endpoints/business-logic in §2–§6** — it
+> only (a) fixes the one genuine functional bug this gap produced (two
+> Pass 14/15 features that were half-built — see §11 Pass 16), and (b)
+> documents that fix. Anyone working on `PassGift`, chat reports,
+> notification preferences, digest email, auto-renew, or the engagement
+> report should currently read those sections directly from `models.py`
+> /`views.py`/`serializers.py` source rather than trusting this file —
+> a full catch-up pass documenting Pass 14/15 in §2–§6 is still needed
+> and is the top item in §12.
 
 ---
 
@@ -606,11 +627,11 @@ commit, and avoids side effects surviving a rolled-back transaction.
 
 ## 7. Celery tasks
 
-26 tasks total in `tasks.py`, all `@shared_task(name="liveclass....")`.
-**7 are on `CELERY_BEAT_SCHEDULE`** (cron jobs); **18 are fire-and-forget
-`.delay()` notification dispatchers** called from views.py/signals.py;
-**1 (`transcribe_recording`, Pass 7) is a deliberately-not-yet-wired
-scaffold** — see below.
+32 tasks total in `tasks.py`, all `@shared_task(name="liveclass....")`.
+**9 are on `CELERY_BEAT_SCHEDULE`** (cron jobs — 2 new in Pass 16, see
+below); **21 are fire-and-forget `.delay()` notification dispatchers**
+called from views.py/signals.py/models.py; **1 (`transcribe_recording`,
+Pass 7) is a deliberately-not-yet-wired scaffold** — see below.
 
 ### Scheduled (beat) jobs
 | Task | What it does |
@@ -622,9 +643,13 @@ scaffold** — see below.
 | `expire_and_refund_passes` | The actual "student loses money" gap-closer — sweeps purchases past `expires_at` with leftover `remaining_balance` and reverses them (nothing else ever calls `reverse()` on a purely-expired row). |
 | `cleanup_stale_chunked_uploads` (Pass 3) | Sweeps `ChunkedUpload` rows stuck `IN_PROGRESS`/`PROCESSING` with no chunk activity for 6h (`CHUNKED_UPLOAD_STALE_AFTER`) → deletes their temp chunk dir, marks `EXPIRED`. Also purges terminal-status rows older than 14 days (`CHUNKED_UPLOAD_ROW_RETENTION_DAYS`), and defensively removes any orphan directory under `CHUNKED_UPLOAD_TMP_ROOT` with no matching DB row at all. Runs hourly. |
 | `reconcile_stuck_coin_purchases` (Pass 7) | The actual "payment retry" gap-closer for coin top-ups — sweeps `CoinPurchase` rows stuck `PENDING` past `COIN_PURCHASE_PENDING_TIMEOUT` (2h) and `mark_failed()`s them, so a client that crashed/closed mid-payment always eventually becomes retry-able instead of sitting invisible forever. **Was written in Pass 7 but never actually added to `CELERY_BEAT_SCHEDULE` — fixed in Pass 8 (see §11); until that fix this task existed but never ran.** |
+| `run_auto_renewals` (Pass 16) | Sweeps `PassPurchase` rows with `auto_renew=True, status=SUCCESS, expires_at<=now` and calls `renew()` on each. **`PassPurchase.auto_renew`/`renew()` were written in Pass 15 but this sweep — the only thing that ever actually calls `renew()` — didn't exist until Pass 16; until that fix a student's auto-renew toggle did nothing and the subscription silently lapsed at expiry.** No lookback window needed — `renew()` always clears `auto_renew` on the row it processed (success or fail), so it's a self-cleaning query. |
+| `expire_unclaimed_gifts` (Pass 16) | Sweeps `PassGift` rows still `PENDING` past `expires_at` (7-day `CLAIM_WINDOW_DAYS`), calls `refund_to_gifter()`, flips to `EXPIRED`. **`PassGift.refund_to_gifter()` was written in Pass 14 but this sweep didn't exist until Pass 16; until that fix an unclaimed gift's already-debited coins stayed stuck in limbo forever.** Same self-cleaning-query reasoning as `run_auto_renewals` — no lookback window needed. |
 
-All 7 have intervals shorter than their own lookback/staleness windows
-(no gap where a batch could be missed).
+All 9 have intervals shorter than their own lookback/staleness windows
+where a lookback window applies (no gap where a batch could be missed);
+`run_auto_renewals`/`expire_unclaimed_gifts` don't use one at all — see
+their own rows above for why.
 
 ### Notification dispatchers (all `.delay()`'d, never called inline)
 `notify_waitlist_promotion`, `notify_classroom_shared` *(Pass 6)*,
@@ -636,10 +661,20 @@ All 7 have intervals shorter than their own lookback/staleness windows
 `notify_session_cancelled`, `notify_assignment_posted`,
 `notify_submission_received`, `notify_staff_added`,
 `notify_review_posted`, `notify_report_reviewed`,
-`notify_query_answered` — each pairs with a `Notification.NotifType`
-value and calls `notifications.send_notification()`. (Withdrawal
-notifications are in-app only, via `create_notification()` directly in
-`views.py` — no matching Celery push task exists for those three.)
+`notify_query_answered`,
+`notify_pass_auto_renewed`, `notify_auto_renew_failed`,
+`notify_gift_expired` *(all three Pass 16)* — each pairs with a
+`Notification.NotifType` value and calls `notifications.
+send_notification()`. (Withdrawal notifications are in-app only, via
+`create_notification()` directly in `views.py` — no matching Celery
+push task exists for those three.) The Pass 16 trio is triggered from
+`models.py` (`PassPurchase.renew()`, `tasks.expire_unclaimed_gifts`)
+rather than `views.py`/`signals.py` — since there's no request context
+to write the in-app bell row synchronously the way the others' call
+sites do, each of these three writes BOTH halves itself
+(`create_notification()` then `send_notification()`), same pattern
+`signals.py` already uses for its own non-request-triggered
+notifications.
 
 ### Scaffold, not wired (Pass 7)
 `transcribe_recording(session_id)` — the queue/state-machine half of
@@ -1562,14 +1597,142 @@ implemented this pass:**
   `poll.created` exactly like a normal create would (a listening client
   can't tell the difference). **Needs a migration** — new model.
 
+**Pass 14 & 15 — undocumented in this file (see the ⚠️ note at the top
+of this doc).** Built directly in source without a matching write-up
+here: gifting a pass (`PassGift`), per-message chat reports
+(`ChatMessageReport`), the automatic profanity/spam filter
+(`moderation.py`), per-notification-type channel preferences + digest
+email (`NotificationPreference`), a post-session engagement report, and
+auto-renew passes (`PassPurchase.auto_renew`/`renew()`). Not retroactively
+documented here — see the ⚠️ note and §12 item 1.
+
+**Pass 16 — closed the one genuine functional bug the Pass 14/15
+documentation gap produced: two "half-built" features whose model-layer
+logic existed but whose scheduled sweep never did.**
+- **Auto-renew passes never actually renewed anything.**
+  `PassPurchase.auto_renew`/`renew()` (Pass 15) were fully implemented —
+  the opt-in flag, the coin-debit-and-rebuy logic, the `renewed_from`/
+  `renewed_into` chain, the fail-closed "clear `auto_renew` + notify" path
+  — but nothing on a schedule ever called `renew()`. A student turning
+  auto-renew on got a subscription that silently lapsed at `expires_at`
+  with no error anywhere. Fixed: new `tasks.run_auto_renewals` beat job
+  sweeps every `SUCCESS` purchase with `auto_renew=True` past its
+  `expires_at` and calls `renew()` on each — see §7. Self-cleaning query
+  (no lookback window needed), since `renew()` always clears `auto_renew`
+  on the row it processed, success or fail.
+- **Unclaimed gifts never expired or refunded.** `PassGift.
+  refund_to_gifter()` and the 7-day `CLAIM_WINDOW_DAYS` deadline (Pass
+  14) existed, but nothing swept `PENDING` gifts past `expires_at` — an
+  unclaimed gift's already-debited coins just sat in limbo forever
+  instead of returning to the gifter. Fixed: new
+  `tasks.expire_unclaimed_gifts` beat job — see §7. Same self-cleaning-
+  query reasoning as `run_auto_renewals`.
+- **Two more `.delay()` calls that were already silently failing.**
+  `PassPurchase.renew()` calls `notify_pass_auto_renewed`/
+  `notify_auto_renew_failed`, and the new `expire_unclaimed_gifts` calls
+  `notify_gift_expired` — none of the three existed in `tasks.py` before
+  this pass (caught only by their callers' own try/except-and-log
+  wrapper, so the failure was silent — same failure shape Pass 8 found
+  for a different pair of tasks). All three added — see §7. Since these
+  fire from a background sweep rather than a request, each writes BOTH
+  the in-app bell row (`create_notification()`) and the push
+  (`send_notification()`) itself, same pattern `signals.py` already uses
+  for its own non-request-triggered notifications — unlike most other
+  `notify_*` tasks, whose bell row is written synchronously in `views.py`
+  and which only need to handle the push half.
+- **`models.py`** — added three `Notification.NotifType` values
+  (`PASS_AUTO_RENEWED`, `AUTO_RENEW_FAILED`, `PASS_GIFT_EXPIRED`) so the
+  three new notify tasks above have a real type instead of falling back
+  to `GENERIC`. Pure enum additions, no migration (choices aren't a
+  schema change).
+- **Not done this pass** (see the ⚠️ note at the top of this file and
+  §12 item 21): retroactively documenting the rest of Pass 14/15 in
+  §2–§6 — this pass only fixed and documented the one functional bug
+  above, not the full feature set either pass introduced.
+
+**Pass 17 — closed the two remaining config gaps flagged by an
+independent re-audit (§12 items 18 and 22), both confirmed still present
+in `settings.py` at the time of that re-audit:**
+- **`chat_reaction` throttle rate was still missing.** `settings.py`'s
+  `DEFAULT_THROTTLE_RATES` had entries for `session_join`,
+  `chat_message_create`, `coin_purchase`, `classroom_share`, etc., but
+  not `chat_reaction` — `ChatMessageViewSet.react()` (Pass 12) would
+  have raised `ImproperlyConfigured` (a guaranteed 500) on the very
+  first reaction tap. Fixed: added `"chat_reaction": "60/min"` —
+  generous relative to `chat_message_create`'s 20/min since a reaction
+  is a single tap, not a typed message. §12 item 18 closed.
+- **The two Pass 16 beat jobs were still unregistered.** `tasks.
+  run_auto_renewals` and `tasks.expire_unclaimed_gifts` existed and
+  were safe to run (see Pass 16 above) but had no
+  `CELERY_BEAT_SCHEDULE` entries — confirmed by direct inspection of
+  `settings.py`, not just inherited from the Pass 16 note. Fixed: both
+  added at `crontab(minute="*/30")`, the cadence Pass 16 already
+  suggested — neither needs a lookback window since both tasks
+  self-clean (they always mutate the row they process, success or
+  fail). §12 item 22 closed.
+- **Not done this pass:** everything else in §12 (env values, real
+  payment gateway, migrations, `COIN_TO_INR_RATE`, the Pass 14/15
+  documentation catch-up) — this pass only touched the two specific
+  `settings.py` gaps above.
+
+**Pass 18 — closed a CRITICAL, project-level wiring gap found once
+`LearnScroll/asgi.py` and `LearnScroll/celery.py` were finally provided
+for review (neither was in scope for any earlier pass):**
+- **liveclass's entire Channels/WebSocket layer was unreachable in
+  production.** `asgi.py`'s `URLRouter` only ever included `message.
+  routing.websocket_urlpatterns`. `liveclass/routing.py` (added to this
+  file's scope back in Pass 9 — see §11 Pass 9) registers `ws/liveclass/
+  session/<id>/` → `consumers.SessionConsumer`, but that routing module
+  was never imported into `asgi.py`, so no WebSocket connection to it
+  could ever resolve — Channels simply has no matching route. This
+  means every real-time feature built for liveclass across Pass 9-13
+  (session chat, reactions, pinning, raise-hand, live polls/quick-poll
+  templates, presence, unread counts) was fully implemented and fully
+  untestable-by-a-real-client at the same time: `consumers.py`'s and
+  `ws_auth.py`'s own logic was correct, but nothing could ever reach it.
+  This is exactly the kind of gap `python manage.py test` alone would
+  NOT have caught (Channels routing isn't exercised by DRF's `APIClient`)
+  — it needed a real WebSocket connection attempt, or a source review of
+  `asgi.py` itself, which wasn't possible until this pass since the file
+  hadn't been provided. Fixed: `asgi.py` now imports `liveclass.routing`
+  and concatenates its `websocket_urlpatterns` onto `message`'s before
+  building the `URLRouter`, exactly as `liveclass/ws_auth.py`'s own
+  docstring already instructed (that docstring's wiring snippet was
+  correct all along — it just never got applied to the real file).
+- **Middleware left as-is, not merged.** liveclass ships its own
+  `liveclass/ws_auth.py::JWTAuthMiddleware`, functionally identical to
+  the already-in-production `message.Middleware.JWTAuthMiddleware` (both
+  read `?token=<jwt>` off the query string and validate it through
+  `rest_framework_simplejwt`'s own `JWTAuthentication`, so a bearer token
+  the REST API would accept is accepted here too, and a rejected one
+  isn't). Rather than nest two independent implementations of the same
+  contract behind one `URLRouter`, both apps' routes were combined under
+  the existing `message.Middleware.JWTAuthMiddleware`. **New open item**
+  (added to §12 below): confirm `message.Middleware.JWTAuthMiddleware`
+  and `liveclass/ws_auth.py::JWTAuthMiddleware` really are behaviorally
+  identical (token param name, failure handling), then delete one copy
+  — ideally consolidate into a single shared middleware — so the two
+  can't silently drift apart on a future edit to only one of them.
+- **`celery.py` reviewed, no changes needed.** Standard `Celery(...)` +
+  `config_from_object(..., namespace="CELERY")` + `autodiscover_tasks()`
+  wiring; picks up `CELERY_BEAT_SCHEDULE` and every `CELERY_*` setting
+  from `settings.py` correctly, and `autodiscover_tasks()` means
+  `liveclass/tasks.py`'s `@shared_task`s register without any manual
+  step. Nothing to fix here.
+- **Not done this pass:** verifying the message/liveclass middleware
+  equivalence above (needs reading `message/Middleware.py`, which wasn't
+  provided), and everything else still open in §12.
+
 ---
 
 ## 12. Open action items before deploy
 
-Config/deployment only, as of Pass 8 — the three genuine code defects
-found this pass (see §11 Pass 8: the `serializers.py` `ImportError`, the
-two missing throttle-rate entries, the unregistered beat job) are already
-fixed in the source, not just noted here.
+Mostly config/deployment, updated through Pass 17 — items 1-20 are as of
+Pass 13 (the genuine code defects found in earlier passes, e.g. Pass 8's
+`serializers.py` `ImportError`/missing throttle entries/unregistered beat
+job, are already fixed in the source, not just noted here). **Items 18
+and 22 are now CLOSED (Pass 17 — see §11).** Item 21 (Pass 14/15
+documentation catch-up) remains open.
 
 1. **Fill real `.env` values** — see §10 for the full list; the code
    already supports every one of these via env vars, they just need
@@ -1588,8 +1751,8 @@ fixed in the source, not just noted here.
    `send_notification(..., channel="sms"/"whatsapp")` silently no-ops,
    and `CoinPurchaseViewSet.verify` fails closed on every attempt.
 5. **Celery worker + beat must both actually run as long-lived
-   processes** — the 7 scheduled jobs in §7 (was 5; Pass 6 and Pass 8
-   each added one) are inert DB config otherwise.
+   processes** — the 9 scheduled jobs in §7 (was 5; Pass 6, Pass 8, and
+   Pass 16 [×2] each added one) are inert DB config otherwise.
 6. **Run `python manage.py check --deploy`** once real `.env` values
    are set — flags anything environment-specific a static read can't.
 7. **Run `python manage.py makemigrations --check`** — this
@@ -1661,7 +1824,8 @@ fixed in the source, not just noted here.
     engagement report, per-notification-type channel preferences, a
     digest email, per-message chat reports, a profanity/spam filter,
     gifting a pass, and auto-renew passes.)
-18. **Add `chat_reaction` to `DEFAULT_THROTTLE_RATES`** (Pass 12) —
+18. ~~**Add `chat_reaction` to `DEFAULT_THROTTLE_RATES`** (Pass 12)~~ —
+    **CLOSED in Pass 17** (see §11). Kept below for history —
     same class of requirement as `chat_message_create`/`session_join`/
     etc.: without a matching entry, `ChatMessageViewSet.react()`'s
     `ScopedRateThrottle` 500s the first request instead of throttling
@@ -1676,6 +1840,48 @@ fixed in the source, not just noted here.
     table. Plain schema changes, no extension needed, safe on any DB
     backend — same as items 9/10/12/14/19 above, just batched into one
     migration file since they landed in the same pass.
+21. **Do a full documentation catch-up pass for Pass 14 and Pass 15**
+    (flagged at the top of this file and in §11's Pass 16 entry) —
+    gifting a pass, per-message chat reports, the profanity/spam filter,
+    per-notification-type preferences + digest email, the post-session
+    engagement report, and auto-renew passes all shipped in source
+    without ever being written into §2–§6. Until this is done, treat
+    those features' §2–§6 coverage in this file as absent, not as
+    verified-accurate — read the source directly for them. Also
+    generate/run whatever migrations Pass 14/15's new models
+    (`PassGift`, `ChatMessageReport`, `NotificationPreference`, the
+    engagement-report support, `PassPurchase.auto_renew`/
+    `renewed_from`/`renewal_failed_at`) still need — not confirmed
+    against real migration files, same caveat as every other migration
+    item in this section.
+22. ~~**Register the two Pass 16 beat jobs in `CELERY_BEAT_SCHEDULE`**~~ —
+    **CLOSED in Pass 17** (see §11). Kept below for history —
+    `run_auto_renewals` and `expire_unclaimed_gifts` (see §7/§11) are
+    written and safe to run, but — same class of gap Pass 8 found for
+    `reconcile_stuck_coin_purchases` (see §11 Pass 8) — a task that
+    exists in `tasks.py` but isn't on the beat schedule simply never
+    runs. Suggested cadence for both: every 30 minutes (`crontab(minute=
+    "*/30")`) — shorter than is strictly required since neither uses a
+    lookback window (see their §7 rows), but frequent enough that a
+    lapsed auto-renew or an unclaimed gift never sits unresolved for
+    long. The three new `notify_*` tasks (§7/§11 Pass 16) do NOT go on
+    the beat schedule — they're triggered via `.delay()` from
+    `PassPurchase.renew()`/`expire_unclaimed_gifts` itself, same as
+    every other `notify_*` task in this file.
+23. **Confirm `message.Middleware.JWTAuthMiddleware` and
+    `liveclass/ws_auth.py::JWTAuthMiddleware` are truly equivalent, then
+    delete one** (Pass 18) — `asgi.py` now routes both apps' WebSocket
+    traffic through the `message` copy (see §11 Pass 18) since the two
+    were documented as functionally identical, but that was inferred
+    from each file's own docstring, not a line-by-line diff of
+    `message/Middleware.py` (not provided in any pass so far). Read the
+    real `message/Middleware.py` and confirm it rejects/accepts tokens
+    exactly like `liveclass/ws_auth.py` does before relying on this in
+    production; if they diverge even slightly (e.g. one blacklists
+    tokens the other doesn't), decide which behavior liveclass actually
+    needs and consolidate to one shared middleware either way — two
+    independent copies of "the same" auth logic is itself a standing
+    risk regardless of which one is currently in `asgi.py`.
 
 ---
 

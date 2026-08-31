@@ -1,98 +1,3 @@
-# # """
-# # ASGI config for LearnScroll project.
-# #
-# # It exposes the ASGI callable as a module-level variable named ``application``.
-# #
-# # For more information on this file, see
-# # https://docs.djangoproject.com/en/6.0/howto/deployment/asgi/
-# # """
-# #
-# # import os
-# #
-# # from django.core.asgi import get_asgi_application
-# # # import os
-# # from django.core.asgi import get_asgi_application
-# # from channels.routing import ProtocolTypeRouter, URLRouter
-# # from channels.auth import AuthMiddlewareStack
-# # os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'LearnScroll.settings')
-# #
-# # # application = get_asgi_application()
-# # application = ProtocolTypeRouter({
-# #     "http": get_asgi_application(),
-# #     "websocket": AuthMiddlewareStack(
-# #         URLRouter(
-# #             # yahan tera message app ka routing ayega
-# #             __import__('message.routing').routing.websocket_urlpatterns
-# #         )
-# #     ),
-# # })
-#
-#
-#
-#
-#
-#
-#
-#
-#
-#
-#
-#
-#
-#
-#
-#
-#
-#
-#
-#
-#
-#
-# import os
-# import django
-# from django.core.asgi import get_asgi_application
-#
-# os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'LearnScroll.settings')
-# django.setup() # <-- Ye line sabse important hai, iske bina model import fail hoga
-#
-# from channels.routing import ProtocolTypeRouter, URLRouter
-# from channels.auth import AuthMiddlewareStack
-# from channels.security.websocket import AllowedHostsOriginValidator
-#
-# # Django setup ke BAAD import karna hai
-# from message import routing as message_routing
-#
-# application = ProtocolTypeRouter({
-#     "http": get_asgi_application(),
-#     "websocket": AllowedHostsOriginValidator(
-#         AuthMiddlewareStack(
-#             URLRouter(
-#                 message_routing.websocket_urlpatterns
-#             )
-#         )
-#     ),
-# })
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 """
 ASGI config for LearnScroll project.
 
@@ -122,12 +27,43 @@ django.setup()  # <-- models import se pehle zaroori hai
 from message.Middleware import JWTAuthMiddleware  # noqa: E402  (django.setup() ke baad import zaroori)
 from message import routing as message_routing  # noqa: E402
 
+# NOTE (fix — CRITICAL, production-breaking): this file only ever wired
+# `message.routing.websocket_urlpatterns` into the URLRouter. liveclass
+# has its OWN Channels layer — `liveclass/routing.py` registers
+# `ws/liveclass/session/<id>/` -> `consumers.SessionConsumer` — built
+# specifically for live-session chat, raise-hand, polls, and presence
+# (see liveclass/consumers.py, realtime.py, ws_auth.py). That routing
+# module was never imported here, so the URLRouter had no matching route
+# for it: every liveclass WebSocket connection attempt would fail to
+# resolve (Channels closes the connection — no route matches the path)
+# regardless of how correct consumers.py/ws_auth.py's own logic is. All
+# of that real-time functionality was unreachable in production. Fixed
+# by importing liveclass's routing module and concatenating its
+# `websocket_urlpatterns` with message's, same as any other Channels
+# project mounting multiple apps' routes onto one URLRouter.
+#
+# Middleware: liveclass ships its own `liveclass.ws_auth.JWTAuthMiddleware`
+# (same contract as `message.Middleware.JWTAuthMiddleware` — reads
+# `?token=<jwt>` from the query string, validates it through
+# rest_framework_simplejwt's own JWTAuthentication, sets scope["user"]).
+# A single URLRouter can only sit behind one middleware instance, so
+# rather than nesting two independent JWT implementations (which would
+# only invite the two to drift apart over time), both apps' routes are
+# combined under the ALREADY-PROVEN-IN-PRODUCTION `message.Middleware.
+# JWTAuthMiddleware` below. TODO: since the two middlewares are meant to
+# do the exact same thing, consider deleting `liveclass/ws_auth.py`'s
+# copy and having liveclass import `message.Middleware.JWTAuthMiddleware`
+# directly, so there's one implementation instead of two that can go out
+# of sync on a future change (token param name, error handling, etc.).
+from liveclass import routing as liveclass_routing  # noqa: E402
+
 application = ProtocolTypeRouter({
     "http": get_asgi_application(),
     "websocket": AllowedHostsOriginValidator(
         JWTAuthMiddleware(
             URLRouter(
                 message_routing.websocket_urlpatterns
+                + liveclass_routing.websocket_urlpatterns
             )
         )
     ),

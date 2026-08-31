@@ -59,6 +59,7 @@ from .models import (
     ClassroomShare,
     ClassroomStaff,
     ClassroomWishlist,
+    ChatMessageReport,
     CoinPurchase,
     CoinTransaction,
     CoinWithdrawal,
@@ -66,7 +67,9 @@ from .models import (
     LivePoll,
     Notice,
     Notification,
+    NotificationPreference,
     PassDailyCharge,
+    PassGift,
     PassPurchase,
     PollResponse,
     PollTemplate,
@@ -94,6 +97,7 @@ from .livekit_utils import (
     verify_webhook_event,
 )
 from .realtime import broadcast_to_session
+from .moderation import screen_message
 from .serializers import (
     AssignmentGradeSerializer,
     AssignmentSerializer,
@@ -102,6 +106,7 @@ from .serializers import (
     CertificateIssueSerializer,
     CertificateSerializer,
     ChatMessageSerializer,
+    ChatMessageReportSerializer,
     ChatReactionSerializer,
     ClassHolidaySerializer,
     ClassJoinRequestDecisionSerializer,
@@ -134,12 +139,16 @@ from .serializers import (
     MyReferralCodeSerializer,
     NoticeSerializer,
     NotificationSerializer,
+    NotificationPreferenceSerializer,
+    PassGiftSerializer,
     PassPurchaseSerializer,
+    PassPurchaseAutoRenewSerializer,
     PollResponseSerializer,
     PollTemplateSerializer,
     ReferLinkResultSerializer,
     ReferralRedeemSerializer,
     ReferralSerializer,
+    SessionEngagementReportSerializer,
     SessionParticipantSerializer,
     SessionRecordingSerializer,
     SessionWaitlistSerializer,
@@ -1490,6 +1499,40 @@ class ClassSessionViewSet(viewsets.ModelViewSet):
 
         return Response({"detail": "Session ended.", "status": session.status})
 
+    @action(detail=True, methods=["get"], url_path="engagement-report")
+    def engagement_report(self, request, pk=None):
+        """NEW (Pass 14 audit — post-session engagement report). Attendance,
+        chat activity, and poll-participation summary for a completed
+        session, for the teacher/co-teacher/moderator to review afterward
+        — same `_can_moderate_session` boundary as `end()` above, since
+        this is classroom analytics for the host, not something a student
+        needs a view into.
+
+        Normally just reads back `ClassSession.engagement_report`,
+        computed once by tasks.build_engagement_report the moment the
+        session hits COMPLETED (see ClassSession.compute_engagement_report's
+        docstring in models.py) — never recomputed per-request, so a
+        teacher re-opening the report a dozen times doesn't re-run five
+        aggregate queries a dozen times. Falls back to computing (and
+        persisting) it here on the rare request that lands in the gap
+        between a session completing and that queued task actually
+        running, so the teacher never sees a hard error for a session
+        that has, in fact, already ended.
+        """
+        session = self.get_object()
+        if not _can_moderate_session(session, request.user):
+            raise PermissionDenied(
+                "Only the classroom's teacher, co-teacher, or moderator can view the engagement report."
+            )
+        if session.status != ClassSession.Status.COMPLETED:
+            raise ValidationError({"detail": "Engagement report is only available once the session has ended."})
+
+        if session.engagement_report is None:
+            session.engagement_report = session.compute_engagement_report()
+            session.save(update_fields=["engagement_report"])
+
+        return Response(SessionEngagementReportSerializer(session.engagement_report).data)
+
     @action(detail=True, methods=["post"], throttle_classes=[ScopedRateThrottle], throttle_scope="session_token")
     def token(self, request, pk=None):
         """Issue a fresh LiveKit token WITHOUT creating a SessionParticipant
@@ -2508,6 +2551,43 @@ class PassPurchaseViewSet(
 
         return Response(PassPurchaseSerializer(purchase).data)
 
+    @action(detail=True, methods=["post"], url_path="toggle-auto-renew")
+    def toggle_auto_renew(self, request, pk=None):
+        """NEW (Pass 15 — auto-renew passes). The student's own opt-in/
+        opt-out switch — see the auto_renew field's docstring on
+        PassPurchase in models.py for what flipping it on actually does
+        (a scheduled sweep, e.g. tasks.run_auto_renewals, picks this
+        purchase up once it expires and calls .renew() on it). This is
+        the only way auto_renew is ever set — it's read-only on
+        PassPurchaseSerializer (see serializers.py) precisely so a
+        student can't smuggle it in through a plain PATCH.
+
+        POST {"auto_renew": true|false}. Scoped to the requester's own
+        purchase, fetched directly (not via get_queryset()) for the same
+        reason as cancel() above — a ?classroom= a teacher might have
+        set for a different call on this viewset must never widen this
+        lookup to someone else's purchase.
+        """
+        purchase = get_object_or_404(PassPurchase, pk=pk, student=request.user)
+        if purchase.status != PassPurchase.Status.SUCCESS:
+            raise ValidationError(f"This purchase is already {purchase.get_status_display().lower()}.")
+
+        serializer = PassPurchaseAutoRenewSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+
+        purchase.auto_renew = serializer.validated_data["auto_renew"]
+        update_fields = ["auto_renew"]
+        if purchase.auto_renew:
+            # Opting back in clears any earlier failure flag — otherwise
+            # a student who tops up their wallet and flips this back on
+            # would still show a stale renewal_failed_at from the
+            # previous cycle until the next sweep run overwrites it.
+            purchase.renewal_failed_at = None
+            update_fields.append("renewal_failed_at")
+        purchase.save(update_fields=update_fields)
+
+        return Response(PassPurchaseSerializer(purchase).data)
+
     # -----------------------------------------------------------------
     # FEATURE (refer & earn): the referrer's own view of what their links
     # have brought in — every purchase currently crediting them a
@@ -3005,6 +3085,182 @@ class ClassJoinRequestViewSet(
 
 
 # ---------------------------------------------------------------------------
+# 5A3. PASS GIFT (Pass 14 — "Gifting a pass"). The ViewSet was the missing
+# piece: PassGift (models.py) and PassGiftSerializer (serializers.py)
+# already existed, but nothing ever exposed create/claim/cancel over the
+# API. Mirrors _charge_and_create_purchase's coin-debit shape above, minus
+# coupon/referral (see PassGift's docstring in models.py for why gifting
+# deliberately doesn't stack with either).
+#
+#   GET    pass-gifts/            own gifts — sent AND received
+#   GET    pass-gifts/{id}/
+#   POST   pass-gifts/            send a gift (body: recipient_id, class_pass, gift_message)
+#   POST   pass-gifts/{id}/claim/   recipient only, while PENDING and not expired
+#   POST   pass-gifts/{id}/cancel/  gifter only, while still PENDING (refunds the gifter)
+# ---------------------------------------------------------------------------
+class PassGiftViewSet(
+    mixins.ListModelMixin, mixins.RetrieveModelMixin, mixins.CreateModelMixin, viewsets.GenericViewSet
+):
+    serializer_class = PassGiftSerializer
+    permission_classes = [IsAuthenticated]
+    pagination_class = LiveClassPagination
+    queryset = PassGift.objects.select_related(
+        "gifter", "recipient", "class_pass", "class_pass__classroom", "purchase"
+    )
+
+    def get_queryset(self):
+        # Own gifts only — sent AND received, same "no browsing other
+        # people's gifts" boundary as everywhere else money moves in this
+        # app (e.g. PassPurchaseViewSet's own-purchases-only default).
+        user = self.request.user
+        return super().get_queryset().filter(Q(gifter=user) | Q(recipient=user))
+
+    def perform_create(self, serializer):
+        class_pass = serializer.validated_data["class_pass"]
+        recipient = serializer.validated_data["recipient"]
+        gifter = self.request.user
+
+        classroom = class_pass.classroom
+        if not classroom.is_active or classroom.is_deleted:
+            raise ValidationError({"class_pass": "This classroom is no longer active."})
+        if not class_pass.is_active:
+            raise ValidationError({"class_pass": "This pass is no longer available."})
+
+        # Same rounding rule as _charge_and_create_purchase above — a
+        # fractional coin price is never left to truncate in either
+        # side's favor.
+        coins_spent = int(class_pass.price.quantize(Decimal("1"), rounding=ROUND_HALF_UP))
+
+        with transaction.atomic():
+            if coins_spent > 0:
+                # The gifter pays NOW (not the recipient, and not at claim
+                # time) — see PassGift's docstring in models.py for why:
+                # they need to be committed before the recipient ever sees
+                # the gift, so they can't back out after the fact.
+                user = type(gifter).objects.select_for_update().get(pk=gifter.pk)
+                if user.coin < coins_spent:
+                    raise ValidationError({"coin": "Insufficient coin balance to gift this pass."})
+                user.coin -= coins_spent
+                user.save(update_fields=["coin"])
+                CoinTransaction.objects.create(
+                    user=user,
+                    txn_type=CoinTransaction.TxnType.DEBIT,
+                    reason=CoinTransaction.Reason.GIFT_SENT,
+                    amount=coins_spent,
+                    balance_after=user.coin,
+                    reference_id=f"class_pass:{class_pass.id}",
+                )
+
+            gift = PassGift.objects.create(
+                gifter=gifter,
+                recipient=recipient,
+                class_pass=class_pass,
+                coins_spent=coins_spent,
+                gift_message=serializer.validated_data.get("gift_message", ""),
+                expires_at=timezone.now() + timezone.timedelta(days=PassGift.CLAIM_WINDOW_DAYS),
+            )
+
+        serializer.instance = gift
+
+        create_notification(
+            recipient=recipient,
+            notif_type=Notification.NotifType.PASS_GIFT_RECEIVED,
+            title="You've received a class pass gift!",
+            message=(
+                f"{gifter.get_full_name() or gifter.username} gifted you a pass "
+                f"for '{classroom.title}'."
+            ),
+            classroom=classroom,
+        )
+        from .tasks import notify_pass_gift_received
+
+        _safe_delay(notify_pass_gift_received, gift.id)
+
+    @action(detail=True, methods=["post"])
+    def claim(self, request, pk=None):
+        """Recipient only. Only NOW is the PassPurchase actually created
+        and the escrow clock started (validity_days counts from claim, not
+        from send) — same "don't start a clock the recipient hasn't
+        agreed to yet" reasoning as an unactivated gift card, see
+        PassGift's docstring in models.py."""
+        gift = self.get_object()
+        if gift.recipient_id != request.user.id:
+            raise PermissionDenied("Only the recipient can claim this gift.")
+        if gift.status != PassGift.Status.PENDING:
+            raise ValidationError(f"This gift is already {gift.get_status_display().lower()}.")
+        if timezone.now() > gift.expires_at:
+            raise ValidationError("This gift has expired and can no longer be claimed.")
+
+        with transaction.atomic():
+            gift = PassGift.objects.select_for_update().get(pk=gift.pk)
+            if gift.status != PassGift.Status.PENDING:
+                raise ValidationError(f"This gift is already {gift.get_status_display().lower()}.")
+            if timezone.now() > gift.expires_at:
+                raise ValidationError("This gift has expired and can no longer be claimed.")
+
+            class_pass = ClassPass.objects.select_for_update().get(pk=gift.class_pass_id)
+            if not class_pass.is_active:
+                raise ValidationError("This pass is no longer available and can't be claimed.")
+
+            per_day_rate = Decimal(gift.coins_spent) / class_pass.validity_days
+            purchase = PassPurchase.objects.create(
+                student=gift.recipient,
+                class_pass=class_pass,
+                payment_method=(
+                    PassPurchase.PaymentMethod.FREE
+                    if gift.coins_spent == 0
+                    else PassPurchase.PaymentMethod.COIN_WALLET
+                ),
+                amount_paid=Decimal(gift.coins_spent),
+                coins_spent=gift.coins_spent,
+                per_day_rate=per_day_rate,
+                status=PassPurchase.Status.SUCCESS,
+                expires_at=timezone.now() + timezone.timedelta(days=class_pass.validity_days),
+                auto_renew=False,
+            )
+            gift.status = PassGift.Status.CLAIMED
+            gift.purchase = purchase
+            gift.claimed_at = timezone.now()
+            gift.save(update_fields=["status", "purchase", "claimed_at"])
+
+        create_notification(
+            recipient=gift.gifter,
+            notif_type=Notification.NotifType.PASS_GIFT_CLAIMED,
+            title="Your gift was claimed",
+            message=(
+                f"{gift.recipient.get_full_name() or gift.recipient.username} "
+                f"claimed your gifted pass for '{class_pass.classroom.title}'."
+            ),
+            classroom=class_pass.classroom,
+        )
+        from .tasks import notify_pass_gift_claimed
+
+        _safe_delay(notify_pass_gift_claimed, gift.id)
+        return Response(PassGiftSerializer(gift).data)
+
+    @action(detail=True, methods=["post"])
+    def cancel(self, request, pk=None):
+        """Gifter only, while still unclaimed. Refunds the gifter's coins
+        — see PassGift.refund_to_gifter()."""
+        gift = self.get_object()
+        if gift.gifter_id != request.user.id:
+            raise PermissionDenied("Only the gifter can cancel this gift.")
+        if gift.status != PassGift.Status.PENDING:
+            raise ValidationError(f"This gift is already {gift.get_status_display().lower()}.")
+
+        with transaction.atomic():
+            gift = PassGift.objects.select_for_update().get(pk=gift.pk)
+            if gift.status != PassGift.Status.PENDING:
+                raise ValidationError(f"This gift is already {gift.get_status_display().lower()}.")
+            if gift.coins_spent > 0:
+                gift.refund_to_gifter()
+            gift.status = PassGift.Status.CANCELLED
+            gift.save(update_fields=["status"])
+
+        return Response(PassGiftSerializer(gift).data)
+
+
+# ---------------------------------------------------------------------------
 # 6. SESSION PARTICIPANT
 # ---------------------------------------------------------------------------
 class SessionParticipantViewSet(
@@ -3175,6 +3431,25 @@ class ChatMessageViewSet(
         if not session or not _has_room_access(session.classroom, self.request.user):
             raise PermissionDenied("A valid pass is required to chat in this session.")
         serializer.save(sender=self.request.user)
+
+        # NEW (Pass 14 — automatic profanity/spam filter). The other
+        # trigger path for ChatMessage.is_flagged, alongside a human
+        # report (see ChatMessageReportViewSet.create below) — that
+        # path already existed, this one was documented on the model
+        # but never actually wired up (screen_message was imported and
+        # unused). Screened AFTER save, never before: a false positive
+        # here must never block a real message from posting, it only
+        # ever adds the message to a moderator's flagged-chat queue —
+        # same "flag, don't delete" contract the report path already
+        # follows.
+        is_flagged, reason = screen_message(serializer.instance.message)
+        if is_flagged:
+            ChatMessage.objects.filter(pk=serializer.instance.pk).update(
+                is_flagged=True, flagged_reason=f"auto:{reason}"
+            )
+            serializer.instance.is_flagged = True
+            serializer.instance.flagged_reason = f"auto:{reason}"
+
         # Realtime push (see realtime.py) — REST create() is still the
         # only write path (validation/throttling stays here); this just
         # fans the already-saved message out so listeners don't have to
@@ -3289,6 +3564,122 @@ class ChatMessageViewSet(
         message.save(update_fields=["is_pinned", "pinned_by", "pinned_at"])
         broadcast_to_session(message.session_id, "chat.unpinned", {"id": message.id})
         return Response(ChatMessageSerializer(message, context={"request": request}).data)
+
+
+# ---------------------------------------------------------------------------
+# NEW (Pass 14 audit — per-message chat reports / abuse-reporting safety
+# feature). A participant flags one chat message as abusive/spam/off-topic/
+# inappropriate; the classroom's teacher/co-teacher/moderator (or platform
+# staff) reviews the flagged-message queue and actions or dismisses it —
+# same "queue + review" shape as ClassroomReportViewSet above, just scoped
+# to a single message instead of a whole classroom. See ChatMessageReport
+# in models.py and ChatMessageReportSerializer in serializers.py — both
+# already existed; this viewset was the missing wiring.
+#
+#   POST chat-message-reports/                file a report
+#                                              {"message": <id>, "reason": "abusive", "note": "..."}
+#   GET  chat-message-reports/?session=<id>   moderator's flagged queue for one session
+#                                              (optional &status=pending/actioned/dismissed)
+#   GET  chat-message-reports/                 platform staff: everything; everyone else: reports THEY filed
+#   POST chat-message-reports/{id}/review/    moderator/staff: {"status": "actioned"|"dismissed"}
+# ---------------------------------------------------------------------------
+class ChatMessageReportViewSet(
+    mixins.ListModelMixin, mixins.CreateModelMixin, viewsets.GenericViewSet
+):
+    serializer_class = ChatMessageReportSerializer
+    permission_classes = [IsAuthenticated]
+    pagination_class = LiveClassPagination
+    queryset = ChatMessageReport.objects.select_related(
+        "message", "message__session", "message__session__classroom", "message__sender", "reporter", "reviewed_by"
+    )
+
+    def get_queryset(self):
+        user = self.request.user
+        qs = super().get_queryset()
+        status_filter = self.request.query_params.get("status")
+
+        session_id = self.request.query_params.get("session")
+        if session_id:
+            # Moderator queue for one session's chat — same boundary as
+            # ChatMessageViewSet.pin/unpin (host tier, not just "has a
+            # valid pass"), so a student can't browse who reported whom.
+            session = ClassSession.objects.filter(pk=session_id).select_related("classroom").first()
+            if not session or not (_can_moderate_session(session, user) or user.is_staff):
+                return qs.none()
+            qs = qs.filter(message__session_id=session_id)
+            return qs.filter(status=status_filter) if status_filter else qs
+
+        if user.is_staff:
+            return qs.filter(status=status_filter) if status_filter else qs
+
+        # Default (no ?session= filter, non-staff caller): only the
+        # reports this user personally filed — never another user's.
+        return qs.filter(reporter=user)
+
+    def perform_create(self, serializer):
+        message = serializer.validated_data["message"]
+        if not _has_room_access(message.session.classroom, self.request.user):
+            raise PermissionDenied("A valid pass is required to report a message in this session.")
+        if message.sender_id == self.request.user.id:
+            raise PermissionDenied("You can't report your own message.")
+
+        # NOTE: `unique_together = ("message", "reporter")` on the model
+        # (see its docstring in models.py) — re-filing a report against
+        # the same message updates the existing row (fresh reason/note,
+        # back to PENDING for re-review) rather than erroring on the
+        # unique constraint or silently duplicating the queue entry.
+        report, _created = ChatMessageReport.objects.update_or_create(
+            message=message,
+            reporter=self.request.user,
+            defaults={
+                "reason": serializer.validated_data.get("reason", ChatMessageReport.Reason.OTHER),
+                "note": serializer.validated_data.get("note", ""),
+                "status": ChatMessageReport.Status.PENDING,
+            },
+        )
+
+        # A filed report is itself a strong-enough signal to pull the
+        # message into the flagged-chat queue immediately — same "either
+        # trigger path (profanity filter OR a report) lands the message
+        # in the same queue" reasoning already documented on
+        # ChatMessage.is_flagged.
+        if not message.is_flagged:
+            message.is_flagged = True
+            message.flagged_reason = f"reported:{report.reason}"
+            message.save(update_fields=["is_flagged", "flagged_reason"])
+
+        serializer.instance = report
+
+    @action(detail=True, methods=["post"])
+    def review(self, request, pk=None):
+        """Classroom teacher/co-teacher/moderator, or platform staff.
+        Moves a report out of PENDING into actioned/dismissed. Actioning
+        one also soft-deletes the reported message itself (same
+        moderation effect as ChatMessageViewSet.perform_destroy) so a
+        moderator doesn't have to separately go delete it after acting on
+        the report."""
+        report = self.get_object()
+        if not (_can_moderate_session(report.message.session, request.user) or request.user.is_staff):
+            raise PermissionDenied("Only the classroom's teacher, co-teacher, or moderator can review a report.")
+
+        new_status = request.data.get("status")
+        valid_statuses = {
+            s for s, _ in ChatMessageReport.Status.choices if s != ChatMessageReport.Status.PENDING
+        }
+        if new_status not in valid_statuses:
+            raise ValidationError({"status": f"Must be one of {sorted(valid_statuses)}."})
+
+        report.status = new_status
+        report.reviewed_by = request.user
+        report.reviewed_at = timezone.now()
+        report.save(update_fields=["status", "reviewed_by", "reviewed_at"])
+
+        if new_status == ChatMessageReport.Status.ACTIONED and not report.message.is_deleted:
+            report.message.is_deleted = True
+            report.message.save(update_fields=["is_deleted"])
+            broadcast_to_session(report.message.session_id, "chat.message_deleted", {"id": report.message_id})
+
+        return Response(ChatMessageReportSerializer(report).data)
 
 
 # ---------------------------------------------------------------------------
@@ -5049,6 +5440,43 @@ class NotificationViewSet(
             is_read=True, read_at=timezone.now()
         )
         return Response({"marked_read": updated})
+
+
+# ---------------------------------------------------------------------------
+# NEW (Pass 14 audit — per-notification-type channel preferences + digest
+# email, audit priority #2/#3). One row per user (NotificationPreference.
+# for_user in models.py lazily creates it with sane defaults on first
+# touch — see that classmethod's docstring). Both features share the same
+# model/serializer, so one settings endpoint covers both:
+#   - push/email/sms/whatsapp_enabled + muted_types: which channels fire
+#     per notification type (NotificationPreference.allowed_channels_for
+#     is what notifications.dispatch_notification() actually consults).
+#   - digest_frequency (off/daily/weekly): batches events into a single
+#     roundup email instead of one-per-event — independent of
+#     email_enabled, see the model's own docstring. Sending the digest
+#     itself is a scheduled task (tasks.py), out of scope for this
+#     settings endpoint; this is just where the user sets the frequency.
+#
+#   GET   notification-preferences/me/   read the caller's own settings
+#   PATCH notification-preferences/me/   partial-update any of the above
+# ---------------------------------------------------------------------------
+class NotificationPreferenceView(APIView):
+    """Always exactly one row: the caller's own. There is no id in the
+    URL and no way to read or write anyone else's preferences — same
+    "own data only" boundary as NotificationViewSet above."""
+
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        pref = NotificationPreference.for_user(request.user)
+        return Response(NotificationPreferenceSerializer(pref).data)
+
+    def patch(self, request):
+        pref = NotificationPreference.for_user(request.user)
+        serializer = NotificationPreferenceSerializer(pref, data=request.data, partial=True)
+        serializer.is_valid(raise_exception=True)
+        serializer.save()
+        return Response(serializer.data)
 
 
 class MyDashboardView(APIView):

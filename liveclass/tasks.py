@@ -79,6 +79,15 @@ CHUNKED_UPLOAD_STALE_AFTER = timedelta(hours=6)
 # cleanup_stale_chunked_uploads purges them outright.
 CHUNKED_UPLOAD_ROW_RETENTION_DAYS = 14
 
+# NOTE: run_auto_renewals and expire_unclaimed_gifts (below) deliberately
+# have no *_LOOKBACK_MINUTES constant like the sweeps above. Both queries
+# are self-cleaning — renew() always clears PassPurchase.auto_renew on the
+# row it processed (success or fail), and expire_unclaimed_gifts always
+# flips PassGift.status off PENDING — so a processed row can never be
+# picked up again next tick, and a slow/delayed beat tick can't open a gap
+# the way it can for expire_and_refund_passes/reconcile_stuck_coin_purchases,
+# whose target rows don't change state just from expiring.
+
 _WEEKDAY_CODE = {0: "mon", 1: "tue", 2: "wed", 3: "thu", 4: "fri", 5: "sat", 6: "sun"}
 
 
@@ -410,6 +419,103 @@ def reconcile_stuck_coin_purchases():
     return reconciled
 
 
+@shared_task(name="liveclass.run_auto_renewals")
+def run_auto_renewals():
+    """NOTE (fix — the exact gap PassPurchase.auto_renew's own docstring
+    already called out): auto-renew passes (Pass 15) has always been
+    fully implemented at the model layer — the opt-in flag, renew()'s
+    coin-debit-and-rebuy logic, the renewed_from/renewed_into chain, the
+    fail-closed "clear auto_renew + notify" path on insufficient
+    balance — but nothing ever actually CALLED renew() on a schedule.
+    A student flipping auto_renew on got a subscription that would
+    silently lapse the moment it expired, with no error surfaced
+    anywhere and no sweep to notice. This is that missing sweep.
+
+    Picks up every SUCCESS purchase with auto_renew=True past its
+    expires_at (exactly the shape the auto_renew field's own docstring
+    and the (auto_renew, status, expires_at) index in PassPurchase.Meta
+    were already built for) and calls renew() on each. No rolling
+    lookback window needed — see the NOTE above _WEEKDAY_CODE: renew()
+    always clears auto_renew on `self` before returning, on success AND
+    on failure, so a row this task has already processed drops out of
+    the filter for good and can never be double-processed next tick.
+    """
+    from .models import PassPurchase
+
+    due = PassPurchase.objects.filter(
+        auto_renew=True, status=PassPurchase.Status.SUCCESS, expires_at__lte=timezone.now(),
+    )
+
+    renewed, failed = 0, 0
+    for purchase in due:
+        try:
+            # renew() takes its own row lock internally and is documented
+            # to never raise (fails closed, returns None) — no
+            # select_for_update()/transaction.atomic() wrapper needed
+            # here, unlike expire_and_refund_passes/expire_unclaimed_gifts
+            # which call lower-level model methods directly.
+            if purchase.renew() is not None:
+                renewed += 1
+            else:
+                failed += 1
+        except Exception:
+            # Last-resort guard only — renew() itself shouldn't raise,
+            # but one truly unexpected error (a DB connection blip) must
+            # never abort the sweep for every other student due this tick.
+            logger.exception("Unexpected error auto-renewing purchase %s", purchase.pk)
+
+    if renewed or failed:
+        logger.info("run_auto_renewals: renewed %s, failed %s.", renewed, failed)
+    return {"renewed": renewed, "failed": failed}
+
+
+@shared_task(name="liveclass.expire_unclaimed_gifts")
+def expire_unclaimed_gifts():
+    """NOTE (fix — same class of gap as run_auto_renewals above):
+    PassGift.refund_to_gifter() and the CLAIM_WINDOW_DAYS deadline it's
+    built for (Pass 14) have always existed, but nothing ever swept
+    PENDING gifts past their expires_at. The gifter's coins are already
+    debited at send time (see PassGift's docstring in models.py) — left
+    unswept, an unclaimed gift's coins just sit in limbo forever instead
+    of returning to the gifter once the recipient plainly isn't going to
+    claim it.
+
+    Same self-cleaning-query reasoning as run_auto_renewals — every row
+    processed flips to Status.EXPIRED, which drops it out of the PENDING
+    filter for good, so no rolling lookback window is needed here either.
+    """
+    from django.db import transaction
+
+    from .models import PassGift
+
+    candidates = PassGift.objects.filter(status=PassGift.Status.PENDING, expires_at__lt=timezone.now())
+
+    expired_count = 0
+    for gift in candidates:
+        try:
+            with transaction.atomic():
+                locked = PassGift.objects.select_for_update().get(pk=gift.pk)
+                # Re-check under the lock — a recipient's own claim() or
+                # the gifter's own cancel() could have raced this sweep
+                # between the filter() above and getting here.
+                if locked.status != PassGift.Status.PENDING:
+                    continue
+                locked.refund_to_gifter()
+                locked.status = PassGift.Status.EXPIRED
+                locked.save(update_fields=["status"])
+            expired_count += 1
+            try:
+                notify_gift_expired.delay(gift.pk)
+            except Exception:
+                logger.exception("Failed to queue gift-expired notification for gift %s", gift.pk)
+        except Exception:
+            logger.exception("Failed to expire unclaimed gift %s", gift.pk)
+
+    if expired_count:
+        logger.info("expire_unclaimed_gifts: expired and refunded %s gift(s).", expired_count)
+    return expired_count
+
+
 @shared_task(name="liveclass.notify_waitlist_promotion")
 def notify_waitlist_promotion(student_id, session_id):
     """Fired from SessionWaitlistViewSet.promote() the instant a waitlist
@@ -536,6 +642,223 @@ def notify_purchase_refunded(purchase_id):
             "pass_purchase_id": str(purchase.id),
         },
     )
+
+
+@shared_task(name="liveclass.notify_pass_auto_renewed")
+def notify_pass_auto_renewed(purchase_id):
+    """Fired from PassPurchase.renew() (models.py) the instant an
+    auto-renewal succeeds (see run_auto_renewals above) — the student's
+    subscription just quietly re-charged their wallet; this is their
+    receipt, same "money moved, tell them" discipline as
+    notify_purchase_refunded above. Triggered from a background sweep,
+    not a request, so — unlike notify_purchase_refunded, whose in-app
+    bell row is written elsewhere — this task writes BOTH halves itself
+    (create_notification() for the bell row, send_notification() for
+    push), same pattern signals.py already uses for its own
+    signal-triggered (non-request) notifications.
+    """
+    from .models import PassPurchase, create_notification
+    from .notifications import send_notification
+
+    purchase = (
+        PassPurchase.objects.select_related("student", "class_pass__classroom")
+        .filter(pk=purchase_id)
+        .first()
+    )
+    if not purchase:
+        return False
+
+    classroom = purchase.class_pass.classroom
+    title = "Pass auto-renewed"
+    message = (
+        f"Your pass for {classroom.title} was auto-renewed — "
+        f"{purchase.coins_spent} coin(s) charged, valid until "
+        f"{purchase.expires_at:%d %b %Y}."
+    )
+    create_notification(
+        purchase.student, "pass_auto_renewed", title, message, classroom=classroom,
+    )
+    return send_notification(
+        purchase.student, title, message, channel="push",
+        data={
+            "type": "pass_auto_renewed",
+            "classroom_id": str(classroom.id),
+            "pass_purchase_id": str(purchase.id),
+        },
+    )
+
+
+@shared_task(name="liveclass.notify_auto_renew_failed")
+def notify_auto_renew_failed(purchase_id):
+    """Fired from PassPurchase.renew() (models.py) the instant an
+    auto-renewal FAILS (insufficient coins, or the classroom/pass having
+    gone inactive) — renew() already clears auto_renew on this purchase
+    so the sweep won't keep retrying, but the student still needs to
+    know their access is about to lapse and *why*, or the exact
+    "I lost access and don't know why" gap notify_purchase_refunded's
+    own docstring already flagged for manual refunds happens all over
+    again, just for a silent subscription lapse instead of a refund."""
+    from .models import PassPurchase, create_notification
+    from .notifications import send_notification
+
+    purchase = (
+        PassPurchase.objects.select_related("student", "class_pass__classroom")
+        .filter(pk=purchase_id)
+        .first()
+    )
+    if not purchase:
+        return False
+
+    classroom = purchase.class_pass.classroom
+    title = "Auto-renewal failed"
+    message = (
+        f"We couldn't auto-renew your pass for {classroom.title} — "
+        f"your coin balance is too low. Top up and renew manually to keep your access."
+    )
+    create_notification(
+        purchase.student, "auto_renew_failed", title, message, classroom=classroom,
+    )
+    return send_notification(
+        purchase.student, title, message, channel="push",
+        data={
+            "type": "auto_renew_failed",
+            "classroom_id": str(classroom.id),
+            "pass_purchase_id": str(purchase.id),
+        },
+    )
+
+
+@shared_task(name="liveclass.notify_gift_expired")
+def notify_gift_expired(gift_id):
+    """Fired from expire_unclaimed_gifts above the instant an unclaimed
+    gift's coins are refunded back to the gifter — same "money moved,
+    tell them" discipline as notify_purchase_refunded/
+    notify_pass_auto_renewed. A third, distinct gift moment alongside
+    the two NotifType.PASS_GIFT_RECEIVED/PASS_GIFT_CLAIMED already cover
+    (see Notification in models.py) — uses its own PASS_GIFT_EXPIRED
+    type rather than overloading either of those."""
+    from .models import PassGift, create_notification
+    from .notifications import send_notification
+
+    gift = PassGift.objects.select_related("gifter", "class_pass__classroom").filter(pk=gift_id).first()
+    if not gift:
+        return False
+
+    classroom = gift.class_pass.classroom
+    title = "Gift refunded"
+    message = (
+        f"Your gifted pass for {classroom.title} wasn't claimed within "
+        f"{PassGift.CLAIM_WINDOW_DAYS} days — {gift.coins_spent} coin(s) credited back to your wallet."
+    )
+    create_notification(
+        gift.gifter, "pass_gift_expired", title, message, classroom=classroom,
+    )
+    return send_notification(
+        gift.gifter, title, message, channel="push",
+        data={"type": "gift_expired", "classroom_id": str(classroom.id), "pass_gift_id": str(gift.id)},
+    )
+
+
+@shared_task(name="liveclass.notify_pass_gift_received")
+def notify_pass_gift_received(gift_id):
+    """Fired from PassGiftViewSet.create() (Pass 14) the instant a gift is
+    sent. NOTE (fix): the in-app bell row was already created
+    synchronously in the view (create_notification()), and the view
+    already called `_safe_delay(notify_pass_gift_received, gift.id)` —
+    but this task itself never existed, so every gift send was silently
+    swallowing that queue call (caught by `_safe_delay`'s own
+    try/except, logged, never surfaced) and no recipient ever got a
+    push. Same push-only pattern as notify_join_request_received/etc.
+    above, since the bell row is handled elsewhere here (unlike the Pass
+    16 auto-renew/gift-expiry trio above, which are sweep-triggered and
+    have no view to write the bell row for them)."""
+    from .models import PassGift
+    from .notifications import send_notification
+
+    gift = (
+        PassGift.objects.select_related("recipient", "gifter", "class_pass__classroom")
+        .filter(pk=gift_id)
+        .first()
+    )
+    if not gift:
+        return False
+
+    classroom = gift.class_pass.classroom
+    gifter_name = gift.gifter.get_full_name() or gift.gifter.username
+    title = "You've received a class pass gift!"
+    message = f"{gifter_name} gifted you a pass for {classroom.title}."
+    return send_notification(
+        gift.recipient, title, message, channel="push",
+        data={"type": "pass_gift_received", "classroom_id": str(classroom.id), "pass_gift_id": str(gift.id)},
+    )
+
+
+@shared_task(name="liveclass.notify_pass_gift_claimed")
+def notify_pass_gift_claimed(gift_id):
+    """Fired from PassGiftViewSet.claim() (Pass 14) the instant a
+    recipient claims a gift — tells the gifter their coins went
+    somewhere (they already paid at send time, see PassGift's docstring
+    in models.py). Same missing-task gap as notify_pass_gift_received
+    above, same fix."""
+    from .models import PassGift
+    from .notifications import send_notification
+
+    gift = (
+        PassGift.objects.select_related("recipient", "gifter", "class_pass__classroom")
+        .filter(pk=gift_id)
+        .first()
+    )
+    if not gift:
+        return False
+
+    classroom = gift.class_pass.classroom
+    recipient_name = gift.recipient.get_full_name() or gift.recipient.username
+    title = "Your gift was claimed"
+    message = f"{recipient_name} claimed your gifted pass for {classroom.title}."
+    return send_notification(
+        gift.gifter, title, message, channel="push",
+        data={"type": "pass_gift_claimed", "classroom_id": str(classroom.id), "pass_gift_id": str(gift.id)},
+    )
+
+
+@shared_task(name="liveclass.build_engagement_report")
+def build_engagement_report(session_id):
+    """Queued from cleanup_on_session_end's on_commit hook in signals.py
+    the moment a ClassSession transitions to COMPLETED (Pass 14) —
+    pre-computes and persists ClassSession.engagement_report so
+    ClassSessionViewSet.engagement_report (views.py) can just read it
+    back instead of re-running five aggregate queries on every request.
+
+    NOTE (fix): this task's job was documented on both ends — the
+    engagement_report field's own docstring in models.py, and the
+    view's "falls back to computing it here on the rare request that
+    lands in the gap" branch — but the task itself was never written,
+    and signals.py's cleanup_on_session_end never queued anything for
+    it (see that function — its other four cleanup steps all exist,
+    this one didn't). Not a broken feature end-to-end — the view's
+    inline fallback means a teacher always got a correct report — just
+    never pre-warmed, so EVERY request paid the "rare gap" cost instead
+    of only the first one.
+    """
+    from .models import ClassSession
+
+    session = ClassSession.objects.filter(pk=session_id).first()
+    if not session:
+        return False
+    if session.status != ClassSession.Status.COMPLETED:
+        # Raced a status flip back out of COMPLETED (shouldn't normally
+        # happen) — never persist a report for a session that isn't
+        # actually done.
+        return False
+
+    try:
+        report = session.compute_engagement_report()
+    except Exception:
+        logger.exception("Failed computing engagement report for session %s", session_id)
+        return False
+
+    ClassSession.objects.filter(pk=session_id).update(engagement_report=report)
+    return True
 
 
 @shared_task(name="liveclass.notify_classroom_flagged")

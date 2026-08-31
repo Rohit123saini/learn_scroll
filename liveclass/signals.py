@@ -198,6 +198,20 @@ def cleanup_on_session_end(sender, instance, created, **kwargs):
         except Exception:
             logger.exception("Failed stamping actual_end for session %s.", session_id)
 
+        # NOTE (fix — Pass 14's engagement report never actually got
+        # queued): ClassSession.engagement_report's own docstring, and
+        # ClassSessionViewSet.engagement_report's fallback-computation
+        # branch, both already described this task firing here — it
+        # just never did. COMPLETED only (not CANCELLED — a cancelled
+        # session has no attendance/chat/poll activity worth a report).
+        if new_status == ClassSession.Status.COMPLETED:
+            try:
+                from .tasks import build_engagement_report
+
+                build_engagement_report.delay(session_id)
+            except Exception:
+                logger.exception("Failed to queue engagement report build for session %s.", session_id)
+
         logger.info("ClassSession %s -> %s: end-of-session cleanup finished.", session_id, new_status)
 
     transaction.on_commit(_run_cleanup)

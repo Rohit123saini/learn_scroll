@@ -21,6 +21,7 @@ from .models import (
     BreakoutRoom,
     Certificate,
     ChatMessage,
+    ChatMessageReport,
     ChatReaction,
     ClassHoliday,
     ClassJoinRequest,
@@ -44,6 +45,8 @@ from .models import (
     LivePoll,
     Notice,
     Notification,
+    NotificationPreference,
+    PassGift,
     PassPurchase,
     PollResponse,
     PollTemplate,
@@ -287,6 +290,30 @@ class ClassSessionSerializer(serializers.ModelSerializer):
 
 
 # ---------------------------------------------------------------------------
+# NEW (Pass 14 — post-session engagement report, audit priority #1). Read-
+# only shape of the dict ClassSession.compute_engagement_report() returns /
+# that gets persisted onto ClassSession.engagement_report (see models.py).
+# Plain Serializer (not a ModelSerializer) since the thing being rendered is
+# a JSON dict, not a model instance — same "output-shape serializer for a
+# computed payload" pattern as ClassroomStatsSerializer below.
+# `computed_at` stays a CharField (not DateTimeField): the value coming in
+# is already an isoformat() string written by compute_engagement_report,
+# not a datetime object, so a DateTimeField would try to re-interpret it.
+# ---------------------------------------------------------------------------
+class SessionEngagementReportSerializer(serializers.Serializer):
+    attendee_count = serializers.IntegerField(read_only=True)
+    avg_watch_seconds = serializers.IntegerField(read_only=True)
+    avg_watch_percent = serializers.FloatField(read_only=True)
+    chat_message_count = serializers.IntegerField(read_only=True)
+    distinct_chatters = serializers.IntegerField(read_only=True)
+    poll_count = serializers.IntegerField(read_only=True)
+    total_poll_responses = serializers.IntegerField(read_only=True)
+    avg_responses_per_poll = serializers.FloatField(read_only=True)
+    hands_raised_count = serializers.IntegerField(read_only=True)
+    computed_at = serializers.CharField(read_only=True)
+
+
+# ---------------------------------------------------------------------------
 # 4. PASS
 # ---------------------------------------------------------------------------
 class ClassPassSerializer(serializers.ModelSerializer):
@@ -343,12 +370,20 @@ class PassPurchaseSerializer(serializers.ModelSerializer):
             "per_day_rate", "coins_released", "remaining_balance", "last_charge_date",
             "referred_by", "referral_commission_percent", "referral_coins_released",
             "referral_remaining_balance",
+            # NEW (Pass 15 — auto-renew passes). auto_renew is read-only
+            # HERE — it's only ever flipped via
+            # PassPurchaseViewSet.toggle_auto_renew (see views.py), never
+            # through a plain PATCH on this serializer, same "no direct
+            # write path for a server-computed subscription state" reasoning
+            # already documented on this Meta for status/payment_method/etc.
+            "auto_renew", "renewed_from", "renewal_failed_at",
         ]
         read_only_fields = [
             "id", "purchased_at", "expires_at", "status", "classes_attended",
             "amount_paid", "coins_spent", "payment_method",
             "per_day_rate", "coins_released", "last_charge_date",
             "referred_by", "referral_commission_percent", "referral_coins_released",
+            "auto_renew", "renewed_from", "renewal_failed_at",
         ]
         # amount_paid / coins_spent / expires_at / status / payment_method are
         # all computed server-side in ClassJoinRequestViewSet.accept() (based
@@ -418,6 +453,59 @@ class ClassJoinRequestDecisionSerializer(serializers.Serializer):
     optional short note (e.g. a rejection reason)."""
 
     note = serializers.CharField(required=False, allow_blank=True, max_length=255)
+
+
+# ---------------------------------------------------------------------------
+# NEW (Pass 15 — auto-renew passes). Input for
+# PassPurchaseViewSet.toggle_auto_renew — the only thing a student can
+# ever set directly on this field (see PassPurchaseSerializer.Meta above,
+# where auto_renew is read-only on the main serializer).
+# ---------------------------------------------------------------------------
+class PassPurchaseAutoRenewSerializer(serializers.Serializer):
+    auto_renew = serializers.BooleanField()
+
+
+# ---------------------------------------------------------------------------
+# 5A3. GIFTING A PASS (Pass 14). Two serializers, same split as
+# ClassJoinRequestSerializer above: one to CREATE a gift (only
+# recipient/class_pass/gift_message are ever client-supplied — everything
+# else, gifter/coins_spent/status/expires_at, is computed server-side in
+# PassGiftViewSet.perform_create), one to READ it back with nested
+# gifter/recipient.
+# ---------------------------------------------------------------------------
+class PassGiftSerializer(serializers.ModelSerializer):
+    gifter = UserMiniSerializer(read_only=True)
+    recipient = UserMiniSerializer(read_only=True)
+    classroom_title = serializers.CharField(source="class_pass.classroom.title", read_only=True)
+    class_pass_title = serializers.CharField(source="class_pass.title", read_only=True)
+    # Client sends recipient_id on create; recipient (nested, above) is
+    # what every read of this row shows back — same write-id/read-nested
+    # split as ClassroomBanSerializer.student_id / .student.
+    recipient_id = serializers.PrimaryKeyRelatedField(
+        source="recipient", queryset=get_user_model().objects.all(), write_only=True
+    )
+
+    class Meta:
+        model = PassGift
+        fields = [
+            "id", "gifter", "recipient", "recipient_id", "class_pass",
+            "classroom_title", "class_pass_title", "coins_spent", "gift_message",
+            "status", "purchase", "created_at", "expires_at", "claimed_at",
+        ]
+        read_only_fields = [
+            "id", "gifter", "coins_spent", "status", "purchase",
+            "created_at", "expires_at", "claimed_at",
+        ]
+
+    def validate(self, attrs):
+        # NOTE (fix — self-gifting is meaningless and just burns coins for
+        # no reason, same "no self-referral" reasoning
+        # ReferralViewSet.redeem already enforces for the referral program).
+        request = self.context.get("request")
+        recipient = attrs.get("recipient")
+        if request and recipient and recipient.id == request.user.id:
+            raise serializers.ValidationError({"recipient_id": "You can't gift a pass to yourself."})
+        return attrs
 
 
 # ---------------------------------------------------------------------------
@@ -533,8 +621,16 @@ class ChatMessageSerializer(serializers.ModelSerializer):
         fields = [
             "id", "session", "sender", "message", "sent_at", "is_deleted",
             "reaction_counts", "my_reaction", "is_pinned", "pinned_by", "pinned_at",
+            # NEW (Pass 14 — profanity/spam filter, see moderation.py):
+            # both are set server-side the moment a message is created
+            # (ChatMessageViewSet.perform_create) or reported
+            # (ChatMessageReportViewSet.create) — never client-writable.
+            "is_flagged", "flagged_reason",
         ]
-        read_only_fields = ["id", "sent_at", "is_deleted", "is_pinned", "pinned_by", "pinned_at"]
+        read_only_fields = [
+            "id", "sent_at", "is_deleted", "is_pinned", "pinned_by", "pinned_at",
+            "is_flagged", "flagged_reason",
+        ]
 
     def get_reaction_counts(self, obj):
         counts: dict[str, int] = {}
@@ -569,6 +665,32 @@ class ChatReactionSerializer(serializers.ModelSerializer):
                 f"Unsupported reaction. Choose one of: {', '.join(ChatReaction.Reaction.values)}."
             )
         return value
+
+
+# ---------------------------------------------------------------------------
+# NEW (Pass 14 — per-message chat reports). Same read/create split as
+# ClassroomReportSerializer above: status/reviewed_by/reviewed_at are only
+# ever written server-side from ChatMessageReportViewSet.review() — never
+# accepted directly from the reporting user's create() call.
+# ---------------------------------------------------------------------------
+class ChatMessageReportSerializer(serializers.ModelSerializer):
+    reporter = UserMiniSerializer(read_only=True)
+    reviewed_by = UserMiniSerializer(read_only=True)
+    # NOTE: lets the moderator's flagged-chat queue render the reported
+    # text and its sender without a second lookup per row — same
+    # dotted-source convention as classroom_title elsewhere in this file.
+    message_text = serializers.CharField(source="message.message", read_only=True)
+    message_sender = UserMiniSerializer(source="message.sender", read_only=True)
+    session = serializers.PrimaryKeyRelatedField(source="message.session", read_only=True)
+
+    class Meta:
+        model = ChatMessageReport
+        fields = [
+            "id", "message", "message_text", "message_sender", "session",
+            "reporter", "reason", "note", "status",
+            "reviewed_by", "reviewed_at", "created_at",
+        ]
+        read_only_fields = ["id", "status", "reviewed_by", "reviewed_at", "created_at"]
 
 
 # ---------------------------------------------------------------------------
@@ -1195,6 +1317,33 @@ class NotificationSerializer(serializers.ModelSerializer):
             "is_read", "created_at", "read_at",
         ]
         read_only_fields = fields
+
+
+# ---------------------------------------------------------------------------
+# NEW (Pass 14 — per-notification-type channel preferences + digest email).
+# One row per user (see NotificationPreference.for_user in models.py) —
+# this serializer is used both to READ the caller's own settings and to
+# PATCH them (NotificationPreferenceView in views.py), so every field is
+# writable except `last_digest_sent_at`/`updated_at` (only ever advanced
+# server-side, never by the client).
+# ---------------------------------------------------------------------------
+class NotificationPreferenceSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = NotificationPreference
+        fields = [
+            "push_enabled", "email_enabled", "sms_enabled", "whatsapp_enabled",
+            "muted_types", "digest_frequency", "last_digest_sent_at", "updated_at",
+        ]
+        read_only_fields = ["last_digest_sent_at", "updated_at"]
+
+    def validate_muted_types(self, value):
+        if not isinstance(value, list):
+            raise serializers.ValidationError("muted_types must be a list of notification type strings.")
+        valid_types = set(Notification.NotifType.values)
+        invalid = [v for v in value if v not in valid_types]
+        if invalid:
+            raise serializers.ValidationError(f"Unknown notification type(s): {', '.join(invalid)}.")
+        return value
 
 
 # ---------------------------------------------------------------------------

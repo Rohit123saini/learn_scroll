@@ -79,6 +79,12 @@ from .cache_utils import invalidate_group_role_cache, get_presence_cached, set_p
 from .mentions import extract_mentioned_user_ids
 from .media_utils import create_group_media_for_message
 from .constants import MAX_PINNED_PER_CONVERSATION
+# 🔧 GAP FIX — `search()` / `search_all()` below already called
+# `search_utils.MIN_QUERY_LENGTH` / `.apply_structured_filters(...)` /
+# `.search_messages(...)`, but this module was never imported here (and,
+# until this session, never existed at all) — every call to either search
+# endpoint was a guaranteed `NameError`. See `search_utils.py`.
+from . import search_utils
 # 🔥 NAYE — advanced features (link preview / auto voice-transcription),
 # dono `tasks.py` ke Celery tasks hain, seedha yahan se `.delay()` hota hai.
 from .tasks import generate_link_preview_task, transcribe_voice_message_task
@@ -149,6 +155,32 @@ class StandardPagination(PageNumberPagination):
     page_size = 20
     page_size_query_param = 'page_size'
     max_page_size = 50
+
+
+# 🔥 NAYA — PERF FIX. `MessageSerializer.get_is_starred`/`get_is_read_by_me` pehle
+# HAR message row ke liye alag DB query karte the (`obj.starred_by.filter(...)
+# .exists()` / `MessageStatus.objects.filter(...).exists()`) — 30-message page pe
+# ye 2 extra query-per-row = 60 extra queries ek single list-load ke liye.
+#
+# Fix: is user ke liye already-narrowed `Prefetch` — poori list ke liye sirf 2
+# EXTRA queries total (starred_by ke liye 1, delivery_status ke liye 1), row-count
+# se independent. Serializer `obj.my_star.exists()`/`obj.my_read_status` (list,
+# already Python-side filtered by prefetch) check karta hai instead of naya query
+# maarne ke — `to_attr` isi liye diya hai taaki `.all()` cache use ho, `.filter()`
+# nahi (jo prefetch cache ko bypass kar deta hai).
+#
+# Har jagah use karo jahan `MessageSerializer(qs_or_page, many=True, ...)` call
+# hoti hai (list ke liye) — single-object responses (`MessageSerializer(message,
+# ...)`) ko iski zaroorat nahi, wahan 1 query already theek hai.
+def with_message_list_prefetch(queryset, user):
+    return queryset.prefetch_related(
+        Prefetch('starred_by', queryset=User.objects.filter(id=user.id), to_attr='my_star'),
+        Prefetch(
+            'delivery_status',
+            queryset=MessageStatus.objects.filter(user=user, is_read=True),
+            to_attr='my_read_status',
+        ),
+    )
 
 
 # ======================================================================
@@ -457,6 +489,7 @@ class ConversationViewSet(viewsets.ReadOnlyModelViewSet):
                 # zyada options ke saath ho to farak padta hai).
                 'poll', 'poll__options', 'poll__options__votes',
             )
+            qs = with_message_list_prefetch(qs, request.user)  # 🔥 NAYA — see helper above
             paginator = MessagePagination()
             page = paginator.paginate_queryset(qs, request, view=self)
             serializer = MessageSerializer(page, many=True, context={'request': request})
@@ -860,25 +893,26 @@ class ConversationViewSet(viewsets.ReadOnlyModelViewSet):
     # ==================================================================
     # SEARCH — ek conversation ke andar text search
     # ==================================================================
-    # GET /message/conversations/<id>/search/?q=...
+    # GET /message/conversations/<id>/search/?q=...&sender=<id>&date_from=
+    #     ...&date_to=...&has_media=true|false
     #
-    # Simple `icontains` search hai (poore chat-app ka scale abhi itna
-    # bada nahi ki Postgres full-text-search / Elasticsearch chahiye ho —
-    # `conversation` FK pe already index hai to query chhoti si conversation
-    # ke andar hi rehti hai). Deleted/expired messages exclude karte hain,
-    # jaisa normal message-list me hota hai.
+    # 🔥 UPGRADED (this session) — pehle plain `icontains` tha. Ab Postgres
+    # full-text search (ranked, stemmed) + trigram similarity (typo-
+    # tolerant) `search_utils.search_messages()` se, plus sender/date-
+    # range/has_media filters. `conversation` FK pe already index hai to
+    # ye query ek conversation tak hi scoped rehti hai; global search
+    # `search_all` neeche hai. Deleted/expired/scheduled messages exclude
+    # karte hain, jaisa normal message-list me hota hai.
     @action(detail=True, methods=['get'], url_path='search')
     def search(self, request, pk=None):
         conversation = self.get_object()
         query = (request.query_params.get('q') or '').strip()
         if not query:
             return Response({'detail': "'q' query param required hai."}, status=status.HTTP_400_BAD_REQUEST)
-        if len(query) < 2:
+        if len(query) < search_utils.MIN_QUERY_LENGTH:
             return Response({'detail': 'Search kam se kam 2 characters ka hona chahiye.'}, status=status.HTTP_400_BAD_REQUEST)
 
         qs = conversation.all_messages.filter(
-            text__icontains=query,
-        ).filter(
             Q(expires_at__isnull=True) | Q(expires_at__gt=timezone.now())
         ).exclude(
             deleted_for_everyone=True,
@@ -886,7 +920,14 @@ class ConversationViewSet(viewsets.ReadOnlyModelViewSet):
             deleted_for_users=request.user,
         ).exclude(
             is_scheduled=True,  # 🔧 GAP FIX — see note in `messages` GET above
-        ).select_related('sender', 'reply_to').order_by('-created_at')
+        ).select_related('sender', 'reply_to')
+
+        qs, filter_error = search_utils.apply_structured_filters(qs, request.query_params)
+        if filter_error:
+            return Response({'detail': filter_error}, status=status.HTTP_400_BAD_REQUEST)
+
+        qs = search_utils.search_messages(qs, query)
+        qs = with_message_list_prefetch(qs, request.user)  # 🔥 NAYA — perf, see helper def
 
         paginator = MessagePagination()
         page = paginator.paginate_queryset(qs, request, view=self)
@@ -896,25 +937,29 @@ class ConversationViewSet(viewsets.ReadOnlyModelViewSet):
     # ==================================================================
     # SEARCH — sabhi conversations me ek saath (global chat search)
     # ==================================================================
-    # GET /message/conversations/search_all/?q=...
+    # GET /message/conversations/search_all/?q=...&sender=<id>&date_from=
+    #     ...&date_to=...&has_media=true|false
     #
     # Ye `detail=False` hai isliye alag URL `search_all/` par baithta hai
     # (router `search/` already `search` action ke through detail route
     # pe bana chuka hai). Sirf un conversations ke messages aate hain jinka
     # user abhi ACTIVE member hai (chat delete/leave kar chuka ho to us
-    # conversation ke results nahi aayenge).
+    # conversation ke results nahi aayenge). 🔥 UPGRADED (this session) —
+    # same ranked/typo-tolerant search + filters as the in-conversation
+    # search above. `sender` filters by sender across ALL conversations —
+    # combine with a specific conversation's own `/search/` endpoint if
+    # you want "messages from X in THIS chat only".
     @action(detail=False, methods=['get'], url_path='search_all')
     def search_all(self, request):
         query = (request.query_params.get('q') or '').strip()
         if not query:
             return Response({'detail': "'q' query param required hai."}, status=status.HTTP_400_BAD_REQUEST)
-        if len(query) < 2:
+        if len(query) < search_utils.MIN_QUERY_LENGTH:
             return Response({'detail': 'Search kam se kam 2 characters ka hona chahiye.'}, status=status.HTTP_400_BAD_REQUEST)
 
         qs = Message.objects.filter(
             conversation__memberships__user=request.user,
             conversation__memberships__left_at__isnull=True,
-            text__icontains=query,
         ).filter(
             Q(expires_at__isnull=True) | Q(expires_at__gt=timezone.now())
         ).exclude(
@@ -925,7 +970,21 @@ class ConversationViewSet(viewsets.ReadOnlyModelViewSet):
             is_scheduled=True,  # 🔧 GAP FIX — see note in `messages` GET above
         ).select_related(
             'sender', 'conversation', 'conversation__group_detail',
-        ).distinct().order_by('-created_at')
+        ).distinct()
+
+        # 🔧 NOTE — `conversation_id` scope param, so the client can reuse
+        # this one global endpoint instead of needing two code paths, e.g.
+        # "search everywhere" vs "search in this chat" with the same UI.
+        conversation_id = request.query_params.get('conversation_id')
+        if conversation_id:
+            qs = qs.filter(conversation_id=conversation_id)
+
+        qs, filter_error = search_utils.apply_structured_filters(qs, request.query_params)
+        if filter_error:
+            return Response({'detail': filter_error}, status=status.HTTP_400_BAD_REQUEST)
+
+        qs = search_utils.search_messages(qs, query)
+        qs = with_message_list_prefetch(qs, request.user)  # 🔥 NAYA — perf, see helper def
 
         paginator = MessagePagination()
         page = paginator.paginate_queryset(qs, request, view=self)
@@ -942,6 +1001,7 @@ class ConversationViewSet(viewsets.ReadOnlyModelViewSet):
         qs = conversation.all_messages.filter(is_pinned=True).select_related(
             'sender', 'pinned_by',
         ).order_by('-pinned_at')
+        qs = with_message_list_prefetch(qs, request.user)  # 🔥 NAYA — perf, see helper def
         serializer = MessageSerializer(qs, many=True, context={'request': request})
         return Response(serializer.data)
 
@@ -1246,6 +1306,7 @@ class MessageViewSet(mixins.RetrieveModelMixin, mixins.UpdateModelMixin,
         ).select_related(
             'sender', 'conversation', 'conversation__group_detail',
         ).distinct().order_by('-created_at')
+        qs = with_message_list_prefetch(qs, request.user)  # 🔥 NAYA — perf, see helper def
 
         paginator = MessagePagination()
         page = paginator.paginate_queryset(qs, request, view=self)

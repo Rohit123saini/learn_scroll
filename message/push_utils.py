@@ -1,14 +1,46 @@
 import os
+import json
 import logging
 
 import firebase_admin
 from firebase_admin import credentials, messaging
+from django.core.cache import cache
 
 from .models import DeviceToken
 
 logger = logging.getLogger(__name__)
 
-_FIREBASE_CRED_PATH = os.getenv("FIREBASE_CREDENTIALS_PATH")
+# 🔥 NAYA — Notification batching / digest window. `send_chat_message_push`
+# ab seedha FCM call nahi karta — har naya message ek per-(user,
+# conversation) cache counter me accumulate hota hai, aur EK hi debounced
+# Celery task (`tasks.flush_chat_push_digest`) us window ke end me actual
+# push bhejta hai: agar sirf 1 message aaya to normal single-message push,
+# agar zyada aaye ("user 10 min tak app open nahi karta aur 20 messages
+# aa jaate hain") to ek batched "X ne N messages bheje" push — WhatsApp
+# jaisa hi behaviour, FCM cost aur notification-fatigue dono kam karta hai.
+# Mentions is batching se bypass karte hain (see `send_mention_push` —
+# wahi immediate/priority path use karta hai, jaisa mute bhi bypass karta
+# hai — same priority logic, dono jagah "mention hamesha turant" hi hai).
+CHAT_PUSH_DEBOUNCE_SECONDS = int(os.getenv("CHAT_PUSH_DEBOUNCE_SECONDS", "30"))
+_DIGEST_COUNT_KEY = "chatpush:count:{user}:{conv}"
+_DIGEST_LAST_KEY = "chatpush:last:{user}:{conv}"
+_DIGEST_SCHEDULED_KEY = "chatpush:scheduled:{user}:{conv}"
+
+# 🔥 FIX (this session) — `settings.py` defines `FCM_SERVICE_ACCOUNT_JSON_PATH`
+# but this module was reading a DIFFERENT env var (`FIREBASE_CREDENTIALS_PATH`)
+# directly via `os.getenv()`. Anyone deploying by following `settings.py`
+# would set the former and pushes would stay silently dead (falls into the
+# lazy "not configured" branch below — logged, never crashes, so it could go
+# unnoticed for a while). Now accepts either, preferring the env var this
+# module always used (back-compat) and falling back to the Django setting so
+# both conventions work without needing a settings.py change.
+from django.conf import settings as _dj_settings
+
+_FIREBASE_CRED_PATH = (
+    os.getenv("FIREBASE_CREDENTIALS_PATH")
+    or getattr(_dj_settings, "FCM_SERVICE_ACCOUNT_JSON_PATH", None)
+    or os.getenv("FCM_SERVICE_ACCOUNT_JSON_PATH")
+)
 
 # 🔥 FIX (production readiness) — same class of bug as `livekit_utils.py`:
 # this used to raise at IMPORT time, and `push_utils` gets imported by
@@ -29,8 +61,9 @@ def _ensure_firebase_initialized():
         raise _firebase_init_error
     if not _FIREBASE_CRED_PATH:
         _firebase_init_error = RuntimeError(
-            "FIREBASE_CREDENTIALS_PATH set nahi hai. Firebase service-account "
-            "JSON ka path .env me daalo, warna push notifications kaam nahi karengi."
+            "FIREBASE_CREDENTIALS_PATH (ya settings.FCM_SERVICE_ACCOUNT_JSON_PATH) "
+            "set nahi hai. Firebase service-account JSON ka path .env me daalo, "
+            "warna push notifications kaam nahi karengi."
         )
         raise _firebase_init_error
     try:
@@ -115,24 +148,13 @@ def send_push_to_users(recipient_ids, title, body, data=None):
     )
 
 
-def send_chat_message_push(recipient_ids, sender_name, message_text, message_type, conversation_id, message_id):
+def _send_single_chat_push(recipient_ids, sender_name, body, conversation_id, message_id):
     """
-    Naya chat message aane par push.
-
-    ⚠️ FIX (duplicate notification bug): pehle yahan `notification=` block
-    bhi bheja ja raha tha. Jab FCM payload me top-level `notification` key
-    hoti hai, Android OS khud background/killed state me ek system-tray
-    notification bana deta hai — aur uske upar humara apna
-    `firebaseBackgroundHandler` -> `_showBackgroundChatNotification()` bhi
-    (Reply action ke saath) ek dusra local notification dikhata hai.
-    Result: user ko har message ka 2 baar notification milta tha.
-
-    Ab hum WhatsApp jaisa hi DATA-ONLY message bhejte hain (jaisa
-    `send_incoming_call_push` pehle se karta hai) — Android tray khud kuch
-    nahi banata, sirf humara apna handler ek hi notification (Reply action
-    ke saath) dikhata hai.
+    Actual single-message FCM call — DATA-ONLY (see class-level note on
+    the double-notification bug this avoids). Called either immediately
+    by `flush_chat_push_digest` when a debounce window only accumulated
+    one message, or would've been called directly here pre-batching.
     """
-    body = message_text if message_type == 'text' else f"Sent a {message_type}"
     tokens = _tokens_for_users(recipient_ids)
     _send_multicast(
         tokens,
@@ -146,6 +168,92 @@ def send_chat_message_push(recipient_ids, sender_name, message_text, message_typ
         },
         android_priority='high',
     )
+
+
+def send_chat_digest_push(recipient_id, conversation_id, sender_name, count):
+    """
+    🔥 NAYA — batched summary push jab debounce window (`flush_chat_push_
+    digest`) me 1 se zyada message accumulate ho gaye ("Riya sent 5
+    messages"). Data-only, jaisa baaki chat pushes — client apna khud ka
+    local notification banata hai `type: 'chat_digest'` dekh kar aur us
+    par tap karke seedha conversation khol sakta hai (`message_id` nahi
+    diya kyunki digest kisi ek specific message ka nahi hai).
+    """
+    tokens = _tokens_for_users([recipient_id])
+    _send_multicast(
+        tokens,
+        notification=None,
+        data={
+            'type': 'chat_digest',
+            'conversation_id': str(conversation_id),
+            'sender_name': sender_name or '',
+            'count': count,
+        },
+        android_priority='high',
+    )
+
+
+def send_chat_message_push(recipient_ids, sender_name, message_text, message_type, conversation_id, message_id):
+    """
+    Naya chat message aane par push.
+
+    🔥 UPDATED (notification batching) — pehle ye function seedha FCM call
+    karta tha. Ab har recipient ke liye ek per-(user, conversation) cache
+    counter me message accumulate karta hai aur (agar is window ke liye
+    already scheduled nahi hai) ek debounced Celery task schedule karta
+    hai (`CHAT_PUSH_DEBOUNCE_SECONDS`, default 30s) — jo window ke end me
+    actual push bhejta hai (single ya batched digest, see
+    `tasks.flush_chat_push_digest`). Signature/callers (`views.py`,
+    `consumers.py`, `scheduled_messages.py`) ko koi change nahi karna
+    pada — sab already isi function ko call kar rahe the.
+
+    `cache.add` isliye use kiya hai schedule-flag ke liye (na ki
+    `cache.set`) — race-safe: burst ke 20 messages me se sirf PEHLA
+    successfully "add" karega (baaki `False` return honge, wahi flag
+    already set hai), isliye is window ke liye sirf EK hi flush task
+    schedule hota hai, 20 nahi.
+    """
+    # local import — avoid `push_utils` <-> `tasks` circular import at
+    # module load time (tasks.py already local-imports its own deps for
+    # the same reason).
+    from .tasks import flush_chat_push_digest
+
+    body = message_text if message_type == 'text' else f"Sent a {message_type}"
+
+    for uid in recipient_ids:
+        uid = str(uid)
+        count_key = _DIGEST_COUNT_KEY.format(user=uid, conv=conversation_id)
+        last_key = _DIGEST_LAST_KEY.format(user=uid, conv=conversation_id)
+        scheduled_key = _DIGEST_SCHEDULED_KEY.format(user=uid, conv=conversation_id)
+
+        # `add` phir `incr` — agar key already thi to `add` False return
+        # karta hai aur kuch nahi badalta, `incr` se count 1 badh jaata hai.
+        # Agar key nahi thi to `add` isse 0 pe set karta hai, phir `incr`
+        # se wo 1 ban jaata hai — dono paths se sahi count milta hai.
+        cache.add(count_key, 0, timeout=CHAT_PUSH_DEBOUNCE_SECONDS + 15)
+        try:
+            new_count = cache.incr(count_key)
+        except ValueError:
+            # extreme race: key `add` ke turant baad expire ho gayi — bahut
+            # rare, bas is message ko count=1 maan lo (worst case ek extra
+            # single push, data loss nahi).
+            cache.set(count_key, 1, timeout=CHAT_PUSH_DEBOUNCE_SECONDS + 15)
+            new_count = 1
+
+        # Sirf sabse RECENT message ka sender/text digest me dikhta hai
+        # ("Riya sent 5 messages" — WhatsApp bhi last sender ka naam
+        # dikhata hai, beech ke sabka nahi).
+        cache.set(
+            last_key,
+            json.dumps({'sender_name': sender_name or '', 'text': (body or '')[:200], 'message_id': str(message_id)}),
+            timeout=CHAT_PUSH_DEBOUNCE_SECONDS + 15,
+        )
+
+        if cache.add(scheduled_key, '1', timeout=CHAT_PUSH_DEBOUNCE_SECONDS):
+            flush_chat_push_digest.apply_async(
+                args=[uid, str(conversation_id)],
+                countdown=CHAT_PUSH_DEBOUNCE_SECONDS,
+            )
 
 
 def send_incoming_call_push(recipient_ids, caller_name, call_type, call_id, conversation_id, channel_name):

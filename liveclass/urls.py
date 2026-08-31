@@ -75,6 +75,10 @@ router — list/retrieve/create/update/delete on each, plus the custom
                                                           {"participant_id": int, "room": int|null})
     sessions/{id}/breakout/close/        POST             (teacher/co-teacher/moderator — deletes all
                                                           breakout rooms, everyone back in the main room)
+    sessions/{id}/engagement-report/     GET              (teacher/co-teacher/moderator only — post-
+                                                          session attendance, chat activity, and poll-
+                                                          result summary; computed once when the session
+                                                          hits COMPLETED, then just read back)
     passes/                              GET, POST
     passes/{id}/                         GET, PUT, PATCH, DELETE  (teacher only. Once a pass has
                                                           ever been purchased: DELETE is refused
@@ -103,6 +107,20 @@ router — list/retrieve/create/update/delete on each, plus the custom
     pass-purchases/{id}/refund/          POST           (classroom's teacher/co-teacher/moderator, or
                                                           platform staff, only — coins back to the
                                                           student, clawed back from the teacher)
+    pass-purchases/{id}/toggle-auto-renew/ POST         (body {"auto_renew": true|false} — student's
+                                                          own subscription-style opt-in/out; a scheduled
+                                                          sweep buys the next PassPurchase automatically
+                                                          when this one expires)
+    pass-gifts/                          GET, POST      (GET: own gifts, sent AND received; POST: send
+                                                          a gift — body {"recipient_id", "class_pass",
+                                                          "gift_message"} — coins leave the gifter's
+                                                          wallet immediately)
+    pass-gifts/{id}/                     GET
+    pass-gifts/{id}/claim/                POST           (recipient only, while still pending and not
+                                                          expired — this is what actually creates the
+                                                          PassPurchase and starts its validity clock)
+    pass-gifts/{id}/cancel/               POST           (gifter only, while still pending — refunds
+                                                          the gifter's coins)
     participants/                        GET
     participants/{id}/                   GET
     participants/{id}/leave/             POST
@@ -113,6 +131,15 @@ router — list/retrieve/create/update/delete on each, plus the custom
     chat-messages/{id}/react/            POST, DELETE     (Pass 12 — reactions)
     chat-messages/{id}/pin/              POST             (Pass 13)
     chat-messages/{id}/unpin/            POST             (Pass 13)
+    chat-message-reports/                GET, POST        (POST: report a message as abusive/spam/etc.,
+                                                          body {"message", "reason", "note"} — re-filing
+                                                          against the same message updates it rather
+                                                          than duplicating; GET: own filed reports, or
+                                                          ?session=<id> as that session's teacher/
+                                                          co-teacher/moderator/staff for its whole queue)
+    chat-message-reports/{id}/review/     POST             (teacher/co-teacher/moderator/staff — body
+                                                          {"status": "actioned"|"dismissed"}; actioning
+                                                          also soft-deletes the reported message)
     polls/                               GET, POST
     polls/{id}/                          GET, PUT, PATCH, DELETE
     polls/{id}/vote/                     POST
@@ -180,6 +207,10 @@ router — list/retrieve/create/update/delete on each, plus the custom
     notifications/unread-count/          GET               (badge count for the bell icon)
     notifications/{id}/mark-read/        POST              (mark one notification as read)
     notifications/mark-all-read/         POST              (mark every unread notification as read)
+    notification-preferences/me/         GET, PATCH        (always the caller's own row — push/email/
+                                                          sms/whatsapp_enabled, muted_types, and
+                                                          digest_frequency off/daily/weekly; see
+                                                          NotificationPreferenceView in views.py)
     referrals/                           GET               (people the caller has successfully referred —
                                                           own ledger only)
     referrals/my-code/                   GET               (own referral code + redemption tally)
@@ -232,6 +263,7 @@ from .views import (
     AssignmentSubmissionViewSet,
     AssignmentViewSet,
     CertificateViewSet,
+    ChatMessageReportViewSet,
     ChatMessageViewSet,
     ClassHolidayViewSet,
     ClassJoinRequestViewSet,
@@ -255,7 +287,9 @@ from .views import (
     LivePollViewSet,
     MyDashboardView,
     NoticeViewSet,
+    NotificationPreferenceView,
     NotificationViewSet,
+    PassGiftViewSet,
     PassPurchaseViewSet,
     PollTemplateViewSet,
     ReferralViewSet,
@@ -275,6 +309,13 @@ router.register(r"sessions", ClassSessionViewSet, basename="classsession")
 router.register(r"passes", ClassPassViewSet, basename="classpass")
 router.register(r"join-requests", ClassJoinRequestViewSet, basename="classjoinrequest")
 router.register(r"pass-purchases", PassPurchaseViewSet, basename="passpurchase")
+# NEW (audit fix — "Gifting a pass"): PassGift/PassGiftSerializer already
+# existed but had no ViewSet or route wired up anywhere — see
+# PassGiftViewSet in views.py.
+router.register(r"pass-gifts", PassGiftViewSet, basename="passgift")
+# NEW (audit fix — "Per-message chat reports"): ChatMessageReportViewSet
+# already existed in views.py but was never registered on the router.
+router.register(r"chat-message-reports", ChatMessageReportViewSet, basename="chatmessagereport")
 router.register(r"participants", SessionParticipantViewSet, basename="sessionparticipant")
 router.register(r"materials", ClassMaterialViewSet, basename="classmaterial")
 router.register(r"chat-messages", ChatMessageViewSet, basename="chatmessage")
@@ -310,6 +351,12 @@ urlpatterns = [
     # Same "plain APIView needs its own explicit path()" reasoning as
     # my-earnings/ above — StudentProgressView isn't a ViewSet either.
     path("my-progress/", StudentProgressView.as_view(), name="student-progress"),
+    # NEW (audit fix — "Per-notification-type channel preferences" +
+    # "Digest email"): NotificationPreferenceView already existed as a
+    # plain APIView in views.py but, same "APIView needs its own explicit
+    # path()" gap as my-earnings/ and my-progress/ above, was never
+    # actually reachable at any URL.
+    path("notification-preferences/me/", NotificationPreferenceView.as_view(), name="notification-preferences"),
     path("livekit-webhook/", LiveKitWebhookView.as_view(), name="livekit-webhook"),
     # NOTE (production): unauthenticated DB+cache liveness/readiness probe
     # for Render's health check / an uptime monitor / a k8s readiness

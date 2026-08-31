@@ -23,6 +23,7 @@
 # instructions), poora sweep worker process me chalega, request-response
 # cycle se bilkul alag.
 
+import json
 import logging
 
 from celery import shared_task
@@ -149,6 +150,87 @@ def cleanup_expired_messages():
         logger.info("cleanup_expired_messages: hard-deleted %s expired message(s)", deleted_total)
 
     return {"deleted": deleted_total}
+
+
+# ======================================================================
+# 🔥 FIX (this session) — Smart notification batching / digest.
+# `push_utils.send_chat_message_push` already does the accumulate-in-cache
+# half (per (user, conversation) counter + "schedule me once" flag) and
+# unconditionally does `from .tasks import flush_chat_push_digest` +
+# `.apply_async(...)` — but this task never actually existed here. That
+# meant EVERY normal chat-message push (REST, WS, AND scheduled-message
+# delivery — all three call `send_chat_message_push`) raised an
+# `ImportError` the moment it tried to schedule the flush, i.e. push
+# notifications for ordinary messages were silently broken end-to-end
+# (mentions/calls were unaffected — those use `send_mention_push` /
+# `send_incoming_call_push` directly, bypassing this path entirely).
+#
+# This is that missing counterpart: it runs once, `CHAT_PUSH_DEBOUNCE_
+# SECONDS` after the FIRST message in a window, reads back whatever
+# accumulated during that window, and sends either a normal single-
+# message push (count == 1) or a "X sent N messages" digest push
+# (count > 1) — exactly what `send_chat_digest_push` already exists for.
+# ======================================================================
+@shared_task(name="message.flush_chat_push_digest")
+def flush_chat_push_digest(user_id, conversation_id):
+    """
+    Scheduled once per debounce window by `push_utils.send_chat_message_
+    push` (via `cache.add` on the scheduled-flag key, so a burst of N
+    messages only ever enqueues this once). Reads back the count + "most
+    recent message" snapshot that accumulated in cache during the window
+    and sends exactly one push for it.
+
+    Keys are read-then-explicitly-cleared here (not just left to
+    TTL-expire) so a message that arrives in the split-second after this
+    task starts reading, but before it finishes, cleanly starts a
+    brand-new window (via `cache.add` back in `send_chat_message_push`)
+    instead of silently folding into a window whose flush is already in
+    flight.
+    """
+    from django.core.cache import cache
+    from .push_utils import (
+        _DIGEST_COUNT_KEY, _DIGEST_LAST_KEY, _DIGEST_SCHEDULED_KEY,
+        _send_single_chat_push, send_chat_digest_push,
+    )
+
+    uid = str(user_id)
+    count_key = _DIGEST_COUNT_KEY.format(user=uid, conv=conversation_id)
+    last_key = _DIGEST_LAST_KEY.format(user=uid, conv=conversation_id)
+    scheduled_key = _DIGEST_SCHEDULED_KEY.format(user=uid, conv=conversation_id)
+
+    count = cache.get(count_key)
+    last_raw = cache.get(last_key)
+
+    cache.delete(count_key)
+    cache.delete(last_key)
+    cache.delete(scheduled_key)
+
+    # Window already flushed/cleared by something else, or expired before
+    # we got to it (very slow/delayed worker) — nothing to send.
+    if not count or not last_raw:
+        return {"sent": False, "reason": "empty_window"}
+
+    try:
+        last = json.loads(last_raw)
+    except (TypeError, ValueError):
+        logger.exception(
+            "flush_chat_push_digest: bad last-message payload user=%s conv=%s",
+            uid, conversation_id,
+        )
+        return {"sent": False, "reason": "bad_payload"}
+
+    if count <= 1:
+        _send_single_chat_push(
+            [uid],
+            last.get('sender_name'),
+            last.get('text'),
+            conversation_id,
+            last.get('message_id'),
+        )
+    else:
+        send_chat_digest_push(uid, conversation_id, last.get('sender_name'), count)
+
+    return {"sent": True, "count": count}
 
 
 # ======================================================================

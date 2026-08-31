@@ -95,6 +95,16 @@ class ChatConsumer(AsyncWebsocketConsumer):
         # jo messages abhi tak deliver nahi hue the unhe deliver mark karo
         await self.mark_undelivered_as_delivered(self.conversation_id, self.user.id)
 
+        # 🔥 NAYA — missed-event replay ("sync"). Pehle offline/background
+        # rehte hue jo bhi WS events (naye messages) miss ho jaate the,
+        # unke liye sirf REST full-refetch hi option tha. Ab yahan seedha
+        # isi (naye) socket ko — poore room ko NAHI, `self.send` se sirf
+        # is connection ko — is user ke `last_read_message` ke baad ke
+        # saare naye messages ek 'sync' payload me bhej dete hain, taaki
+        # chhote gap (reconnect) ke baad client turant local-merge kar
+        # sake, bina full list reload ke.
+        await self.send_missed_events_sync(self.conversation_id, self.user.id)
+
     # ---------------- DISCONNECT ----------------
     #
     # 🔥 FIX: pehle yahan koi timeout nahi tha. `channel_layer.group_discard`
@@ -671,6 +681,83 @@ class ChatConsumer(AsyncWebsocketConsumer):
         MessageStatus.objects.filter(
             message__conversation_id=conversation_id, user_id=user_id, is_delivered=False
         ).update(is_delivered=True, delivered_at=timezone.now())
+
+    # ---------------- MISSED-EVENT SYNC (reconnect) ----------------
+    async def send_missed_events_sync(self, conversation_id, user_id):
+        missed = await self.get_missed_messages(conversation_id, user_id)
+        if not missed:
+            return
+        await self.send(text_data=json.dumps({
+            'type': 'sync',
+            'event': 'sync',
+            'conversation_id': str(conversation_id),
+            'count': len(missed),
+            'messages': missed,
+        }))
+
+    @database_sync_to_async
+    def get_missed_messages(self, conversation_id, user_id):
+        """
+        `last_read_message` ke baad (ya, agar user ne is chat me kabhi
+        kuch read hi nahi kiya, `joined_at` ke baad) ke saare naye
+        messages — jo is connect se pehle offline/disconnected rehte hue
+        miss ho gaye the. Bounded (200) taaki bahut lamba gap (din/hafton
+        baad wapas aana) ek hi bhaari query na ban jaaye — us case me
+        client apna normal paginated REST history-fetch use kare; ye sirf
+        chhote reconnect-gap ki UX-smoothing ke liye hai. Apne hi bheje
+        hue messages exclude kiye hain (client ko wo already, apne
+        optimistic-send se, pata hote hain).
+        """
+        try:
+            participant = ConversationParticipant.objects.select_related('last_read_message').get(
+                conversation_id=conversation_id, user_id=user_id, left_at__isnull=True,
+            )
+        except ConversationParticipant.DoesNotExist:
+            return []
+
+        baseline = (
+            participant.last_read_message.created_at
+            if participant.last_read_message_id else participant.joined_at
+        )
+
+        qs = Message.objects.filter(
+            conversation_id=conversation_id, created_at__gt=baseline,
+        ).filter(
+            Q(expires_at__isnull=True) | Q(expires_at__gt=timezone.now())
+        ).exclude(
+            deleted_for_everyone=True,
+        ).exclude(
+            deleted_for_users=user_id,
+        ).exclude(
+            is_scheduled=True,
+        ).exclude(
+            sender_id=user_id,
+        ).select_related('sender').order_by('created_at')[:200]
+
+        results = []
+        for message in qs:
+            sender = build_user_mini(message.sender)
+            results.append({
+                'id': str(message.id),
+                'sender_id': str(message.sender_id),
+                'sender_name': sender['display_name'],
+                'sender_username': sender['username'],
+                'sender_first_name': sender['first_name'],
+                'sender_last_name': sender['last_name'],
+                'sender_profile_photo': sender['profile_photo'],
+                'message_type': message.type,
+                'text': message.text,
+                'file_url': message.file_url,
+                'file_urls': message.file_urls,
+                'thumbnail_url': message.thumbnail_url,
+                'meta': message.meta,
+                'reply_to': str(message.reply_to_id) if message.reply_to_id else None,
+                'client_id': message.client_id,
+                'is_edited': message.is_edited,
+                'is_forwarded': message.is_forwarded,
+                'created_at': message.created_at.isoformat(),
+            })
+        return results
 
     # ---------------- INBOX BROADCAST (global list update) ----------------
     async def broadcast_inbox_update(self, message, sender, text, message_type):

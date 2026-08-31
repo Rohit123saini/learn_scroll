@@ -27,11 +27,39 @@
 #      dobara) — `requests` ka default redirect-follow ye check bypass kar
 #      sakta hai agar seedha allow kar diya.
 #   4. Response size aur time dono capped hain.
+#   5. 🔥 FIX (this session) — DNS-REBINDING / TOCTOU. Pehle `_is_safe_url()`
+#      hostname ko resolve karke IP check karta tha, par phir `requests.get()`
+#      ko ORIGINAL HOSTNAME diya jaata tha — jisse `requests`/`urllib3` khud
+#      DOBARA DNS resolve karta hai connect karte waqt. Ek attacker jo apne
+#      domain ka DNS control karta hai, is gap ko exploit kar sakta hai:
+#      pehli resolution (check ke waqt) ek safe public IP degi, par TTL=0 /
+#      "DNS rebinding" trick se dusri resolution (connect ke waqt, milli-
+#      seconds baad) ek private/internal IP de degi — check pass ho jaata
+#      hai par actual connection internal network pe jaata hai. Isse
+#      classic "check-then-use" (TOCTOU) SSRF bypass kehte hain.
+#
+#      Fix: hostname ko sirf EK BAAR resolve karte hain, wahi validated IP
+#      "pin" kar dete hain (ek scoped `socket.getaddrinfo` patch ke zariye,
+#      sirf is request ki duration ke liye, lock se guarded) taaki
+#      `requests` connect karte waqt DOBARA resolve na kare — jo IP check
+#      hua wahi IP use ho, guaranteed.
+#
+#      NOTE: ye monkeypatch process-wide `socket.getaddrinfo` ko chhota sa
+#      window ke liye override karta hai. Celery prefork workers (jahan har
+#      worker apna alag process hai — is app ka default) ke liye completely
+#      safe hai. Agar kabhi thread-based/gevent Celery pool pe switch karo
+#      to isse ek per-thread/per-greenlet DNS resolver override (jaise
+#      `python-socks`/custom `HTTPAdapter` transport) se replace kar dena —
+#      neeche ka `_dns_pin_lock` sirf overlapping *calls in this process* ko
+#      serialize karta hai, alag threads ke concurrent unrelated socket
+#      calls ko affect hone se pura nahi rokta.
 
 import ipaddress
 import logging
 import re
 import socket
+import threading
+from contextlib import contextmanager
 from urllib.parse import urljoin, urlparse
 
 import requests
@@ -51,6 +79,12 @@ _OG_TAG_RE = re.compile(
 )
 _TITLE_TAG_RE = re.compile(r'<title[^>]*>([^<]+)</title>', re.IGNORECASE)
 
+# Ek hi process ke andar overlapping fetches (e.g. do Celery tasks ek hi
+# worker-thread pool me chal rahe) ek doosre ka DNS-pin patch overwrite na
+# karein, isliye serialize kar dete hain — link-preview fetches already
+# rare/lightweight hain, is lock ka throughput-cost negligible hai.
+_dns_pin_lock = threading.Lock()
+
 
 def extract_first_url(text: str) -> "str | None":
     """Message text me pehla http(s) URL dhoondta hai. Nahi mila to None."""
@@ -60,13 +94,20 @@ def extract_first_url(text: str) -> "str | None":
     return match.group(0).rstrip('.,)>]') if match else None
 
 
-def _is_safe_host(hostname: str) -> bool:
-    """Hostname resolve karke check karta hai ki IP private/internal to nahi."""
+def _resolve_safe_ip(hostname: str) -> "str | None":
+    """
+    Hostname resolve karke saari candidate IPs check karta hai. Agar
+    KOI BHI resolved IP private/internal range me ho to poora hostname hi
+    unsafe maan lete hain (attacker multi-A-record trick — ek safe, ek
+    internal — se bhi na bach paaye). Safe hone par pehli usable IP
+    return karta hai, jise caller connection ke liye "pin" karega.
+    """
     try:
         infos = socket.getaddrinfo(hostname, None)
     except socket.gaierror:
-        return False
+        return None
 
+    resolved_ips = []
     for info in infos:
         ip_str = info[4][0]
         try:
@@ -77,8 +118,10 @@ def _is_safe_host(hostname: str) -> bool:
             ip.is_private or ip.is_loopback or ip.is_link_local
             or ip.is_multicast or ip.is_reserved or ip.is_unspecified
         ):
-            return False
-    return True
+            return None
+        resolved_ips.append(ip_str)
+
+    return resolved_ips[0] if resolved_ips else None
 
 
 def _is_safe_url(url: str) -> bool:
@@ -87,7 +130,31 @@ def _is_safe_url(url: str) -> bool:
         return False
     if not parsed.hostname:
         return False
-    return _is_safe_host(parsed.hostname)
+    return _resolve_safe_ip(parsed.hostname) is not None
+
+
+@contextmanager
+def _pinned_dns(hostname: str, ip: str):
+    """
+    Is block ke andar `hostname` ke liye koi bhi `socket.getaddrinfo` call
+    seedha `ip` return karega — actual DNS lookup nahi hoga. Isse
+    `requests`/`urllib3` connect karte waqt wahi IP use karta hai jo already
+    `_resolve_safe_ip()` ne validate kiya tha, dobara resolve nahi karta
+    (DNS-rebinding window band ho jaati hai).
+    """
+    original_getaddrinfo = socket.getaddrinfo
+
+    def _pinned(host, port, *args, **kwargs):
+        if host == hostname:
+            host = ip
+        return original_getaddrinfo(host, port, *args, **kwargs)
+
+    with _dns_pin_lock:
+        socket.getaddrinfo = _pinned
+        try:
+            yield
+        finally:
+            socket.getaddrinfo = original_getaddrinfo
 
 
 def fetch_link_preview(url: str) -> "dict | None":
@@ -104,17 +171,31 @@ def fetch_link_preview(url: str) -> "dict | None":
 
     current_url = url
     for _ in range(_MAX_REDIRECTS + 1):
-        if not _is_safe_url(current_url):
+        parsed = urlparse(current_url)
+        if parsed.scheme not in ('http', 'https') or not parsed.hostname:
             cache.set(cache_key, {}, _CACHE_TTL)
             return None
+
+        safe_ip = _resolve_safe_ip(parsed.hostname)
+        if safe_ip is None:
+            cache.set(cache_key, {}, _CACHE_TTL)
+            return None
+
         try:
-            resp = requests.get(
-                current_url,
-                timeout=_TIMEOUT_SECONDS,
-                allow_redirects=False,
-                stream=True,
-                headers={"User-Agent": "Mozilla/5.0 (compatible; ChatLinkPreviewBot/1.0)"},
-            )
+            # 🔥 FIX — DNS pin: `requests` ab isi `safe_ip` se connect karega,
+            # `parsed.hostname` ko dobara resolve nahi karega (see module-
+            # level note on DNS rebinding above). TLS/SNI/Host-header sab
+            # normal rehte hain kyunki URL khud (aur isliye Host header +
+            # SNI) still original hostname hi use karta hai — sirf socket-
+            # level connect() us validated IP par jaata hai.
+            with _pinned_dns(parsed.hostname, safe_ip):
+                resp = requests.get(
+                    current_url,
+                    timeout=_TIMEOUT_SECONDS,
+                    allow_redirects=False,
+                    stream=True,
+                    headers={"User-Agent": "Mozilla/5.0 (compatible; ChatLinkPreviewBot/1.0)"},
+                )
         except requests.RequestException as e:
             logger.info("link_preview: fetch failed for %s: %s", current_url, e)
             cache.set(cache_key, {}, _CACHE_TTL)
@@ -127,7 +208,7 @@ def fetch_link_preview(url: str) -> "dict | None":
                 cache.set(cache_key, {}, _CACHE_TTL)
                 return None
             current_url = urljoin(current_url, location)
-            continue
+            continue  # agla loop-iteration naye hostname ko dobara resolve+validate+pin karega
 
         if resp.status_code != 200 or 'text/html' not in (resp.headers.get('Content-Type') or ''):
             resp.close()

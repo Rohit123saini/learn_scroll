@@ -116,6 +116,61 @@ def transcribe_audio(file_url: str, mime_type: str = "audio/ogg") -> str:
     return result
 
 
+# 🔥 NAYA — Smart-reply / quick-reply suggestions (Gmail/WhatsApp Business
+# jaisa "tap-to-send" chips). Existing Gemini client + 24h content-hash
+# cache pattern (upar summary/quiz/transcript) hi reuse kiya hai — koi
+# naya AI wiring nahi chahiye tha. Cache key `context_text` (last-N
+# messages joined) ka hash hai, isliye same conversation-state dobara
+# aaye (dusra participant bhi suggestion maange, ya same user page
+# refresh kare) to Gemini dobara call nahi hota, seedha cache se milta
+# hai — same TTL (`CACHE_TTL`, 24h) jo baaki functions use karte hain,
+# kyunki key khud hi context badalte hi naturally change ho jaata hai
+# (staleness ka risk cache-hit se nahi, purane context ko dobara bhejne
+# se hai, jo caller (`views_ai.py`) ki zimmedari hai).
+def generate_reply_suggestions(context_text: str) -> list:
+    if not AI_ENABLED:
+        raise RuntimeError("AI not configured")
+
+    key = _get_cache_key("replies", context_text)
+    if cached := cache.get(key):
+        logger.info(f"CACHE HIT replies {key}")
+        return cached
+
+    prompt = f"""
+    You are helping someone quickly reply to an incoming chat message.
+    Based on the recent conversation below (oldest first, "Me" is the
+    person who needs to reply), suggest exactly 3 short quick-reply
+    options they could tap to send as-is, with no further editing.
+
+    Rules:
+    - Each suggestion under 8 words.
+    - Match the tone and language of the conversation (reply in the same
+      language the conversation is in).
+    - The 3 suggestions must be meaningfully different from each other,
+      not just rephrasings of the same idea.
+    - If the last message is a question or request, suggestions should be
+      plausible direct answers, not generic filler.
+    - Return ONLY valid JSON, no markdown, no explanation:
+      {{"suggestions": ["...", "...", "..."]}}
+
+    Conversation:
+    ---
+    {context_text[:4000]}
+    ---
+    """
+
+    res = _call_gemini(prompt)
+    text = res.text.replace("```json", "").replace("```", "").strip()
+    data = json.loads(text)
+    suggestions = [s.strip() for s in data.get("suggestions", []) if s and s.strip()][:3]
+
+    if not suggestions:
+        raise ValueError("AI returned empty suggestions")
+
+    cache.set(key, suggestions, CACHE_TTL)
+    return suggestions
+
+
 def generate_quiz(content: str) -> list:
     if not AI_ENABLED:
         raise RuntimeError("AI not configured")

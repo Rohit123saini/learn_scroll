@@ -41,6 +41,7 @@ from django.core.cache import cache
 from django.core.exceptions import ValidationError
 from django.core.validators import FileExtensionValidator, MaxValueValidator, MinValueValidator
 from django.contrib.postgres.indexes import GinIndex
+from django.db import IntegrityError as DjangoIntegrityError
 from django.db import models, transaction
 from django.db.models import F
 from django.db.models.functions import Greatest
@@ -684,6 +685,17 @@ class ClassSession(models.Model):
     caption_status = models.CharField(max_length=12, choices=CaptionStatus.choices, default=CaptionStatus.NONE)
     caption_url = models.URLField(blank=True)  # points at a .vtt/.srt file once READY
 
+    # NEW (Pass 14 — post-session engagement report). Computed once by
+    # tasks.build_engagement_report (queued from cleanup_on_session_end's
+    # on_commit hook in signals.py, alongside the existing LiveKit-teardown/
+    # poll-close/participant-checkout steps) the moment a session reaches
+    # COMPLETED, then just read back by ClassSessionViewSet.engagement_report
+    # — never recomputed per-request, so a teacher re-opening the report a
+    # dozen times doesn't re-run five aggregate queries a dozen times.
+    # Null until that task runs (or for a session that never went LIVE).
+    # See ClassSession.compute_engagement_report() below for the shape.
+    engagement_report = models.JSONField(null=True, blank=True)
+
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
@@ -713,6 +725,52 @@ class ClassSession(models.Model):
         change their calls.
         """
         return self.status in (self.Status.SCHEDULED, self.Status.LIVE)
+
+    def compute_engagement_report(self) -> dict:
+        """Aggregate, don't join-explode: each metric is its own small
+        query against a table indexed on session_id (participants/
+        chat_messages/live_polls all already carry that index — see each
+        model's Meta) rather than one giant multi-table join, so this
+        stays cheap even for a long-running session with thousands of
+        chat rows. Pure computation, no save — see build_engagement_report
+        in tasks.py for who calls this and persists the result onto
+        `engagement_report`.
+        """
+        participants = list(self.participants.filter(role=SessionParticipant.Role.STUDENT))
+        attendee_count = len(participants)
+
+        durations = []
+        for p in participants:
+            ended = p.left_at or self.actual_end or timezone.now()
+            if p.joined_at and ended > p.joined_at:
+                durations.append((ended - p.joined_at).total_seconds())
+        avg_watch_seconds = int(sum(durations) / len(durations)) if durations else 0
+
+        scheduled_seconds = max((self.scheduled_end - self.scheduled_start).total_seconds(), 1)
+
+        chat_qs = self.chat_messages.filter(is_deleted=False)
+        chat_message_count = chat_qs.count()
+        distinct_chatters = chat_qs.values("sender_id").distinct().count()
+
+        polls = list(self.polls.all())
+        poll_count = len(polls)
+        total_poll_responses = PollResponse.objects.filter(poll__session=self).count()
+        avg_responses_per_poll = round(total_poll_responses / poll_count, 1) if poll_count else 0
+
+        hands_raised = SessionParticipant.objects.filter(session=self, hand_raised_at__isnull=False).count()
+
+        return {
+            "attendee_count": attendee_count,
+            "avg_watch_seconds": avg_watch_seconds,
+            "avg_watch_percent": round(min(avg_watch_seconds / scheduled_seconds, 1.0) * 100, 1),
+            "chat_message_count": chat_message_count,
+            "distinct_chatters": distinct_chatters,
+            "poll_count": poll_count,
+            "total_poll_responses": total_poll_responses,
+            "avg_responses_per_poll": avg_responses_per_poll,
+            "hands_raised_count": hands_raised,
+            "computed_at": timezone.now().isoformat(),
+        }
 
 
 # ---------------------------------------------------------------------------
@@ -876,11 +934,44 @@ class PassPurchase(models.Model):
     referral_per_day_rate = models.DecimalField(max_digits=8, decimal_places=4, default=0)
     referral_coins_released = models.PositiveIntegerField(default=0)
 
+    # -----------------------------------------------------------------
+    # NEW (Pass 15 — auto-renew passes, subscription-style recurring
+    # access). Off by default — a student opts IN per purchase via
+    # PassPurchaseViewSet.toggle_auto_renew. When on, and this purchase
+    # expires, renew() (below) is expected to be called by a scheduled
+    # sweep (e.g. tasks.run_auto_renewals, checking `auto_renew=True,
+    # status=SUCCESS, expires_at__lte=now`) to buy a fresh PassPurchase
+    # for the SAME class_pass/student, chained via renewed_into/
+    # renewed_from so a student's purchase history reads as one
+    # continuous subscription rather than a series of unrelated buys.
+    #
+    #   auto_renew     — the student's own opt-in switch. Cleared
+    #                     automatically by renew() if a renewal attempt
+    #                     ever fails for insufficient balance (never
+    #                     silently retried forever — see renew()).
+    #   renewed_from    — the purchase this one was auto-renewed FROM, if
+    #                     any. Null for a purchase that was bought
+    #                     directly (join-request accept, gift claim).
+    #   renewal_failed_at — set (and auto_renew cleared) the moment a
+    #                     renewal attempt fails for lack of coins, so the
+    #                     app can prompt the student to top up instead of
+    #                     silently losing access with no explanation.
+    # -----------------------------------------------------------------
+    auto_renew = models.BooleanField(default=False)
+    renewed_from = models.OneToOneField(
+        "self", on_delete=models.SET_NULL, null=True, blank=True, related_name="renewed_into"
+    )
+    renewal_failed_at = models.DateTimeField(null=True, blank=True)
+
     class Meta:
         ordering = ["-purchased_at"]
         indexes = [
             models.Index(fields=["student", "status", "expires_at"]),
             models.Index(fields=["referred_by"]),
+            # NEW (Pass 15): the exact shape tasks.run_auto_renewals sweeps
+            # — every SUCCESS purchase with auto_renew on, ordered by
+            # who's expiring soonest.
+            models.Index(fields=["auto_renew", "status", "expires_at"]),
         ]
 
     def __str__(self):
@@ -1140,6 +1231,110 @@ class PassPurchase(models.Model):
                     "Failed to queue refund notification for purchase %s", self.id
                 )
 
+    def renew(self) -> "PassPurchase | None":
+        """NEW (Pass 15 — auto-renew passes). Buys a fresh PassPurchase for
+        the exact same (student, class_pass) this one was for — meant to be
+        called once this purchase has actually expired (or is about to),
+        by a scheduled sweep (see the auto_renew field's docstring above).
+
+        Deliberately mirrors _charge_and_create_purchase() in views.py
+        (same coin-debit-then-create shape, same per_day_rate math) rather
+        than importing it, so models.py never has to import from views.py
+        — but WITHOUT coupon/referral carry-over: a renewal is a fresh
+        subscription cycle at the class_pass's current plain price, same
+        "coupons are a one-time self-purchase discount, not a standing
+        entitlement" reasoning PassGift already applies to gifting.
+
+        Returns the new PassPurchase on success. On failure (insufficient
+        coins, or the classroom/pass having gone inactive since), clears
+        auto_renew on THIS purchase (so the sweep doesn't keep retrying a
+        subscription that can't renew), stamps renewal_failed_at, and
+        returns None — never raises, since a scheduled sweep processing
+        many purchases can't let one student's empty wallet blow up the
+        whole run.
+
+        Caller does not need to pre-lock self — this method takes its own
+        row lock internally, same contract as charge_for_session/reverse
+        expect of THEIR callers, just self-contained here since renew()
+        is normally invoked standalone per-purchase by the sweep rather
+        than nested inside a larger already-locked transaction.
+        """
+        class_pass = self.class_pass
+        student = self.student
+
+        def _fail() -> None:
+            PassPurchase.objects.filter(pk=self.pk).update(
+                auto_renew=False, renewal_failed_at=timezone.now()
+            )
+            try:
+                from .tasks import notify_auto_renew_failed
+
+                notify_auto_renew_failed.delay(self.id)
+            except Exception:
+                logging.getLogger(__name__).exception(
+                    "Failed to queue auto-renew-failed notification for purchase %s", self.id
+                )
+
+        if not class_pass.is_active or not class_pass.classroom.is_active or class_pass.classroom.is_deleted:
+            _fail()
+            return None
+
+        coins_spent = int(class_pass.price.quantize(Decimal("1"), rounding=ROUND_HALF_UP))
+
+        try:
+            with transaction.atomic():
+                if coins_spent > 0:
+                    locked_student = type(student).objects.select_for_update().get(pk=student.pk)
+                    if locked_student.coin < coins_spent:
+                        raise ValidationError("Insufficient coin balance for renewal.")
+                    locked_student.coin -= coins_spent
+                    locked_student.save(update_fields=["coin"])
+                    CoinTransaction.objects.create(
+                        user=locked_student,
+                        txn_type=CoinTransaction.TxnType.DEBIT,
+                        reason=CoinTransaction.Reason.PASS_AUTO_RENEWED,
+                        amount=coins_spent,
+                        balance_after=locked_student.coin,
+                        reference_id=f"class_pass:{class_pass.id}:renewal_of:{self.id}",
+                    )
+                    payment_method = PassPurchase.PaymentMethod.COIN_WALLET
+                else:
+                    payment_method = PassPurchase.PaymentMethod.FREE
+
+                per_day_rate = Decimal(coins_spent) / class_pass.validity_days
+                new_purchase = PassPurchase.objects.create(
+                    student=student,
+                    class_pass=class_pass,
+                    payment_method=payment_method,
+                    amount_paid=Decimal(coins_spent),
+                    coins_spent=coins_spent,
+                    per_day_rate=per_day_rate,
+                    status=PassPurchase.Status.SUCCESS,
+                    expires_at=timezone.now() + timezone.timedelta(days=class_pass.validity_days),
+                    auto_renew=True,  # subscription continues by default; student can turn it off again
+                    renewed_from=self,
+                )
+        except (ValidationError, DjangoIntegrityError):
+            _fail()
+            return None
+
+        # This purchase's own cycle is over — leave its escrow/coins_released
+        # history exactly as it is (audit trail), just stop it being picked
+        # up by the sweep again (only the newest link in the chain has
+        # auto_renew=True).
+        PassPurchase.objects.filter(pk=self.pk).update(auto_renew=False)
+
+        try:
+            from .tasks import notify_pass_auto_renewed
+
+            notify_pass_auto_renewed.delay(new_purchase.id)
+        except Exception:
+            logging.getLogger(__name__).exception(
+                "Failed to queue auto-renew notification for purchase %s", new_purchase.id
+            )
+
+        return new_purchase
+
 
 # ---------------------------------------------------------------------------
 # 5A2. PASS DAILY CHARGE (audit trail — one row per calendar day a pass was
@@ -1176,6 +1371,93 @@ class PassDailyCharge(models.Model):
 
     def __str__(self):
         return f"{self.purchase} - {self.date} ({self.amount} coin)"
+
+
+# ---------------------------------------------------------------------------
+# 5A3. GIFTING A PASS (Pass 14) — one platform user pays for a pass and
+# hands it to another platform user, instead of buying it for themselves.
+# ---------------------------------------------------------------------------
+class PassGift(models.Model):
+    """A gift is its own row, separate from PassPurchase, because the coin
+    debit and the actual pass grant happen at DIFFERENT times: the gifter
+    pays the moment they send the gift (so they can't back out after the
+    recipient already sees it), but the PassPurchase (and its escrow
+    clock — validity_days, per_day_rate, etc.) is only created once the
+    recipient actually claims it — same "don't start a clock the
+    recipient hasn't agreed to yet" reasoning as a gift card not
+    activating until redeemed. See `_create_gift`/`claim`/`cancel` on
+    PassGiftViewSet in views.py for the coin-flow details.
+
+    SCOPING NOTE: a gift does not stack with a coupon or a referral link
+    — the gifter pays the class_pass's plain price in full, and the
+    resulting PassPurchase (once claimed) has no coupon/referred_by set.
+    Coupons/referrals are a self-purchase discount/commission mechanic;
+    mixing them into gifting would mean deciding whose referral credit
+    a gift counts against (the gifter's or the recipient's), which is a
+    product decision this pass deliberately leaves for later rather than
+    guessing.
+    """
+
+    class Status(models.TextChoices):
+        PENDING = "pending", "Pending Claim"
+        CLAIMED = "claimed", "Claimed"
+        CANCELLED = "cancelled", "Cancelled By Gifter"
+        EXPIRED = "expired", "Expired Unclaimed"
+
+    # How long an unclaimed gift stays open before the recipient can no
+    # longer claim it (and tasks.expire_unclaimed_gifts sweeps it back to
+    # the gifter) — used by PassGiftViewSet.perform_create to stamp
+    # expires_at. Kept as a class constant (not a settings.py value) since
+    # it's a product decision about this one flow, not deployment config.
+    CLAIM_WINDOW_DAYS = 7
+
+    gifter = models.ForeignKey(User, on_delete=models.CASCADE, related_name="passes_gifted")
+    recipient = models.ForeignKey(User, on_delete=models.CASCADE, related_name="passes_gifted_to_me")
+    class_pass = models.ForeignKey(ClassPass, on_delete=models.CASCADE, related_name="gifts")
+
+    coins_spent = models.PositiveIntegerField(help_text="Frozen at gift time — the class_pass's price then.")
+    gift_message = models.CharField(max_length=255, blank=True)
+    status = models.CharField(max_length=20, choices=Status.choices, default=Status.PENDING)
+
+    # Resulting purchase, once claimed — null until then. SET_NULL so a
+    # later purchase deletion (there isn't one today, but defensively)
+    # can never cascade-delete the gift's own audit trail.
+    purchase = models.ForeignKey(
+        PassPurchase, on_delete=models.SET_NULL, null=True, blank=True, related_name="from_gift"
+    )
+
+    created_at = models.DateTimeField(auto_now_add=True)
+    # Unclaimed gifts don't sit open forever — same "escrowed coin, not
+    # free money" reasoning as PassPurchase itself: the gifter's coins are
+    # already debited (see PassGiftViewSet.create), so an abandoned gift
+    # needs a claim deadline and a refund path, not an indefinite hold.
+    expires_at = models.DateTimeField()
+    claimed_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+        indexes = [models.Index(fields=["recipient", "status"]), models.Index(fields=["status", "expires_at"])]
+
+    def __str__(self):
+        return f"{self.gifter} -> {self.recipient}: {self.class_pass} ({self.get_status_display()})"
+
+    def refund_to_gifter(self) -> None:
+        """Give the gifter their coins back — used by both cancel() (the
+        gifter changes their mind before the recipient claims) and the
+        expiry sweep (tasks.expire_unclaimed_gifts). Caller must hold a
+        row lock on self and run inside transaction.atomic(), same
+        contract as PassPurchase.reverse()."""
+        gifter = type(self.gifter).objects.select_for_update().get(pk=self.gifter_id)
+        gifter.coin += self.coins_spent
+        gifter.save(update_fields=["coin"])
+        CoinTransaction.objects.create(
+            user=gifter,
+            txn_type=CoinTransaction.TxnType.CREDIT,
+            reason=CoinTransaction.Reason.GIFT_CANCELLED_REFUND,
+            amount=self.coins_spent,
+            balance_after=gifter.coin,
+            reference_id=f"passgift:{self.id}",
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -1393,12 +1675,68 @@ class ChatMessage(models.Model):
     )
     pinned_at = models.DateTimeField(null=True, blank=True)
 
+    # NEW (Pass 14 — chat safety: reports + profanity filter). See
+    # moderation.py's `screen_message()` for the actual word-list check —
+    # kept out of this file so the model stays free of moderation policy.
+    # `is_flagged` is set automatically the moment a message trips the
+    # filter (ChatMessageViewSet.perform_create) OR the moment a report
+    # against it is filed (ChatMessageReportViewSet.create, see below) —
+    # either path makes the message show up in a moderator's flagged-chat
+    # queue without a moderator having to know which trigger fired.
+    is_flagged = models.BooleanField(default=False)
+    flagged_reason = models.CharField(max_length=100, blank=True)
+
     class Meta:
         ordering = ["sent_at"]
-        indexes = [models.Index(fields=["session", "sent_at"])]
+        indexes = [models.Index(fields=["session", "sent_at"]), models.Index(fields=["is_flagged"])]
 
     def __str__(self):
         return f"{self.sender}: {self.message[:30]}"
+
+
+# ---------------------------------------------------------------------------
+# NEW (Pass 14 — per-message chat reports). One row per (message, reporter)
+# report — a student flagging one message as abusive/spam/off-topic for a
+# moderator to review, same "queue + review action" shape as
+# ClassroomReport (see ClassroomReportViewSet.review in views.py), just
+# scoped to a single chat message instead of a whole classroom.
+# ---------------------------------------------------------------------------
+class ChatMessageReport(models.Model):
+    class Reason(models.TextChoices):
+        ABUSIVE = "abusive", "Abusive / Harassment"
+        SPAM = "spam", "Spam / Advertising"
+        OFF_TOPIC = "off_topic", "Off-topic"
+        INAPPROPRIATE = "inappropriate", "Inappropriate Content"
+        OTHER = "other", "Other"
+
+    class Status(models.TextChoices):
+        PENDING = "pending", "Pending"
+        ACTIONED = "actioned", "Actioned"  # moderator deleted the message / warned the sender
+        DISMISSED = "dismissed", "Dismissed"
+
+    message = models.ForeignKey(ChatMessage, on_delete=models.CASCADE, related_name="reports")
+    reporter = models.ForeignKey(User, on_delete=models.CASCADE, related_name="chat_reports_filed")
+    reason = models.CharField(max_length=20, choices=Reason.choices, default=Reason.OTHER)
+    note = models.CharField(max_length=255, blank=True)
+    status = models.CharField(max_length=20, choices=Status.choices, default=Status.PENDING)
+
+    reviewed_by = models.ForeignKey(
+        User, on_delete=models.SET_NULL, null=True, blank=True, related_name="chat_reports_reviewed"
+    )
+    reviewed_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        # One report per (message, reporter) — same "can't spam-report the
+        # same message to inflate the queue" reasoning as ChatReaction's
+        # unique_together above, re-filing is a PATCH-style upsert, not a
+        # new row (see ChatMessageReportViewSet.create).
+        unique_together = ("message", "reporter")
+        ordering = ["-created_at"]
+        indexes = [models.Index(fields=["status", "-created_at"])]
+
+    def __str__(self):
+        return f"Report on message {self.message_id} by {self.reporter} ({self.get_reason_display()})"
 
 
 class ChatReaction(models.Model):
@@ -1721,6 +2059,16 @@ class CoinTransaction(models.Model):
         # PassPurchase.charge_for_session.
         CLASS_REFERRAL_COMMISSION = "class_referral_commission", "Class Referral Commission"
         REFUND = "refund", "Refund"
+        # NEW (Pass 14 — gifting a pass): distinct from PASS_PURCHASE/REFUND
+        # so a wallet-history screen can tell "I bought this for myself" and
+        # "I bought this for someone else" apart, and so a recipient's
+        # claimed gift never looks like a REFUND (they never paid anything).
+        GIFT_SENT = "gift_sent", "Pass Gifted To Someone"
+        GIFT_CANCELLED_REFUND = "gift_cancelled_refund", "Unclaimed Gift Refunded"
+        # NEW (Pass 15 — auto-renew passes): distinct from PASS_PURCHASE so
+        # a wallet-history screen can tell "I bought this" apart from "this
+        # renewed itself" — see PassPurchase.renew() below.
+        PASS_AUTO_RENEWED = "pass_auto_renewed", "Pass Auto-Renewed"
         ADMIN_ADJUSTMENT = "admin_adjustment", "Admin Adjustment"
         TOPUP = "topup", "Wallet Top-up"
         WITHDRAWAL = "withdrawal", "Withdrawal"  # debited the moment a CoinWithdrawal request is made
@@ -2418,6 +2766,23 @@ class Notification(models.Model):
         # NOTE (feature add — classroom sharing): see ClassroomShare above
         # and ClassroomViewSet.share in views.py.
         CLASSROOM_SHARED = "classroom_shared", "Classroom Shared With You"
+        # NEW (Pass 14 — gifting a pass): the two notification moments a
+        # gift needs — the recipient finding out they got one, and the
+        # gifter finding out it was actually claimed (they already paid
+        # at send time, so "claimed" is their confirmation the coins
+        # went somewhere, not a new charge). See PassGiftViewSet in
+        # views.py.
+        PASS_GIFT_RECEIVED = "pass_gift_received", "Pass Gift Received"
+        PASS_GIFT_CLAIMED = "pass_gift_claimed", "Pass Gift Claimed"
+        # NEW (fix — auto-renew/gift-expiry sweep tasks added: see
+        # tasks.run_auto_renewals/expire_unclaimed_gifts): these three
+        # events had no NotifType of their own even though the
+        # underlying flows (PassPurchase.renew(), PassGift.
+        # refund_to_gifter()) already existed — pure enum additions, no
+        # migration needed since choices aren't a schema change.
+        PASS_AUTO_RENEWED = "pass_auto_renewed", "Pass Auto-Renewed"
+        AUTO_RENEW_FAILED = "auto_renew_failed", "Auto-Renewal Failed"
+        PASS_GIFT_EXPIRED = "pass_gift_expired", "Gift Expired & Refunded"
         GENERIC = "generic", "Generic"
 
     recipient = models.ForeignKey(User, on_delete=models.CASCADE, related_name="notifications")
@@ -2452,6 +2817,78 @@ class Notification(models.Model):
             self.is_read = True
             self.read_at = timezone.now()
             self.save(update_fields=["is_read", "read_at"])
+
+
+# ---------------------------------------------------------------------------
+# NEW (Pass 14 — per-notification-type channel preferences). One row per
+# user. Two layers, cheapest-first:
+#   1. Four blanket toggles (push/email/sms/whatsapp_enabled) — the "I
+#      never want SMS at all" switch most users will actually touch.
+#   2. `muted_types` — a JSON list of NotifType values the user wants
+#      silenced entirely (no channel, not even the in-app bell row),
+#      e.g. muting NOTICE_POSTED on a classroom they're only half-
+#      following. Deliberately NOT a per-type-per-channel matrix (that's
+#      a settings-screen nobody asks for in practice) — see
+#      `allowed_channels_for()` below for exactly how the two layers
+#      combine.
+# ---------------------------------------------------------------------------
+class NotificationPreference(models.Model):
+    user = models.OneToOneField(User, on_delete=models.CASCADE, related_name="notification_preference")
+
+    push_enabled = models.BooleanField(default=True)
+    email_enabled = models.BooleanField(default=True)
+    sms_enabled = models.BooleanField(default=False)  # opt-IN: SMS costs real money per send (see notifications.py)
+    whatsapp_enabled = models.BooleanField(default=False)  # opt-IN, same reasoning as sms_enabled
+
+    muted_types = models.JSONField(default=list, blank=True, help_text="List of Notification.NotifType values.")
+
+    # Digest email (Pass 14): instead of one email per event, batch
+    # everything since the last digest into a single daily/weekly email.
+    # Independent of email_enabled above — a user can want digest-only
+    # (no per-event email, still wants the roundup) or both off.
+    class DigestFrequency(models.TextChoices):
+        OFF = "off", "Off"
+        DAILY = "daily", "Daily"
+        WEEKLY = "weekly", "Weekly"
+
+    digest_frequency = models.CharField(max_length=10, choices=DigestFrequency.choices, default=DigestFrequency.OFF)
+    last_digest_sent_at = models.DateTimeField(null=True, blank=True)
+
+    updated_at = models.DateTimeField(auto_now=True)
+
+    def __str__(self):
+        return f"Notification prefs for {self.user}"
+
+    def allowed_channels_for(self, notif_type: str) -> list[str]:
+        """What notifications.dispatch_notification() should actually try
+        for this (user, notif_type) — an empty list means "in-app bell row
+        only, no push/email/sms/whatsapp send at all", which is what a
+        muted type collapses to (the Notification row itself is still
+        created — a user muting reminders shouldn't lose the in-app
+        history, just the interruption)."""
+        if notif_type in (self.muted_types or []):
+            return []
+        allowed = []
+        if self.push_enabled:
+            allowed.append("push")
+        if self.email_enabled:
+            allowed.append("email")
+        if self.sms_enabled:
+            allowed.append("sms")
+        if self.whatsapp_enabled:
+            allowed.append("whatsapp")
+        return allowed
+
+    @classmethod
+    def for_user(cls, user) -> "NotificationPreference":
+        """Every user gets sane defaults (all-on push/email, opt-in
+        sms/whatsapp, no mutes) without needing a migration data-load or a
+        signal on User creation — get_or_create on first touch, same lazy
+        pattern already used elsewhere in this app (see e.g.
+        Classroom.refresh_rating being callable on demand rather than
+        requiring a row to pre-exist)."""
+        pref, _ = cls.objects.get_or_create(user=user)
+        return pref
 
 
 def create_notification(

@@ -316,16 +316,24 @@ class MessageSerializer(serializers.ModelSerializer):
         request = self.context.get('request')
         if not request:
             return False
+        # 🔥 PERF FIX — jab view ne `with_message_list_prefetch()` laga rakha
+        # hai to `my_read_status` (Prefetch `to_attr`) already Python me
+        # available hai, koi naya query nahi lagti. Jahan prefetch nahi laga
+        # (single-message responses), fallback usi purane per-row query pe
+        # hai — dono jagah sahi result deta hai.
+        if hasattr(obj, 'my_read_status'):
+            return bool(obj.my_read_status)
         return MessageStatus.objects.filter(message=obj, user=request.user, is_read=True).exists()
 
     def get_is_starred(self, obj):
         request = self.context.get('request')
         if not request:
             return False
-        # `starred_by` prefetch nahi kiya gaya har jagah (personal bookmark
-        # hai, list view me sabke liye alag hota), isliye chhota per-row
-        # EXISTS query — indexed M2M pe fast hai, message list-size (30-100
-        # per page) ke liye theek hai.
+        # 🔥 PERF FIX — same idea as get_is_read_by_me above. Prefetch's
+        # `to_attr` puts a plain (already-filtered) Python list on `obj.
+        # my_star`, so this is just a list-emptiness check, zero queries.
+        if hasattr(obj, 'my_star'):
+            return bool(obj.my_star)
         return obj.starred_by.filter(id=request.user.id).exists()
 
     def get_poll(self, obj):

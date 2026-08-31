@@ -441,6 +441,14 @@ REST_FRAMEWORK = {
         # times to different contacts) while stopping a script from
         # inflating share_count or spamming in-app share notifications.
         "classroom_share": "10/min",
+        # NOTE (fix — CRITICAL, same bug class as every other scope in this
+        # dict, audit §12 item 18): ChatMessageViewSet.react() (Pass 12)
+        # sets throttle_scope="chat_reaction" via ScopedRateThrottle but had
+        # no matching rate here — ImproperlyConfigured on the very first
+        # reaction tap, a guaranteed 500. A reaction is a single tap (not a
+        # typed message), so rated generously relative to
+        # chat_message_create above.
+        "chat_reaction": "60/min",
         # ---------------------------------------------------------------
         # NOTE (fix — CRITICAL, same bug class as every scope documented
         # above, found in the `message` app this time): `message/throttles.
@@ -682,6 +690,30 @@ CELERY_BEAT_SCHEDULE = {
     # lookback-window job in this schedule.
     "liveclass-reconcile-stuck-coin-purchases": {
         "task": "liveclass.reconcile_stuck_coin_purchases",
+        "schedule": crontab(minute="*/30"),
+    },
+    # NOTE (fix — same "written but never registered" bug class as
+    # refresh-stale-enrolled-counts / reconcile-stuck-coin-purchases above,
+    # audit §12 item 22): tasks.run_auto_renewals (Pass 16) exists
+    # specifically to actually call PassPurchase.renew() on every
+    # SUCCESS purchase with auto_renew=True past its expires_at — without
+    # this entry a student's auto-renew opt-in silently lapsed with no
+    # error anywhere. Self-cleaning query (no lookback window needed:
+    # renew() always clears auto_renew on the row it processes, success
+    # or fail), so a short, frequent cadence is safe and keeps a lapsed
+    # renewal from sitting unresolved for long.
+    "liveclass-run-auto-renewals": {
+        "task": "liveclass.run_auto_renewals",
+        "schedule": crontab(minute="*/30"),
+    },
+    # NOTE (fix — same gap as liveclass-run-auto-renewals immediately
+    # above, audit §12 item 22): tasks.expire_unclaimed_gifts (Pass 16)
+    # sweeps PENDING PassGifts past their 7-day CLAIM_WINDOW_DAYS deadline
+    # and refunds the gifter — without this entry an unclaimed gift's
+    # already-debited coins just sat in limbo forever. Same self-cleaning-
+    # query reasoning, same cadence.
+    "liveclass-expire-unclaimed-gifts": {
+        "task": "liveclass.expire_unclaimed_gifts",
         "schedule": crontab(minute="*/30"),
     },
     # 🔥 NAYA — message app ka is Celery beat me pehle ZERO entry tha,
