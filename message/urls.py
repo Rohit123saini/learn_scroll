@@ -51,6 +51,21 @@ from .views import (
 from .views_ai import AiStudyRoomView, VoiceTranscribeView, SmartReplySuggestionsView
 from .upload_view import MessageUploadAPIView
 
+# 🔧 GAP FIX (this session) — `PROJECT_ARCHITECTURE.md` §"API surface" and
+# `message_api_service.dart` BOTH describe the scheduled-message contract as
+#     GET/POST /message/conversations/<id>/scheduled/
+#     PATCH/DELETE /message/scheduled/<id>/
+# but the actual `@action`s in `views.py` are named `schedule-message` /
+# `scheduled-messages` (on ConversationViewSet) and `schedule` nested under
+# `/messages/<id>/` (on MessageViewSet) — none of those paths match what the
+# frontend calls, so all 4 scheduled-message calls were 404ing end-to-end.
+#
+# Fix is additive and non-breaking: register the documented URLs below as
+# extra paths pointing at the SAME existing ViewSet actions imported above
+# (no business-logic duplication, no risk to whatever already calls the
+# old `schedule-message`/`scheduled-messages`/`messages/<id>/schedule/`
+# paths — those keep working unchanged).
+
 router = DefaultRouter()
 router.register(r'conversations', ConversationViewSet, basename='conversation')
 router.register(r'messages', MessageViewSet, basename='message')
@@ -92,6 +107,29 @@ urlpatterns = [
 
     # --- Generic file upload (returns a URL to attach to a message) ---
     path('upload/', MessageUploadAPIView.as_view(), name='message-upload'),
+
+    # --- Scheduled messages (🔧 GAP FIX — frontend/doc-contract aliases) ---
+    # Same handlers as the `schedule-message` / `scheduled-messages` /
+    # `messages/<id>/schedule/` actions already registered via the router
+    # above — just exposed at the URLs `message_api_service.dart` and
+    # `PROJECT_ARCHITECTURE.md` actually expect.
+    path(
+        'conversations/<uuid:pk>/scheduled/',
+        ConversationViewSet.as_view({'get': 'scheduled_messages_list', 'post': 'schedule_message'}),
+        name='conversation-scheduled-alias',
+    ),
+    path(
+        'scheduled/<uuid:pk>/',
+        MessageViewSet.as_view({'patch': 'manage_schedule', 'delete': 'manage_schedule'}),
+        name='scheduled-message-alias',
+    ),
+
+    # --- Group photo removal (🔧 GAP FIX — see views.py GroupViewSet.remove_photo) ---
+    path(
+        'groups/<uuid:pk>/photo/',
+        GroupViewSet.as_view({'delete': 'remove_photo'}),
+        name='group-photo-alias',
+    ),
 ]
 
 # ==============================================================================

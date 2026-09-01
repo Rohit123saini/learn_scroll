@@ -50,6 +50,7 @@ from .serializers import (
     CallSessionSerializer,
     ConversationListSerializer,
     ConversationSettingsSerializer,
+    ConversationWallpaperSerializer,
     GroupCreateSerializer,
     GroupJoinRequestSerializer,
     GroupMediaSerializer,
@@ -316,6 +317,45 @@ class ConversationViewSet(viewsets.ReadOnlyModelViewSet):
         serializer.is_valid(raise_exception=True)
         serializer.save()
         return Response(serializer.data)
+
+    # 🔧 GAP FIX (this session) — `message_api_service.dart` (getWallpaper/
+    # setWallpaper/clearWallpaper) and `PROJECT_ARCHITECTURE.md` document
+    # `GET/PATCH /conversations/<id>/wallpaper/` as its own endpoint,
+    # separate from the combined `settings` action above. Per-user (same
+    # `ConversationParticipant` row as mute/pin/label), so nobody else in
+    # the chat sees or is affected by it.
+    # GET  -> {"wallpaper_url": "..."} or {"wallpaper_url": null} if unset.
+    # PATCH {"wallpaper_url": "..."} -> sets it; {"wallpaper_url": ""} or
+    #       {"wallpaper_url": null} -> clears it back to the client default.
+    @action(detail=True, methods=['get', 'patch'], url_path='wallpaper')
+    def wallpaper(self, request, pk=None):
+        conversation = self.get_object()
+        membership = get_object_or_404(ConversationParticipant, conversation=conversation, user=request.user)
+
+        if request.method == 'GET':
+            return Response(ConversationWallpaperSerializer(membership).data)
+
+        serializer = ConversationWallpaperSerializer(membership, data=request.data, partial=True)
+        serializer.is_valid(raise_exception=True)
+        serializer.save()
+
+        # 🔥 Same-user multi-device sync (e.g. phone sets wallpaper, laptop
+        # session open in the same chat should update live too) — NOT
+        # broadcast to the other participant(s), this is private per-user
+        # styling, unlike `disappearing_messages_updated` above which is a
+        # shared conversation-level setting. Matches the `user_<uid>` group
+        # pattern already used elsewhere in this file for personal sync.
+        channel_layer = get_channel_layer()
+        async_to_sync(channel_layer.group_send)(
+            f'user_{request.user.id}',
+            {
+                'type': 'conversation_wallpaper_updated',
+                'conversation_id': str(conversation.id),
+                'wallpaper_url': membership.wallpaper_url,
+            }
+        )
+
+        return Response(ConversationWallpaperSerializer(membership).data)
 
     # 🔥 NAYA — chat list se ek ya kai chats ek saath delete karne ke liye.
     # Ye sirf REQUESTING USER ke liye chat hide karta hai (WhatsApp jaisa
@@ -1914,6 +1954,24 @@ class GroupViewSet(viewsets.ModelViewSet):
             group.refresh_from_db()
 
         return Response(GroupSerializer(group, context={'request': request}).data, status=status.HTTP_201_CREATED)
+
+    # 🔥 GAP FIX (this session) — `message_api_service.dart` calls
+    # `DELETE /groups/<id>/photo/` (and `PROJECT_ARCHITECTURE.md` documents
+    # it as "remove photo (admin/mod)"), but no such action existed on
+    # `GroupViewSet` — `photo_url` was only ever settable at creation time.
+    # Added here, reusing the same admin/mod gate as the rest of this
+    # ViewSet's write-actions (`_require_admin`).
+    @action(detail=True, methods=['delete'], url_path='photo')
+    def remove_photo(self, request, pk=None):
+        group = self.get_object()
+        self._require_admin(group.id, request.user)
+
+        if not group.photo_url:
+            return Response({'detail': 'Group ki koi photo set nahi hai.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        group.photo_url = None
+        group.save(update_fields=['photo_url'])
+        return Response(GroupSerializer(group, context={'request': request}).data)
 
     @action(detail=True, methods=['post'], url_path='members')
     def add_members(self, request, pk=None):

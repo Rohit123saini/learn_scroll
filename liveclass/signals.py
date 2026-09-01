@@ -318,17 +318,22 @@ def on_participant_left(sender, instance, created, **kwargs):
                 )
 
             try:
-                # NOTE (fix): the previous import here
-                # (`from .notifications import notify_waitlist_seat_open`)
-                # pointed at a function that was never defined — this
-                # always raised ImportError, was swallowed by this same
-                # except block, and no push was ever sent. The real task
-                # lives in tasks.py. Lazy-imported (same as views.py does
-                # for other .delay() calls) to avoid a hard Celery
-                # dependency at signals.py import time.
+                # FIX (audit): this used to pass next_in_line.pk alone —
+                # the same broken pre-fix call shape views.py's own
+                # comments (SessionWaitlistViewSet.promote()) describe as
+                # a "CRITICAL production bug": notify_waitlist_promotion's
+                # real signature is (student_id, session_id), not a
+                # single waitlist-entry pk. views.py's two call sites
+                # were already updated to the new shape; this one was
+                # missed, so every push here raised TypeError inside the
+                # Celery worker (silent — this is a fire-and-forget
+                # .delay(), so nothing here ever saw the failure) and no
+                # student was ever actually pushed for THIS promotion
+                # path (the leave-triggered one) even though the in-app
+                # bell row above worked fine.
                 from .tasks import notify_waitlist_promotion
 
-                notify_waitlist_promotion.delay(next_in_line.pk)
+                notify_waitlist_promotion.delay(next_in_line.student_id, session_id)
             except Exception:
                 logger.exception(
                     "Failed queuing waitlist-seat-open push for entry %s.",

@@ -236,6 +236,22 @@ class ConversationParticipant(BaseModel):
     draft_text = models.TextField(blank=True, null=True)
     draft_updated_at = models.DateTimeField(null=True, blank=True)
 
+    # 🔧 GAP FIX (this session) — corrected: `message_api_service.dart`
+    # (getWallpaper/setWallpaper/clearWallpaper) and `PROJECT_ARCHITECTURE.md`
+    # (`GET/PATCH /message/conversations/<id>/wallpaper/`) already describe
+    # this as a per-user setting, exactly like `is_muted`/`is_pinned`/
+    # `label` above. Turns out this field was NEVER actually missing from
+    # the database — migrations `0007_remove_message_background_url_and_more`
+    # (AddField) and `0008_alter_conversationparticipant_wallpaper_url`
+    # (AlterField → max_length=1000) already added and finalized it. It had
+    # only dropped out of this models.py source snapshot (drift between the
+    # file and the applied migration history) — the field itself, and its
+    # `max_length=1000`, must exactly match those two migrations so
+    # `makemigrations` sees no difference here. The REST endpoint
+    # (`ConversationViewSet.wallpaper` in views.py) was the actual missing
+    # piece, not this field.
+    wallpaper_url = models.URLField(max_length=1000, blank=True, null=True)
+
     joined_at = models.DateTimeField(default=timezone.now)
     left_at = models.DateTimeField(null=True, blank=True)  # group leave ke liye
 

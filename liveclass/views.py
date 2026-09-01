@@ -3113,7 +3113,22 @@ class PassGiftViewSet(
         # people's gifts" boundary as everywhere else money moves in this
         # app (e.g. PassPurchaseViewSet's own-purchases-only default).
         user = self.request.user
-        return super().get_queryset().filter(Q(gifter=user) | Q(recipient=user))
+        qs = super().get_queryset().filter(Q(gifter=user) | Q(recipient=user))
+
+        # FIX (audit): the frontend (liveclass_api_service.dart ->
+        # PassGiftApi.myGiftsSent()/myGiftsReceived()) has always sent
+        # ?direction=sent|received expecting this to split the "own
+        # gifts" queryset above into sent-only / received-only — this
+        # filter never existed, so both calls silently returned the
+        # same unfiltered sent+received mix. Restricted to gifter=user /
+        # recipient=user (not an arbitrary id) so this can't be used to
+        # peek at someone else's gifts via the query param.
+        direction = self.request.query_params.get("direction")
+        if direction == "sent":
+            qs = qs.filter(gifter=user)
+        elif direction == "received":
+            qs = qs.filter(recipient=user)
+        return qs
 
     def perform_create(self, serializer):
         class_pass = serializer.validated_data["class_pass"]

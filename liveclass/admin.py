@@ -13,6 +13,7 @@ from .models import (
     BreakoutRoom,
     Certificate,
     ChatMessage,
+    ChatMessageReport,
     ClassHoliday,
     ClassJoinRequest,
     ClassMaterial,
@@ -27,12 +28,15 @@ from .models import (
     ClassroomReview,
     ClassroomStaff,
     ClassroomWishlist,
+    CoinPurchase,
     CoinTransaction,
+    CoinWithdrawal,
     Coupon,
     LivePoll,
     Notice,
     Notification,
     PassDailyCharge,
+    PassGift,
     PassPurchase,
     PollResponse,
     Referral,
@@ -200,6 +204,33 @@ class PassPurchaseAdmin(admin.ModelAdmin):
 
 
 # ---------------------------------------------------------------------------
+# 5A2. PassGift — NEW (audit fix): this model has existed since Pass 14
+# (real coins move on send/claim/cancel/expire — see PassGiftViewSet in
+# views.py and expire_unclaimed_gifts in tasks.py) but had no admin
+# registration at all, so support had no way to look up a stuck/disputed
+# gift without a raw DB query. Registered with the same read-mostly
+# posture as PassPurchaseAdmin above — status/coins/dates are readonly
+# since the model's own methods (claim()/cancel()/refund_to_gifter()) are
+# what's supposed to change them, not an admin edit.
+# ---------------------------------------------------------------------------
+@admin.register(PassGift)
+class PassGiftAdmin(admin.ModelAdmin):
+    list_display = (
+        "gifter", "recipient", "class_pass", "status",
+        "coins_spent", "created_at", "expires_at", "claimed_at",
+    )
+    list_filter = ("status",)
+    search_fields = (
+        "gifter__username", "gifter__email",
+        "recipient__username", "recipient__email",
+        "class_pass__classroom__title",
+    )
+    autocomplete_fields = ["gifter", "recipient", "class_pass", "purchase"]
+    readonly_fields = ("coins_spent", "created_at", "expires_at", "claimed_at")
+    date_hierarchy = "created_at"
+
+
+# ---------------------------------------------------------------------------
 # 5A. PassDailyCharge
 # ---------------------------------------------------------------------------
 @admin.register(PassDailyCharge)
@@ -272,6 +303,25 @@ class ChatMessageAdmin(admin.ModelAdmin):
     @admin.display(description="Message")
     def short_message(self, obj):
         return obj.message[:50]
+
+
+# ---------------------------------------------------------------------------
+# 8A. ChatMessageReport — NEW (audit fix): this model/viewset have existed
+# since Pass 14 (the actual moderation queue behind
+# ChatMessageReportViewSet.review() — see views.py) but were never
+# registered here, so a platform admin couldn't browse/search the report
+# queue outside the app itself. status/reviewed_by/reviewed_at are
+# readonly — same "the model's own review() flow owns this transition,
+# not a raw admin edit" reasoning as PassGiftAdmin above.
+# ---------------------------------------------------------------------------
+@admin.register(ChatMessageReport)
+class ChatMessageReportAdmin(admin.ModelAdmin):
+    list_display = ("message", "reporter", "reason", "status", "reviewed_by", "reviewed_at", "created_at")
+    list_filter = ("status", "reason")
+    search_fields = ("reporter__username", "message__message", "message__session__classroom__title")
+    autocomplete_fields = ["message", "reporter", "reviewed_by"]
+    readonly_fields = ("status", "reviewed_by", "reviewed_at", "created_at")
+    date_hierarchy = "created_at"
 
 
 # ---------------------------------------------------------------------------
@@ -364,6 +414,51 @@ class CoinTransactionAdmin(admin.ModelAdmin):
     autocomplete_fields = ["user"]
     readonly_fields = ("created_at",)
     date_hierarchy = "created_at"
+
+
+# ---------------------------------------------------------------------------
+# 13A. CoinPurchase — NEW (audit fix): coin top-up (real money in via a
+# payment gateway — order_id/gateway_payment_id/gateway_signature) had no
+# admin registration at all, so support couldn't look up a stuck/failed
+# top-up without a raw DB query. Read-mostly: status/gateway fields are
+# the payment gateway's own record of what happened, not something an
+# admin should hand-edit.
+# ---------------------------------------------------------------------------
+@admin.register(CoinPurchase)
+class CoinPurchaseAdmin(admin.ModelAdmin):
+    list_display = ("user", "coins", "amount_inr", "status", "order_id", "created_at")
+    list_filter = ("status",)
+    search_fields = ("user__username", "user__email", "order_id", "gateway_payment_id")
+    autocomplete_fields = ["user", "retry_of"]
+    readonly_fields = (
+        "order_id", "gateway_payment_id", "gateway_signature",
+        "created_at", "failure_reason",
+    )
+    date_hierarchy = "created_at"
+
+
+# ---------------------------------------------------------------------------
+# 13B. CoinWithdrawal — NEW (audit fix): the biggest gap of the four —
+# this is the teacher payout queue (real money OUT, bank/UPI details in
+# payout_details) and platform staff review it via the REST endpoints
+# (withdrawals/{id}/approve|reject|mark-paid/ in views.py), but there was
+# no admin visibility into it at all. admin_note/external_reference are
+# left editable (they're exactly what a staff member fills in while
+# handling a request by hand); status is left off readonly_fields for
+# the same reason — but coins/amount_inr/payout_details are frozen at
+# request time and must never be hand-edited after the fact.
+# ---------------------------------------------------------------------------
+@admin.register(CoinWithdrawal)
+class CoinWithdrawalAdmin(admin.ModelAdmin):
+    list_display = (
+        "user", "coins", "amount_inr", "payout_method", "status",
+        "external_reference", "requested_at",
+    )
+    list_filter = ("status", "payout_method")
+    search_fields = ("user__username", "user__email", "external_reference")
+    autocomplete_fields = ["user", "reviewed_by"]
+    readonly_fields = ("coins", "amount_inr", "payout_details", "requested_at")
+    date_hierarchy = "requested_at"
 
 
 # ---------------------------------------------------------------------------

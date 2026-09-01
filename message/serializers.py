@@ -92,6 +92,18 @@ class ConversationSettingsSerializer(serializers.ModelSerializer):
         return super().update(instance, validated_data)
 
 
+# 🔧 GAP FIX (this session) — backs the new `GET/PATCH /conversations/<id>/
+# wallpaper/` action (`ConversationViewSet.wallpaper` in views.py). Kept as
+# its own tiny serializer (not folded into `ConversationSettingsSerializer`)
+# because the frontend/doc contract treats it as its own single-field
+# endpoint, separate from the combined mute/archive/pin/draft `settings`
+# endpoint.
+class ConversationWallpaperSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = ConversationParticipant
+        fields = ['wallpaper_url']
+
+
 class GroupMiniSerializer(serializers.ModelSerializer):
     class Meta:
         model = Group
