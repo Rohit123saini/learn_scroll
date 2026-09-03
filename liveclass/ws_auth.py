@@ -16,6 +16,17 @@ pattern for JWT-over-WebSocket with Channels; the token is short-lived
 (SIMPLE_JWT's ACCESS_TOKEN_LIFETIME) same as any other API call, and the
 connection is over wss:// in production so it's not sent in the clear.
 
+NOTE (fix — duplicate-middleware consolidation): this file used to carry
+its own independent JWTAuthMiddleware implementation, separate from (and
+never verified line-by-line against) message/Middleware.py's — the
+`message` app is a fully independent chat system with no dependency on
+`liveclass`, so having either app import the other's auth middleware is
+the wrong direction. The actual logic now lives in the project-level
+`LearnScroll/ws_auth.py` (alongside settings.py/asgi.py), a location
+neutral to both apps — this file just re-exports it so every existing
+`from liveclass.ws_auth import JWTAuthMiddleware` call (including the
+asgi.py wiring below) keeps working unchanged.
+
 Wire this into asgi.py (project-level, not part of this liveclass
 upload — see settings.py's own note re: files outside its scope) as:
 
@@ -38,43 +49,6 @@ upload — see settings.py's own note re: files outside its scope) as:
     })
 """
 
-import logging
-from urllib.parse import parse_qs
+from LearnScroll.ws_auth import JWTAuthMiddleware, get_user_from_token
 
-from channels.db import database_sync_to_async
-from channels.middleware import BaseMiddleware
-from django.contrib.auth.models import AnonymousUser
-from rest_framework_simplejwt.authentication import JWTAuthentication
-from rest_framework_simplejwt.exceptions import InvalidToken, TokenError
-
-logger = logging.getLogger(__name__)
-
-_jwt_auth = JWTAuthentication()
-
-
-@database_sync_to_async
-def _user_from_token(raw_token: str):
-    """Runs JWTAuthentication's own validated_token()/get_user() — the
-    exact same code path a normal DRF request goes through — so a
-    WebSocket connection can never end up trusting a token the REST API
-    would have rejected (expired, blacklisted, wrong signature, etc.)."""
-    try:
-        validated_token = _jwt_auth.get_validated_token(raw_token)
-        return _jwt_auth.get_user(validated_token)
-    except (InvalidToken, TokenError) as exc:
-        logger.info("WebSocket connect rejected — invalid token: %s", exc)
-        return None
-
-
-class JWTAuthMiddleware(BaseMiddleware):
-    async def __call__(self, scope, receive, send):
-        query_string = scope.get("query_string", b"").decode("utf-8")
-        token = parse_qs(query_string).get("token", [None])[0]
-
-        scope["user"] = AnonymousUser()
-        if token:
-            user = await _user_from_token(token)
-            if user is not None:
-                scope["user"] = user
-
-        return await super().__call__(scope, receive, send)
+__all__ = ["JWTAuthMiddleware", "get_user_from_token"]

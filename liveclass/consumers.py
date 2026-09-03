@@ -106,6 +106,13 @@ from .realtime import (
     mark_present,
 )
 
+# NEW — per-user realtime channel (Flutter Phase 1 items 2 & 3 / Phase 4
+# item 2): pairs with routing.py's `ws/liveclass/user/` route and
+# realtime.py's `broadcast_to_user()`. See that function's docstring for
+# why this was previously a silent no-op rather than a boot-time crash,
+# and UserConsumer's own docstring below for how this differs from
+# SessionConsumer.
+
 logger = logging.getLogger(__name__)
 
 # NEW (Pass 12 — idle-timeout presence eviction): how often the watchdog
@@ -377,3 +384,93 @@ class SessionConsumer(AsyncJsonWebsocketConsumer):
         # participant list, same as any other push.
         if message["event"] == "participant.kicked" and message["payload"].get("user_id") == self.user_id:
             await self.close(code=4403)
+
+
+class UserConsumer(AsyncJsonWebsocketConsumer):
+    """A client connects to ws/liveclass/user/ — no session id in the
+    path; auth alone determines which per-user group they join. Receives
+    everything views.py pushes via realtime.broadcast_to_user() for
+    THIS user: `join_request.created` (teacher's pending-request-count
+    badge), `join_request.decided` (student's own request flipping
+    pending -> active/none), `staff.added` (mid-session role promote —
+    see ClassroomStaffViewSet.perform_create in views.py). See
+    realtime.py's broadcast_to_user() docstring for the full event list
+    and payload shapes, and its module docstring for why this class
+    (like broadcast_to_user() itself) was missing even though every
+    caller/listener on both the Django and Flutter sides already assumed
+    it existed.
+
+    Deliberately much thinner than SessionConsumer:
+    - No DB session/access lookup on connect — authentication alone is
+      the gate. Every event pushed here is already scoped server-side to
+      this exact user_id by broadcast_to_user()'s caller, so there's
+      nothing further to authorize at connect time the way a session's
+      classroom-access check authorizes joining that session's group.
+    - No presence tracking, no missed-event replay buffer (see
+      broadcast_to_user()'s own docstring for why a replay buffer isn't
+      needed here), no idle-watchdog eviction — none of those exist to
+      serve a live participant list, which this channel has no concept
+      of.
+    - "ping" is still accepted/answered, same keepalive purpose
+      SessionConsumer supports it for (this socket is meant to stay open
+      for the lifetime of the app being foregrounded, same as the
+      session one). No "typing" here — that's a session-scoped concept.
+
+    ACCESS CONTROL: same IsAuthenticated-equivalent contract as
+    SessionConsumer.connect() — ws_auth.JWTAuthMiddleware has already
+    resolved (or failed to resolve) scope["user"] before this ever runs.
+    """
+
+    async def connect(self):
+        user = self.scope.get("user")
+        if user is None or not user.is_authenticated:
+            await self.close(code=4401)  # 4401: app-defined "unauthenticated", same as SessionConsumer
+            return
+
+        # Reuses SessionConsumer's own per-user WS-connect rate limiter
+        # (see realtime.py's check_connect_rate_limit docstring) — it's
+        # already keyed by user_id, not session_id, so sharing it here
+        # means a client stuck in a reconnect loop on EITHER socket burns
+        # the same shared budget, which is the right scope for a
+        # connect-loop protection regardless of which socket it's hitting.
+        allowed = await sync_to_async(check_connect_rate_limit)(user.id)
+        if not allowed:
+            await self.close(code=4429)  # 4429: app-defined "too many connection attempts"
+            return
+
+        self.user_id = user.id
+        self.group_name = f"user.{self.user_id}"
+        await self.channel_layer.group_add(self.group_name, self.channel_name)
+        await self.accept()
+        await self.send_json({"event": "connection.ack", "payload": {}, "ts": time.time()})
+
+    async def disconnect(self, close_code):
+        if hasattr(self, "group_name"):
+            await self.channel_layer.group_discard(self.group_name, self.channel_name)
+
+    async def receive_json(self, content, **kwargs):
+        # Read-only, same spirit as SessionConsumer — see its module
+        # docstring for why writes go through REST, not this socket. Only
+        # "ping" is meaningful here.
+        if content.get("type") == "ping":
+            await self.send_json({"event": "pong", "payload": {}})
+            return
+        await self.send_json(
+            {
+                "event": "error",
+                "payload": {
+                    "detail": (
+                        "This socket is read-only and only accepts \"ping\". "
+                        "All writes go through the REST API."
+                    ),
+                },
+            }
+        )
+
+    # Dispatched by Channels when realtime.broadcast_to_user() calls
+    # channel_layer.group_send(..., {"type": "user.event", ...}) — the
+    # "type" value there maps to this method name (user.event ->
+    # user_event) by Channels' own naming convention, the exact mechanism
+    # SessionConsumer.session_event relies on for "session.event".
+    async def user_event(self, message):
+        await self.send_json({"event": message["event"], "payload": message["payload"], "ts": message.get("ts")})

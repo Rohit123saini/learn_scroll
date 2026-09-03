@@ -75,6 +75,20 @@ router — list/retrieve/create/update/delete on each, plus the custom
                                                           {"participant_id": int, "room": int|null})
     sessions/{id}/breakout/close/        POST             (teacher/co-teacher/moderator — deletes all
                                                           breakout rooms, everyone back in the main room)
+    sessions/{id}/reactions/             GET, POST        (NEW — persistence fix. GET: anyone with room
+                                                          access — {"total": int, "counts": {emoji: int}}
+                                                          for this session. POST: {"reaction": "heart"}
+                                                          logs one emoji tap; live delivery to connected
+                                                          peers is still the LiveKit data channel, this
+                                                          is the durable log underneath it — see
+                                                          SessionReaction in models.py)
+    sessions/{id}/captions/              GET, POST        (NEW — persistence fix. GET: anyone with room
+                                                          access — the session's live-caption transcript
+                                                          so far, oldest-first, capped to the last 200
+                                                          lines. POST: {"text": "..."} appends the
+                                                          caller's own just-finished on-device-STT line
+                                                          (speaker is always request.user) — see
+                                                          SessionCaption in models.py)
     sessions/{id}/engagement-report/     GET              (teacher/co-teacher/moderator only — post-
                                                           session attendance, chat activity, and poll-
                                                           result summary; computed once when the session
@@ -126,11 +140,21 @@ router — list/retrieve/create/update/delete on each, plus the custom
     participants/{id}/leave/             POST
     materials/                           GET, POST
     materials/{id}/                      GET, PUT, PATCH, DELETE
-    chat-messages/                       GET, POST
+    chat-messages/                       GET, POST        (POST body may include "reply_to": <message id>
+                                                          to quote an earlier message in the same session;
+                                                          GET supports &search=<text> to filter the
+                                                          session's chat by substring)
     chat-messages/{id}/                  DELETE           (soft delete)
     chat-messages/{id}/react/            POST, DELETE     (Pass 12 — reactions)
     chat-messages/{id}/pin/              POST             (Pass 13)
     chat-messages/{id}/unpin/            POST             (Pass 13)
+    chat-messages/{id}/read/             POST             (read receipts — mark this one message as
+                                                          seen by the caller; idempotent)
+    chat-messages/mark-read/             POST             (read receipts — bulk version, body
+                                                          {"session": <id>, "up_to": <message id>} marks
+                                                          every not-yet-read message up to that id as seen)
+    chat-messages/{id}/read-receipts/    GET              (read receipts — who has seen this message, and
+                                                          when; oldest-first)
     chat-message-reports/                GET, POST        (POST: report a message as abusive/spam/etc.,
                                                           body {"message", "reason", "note"} — re-filing
                                                           against the same message updates it rather

@@ -26,10 +26,12 @@ Design discipline (same as views.py/signals.py):
 import logging
 import os
 import shutil
+import uuid
 import zoneinfo
 from datetime import date, datetime, timedelta
 
 from celery import shared_task
+from django.conf import settings
 from django.utils import timezone
 
 logger = logging.getLogger(__name__)
@@ -261,7 +263,7 @@ def send_due_reminders():
             ok = send_notification(
                 reminder.user, title, message, channel=reminder.channel,
                 data={
-                    "type": "class_reminder",
+                    "type": "session_reminder",
                     "session_id": str(session.id),
                     "classroom_id": str(session.classroom_id),
                 },
@@ -516,6 +518,112 @@ def expire_unclaimed_gifts():
     return expired_count
 
 
+@shared_task(name="liveclass.send_notification_digests")
+def send_notification_digests():
+    """NOTE (fix — same class of gap run_auto_renewals/expire_unclaimed_gifts
+    closed for Pass 15's features): NotificationPreference.digest_frequency/
+    last_digest_sent_at (Pass 14) have always existed and are fully
+    read/write via NotificationPreferenceView — a user CAN opt into a
+    daily/weekly digest today — but until this task, nothing ever read
+    those fields to actually compose or send one. Unlike auto-renew/gift-
+    expiry, there wasn't even a written-but-unregistered task sitting
+    unused; this task itself never existed before now.
+
+    Runs frequently (see CELERY_BEAT_SCHEDULE) but only actually acts on a
+    given user once their own digest_frequency's interval has elapsed
+    since last_digest_sent_at — most ticks, for most users, this is a
+    cheap no-op scan.
+
+    Deliberately bypasses notifications.send_notification() (that
+    function is built for one push/email/sms/whatsapp send per single
+    Notification event) — a digest is its own single email summarizing
+    MANY Notification rows, sent directly via Django's mail backend.
+    Independent of NotificationPreference.email_enabled by design (see
+    that field's own docstring): a user can want digest-only, per-event-
+    only, both, or neither.
+
+    Fail-safe per user, same discipline as every other sweep in this
+    file: one user's bad email/send failure is logged and skipped, never
+    aborts the run for everyone else due this tick.
+    """
+    from django.core.mail import EmailMultiAlternatives
+
+    from .models import Notification, NotificationPreference
+
+    now = timezone.now()
+    intervals = {
+        NotificationPreference.DigestFrequency.DAILY: timedelta(days=1),
+        NotificationPreference.DigestFrequency.WEEKLY: timedelta(days=7),
+    }
+
+    due_prefs = NotificationPreference.objects.exclude(
+        digest_frequency=NotificationPreference.DigestFrequency.OFF
+    ).select_related("user")
+
+    sent, skipped_not_due, skipped_empty, failed = 0, 0, 0, 0
+    for pref in due_prefs:
+        interval = intervals.get(pref.digest_frequency)
+        if interval is None:
+            # Unknown/future DigestFrequency value — fail safe (skip
+            # rather than guess an interval), same reasoning as every
+            # other "don't know this shape, don't act on it" branch in
+            # this file.
+            continue
+        since = pref.last_digest_sent_at
+        if since is not None and now - since < interval:
+            skipped_not_due += 1
+            continue
+
+        window_start = since or (now - interval)
+        notifs = list(
+            Notification.objects.filter(recipient_id=pref.user_id, created_at__gt=window_start, created_at__lte=now)
+            .exclude(notif_type__in=(pref.muted_types or []))
+            .order_by("-created_at")[:50]
+        )
+        if not notifs:
+            # Nothing new since the window opened — don't send an empty
+            # email, and deliberately DON'T move last_digest_sent_at
+            # forward either: the window stays open until there's
+            # actually something to report, so a user's first
+            # notification in a quiet stretch still lands in their next
+            # digest instead of being silently swallowed by a window
+            # that already moved past it.
+            skipped_empty += 1
+            continue
+
+        if not pref.user.email:
+            continue
+
+        try:
+            plural = "" if len(notifs) == 1 else "s"
+            subject = f"Your {pref.get_digest_frequency_display().lower()} LiveClass digest ({len(notifs)} update{plural})"
+            lines = [f"- {n.title}" + (f": {n.message}" if n.message else "") for n in notifs]
+            body = "Here's what you missed:\n\n" + "\n".join(lines)
+            EmailMultiAlternatives(
+                subject=subject,
+                body=body,
+                to=[pref.user.email],
+            ).send(fail_silently=False)
+            # Only advance the window on a SUCCESSFUL send — same
+            # fail-closed-and-retry-next-tick discipline as every other
+            # sweep here (e.g. reconcile_stuck_coin_purchases): a send
+            # failure this tick means the same batch is retried next
+            # tick instead of being silently marked as delivered.
+            pref.last_digest_sent_at = now
+            pref.save(update_fields=["last_digest_sent_at"])
+            sent += 1
+        except Exception:
+            logger.exception("Failed to send digest email to user %s", pref.user_id)
+            failed += 1
+
+    if sent or failed:
+        logger.info(
+            "send_notification_digests: sent %s, failed %s, not-yet-due %s, nothing-new %s.",
+            sent, failed, skipped_not_due, skipped_empty,
+        )
+    return {"sent": sent, "failed": failed, "skipped_not_due": skipped_not_due, "skipped_empty": skipped_empty}
+
+
 @shared_task(name="liveclass.notify_waitlist_promotion")
 def notify_waitlist_promotion(student_id, session_id):
     """Fired from SessionWaitlistViewSet.promote() the instant a waitlist
@@ -550,7 +658,7 @@ def notify_waitlist_promotion(student_id, session_id):
     return send_notification(
         student, title, message, channel="push",
         data={
-            "type": "waitlist_seat_open",
+            "type": "waitlist_promoted",
             "session_id": str(session.id),
             "classroom_id": str(session.classroom_id),
         },
@@ -755,7 +863,7 @@ def notify_gift_expired(gift_id):
     )
     return send_notification(
         gift.gifter, title, message, channel="push",
-        data={"type": "gift_expired", "classroom_id": str(classroom.id), "pass_gift_id": str(gift.id)},
+        data={"type": "pass_gift_expired", "classroom_id": str(classroom.id), "pass_gift_id": str(gift.id)},
     )
 
 
@@ -1464,21 +1572,36 @@ def _chunked_upload_dir_size(path: str) -> int:
 
 @shared_task(name="liveclass.transcribe_recording")
 def transcribe_recording(session_id):
-    """SCAFFOLD (Pass 7) — the queueing/state-machine half of captions is
-    real; the actual speech-to-text call is a stub pending a provider
-    decision (AWS Transcribe / Google Speech-to-Text / a hosted Whisper
-    API all fit here equally — none of ClassSession.caption_status/
-    caption_url care which one produced the result).
+    """Provider: AWS Transcribe (async job — a recording can run well past
+    what's reasonable for a synchronous call inside a worker, so this only
+    *starts* the job here; completion is picked up by poll_transcription_job
+    below, a periodic task, once the job's JobStatus flips to COMPLETED/
+    FAILED).
 
     Intended trigger: queue this via `.delay(session.id)` right after
-    LiveKitWebhookView's egress_ended handling fills in recording_url
-    (see views.py) — NOT wired up automatically in this pass, since
-    firing it unconditionally would mean paying for transcription on
-    every single recorded session whether or not captions were ever
-    asked for. Wire the `.delay()` call in once a provider is chosen and
-    a product decision is made on whether captions are opt-in
-    (Classroom-level toggle, mirroring recording_enabled) or default-on.
+    LiveKitWebhookView's egress_ended handling fills in recording_url (see
+    views.py) — gated behind `session.classroom.captions_enabled` there,
+    NOT fired unconditionally, so transcription is only ever paid for on
+    classrooms that actually opted in (mirrors recording_enabled's own
+    opt-in shape). See views.py's egress_ended handler for the exact
+    gate + `_safe_delay(transcribe_recording, session.id)` call site.
+
+    Requires (settings.py):
+      AWS_REGION               — e.g. "ap-south-1"
+      CAPTIONS_S3_BUCKET       — output bucket Transcribe writes the
+                                  finished transcript JSON into
+      (standard boto3 credential chain otherwise — IAM role in
+      production, AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY locally)
+
+    Requires (models.py — not part of this file, flag as a pending
+    migration): ClassSession.transcription_job_name (CharField, blank) —
+    poll_transcription_job needs a way to know which AWS job belongs to
+    which session; job name alone isn't derivable from session_id after
+    the fact since it includes a random suffix (see job_name below).
     """
+    import boto3
+    from botocore.exceptions import BotoCoreError, ClientError
+
     from .models import ClassSession
 
     session = ClassSession.objects.filter(pk=session_id).select_related("classroom").first()
@@ -1489,17 +1612,94 @@ def transcribe_recording(session_id):
     session.caption_status = ClassSession.CaptionStatus.PROCESSING
     session.save(update_fields=["caption_status"])
 
+    job_name = f"caption-session-{session_id}-{uuid.uuid4().hex[:8]}"
     try:
-        # STUB — replace with a real call, e.g.:
-        #   caption_url = transcribe_provider.transcribe(session.recording_url)
-        # Left unimplemented deliberately (see docstring) rather than
-        # faked, so this task fails loudly/visibly instead of silently
-        # "succeeding" with no real captions.
-        raise NotImplementedError(
-            "No speech-to-text provider wired in yet — see transcribe_recording's docstring."
+        transcribe = boto3.client("transcribe", region_name=settings.AWS_REGION)
+        # MediaFormat is inferred from the recording_url's extension —
+        # LiveKit egress output format is configured project-side, so this
+        # should always resolve; falls back to "mp4" (LiveKit's default
+        # container) if the URL has no recognizable extension.
+        ext = session.recording_url.rsplit(".", 1)[-1].lower()
+        media_format = ext if ext in {"mp3", "mp4", "wav", "flac", "ogg", "webm", "m4a"} else "mp4"
+        transcribe.start_transcription_job(
+            TranscriptionJobName=job_name,
+            Media={"MediaFileUri": session.recording_url},
+            MediaFormat=media_format,
+            LanguageCode="en-US",
+            OutputBucketName=settings.CAPTIONS_S3_BUCKET,
         )
-    except Exception:
-        logger.exception("transcribe_recording failed for session %s", session_id)
+        session.transcription_job_name = job_name
+        session.save(update_fields=["transcription_job_name"])
+        # Completion is NOT waited on here — poll_transcription_job (a
+        # periodic task, see CELERY_BEAT_SCHEDULE) checks job status and
+        # sets caption_status=READY + caption_url once AWS reports
+        # COMPLETED, or FAILED (with logging) if AWS reports FAILED.
+        return True
+    except (BotoCoreError, ClientError):
+        logger.exception("transcribe_recording: failed to start AWS Transcribe job for session %s", session_id)
         session.caption_status = ClassSession.CaptionStatus.FAILED
         session.save(update_fields=["caption_status"])
         return False
+
+
+@shared_task(name="liveclass.poll_transcription_jobs")
+def poll_transcription_jobs():
+    """Periodic companion to transcribe_recording (see CELERY_BEAT_SCHEDULE
+    — runs every 2-3 min). Checks every session with an in-flight AWS
+    Transcribe job (caption_status=PROCESSING and transcription_job_name
+    set) and, once AWS reports a job done, downloads the transcript and
+    fills in caption_status/caption_url. A session with no job in flight
+    is never touched here — cheap query, skipped."""
+    import json
+    import urllib.request
+
+    import boto3
+    from botocore.exceptions import BotoCoreError, ClientError
+
+    from .models import ClassSession
+
+    sessions = ClassSession.objects.filter(
+        caption_status=ClassSession.CaptionStatus.PROCESSING,
+    ).exclude(transcription_job_name="")
+
+    transcribe = boto3.client("transcribe", region_name=settings.AWS_REGION)
+    s3 = boto3.client("s3", region_name=settings.AWS_REGION)
+    resolved = 0
+
+    for session in sessions:
+        try:
+            job = transcribe.get_transcription_job(TranscriptionJobName=session.transcription_job_name)
+            status = job["TranscriptionJob"]["TranscriptionJobStatus"]
+
+            if status == "COMPLETED":
+                transcript_uri = job["TranscriptionJob"]["Transcript"]["TranscriptFileUri"]
+                # AWS's own JSON is the source of truth; we only pull the
+                # plain-text transcript for caption_url here — real
+                # caption/VTT generation from AWS's word-timing JSON is a
+                # follow-up, not blocking captions being *available* at all.
+                with urllib.request.urlopen(transcript_uri, timeout=15) as resp:
+                    transcript_json = json.loads(resp.read())
+                caption_text = transcript_json["results"]["transcripts"][0]["transcript"]
+                caption_key = f"captions/{session.id}/{session.transcription_job_name}.txt"
+                s3.put_object(
+                    Bucket=settings.CAPTIONS_S3_BUCKET, Key=caption_key,
+                    Body=caption_text.encode("utf-8"), ContentType="text/plain",
+                )
+                session.caption_url = f"https://{settings.CAPTIONS_S3_BUCKET}.s3.amazonaws.com/{caption_key}"
+                session.caption_status = ClassSession.CaptionStatus.READY
+                session.save(update_fields=["caption_url", "caption_status"])
+                resolved += 1
+
+            elif status == "FAILED":
+                reason = job["TranscriptionJob"].get("FailureReason", "unknown")
+                logger.error("poll_transcription_jobs: AWS job failed for session %s — %s", session.id, reason)
+                session.caption_status = ClassSession.CaptionStatus.FAILED
+                session.save(update_fields=["caption_status"])
+
+            # IN_PROGRESS / QUEUED — leave PROCESSING, next tick checks again.
+        except (BotoCoreError, ClientError):
+            logger.exception("poll_transcription_jobs: AWS error checking job for session %s", session.id)
+
+    if resolved:
+        logger.info("poll_transcription_jobs: resolved %s caption job(s).", resolved)
+    return resolved

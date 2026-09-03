@@ -96,6 +96,54 @@ def bump_classroom_list_cache_version() -> None:
 
 
 # ---------------------------------------------------------------------------
+# NOTE (fix — classroom stats realtime push): classroom_detail_screen.dart
+# used to refresh enrolled_count/rating with a plain `Timer.periodic(30s)`
+# GET, since there was no realtime push for it the way there is for
+# join-request badges (see LiveClassUserSocket / broadcast_to_user). This
+# gives it one, following the exact same pattern: a per-CLASSROOM channel
+# group (as opposed to broadcast_to_user's per-user one, or
+# broadcast_to_session's per-live-session one) — `ClassroomConsumer` on a
+# `ws/liveclass/classroom/<id>/` route, mirroring `UserConsumer` /
+# `ws/liveclass/user/` in consumers.py/routing.py, and a `broadcast_to_classroom()`
+# in realtime.py mirroring that module's existing `broadcast_to_user()`.
+#
+# Hooked at the two places Classroom.rating_avg/rating_count/enrolled_count
+# actually change (refresh_rating/refresh_enrolled_count below) rather than
+# at every call site that triggers them (PassPurchase/ClassroomReview save
+# signals at the bottom of this file) — same one-place-covers-everything
+# reasoning the cache-versioning block above already uses for this exact
+# pair of methods.
+#
+# Best-effort / never-block-the-save, same contract as views.py's
+# _safe_broadcast_to_user — a channel-layer hiccup degrades to "no live
+# push, the screen's fallback poll (now a much longer interval, kept only
+# as a correctness backstop) still catches it" rather than ever breaking
+# the actual rating/enrollment recompute this runs after.
+# ---------------------------------------------------------------------------
+def _broadcast_classroom_stats(classroom) -> None:
+    try:
+        from .realtime import broadcast_to_classroom
+
+        broadcast_to_classroom(
+            classroom.id,
+            "classroom.stats",
+            {
+                "classroom_id": classroom.id,
+                "rating_avg": float(classroom.rating_avg),
+                "rating_count": classroom.rating_count,
+                "enrolled_count": classroom.enrolled_count,
+            },
+        )
+    except Exception:
+        logging.getLogger(__name__).exception(
+            "Failed to push realtime stats for classroom %s "
+            "(broadcast_to_classroom missing/unreachable?) — recompute "
+            "still succeeds; frontend falls back to its backstop poll.",
+            classroom.id,
+        )
+
+
+# ---------------------------------------------------------------------------
 # PER-CLASSROOM NOTICE LIST CACHE VERSIONING
 #
 # NOTE (perf — fix): NoticeViewSet.list is read far more often than it's
@@ -227,6 +275,14 @@ class Classroom(models.Model):
     screen_share_enabled = models.BooleanField(default=True)
     chat_enabled = models.BooleanField(default=True)
     recording_enabled = models.BooleanField(default=True)
+    # NOTE (fix — captions wiring, item 3): per-classroom opt-in for
+    # speech-to-text captions (tasks.transcribe_recording), mirroring
+    # recording_enabled's own shape. Default False (opt-in, not opt-on)
+    # so transcription cost is only ever incurred for classrooms that
+    # explicitly asked for captions — see LiveKitWebhookView's
+    # egress_ended handler (views.py), which checks this flag before
+    # queueing transcribe_recording.delay().
+    captions_enabled = models.BooleanField(default=False)
 
     max_participants = models.PositiveIntegerField(
         default=100, validators=[MinValueValidator(1)]
@@ -287,8 +343,9 @@ class Classroom(models.Model):
         validators=[MinValueValidator(0), MaxValueValidator(100)],
         help_text=(
             "% of each day's released class-earning charge (see PassPurchase.charge_for_session) "
-            "that also gets paid to whoever referred the student, on top of the teacher's own "
-            "share — not deducted from it. Only takes effect while referral_enabled=True."
+            "that gets paid to whoever referred the student — deducted OUT OF the teacher's own "
+            "share, never added on top by the platform. The teacher sets this rate themselves and "
+            "funds it out of their own earnings. Only takes effect while referral_enabled=True."
         ),
     )
 
@@ -479,6 +536,7 @@ class Classroom(models.Model):
         self.rating_avg = round(agg["avg"] or 0, 2)
         self.rating_count = agg["count"] or 0
         self.save(update_fields=["rating_avg", "rating_count"])
+        _broadcast_classroom_stats(self)
 
     def refresh_enrolled_count(self):
         """Recompute enrolled_count = distinct students with a currently valid pass.
@@ -498,6 +556,7 @@ class Classroom(models.Model):
             .count()
         )
         self.save(update_fields=["enrolled_count"])
+        _broadcast_classroom_stats(self)
 
     def weekly_timing_summary(self):
         """Human-friendly 'when does this class run' string built from all
@@ -667,15 +726,31 @@ class ClassSession(models.Model):
     # filled in once the file finishes uploading. Blank = not currently
     # recording.
     egress_id = models.CharField(max_length=64, blank=True)
-    whiteboard_snapshot = models.JSONField(null=True, blank=True)
 
-    # FEATURE (captions, scaffolding only — see tasks.transcribe_recording):
-    # once recording_url is filled in by the egress webhook above, a
-    # transcription job can be queued against that file. This just holds
-    # the job's state/result — the actual speech-to-text provider call is
-    # a stub (see tasks.py) pending a provider decision (AWS Transcribe /
-    # Google STT / Whisper API are all drop-in candidates here since none
-    # of this model cares which one produced caption_url).
+    # NOTE (fix — whiteboard/spotlight persistence): whiteboard_snapshot
+    # already existed on this model but nothing ever read/wrote it — the
+    # whiteboard lived only in each connected client's memory, synced
+    # peer-to-peer over the LiveKit data channel. That's fine for a
+    # brand-new joiner (they get caught up peer-to-peer by whoever's
+    # already in the room), but breaks the moment nobody left in the room
+    # still holds the strokes — e.g. everyone disconnects and the host
+    # reconnects alone, or a student joins before anyone with the current
+    # board has (re)joined. spotlight_identity is the same story for the
+    # host's pinned/spotlighted tile. Both are now written by dedicated
+    # actions on ClassSessionViewSet (whiteboard()/spotlight() in
+    # views.py) instead of the generic PATCH, so a non-host participant
+    # can still autosave whiteboard strokes without needing full
+    # classroom-manage permissions. See those actions' docstrings for the
+    # permission split.
+    whiteboard_snapshot = models.JSONField(null=True, blank=True)
+    spotlight_identity = models.CharField(max_length=64, blank=True)  # LiveKit identity (str(user_id)) of the pinned tile, "" = none
+
+    # FEATURE (captions — see tasks.transcribe_recording/poll_transcription_job):
+    # once recording_url is filled in by the egress webhook above, and
+    # Classroom.captions_enabled is on, a transcription job is queued
+    # against that file. This holds the job's state/result — provider is
+    # AWS Transcribe (see tasks.py); transcription_job_name below tracks
+    # the specific in-flight job.
     class CaptionStatus(models.TextChoices):
         NONE = "none", "Not Requested"
         PROCESSING = "processing", "Processing"
@@ -684,6 +759,13 @@ class ClassSession(models.Model):
 
     caption_status = models.CharField(max_length=12, choices=CaptionStatus.choices, default=CaptionStatus.NONE)
     caption_url = models.URLField(blank=True)  # points at a .vtt/.srt file once READY
+    # NOTE (fix — captions wiring, item 3): AWS Transcribe job name for
+    # the in-flight transcription job started by tasks.transcribe_recording
+    # — needed so the periodic tasks.poll_transcription_job can look up
+    # job status later (job name includes a random suffix, so it can't be
+    # re-derived from session_id alone once the job's already running).
+    # Blank = no transcription job currently in flight for this session.
+    transcription_job_name = models.CharField(max_length=128, blank=True)
 
     # NEW (Pass 14 — post-session engagement report). Computed once by
     # tasks.build_engagement_report (queued from cleanup_on_session_end's
@@ -803,6 +885,16 @@ class ClassPass(models.Model):
     max_classes = models.PositiveIntegerField(null=True, blank=True)
 
     is_active = models.BooleanField(default=True)
+    # FIX (frontend cross-check — Pass 14 gifting): pass_management_screen.dart
+    # (Dart) already ships a per-pass "Allow gifting" toggle and
+    # PassGiftClaimScreen already lets a student receive a gifted pass, but
+    # nothing on this model or PassGiftViewSet.perform_create ever actually
+    # gated gifting by it — every active pass was giftable regardless of what
+    # a teacher set here. Defaults to True (opt-out) so existing passes keep
+    # today's de-facto "always giftable" behavior after this migrates.
+    # NOTE: adding this field requires a migration
+    # (`manage.py makemigrations liveclass`) before it takes effect.
+    allow_gifting = models.BooleanField(default=True)
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
@@ -909,6 +1001,12 @@ class PassPurchase(models.Model):
     # the teacher (see charge_for_session below) also pays a commission
     # to whoever referred this student — IF they came in through a
     # referral link and the classroom had referrals on at accept()-time.
+    # UPDATE: the commission is now deducted OUT OF the teacher's own
+    # per-day release, never added on top by the platform — see
+    # charge_for_session's teacher_amount/referral_amount split. It only
+    # exists at all because the teacher opted in via
+    # Classroom.referral_enabled and chose the cut themselves via
+    # Classroom.referral_commission_percent.
     # Set once, at purchase-creation time, from ClassJoinRequest.referred_by
     # + Classroom.referral_commission_percent — see
     # _charge_and_create_purchase in views.py.
@@ -1068,62 +1166,71 @@ class PassPurchase(models.Model):
         if not created:
             return charge  # already charged for this date — no-op
 
+        # -------------------------------------------------------------
+        # FEATURE (refer & earn — UPDATE: teacher-funded commission, not
+        # platform-funded): the referrer's cut is now computed FIRST and
+        # taken OUT of charge.amount before the teacher is paid — the
+        # platform never tops this up out of its own pocket. The teacher
+        # is the one who opted into referral_enabled and chose
+        # referral_commission_percent for their own classroom (see
+        # Classroom.referral_enabled/referral_commission_percent — teacher-
+        # only, gated by ClassroomViewSet.perform_update), so it's the
+        # teacher's own escrow release that funds the commission, same as
+        # any real-world referral/affiliate arrangement a business owner
+        # sets up out of their own margin.
+        # Capped so a teacher's day can never go negative: referral_amount
+        # can take at most charge.amount, even if referral_per_day_rate
+        # would technically allow more (can only happen from a rounding
+        # edge on the very last, fractional-remainder day — see the
+        # get_or_create defaults above).
+        # -------------------------------------------------------------
+        referral_amount = 0
+        if self.referred_by_id and self.referral_remaining_balance > 0:
+            referral_amount = min(
+                int(self.referral_per_day_rate.to_integral_value(rounding="ROUND_HALF_UP")),
+                self.referral_remaining_balance,
+                charge.amount,
+            )
+
+        teacher_amount = charge.amount - referral_amount
+
         teacher = type(self.class_pass.classroom.teacher).objects.select_for_update().get(
             pk=self.class_pass.classroom.teacher_id
         )
-        teacher.coin += charge.amount
-        teacher.save(update_fields=["coin"])
-        CoinTransaction.objects.create(
-            user=teacher,
-            txn_type=CoinTransaction.TxnType.CREDIT,
-            reason=CoinTransaction.Reason.CLASS_EARNING,
-            amount=charge.amount,
-            balance_after=teacher.coin,
-            reference_id=f"passpurchase:{self.id}:day:{charge_date.isoformat()}",
-        )
+        if teacher_amount > 0:
+            teacher.coin += teacher_amount
+            teacher.save(update_fields=["coin"])
+            CoinTransaction.objects.create(
+                user=teacher,
+                txn_type=CoinTransaction.TxnType.CREDIT,
+                reason=CoinTransaction.Reason.CLASS_EARNING,
+                amount=teacher_amount,
+                balance_after=teacher.coin,
+                reference_id=f"passpurchase:{self.id}:day:{charge_date.isoformat()}",
+            )
 
         self.coins_released = min(self.coins_released + charge.amount, self.coins_spent)
         self.last_charge_date = charge_date
         update_fields = ["coins_released", "last_charge_date"]
 
-        # -------------------------------------------------------------
-        # FEATURE (refer & earn): same day, same trigger, separate payout
-        # — the referrer's cut is NOT taken out of charge.amount (the
-        # teacher gets their full per-day release regardless of whether
-        # this purchase was referred), it's an additional platform-funded
-        # credit sized off referral_per_day_rate. Only fires once per
-        # date thanks to the `created` guard above (this whole block is
-        # already inside the `if not created: return charge` early-out),
-        # and only while there's still commission left in
-        # referral_remaining_balance — a purchase that's already paid out
-        # its full referral_total_amount (e.g. every validity day ended
-        # up chargeable) simply stops crediting the referrer from here on,
-        # same "capped, never over-released" contract remaining_balance
-        # already gives the teacher's side.
-        # -------------------------------------------------------------
-        if self.referred_by_id and self.referral_remaining_balance > 0:
-            referral_amount = min(
-                int(self.referral_per_day_rate.to_integral_value(rounding="ROUND_HALF_UP")),
-                self.referral_remaining_balance,
+        if referral_amount > 0:
+            referrer = type(self.referred_by).objects.select_for_update().get(pk=self.referred_by_id)
+            referrer.coin += referral_amount
+            referrer.save(update_fields=["coin"])
+            CoinTransaction.objects.create(
+                user=referrer,
+                txn_type=CoinTransaction.TxnType.CREDIT,
+                reason=CoinTransaction.Reason.CLASS_REFERRAL_COMMISSION,
+                amount=referral_amount,
+                balance_after=referrer.coin,
+                reference_id=f"passpurchase:{self.id}:referral:day:{charge_date.isoformat()}",
             )
-            if referral_amount > 0:
-                referrer = type(self.referred_by).objects.select_for_update().get(pk=self.referred_by_id)
-                referrer.coin += referral_amount
-                referrer.save(update_fields=["coin"])
-                CoinTransaction.objects.create(
-                    user=referrer,
-                    txn_type=CoinTransaction.TxnType.CREDIT,
-                    reason=CoinTransaction.Reason.CLASS_REFERRAL_COMMISSION,
-                    amount=referral_amount,
-                    balance_after=referrer.coin,
-                    reference_id=f"passpurchase:{self.id}:referral:day:{charge_date.isoformat()}",
-                )
-                self.referral_coins_released = min(
-                    self.referral_coins_released + referral_amount, self.referral_total_amount
-                )
-                update_fields.append("referral_coins_released")
-                charge.referral_amount = referral_amount
-                charge.save(update_fields=["referral_amount"])
+            self.referral_coins_released = min(
+                self.referral_coins_released + referral_amount, self.referral_total_amount
+            )
+            update_fields.append("referral_coins_released")
+            charge.referral_amount = referral_amount
+            charge.save(update_fields=["referral_amount"])
 
         self.save(update_fields=update_fields)
         return charge
@@ -1686,6 +1793,20 @@ class ChatMessage(models.Model):
     is_flagged = models.BooleanField(default=False)
     flagged_reason = models.CharField(max_length=100, blank=True)
 
+    # NEW (reply feature) — one-level "reply/quote" reference, same shape as
+    # WhatsApp's reply-to rather than a full nested-thread tree: a message
+    # can quote exactly one earlier message in the SAME session (enforced in
+    # ChatMessageSerializer.validate, since that needs the in-flight
+    # `session` value from attrs, not just `self.instance`). SET_NULL (not
+    # CASCADE) so deleting/soft-deleting the original doesn't take the reply
+    # down with it — the quote just renders as "original message deleted"
+    # (see ChatMessageSerializer.get_reply_to_detail). `related_name="replies"`
+    # lets a message look up everything that quoted it, if that's ever needed
+    # for a "view thread" UI, without a separate join table.
+    reply_to = models.ForeignKey(
+        "self", on_delete=models.SET_NULL, null=True, blank=True, related_name="replies"
+    )
+
     class Meta:
         ordering = ["sent_at"]
         indexes = [models.Index(fields=["session", "sent_at"]), models.Index(fields=["is_flagged"])]
@@ -1772,6 +1893,132 @@ class ChatReaction(models.Model):
 
     def __str__(self):
         return f"{self.user} reacted {self.reaction} to message {self.message_id}"
+
+
+class ChatMessageRead(models.Model):
+    """NEW (read receipts) — WhatsApp-style "seen by" for live-session chat.
+
+    Deliberately its own row-per-(message, user) table, same reasoning as
+    `ChatReaction` right above: a receipt can be recorded without touching or
+    locking the `ChatMessage` row itself, and `unique_together` gives us "one
+    receipt per user per message" for free at the DB level instead of an
+    application-level check-then-write race.
+
+    This is distinct from `SessionReadState.last_read_chat_message_id`
+    elsewhere in this file: that field is a single per-user *watermark* used
+    only to drive the unread-count BADGE on the sessions list (see
+    `ClassSessionViewSet.unread_counts`/`mark_read`) — it has no idea who
+    else has read a given message. This table is the other direction: given
+    ONE message, who (and when) has actually seen it — what a sender taps a
+    message to check, same as WhatsApp/Slack read receipts. The two features
+    share the same underlying "user has seen up to here" idea but serve
+    different UI (a badge vs. a per-message seen-by list) and are kept as
+    separate tables so neither has to shoehorn the other's access pattern.
+
+    Append/upsert-only — a read receipt never gets un-set (you can't
+    "un-read" a message), so unlike `ChatReaction` there is no DELETE path.
+    """
+
+    message = models.ForeignKey(ChatMessage, on_delete=models.CASCADE, related_name="reads")
+    user = models.ForeignKey(User, on_delete=models.CASCADE, related_name="chat_message_reads")
+    read_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        unique_together = ("message", "user")
+        indexes = [models.Index(fields=["message"])]
+        ordering = ["read_at"]
+
+    def __str__(self):
+        return f"{self.user} read message {self.message_id} at {self.read_at}"
+
+
+class SessionReaction(models.Model):
+    """NEW (persistence fix) — durable log for the in-session emoji
+    reactions (👍❤️😂👏🎉🙌) fired from live_session_screen.dart's
+    `_sendReaction`/`_addFloatingReaction`. Previously a PURE LiveKit
+    data-channel broadcast (see that file's `_kSignalTopic` signaling) —
+    nothing was ever written to the database, so the moment every
+    participant left the room the entire reaction history for that
+    session was gone, and a client reconnecting mid-session started its
+    running `_reactionTotalCount` badge back at zero even though the
+    class had already reacted a hundred times.
+
+    Deliberately an APPEND-ONLY log (one row per tap), not a per-user
+    upsert like `ChatReaction` above — the point of this feature is the
+    burst/stream over time (and a running total), not "what is each
+    user's current reaction", so there's no `unique_together` here.
+    Live delivery to already-connected peers is UNCHANGED (still the
+    LiveKit data channel, for lowest latency) — this table is the
+    missing persistence layer underneath it, written by
+    `ClassSessionViewSet.reactions()` (POST) in views.py alongside the
+    existing data-channel broadcast, not instead of it.
+    """
+
+    class Reaction(models.TextChoices):
+        THUMBS_UP = "thumbs_up", "👍"
+        HEART = "heart", "❤️"
+        LAUGH = "laugh", "😂"
+        CLAP = "clap", "👏"
+        PARTY = "party", "🎉"
+        RAISED_HANDS = "raised_hands", "🙌"
+
+    session = models.ForeignKey(ClassSession, on_delete=models.CASCADE, related_name="reaction_log")
+    user = models.ForeignKey(User, on_delete=models.CASCADE, related_name="session_reactions")
+    reaction = models.CharField(max_length=20, choices=Reaction.choices)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["created_at"]
+        indexes = [models.Index(fields=["session", "created_at"])]
+
+    def __str__(self):
+        return f"{self.user} reacted {self.reaction} in {self.session}"
+
+
+class SessionCaption(models.Model):
+    """NEW (persistence fix) — durable transcript line for the LIVE
+    caption feature (`speech_to_text` on-device STT, see
+    live_session_screen.dart's `_startCaptionListenBurst`/
+    `_addCaptionLine`). Each device still only ever recognizes ITS OWN
+    mic — that on-device-STT limitation is unchanged and is documented
+    at length in that file's header (no per-frame hook into remote
+    participants' decoded audio in Flutter/LiveKit) — but every device
+    already produces its own finished lines and tags them with the
+    speaker's name before broadcasting over the LiveKit data channel.
+    Previously that broadcast was the ONLY place a line ever went:
+    nothing was persisted, the on-screen feed was capped to the last 3
+    lines and self-expired after 6 seconds (see `_addCaptionLine`), and
+    a participant who joined mid-session or reconnected saw nothing
+    that was said before they arrived.
+
+    This table is that missing persistence layer: every device's own
+    recognized line is now ALSO POSTed to the server
+    (`ClassSessionViewSet.captions()` POST) and kept as a row here,
+    which (a) survives the session ending, and (b) lets a client fetch
+    the transcript-so-far (`captions()` GET) — so even though the
+    recognition itself is still per-own-voice, the aggregate transcript
+    the server accumulates covers EVERY participant's own speech, not
+    just whoever's LiveKit data-channel packet happened to reach a
+    given listener live. A genuinely server-side, cross-participant
+    live transcript would need real server-side STT on each
+    participant's audio track (a much bigger, separate change — see the
+    existing async whole-recording transcription path instead,
+    `Classroom.captions_enabled` / `ClassSession.caption_url` /
+    `tasks.transcribe_recording`, which already covers the mixed
+    recording after the session ends).
+    """
+
+    session = models.ForeignKey(ClassSession, on_delete=models.CASCADE, related_name="caption_log")
+    speaker = models.ForeignKey(User, on_delete=models.CASCADE, related_name="session_captions")
+    text = models.CharField(max_length=500)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["created_at"]
+        indexes = [models.Index(fields=["session", "created_at"])]
+
+    def __str__(self):
+        return f"{self.speaker}: {self.text[:40]}"
 
 
 class SessionReadState(models.Model):

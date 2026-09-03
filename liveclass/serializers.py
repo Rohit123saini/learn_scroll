@@ -21,6 +21,7 @@ from .models import (
     BreakoutRoom,
     Certificate,
     ChatMessage,
+    ChatMessageRead,
     ChatMessageReport,
     ChatReaction,
     ClassHoliday,
@@ -51,7 +52,9 @@ from .models import (
     PollResponse,
     PollTemplate,
     Referral,
+    SessionCaption,
     SessionParticipant,
+    SessionReaction,
     SessionReadState,
     SessionWaitlist,
 )
@@ -244,10 +247,18 @@ class ClassSessionSerializer(serializers.ModelSerializer):
         fields = [
             "id", "classroom", "classroom_title", "schedule", "room_id",
             "scheduled_start", "scheduled_end", "actual_start", "actual_end",
-            "status", "recording_url", "is_recording", "whiteboard_snapshot", "is_joinable",
-            "created_at",
+            "status", "recording_url", "is_recording", "whiteboard_snapshot",
+            "spotlight_identity", "is_joinable", "created_at",
         ]
-        read_only_fields = ["id", "room_id", "created_at"]
+        # NOTE (fix — whiteboard/spotlight persistence): both fields are
+        # read-only here on purpose — writes go through
+        # ClassSessionViewSet.whiteboard()/spotlight() instead of the
+        # generic PATCH (which is locked to _can_manage_classroom, i.e.
+        # the teacher only — too tight for the whiteboard, since any
+        # participant should be able to autosave strokes). Still returned
+        # on every read so a reconnecting/late-joining client can restore
+        # both from the plain session GET.
+        read_only_fields = ["id", "room_id", "created_at", "whiteboard_snapshot", "spotlight_identity"]
 
     def get_is_joinable(self, obj):
         # NOTE (fix — CRITICAL): was `obj.is_joinable()` with no `is_host`,
@@ -321,7 +332,7 @@ class ClassPassSerializer(serializers.ModelSerializer):
         model = ClassPass
         fields = [
             "id", "classroom", "pass_type", "title", "price", "validity_days",
-            "max_classes", "is_active", "created_at",
+            "max_classes", "is_active", "allow_gifting", "created_at",
         ]
         read_only_fields = ["id", "created_at"]
 
@@ -358,6 +369,44 @@ class PassPurchaseSerializer(serializers.ModelSerializer):
     # same remaining/released pairing already given for the teacher's side.
     referred_by = UserMiniSerializer(read_only=True)
     referral_remaining_balance = serializers.IntegerField(read_only=True)
+    # FIX (backend cross-check — liveclass_models.dart's PassPurchase.
+    # fromJson already expected class_pass_max_classes/renewed_into/gift/
+    # gifted_by, flagged there as "unconfirmed against
+    # PassPurchaseSerializer" — they were never actually added here, so
+    # those fields silently parsed to null on every purchase: the "X/Y
+    # classes used" progress bar and "Gifted to you by ..." badge on My
+    # Passes could never render, and a renewed subscription's forward link
+    # (this purchase -> the one that superseded it) was invisible even
+    # though renewed_from (the backward link) already worked.
+    class_pass_max_classes = serializers.IntegerField(source="class_pass.max_classes", read_only=True, allow_null=True)
+    renewed_into = serializers.SerializerMethodField()
+    gift = serializers.SerializerMethodField()
+    gifted_by = serializers.SerializerMethodField()
+
+    def get_renewed_into(self, obj):
+        # renewed_from is a OneToOneField, so the reverse accessor raises
+        # DoesNotExist rather than returning None when nothing points back
+        # at this purchase — same "no successor yet" case as an
+        # unrenewed/still-active purchase.
+        try:
+            return obj.renewed_into.id
+        except PassPurchase.DoesNotExist:
+            return None
+
+    def _gift(self, obj):
+        # from_gift is a plain ForeignKey's reverse manager (not
+        # OneToOne) — at most one PassGift ever points at a given
+        # purchase in practice (a gift claims into exactly one purchase),
+        # so .first() is the whole answer.
+        return obj.from_gift.first()
+
+    def get_gift(self, obj):
+        gift = self._gift(obj)
+        return gift.id if gift else None
+
+    def get_gifted_by(self, obj):
+        gift = self._gift(obj)
+        return UserMiniSerializer(gift.gifter).data if gift else None
 
     class Meta:
         model = PassPurchase
@@ -377,6 +426,10 @@ class PassPurchaseSerializer(serializers.ModelSerializer):
             # write path for a server-computed subscription state" reasoning
             # already documented on this Meta for status/payment_method/etc.
             "auto_renew", "renewed_from", "renewal_failed_at",
+            # FIX (backend cross-check): see the field definitions above —
+            # these four were expected by the Flutter model but never
+            # actually exposed.
+            "class_pass_max_classes", "renewed_into", "gift", "gifted_by",
         ]
         read_only_fields = [
             "id", "purchased_at", "expires_at", "status", "classes_attended",
@@ -384,6 +437,7 @@ class PassPurchaseSerializer(serializers.ModelSerializer):
             "per_day_rate", "coins_released", "last_charge_date",
             "referred_by", "referral_commission_percent", "referral_coins_released",
             "auto_renew", "renewed_from", "renewal_failed_at",
+            "class_pass_max_classes",
         ]
         # amount_paid / coins_spent / expires_at / status / payment_method are
         # all computed server-side in ClassJoinRequestViewSet.accept() (based
@@ -616,11 +670,36 @@ class ChatMessageSerializer(serializers.ModelSerializer):
     reaction_counts = serializers.SerializerMethodField()
     my_reaction = serializers.SerializerMethodField()
 
+    # NEW (reply feature) — `reply_to` accepts a message id on write
+    # (validated below); `reply_to_detail` gives the client everything it
+    # needs to render the little quoted preview above the bubble (sender
+    # name + a snippet + whether the original was soft-deleted) WITHOUT a
+    # second round trip — same "denormalize read-side, keep write-side a
+    # bare id" split as message_text/message_sender on
+    # ChatMessageReportSerializer below. Relies on
+    # ChatMessageViewSet.get_queryset()'s select_related("reply_to",
+    # "reply_to__sender") so this never adds a query per message.
+    reply_to_detail = serializers.SerializerMethodField()
+
+    # NEW (read receipts) — read_count is the cheap "N people have seen
+    # this" number every bubble can show inline; the full who-and-when list
+    # is deliberately NOT inlined here (a busy session's chat could have
+    # dozens of readers per message, and most of the time nobody taps to
+    # see the list) — that's ChatMessageViewSet.read_receipts() instead,
+    # fetched on demand. seen_by_me lets the client skip firing its own
+    # mark-as-read call for a message it already knows it has read.
+    # Both rely on ChatMessageViewSet.get_queryset()'s
+    # prefetch_related("reads") — same N+1 avoidance as reaction_counts.
+    read_count = serializers.SerializerMethodField()
+    seen_by_me = serializers.SerializerMethodField()
+
     class Meta:
         model = ChatMessage
         fields = [
             "id", "session", "sender", "message", "sent_at", "is_deleted",
             "reaction_counts", "my_reaction", "is_pinned", "pinned_by", "pinned_at",
+            "reply_to", "reply_to_detail",
+            "read_count", "seen_by_me",
             # NEW (Pass 14 — profanity/spam filter, see moderation.py):
             # both are set server-side the moment a message is created
             # (ChatMessageViewSet.perform_create) or reported
@@ -650,6 +729,69 @@ class ChatMessageSerializer(serializers.ModelSerializer):
                 return r.reaction
         return None
 
+    def get_reply_to_detail(self, obj):
+        original = obj.reply_to
+        if original is None:
+            # Either this message never quoted anything, or it did and the
+            # original has since been hard-deleted at the DB level (SET_NULL
+            # on the FK) — either way there's nothing to preview.
+            return None
+        if original.is_deleted:
+            # Soft-deleted (the normal delete path — see
+            # ChatMessageViewSet.perform_destroy): still show that a reply
+            # exists, but never leak the moderated-away text/sender.
+            return {"id": original.id, "message": None, "sender": None, "is_deleted": True}
+        return {
+            "id": original.id,
+            "message": original.message,
+            "sender": UserMiniSerializer(original.sender).data,
+            "is_deleted": False,
+        }
+
+    def get_read_count(self, obj):
+        return len(obj.reads.all())  # .all() reuses the prefetch, see above
+
+    def get_seen_by_me(self, obj):
+        request = self.context.get("request")
+        user = getattr(request, "user", None)
+        if user is None or not getattr(user, "is_authenticated", False):
+            return False
+        return any(r.user_id == user.id for r in obj.reads.all())
+
+    def validate_reply_to(self, value):
+        if value is None:
+            return value
+        # `attrs['session']` isn't available yet inside a field-level
+        # validate_<field> (DRF runs those before object-level `validate`),
+        # so the actual "same session" cross-check happens in `validate`
+        # below, where both values are on `attrs` together — same reasoning
+        # ClassMaterialSerializer.validate uses just above for
+        # classroom/session cross-checks.
+        return value
+
+    def validate(self, attrs):
+        reply_to = attrs.get("reply_to", getattr(self.instance, "reply_to", None))
+        session = attrs.get("session", getattr(self.instance, "session", None))
+        if reply_to and session and reply_to.session_id != session.id:
+            raise serializers.ValidationError(
+                {"reply_to": "You can only reply to a message from the same session."}
+            )
+        return attrs
+
+
+class ChatMessageReadSerializer(serializers.ModelSerializer):
+    """NEW (read receipts) — one row of the "seen by" list returned by
+    ChatMessageViewSet.read_receipts(). Kept as its own thin serializer
+    (rather than reusing ChatReactionSerializer's shape) since a read
+    receipt has no equivalent of `reaction` — just who, and when."""
+
+    user = UserMiniSerializer(read_only=True)
+
+    class Meta:
+        model = ChatMessageRead
+        fields = ["id", "message", "user", "read_at"]
+        read_only_fields = ["id", "message", "user", "read_at"]
+
 
 class ChatReactionSerializer(serializers.ModelSerializer):
     user = UserMiniSerializer(read_only=True)
@@ -664,6 +806,45 @@ class ChatReactionSerializer(serializers.ModelSerializer):
             raise serializers.ValidationError(
                 f"Unsupported reaction. Choose one of: {', '.join(ChatReaction.Reaction.values)}."
             )
+        return value
+
+
+# ---------------------------------------------------------------------------
+# NEW (persistence fix) — SessionReaction / SessionCaption. See both
+# models' docstrings in models.py for why these exist: the in-room emoji
+# reactions and live captions were previously LiveKit-data-channel-only
+# (never written to the DB), so both vanished the moment everyone left
+# the session. These serializers back the new
+# ClassSessionViewSet.reactions()/captions() actions in views.py.
+# ---------------------------------------------------------------------------
+class SessionReactionSerializer(serializers.ModelSerializer):
+    user = UserMiniSerializer(read_only=True)
+
+    class Meta:
+        model = SessionReaction
+        fields = ["id", "session", "user", "reaction", "created_at"]
+        read_only_fields = ["id", "session", "user", "created_at"]
+
+    def validate_reaction(self, value):
+        if value not in SessionReaction.Reaction.values:
+            raise serializers.ValidationError(
+                f"Unsupported reaction. Choose one of: {', '.join(SessionReaction.Reaction.values)}."
+            )
+        return value
+
+
+class SessionCaptionSerializer(serializers.ModelSerializer):
+    speaker = UserMiniSerializer(read_only=True)
+
+    class Meta:
+        model = SessionCaption
+        fields = ["id", "session", "speaker", "text", "created_at"]
+        read_only_fields = ["id", "session", "speaker", "created_at"]
+
+    def validate_text(self, value):
+        value = value.strip()
+        if not value:
+            raise serializers.ValidationError("Caption text can't be empty.")
         return value
 
 
@@ -1422,6 +1603,23 @@ class TeacherEarningsSerializer(serializers.Serializer):
     this_month_earned = serializers.IntegerField()
     last_30_days = EarningsByDaySerializer(many=True)
     by_classroom = EarningsByClassroomSerializer(many=True)
+
+
+# ---------------------------------------------------------------------------
+# STUDENT PROGRESS — composite read-only payload, same pattern as
+# ClassroomStatsSerializer/TeacherEarningsSerializer above (wraps a plain
+# dict assembled in StudentProgressView.get() from several aggregate
+# queries — SessionParticipant/PassPurchase/AssignmentSubmission/
+# Certificate counts + the attendance-streak helper — not a single model
+# instance).
+# ---------------------------------------------------------------------------
+class StudentProgressSerializer(serializers.Serializer):
+    classes_attended = serializers.IntegerField()
+    classrooms_enrolled = serializers.IntegerField()
+    assignments_submitted = serializers.IntegerField()
+    certificates_earned = serializers.IntegerField()
+    current_streak_days = serializers.IntegerField()
+    longest_streak_days = serializers.IntegerField()
 
 
 # ---------------------------------------------------------------------------

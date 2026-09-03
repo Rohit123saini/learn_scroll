@@ -8,35 +8,21 @@ verify karna padta hai, warna scope['user'] hamesha AnonymousUser rahega.
 
 CLIENT connect karega:
     wss://yourdomain.com/ws/chat/<conversation_id>/?token=<JWT_ACCESS_TOKEN>
+
+NOTE (fix — duplicate-middleware consolidation): yeh file pehle apna
+independent JWTAuthMiddleware carry karti thi — liveclass app me bhi
+functionally almost-identical ek copy thi (liveclass/ws_auth.py), dono
+kabhi line-by-line compare nahi hui thi. `message` yahan ek fully
+independent chat app hai (apna poora models/views/consumers — liveclass
+se koi dependency nahi), isliye `message` ko `liveclass` pe (ya
+vice-versa) depend karana galat direction hoti — is file ka ASLI, tested
+logic (AccessToken + manual is_active-checked query) ab
+project-level `LearnScroll/ws_auth.py` me move ho gaya hai (jahan
+settings.py/asgi.py bhi hain) — dono apps se neutral shared location.
+Dono apps (message aur liveclass) ab wahi se import karte hain — koi ek
+doosre pe depend nahi karta, aur future me sirf ek jagah update karni
+padegi.
 """
-from urllib.parse import parse_qs
+from LearnScroll.ws_auth import JWTAuthMiddleware, get_user_from_token
 
-from channels.db import database_sync_to_async
-from channels.middleware import BaseMiddleware
-from django.contrib.auth.models import AnonymousUser
-from rest_framework_simplejwt.exceptions import InvalidToken, TokenError
-from rest_framework_simplejwt.tokens import AccessToken
-
-
-@database_sync_to_async
-def get_user_from_token(token):
-    from django.contrib.auth import get_user_model
-    User = get_user_model()  # yahi tera AUTH_USER_MODEL = "login.User" resolve karega
-    try:
-        validated_token = AccessToken(token)
-        user_id = validated_token['user_id']
-        return User.objects.get(id=user_id, is_active=True)
-    except (InvalidToken, TokenError, User.DoesNotExist, KeyError):
-        return AnonymousUser()
-
-
-class JWTAuthMiddleware(BaseMiddleware):
-    async def __call__(self, scope, receive, send):
-        query_string = parse_qs(scope.get('query_string', b'').decode())
-        token = query_string.get('token', [None])[0]
-
-        scope['user'] = AnonymousUser()
-        if token:
-            scope['user'] = await get_user_from_token(token)
-
-        return await super().__call__(scope, receive, send)
+__all__ = ["JWTAuthMiddleware", "get_user_from_token"]

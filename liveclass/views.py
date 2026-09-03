@@ -43,6 +43,7 @@ from .models import (
     BreakoutRoom,
     Certificate,
     ChatMessage,
+    ChatMessageRead,
     ChatReaction,
     ClassHoliday,
     ClassJoinRequest,
@@ -61,6 +62,8 @@ from .models import (
     ClassroomWishlist,
     ChatMessageReport,
     CoinPurchase,
+    SessionCaption,
+    SessionReaction,
     CoinTransaction,
     CoinWithdrawal,
     Coupon,
@@ -106,8 +109,11 @@ from .serializers import (
     CertificateIssueSerializer,
     CertificateSerializer,
     ChatMessageSerializer,
+    ChatMessageReadSerializer,
     ChatMessageReportSerializer,
     ChatReactionSerializer,
+    SessionCaptionSerializer,
+    SessionReactionSerializer,
     ClassHolidaySerializer,
     ClassJoinRequestDecisionSerializer,
     ClassJoinRequestSerializer,
@@ -199,6 +205,34 @@ def _safe_delay(task, *args, **kwargs):
         logging.getLogger(__name__).exception(
             "Failed to queue Celery task %s (broker unreachable?) — request still succeeds.",
             getattr(task, "name", task),
+        )
+
+
+def _safe_broadcast_to_user(user_id, event_type, data):
+    """Push a realtime event to one user's own WebSocket channel, the same
+    best-effort/never-block-the-request spirit as _safe_delay() above.
+
+    CONFIRMED (realtime fix pass): `broadcast_to_user()` now exists in
+    `realtime.py`, backed by `UserConsumer` in `consumers.py` and the
+    `ws/liveclass/user/` route in `routing.py` — group naming/routing
+    verified against those real files, not guessed. The try/except below
+    is kept regardless (same best-effort contract every other realtime/
+    notification call in this app follows, e.g. _safe_delay() above,
+    notifications.send_notification()) — a channel-layer hiccup should
+    still degrade to "no live badge push, poll/reopen still works"
+    rather than ever breaking join-request creation/accept/reject or
+    staff promotion.
+    """
+    try:
+        from .realtime import broadcast_to_user
+
+        broadcast_to_user(user_id, event_type, data)
+    except Exception:
+        logging.getLogger(__name__).exception(
+            "Failed to push realtime event %r to user %s (broadcast_to_user missing/unreachable?) — "
+            "request still succeeds; frontend falls back to poll/reopen.",
+            event_type,
+            user_id,
         )
 
 
@@ -495,9 +529,22 @@ class ClassroomViewSet(viewsets.ModelViewSet):
                                 doubts, assignments, reviews, etc.) but
                                 CANNOT enter a live session — needs a fresh
                                 join request to renew.
-            "none"          -> never purchased a pass (or their only join
-                                request is still pending/rejected/cancelled).
-                                Sees only the public listing info + reviews.
+            "pending"       -> not enrolled, but has a ClassJoinRequest
+                                against this classroom still awaiting the
+                                teacher's decision. `pending_request_id` is
+                                set so the frontend can cancel it
+                                (JoinRequestApi.cancel) without a separate
+                                lookup. Flips to "active" (accepted) or
+                                "none" (rejected) the moment the teacher
+                                decides — see ClassJoinRequestViewSet.accept/
+                                reject, which push a `join_request.decided`
+                                event over the caller's user-scoped
+                                WebSocket channel so the frontend doesn't
+                                have to poll this endpoint to notice.
+            "none"          -> never purchased a pass (no pending request
+                                either; or their only past request was
+                                rejected/cancelled). Sees only the public
+                                listing info + reviews.
 
         can_view_internals -> True for admin/active/expired.
         can_enter_class    -> True for admin/active only — this is exactly
@@ -519,6 +566,14 @@ class ClassroomViewSet(viewsets.ModelViewSet):
                 .first()
             )
 
+        pending_request_id = None
+        if level == AccessLevel.PENDING:
+            pending_request_id = (
+                classroom.join_requests.filter(student=user, status=ClassJoinRequest.Status.PENDING)
+                .values_list("id", flat=True)
+                .first()
+            )
+
         # legacy "status" naming kept exactly as before ("owner" not "admin")
         # so existing frontend code doesn't break.
         status_label = "owner" if level == AccessLevel.ADMIN else level
@@ -531,6 +586,7 @@ class ClassroomViewSet(viewsets.ModelViewSet):
                 "can_view_internals": level != AccessLevel.NONE,
                 "can_enter_class": level in (AccessLevel.ADMIN, AccessLevel.ACTIVE),
                 "expires_at": latest.expires_at if latest else None,
+                "pending_request_id": pending_request_id,
             }
         )
 
@@ -1132,9 +1188,23 @@ class ClassScheduleViewSet(viewsets.ModelViewSet):
             raise PermissionDenied("Only the classroom's teacher can add a schedule.")
         serializer.save()
 
+    # NOTE (fix — writable-classroom-FK reassignment sweep, item 5): this
+    # checked permission against `serializer.instance.classroom` (the OLD
+    # value) but ClassScheduleSerializer.classroom is writable, not
+    # read_only — a caller who legitimately manages this schedule's
+    # classroom could also reassign `classroom` to a DIFFERENT one in the
+    # same PATCH, one they may have no rights on at all, since only the
+    # old value's permission was ever verified. Same bug-class already
+    # fixed on Assignment/Notice/ClassHoliday/LivePoll/ClassQuery/
+    # PollTemplate/ClassroomStaff/ClassroomReview — schedules aren't
+    # meant to move between classrooms after creation either, so blocked
+    # outright rather than re-validated against a second classroom.
     def perform_update(self, serializer):
         if serializer.instance.classroom.teacher_id != self.request.user.id:
             raise PermissionDenied("Only the classroom's teacher can edit a schedule.")
+        new_classroom = serializer.validated_data.get("classroom")
+        if new_classroom is not None and new_classroom.id != serializer.instance.classroom_id:
+            raise ValidationError({"classroom": "A schedule can't be moved to a different classroom."})
         serializer.save()
 
     def perform_destroy(self, instance):
@@ -1264,17 +1334,29 @@ class AccessLevel:
     ADMIN = "admin"      # teacher, or co-teacher/moderator/org-staff — full manage rights
     ACTIVE = "active"    # currently valid (unexpired) pass — full access, CAN enter a live session
     EXPIRED = "expired"  # held a pass before, it lapsed — full access EXCEPT entering a live session
+    # PENDING (Flutter Phase 1 — join-request pending state): caller has a
+    # ClassJoinRequest against this classroom still sitting at
+    # Status.PENDING, and has never separately held access some other way.
+    # Distinct from NONE so the frontend can show "Request Sent — Waiting
+    # for Approval" instead of "Request to Join" and disable the CTA/stop
+    # a duplicate request being raised (perform_create() already blocks a
+    # second pending request server-side; this just lets the UI reflect
+    # that state instead of the student discovering it via a 400).
+    PENDING = "pending"
     NONE = "none"        # never held a pass / no accepted join request yet — public listing + reviews only
 
 
 def _access_level(classroom, user) -> str:
-    """Single source of truth for the 4-tier access model:
+    """Single source of truth for the access-tier model:
         admin   -> _can_manage_classroom (teacher / co-teacher / moderator /
                     org staff of any role)
         active  -> classroom.has_access (currently valid pass)
         expired -> classroom.is_enrolled but NOT has_access (pass lapsed)
-        none    -> everything else (no pass ever purchased, or their only
-                    join request is still pending/rejected/cancelled)
+        pending -> not enrolled at all, but has a ClassJoinRequest against
+                    this classroom still sitting at PENDING
+        none    -> everything else (no pass ever purchased, no pending
+                    request; or their only past join request was
+                    rejected/cancelled)
     """
     if _can_manage_classroom(classroom, user):
         return AccessLevel.ADMIN
@@ -1282,6 +1364,8 @@ def _access_level(classroom, user) -> str:
         return AccessLevel.ACTIVE
     if classroom.is_enrolled(user):
         return AccessLevel.EXPIRED
+    if classroom.join_requests.filter(student=user, status=ClassJoinRequest.Status.PENDING).exists():
+        return AccessLevel.PENDING
     return AccessLevel.NONE
 
 
@@ -1383,9 +1467,25 @@ class ClassSessionViewSet(viewsets.ModelViewSet):
             raise ValidationError("Can't create a session on an inactive or deleted classroom.")
         serializer.save()
 
+    # NOTE (fix — writable-classroom-FK reassignment sweep, item 5): both
+    # `classroom` and `schedule` are writable on ClassSessionSerializer,
+    # but permission here was only ever checked against the OLD
+    # `serializer.instance.classroom` — a co-teacher/moderator on
+    # classroom A could edit a session that belongs to A while also
+    # reassigning `classroom` (or `schedule`) to a DIFFERENT
+    # classroom/schedule in the same PATCH, one they may have no manage
+    # rights on. Same bug-class as ClassScheduleViewSet just above;
+    # blocked outright since a session isn't meant to move between
+    # classrooms/schedules after creation.
     def perform_update(self, serializer):
         if not _can_manage_classroom(serializer.instance.classroom, self.request.user):
             raise PermissionDenied("Only the classroom's teacher, co-teacher, or moderator can edit this session.")
+        new_classroom = serializer.validated_data.get("classroom")
+        if new_classroom is not None and new_classroom.id != serializer.instance.classroom_id:
+            raise ValidationError({"classroom": "A session can't be moved to a different classroom."})
+        new_schedule = serializer.validated_data.get("schedule")
+        if new_schedule is not None and new_schedule.id != serializer.instance.schedule_id:
+            raise ValidationError({"schedule": "A session can't be reassigned to a different schedule."})
         # NOTE (fix): a teacher flipping a session's status to CANCELLED via
         # PATCH previously told nobody — students who had it on their
         # schedule (and anyone with a ClassReminder queued for it) only
@@ -1711,6 +1811,169 @@ class ClassSessionViewSet(viewsets.ModelViewSet):
             raise NotFound("That participant's hand wasn't raised.")
         broadcast_to_session(session.id, "hand.lowered", {"user_id": int(user_id), "hand_raised": False})
         return Response({"detail": "Hand lowered."})
+
+    @action(detail=True, methods=["post"], url_path="whiteboard")
+    def whiteboard(self, request, pk=None):
+        """FEATURE (fix — whiteboard persistence): checkpoint the
+        collaborative whiteboard to the server so it survives everyone who
+        was holding it in memory leaving the room. Live sync between
+        currently-connected clients still happens peer-to-peer over the
+        LiveKit data channel (see live_session_screen.dart) — this is only
+        the periodic/close-time autosave that a reconnecting participant,
+        or a joiner who arrives before anyone with the current board has
+        (re)joined, falls back to reading via the normal session GET
+        (whiteboard_snapshot).
+
+        Any current room participant can call this — same `_has_room_access`
+        gate as chat/polls, NOT the tighter `_can_manage_classroom` the
+        generic session PATCH uses — a student's device may hold the most
+        complete stroke history, not just the host's.
+
+        Body: {"snapshot": {<strokeId>: {...}, ...}} — the client's full
+        current stroke map, or {"snapshot": null} to clear the board
+        (e.g. host taps "Clear"). Always a full overwrite, same
+        last-write-wins contract as any other autosave.
+        """
+        session = self.get_object()
+        if not _has_room_access(session.classroom, request.user):
+            raise PermissionDenied("You don't have access to this session's room.")
+
+        if "snapshot" not in request.data:
+            raise ValidationError({"snapshot": "This field is required (an object, or null to clear)."})
+        snapshot = request.data.get("snapshot")
+        if snapshot is not None and not isinstance(snapshot, dict):
+            raise ValidationError({"snapshot": "Must be an object (strokeId -> stroke) or null."})
+
+        session.whiteboard_snapshot = snapshot
+        session.save(update_fields=["whiteboard_snapshot"])
+        return Response({"detail": "Whiteboard saved."})
+
+    @action(detail=True, methods=["post"], url_path="spotlight")
+    def spotlight(self, request, pk=None):
+        """FEATURE (fix — spotlight persistence): host-only pin, previously
+        a pure LiveKit data-channel broadcast with nothing stored
+        server-side — a reconnecting participant, or a fresh mid-class
+        joiner, saw no spotlight at all until the host happened to
+        re-broadcast one. Persists the current pin here so a reconnect/
+        late join can read it straight off the session GET
+        (spotlight_identity), and also re-broadcasts over the session's
+        realtime channel so anyone already connected updates immediately
+        too — same as every other host/moderator control below.
+
+        Body: {"identity": "<livekit identity>"} or {"identity": null} to
+        clear. Same `_can_moderate_session` gate as mute/kick/lower_hand —
+        host, co-teacher, or moderator only.
+        """
+        session = self.get_object()
+        if not _can_moderate_session(session, request.user):
+            raise PermissionDenied("Only the classroom's teacher, co-teacher, or moderator can set the spotlight.")
+
+        if "identity" not in request.data:
+            raise ValidationError({"identity": "This field is required (a string identity, or null to clear)."})
+        identity = request.data.get("identity")
+        if identity is not None and not isinstance(identity, str):
+            raise ValidationError({"identity": "Must be a string identity or null."})
+
+        session.spotlight_identity = identity or ""
+        session.save(update_fields=["spotlight_identity"])
+        broadcast_to_session(session.id, "spotlight", {"identity": identity or None})
+        return Response({"detail": "Spotlight updated.", "identity": identity or None})
+
+    @action(
+        detail=True, methods=["get", "post"], url_path="reactions",
+        throttle_classes=[ScopedRateThrottle], throttle_scope="session_reaction",
+    )
+    def reactions(self, request, pk=None):
+        """NEW (persistence fix) — durable log for the in-room emoji
+        reactions (`_sendReaction` in live_session_screen.dart), which
+        used to be PURE LiveKit data-channel signaling with nothing ever
+        written to the database (see SessionReaction's docstring in
+        models.py). Live delivery to already-connected peers is
+        UNCHANGED — the client still broadcasts over the data channel
+        for lowest latency; this endpoint is the persistence layer
+        underneath it, called alongside that broadcast, not instead of
+        it.
+
+        POST {"reaction": "heart"} — any current room participant (same
+        `_has_room_access` gate as chat/whiteboard) logs one reaction
+        tap. Returns {"total": <int>} — the session's running total, so
+        a reconnecting client can re-seed its `_reactionTotalCount`
+        badge instead of starting back at zero.
+
+        GET — same gate. Returns {"total": <int>, "counts": {<emoji>:
+        <int>, ...}} — a lightweight summary, not the full per-tap log
+        (a popular session could have thousands of taps; nobody needs
+        to page through them one by one, unlike chat/captions where the
+        individual lines matter).
+        """
+        session = self.get_object()
+        if not _has_room_access(session.classroom, request.user):
+            raise PermissionDenied("A valid pass is required to react in this session.")
+
+        if request.method == "POST":
+            serializer = SessionReactionSerializer(data=request.data)
+            serializer.is_valid(raise_exception=True)
+            SessionReaction.objects.create(
+                session=session, user=request.user, reaction=serializer.validated_data["reaction"]
+            )
+
+        total = SessionReaction.objects.filter(session=session).count()
+        if request.method == "POST":
+            return Response({"total": total}, status=status.HTTP_201_CREATED)
+
+        counts: dict[str, int] = {}
+        for row in (
+            SessionReaction.objects.filter(session=session).values("reaction").annotate(n=Count("reaction"))
+        ):
+            counts[row["reaction"]] = row["n"]
+        return Response({"total": total, "counts": counts})
+
+    @action(
+        detail=True, methods=["get", "post"], url_path="captions",
+        throttle_classes=[ScopedRateThrottle], throttle_scope="session_caption",
+    )
+    def captions(self, request, pk=None):
+        """NEW (persistence fix) — durable transcript line for the LIVE
+        caption feature (`speech_to_text` on-device STT in
+        live_session_screen.dart). Recognition is still per-device,
+        own-mic-only (see SessionCaption's docstring in models.py for
+        why remote-audio STT isn't possible from this Dart file) — what
+        changes is that every device's own finished line now also lands
+        here, so the SERVER accumulates a transcript covering every
+        participant's own speech, not just whoever's on-screen 3-line
+        feed happened to still show it live. Previously the on-screen
+        feed was capped to 3 lines and self-expired after 6 seconds,
+        with nothing persisted anywhere.
+
+        POST {"text": "..."} — the caller's own just-finished caption
+        line (speaker is always the authenticated caller, never
+        client-supplied — mirrors ChatMessageViewSet.perform_create's
+        "owner comes from request.user" rule). Same `_has_room_access`
+        gate as chat/reactions.
+
+        GET — returns the session's transcript so far, oldest first,
+        capped to the most recent 200 lines (a live caption transcript
+        is a running log meant for "what did I miss" / post-session
+        review, not something that needs full pagination like chat
+        history).
+        """
+        session = self.get_object()
+        if not _has_room_access(session.classroom, request.user):
+            raise PermissionDenied("A valid pass is required to use captions in this session.")
+
+        if request.method == "POST":
+            serializer = SessionCaptionSerializer(data=request.data)
+            serializer.is_valid(raise_exception=True)
+            caption = SessionCaption.objects.create(
+                session=session, speaker=request.user, text=serializer.validated_data["text"]
+            )
+            return Response(SessionCaptionSerializer(caption).data, status=status.HTTP_201_CREATED)
+
+        recent = list(
+            SessionCaption.objects.filter(session=session).select_related("speaker").order_by("-created_at")[:200]
+        )
+        recent.reverse()  # oldest first, matches the live on-screen feed's own top-to-bottom order
+        return Response(SessionCaptionSerializer(recent, many=True).data)
 
     @action(detail=True, methods=["get"], url_path="unread")
     def unread(self, request, pk=None):
@@ -2291,6 +2554,17 @@ class LiveKitWebhookView(APIView):
                     broadcast_to_session(session.id, "recording.stopped", {"egress_id": egress_info.egress_id})
                 if url:
                     broadcast_to_session(session.id, "recording.ready", {"recording_url": url})
+                    # NOTE (fix — captions wiring): transcribe_recording
+                    # (tasks.py) was fully implemented but never actually
+                    # queued from anywhere. Gated behind a per-classroom
+                    # opt-in toggle (mirrors recording_enabled's own
+                    # shape) so transcription cost is only ever incurred
+                    # for classrooms that asked for captions — NOT fired
+                    # unconditionally on every recording.
+                    if session.classroom.captions_enabled:
+                        from .tasks import transcribe_recording
+
+                        _safe_delay(transcribe_recording, session.id)
 
         # 200 with no body is all LiveKit's webhook sender expects — it
         # just needs to know delivery succeeded so it doesn't retry.
@@ -2343,10 +2617,19 @@ class ClassPassViewSet(viewsets.ModelViewSet):
             raise PermissionDenied("Only the classroom's teacher can create a pass.")
         serializer.save()
 
+    # NOTE (fix — writable-classroom-FK reassignment sweep, item 5):
+    # ClassPassSerializer.classroom is writable, not read_only — permission
+    # was only ever checked against the OLD `instance.classroom`, so a
+    # teacher could reassign a pass they own to a different classroom in
+    # the same PATCH. Same bug-class as Schedule/Session above; blocked
+    # outright.
     def perform_update(self, serializer):
         instance = serializer.instance
         if instance.classroom.teacher_id != self.request.user.id:
             raise PermissionDenied("Only the classroom's teacher can edit a pass.")
+        new_classroom = serializer.validated_data.get("classroom")
+        if new_classroom is not None and new_classroom.id != instance.classroom_id:
+            raise ValidationError({"classroom": "A pass can't be moved to a different classroom."})
 
         # NOTE (fix): this is the pass-level twin of the create-sell-vanish
         # gap Classroom.perform_destroy was hardened against — just reached
@@ -2917,6 +3200,30 @@ class ClassJoinRequestViewSet(
         except IntegrityError:
             raise ValidationError("You already have a pending request for this classroom.")
 
+        # REALTIME (Flutter Phase 1, item 3 — live pending-count badge):
+        # push straight to the teacher's user-scoped WS channel so
+        # ClassroomDetailScreen's manage-sheet badge can go +1 immediately
+        # instead of waiting for the screen to reopen/poll. This is
+        # DIFFERENT from broadcast_to_session (targets everyone in a *live
+        # session*'s group) — a join request can be raised with no session
+        # running at all, so it has to be a per-user channel. See
+        # _safe_broadcast_to_user()'s docstring — broadcast_to_user() now
+        # exists in realtime.py.
+        _safe_broadcast_to_user(
+            classroom.teacher_id,
+            "join_request.created",
+            {
+                "id": join_request.id,
+                "classroom_id": classroom.id,
+                "classroom_title": classroom.title,
+                "student_id": user.id,
+                "student_name": user.get_full_name() or user.username,
+                "pending_count": classroom.join_requests.filter(
+                    status=ClassJoinRequest.Status.PENDING
+                ).count(),
+            },
+        )
+
         create_notification(
             recipient=classroom.teacher,
             notif_type=Notification.NotifType.JOIN_REQUEST_RECEIVED,
@@ -3018,6 +3325,21 @@ class ClassJoinRequestViewSet(
                 update_fields=["status", "pass_purchase", "decided_by", "decision_note", "decided_at"]
             )
 
+        # REALTIME (Flutter Phase 1, item 2 — pending -> active without
+        # reopening the app): student's own ClassroomDetailScreen should
+        # flip out of "Request Sent — Waiting for Approval" the instant
+        # this commits.
+        _safe_broadcast_to_user(
+            join_request.student_id,
+            "join_request.decided",
+            {
+                "id": join_request.id,
+                "classroom_id": join_request.classroom_id,
+                "status": ClassJoinRequest.Status.ACCEPTED,
+                "access_level": AccessLevel.ACTIVE,
+            },
+        )
+
         create_notification(
             recipient=join_request.student,
             notif_type=Notification.NotifType.JOIN_REQUEST_ACCEPTED,
@@ -3052,6 +3374,19 @@ class ClassJoinRequestViewSet(
         join_request.decision_note = decision.validated_data.get("note", "")
         join_request.decided_at = timezone.now()
         join_request.save(update_fields=["status", "decided_by", "decision_note", "decided_at"])
+
+        # REALTIME (Flutter Phase 1, item 2 — pending -> none without
+        # reopening the app).
+        _safe_broadcast_to_user(
+            join_request.student_id,
+            "join_request.decided",
+            {
+                "id": join_request.id,
+                "classroom_id": join_request.classroom_id,
+                "status": ClassJoinRequest.Status.REJECTED,
+                "access_level": AccessLevel.NONE,
+            },
+        )
 
         create_notification(
             recipient=join_request.student,
@@ -3140,6 +3475,12 @@ class PassGiftViewSet(
             raise ValidationError({"class_pass": "This classroom is no longer active."})
         if not class_pass.is_active:
             raise ValidationError({"class_pass": "This pass is no longer available."})
+        # FIX (frontend cross-check): pass_management_screen.dart's
+        # per-pass "Allow gifting" toggle had nothing enforcing it
+        # server-side — see ClassPass.allow_gifting's doc comment in
+        # models.py.
+        if not class_pass.allow_gifting:
+            raise ValidationError({"class_pass": "The teacher has disabled gifting for this pass."})
 
         # Same rounding rule as _charge_and_create_purchase above — a
         # fractional coin price is never left to truncate in either
@@ -3359,11 +3700,23 @@ class ClassMaterialViewSet(viewsets.ModelViewSet):
             )
         serializer.save(uploaded_by=self.request.user)
 
+    # NOTE (fix — writable-classroom-FK reassignment sweep, item 5): both
+    # `classroom` and `session` are writable on ClassMaterialSerializer,
+    # but permission was only ever checked against the OLD
+    # `serializer.instance.classroom` — same bug-class as Schedule/
+    # Session/Pass above. Blocked outright; a material isn't meant to
+    # move between classrooms/sessions after upload.
     def perform_update(self, serializer):
         if not _can_manage_classroom(serializer.instance.classroom, self.request.user):
             raise PermissionDenied(
                 "Only the classroom's teacher, co-teacher, or moderator can edit this material."
             )
+        new_classroom = serializer.validated_data.get("classroom")
+        if new_classroom is not None and new_classroom.id != serializer.instance.classroom_id:
+            raise ValidationError({"classroom": "A material can't be moved to a different classroom."})
+        new_session = serializer.validated_data.get("session")
+        if new_session is not None and new_session.id != serializer.instance.session_id:
+            raise ValidationError({"session": "A material can't be reassigned to a different session."})
         serializer.save()
 
     def perform_destroy(self, instance):
@@ -3419,6 +3772,15 @@ class ChatMessageViewSet(
             # {"chat_reaction": "60/min"} to DEFAULT_THROTTLE_RATES.
             self.throttle_scope = "chat_reaction"
             return [ScopedRateThrottle()]
+        if self.action in ("read", "read_receipts", "mark_read"):
+            # NEW (read receipts) — a receipt fires roughly once per message
+            # per viewer (or once per "mark everything visible as read"
+            # batch), so it's a much lighter, more frequent call than
+            # posting a message — same "own, looser scope" reasoning as
+            # chat_reaction above. Add e.g. {"chat_read": "120/min"} to
+            # DEFAULT_THROTTLE_RATES for this to take effect.
+            self.throttle_scope = "chat_read"
+            return [ScopedRateThrottle()]
         return super().get_throttles()
 
     def _session_or_none(self, session_id):
@@ -3433,13 +3795,34 @@ class ChatMessageViewSet(
         # LivePollSerializer already avoids via LivePollViewSet's own
         # prefetch_related("responses").
         qs = qs.prefetch_related("reactions__user")
+        # NEW (reply feature) — ChatMessageSerializer.get_reply_to_detail()
+        # reads obj.reply_to.sender; without this select_related that's two
+        # extra queries per replied-to message in a list response.
+        qs = qs.select_related("reply_to", "reply_to__sender")
+        # NEW (read receipts) — ChatMessageSerializer.read_count/seen_by_me
+        # iterate obj.reads.all() per message; same N+1 avoidance as
+        # reactions above.
+        qs = qs.prefetch_related("reads__user")
         session_id = self.request.query_params.get("session")
         if not session_id:
             return qs.none()
         session = self._session_or_none(session_id)
         if not session or not _has_room_access(session.classroom, self.request.user):
             return qs.none()
-        return qs.filter(session_id=session_id)
+        qs = qs.filter(session_id=session_id)
+        # NEW (message search) — ?search=<text> on the existing list
+        # endpoint, scoped to the ?session= the caller already had access
+        # to above (never a cross-session search — that would need its own
+        # access check per session). Deliberately a plain case-insensitive
+        # substring match, not full-text search: a single live session's
+        # chat history is small enough (paginated at that) that a DB index
+        # buys little, and this keeps the feature backend-agnostic (works
+        # the same on SQLite in dev and Postgres in prod). Blank/whitespace-
+        # only search terms are ignored rather than matching everything.
+        search = (self.request.query_params.get("search") or "").strip()
+        if search:
+            qs = qs.filter(message__icontains=search)
+        return qs
 
     def perform_create(self, serializer):
         session = serializer.validated_data.get("session")
@@ -3579,6 +3962,119 @@ class ChatMessageViewSet(
         message.save(update_fields=["is_pinned", "pinned_by", "pinned_at"])
         broadcast_to_session(message.session_id, "chat.unpinned", {"id": message.id})
         return Response(ChatMessageSerializer(message, context={"request": request}).data)
+
+    # -----------------------------------------------------------------
+    # NEW — read receipts (WhatsApp-style "seen by"). See ChatMessageRead's
+    # docstring in models.py for how this differs from the existing
+    # SessionReadState unread-BADGE watermark (ClassSessionViewSet.mark_read
+    # below) — that one is "how many messages has THIS user not looked at
+    # yet"; this one is "who has looked at THIS message". Both stay, for
+    # different UI.
+    # -----------------------------------------------------------------
+    @action(detail=True, methods=["post"])
+    def read(self, request, pk=None):
+        """Mark a single message as read/seen by the caller. Idempotent —
+        re-marking an already-read message is a no-op, not an error, same
+        "safe to call again" contract as `react`'s DELETE above. Looked up
+        directly rather than via get_object()/get_queryset() for the same
+        reason `react`/`pin` are: get_queryset()'s ?session= filter only
+        applies to the 'list' action.
+        """
+        message = ChatMessage.objects.filter(pk=pk, is_deleted=False).select_related("session__classroom").first()
+        if message is None:
+            raise NotFound("Chat message not found.")
+        if not _has_room_access(message.session.classroom, request.user):
+            raise PermissionDenied("A valid pass is required to read chat in this session.")
+
+        _, created = ChatMessageRead.objects.get_or_create(message=message, user=request.user)
+        if created:
+            # Only push a socket event on an ACTUAL new receipt — re-marking
+            # an already-read message must never spam the room with no-op
+            # events, same "only broadcast on a real change" discipline as
+            # perform_destroy's soft-delete above.
+            broadcast_to_session(
+                message.session_id,
+                "chat.read",
+                {
+                    "message_id": message.id,
+                    "user": UserMiniSerializer(request.user).data,
+                    "read_count": message.reads.count(),
+                },
+            )
+        return Response(ChatMessageSerializer(message, context={"request": request}).data)
+
+    @action(detail=False, methods=["post"], url_path="mark-read")
+    def mark_read(self, request):
+        """Bulk version of `read` above — POST {"session": <id>, "up_to": <message_id>}
+        marks every not-yet-read, not-own message in that session up to and
+        including `up_to` as read in one call. This is what the chat panel
+        calls when it's opened (or scrolled to the bottom), instead of
+        firing one `read` request per visible message — same "one call for
+        a batch of implied reads" shape as SessionReadState's own
+        `last_read_chat_message_id` watermark, just recording a receipt
+        PER MESSAGE instead of a single pointer, since the whole point here
+        is per-message "who's seen this", not just an unread count.
+        """
+        session_id = request.data.get("session")
+        up_to = request.data.get("up_to")
+        if not session_id or not up_to:
+            raise ValidationError({"detail": "Both 'session' and 'up_to' are required."})
+        session = self._session_or_none(session_id)
+        if not session or not _has_room_access(session.classroom, request.user):
+            raise PermissionDenied("A valid pass is required to read chat in this session.")
+
+        # Never a receipt on your own messages — you obviously "saw" what
+        # you sent, and it would only clutter your own bubbles' seen-by list.
+        candidate_ids = list(
+            ChatMessage.objects.filter(session_id=session_id, is_deleted=False, id__lte=up_to)
+            .exclude(sender_id=request.user.id)
+            .values_list("id", flat=True)
+        )
+        already_read = set(
+            ChatMessageRead.objects.filter(message_id__in=candidate_ids, user=request.user).values_list(
+                "message_id", flat=True
+            )
+        )
+        new_ids = [mid for mid in candidate_ids if mid not in already_read]
+        if new_ids:
+            ChatMessageRead.objects.bulk_create(
+                [ChatMessageRead(message_id=mid, user=request.user) for mid in new_ids],
+                ignore_conflicts=True,  # belt-and-suspenders against a racing single `read` call
+            )
+            # One broadcast per newly-read message, same event shape `read`
+            # emits — a busy chat opening for the first time might fire a
+            # short burst of these, which is fine: it's exactly as many
+            # "someone read something" events as if each had come in one by
+            # one via `read`.
+            for mid in new_ids:
+                broadcast_to_session(
+                    session_id,
+                    "chat.read",
+                    {
+                        "message_id": mid,
+                        "user": UserMiniSerializer(request.user).data,
+                        "read_count": ChatMessageRead.objects.filter(message_id=mid).count(),
+                    },
+                )
+        return Response({"marked_read": len(new_ids)})
+
+    @action(detail=True, methods=["get"], url_path="read-receipts")
+    def read_receipts(self, request, pk=None):
+        """GET — full "seen by" list (who + when) for one message, for the
+        sender (or anyone else who can see the chat) to tap a message and
+        check. Kept out of the main list-serializer payload deliberately —
+        see read_count/seen_by_me's docstring on ChatMessageSerializer —
+        and returned oldest-first (ChatMessageRead.Meta.ordering) so the
+        UI can show "first seen by X, then Y" if it wants to.
+        """
+        message = ChatMessage.objects.filter(pk=pk, is_deleted=False).select_related("session__classroom").first()
+        if message is None:
+            raise NotFound("Chat message not found.")
+        if not _has_room_access(message.session.classroom, request.user):
+            raise PermissionDenied("A valid pass is required to view this session's chat.")
+
+        receipts = ChatMessageRead.objects.filter(message=message).select_related("user")
+        return Response(ChatMessageReadSerializer(receipts, many=True).data)
 
 
 # ---------------------------------------------------------------------------
@@ -3758,6 +4254,21 @@ class LivePollViewSet(viewsets.ModelViewSet):
     def perform_update(self, serializer):
         if not _can_moderate_session(serializer.instance.session, self.request.user):
             raise PermissionDenied("Only the classroom's teacher, co-teacher, or moderator can edit this poll.")
+        # NOTE (fix — same class of gap as Assignment/Notice/ClassHoliday
+        # perform_update above, found in the same pass): `session` is
+        # writable on `LivePollSerializer` and — unlike Assignment/Query,
+        # which cross-validate `session.classroom_id == classroom.id` in
+        # their serializer's `validate()` — nothing here stops a PATCH from
+        # reassigning a poll to ANY session, including one in a classroom
+        # the caller doesn't moderate at all (only the poll's original
+        # session was ever permission-checked). Pre-existing gap (this
+        # `perform_update` already existed before this pass; only
+        # PollApi.update() — which deliberately never sends `session` — is
+        # new), closed the same way: the session can't be changed via
+        # update, only question/options can.
+        new_session = serializer.validated_data.get("session")
+        if new_session is not None and new_session.id != serializer.instance.session_id:
+            raise ValidationError({"session": "A poll can't be moved to a different session."})
         serializer.save()
 
     def perform_destroy(self, instance):
@@ -3894,6 +4405,19 @@ class PollTemplateViewSet(viewsets.ModelViewSet):
     def perform_update(self, serializer):
         if not _can_manage_classroom(serializer.instance.classroom, self.request.user):
             raise PermissionDenied("Only the classroom's teacher, co-teacher, or moderator can edit this template.")
+        # NOTE (fix — found during the Phase 3 audit sweep, same class of
+        # gap as Assignment/Notice/ClassHoliday/LivePoll/Submission/
+        # ClassQuery above): `PollTemplateSerializer.classroom` is
+        # writable, so without this a manager of the CURRENT classroom
+        # could reassign a template to a different one via the same PATCH,
+        # bypassing that classroom's own manage-permission check. Not part
+        # of this pass's Dart CRUD work (PollTemplateApi.update() already
+        # existed, unrelated to Phase 3's 7 APIs), but the same bug — fixed
+        # while auditing every writable-classroom-field perform_update in
+        # this file.
+        new_classroom = serializer.validated_data.get("classroom")
+        if new_classroom is not None and new_classroom.id != serializer.instance.classroom_id:
+            raise ValidationError({"classroom": "A poll template can't be moved to a different classroom."})
         serializer.save()
 
     def perform_destroy(self, instance):
@@ -3971,11 +4495,29 @@ class AssignmentViewSet(viewsets.ModelViewSet):
 
         _safe_delay(notify_assignment_posted, assignment.id, student_ids)
 
+    # NOTE (fix — Phase 3 follow-up, classroom-reassignment gap): this
+    # checked permission against `serializer.instance.classroom` (the
+    # OLD value) but `AssignmentSerializer.classroom` is writable and not
+    # read_only — a caller who manages classroom A could edit an
+    # assignment that belongs to A while also changing `classroom` to B
+    # in the same PATCH, moving it into a classroom they may have no
+    # manage rights on at all (only A's permission was ever checked).
+    # This was reachable the moment AssignmentApi.update() (Dart) started
+    # sending full `Assignment.toJson()` on PATCH, which includes
+    # `classroom`. Assignments aren't meant to move between classrooms
+    # after creation anyway (nothing about "editing" an assignment implies
+    # relocating it) — same "frozen field" shape as
+    # AssignmentSubmissionViewSet's `graded_at` guard above — so this is
+    # blocked outright rather than re-validated against a second
+    # classroom.
     def perform_update(self, serializer):
         if not _can_manage_classroom(serializer.instance.classroom, self.request.user):
             raise PermissionDenied(
                 "Only the classroom's teacher, co-teacher, or moderator can edit this assignment."
             )
+        new_classroom = serializer.validated_data.get("classroom")
+        if new_classroom is not None and new_classroom.id != serializer.instance.classroom_id:
+            raise ValidationError({"classroom": "An assignment can't be moved to a different classroom."})
         serializer.save()
 
     def perform_destroy(self, instance):
@@ -4076,6 +4618,23 @@ class AssignmentSubmissionViewSet(viewsets.ModelViewSet):
             raise PermissionDenied("You can only edit your own submission.")
         if instance.graded_at:
             raise ValidationError("This submission has already been graded and can no longer be edited.")
+        # NOTE (fix — same class of gap as Assignment/Notice/ClassHoliday/
+        # LivePoll perform_update above): `assignment` is writable on
+        # `AssignmentSubmissionSerializer` (only student/submitted_at/score/
+        # feedback/graded_at are read_only). Without this, a student could
+        # PATCH their OWN ungraded submission's `assignment` to point at a
+        # different assignment entirely — bypassing perform_create's
+        # `_can_view_classroom_internals` check on that assignment's
+        # classroom (which only runs on create, not update) and the
+        # unique-submission check, effectively faking a submission to an
+        # assignment they never actually turned work in for.
+        # SubmissionApi.update() (Dart) never sends `assignment` — it only
+        # ever sends `file` — but the endpoint itself is reachable
+        # regardless, so this is closed here rather than relying on the
+        # client to keep behaving.
+        new_assignment = serializer.validated_data.get("assignment")
+        if new_assignment is not None and new_assignment.id != instance.assignment_id:
+            raise ValidationError({"assignment": "A submission can't be moved to a different assignment."})
         serializer.save()
 
     def perform_destroy(self, instance):
@@ -4154,6 +4713,37 @@ class ClassroomReviewViewSet(viewsets.ModelViewSet):
         from .tasks import notify_review_posted
 
         _safe_delay(notify_review_posted, review.id)
+
+    # NOTE (fix — found during the Phase 3 audit sweep, SEVERE, pre-existing):
+    # this viewset had NO perform_update or perform_destroy override at
+    # all — a plain ModelViewSet. get_queryset() above applies no ownership
+    # filter either (unlike e.g. ClassReminderViewSet, which always scopes
+    # to `user=self.request.user`): with no ?classroom= query param, it
+    # returns literally every review on the whole platform. Put together,
+    # ANY authenticated user could PATCH or DELETE ANY OTHER student's
+    # review by id — rewrite someone else's rating/comment, or delete it
+    # outright — with zero ownership check, and (same as the other
+    # writable-classroom-field gaps found in this sweep)
+    # `ClassroomReviewSerializer.classroom` is writable too, so an update
+    # could also reassign a review to an unrelated classroom. This was
+    # already reachable before this pass — `ReviewApi.update()`/`.delete()`
+    # (Dart) already existed — this pass just happened to be the one
+    # auditing every perform_update/perform_destroy in this file for the
+    # same bug class. Locked down to the review's own student, same shape
+    # as AssignmentSubmissionViewSet's ownership check above.
+    def perform_update(self, serializer):
+        instance = serializer.instance
+        if instance.student_id != self.request.user.id:
+            raise PermissionDenied("You can only edit your own review.")
+        new_classroom = serializer.validated_data.get("classroom")
+        if new_classroom is not None and new_classroom.id != instance.classroom_id:
+            raise ValidationError({"classroom": "A review can't be moved to a different classroom."})
+        serializer.save()
+
+    def perform_destroy(self, instance):
+        if instance.student_id != self.request.user.id:
+            raise PermissionDenied("You can only delete your own review.")
+        instance.delete()
 
 
 # ---------------------------------------------------------------------------
@@ -4937,9 +5527,48 @@ class ClassroomStaffViewSet(viewsets.ModelViewSet):
 
         _safe_delay(notify_staff_added, staff.id)
 
+        # REALTIME (Phase 4, item 2 — mid-session role promote): mirrors the
+        # join_request.created push above (same _safe_broadcast_to_user /
+        # per-user WS channel). Without this, a user who's already sitting
+        # on ClassroomDetailScreen when they get promoted only picks up
+        # manage-tier access (and, with it, the pending-join-request badge)
+        # on their NEXT full screen load — the screen has no way to know
+        # its own access just changed underneath it. The Flutter side's
+        # `staff.added` handler just re-runs `_load()` (same as it already
+        # does for `join_request.decided`), which recomputes `_canManage`
+        # fresh and fires `_loadPendingRequestCount()` immediately if it's
+        # now true — see classroom_detail_screen.dart.
+        _safe_broadcast_to_user(
+            target_user.id,
+            "staff.added",
+            {
+                "classroom_id": classroom.id,
+                "classroom_title": classroom.title,
+                "role": staff.role,
+            },
+        )
+
     def perform_update(self, serializer):
         if serializer.instance.classroom.teacher_id != self.request.user.id:
             raise PermissionDenied("Only the classroom's teacher can edit a staff member's role.")
+        # NOTE (fix — found during the Phase 3 audit sweep, same class of
+        # gap as everywhere else in this sweep): both `classroom` and
+        # `user` (via `user_id`) are writable on `ClassroomStaffSerializer`.
+        # Without this, classroom A's teacher could PATCH one of their own
+        # staff rows to move it to classroom B (bypassing B's own teacher
+        # check entirely — only A's was ever verified), or reassign it to
+        # an arbitrary different user, effectively granting staff access to
+        # someone who was never actually added via perform_create's own
+        # checks (duplicate-staff guard, teacher-can't-be-staff guard).
+        # Both are frozen after creation, same as the classroom-immutability
+        # guards added elsewhere in this pass — a role CHANGE for the same
+        # person on the same classroom is the only thing update() is for.
+        new_classroom = serializer.validated_data.get("classroom")
+        if new_classroom is not None and new_classroom.id != serializer.instance.classroom_id:
+            raise ValidationError({"classroom": "A staff row can't be moved to a different classroom."})
+        new_user = serializer.validated_data.get("user")
+        if new_user is not None and new_user.id != serializer.instance.user_id:
+            raise ValidationError({"user_id": "A staff row can't be reassigned to a different user."})
         serializer.save()
 
     def perform_destroy(self, instance):
@@ -5186,6 +5815,32 @@ class ClassHolidayViewSet(viewsets.ModelViewSet):
             raise PermissionDenied("Only the classroom's teacher, co-teacher, or moderator can mark an off-day.")
         serializer.save(created_by=self.request.user)
 
+    # NOTE (fix — Phase 3, Dart HolidayApi.update() prep): this viewset had
+    # no perform_update override at all, unlike every sibling viewset in
+    # this file (Notice/Assignment/Poll all gate perform_update behind the
+    # same manage-tier check their perform_destroy already uses). Left as a
+    # plain ModelViewSet, update() would fall through to the default
+    # serializer.save() with NO permission check. get_queryset() above only
+    # enforces _can_view_classroom_internals (read-tier — true for anyone
+    # who has EVER held a pass, active or expired), so any such user could
+    # have PATCH'd another classroom's off-day (date/reason/schedule) just
+    # by including ?classroom=<id> on the request — a write via a read-only
+    # boundary. Gated to the same _can_manage_classroom check perform_create/
+    # perform_destroy already use, closing the gap before the Dart client
+    # gets a wrapper that actually calls this.
+    def perform_update(self, serializer):
+        if not _can_manage_classroom(serializer.instance.classroom, self.request.user):
+            raise PermissionDenied("Only the classroom's teacher, co-teacher, or moderator can edit an off-day.")
+        # Same classroom-reassignment guard as AssignmentViewSet/
+        # NoticeViewSet.perform_update — `ClassHolidaySerializer.classroom`
+        # is writable, so without this a manager of the CURRENT classroom
+        # could reassign the holiday to a different one in the same PATCH,
+        # bypassing that other classroom's own manage-permission check.
+        new_classroom = serializer.validated_data.get("classroom")
+        if new_classroom is not None and new_classroom.id != serializer.instance.classroom_id:
+            raise ValidationError({"classroom": "An off-day can't be moved to a different classroom."})
+        serializer.save()
+
     def perform_destroy(self, instance):
         if not _can_manage_classroom(instance.classroom, self.request.user):
             raise PermissionDenied("Only the classroom's teacher, co-teacher, or moderator can remove an off-day.")
@@ -5298,9 +5953,18 @@ class NoticeViewSet(viewsets.ModelViewSet):
 
             _safe_delay(notify_notice_posted, notice.id, student_ids)
 
+    # NOTE (fix — Phase 3 follow-up, same classroom-reassignment gap as
+    # AssignmentViewSet.perform_update above): `NoticeSerializer.classroom`
+    # is writable too — reachable now that NoticeApi.update() (Dart) sends
+    # full `Notice.toJson()` (includes `classroom`) on PATCH. Blocked the
+    # same way: permission is checked against the notice's current
+    # classroom, and the classroom itself can't be changed via update.
     def perform_update(self, serializer):
         if not _can_manage_classroom(serializer.instance.classroom, self.request.user):
             raise PermissionDenied("Only the classroom's teacher, co-teacher, or moderator can edit this notice.")
+        new_classroom = serializer.validated_data.get("classroom")
+        if new_classroom is not None and new_classroom.id != serializer.instance.classroom_id:
+            raise ValidationError({"classroom": "A notice can't be moved to a different classroom."})
         serializer.save()
 
     def perform_destroy(self, instance):
@@ -5357,6 +6021,36 @@ class ClassQueryViewSet(viewsets.ModelViewSet):
         if not _can_view_classroom_internals(classroom, self.request.user):
             raise PermissionDenied("A pass (active or expired) is required to ask a question in this classroom.")
         serializer.save(asked_by=self.request.user)
+
+    # NOTE (fix — Phase 3, Dart QueryApi.update() prep): no perform_update
+    # override existed here. ClassQuerySerializer locks down status/answer/
+    # answered_by/answered_at as read_only (only the `answer` action below
+    # can touch those), but — corrected from an earlier pass of this same
+    # note — `classroom` and `session` are NOT read_only, so WHO could call
+    # this and WHAT it could touch were both wide open. get_queryset() above
+    # returns every query for a classroom (any student's) to a caller who
+    # manages that classroom, so a teacher/co-teacher/moderator sending
+    # ?classroom=<id> on a PATCH could otherwise rewrite a STUDENT's own
+    # question, or a student could reassign their own query's `classroom`
+    # to one they don't have `_can_view_classroom_internals` access to at
+    # all — bypassing perform_create's access check entirely, since it only
+    # runs on create. Restricted to: only the original asker may edit, only
+    # while still unanswered (same "frozen after the fact" pattern as
+    # AssignmentSubmissionViewSet.perform_update's graded_at check), and the
+    # classroom can't be changed via update (mirrors the same guard on
+    # Assignment/Notice/ClassHoliday/LivePoll above). `QueryApi.update()`
+    # (Dart) only ever sends `question`, but the endpoint itself doesn't
+    # rely on the client to keep behaving.
+    def perform_update(self, serializer):
+        instance = serializer.instance
+        if instance.asked_by_id != self.request.user.id:
+            raise PermissionDenied("You can only edit your own question.")
+        if instance.status == ClassQuery.Status.ANSWERED:
+            raise ValidationError("This question has already been answered and can no longer be edited.")
+        new_classroom = serializer.validated_data.get("classroom")
+        if new_classroom is not None and new_classroom.id != instance.classroom_id:
+            raise ValidationError({"classroom": "A question can't be moved to a different classroom."})
+        serializer.save()
 
     @action(detail=True, methods=["post"])
     def answer(self, request, pk=None):

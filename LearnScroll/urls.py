@@ -56,7 +56,8 @@ urlpatterns = [
     path("swagger/", SpectacularSwaggerView.as_view(url_name="schema"), name="swagger-ui"),
     path("redoc/", SpectacularRedocView.as_view(url_name="schema"), name="redoc"),
     path('media/<path:path>', serve_media_with_range, name='media'),
-    path("message/",include("message.urls"))
+    path("message/",include("message.urls")),
+    path("liveclass/", include("liveclass.urls")), 
 ]
 
 # if settings.DEBUG:

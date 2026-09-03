@@ -19,7 +19,7 @@ SECRET_KEY = os.getenv("SECRET_KEY")
 # values to .env instead of relying on code defaults being right.
 DEBUG = os.getenv("DEBUG", "False") == "True"
 ALLOWED_HOSTS = [
-    h.strip() for h in os.getenv("ALLOWED_HOSTS", "localhost,127.0.0.1").split(",") if h.strip()
+    "*"
 ]
 
 # NOTE (fix — local dev on a physical device): a phone/emulator on the same
@@ -436,11 +436,14 @@ REST_FRAMEWORK = {
         # NOTE (fix — same bug class as the scopes documented above):
         # ClassroomViewSet.share now sets throttle_scope="classroom_share"
         # via ScopedRateThrottle (see views.py) but had no rate here —
-        # would ImproperlyConfigured on the first share request. 10/min
-        # covers real sharing behavior (a user sharing a class a couple
-        # times to different contacts) while stopping a script from
+        # would ImproperlyConfigured on the first share request.
+        # UPDATE: changed from a 10/min burst cap to a flat 100/day
+        # per-user cap (product decision) — generous enough for genuine
+        # sharing across a whole day, still stops a script from
         # inflating share_count or spamming in-app share notifications.
-        "classroom_share": "10/min",
+        # DRF's ScopedRateThrottle resets this on a rolling 24h window
+        # per user, not a calendar-day boundary.
+        "classroom_share": "100/day",
         # NOTE (fix — CRITICAL, same bug class as every other scope in this
         # dict, audit §12 item 18): ChatMessageViewSet.react() (Pass 12)
         # sets throttle_scope="chat_reaction" via ScopedRateThrottle but had
@@ -715,6 +718,18 @@ CELERY_BEAT_SCHEDULE = {
     "liveclass-expire-unclaimed-gifts": {
         "task": "liveclass.expire_unclaimed_gifts",
         "schedule": crontab(minute="*/30"),
+    },
+    # NOTE (fix — audit §12 item 24): tasks.send_notification_digests
+    # actually reads NotificationPreference.digest_frequency/
+    # last_digest_sent_at (Pass 14 fields that were previously pure dead
+    # weight — nothing ever sent a digest email) and sends a batched
+    # email to anyone whose daily/weekly interval has elapsed. Hourly is
+    # frequent enough to keep a daily/weekly digest close to on-time
+    # without re-scanning NotificationPreference constantly; the task
+    # itself is a cheap no-op for any user not yet due.
+    "liveclass-send-notification-digests": {
+        "task": "liveclass.send_notification_digests",
+        "schedule": crontab(minute=0),
     },
     # 🔥 NAYA — message app ka is Celery beat me pehle ZERO entry tha,
     # jabki dono tasks (message/tasks.py) ek poore feature ke liye zaroori

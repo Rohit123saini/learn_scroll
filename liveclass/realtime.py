@@ -19,6 +19,21 @@ WHY THIS FILE EXISTS:
     have" gap, it was a guaranteed failure to boot at all. This file (plus
     consumers.py / routing.py / ws_auth.py alongside it) is the fix.
 
+    NEW (realtime fix pass) — PER-USER CHANNEL (`broadcast_to_user()`):
+    a second, narrower gap of the same shape. `views.py`'s
+    `_safe_broadcast_to_user()` (used by ClassJoinRequestViewSet's
+    create/accept/reject and ClassroomStaffViewSet's perform_create) has
+    called `from .realtime import broadcast_to_user` since Flutter Phase
+    1/Phase 4, but — unlike `broadcast_to_session` above — that one
+    never raised ImportError, because `_safe_broadcast_to_user()` wraps
+    the whole thing in a try/except that only logs. So instead of a
+    boot-time crash, this one just silently never fired: every join-
+    request badge push and staff-promotion push was a no-op, degrading
+    to "works fine on manual refresh/reopen, never updates live" with
+    nothing in the logs loud enough to notice quickly. `broadcast_to_
+    user()` below (plus `UserConsumer` in consumers.py, and the
+    `ws/liveclass/user/` route already in routing.py) closes that gap.
+
 HOW A MESSAGE FLOWS:
     views.py: broadcast_to_session(42, "chat.message", {...})
         -> channel_layer.group_send("session.42", {"type": "session.event", ...})
@@ -410,5 +425,75 @@ def broadcast_to_session(session_id, event_type: str, payload: dict) -> bool:
             "Realtime broadcast failed (session=%s, event=%s) — connected "
             "clients will miss this push and rely on their next REST call.",
             session_id, event_type,
+        )
+        return False
+
+
+def _user_group_name(user_id) -> str:
+    return f"user.{user_id}"
+
+
+def broadcast_to_user(user_id, event_type: str, payload: dict) -> bool:
+    """Per-user counterpart to broadcast_to_session() above — pushes to
+    ONE user's own WebSocket channel (see UserConsumer in consumers.py)
+    instead of everyone in a live session's group. This is what
+    views.py's `_safe_broadcast_to_user()` calls (join_request.created,
+    join_request.decided, staff.added — see its call sites in
+    ClassJoinRequestViewSet/ClassroomStaffViewSet) — those events aren't
+    tied to any one live session at all (a join request can be raised
+    with no session running), so a session-scoped group is the wrong
+    shape and this function was the missing piece: `_safe_broadcast_to_
+    user()` already existed and already called `from .realtime import
+    broadcast_to_user`, but no such name was defined here, so every one
+    of those calls silently no-op'd (caught by that function's own
+    try/except) instead of actually pushing anything.
+
+    Same best-effort contract as broadcast_to_session(): NEVER raises —
+    the request that triggered this (accepting a join request, adding
+    staff) must succeed even if the channel layer is down. Same envelope
+    shape too ("event"/"payload"/"ts"), dispatched via a "user.event"
+    message type to UserConsumer.user_event — the per-user mirror of
+    "session.event" -> SessionConsumer.session_event, same Channels
+    type->method-name convention. Group name "user.<id>" (dot, matching
+    "session.<id>" above) — NOT "user:<id>", same ASCII-only constraint
+    noted in the module docstring.
+
+    Deliberately does NOT append to a replay/history buffer the way
+    broadcast_to_session() does: UserConsumer.connect() has no `?since=`
+    catch-up (nothing currently needs one — every event pushed through
+    here already has a REST-backed source of truth a full `_load()`/
+    reopen will re-derive correctly, which is exactly the fallback
+    `_safe_broadcast_to_user()`'s callers already document), so a replay
+    buffer here would just be unused complexity.
+
+    event_type: dotted event name, e.g. "join_request.created",
+        "join_request.decided", "staff.added".
+    payload: JSON-serializable dict — same already-serialized shape the
+        REST response for the triggering action used.
+    """
+    channel_layer = get_channel_layer()
+    if channel_layer is None:
+        logger.warning(
+            "No channel layer configured — dropping realtime event %r for user %s.",
+            event_type, user_id,
+        )
+        return False
+    try:
+        async_to_sync(channel_layer.group_send)(
+            _user_group_name(user_id),
+            {
+                "type": "user.event",  # dispatched to UserConsumer.user_event
+                "event": event_type,
+                "payload": payload,
+                "ts": time.time(),
+            },
+        )
+        return True
+    except Exception:
+        logger.exception(
+            "Realtime broadcast failed (user=%s, event=%s) — the connected "
+            "client, if any, will miss this push and rely on its next REST "
+            "call/reopen.",
+            user_id, event_type,
         )
         return False
