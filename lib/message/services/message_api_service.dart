@@ -645,7 +645,7 @@ class MessageApiService {
   }
 
   /// POST /message/messages/forward/
-  /// body: {"message_ids": [...], "conversation_ids": [...]}
+  /// body: {"message_ids": [...], "conversation_ids": [...], "caption": "..."}
   ///
   /// Forwards one or many messages (any type: text/image/video/audio/
   /// file/location) into one or many target chats in a single call.
@@ -655,9 +655,21 @@ class MessageApiService {
   /// touch the forwarded copies. Real-time delivery to the target
   /// chats happens over the socket on the backend side; this call just
   /// confirms success/failure.
+  ///
+  /// 🔧 GAP FIX (this session) — `caption` param add kiya. Backend
+  /// (`ConversationViewSet` — no wait, `MessageViewSet.forward` in
+  /// views.py) already fully supports an optional `caption` (WhatsApp
+  /// jaisa: forward karte waqt compose box me kuch aur likh ke bhejna) —
+  /// isko sirf un forwarded copies pe apply karta hai jinke paas khud
+  /// koi non-empty text nahi tha (media/location messages); agar source
+  /// message pehle se hi text-type hai to uska original text overwrite
+  /// nahi hota, caption us case me silently ignore ho jaati hai. Ye
+  /// param yahan missing tha, isliye `forward_message_screen.dart` build
+  /// hi nahi ho raha tha (`No named parameter with the name 'caption'`).
   static Future<void> forwardMessages({
     required List<String> messageIds,
     required List<String> conversationIds,
+    String? caption,
   }) async {
     final res = await http.post(
       Uri.parse("$_base/messages/forward/"),
@@ -665,6 +677,7 @@ class MessageApiService {
       body: jsonEncode({
         "message_ids": messageIds,
         "conversation_ids": conversationIds,
+        if (caption != null && caption.isNotEmpty) "caption": caption,
       }),
     );
     _decode(res);
@@ -982,7 +995,12 @@ class MessageApiService {
     return list.map((e) => MessageModel.fromJson(e)).toList();
   }
 
-  /// GET /message/search_all/?q=...&<filters>
+  /// 🔧 FIX (backend mismatch, confirmed against CHAT_APP_DOCUMENTATION.md
+  /// §7.1) — global search is an ACTION on `ConversationViewSet`, so it
+  /// lives under the `conversations/` prefix like every other viewset
+  /// action: `GET /message/conversations/search_all/?q=...`. It is NOT a
+  /// top-level `/message/search_all/` path — that would 404.
+  /// GET /message/conversations/search_all/?q=...&<filters>
   /// Global search — saari conversations me dhoondta hai, har result ke
   /// saath `conversation_preview` (name/photo/type) bhi aata hai taaki
   /// tap karke us conversation me jump kiya ja sake.
@@ -991,7 +1009,8 @@ class MessageApiService {
     SearchFilterModel? filters,
   }) async {
     final params = <String, String>{'q': query, ...?filters?.toQueryParams()};
-    final uri = Uri.parse("$_base/search_all/").replace(queryParameters: params);
+    final uri = Uri.parse("$_base/conversations/search_all/")
+        .replace(queryParameters: params);
     final res = await http.get(uri, headers: await _headers());
     final data = _decode(res);
     final List list = data is Map && data.containsKey('results')
@@ -1048,10 +1067,17 @@ class MessageApiService {
   // PRESENCE
   // ==================================================================
 
-  /// GET /message/users/<user_id>/presence/
+  /// 🔧 FIX (backend mismatch, confirmed against CHAT_APP_DOCUMENTATION.md
+  /// §6 "UserPresenceView") — real endpoint is `/message/presence/<user_id>/`,
+  /// NOT `/message/users/<user_id>/presence/`. This was 404ing — online/
+  /// last-seen status shown in chat_screen.dart's AppBar (§9 `presence`
+  /// handling) had no working REST fallback (WS `presence`/`presence_update`
+  /// events still worked independently, so this only broke the initial
+  /// on-open fetch, not live updates).
+  /// GET /message/presence/<user_id>/
   static Future<Map<String, dynamic>> getUserPresence(String userId) async {
     final res = await http.get(
-      Uri.parse("$_base/users/$userId/presence/"),
+      Uri.parse("$_base/presence/$userId/"),
       headers: await _headers(),
     );
     return _decode(res);
@@ -1061,17 +1087,23 @@ class MessageApiService {
   // CALLS
   // ==================================================================
 
-  /// GET /message/calls/
+  /// 🔧 FIX (backend mismatch, confirmed against CHAT_APP_DOCUMENTATION.md
+  /// §6 "Calls") — `CallHistoryViewSet` is router-registered at
+  /// `calls/history/`, NOT bare `calls/` (that prefix is only used by the
+  /// plain-path views `CallInitiateView`/`CallActionView` — see
+  /// `call_api_service.dart`). List/detail/missed/addable-participants/
+  /// add-participant ALL need the `history/` segment.
+  /// GET /message/calls/history/
   static Future<List<dynamic>> getCallHistory() async {
-    final res =
-        await http.get(Uri.parse("$_base/calls/"), headers: await _headers());
+    final res = await http.get(Uri.parse("$_base/calls/history/"),
+        headers: await _headers());
     final data = _decode(res);
     return data is Map && data.containsKey('results') ? data['results'] : data;
   }
 
-  /// GET /message/calls/<id>/
+  /// GET /message/calls/history/<id>/
   static Future<Map<String, dynamic>> getCallDetail(String callId) async {
-    final res = await http.get(Uri.parse("$_base/calls/$callId/"),
+    final res = await http.get(Uri.parse("$_base/calls/history/$callId/"),
         headers: await _headers());
     return _decode(res);
   }
@@ -1106,40 +1138,52 @@ class MessageApiService {
   // STUDY ROOM — WHITEBOARD AUTO-SAVE
   // ==================================================================
 
-  /// PUT /message/conversations/<id>/study-room-state/  {"pages": [...]}
+  /// 🔧 FIX (backend mismatch, confirmed against CHAT_APP_DOCUMENTATION.md
+  /// §6 "Study Room (`StudyRoomJoinView`, `StudyRoomStateView`)") — the
+  /// old comments here predate the backend endpoint existing at all
+  /// ("Backend me abhi ye endpoint maujood NAHI hai — banana hoga"). It
+  /// now exists, but under `/message/study-room/<id>/state/`, NOT
+  /// `/message/conversations/<id>/study-room-state/` — completely
+  /// different prefix, not just a renamed segment. All 3 of
+  /// save/get/end below were hitting a URL the backend never served,
+  /// so whiteboard auto-save/restore/end-session were **silently
+  /// broken end-to-end** (get/end fail open to "start with an empty
+  /// board" by design — see each method's own comment — so this never
+  /// surfaced as a visible error, just as "the board never remembers
+  /// anything").
+  /// PUT /message/study-room/<id>/state/  {"pages": [...]}
   ///
   /// 🔥 NAYA — poora whiteboard (saari pages: strokes/shapes/text/sticky
   /// notes) periodically yahan save hota hai taaki app band karke wapas
-  /// aane par board wahi se dikhe jahan chhoda tha. Backend me abhi ye
-  /// endpoint maujood NAHI hai — banana hoga (ek simple JSONField wala
-  /// model jo conversation se linked ho, poora board JSON store kare).
+  /// aane par board wahi se dikhe jahan chhoda tha.
   static Future<void> saveStudyRoomState(
     String conversationId,
     Map<String, dynamic> state,
   ) async {
     final res = await http.put(
-      Uri.parse("$_base/conversations/$conversationId/study-room-state/"),
+      Uri.parse("$_base/study-room/$conversationId/state/"),
       headers: await _headers(),
       body: jsonEncode(state),
     );
     _decode(res);
   }
 
-  /// GET /message/conversations/<id>/study-room-state/
+  /// GET /message/study-room/<id>/state/
   ///
   /// 🔥 NAYA — study room khulte hi last-saved board wapas load karne ke
-  /// liye. Endpoint na milne (404) ya koi bhi error case me caller
-  /// (StudyRoomScreen) gracefully khali board se hi shuru kar deta hai.
+  /// liye. Backend doc confirms this NEVER 404s (`{"pages": []}` on a
+  /// never-saved room) — but keep the graceful-empty-board fallback here
+  /// anyway for any other error case (network, auth, etc.).
   static Future<Map<String, dynamic>?> getStudyRoomState(String conversationId) async {
     final res = await http.get(
-      Uri.parse("$_base/conversations/$conversationId/study-room-state/"),
+      Uri.parse("$_base/study-room/$conversationId/state/"),
       headers: await _headers(),
     );
     final data = _decode(res);
     return data is Map<String, dynamic> ? data : null;
   }
 
-  /// DELETE /message/conversations/<id>/study-room-state/
+  /// DELETE /message/study-room/<id>/state/
   ///
   /// 🔥 NAYA — "End Session for Everyone" par call hota hai taaki saved
   /// whiteboard state permanently mit jaaye. "Leave Session" isko kabhi
@@ -1148,7 +1192,7 @@ class MessageApiService {
   /// ko agli baar ke liye bilkul fresh/khaali kar dete hain.
   static Future<void> endStudyRoomState(String conversationId) async {
     final res = await http.delete(
-      Uri.parse("$_base/conversations/$conversationId/study-room-state/"),
+      Uri.parse("$_base/study-room/$conversationId/state/"),
       headers: await _headers(),
     );
     _decode(res);

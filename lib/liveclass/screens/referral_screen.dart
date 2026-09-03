@@ -36,6 +36,18 @@ class _ReferralScreenState extends State<ReferralScreen> {
   bool _loading = true;
   String? _error;
 
+  // FEATURE (Phase 2, item 9 — classroom referral earnings): distinct
+  // from the sign-up code system above (referrals/my-code — referring
+  // PEOPLE to the app). This is PassPurchaseApi.referralEarnings() — the
+  // caller's own commission ledger from referring specific CLASSROOMS via
+  // ClassroomApi.referLink (see classroom_detail_screen.dart's "Refer &
+  // Earn" entry point). Backend was ready with no frontend caller
+  // anywhere in the module. Fetched separately and best-effort — a
+  // failure here shouldn't block the sign-up referral section above,
+  // which is this screen's original purpose.
+  ReferralEarnings? _earnings;
+  bool _earningsLoading = true;
+
   final _redeemCtrl = TextEditingController();
   bool _redeeming = false;
 
@@ -43,6 +55,7 @@ class _ReferralScreenState extends State<ReferralScreen> {
   void initState() {
     super.initState();
     _load();
+    _loadEarnings();
   }
 
   @override
@@ -79,6 +92,21 @@ class _ReferralScreenState extends State<ReferralScreen> {
   void _snack(String msg) {
     if (!mounted) return;
     ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(msg)));
+  }
+
+  Future<void> _loadEarnings() async {
+    try {
+      final earnings = await LiveClassApi.passPurchases.referralEarnings();
+      if (!mounted) return;
+      setState(() {
+        _earnings = earnings;
+        _earningsLoading = false;
+      });
+    } catch (_) {
+      // Best-effort — never block the sign-up referral section on this.
+      if (!mounted) return;
+      setState(() => _earningsLoading = false);
+    }
   }
 
   Future<void> _copyCode() async {
@@ -213,7 +241,60 @@ class _ReferralScreenState extends State<ReferralScreen> {
         _referrals.isEmpty
             ? Text("You haven't referred anyone yet.", style: TextStyle(fontSize: 12.5, color: Colors.grey.shade600))
             : Column(children: _referrals.map(_referralTile).toList()),
+        if (!_earningsLoading && _earnings != null) ...[
+          const SizedBox(height: 24),
+          const Text('Classroom Referral Earnings',
+              style: TextStyle(fontWeight: FontWeight.bold, fontSize: 14.5, color: LiveClassColors.navy)),
+          const SizedBox(height: 4),
+          Text(
+            'Commission from classrooms you\'ve referred (via each classroom\'s own "Refer & Earn" link).',
+            style: TextStyle(fontSize: 11.5, color: Colors.grey.shade600),
+          ),
+          const SizedBox(height: 10),
+          LiveClassCard(
+            margin: EdgeInsets.zero,
+            child: Row(
+              children: [
+                const Icon(Icons.savings_outlined, color: LiveClassColors.success, size: 22),
+                const SizedBox(width: 10),
+                Text('${_earnings!.totalEarned}', style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 18, color: LiveClassColors.navy)),
+                const SizedBox(width: 6),
+                Text('coins earned total', style: TextStyle(fontSize: 12.5, color: Colors.grey.shade600)),
+              ],
+            ),
+          ),
+          const SizedBox(height: 10),
+          _earnings!.purchases.results.isEmpty
+              ? Text('No classroom referrals yet.', style: TextStyle(fontSize: 12.5, color: Colors.grey.shade600))
+              : Column(children: _earnings!.purchases.results.map(_earningTile).toList()),
+        ],
       ],
+    );
+  }
+
+  Widget _earningTile(PassPurchase p) {
+    return LiveClassCard(
+      padding: const EdgeInsets.all(12),
+      margin: const EdgeInsets.only(bottom: 10),
+      child: Row(
+        children: [
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(p.classroomTitle.isNotEmpty ? p.classroomTitle : 'Classroom',
+                    style: const TextStyle(fontWeight: FontWeight.w600, fontSize: 13.5)),
+                const SizedBox(height: 2),
+                Text(
+                  '${p.student.fullName.isNotEmpty ? p.student.fullName : p.student.username} · ${liveClassFmtDate(p.purchasedAt)}',
+                  style: TextStyle(fontSize: 11.5, color: Colors.grey.shade600),
+                ),
+              ],
+            ),
+          ),
+          Text('+${p.referralCoinsReleased}', style: const TextStyle(fontWeight: FontWeight.bold, color: LiveClassColors.success)),
+        ],
+      ),
     );
   }
 

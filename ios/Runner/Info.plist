@@ -74,6 +74,11 @@
 	<string>To select photos for comments and posts</string>
 	<key>NSMicrophoneUsageDescription</key>
 	<string>To capture videos with audio</string>
+	<key>UIBackgroundModes</key>
+	<array>
+		<string>audio</string>
+		<string>voip</string>
+	</array>
 	<key>CFBundleURLTypes</key>
 	<array>
 		<dict>

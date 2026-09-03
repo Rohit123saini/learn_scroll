@@ -192,7 +192,7 @@ class _JoinRequestsScreenState extends State<JoinRequestsScreen> with SingleTick
           ],
         ),
         actions: [
-          TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('Wapas')),
+          TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('Cancel')),
           TextButton(
             onPressed: () => Navigator.pop(context, true),
             child: Text(accept ? 'Accept' : 'Reject', style: TextStyle(color: accept ? Colors.green.shade700 : Colors.red)),
@@ -229,7 +229,7 @@ class _JoinRequestsScreenState extends State<JoinRequestsScreen> with SingleTick
         title: const Text('Cancel Request?'),
         content: Text('Your pending request for "${req.classroomTitle}" will be cancelled.'),
         actions: [
-          TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('Wapas')),
+          TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('Cancel')),
           TextButton(
             onPressed: () => Navigator.pop(context, true),
             child: const Text('Cancel Request', style: TextStyle(color: Colors.red)),

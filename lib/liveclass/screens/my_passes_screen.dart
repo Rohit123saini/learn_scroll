@@ -13,6 +13,7 @@ import 'package:flutter/material.dart';
 import '../models/liveclass_models.dart';
 import '../services/liveclass_api_service.dart';
 import '../theme/liveclass_theme.dart';
+import 'pass_gift_claim_screen.dart';
 
 String _passTypeLabel(String type) {
   switch (type) {
@@ -232,6 +233,29 @@ class _MyPassesScreenState extends State<MyPassesScreen> {
       appBar: liveClassAppBar(
         'My Passes',
         actions: [
+          // FIX (orphan screen — PassGiftClaimScreen had zero navigation
+          // edges anywhere in the app despite being fully built and backed
+          // by a ready API). This is entry point #2 from that screen's own
+          // header comment: "general browsing — a 'My gifts' entry from
+          // my_passes_screen.dart". Opens on the Received/Sent tabs (no
+          // giftId), matching PassGiftClaimScreen()'s no-id constructor.
+          IconButton(
+            tooltip: 'Gifted passes',
+            icon: const Icon(Icons.card_giftcard_outlined),
+            onPressed: () => Navigator.push(
+              context,
+              MaterialPageRoute(
+                builder: (_) => PassGiftClaimScreen(
+                  onClaimed: (claimed) {
+                    // A claimed gift grants access to a classroom — refresh
+                    // this list so the newly-claimed pass shows up without
+                    // requiring a manual pull-to-refresh.
+                    _load();
+                  },
+                ),
+              ),
+            ),
+          ),
           Padding(
             padding: const EdgeInsets.only(right: 12),
             child: Center(

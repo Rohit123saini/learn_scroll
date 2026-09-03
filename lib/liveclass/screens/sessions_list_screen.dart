@@ -30,12 +30,14 @@
 
 import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
+import 'package:url_launcher/url_launcher.dart';
 
 import '../models/liveclass_models.dart';
 import '../services/liveclass_api_service.dart';
 import '../theme/liveclass_theme.dart';
 import 'live_session_screen.dart';
 import 'waitlist_screen.dart';
+import 'session_engagement_report_screen.dart';
 
 // FIX (design-system drift — production readiness audit): aliased to the
 // shared tokens instead of locally-duplicated hex literals — see the
@@ -234,6 +236,15 @@ class _SessionsListScreenState extends State<SessionsListScreen> {
 
   void _snack(String msg) => ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(msg)));
 
+  Future<void> _openRecording(String recordingUrl) async {
+    final uri = Uri.tryParse(recordingUrl);
+    if (uri == null || !await canLaunchUrl(uri)) {
+      _snack('Could not open this recording.');
+      return;
+    }
+    await launchUrl(uri, mode: LaunchMode.externalApplication);
+  }
+
   // -------------------------------------------------------------------
   // Actions
   // -------------------------------------------------------------------
@@ -335,15 +346,7 @@ class _SessionsListScreenState extends State<SessionsListScreen> {
   Widget build(BuildContext context) {
     return Scaffold(
       backgroundColor: _kBg,
-      appBar: AppBar(
-        backgroundColor: Colors.white,
-        foregroundColor: _kNavy,
-        elevation: 0.5,
-        title: Text(
-          widget.classroomTitle.isNotEmpty ? widget.classroomTitle : 'Sessions',
-          style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 16),
-        ),
-      ),
+      appBar: liveClassAppBar(widget.classroomTitle.isNotEmpty ? widget.classroomTitle : 'Sessions'),
       floatingActionButton: widget.canManage
           ? DecoratedBox(
               decoration: BoxDecoration(gradient: _kGradient, borderRadius: BorderRadius.circular(28)),
@@ -362,9 +365,9 @@ class _SessionsListScreenState extends State<SessionsListScreen> {
           _statusChips(),
           Expanded(
             child: _loading
-                ? const Center(child: CircularProgressIndicator(color: _kNavy))
+                ? const LiveClassLoading()
                 : _error != null
-                    ? _ErrorState(message: _error!, onRetry: _load)
+                    ? LiveClassErrorState(message: _error!, onRetry: _load)
                     : RefreshIndicator(
                         color: _kNavy,
                         onRefresh: _load,
@@ -483,6 +486,28 @@ class _SessionsListScreenState extends State<SessionsListScreen> {
     );
   }
 
+  Widget _unreadBadges(SessionUnreadCount u) {
+    if (u.chat <= 0 && u.polls <= 0) return const SizedBox.shrink();
+    Widget badge(IconData icon, int count) => Padding(
+          padding: const EdgeInsets.only(right: 8),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(icon, size: 13, color: _kNavy),
+              const SizedBox(width: 3),
+              Text('$count', style: const TextStyle(fontSize: 11, fontWeight: FontWeight.bold, color: _kNavy)),
+            ],
+          ),
+        );
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        if (u.chat > 0) badge(Icons.chat_bubble_outline_rounded, u.chat),
+        if (u.polls > 0) badge(Icons.poll_outlined, u.polls),
+      ],
+    );
+  }
+
   Widget _sessionCard(ClassSession s) {
     final color = _statusColor(s.status);
     return Container(
@@ -592,7 +617,7 @@ class _SessionsListScreenState extends State<SessionsListScreen> {
                   child: SizedBox(
                     height: 38,
                     child: OutlinedButton.icon(
-                      onPressed: () => _snack('Recording: ${s.recordingUrl}'),
+                      onPressed: () => _openRecording(s.recordingUrl),
                       icon: const Icon(Icons.play_circle_outline_rounded, size: 16),
                       label: const Text('Recording', style: TextStyle(fontSize: 12)),
                     ),
@@ -1136,38 +1161,6 @@ class _SessionFormSheetState extends State<_SessionFormSheet> {
             Icon(icon, size: 17, color: _kNavy),
             const SizedBox(width: 8),
             Expanded(child: Text(label, style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600))),
-          ],
-        ),
-      ),
-    );
-  }
-}
-
-// ===========================================================================
-// Shared small widgets
-// ===========================================================================
-class _ErrorState extends StatelessWidget {
-  final String message;
-  final VoidCallback onRetry;
-  const _ErrorState({required this.message, required this.onRetry});
-
-  @override
-  Widget build(BuildContext context) {
-    return Center(
-      child: Padding(
-        padding: const EdgeInsets.all(24),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            const Icon(Icons.error_outline_rounded, size: 40, color: Colors.black38),
-            const SizedBox(height: 12),
-            Text(message, textAlign: TextAlign.center, style: const TextStyle(color: Colors.black54)),
-            const SizedBox(height: 16),
-            ElevatedButton(
-              style: ElevatedButton.styleFrom(backgroundColor: _kNavy, foregroundColor: Colors.white),
-              onPressed: onRetry,
-              child: const Text('Retry'),
-            ),
           ],
         ),
       ),

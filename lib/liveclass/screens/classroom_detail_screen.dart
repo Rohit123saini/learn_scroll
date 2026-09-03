@@ -13,6 +13,11 @@
 //                  Close Classroom) + full tabs, no bottom CTA bar
 //   active      -> full tabs + "Enter Class" bottom bar
 //   expired     -> full tabs + "Renew Pass" bottom bar
+//   pending     -> About + Reviews only + disabled "Request Sent —
+//                  Waiting for Approval" bar (tap offers Cancel Request).
+//                  (Flutter Phase 1, item 2.) Flips to active/none live via
+//                  LiveClassUserSocket's `join_request.decided` event
+//                  without reopening this screen — see initState below.
 //   none        -> About + Reviews only + "Request to Join" bottom bar
 //
 // Screens this pushes into: Edit Classroom, Schedule Manager, Passes,
@@ -29,6 +34,7 @@ import 'package:path_provider/path_provider.dart';
 import 'package:open_filex/open_filex.dart';
 import 'package:file_selector/file_selector.dart';
 import 'package:intl/intl.dart';
+import 'package:share_plus/share_plus.dart';
 
 import '../../services/auth_service.dart';
 import '../models/liveclass_models.dart';
@@ -36,6 +42,7 @@ import '../services/liveclass_api_service.dart';
 import '../theme/liveclass_theme.dart';
 import '../utils/liveclass_datetime.dart';
 import 'banned_students_screen.dart';
+import 'chat_message_reports_screen.dart';
 import 'classroom_form_screen.dart';
 import 'classroom_recordings_screen.dart';
 import 'request_join_screen.dart';
@@ -127,11 +134,139 @@ class _ClassroomDetailScreenState extends State<ClassroomDetailScreen> {
   String? _error;
   bool _actionBusy = false;
 
+  // REALTIME (Flutter Phase 1, items 2 & 3): user-scoped socket so a
+  // teacher's pending badge and a student's own pending->active/none
+  // transition update live, without reopening this screen. CONFIRMED
+  // (realtime fix pass): the backend route/event this expects
+  // (`ws/liveclass/user/`, `broadcast_to_user()`, `UserConsumer` — see
+  // LiveClassUserSocket's header comment in liveclass_api_service.dart)
+  // now exists. If the channel layer or socket is ever unreachable this
+  // still degrades silently to the existing load-on-open behaviour —
+  // that fallback is a deliberate safety net, not a sign anything here
+  // is unwired.
+  final LiveClassUserSocket _userSocket = LiveClassUserSocket();
+  StreamSubscription<LiveSocketEvent>? _userSocketSub;
+
+  // NOTE (fix — Phase 4, item 3 / classroom stats push): `_stats`
+  // (enrolled_count, rating) used to be refreshed ONLY by `_load()` (first
+  // open / manual pull-to-refresh) or, in a stop-gap fix, by a plain
+  // `Timer.periodic(30s)` GET — that stop-gap worked but re-hit the network
+  // every 30s regardless of whether anything had actually changed, purely
+  // background battery/network cost for a screen that might sit open for a
+  // long time with the stats never moving.
+  //
+  // Now uses a per-classroom WebSocket push (`LiveClassClassroomSocket`,
+  // same pattern as `_userSocket` above — see that class's header comment
+  // in liveclass_api_service.dart for the backend piece it needs) so a GET
+  // only fires when a `classroom.stats` event actually arrives. The
+  // interval-based `_statsTimer` stays, but as a much-longer backstop
+  // (5 min, not 30s) for the same "channel layer hiccup should still
+  // degrade gracefully, not go stale forever" reason every other realtime
+  // feature in this app keeps a poll/reopen fallback.
+  late final LiveClassClassroomSocket _classroomSocket = LiveClassClassroomSocket(widget.classroomId);
+  StreamSubscription<LiveSocketEvent>? _classroomSocketSub;
+  Timer? _statsTimer;
+
   @override
   void initState() {
     super.initState();
     _classroom = widget.initial;
     _load();
+    _userSocket.connect();
+    _userSocketSub = _userSocket.events.listen(_onUserSocketEvent);
+    _classroomSocket.connect();
+    _classroomSocketSub = _classroomSocket.events.listen(_onClassroomSocketEvent);
+    // Backstop only — see the field comment above for why this is now 5
+    // minutes instead of the old 30s poll.
+    _statsTimer = Timer.periodic(const Duration(minutes: 5), (_) => _refreshStats());
+  }
+
+  void _onClassroomSocketEvent(LiveSocketEvent e) {
+    if (!mounted) return;
+    if (e.type == 'classroom.stats' && e.data['classroom_id'] == widget.classroomId) {
+      // Server already computed the fresh numbers — apply them directly
+      // instead of firing a follow-up GET (see _broadcast_classroom_stats
+      // in models.py for the exact payload shape).
+      final data = e.data;
+      setState(() {
+        _stats = ClassroomStats(
+          ratingAvg: (data['rating_avg'] as num?)?.toDouble() ?? _stats?.ratingAvg ?? 0,
+          ratingCount: data['rating_count'] as int? ?? _stats?.ratingCount ?? 0,
+          enrolledCount: data['enrolled_count'] as int? ?? _stats?.enrolledCount ?? 0,
+          weeklyTiming: _stats?.weeklyTiming ?? '',
+          upcomingHolidays: _stats?.upcomingHolidays ?? const [],
+        );
+      });
+    }
+  }
+
+  @override
+  void dispose() {
+    _statsTimer?.cancel();
+    _userSocketSub?.cancel();
+    _userSocket.dispose();
+    _classroomSocketSub?.cancel();
+    _classroomSocket.dispose();
+    super.dispose();
+  }
+
+  // Lightweight counterpart to `_load()` — just the stats GET, no loading
+  // spinner, no touching `_classroom`/`_myPass`. Silent on failure, same
+  // "never block/interrupt the screen over this" reasoning `_load()` already
+  // uses for the wishlist lookup.
+  Future<void> _refreshStats() async {
+    if (!mounted || _loading) return;
+    try {
+      final stats = await LiveClassApi.classrooms.stats(widget.classroomId);
+      if (!mounted) return;
+      setState(() => _stats = stats);
+    } catch (_) {
+      // Best-effort background refresh — next tick will just try again.
+    }
+  }
+
+  void _onUserSocketEvent(LiveSocketEvent e) {
+    if (!mounted) return;
+    switch (e.type) {
+      case 'join_request.created':
+        // Teacher-side: someone just raised a request against THIS
+        // classroom. Bump the badge without a re-fetch; a full
+        // `_loadPendingRequestCount()` still runs on manual refresh/reopen
+        // as a correctness backstop in case an event is ever missed.
+        if (_canManage && e.data['classroom_id'] == widget.classroomId) {
+          final serverCount = e.data['pending_count'];
+          setState(() {
+            _pendingRequestCount = serverCount is int ? serverCount : _pendingRequestCount + 1;
+          });
+        }
+        break;
+      case 'join_request.decided':
+        // Student-side: MY pending request on this classroom was just
+        // accepted/rejected. Flip the CTA immediately instead of leaving
+        // "Request Sent — Waiting for Approval" showing until next reopen.
+        if (e.data['classroom_id'] == widget.classroomId &&
+            _myPass?.pendingRequestId != null &&
+            e.data['id'] == _myPass!.pendingRequestId) {
+          _load();
+        }
+        break;
+      case 'staff.added':
+        // NOTE (fix — Phase 4, item 2): I was just promoted to staff on
+        // THIS classroom (see ClassroomStaffViewSet.perform_create's
+        // _safe_broadcast_to_user push in views.py). Previously
+        // `_pendingRequestCount` only got fetched once, inside `_load()`,
+        // gated on whatever `_canManage` was AT THAT MOMENT — if the
+        // promotion happened while this screen was already open, the
+        // manage-tier UI (and the join-request badge with it) wouldn't
+        // show up until the user backed out and reopened the classroom.
+        // Re-running `_load()` here recomputes `_canManage` fresh from the
+        // server and — same as any other load — fires
+        // `_loadPendingRequestCount()` immediately if it's now true.
+        if (e.data['classroom_id'] == widget.classroomId) {
+          _load();
+        }
+        break;
+    }
   }
 
   Future<void> _load() async {
@@ -191,14 +326,34 @@ class _ClassroomDetailScreenState extends State<ClassroomDetailScreen> {
   bool get _canManage => _accessLevel == 'owner' || _accessLevel == 'admin';
   bool get _hasFullAccess => _canManage || _accessLevel == 'active' || _accessLevel == 'expired';
   bool get _everHadAccess => _accessLevel != 'none';
+  // Flutter Phase 1, item 2: caller has a join request sitting with the
+  // teacher right now.
+  bool get _isPending => _accessLevel == 'pending';
 
   // -------------------------------------------------------------------
   // Wishlist
   // -------------------------------------------------------------------
+  // NOTE (fix — Phase 4, double-tap guard): _wishlistEntryId is set
+  // optimistically BEFORE the await below, so a second tap landing while
+  // the first request is still in flight used to read the already-flipped
+  // optimistic state, fire its own add()/remove() against the server on
+  // top of the first one, and then race it back — whichever response lands
+  // second silently overwrites the other's result in state (e.g. a fast
+  // add-then-remove double-tap can leave the heart showing "wishlisted"
+  // even though the server's last-committed state is "removed", or vice
+  // versa). `_wishlistBusy` blocks re-entrancy for the duration of exactly
+  // one in-flight call, same guard shape as `_actionBusy` already uses
+  // elsewhere on this screen for Enter Class / Cancel Request.
+  bool _wishlistBusy = false;
+
   Future<void> _toggleWishlist() async {
+    if (_wishlistBusy) return;
     final wasWishlisted = _wishlistEntryId != null;
     final previousId = _wishlistEntryId;
-    setState(() => _wishlistEntryId = wasWishlisted ? null : -1); // optimistic
+    setState(() {
+      _wishlistBusy = true;
+      _wishlistEntryId = wasWishlisted ? null : -1; // optimistic
+    });
     try {
       if (wasWishlisted) {
         await LiveClassApi.wishlist.remove(previousId!);
@@ -210,6 +365,8 @@ class _ClassroomDetailScreenState extends State<ClassroomDetailScreen> {
       if (!mounted) return;
       setState(() => _wishlistEntryId = previousId);
       _snack(e is LiveClassApiException ? e.message : 'Something went wrong');
+    } finally {
+      if (mounted) setState(() => _wishlistBusy = false);
     }
   }
 
@@ -350,6 +507,228 @@ class _ClassroomDetailScreenState extends State<ClassroomDetailScreen> {
   // -------------------------------------------------------------------
   // Report
   // -------------------------------------------------------------------
+  // -------------------------------------------------------------------
+  // Share (Phase 2, item 6) + Refer & Earn (Phase 2, item 9)
+  // -------------------------------------------------------------------
+  Future<void> _openShareSheet() async {
+    ClassroomShareResult? result;
+    String? error;
+    try {
+      result = await LiveClassApi.classrooms.share(widget.classroomId);
+    } catch (e) {
+      error = e is LiveClassApiException ? e.message : 'Could not create a share link.';
+    }
+    if (!mounted) return;
+    await showModalBottomSheet<void>(
+      context: context,
+      backgroundColor: Colors.white,
+      shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(18))),
+      builder: (ctx) {
+        if (error != null) {
+          return Padding(
+            padding: const EdgeInsets.all(24),
+            child: Text(error!, style: const TextStyle(fontSize: 13.5)),
+          );
+        }
+        final r = result!;
+        return Padding(
+          padding: const EdgeInsets.fromLTRB(20, 20, 20, 28),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              const Text('Share this Classroom', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
+              const SizedBox(height: 4),
+              Text('${r.shareCount} share${r.shareCount == 1 ? '' : 's'} so far',
+                  style: TextStyle(fontSize: 12, color: Colors.grey.shade600)),
+              const SizedBox(height: 14),
+              Container(
+                width: double.infinity,
+                padding: const EdgeInsets.all(12),
+                decoration: BoxDecoration(color: _kBg, borderRadius: BorderRadius.circular(LiveClassRadius.chip)),
+                child: Text(r.webUrl.isNotEmpty ? r.webUrl : r.shareText, style: const TextStyle(fontSize: 12.5)),
+              ),
+              const SizedBox(height: 12),
+              Row(
+                children: [
+                  Expanded(
+                    child: OutlinedButton.icon(
+                      icon: const Icon(Icons.copy_rounded, size: 16),
+                      label: const Text('Copy Link'),
+                      onPressed: () async {
+                        await Clipboard.setData(ClipboardData(text: r.webUrl.isNotEmpty ? r.webUrl : r.deepLink));
+                        _snack('Link copied.');
+                      },
+                    ),
+                  ),
+                  const SizedBox(width: 10),
+                  Expanded(
+                    child: ElevatedButton.icon(
+                      style: ElevatedButton.styleFrom(backgroundColor: _kNavy, foregroundColor: Colors.white),
+                      icon: const Icon(Icons.ios_share_rounded, size: 16),
+                      label: const Text('Share'),
+                      onPressed: () async {
+                        // NOTE (fix — item 6): now opens the OS's real
+                        // native share sheet (WhatsApp/SMS/email/etc.) via
+                        // share_plus instead of only ever copying to the
+                        // clipboard. Falls back to clipboard-copy if the
+                        // platform share sheet itself fails to launch
+                        // (e.g. no share targets registered).
+                        try {
+                          await SharePlus.instance.share(
+                            ShareParams(text: r.shareText, subject: 'Join this classroom'),
+                          );
+                        } catch (_) {
+                          await Clipboard.setData(ClipboardData(text: r.shareText));
+                          _snack('Share message copied — paste it anywhere.');
+                        }
+                      },
+                    ),
+                  ),
+                ],
+              ),
+              if (_classroom?.referralEnabled == true && !_canManage) ...[
+                const Divider(height: 28),
+                Row(
+                  children: [
+                    const Icon(Icons.percent_rounded, size: 18, color: LiveClassColors.success),
+                    const SizedBox(width: 8),
+                    Expanded(
+                      child: Text(
+                        'Refer & Earn ${_classroom!.referralCommissionPercent.toStringAsFixed(0)}% commission when someone joins through your link.',
+                        style: const TextStyle(fontSize: 12.5, fontWeight: FontWeight.w600),
+                      ),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 10),
+                SizedBox(
+                  width: double.infinity,
+                  child: OutlinedButton(
+                    onPressed: () {
+                      Navigator.pop(ctx);
+                      _openReferLink();
+                    },
+                    child: const Text('Get My Referral Link'),
+                  ),
+                ),
+              ],
+            ],
+          ),
+        );
+      },
+    );
+  }
+
+  Future<void> _openReferLink() async {
+    try {
+      final link = await LiveClassApi.classrooms.referLink(widget.classroomId);
+      if (!mounted) return;
+      await showModalBottomSheet<void>(
+        context: context,
+        backgroundColor: Colors.white,
+        shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(18))),
+        builder: (ctx) => Padding(
+          padding: const EdgeInsets.fromLTRB(20, 20, 20, 28),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              const Text('Your Referral Link', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
+              const SizedBox(height: 4),
+              Text('You earn ${link.commissionPercent.toStringAsFixed(0)}% on purchases made through this link.',
+                  style: TextStyle(fontSize: 12, color: Colors.grey.shade600)),
+              const SizedBox(height: 14),
+              Container(
+                width: double.infinity,
+                padding: const EdgeInsets.all(12),
+                decoration: BoxDecoration(color: _kBg, borderRadius: BorderRadius.circular(LiveClassRadius.chip)),
+                child: Text(link.webUrl, style: const TextStyle(fontSize: 12.5)),
+              ),
+              const SizedBox(height: 12),
+              SizedBox(
+                width: double.infinity,
+                child: ElevatedButton(
+                  style: ElevatedButton.styleFrom(backgroundColor: _kNavy, foregroundColor: Colors.white),
+                  onPressed: () async {
+                    await Clipboard.setData(ClipboardData(text: link.webUrl));
+                    _snack('Referral link copied.');
+                  },
+                  child: const Text('Copy Link'),
+                ),
+              ),
+            ],
+          ),
+        ),
+      );
+    } catch (e) {
+      _snack(e is LiveClassApiException ? e.message : 'Could not create your referral link.');
+    }
+  }
+
+  Future<void> _openShareStats() async {
+    try {
+      final stats = await LiveClassApi.classrooms.shareStats(widget.classroomId);
+      if (!mounted) return;
+      await showModalBottomSheet<void>(
+        context: context,
+        isScrollControlled: true,
+        backgroundColor: Colors.white,
+        shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(18))),
+        builder: (ctx) => DraggableScrollableSheet(
+          initialChildSize: 0.6,
+          minChildSize: 0.3,
+          maxChildSize: 0.9,
+          expand: false,
+          builder: (_, scrollCtrl) => ListView(
+            controller: scrollCtrl,
+            padding: const EdgeInsets.fromLTRB(20, 20, 20, 28),
+            children: [
+              const Text('Share Insights', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
+              const SizedBox(height: 4),
+              Text('${stats.shareCount} total share${stats.shareCount == 1 ? '' : 's'}',
+                  style: TextStyle(fontSize: 12.5, color: Colors.grey.shade600)),
+              if (stats.byChannel.isNotEmpty) ...[
+                const SizedBox(height: 14),
+                Wrap(
+                  spacing: 8,
+                  runSpacing: 8,
+                  children: stats.byChannel.entries
+                      .map((e) => Chip(label: Text('${e.key}: ${e.value}'), backgroundColor: _kBg))
+                      .toList(),
+                ),
+              ],
+              const SizedBox(height: 18),
+              const Text('Recent Shares', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 13.5)),
+              const SizedBox(height: 8),
+              if (stats.recent.isEmpty)
+                Text('No shares yet.', style: TextStyle(fontSize: 12.5, color: Colors.grey.shade600))
+              else
+                ...stats.recent.map((log) => ListTile(
+                      dense: true,
+                      contentPadding: EdgeInsets.zero,
+                      leading: const Icon(Icons.share_outlined, size: 18, color: _kNavy),
+                      title: Text(log.sharedBy.fullName.isNotEmpty ? log.sharedBy.fullName : log.sharedBy.username,
+                          style: const TextStyle(fontSize: 13)),
+                      subtitle: Text('${log.channel} · ${liveClassFmtDateTime(log.createdAt)}', style: const TextStyle(fontSize: 11)),
+                    )),
+            ],
+          ),
+        ),
+      );
+    } catch (e) {
+      _snack(e is LiveClassApiException ? e.message : 'Could not load share insights.');
+    }
+  }
+
+  // -------------------------------------------------------------------
+  // Reported Messages (Phase 2, item 7)
+  // -------------------------------------------------------------------
+  void _openChatMessageReports() {
+    Navigator.push(context, MaterialPageRoute(builder: (_) => ChatMessageReportsScreen(classroomId: widget.classroomId)))
+        .then((_) => _load());
+  }
+
   Future<void> _openReportDialog() async {
     // FIX (memory leak): this controller used to be created here and never
     // disposed — every open+close of this sheet leaked one
@@ -466,6 +845,13 @@ class _ClassroomDetailScreenState extends State<ClassroomDetailScreen> {
               _manageTile(ctx, Icons.quiz_outlined, 'Poll Templates', _openPollTemplates),
               _manageTile(ctx, Icons.video_library_outlined, 'Recordings', _openRecordings),
               _manageTile(ctx, Icons.person_off_outlined, 'Banned Students', _openBannedStudents),
+              // FEATURE (Phase 2, item 7 — chat report review): backend +
+              // Dart caller (ChatMessageReportApi.review) existed since
+              // Pass 14 with no tile anywhere to reach the moderation queue.
+              _manageTile(ctx, Icons.report_gmailerrorred_outlined, 'Reported Messages', _openChatMessageReports),
+              // FEATURE (Phase 2, item 6 — share insights): teacher's view
+              // of ClassroomViewSet.share_stats (who shared, which channel).
+              _manageTile(ctx, Icons.insights_outlined, 'Share Insights', _openShareStats),
               const Divider(height: 8),
               _manageTile(ctx, Icons.folder_outlined, 'Materials (full screen)', _openMaterialsFullScreen),
               _manageTile(ctx, Icons.campaign_outlined, 'Notice Board (full screen)', _openNoticeBoardFullScreen),
@@ -548,7 +934,7 @@ class _ClassroomDetailScreenState extends State<ClassroomDetailScreen> {
       MaterialPageRoute(
         builder: (_) => HolidaysScreen(classroomId: widget.classroomId, classroomTitle: _classroom?.title ?? ''),
       ),
-    );
+    ).then((_) => _load());
   }
 
   // NEW (frontend integration architecture v3, §1.11): quick-poll templates
@@ -559,7 +945,7 @@ class _ClassroomDetailScreenState extends State<ClassroomDetailScreen> {
       MaterialPageRoute(
         builder: (_) => PollTemplatesScreen(classroomId: widget.classroomId, classroomTitle: _classroom?.title ?? ''),
       ),
-    );
+    ).then((_) => _load());
   }
 
   void _openCoupons() {
@@ -568,7 +954,7 @@ class _ClassroomDetailScreenState extends State<ClassroomDetailScreen> {
       MaterialPageRoute(
         builder: (_) => CouponsScreen(classroomId: widget.classroomId, classroomTitle: _classroom?.title ?? ''),
       ),
-    );
+    ).then((_) => _load());
   }
 
   void _openPassManagement() {
@@ -577,7 +963,7 @@ class _ClassroomDetailScreenState extends State<ClassroomDetailScreen> {
       MaterialPageRoute(
         builder: (_) => PassManagementScreen(classroomId: widget.classroomId, classroomTitle: _classroom?.title ?? ''),
       ),
-    );
+    ).then((_) => _load());
   }
 
   // NOTE (fix): PassPurchaseApi.refund() already existed with no screen
@@ -592,7 +978,7 @@ class _ClassroomDetailScreenState extends State<ClassroomDetailScreen> {
       MaterialPageRoute(
         builder: (_) => ClassroomPurchasesScreen(classroomId: widget.classroomId, classroomTitle: _classroom?.title ?? ''),
       ),
-    );
+    ).then((_) => _load());
   }
 
   void _openStaffManagement() {
@@ -601,7 +987,7 @@ class _ClassroomDetailScreenState extends State<ClassroomDetailScreen> {
       MaterialPageRoute(
         builder: (_) => StaffManagementScreen(classroomId: widget.classroomId, classroomTitle: _classroom?.title ?? ''),
       ),
-    );
+    ).then((_) => _load());
   }
 
   // NOTE (fix — new frontend for existing backend feature): my-earnings/
@@ -615,7 +1001,7 @@ class _ClassroomDetailScreenState extends State<ClassroomDetailScreen> {
       MaterialPageRoute(
         builder: (_) => TeacherEarningsScreen(classroomId: widget.classroomId, classroomTitle: _classroom?.title ?? ''),
       ),
-    );
+    ).then((_) => _load());
   }
 
   // NOTE (fix — new frontend for existing backend feature): the recordings
@@ -627,7 +1013,7 @@ class _ClassroomDetailScreenState extends State<ClassroomDetailScreen> {
       MaterialPageRoute(
         builder: (_) => ClassroomRecordingsScreen(classroomId: widget.classroomId, classroomTitle: _classroom?.title ?? ''),
       ),
-    );
+    ).then((_) => _load());
   }
 
   // NOTE (fix — new frontend for existing backend feature): classroom-wide
@@ -640,7 +1026,7 @@ class _ClassroomDetailScreenState extends State<ClassroomDetailScreen> {
       MaterialPageRoute(
         builder: (_) => BannedStudentsScreen(classroomId: widget.classroomId, classroomTitle: _classroom?.title ?? ''),
       ),
-    );
+    ).then((_) => _load());
   }
 
   void _openJoinRequestsInbox() {
@@ -658,7 +1044,7 @@ class _ClassroomDetailScreenState extends State<ClassroomDetailScreen> {
       MaterialPageRoute(
         builder: (_) => CertificatesScreen(classroomId: widget.classroomId, classroomTitle: _classroom?.title ?? '', canIssue: true),
       ),
-    );
+    ).then((_) => _load());
   }
 
   // Dedicated full-screen variants — same data as the in-tab views below,
@@ -671,28 +1057,28 @@ class _ClassroomDetailScreenState extends State<ClassroomDetailScreen> {
       MaterialPageRoute(
         builder: (_) => MaterialsScreen(classroomId: widget.classroomId, classroomTitle: _classroom?.title ?? '', canManage: _canManage),
       ),
-    );
+    ).then((_) => _load());
   }
 
   void _openNoticeBoardFullScreen() {
     Navigator.push(
       context,
       MaterialPageRoute(builder: (_) => NoticeBoardScreen(classroomId: widget.classroomId, canManage: _canManage)),
-    );
+    ).then((_) => _load());
   }
 
   void _openDoubtsFullScreen() {
     Navigator.push(
       context,
       MaterialPageRoute(builder: (_) => DoubtsScreen(classroomId: widget.classroomId, canManage: _canManage)),
-    );
+    ).then((_) => _load());
   }
 
   void _openAssignmentsFullScreen() {
     Navigator.push(
       context,
       MaterialPageRoute(builder: (_) => AssignmentsScreen(classroomId: widget.classroomId, canManage: _canManage)),
-    );
+    ).then((_) => _load());
   }
 
   /// Used for both the fresh "Request to Join" flow and "Renew Pass" —
@@ -716,19 +1102,13 @@ class _ClassroomDetailScreenState extends State<ClassroomDetailScreen> {
   @override
   Widget build(BuildContext context) {
     if (_loading && _classroom == null) {
-      return const Scaffold(backgroundColor: _kBg, body: Center(child: CircularProgressIndicator(color: _kNavy)));
+      return Scaffold(backgroundColor: _kBg, appBar: liveClassAppBar(''), body: const LiveClassLoading());
     }
     if (_error != null && _classroom == null) {
       return Scaffold(
         backgroundColor: _kBg,
-        appBar: AppBar(backgroundColor: _kNavy, foregroundColor: Colors.white),
-        body: _InlineMessage(
-          icon: Icons.wifi_off_rounded,
-          title: 'Could not load',
-          subtitle: _error!,
-          actionLabel: 'Retry',
-          onAction: _load,
-        ),
+        appBar: liveClassAppBar(''),
+        body: LiveClassErrorState(message: _error!, onRetry: _load),
       );
     }
 
@@ -840,6 +1220,11 @@ class _ClassroomDetailScreenState extends State<ClassroomDetailScreen> {
         ),
       ),
       actions: [
+        // FEATURE (Phase 2, item 6 — share button): ClassroomViewSet.share/
+        // .share_stats/.my_shares were fully ready server-side with zero
+        // frontend caller anywhere in the module. Visible to everyone
+        // (sharing doesn't require access to the classroom itself).
+        IconButton(icon: const Icon(Icons.share_outlined), onPressed: _openShareSheet),
         if (!_canManage)
           IconButton(
             icon: Icon(_wishlistEntryId != null ? Icons.favorite_rounded : Icons.favorite_border_rounded,
@@ -941,6 +1326,10 @@ class _ClassroomDetailScreenState extends State<ClassroomDetailScreen> {
             const SizedBox(height: 10),
             Text('Pass is valid until ${_fmtDate(_myPass!.expiresAt!)}.',
                 style: TextStyle(color: Colors.green.shade700, fontSize: 12.5, fontWeight: FontWeight.w600)),
+          ] else if (_isPending) ...[
+            const SizedBox(height: 10),
+            Text('Your request to join is awaiting the teacher\'s approval.',
+                style: TextStyle(color: Colors.orange.shade800, fontSize: 12.5, fontWeight: FontWeight.w600)),
           ],
         ],
       ),
@@ -1009,12 +1398,59 @@ class _ClassroomDetailScreenState extends State<ClassroomDetailScreen> {
           gradient: true,
           onTap: _openRequestJoin,
         );
+      case 'pending':
+        // Flutter Phase 1, item 2: styled as inactive (not the primary
+        // gradient CTA) so it doesn't invite re-tapping to "submit again"
+        // — but tapping still does something useful (offers to cancel the
+        // request) rather than being a dead end.
+        return _BottomActionBar(
+          label: 'Request Sent — Waiting for Approval',
+          gradient: false,
+          disabled: true,
+          busy: _actionBusy,
+          onTap: _confirmCancelJoinRequest,
+        );
       default:
         return _BottomActionBar(
           label: 'Request to Join',
           gradient: false,
           onTap: _openRequestJoin,
         );
+    }
+  }
+
+  // Flutter Phase 1, item 2: let a student back out of a pending request
+  // instead of just waiting silently — reuses
+  // LiveClassApi.joinRequests.cancel, already built for
+  // `request_join_screen.dart` / `join_requests_screen.dart`'s own "mine"
+  // tab, just not previously reachable from this screen's main CTA.
+  Future<void> _confirmCancelJoinRequest() async {
+    final requestId = _myPass?.pendingRequestId;
+    if (requestId == null) return;
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (_) => AlertDialog(
+        title: const Text('Cancel Request?'),
+        content: const Text('This withdraws your join request. You can request to join again later.'),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('Keep Waiting')),
+          TextButton(onPressed: () => Navigator.pop(context, true), child: const Text('Cancel Request')),
+        ],
+      ),
+    );
+    if (ok != true || !mounted) return;
+    setState(() => _actionBusy = true);
+    try {
+      await LiveClassApi.joinRequests.cancel(requestId);
+      if (!mounted) return;
+      await _load();
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text(e is LiveClassApiException ? e.message : 'Could not cancel the request.')),
+      );
+    } finally {
+      if (mounted) setState(() => _actionBusy = false);
     }
   }
 }
@@ -1026,8 +1462,20 @@ class _BottomActionBar extends StatelessWidget {
   final String label;
   final bool gradient;
   final bool busy;
+  // Flutter Phase 1, item 2: muted/outline styling for the "already
+  // pending" state — visually distinct from the primary "Enter
+  // Class"/"Request to Join" CTAs so it doesn't read as an active call to
+  // action, even though [onTap] is still wired (to "Cancel Request", not
+  // "submit again") so the bar isn't a dead end.
+  final bool disabled;
   final VoidCallback onTap;
-  const _BottomActionBar({required this.label, required this.gradient, required this.onTap, this.busy = false});
+  const _BottomActionBar({
+    required this.label,
+    required this.gradient,
+    required this.onTap,
+    this.busy = false,
+    this.disabled = false,
+  });
 
   @override
   Widget build(BuildContext context) {
@@ -1042,9 +1490,10 @@ class _BottomActionBar extends StatelessWidget {
           height: 48,
           child: DecoratedBox(
             decoration: BoxDecoration(
-              gradient: gradient ? _kGradient : null,
-              color: gradient ? null : _kNavy,
+              gradient: disabled ? null : (gradient ? _kGradient : null),
+              color: disabled ? Colors.grey.shade200 : (gradient ? null : _kNavy),
               borderRadius: BorderRadius.circular(12),
+              border: disabled ? Border.all(color: Colors.grey.shade400) : null,
             ),
             child: Material(
               color: Colors.transparent,
@@ -1053,8 +1502,23 @@ class _BottomActionBar extends StatelessWidget {
                 onTap: busy ? null : onTap,
                 child: Center(
                   child: busy
-                      ? const SizedBox(width: 20, height: 20, child: CircularProgressIndicator(color: Colors.white, strokeWidth: 2))
-                      : Text(label, style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold, fontSize: 15)),
+                      ? SizedBox(
+                          width: 20,
+                          height: 20,
+                          child: CircularProgressIndicator(
+                            color: disabled ? _kNavy : Colors.white,
+                            strokeWidth: 2,
+                          ),
+                        )
+                      : Text(
+                          label,
+                          textAlign: TextAlign.center,
+                          style: TextStyle(
+                            color: disabled ? Colors.grey.shade700 : Colors.white,
+                            fontWeight: FontWeight.bold,
+                            fontSize: 15,
+                          ),
+                        ),
                 ),
               ),
             ),
@@ -1292,9 +1756,9 @@ class _ScheduleTabState extends State<_ScheduleTab> with AutomaticKeepAliveClien
               ),
             ),
           if (_loading)
-            const Padding(padding: EdgeInsets.only(top: 60), child: Center(child: CircularProgressIndicator(color: _kNavy)))
+            const Padding(padding: EdgeInsets.only(top: 60), child: LiveClassLoading())
           else if (_error != null)
-            _InlineMessage(icon: Icons.wifi_off_rounded, title: 'Could not load', subtitle: _error!, actionLabel: 'Retry', onAction: _load)
+            LiveClassErrorState(message: _error!, onRetry: _load)
           else ...[
             if (_schedules.isNotEmpty) ...[
               const Text('Recurring pattern', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 14)),
@@ -1681,9 +2145,9 @@ class _MaterialsTabState extends State<_MaterialsTab> with AutomaticKeepAliveCli
             ),
           const SizedBox(height: 10),
           if (_loading)
-            const Padding(padding: EdgeInsets.only(top: 60), child: Center(child: CircularProgressIndicator(color: _kNavy)))
+            const Padding(padding: EdgeInsets.only(top: 60), child: LiveClassLoading())
           else if (_error != null)
-            _InlineMessage(icon: Icons.wifi_off_rounded, title: 'Could not load', subtitle: _error!, actionLabel: 'Retry', onAction: _load)
+            LiveClassErrorState(message: _error!, onRetry: _load)
           else if (_items.isEmpty)
             const _InlineMessage(icon: Icons.folder_off_outlined, title: 'No materials yet', subtitle: 'Notes/PDFs added by the teacher will show up here.')
           else
@@ -1877,9 +2341,9 @@ class _NoticesTabState extends State<_NoticesTab> with AutomaticKeepAliveClientM
             ),
           const SizedBox(height: 10),
           if (_loading)
-            const Padding(padding: EdgeInsets.only(top: 60), child: Center(child: CircularProgressIndicator(color: _kNavy)))
+            const Padding(padding: EdgeInsets.only(top: 60), child: LiveClassLoading())
           else if (_error != null)
-            _InlineMessage(icon: Icons.wifi_off_rounded, title: 'Could not load', subtitle: _error!, actionLabel: 'Retry', onAction: _load)
+            LiveClassErrorState(message: _error!, onRetry: _load)
           else if (_items.isEmpty)
             const _InlineMessage(icon: Icons.campaign_outlined, title: 'No notices yet', subtitle: '')
           else
@@ -2074,9 +2538,9 @@ class _DoubtsTabState extends State<_DoubtsTab> with AutomaticKeepAliveClientMix
             const SizedBox(height: 14),
           ],
           if (_loading)
-            const Padding(padding: EdgeInsets.only(top: 60), child: Center(child: CircularProgressIndicator(color: _kNavy)))
+            const Padding(padding: EdgeInsets.only(top: 60), child: LiveClassLoading())
           else if (_error != null)
-            _InlineMessage(icon: Icons.wifi_off_rounded, title: 'Could not load', subtitle: _error!, actionLabel: 'Retry', onAction: _load)
+            LiveClassErrorState(message: _error!, onRetry: _load)
           else if (_items.isEmpty)
             const _InlineMessage(icon: Icons.help_outline_rounded, title: 'No doubts yet', subtitle: '')
           else
@@ -2270,9 +2734,9 @@ class _ReviewsTabState extends State<_ReviewsTab> with AutomaticKeepAliveClientM
             ),
           const SizedBox(height: 10),
           if (_loading)
-            const Padding(padding: EdgeInsets.only(top: 60), child: Center(child: CircularProgressIndicator(color: _kNavy)))
+            const Padding(padding: EdgeInsets.only(top: 60), child: LiveClassLoading())
           else if (_error != null)
-            _InlineMessage(icon: Icons.wifi_off_rounded, title: 'Could not load', subtitle: _error!, actionLabel: 'Retry', onAction: _load)
+            LiveClassErrorState(message: _error!, onRetry: _load)
           else if (_items.isEmpty)
             const _InlineMessage(icon: Icons.reviews_outlined, title: 'No reviews yet', subtitle: '')
           else
@@ -2508,9 +2972,9 @@ class _AssignmentsTabState extends State<_AssignmentsTab> with AutomaticKeepAliv
             ),
           const SizedBox(height: 10),
           if (_loading)
-            const Padding(padding: EdgeInsets.only(top: 60), child: Center(child: CircularProgressIndicator(color: _kNavy)))
+            const Padding(padding: EdgeInsets.only(top: 60), child: LiveClassLoading())
           else if (_error != null)
-            _InlineMessage(icon: Icons.wifi_off_rounded, title: 'Could not load', subtitle: _error!, actionLabel: 'Retry', onAction: _load)
+            LiveClassErrorState(message: _error!, onRetry: _load)
           else if (_items.isEmpty)
             const _InlineMessage(icon: Icons.assignment_outlined, title: 'No assignments yet', subtitle: '')
           else

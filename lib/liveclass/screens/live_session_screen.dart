@@ -112,6 +112,7 @@ import 'package:intl/intl.dart';
 
 import '../models/liveclass_models.dart';
 import '../services/liveclass_api_service.dart';
+import '../services/pip_service.dart';
 import '../theme/liveclass_theme.dart';
 
 // FIX (design-system drift): aliased to the shared tokens instead of
@@ -161,6 +162,17 @@ class _LiveSessionScreenState extends State<LiveSessionScreen> with WidgetsBindi
   bool _camOn = true;
   bool _screenSharing = false;
 
+  // NEW (audio settings) — user-facing toggles for the mic's noise
+  // suppression / echo cancellation processing (WebRTC-level constraints,
+  // applied via `lk.AudioCaptureOptions` — see `_audioCaptureOptions` and
+  // `_doLiveKitConnect`/`_applyAudioProcessingSettings` below). Both default
+  // ON: that matches LiveKit/WebRTC's own defaults, so a user who never
+  // opens the audio-settings sheet gets exactly the behavior they had
+  // before this feature existed. Purely a local device preference (not
+  // synced anywhere) — each participant controls their own mic processing.
+  bool _noiseSuppressionOn = true;
+  bool _echoCancellationOn = true;
+
   // Tracks which physical camera is currently live for the front/back flip
   // buttons (_flipCamera/_flipGreenRoomCamera) — `switchCamera()` on newer
   // livekit_client needs an explicit device id/position rather than just
@@ -191,6 +203,23 @@ class _LiveSessionScreenState extends State<LiveSessionScreen> with WidgetsBindi
   bool _chatLoading = false;
   bool _sendingChat = false;
 
+  // NEW (reply feature) — the message currently being replied to, shown as
+  // a quote-preview strip above the compose bar (see `_chatComposeBar`),
+  // cleared on send/cancel. WhatsApp-style one-level reply, not a full
+  // nested thread view — see ChatMessage.reply_to's docstring in models.py.
+  ChatMessage? _replyingTo;
+
+  // NEW (message search) — toggled from the chat panel header. When active,
+  // `_chatSearchCtrl`'s text re-queries the backend (debounced) instead of
+  // showing the normal live history, and results replace `_chatMessages`'
+  // rendering via `_chatSearchResults` so the running live list underneath
+  // is never mutated by a search.
+  bool _chatSearchActive = false;
+  final TextEditingController _chatSearchCtrl = TextEditingController();
+  List<ChatMessage>? _chatSearchResults; // null = no search in flight/shown yet
+  bool _chatSearching = false;
+  Timer? _chatSearchDebounce;
+
   // Polls
   List<LivePoll> _polls = [];
   bool _pollsLoading = false;
@@ -201,6 +230,33 @@ class _LiveSessionScreenState extends State<LiveSessionScreen> with WidgetsBindi
   bool _participantsLoading = false;
 
   bool _actionBusy = false; // end / leave / kick in flight
+
+  // REALTIME (Flutter Phase 1, items 1/4/5 + realtime fix pass): the
+  // WebSocket client — see LiveClassSocket's header comment in
+  // liveclass_api_service.dart for the confirmed protocol (consumers.py's
+  // SessionConsumer). Originally only `participant.kicked` and
+  // `presence.*` were wired here; chat/poll/hand/recording now ALSO
+  // listen on this same socket (see _onLiveSocketEvent below) instead of
+  // polling REST every few seconds — see _startPolling's comment for
+  // which polling timers this replaced and which ones stayed (roster
+  // join/leave and mic-mute icons on _participants still poll, since the
+  // backend doesn't broadcast a `participant.joined`/`participant.left`
+  // roster event — only `presence.*`, which is a lighter-weight "who's
+  // connected right now" signal, not the full DB-backed participant row).
+  late final LiveClassSocket _liveSocket = LiveClassSocket(widget.sessionId);
+  StreamSubscription<LiveSocketEvent>? _liveSocketSub;
+  // FEATURE (Flutter Phase 1, item 5 — presence strip): who's ACTUALLY
+  // connected right now, per `presence.snapshot`/`joined`/`left` — a
+  // truer "who's live" signal than `_participants` (that list is DB-
+  // backed and only refreshes every 8s via _participantsPollTimer, and
+  // includes people whose socket already dropped but whose participant
+  // row hasn't been cleaned up yet).
+  final Set<int> _onlinePresenceUserIds = {};
+  // FEATURE (Flutter Phase 1, item 4): true once WE'VE been told over the
+  // socket that we were removed — stops _scheduleAutoReconnect() from
+  // treating the LiveKit RoomDisconnectedEvent that follows a kick as
+  // just another network blip to quietly retry forever.
+  bool _kickedBySocket = false;
 
   // FEATURE: hand-raise. `_handRaised` mirrors OUR OWN
   // SessionParticipant.hand_raised_at (see sessions/{id}/hand/ in
@@ -214,10 +270,10 @@ class _LiveSessionScreenState extends State<LiveSessionScreen> with WidgetsBindi
 
   // FEATURE: recording. `_isRecording` mirrors ClassSession.is_recording
   // (true while `egress_id` is set — see models.py). Seeded from
-  // [_session] on join and kept fresh by [_sessionPollTimer] below so
-  // every participant (not just whoever tapped the button) sees the
-  // "REC" indicator update, even if the host started it from a
-  // different device.
+  // [_session] once on join (_refreshSessionRecordingState), then kept
+  // live for EVERY participant (not just whoever tapped the button) by
+  // the `recording.started`/`recording.stopped` socket events in
+  // _onLiveSocketEvent — no periodic poll needed for this anymore.
   bool _isRecording = false;
   bool _recordingBusy = false; // guards start/stop recording while in flight
 
@@ -285,12 +341,19 @@ class _LiveSessionScreenState extends State<LiveSessionScreen> with WidgetsBindi
 
   // FEATURE: collaborative whiteboard — everyone's strokes synced live over
   // the LiveKit data channel (see _WhiteboardStroke near the bottom of this
-  // file), no backend persistence. `Classroom.whiteboard_snapshot` (see
-  // models.py) is never read or written here — a participant who opens the
-  // board after drawing has already happened gets caught up via a
-  // peer-to-peer "does anyone have the current board" request/response
-  // (_wbRequestSync / 'wb_full_state' below) instead of a server round-trip,
-  // so the board is empty again once every participant has left.
+  // file). A participant who opens the board after drawing has already
+  // happened gets caught up via a peer-to-peer "does anyone have the
+  // current board" request/response (_wbRequestSync / 'wb_full_state'
+  // below), same as before.
+  //
+  // NOTE (fix — whiteboard persistence): that peer-to-peer catch-up only
+  // works while SOMEONE still in the room holds the strokes in memory —
+  // `ClassSession.whiteboard_snapshot` (models.py) now backstops that gap.
+  // `_wbAutosaveTimer` below periodically checkpoints the current board
+  // via ClassSessionViewSet.whiteboard() (views.py) so a device that
+  // reconnects alone, or a joiner who beats everyone else back into the
+  // room, still finds the board — see `_restoreSpotlightAndWhiteboardFromServer`
+  // (seeds `_wbStrokes` on join/reconnect) and `_wbAutosave` (writes it back).
   bool _whiteboardOpen = false;
   final Map<String, _WhiteboardStroke> _wbStrokes = {}; // strokeId -> stroke
   final List<String> _wbStrokeOrder = []; // insertion order — paint order + undo (pop own last id)
@@ -301,6 +364,10 @@ class _LiveSessionScreenState extends State<LiveSessionScreen> with WidgetsBindi
   String? _wbActiveStrokeId; // stroke currently being drawn by ME, if any
   Size _wbCanvasSize = Size.zero; // last-known canvas box size, for normalizing/denormalizing points
   final GlobalKey _wbRepaintKey = GlobalKey(); // wraps the whiteboard's CustomPaint -- see _exportWhiteboardPdf
+  Timer? _wbAutosaveTimer; // periodic checkpoint to the server — see _wbAutosave
+  bool _wbDirty = false; // set on any local stroke mutation, cleared once a save actually goes out
+  int _wbLastSavedStrokeCount = -1; // avoids POSTing an unchanged empty board over and over
+
 
   // LiveKit
   lk.Room? _lkRoom;
@@ -386,6 +453,13 @@ class _LiveSessionScreenState extends State<LiveSessionScreen> with WidgetsBindi
   bool _captionsListening = false; // actually mid-recognition right now (STT auto-restarts in short bursts)
   String _myPartialCaption = ''; // our own in-progress (not yet finalized) line, shown locally only
   final List<_CaptionLine> _captionFeed = []; // finalized lines from everyone, newest last
+  // NEW (persistence fix): the session's full durable transcript (from
+  // sessions/{id}/captions/ GET) — separate from `_captionFeed` above,
+  // which stays the short-lived, self-expiring 3-line live strip. This
+  // list only grows (seeded once on join via `_loadCaptionHistory`, then
+  // appended to as new lines are finalized) and backs the "View
+  // transcript" sheet — see `_showCaptionTranscript`.
+  List<SessionCaptionLine> _captionTranscript = [];
   Timer? _captionLineExpiryTimer;
 
   // FEATURE: in-app "mini view" (Picture-in-Picture-style floating tile).
@@ -398,6 +472,16 @@ class _LiveSessionScreenState extends State<LiveSessionScreen> with WidgetsBindi
   // to the full room view (closes whatever panel is open).
   bool _miniViewOn = false;
   Offset _miniViewOffset = const Offset(14, 90); // top-left corner, screen coords; dragged live in _MiniViewTile
+
+  // FEATURE: real OS-level Picture-in-Picture (see pip_service.dart /
+  // MainActivity.kt / PipManager.swift). Separate from the in-app mini-view
+  // above — this one survives actually backgrounding the whole app.
+  // `_isInPip` drives a chrome-free layout swap (see build()); on Android it
+  // matters because the PiP window mirrors whatever this screen is
+  // currently drawing, so a full appbar/control-bar layout would just look
+  // squeezed and unreadable in a postage-stamp window.
+  bool _isInPip = false;
+  StreamSubscription<bool>? _pipModeSub;
 
   // FEATURE: breakout rooms (host-only creation/assignment; everyone else
   // just sees which room they've been put in). See file header for the
@@ -423,12 +507,20 @@ class _LiveSessionScreenState extends State<LiveSessionScreen> with WidgetsBindi
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
+    _pipModeSub = PipService.instance.onPipModeChanged.listen((inPip) {
+      if (!mounted) return;
+      setState(() => _isInPip = inPip);
+    });
     _session = widget.session;
     // FEATURE (advanced): see _connectivitySub's own comment. Set up
     // unconditionally here (not gated on _state) since it only ever acts
     // while _state == inRoom anyway -- the handler checks that itself.
     _connectivitySub = Connectivity().onConnectivityChanged.listen((results) {
       if (!mounted || _state != _RoomState.inRoom) return;
+      // Flutter Phase 1, item 4: a kicked user's network coming back
+      // shouldn't trigger a reconnect attempt either — same reasoning as
+      // the guard in _scheduleAutoReconnect().
+      if (_kickedBySocket) return;
       final hasNetwork = results.isNotEmpty && !results.contains(ConnectivityResult.none);
       if (!hasNetwork) return;
       // Network just came back while we were either sitting in the
@@ -544,6 +636,21 @@ class _LiveSessionScreenState extends State<LiveSessionScreen> with WidgetsBindi
       case AppLifecycleState.paused:
       case AppLifecycleState.inactive:
       case AppLifecycleState.hidden:
+        // FIX (PiP): this used to unconditionally kill the camera the
+        // instant the app backgrounded. That was correct before real PiP
+        // existed (nothing could show the feed anyway, so keeping it
+        // publishing was just wasted battery/bandwidth) but would now go
+        // black inside the PiP window MainActivity/PipManager are about to
+        // float on top of everything else. `_isInPip` is set by the
+        // onUserLeaveHint -> enterPictureInPictureMode -> onPipModeChanged
+        // round trip, which on Android fires before this callback in
+        // practice, but the ordering isn't a hard platform guarantee —
+        // that's an acceptable small window, not a correctness bug (worst
+        // case one paused frame shows before PiP catches up).
+        if (_isInPip) {
+          _camOnBeforeBackground = _camOn;
+          break;
+        }
         if (_camOn) {
           _camOnBeforeBackground = true;
           unawaited(_lkRoom?.localParticipant?.setCameraEnabled(false));
@@ -564,47 +671,38 @@ class _LiveSessionScreenState extends State<LiveSessionScreen> with WidgetsBindi
     }
   }
 
-  // Lightweight polling — there's no websocket/pubsub wired up (see file
-  // header), so this is how chat/polls/participants stay "live" without one.
-  // Only the panel that's actually open gets polled, and only while the
-  // widget is mounted and still in the room.
-  Timer? _chatPollTimer;
-  Timer? _pollPollTimer;
+  // Lightweight polling — kept ONLY for data the backend doesn't push over
+  // the socket (participant roster join/leave, mic-mute icons — see the
+  // field comment on _liveSocket above for why). Chat, polls, hand-raise,
+  // and the recording indicator used to poll here too (4s/6s/8s/10s
+  // timers) but now update instantly from `_onLiveSocketEvent` instead —
+  // removed below rather than left dead, since a stale disabled Timer
+  // that never fires is more confusing to find later than no Timer at
+  // all. A brief socket drop doesn't lose events either: consumers.py's
+  // reconnect-with-`?since=` catch-up (see LiveClassSocket) replays
+  // anything missed once the socket reconnects, so there's no gap for a
+  // REST fallback to cover.
   Timer? _participantsPollTimer;
-  Timer? _sessionPollTimer;
   Timer? _noticePollTimer;
   Timer? _batteryCheckTimer;
 
   void _startPolling() {
-    _chatPollTimer?.cancel();
-    _pollPollTimer?.cancel();
     _participantsPollTimer?.cancel();
-    _sessionPollTimer?.cancel();
     _noticePollTimer?.cancel();
     _batteryCheckTimer?.cancel();
-    _chatPollTimer = Timer.periodic(const Duration(seconds: 4), (_) {
-      if (_state == _RoomState.inRoom && _openPanel == _PanelTab.chat) _loadChat(silent: true);
-    });
-    _pollPollTimer = Timer.periodic(const Duration(seconds: 6), (_) {
-      if (_state == _RoomState.inRoom && _openPanel == _PanelTab.polls) _loadPolls(silent: true);
-    });
     // FEATURE (grid view): participants now need to stay fresh for EVERY
     // role when the grid is open, not just for the host's management panel
-    // — previously this whole timer only existed for _isHost. Same timer
-    // now also refreshes the hand-raise queue (see _participantsPanel)
-    // whenever that panel is open, since raised hands live on this same
-    // participant list.
+    // — previously this whole timer only existed for _isHost.
+    //
+    // NOTE (realtime fix pass): hand-raise no longer depends on this timer
+    // — `hand.raised`/`hand.lowered` push over the socket and patch
+    // `_participants`/`_handRaised` directly (see _onLiveSocketEvent).
+    // This timer now only exists for what the backend doesn't broadcast:
+    // roster join/leave and per-participant mic-mute icon state.
     _participantsPollTimer = Timer.periodic(const Duration(seconds: 8), (_) {
       if (_state == _RoomState.inRoom && (_openPanel == _PanelTab.participants || _gridView)) {
         _loadParticipants(silent: true);
       }
-    });
-    // FEATURE (recording): the REC indicator in the header (see
-    // _roomHeader) has to be visible to EVERY participant, not just
-    // whoever tapped start/stop — this is how a student's client learns
-    // the host started/stopped recording from their own device.
-    _sessionPollTimer = Timer.periodic(const Duration(seconds: 10), (_) {
-      if (_state == _RoomState.inRoom) _refreshSessionRecordingState();
     });
     // FEATURE (notice banner): a newly-pinned/urgent notice should surface
     // without the student having to leave the room to notice it — but
@@ -637,6 +735,10 @@ class _LiveSessionScreenState extends State<LiveSessionScreen> with WidgetsBindi
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
+    unawaited(PipService.instance.setPipEnabled(false));
+    _pipModeSub?.cancel();
+    _liveSocketSub?.cancel();
+    _liveSocket.dispose();
     // NEW (Pass 13 §1.10): safety-net mark-read in case the caller leaves
     // the session with the chat/polls panel still open (the tab-open
     // handlers above already cover the normal case) — best-effort, same
@@ -647,16 +749,21 @@ class _LiveSessionScreenState extends State<LiveSessionScreen> with WidgetsBindi
       _markSessionRead(polls: true);
     }
     _chatCtrl.dispose();
+    _chatSearchCtrl.dispose();
+    _chatSearchDebounce?.cancel();
     _queryCtrl.dispose();
-    _chatPollTimer?.cancel();
-    _pollPollTimer?.cancel();
     _participantsPollTimer?.cancel();
-    _sessionPollTimer?.cancel();
     _noticePollTimer?.cancel();
     _lkRetryTimer?.cancel();
     _batteryCheckTimer?.cancel();
     _breakoutPollTimer?.cancel();
     _captionLineExpiryTimer?.cancel();
+    _wbAutosaveTimer?.cancel();
+    // Best-effort final checkpoint — same fire-and-forget contract as the
+    // LiveKit teardown just below. Without this, the very last strokes
+    // drawn right before leaving would be lost until (if ever) another
+    // participant's autosave tick catches them.
+    unawaited(_wbAutosave(force: true));
     unawaited(_speech?.stop());
     unawaited(_connectivitySub?.cancel());
     // Best-effort, fire-and-forget — same pattern as _leave()'s participant
@@ -706,6 +813,14 @@ class _LiveSessionScreenState extends State<LiveSessionScreen> with WidgetsBindi
   }
 
   Future<void> _afterJoined() async {
+    // Only this screen, only once actually in the room, is ever PiP-eligible
+    // — see pip_service.dart. Turned back off in dispose()/_leave()/_endSession().
+    unawaited(PipService.instance.setPipEnabled(true));
+    // REALTIME (Flutter Phase 1, item 1): connect the session socket as
+    // soon as we're actually in the room — see field comments above for
+    // scope (kick + presence wired this pass).
+    _liveSocket.connect();
+    _liveSocketSub = _liveSocket.events.listen(_onLiveSocketEvent);
     _loadChat();
     _loadPolls();
     // FEATURE (grid view): loaded for everyone now, not just the host — the
@@ -736,8 +851,257 @@ class _LiveSessionScreenState extends State<LiveSessionScreen> with WidgetsBindi
     // running lands straight in their assigned room's banner instead of
     // only finding out once they happen to open the panel.
     _loadBreakoutRooms(silent: true);
+    // NEW (persistence fix): seed the reaction badge + caption transcript
+    // from the server's durable history instead of always starting both
+    // at zero/empty — see SessionApi.reactionSummary/captionHistory and
+    // ClassSessionViewSet.reactions()/captions() in views.py. A student
+    // who reconnects (or opened captions for the first time mid-session)
+    // now sees what the class already reacted/said, not just what
+    // happens from this moment on.
+    _loadReactionSummary();
+    _loadCaptionHistory();
     _startPolling();
+    _startWbAutosaveTimer();
     unawaited(_connectLiveKit());
+  }
+
+  Future<void> _loadReactionSummary() async {
+    try {
+      final summary = await LiveClassApi.sessions.reactionSummary(widget.sessionId);
+      if (!mounted) return;
+      setState(() => _reactionTotalCount = summary.total);
+    } catch (_) {
+      // best-effort — the local, session-only counter just keeps ticking
+      // up from zero if this catch-up fetch fails
+    }
+  }
+
+  Future<void> _loadCaptionHistory() async {
+    try {
+      final lines = await LiveClassApi.sessions.captionHistory(widget.sessionId);
+      if (!mounted) return;
+      setState(() => _captionTranscript = lines);
+    } catch (_) {
+      // best-effort — the live feed still works purely off the data
+      // channel even if this catch-up fetch fails
+    }
+  }
+
+  // -------------------------------------------------------------------
+  // REALTIME (Flutter Phase 1, items 4 & 5) — session WebSocket events.
+  // -------------------------------------------------------------------
+  void _onLiveSocketEvent(LiveSocketEvent e) {
+    if (!mounted) return;
+    switch (e.type) {
+      case 'presence.snapshot':
+        final ids = (e.data['user_ids'] as List? ?? []).map((v) => v as int).toSet();
+        setState(() {
+          _onlinePresenceUserIds
+            ..clear()
+            ..addAll(ids);
+        });
+        break;
+      case 'presence.joined':
+        final uid = e.data['user_id'];
+        if (uid is int) setState(() => _onlinePresenceUserIds.add(uid));
+        break;
+      case 'presence.left':
+        final uid = e.data['user_id'];
+        if (uid is int) setState(() => _onlinePresenceUserIds.remove(uid));
+        break;
+      case 'participant.kicked':
+        final kickedUserId = e.data['user_id'];
+        final myUserId = int.tryParse(_localIdentity() ?? '');
+        if (myUserId != null && kickedUserId == myUserId) {
+          _handleIWasKicked();
+        } else if (kickedUserId is int) {
+          // Someone else was removed — drop them from the participant
+          // list immediately instead of waiting for the next
+          // _participantsPollTimer tick (up to 8s away).
+          setState(() {
+            _participants = _participants.where((p) => p.user.id != kickedUserId).toList();
+            _onlinePresenceUserIds.remove(kickedUserId);
+          });
+        }
+        break;
+
+      // ---------------------------------------------------------------
+      // REALTIME (fix pass) — chat/poll/hand/recording now push instead
+      // of waiting for the next REST poll tick (removed above). See
+      // views.py's broadcast_to_session() call sites for the exact
+      // payload shape of each of these — every one below mirrors that.
+      // ---------------------------------------------------------------
+      case 'chat.message':
+        final msg = ChatMessage.fromJson(e.data);
+        // Dedup: our OWN sent message is already appended optimistically
+        // by _sendChat() the moment the REST call returns, and the
+        // broadcast for it arrives on this same socket a moment later.
+        if (_chatMessages.any((m) => m.id == msg.id)) return;
+        setState(() => _chatMessages.add(msg));
+        if (_openPanel == _PanelTab.chat) {
+          _markSessionRead(chat: true);
+          _markChatReadUpToLatest();
+        }
+        break;
+      case 'chat.message_deleted':
+        final id = e.data['id'];
+        setState(() => _chatMessages.removeWhere((m) => m.id == id));
+        break;
+      case 'chat.reaction':
+        final messageId = e.data['message_id'];
+        final counts = (e.data['reaction_counts'] as Map? ?? {}).map((k, v) => MapEntry(k.toString(), (v as num).toInt()));
+        final idx = _chatMessages.indexWhere((m) => m.id == messageId);
+        if (idx != -1) {
+          setState(() => _chatMessages[idx] = _chatMessages[idx].copyWith(reactionCounts: counts));
+        }
+        break;
+      case 'chat.pinned':
+        final pinned = ChatMessage.fromJson(e.data);
+        setState(() {
+          // Mirrors the backend's own "at most one pinned message" rule
+          // (see _pinChat's matching local-optimistic clear) — unpin
+          // whichever else was pinned locally, then set/refresh this one.
+          for (var i = 0; i < _chatMessages.length; i++) {
+            if (_chatMessages[i].id != pinned.id && _chatMessages[i].isPinned) {
+              _chatMessages[i] = _chatMessages[i].copyWith(isPinned: false, pinnedBy: null, pinnedAt: null);
+            }
+          }
+          final idx = _chatMessages.indexWhere((m) => m.id == pinned.id);
+          if (idx != -1) {
+            _chatMessages[idx] = pinned;
+          }
+        });
+        break;
+      case 'chat.unpinned':
+        final id = e.data['id'];
+        final idx = _chatMessages.indexWhere((m) => m.id == id);
+        if (idx != -1) {
+          setState(() => _chatMessages[idx] = _chatMessages[idx].copyWith(isPinned: false, pinnedBy: null, pinnedAt: null));
+        }
+        break;
+      case 'chat.read':
+        // NEW (read receipts) — another participant (or us, from a second
+        // device) just read a message; bump that bubble's `readCount` live
+        // instead of waiting for the next `_loadChat` refresh. We don't
+        // have the full reader list here (that's a separate on-demand
+        // fetch — see `_showReadReceipts`), just the fresh total.
+        final messageId = e.data['message_id'];
+        final readCount = e.data['read_count'];
+        final idx = _chatMessages.indexWhere((m) => m.id == messageId);
+        if (idx != -1 && readCount is int) {
+          final myUserId = int.tryParse(_localIdentity() ?? '');
+          final readerId = (e.data['user'] as Map?)?['id'];
+          setState(() => _chatMessages[idx] = _chatMessages[idx].copyWith(
+                readCount: readCount,
+                seenByMe: _chatMessages[idx].seenByMe || readerId == myUserId,
+              ));
+        }
+        break;
+
+      case 'poll.created':
+        final poll = LivePoll.fromJson(e.data);
+        if (_polls.any((p) => p.id == poll.id)) return; // our own create already refetches
+        setState(() => _polls = [..._polls, poll]);
+        if (_openPanel == _PanelTab.polls) _markSessionRead(polls: true);
+        break;
+      case 'poll.updated':
+      case 'poll.closed':
+        final poll = LivePoll.fromJson(e.data);
+        final pIdx = _polls.indexWhere((p) => p.id == poll.id);
+        if (pIdx != -1) {
+          setState(() => _polls[pIdx] = poll);
+        } else {
+          setState(() => _polls = [..._polls, poll]);
+        }
+        break;
+
+      case 'hand.raised':
+      case 'hand.lowered':
+        final uid = e.data['user_id'];
+        final raised = e.data['hand_raised'] == true;
+        if (uid is! int) return;
+        final myUserId = int.tryParse(_localIdentity() ?? '');
+        setState(() {
+          final idx = _participants.indexWhere((p) => p.user.id == uid);
+          if (idx != -1) {
+            final p = _participants[idx];
+            _participants[idx] = SessionParticipant(
+              id: p.id,
+              sessionId: p.sessionId,
+              user: p.user,
+              role: p.role,
+              joinedAt: p.joinedAt,
+              leftAt: p.leftAt,
+              handRaised: raised,
+              handRaisedAt: raised ? DateTime.now() : null,
+            );
+          }
+          // Keep OUR OWN control-bar button in sync too — same guard
+          // _syncOwnHandState uses so an in-flight tap of our own isn't
+          // clobbered by an echo of the very request we just sent.
+          if (!_handBusy && myUserId != null && uid == myUserId) {
+            _handRaised = raised;
+          }
+        });
+        break;
+
+      case 'spotlight':
+        // NOTE (fix — spotlight persistence): the host's pin already
+        // reaches everyone currently connected via the LiveKit data
+        // channel (_handleSignal's 'spotlight' case below) — this WS
+        // event is the same update arriving over the session socket
+        // instead, so a client whose data channel hasn't (re)established
+        // yet still updates. See ClassSessionViewSet.spotlight() in
+        // views.py.
+        if (mounted) setState(() => _spotlightIdentity = e.data['identity'] as String?);
+        break;
+
+      case 'recording.started':
+        setState(() => _isRecording = true);
+        break;
+      case 'recording.stopped':
+        setState(() => _isRecording = false);
+        break;
+      case 'recording.ready':
+        // The file just finished processing — see LiveKitWebhookView in
+        // views.py. Recording start/stop state doesn't change here (that
+        // already flipped on recording.stopped); this is just a courtesy
+        // heads-up that the actual recording_url is now filled in.
+        _snack('Recording is ready.');
+        break;
+    }
+  }
+
+  /// Flutter Phase 1, item 4: fires the moment consumers.py's
+  /// `session_event` closes OUR socket with 4403 after a
+  /// `participant.kicked` broadcast naming us. Distinct from the generic
+  /// `RoomDisconnectedEvent` -> `_scheduleAutoReconnect()` path (see that
+  /// method's new guard below) — a kicked user's access is gone, so
+  /// quietly retrying LiveKit for up to ~14s (2s/4s/8s backoff) before
+  /// giving up would just be a confusing delay before the same dead end.
+  void _handleIWasKicked() {
+    if (_kickedBySocket) return; // already handling this
+    _kickedBySocket = true;
+    _lkRetryTimer?.cancel();
+    unawaited(_disconnectLiveKit()); // best-effort, mirrors _leave()'s own teardown
+    if (!mounted) return;
+    showDialog(
+      context: context,
+      barrierDismissible: false,
+      builder: (_) => AlertDialog(
+        title: const Text('Removed from Session'),
+        content: const Text('The host removed you from this live class.'),
+        actions: [
+          TextButton(
+            onPressed: () {
+              Navigator.pop(context); // close dialog
+              if (mounted) Navigator.pop(context); // leave the session screen
+            },
+            child: const Text('OK'),
+          ),
+        ],
+      ),
+    );
   }
 
   /// classroom_id for the classroom-scoped panels (materials/doubts/
@@ -749,10 +1113,13 @@ class _LiveSessionScreenState extends State<LiveSessionScreen> with WidgetsBindi
   // Recording — start/stop the LiveKit egress job and keep the REC
   // indicator in sync for everyone in the room.
   // -------------------------------------------------------------------
-  /// Silent background refresh of [_isRecording] from the server (see
-  /// sessions/{id}/ -> is_recording in serializers.py). Never surfaces an
-  /// error to the user — this is just a polling heartbeat, same spirit as
-  /// _loadChat/_loadPolls/_loadParticipants(silent: true).
+  /// One-time seed of [_isRecording] from the server on join (see
+  /// sessions/{id}/ -> is_recording in serializers.py). Live updates after
+  /// that come from the `recording.started`/`recording.stopped` socket
+  /// events instead of a repeating poll — see _onLiveSocketEvent. Never
+  /// surfaces an error to the user; a failed seed just means the REC
+  /// indicator starts in its default (off) state until the next real
+  /// recording event arrives.
   Future<void> _refreshSessionRecordingState() async {
     try {
       final fresh = await LiveClassApi.sessions.detail(widget.sessionId);
@@ -761,9 +1128,47 @@ class _LiveSessionScreenState extends State<LiveSessionScreen> with WidgetsBindi
       if (fresh.isRecording != _isRecording) {
         setState(() => _isRecording = fresh.isRecording);
       }
+      _restoreSpotlightAndWhiteboardFromServer(fresh);
     } catch (_) {
       // best-effort — keep showing whatever we last knew
     }
+  }
+
+  /// NOTE (fix — whiteboard/spotlight persistence): seeds both from the
+  /// server checkpoint the moment we have a fresh [ClassSession] — on
+  /// first join, and again on every reconnect (this runs from the same
+  /// `_refreshSessionRecordingState` call `_afterJoined` already makes).
+  /// Deliberately additive/non-destructive, same "last write wins per
+  /// stroke id" contract as `wb_full_state`'s peer-to-peer catch-up
+  /// (_handleSignal above) — whichever arrives first (server or a peer)
+  /// doesn't get clobbered by whichever arrives second:
+  ///   - spotlight only applies if nothing has set it locally yet (a live
+  ///     'spotlight' signal — from a peer OR the spotlight.* socket event
+  ///     above — always wins over this stale-by-definition snapshot).
+  ///   - whiteboard strokes are merged in by id, never replaced, so a
+  ///     peer's `wb_full_state` arriving before or after this doesn't
+  ///     lose anything either way.
+  void _restoreSpotlightAndWhiteboardFromServer(ClassSession fresh) {
+    if (!mounted) return;
+    setState(() {
+      if (_spotlightIdentity == null && fresh.spotlightIdentity != null) {
+        _spotlightIdentity = fresh.spotlightIdentity;
+      }
+      final strokes = fresh.whiteboardSnapshot?['strokes'] as List?;
+      if (strokes != null) {
+        for (final raw in strokes) {
+          try {
+            final stroke = _WhiteboardStroke.fromJson((raw as Map).cast<String, dynamic>());
+            if (!_wbStrokes.containsKey(stroke.id)) {
+              _wbStrokes[stroke.id] = stroke;
+              _wbStrokeOrder.add(stroke.id);
+            }
+          } catch (_) {
+            // one malformed stroke shouldn't drop the rest of the board
+          }
+        }
+      }
+    });
   }
 
   /// Host/co-teacher/moderator only: starts a LiveKit Egress recording of
@@ -886,6 +1291,27 @@ class _LiveSessionScreenState extends State<LiveSessionScreen> with WidgetsBindi
   // -------------------------------------------------------------------
   // LiveKit — connect / events / teardown
   // -------------------------------------------------------------------
+  /// NEW (audio settings) — builds the `AudioCaptureOptions` LiveKit applies
+  /// to the local mic track from the current `_noiseSuppressionOn`/
+  /// `_echoCancellationOn` toggle state. `autoGainControl` is left ON
+  /// unconditionally — this feature only exposes the two toggles the user
+  /// actually asked for; AGC isn't something either toggle in the audio-
+  /// settings sheet (`_audioSettingsSheet`) controls. Used both at initial
+  /// connect (`_doLiveKitConnect`) and whenever the toggles change while
+  /// already connected (`_applyAudioProcessingSettings`), so the two paths
+  /// can never drift out of sync with each other.
+  /// ⚠️ Field names (`noiseSuppression`/`echoCancellation`/`autoGainControl`)
+  /// match `livekit_client`'s `AudioCaptureOptions` as of the versions this
+  /// app has used elsewhere — this file doesn't have visibility into
+  /// pubspec.yaml's pinned version, so if the installed version renamed or
+  /// restructured these constructor params, update this one function only;
+  /// every call site above goes through it.
+  lk.AudioCaptureOptions _audioCaptureOptions() => lk.AudioCaptureOptions(
+        noiseSuppression: _noiseSuppressionOn,
+        echoCancellation: _echoCancellationOn,
+        autoGainControl: true,
+      );
+
   /// Does the actual `lk.Room` construction + connect + local-track publish.
   /// Never touches `_lkError`/`_lkConnecting`/`_lkReconnecting` or schedules
   /// retries itself — the two callers below (first connect vs. reconnect)
@@ -902,9 +1328,14 @@ class _LiveSessionScreenState extends State<LiveSessionScreen> with WidgetsBindi
     }
 
     final room = lk.Room(
-      roomOptions: const lk.RoomOptions(
+      roomOptions: lk.RoomOptions(
         adaptiveStream: true, // downscale subscribed tracks to renderer size
         dynacast: true, // simulcast layer switching server-side
+        // NEW (audio settings) — applied to the local mic capture the
+        // moment it's first published just below; kept in sync afterwards
+        // by `_applyAudioProcessingSettings` if the user flips a toggle
+        // mid-call.
+        defaultAudioCaptureOptions: _audioCaptureOptions(),
       ),
     );
     _lkRoom = room;
@@ -1028,6 +1459,11 @@ class _LiveSessionScreenState extends State<LiveSessionScreen> with WidgetsBindi
   /// gives up and shows the persistent banner + manual Retry button.
   void _scheduleAutoReconnect() {
     if (!mounted || _state != _RoomState.inRoom) return;
+    // Flutter Phase 1, item 4: the socket already told us definitively
+    // this was a kick, not a network drop (see _handleIWasKicked) —
+    // don't quietly retry LiveKit toward a room we no longer have access
+    // to.
+    if (_kickedBySocket) return;
     _lkRetryTimer?.cancel();
     if (_lkAutoRetryCount >= _maxAutoRetries) {
       setState(() {
@@ -1261,6 +1697,7 @@ class _LiveSessionScreenState extends State<LiveSessionScreen> with WidgetsBindi
             _wbStrokes.remove(sid);
             _wbStrokeOrder.remove(sid);
           });
+          _wbDirty = true;
         }
         break;
       case 'wb_clear':
@@ -1268,6 +1705,7 @@ class _LiveSessionScreenState extends State<LiveSessionScreen> with WidgetsBindi
           _wbStrokes.clear();
           _wbStrokeOrder.clear();
         });
+        _wbDirty = true;
         break;
       case 'wb_request_sync':
         if (fromIdentity == null || _wbStrokes.isEmpty) return;
@@ -1285,6 +1723,7 @@ class _LiveSessionScreenState extends State<LiveSessionScreen> with WidgetsBindi
               if (!_wbStrokes.containsKey(stroke.id)) {
                 _wbStrokes[stroke.id] = stroke;
                 _wbStrokeOrder.add(stroke.id);
+                _wbDirty = true;
               }
             }
           });
@@ -1301,6 +1740,14 @@ class _LiveSessionScreenState extends State<LiveSessionScreen> with WidgetsBindi
     final next = _spotlightIdentity == identity ? null : identity; // tapping the same tile again un-spotlights it
     setState(() => _spotlightIdentity = next);
     _sendSignal({'t': 'spotlight', 'id': next});
+    // NOTE (fix — spotlight persistence): the data-channel broadcast above
+    // is instant for everyone currently in the room; this REST call is
+    // what makes it survive a reconnect or reach a late joiner (see
+    // ClassSessionViewSet.spotlight() in views.py, and the initial-state
+    // restore in _connectLiveKit below). Best-effort — a failure here
+    // just means the live broadcast above still worked and the persisted
+    // value is a tick behind, not a broken spotlight.
+    unawaited(LiveClassApi.sessions.setSpotlight(widget.sessionId, next).catchError((_) {}));
   }
 
   // -------------------------------------------------------------------
@@ -1354,6 +1801,26 @@ class _LiveSessionScreenState extends State<LiveSessionScreen> with WidgetsBindi
   void _sendReaction(String emoji) {
     _addFloatingReaction(emoji);
     _sendSignal({'t': 'reaction', 'emoji': emoji});
+    // NEW (persistence fix): log this tap server-side too — see
+    // SessionApi.logReaction's own doc comment. Fire-and-forget; the
+    // floating animation and local `_reactionTotalCount` bump above
+    // already happened optimistically and don't wait on this.
+    unawaited(LiveClassApi.sessions.logReaction(widget.sessionId, _reactionEmojiCode(emoji)));
+  }
+
+  /// Maps the emoji glyph used in the UI to the backend's
+  /// `SessionReaction.Reaction` code (thumbs_up/heart/laugh/clap/party/
+  /// raised_hands) — the picker only ever sends one of the six glyphs
+  /// below (see `_showReactionPicker`), so an unrecognized glyph should
+  /// never reach here in practice; falls back to 'thumbs_up' rather than
+  /// throwing, since a slightly-wrong persisted emoji is harmless and
+  /// far better than crashing a live reaction tap.
+  String _reactionEmojiCode(String emoji) {
+    const map = {
+      '👍': 'thumbs_up', '❤️': 'heart', '😂': 'laugh',
+      '👏': 'clap', '🎉': 'party', '🙌': 'raised_hands',
+    };
+    return map[emoji] ?? 'thumbs_up';
   }
 
   void _addFloatingReaction(String emoji) {
@@ -1473,6 +1940,13 @@ class _LiveSessionScreenState extends State<LiveSessionScreen> with WidgetsBindi
                 .user
                 .fullName;
             _sendSignal({'t': 'caption', 'text': text, 'name': myName});
+            // NEW (persistence fix): also persist this line server-side
+            // (speaker is resolved server-side from the authenticated
+            // caller, not from `myName` above — that name is only for the
+            // live data-channel broadcast). Fire-and-forget, same
+            // best-effort spirit as the reaction log: a dropped write here
+            // should never interrupt live captioning.
+            unawaited(LiveClassApi.sessions.logCaption(widget.sessionId, text));
           }
         } else {
           setState(() => _myPartialCaption = result.recognizedWords);
@@ -1491,6 +1965,21 @@ class _LiveSessionScreenState extends State<LiveSessionScreen> with WidgetsBindi
       _captionFeed.add(_CaptionLine(speaker: speaker, text: text, at: DateTime.now()));
       // Keep the feed short — this is a live strip, not a transcript log.
       if (_captionFeed.length > 3) _captionFeed.removeAt(0);
+      // NEW (persistence fix): also grow the durable transcript list
+      // optimistically, so "View transcript" reflects this line
+      // immediately rather than waiting on the next full refetch. Uses a
+      // synthetic negative id (never collides with a real server id,
+      // which is always positive) — harmless since the transcript sheet
+      // only ever reads this list, never writes it back.
+      _captionTranscript = [
+        ..._captionTranscript,
+        SessionCaptionLine(
+          id: -DateTime.now().microsecondsSinceEpoch,
+          speaker: UserMini(id: 0, username: '', fullName: speaker),
+          text: text,
+          createdAt: DateTime.now(),
+        ),
+      ];
     });
     _captionLineExpiryTimer?.cancel();
     _captionLineExpiryTimer = Timer(const Duration(seconds: 6), () {
@@ -1499,6 +1988,51 @@ class _LiveSessionScreenState extends State<LiveSessionScreen> with WidgetsBindi
         if (_captionFeed.isNotEmpty) _captionFeed.removeAt(0);
       });
     });
+  }
+
+  /// NEW (persistence fix) — full-transcript viewer. Reachable via a long
+  /// press on the captions toggle (see its `onLongPress` below) so it
+  /// doesn't compete for space with the existing tap-to-toggle action.
+  /// Shows every line captured this session (seeded from
+  /// `_loadCaptionHistory` on join, grown live by `_addCaptionLine`) —
+  /// this is the "read what I missed / review after class" surface the
+  /// self-expiring 3-line `_captionFeed` strip was never meant to be.
+  Future<void> _showCaptionTranscript() async {
+    await showModalBottomSheet(
+      context: context,
+      isScrollControlled: true,
+      builder: (ctx) {
+        return DraggableScrollableSheet(
+          initialChildSize: 0.6,
+          expand: false,
+          builder: (ctx, scrollController) {
+            if (_captionTranscript.isEmpty) {
+              return const Center(child: Text('No captions yet in this session.'));
+            }
+            return ListView.builder(
+              controller: scrollController,
+              padding: const EdgeInsets.all(16),
+              itemCount: _captionTranscript.length,
+              itemBuilder: (ctx, i) {
+                final line = _captionTranscript[i];
+                return Padding(
+                  padding: const EdgeInsets.only(bottom: 10),
+                  child: RichText(
+                    text: TextSpan(
+                      style: DefaultTextStyle.of(ctx).style,
+                      children: [
+                        TextSpan(text: '${line.speaker.fullName}: ', style: const TextStyle(fontWeight: FontWeight.bold)),
+                        TextSpan(text: line.text),
+                      ],
+                    ),
+                  ),
+                );
+              },
+            );
+          },
+        );
+      },
+    );
   }
 
   // -------------------------------------------------------------------
@@ -1856,6 +2390,7 @@ class _LiveSessionScreenState extends State<LiveSessionScreen> with WidgetsBindi
     final id = _wbActiveStrokeId;
     if (id == null) return;
     _wbActiveStrokeId = null;
+    _wbDirty = true;
     _sendSignal({'t': 'wb_stroke_end', 'sid': id});
   }
 
@@ -1890,6 +2425,7 @@ class _LiveSessionScreenState extends State<LiveSessionScreen> with WidgetsBindi
       _wbStrokes.clear();
       _wbStrokeOrder.clear();
     });
+    _wbDirty = true;
     _sendSignal({'t': 'wb_clear'});
   }
 
@@ -1990,10 +2526,45 @@ class _LiveSessionScreenState extends State<LiveSessionScreen> with WidgetsBindi
           _wbStrokes.remove(id);
           _wbStrokeOrder.removeAt(i);
         });
+        _wbDirty = true;
         _sendSignal({'t': 'wb_undo', 'sid': id});
         return;
       }
     }
+  }
+
+  /// NOTE (fix — whiteboard persistence): periodic server checkpoint of the
+  /// whiteboard, so the board survives everyone who held it in memory
+  /// leaving the room — see the FEATURE note on `_whiteboardOpen` above.
+  /// Runs the whole session (not just while the board panel is open) on a
+  /// `_wbAutosaveTimer` started in `_afterJoined`/cancelled in `dispose`,
+  /// same "cheap periodic tick, silent on failure" spirit as the old
+  /// classroom-stats poll this whole fix was prompted by. Only actually
+  /// POSTs when something changed (`_wbDirty`) or the stroke count differs
+  /// from what was last saved, so an idle board doesn't re-send itself
+  /// every tick. `force` skips both checks — used on whiteboard close and
+  /// screen dispose so the very last strokes aren't left for the next
+  /// timer tick (which might never come, if this was the last participant
+  /// leaving).
+  Future<void> _wbAutosave({bool force = false}) async {
+    if (!force && !_wbDirty && _wbStrokeOrder.length == _wbLastSavedStrokeCount) return;
+    _wbDirty = false;
+    _wbLastSavedStrokeCount = _wbStrokeOrder.length;
+    final snapshot = _wbStrokeOrder.isEmpty
+        ? null
+        : {'strokes': _wbStrokeOrder.map((id) => _wbStrokes[id]!.toJson()).toList()};
+    try {
+      await LiveClassApi.sessions.saveWhiteboard(widget.sessionId, snapshot);
+    } catch (_) {
+      // Best-effort — next timer tick (or the next dirty mutation) retries.
+      // Un-mark as saved so a real change isn't silently dropped forever.
+      _wbDirty = true;
+    }
+  }
+
+  void _startWbAutosaveTimer() {
+    _wbAutosaveTimer?.cancel();
+    _wbAutosaveTimer = Timer.periodic(const Duration(seconds: 20), (_) => _wbAutosave());
   }
 
   Future<void> _disconnectLiveKit() async {
@@ -2071,6 +2642,80 @@ class _LiveSessionScreenState extends State<LiveSessionScreen> with WidgetsBindi
     }
   }
 
+  // -- NEW: audio settings (noise suppression / echo cancellation) --------
+  /// Restarts local mic capture with the current `_audioCaptureOptions()`
+  /// so a mid-call toggle flip actually takes effect. WebRTC audio
+  /// constraints (noise suppression/echo cancellation/AGC) are applied at
+  /// the moment a track's capture STARTS, not something that can be
+  /// patched onto an already-running track — so this briefly disables and
+  /// re-enables the mic (only when it was already on; nothing to restart
+  /// otherwise, the new options are simply picked up the next time the
+  /// user unmutes). Same "optimistic UI, snackbar + no-op on failure"
+  /// shape as `_toggleMic` above — a failed restart here just means the
+  /// toggle's effect is delayed to the next natural mic re-enable, not a
+  /// dropped call.
+  Future<void> _applyAudioProcessingSettings() async {
+    final participant = _lkRoom?.localParticipant;
+    if (participant == null || !_micOn) return; // nothing live to restart
+    try {
+      await participant.setMicrophoneEnabled(false);
+      await participant.setMicrophoneEnabled(true, audioCaptureOptions: _audioCaptureOptions());
+    } catch (e) {
+      debugPrint('Could not apply audio processing settings: $e');
+      _snack('Could not update audio settings — please try again.');
+    }
+  }
+
+  /// Bottom sheet with the two user-facing toggles. Purely a local device
+  /// preference (see `_noiseSuppressionOn`/`_echoCancellationOn`'s
+  /// docstring) — each participant's settings only affect the audio THEY
+  /// capture and send, never anyone else's.
+  void _openAudioSettings() {
+    showModalBottomSheet(
+      context: context,
+      showDragHandle: true,
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setSheetState) => SafeArea(
+          child: Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Padding(
+                  padding: const EdgeInsets.only(bottom: 4),
+                  child: Text('Audio settings', style: Theme.of(ctx).textTheme.titleMedium),
+                ),
+                SwitchListTile(
+                  contentPadding: EdgeInsets.zero,
+                  title: const Text('Noise suppression'),
+                  subtitle: const Text('Reduces background noise picked up by your mic'),
+                  value: _noiseSuppressionOn,
+                  onChanged: (v) {
+                    setSheetState(() => _noiseSuppressionOn = v);
+                    setState(() {});
+                    unawaited(_applyAudioProcessingSettings());
+                  },
+                ),
+                SwitchListTile(
+                  contentPadding: EdgeInsets.zero,
+                  title: const Text('Echo cancellation'),
+                  subtitle: const Text('Stops others from hearing their own voice echoed back'),
+                  value: _echoCancellationOn,
+                  onChanged: (v) {
+                    setSheetState(() => _echoCancellationOn = v);
+                    setState(() {});
+                    unawaited(_applyAudioProcessingSettings());
+                  },
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
   Future<void> _toggleCam() async {
     final next = !_camOn;
     setState(() => _camOn = next);
@@ -2132,6 +2777,13 @@ class _LiveSessionScreenState extends State<LiveSessionScreen> with WidgetsBindi
           ..addAll(page.results.where((m) => !m.isDeleted));
         _chatLoading = false;
       });
+      // NEW (read receipts) — opening/refreshing the chat panel is the
+      // natural "the user has now seen everything currently loaded" point,
+      // same moment `_markSessionRead(chat: true)` already advances the
+      // unread-badge watermark elsewhere in this file. One bulk call marks
+      // every not-yet-read, not-own message up to the newest as seen,
+      // instead of one request per bubble.
+      _markChatReadUpToLatest();
     } catch (_) {
       // A silent background refresh failing is not worth interrupting the
       // user over — just try again on the next tick.
@@ -2139,16 +2791,145 @@ class _LiveSessionScreenState extends State<LiveSessionScreen> with WidgetsBindi
     }
   }
 
+  /// Fire-and-forget bulk read-receipt call — see `_loadChat` and the
+  /// `chat.message` socket handler above, both of which call this whenever
+  /// new messages land while the chat panel is the open tab. A no-op when
+  /// there's nothing loaded yet, or nothing but our own messages.
+  void _markChatReadUpToLatest() {
+    if (_chatMessages.isEmpty) return;
+    unawaited(LiveClassApi.chatMessages
+        .markChatRead(sessionId: widget.sessionId, upToMessageId: _chatMessages.last.id)
+        .catchError((_) => 0));
+  }
+
+  /// NEW (read receipts) — fetches and shows the full "seen by" list for
+  /// one message in a bottom sheet. Only meaningful to check on your OWN
+  /// sent messages (that's the only case the chat bubble shows the tappable
+  /// seen-by row for — see `_chatPanel`), but the backend doesn't restrict
+  /// it either way.
+  Future<void> _showReadReceipts(ChatMessage msg) async {
+    List<ChatMessageReadReceipt> receipts;
+    try {
+      receipts = await LiveClassApi.chatMessages.readReceipts(msg.id);
+    } catch (_) {
+      _snack('Could not load read receipts.');
+      return;
+    }
+    if (!mounted) return;
+    showModalBottomSheet(
+      context: context,
+      showDragHandle: true,
+      builder: (ctx) => SafeArea(
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Padding(
+                padding: const EdgeInsets.only(bottom: 8),
+                child: Text(
+                  receipts.isEmpty ? 'Not seen yet' : 'Seen by ${receipts.length}',
+                  style: Theme.of(ctx).textTheme.titleMedium,
+                ),
+              ),
+              Flexible(
+                child: ListView.builder(
+                  shrinkWrap: true,
+                  itemCount: receipts.length,
+                  itemBuilder: (_, i) {
+                    final r = receipts[i];
+                    return ListTile(
+                      dense: true,
+                      leading: CircleAvatar(
+                        radius: 16,
+                        backgroundImage: r.user.profilePicture != null ? NetworkImage(r.user.profilePicture!) : null,
+                        child: r.user.profilePicture == null
+                            ? Text(r.user.fullName.isNotEmpty ? r.user.fullName[0] : '?')
+                            : null,
+                      ),
+                      title: Text(r.user.fullName),
+                      trailing: Text(DateFormat('h:mm a').format(r.readAt.toLocal())),
+                    );
+                  },
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  // -- NEW: message search --------------------------------------------------
+  /// Debounced re-query against the backend's `?search=` filter (see
+  /// ChatMessageViewSet.get_queryset in views.py) — 350ms is long enough
+  /// that a normal typing cadence doesn't fire a request per keystroke, but
+  /// short enough to still feel live. Clearing the field drops back to the
+  /// normal `_chatMessages` list (`_chatSearchResults = null`), it does NOT
+  /// re-show an empty search result.
+  void _onChatSearchChanged(String query) {
+    _chatSearchDebounce?.cancel();
+    if (query.trim().isEmpty) {
+      setState(() {
+        _chatSearchResults = null;
+        _chatSearching = false;
+      });
+      return;
+    }
+    _chatSearchDebounce = Timer(const Duration(milliseconds: 350), () async {
+      if (!mounted) return;
+      setState(() => _chatSearching = true);
+      try {
+        final page = await LiveClassApi.chatMessages.list(widget.sessionId, search: query.trim());
+        if (!mounted) return;
+        setState(() {
+          _chatSearchResults = page.results.where((m) => !m.isDeleted).toList();
+          _chatSearching = false;
+        });
+      } catch (_) {
+        if (!mounted) return;
+        setState(() => _chatSearching = false);
+      }
+    });
+  }
+
+  void _toggleChatSearch() {
+    setState(() {
+      _chatSearchActive = !_chatSearchActive;
+      if (!_chatSearchActive) {
+        _chatSearchCtrl.clear();
+        _chatSearchResults = null;
+        _chatSearchDebounce?.cancel();
+      }
+    });
+  }
+
+  // -- NEW: reply-to ---------------------------------------------------------
+  void _startReply(ChatMessage msg) {
+    setState(() => _replyingTo = msg);
+  }
+
+  void _cancelReply() {
+    setState(() => _replyingTo = null);
+  }
+
   Future<void> _sendChat() async {
     final text = _chatCtrl.text.trim();
     if (text.isEmpty || _sendingChat) return;
+    final replyTo = _replyingTo; // captured before clearing below
     setState(() => _sendingChat = true);
     try {
-      final msg = await LiveClassApi.chatMessages.send(sessionId: widget.sessionId, message: text);
+      final msg = await LiveClassApi.chatMessages.send(
+        sessionId: widget.sessionId,
+        message: text,
+        replyTo: replyTo?.id,
+      );
       if (!mounted) return;
       setState(() {
         _chatMessages.add(msg);
         _chatCtrl.clear();
+        _replyingTo = null;
         _sendingChat = false;
       });
     } on LiveClassApiException catch (e) {
@@ -2196,10 +2977,9 @@ class _LiveSessionScreenState extends State<LiveSessionScreen> with WidgetsBindi
   // Long-press (or the small reaction row under) a chat bubble -> emoji
   // picker -> here. Tapping an already-selected reaction removes it
   // instead (see _chatPanel's onTap wiring below). Optimistic local
-  // update via ChatMessage.copyWith, corrected on the next `_loadChat`
-  // poll tick (4s — see _startPolling) since there's no WebSocket wired
-  // up in this file to carry a live `chat.reaction` event (see the
-  // "Lightweight polling" comment above _startPolling).
+  // update via ChatMessage.copyWith, corrected by the REST response below
+  // and, for every OTHER connected client, by the `chat.reaction` socket
+  // event (see _onLiveSocketEvent) instead of waiting on a poll tick.
   Future<void> _reactToChat(ChatMessage msg, String emoji) async {
     final idx = _chatMessages.indexWhere((m) => m.id == msg.id);
     if (idx == -1) return;
@@ -2305,8 +3085,8 @@ class _LiveSessionScreenState extends State<LiveSessionScreen> with WidgetsBindi
       setState(() {
         // Locally clear any other message's isPinned flag (the backend
         // already did this server-side; mirror it here so the old pinned
-        // banner disappears immediately instead of waiting for the next
-        // 4s chat poll to correct it).
+        // banner disappears immediately instead of waiting for the
+        // `chat.pinned` socket event to correct it).
         for (var i = 0; i < _chatMessages.length; i++) {
           if (_chatMessages[i].id != updated.id && _chatMessages[i].isPinned) {
             _chatMessages[i] = _chatMessages[i].copyWith(isPinned: false, pinnedBy: null, pinnedAt: null);
@@ -2386,7 +3166,7 @@ class _LiveSessionScreenState extends State<LiveSessionScreen> with WidgetsBindi
       isScrollControlled: true,
       backgroundColor: Colors.white,
       shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(20))),
-      builder: (_) => _CreatePollSheet(sessionId: widget.sessionId),
+      builder: (_) => _CreatePollSheet(sessionId: widget.sessionId, classroomId: _classroomId),
     );
     if (created == true) _loadPolls();
   }
@@ -2777,8 +3557,32 @@ class _LiveSessionScreenState extends State<LiveSessionScreen> with WidgetsBindi
           onAction: _join,
         );
       case _RoomState.inRoom:
+        // FEATURE (real PiP): while the OS has us floating in a
+        // Picture-in-Picture window, none of the normal chrome (appbar,
+        // control bar, side panels) is usable or even visible at that
+        // size — Android in particular mirrors whatever this build()
+        // returns straight into the tiny floating window, so a
+        // full-featured layout there just renders as illegible clutter.
+        // Swap to bare video the instant _isInPip flips true.
+        if (_isInPip) return _buildPipOnlyView();
         return _buildRoom();
     }
+  }
+
+  /// Minimal chrome-free layout shown only while `_isInPip` is true — see
+  /// the call site's comment above. Prefers the host's spotlighted
+  /// participant (same priority the in-app mini-view already uses in
+  /// `_miniViewContent()`), falling back to the caller's own camera.
+  Widget _buildPipOnlyView() {
+    final spotlightTrack = _spotlightIdentity != null ? _remoteCameraTrack(_spotlightIdentity!) : null;
+    if (spotlightTrack != null) {
+      return ColoredBox(color: Colors.black, child: lk.VideoTrackRenderer(spotlightTrack));
+    }
+    final myTrack = _localCameraVideoTrack();
+    if (myTrack != null) {
+      return ColoredBox(color: Colors.black, child: lk.VideoTrackRenderer(myTrack));
+    }
+    return const ColoredBox(color: Colors.black);
   }
 
   // -------------------------------------------------------------------
@@ -3129,6 +3933,28 @@ class _LiveSessionScreenState extends State<LiveSessionScreen> with WidgetsBindi
                   Icon(Icons.fiber_manual_record_rounded, color: Colors.red, size: 10),
                   SizedBox(width: 3),
                   Text('REC', style: TextStyle(color: Colors.white, fontSize: 10, fontWeight: FontWeight.bold)),
+                ],
+              ),
+            ),
+          ],
+          // FEATURE (Flutter Phase 1, item 5 — presence): how many are
+          // ACTUALLY connected right now per the socket's presence.*
+          // events, distinct from `_participants.length` (DB-backed,
+          // refreshes only every 8s and can lag a drop/kick). Shown once
+          // there's more than just us so it doesn't clutter a 1-person
+          // room.
+          if (_onlinePresenceUserIds.length > 1) ...[
+            const SizedBox(width: 6),
+            Container(
+              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+              decoration: BoxDecoration(color: Colors.black45, borderRadius: BorderRadius.circular(6)),
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  const Icon(Icons.circle, color: Colors.greenAccent, size: 8),
+                  const SizedBox(width: 4),
+                  Text('${_onlinePresenceUserIds.length} live',
+                      style: const TextStyle(color: Colors.white, fontSize: 10, fontWeight: FontWeight.bold)),
                 ],
               ),
             ),
@@ -3734,6 +4560,14 @@ class _LiveSessionScreenState extends State<LiveSessionScreen> with WidgetsBindi
                 icon: _micOn ? Icons.mic_rounded : Icons.mic_off_rounded,
                 active: _micOn,
                 onTap: _toggleMic,
+                // NEW (audio settings) — long-press the mic button to open
+                // the noise suppression / echo cancellation sheet, same
+                // "long-press for a secondary sheet without competing with
+                // the primary tap-to-toggle" pattern the captions button
+                // already uses (see this parameter's own doc comment on
+                // _controlButton below).
+                onLongPress: _openAudioSettings,
+                tooltip: 'Mic — long-press for audio settings',
               ),
               _controlButton(
                 icon: _camOn ? Icons.videocam_rounded : Icons.videocam_off_rounded,
@@ -3826,17 +4660,37 @@ class _LiveSessionScreenState extends State<LiveSessionScreen> with WidgetsBindi
               _controlButton(
                 icon: _captionsOn ? Icons.closed_caption_rounded : Icons.closed_caption_off_outlined,
                 active: _captionsOn,
-                tooltip: _captionsUnavailable ? 'Not available on this device' : 'Live captions',
+                tooltip: _captionsUnavailable ? 'Not available on this device' : 'Live captions (long-press for transcript)',
                 onTap: _captionsUnavailable ? null : _toggleCaptions,
+                // NEW (persistence fix): long-press opens the full,
+                // server-persisted transcript for this session — see
+                // _showCaptionTranscript. Available even on a device with
+                // no local STT engine (_captionsUnavailable), since the
+                // transcript is built from everyone else's own devices,
+                // not this one.
+                onLongPress: _showCaptionTranscript,
               ),
-              // FEATURE: in-app mini-view (PiP-style floating tile) -- see
-              // _MiniViewTile's own comment for why this is in-app only,
-              // not real OS-level Picture-in-Picture.
+              // FEATURE: in-app mini-view (PiP-style floating tile) -- for
+              // when chat/whiteboard/materials would otherwise cover the
+              // video while the app stays in the foreground.
               _controlButton(
                 icon: _miniViewOn ? Icons.picture_in_picture_rounded : Icons.picture_in_picture_outlined,
                 active: _miniViewOn,
                 tooltip: 'Mini view',
                 onTap: () => setState(() => _miniViewOn = !_miniViewOn),
+              ),
+              // FEATURE: real OS-level Picture-in-Picture -- pops the video
+              // into a system-level floating window that survives leaving
+              // the app entirely, without waiting for the user to actually
+              // background the app themselves. Same window also opens
+              // automatically on backgrounding (see MainActivity.kt's
+              // onUserLeaveHint / PipManager.swift) -- this button is just
+              // the "do it right now" shortcut.
+              _controlButton(
+                icon: Icons.picture_in_picture_alt_rounded,
+                active: _isInPip,
+                tooltip: 'Pop out (Picture-in-Picture)',
+                onTap: () => unawaited(PipService.instance.enterPip()),
               ),
               // FEATURE: breakout rooms -- host manages from here; a
               // student with no breakout running doesn't get the button at
@@ -3998,6 +4852,11 @@ class _LiveSessionScreenState extends State<LiveSessionScreen> with WidgetsBindi
     required IconData icon,
     required bool active,
     VoidCallback? onTap,
+    // NEW (persistence fix): optional secondary action, currently only
+    // used by the captions button to open the full transcript sheet
+    // (see _showCaptionTranscript) without competing with the primary
+    // tap-to-toggle action for the same button.
+    VoidCallback? onLongPress,
     bool danger = false,
     int? badge,
     String? tooltip,
@@ -4013,6 +4872,12 @@ class _LiveSessionScreenState extends State<LiveSessionScreen> with WidgetsBindi
           : () {
               HapticFeedback.lightImpact();
               onTap();
+            },
+      onLongPress: onLongPress == null
+          ? null
+          : () {
+              HapticFeedback.mediumImpact();
+              onLongPress();
             },
       borderRadius: BorderRadius.circular(28),
       child: Container(
@@ -4123,14 +4988,72 @@ class _LiveSessionScreenState extends State<LiveSessionScreen> with WidgetsBindi
 
   Widget _chatPanel() {
     final pinned = _pinnedChatMessage;
+    final displayedMessages = _chatSearchActive ? (_chatSearchResults ?? const <ChatMessage>[]) : _chatMessages;
     return Column(
       children: [
+        // NEW (message search) — a header row above the pinned banner with
+        // a search toggle. Tapping it swaps the compose-area context: the
+        // message list below starts showing `_chatSearchResults` instead of
+        // the live `_chatMessages`, and the normal compose bar (send/reply)
+        // is hidden while searching, same "one mode at a time" simplicity
+        // as the existing pinned-banner/list split just below.
+        Container(
+          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+          decoration: const BoxDecoration(border: Border(bottom: BorderSide(color: Colors.white12))),
+          child: _chatSearchActive
+              ? Row(
+                  children: [
+                    Expanded(
+                      child: TextField(
+                        controller: _chatSearchCtrl,
+                        autofocus: true,
+                        style: const TextStyle(color: Colors.white, fontSize: 13.5),
+                        decoration: const InputDecoration(
+                          hintText: 'Search this chat…',
+                          hintStyle: TextStyle(color: Colors.white30),
+                          border: InputBorder.none,
+                          isDense: true,
+                        ),
+                        onChanged: _onChatSearchChanged,
+                      ),
+                    ),
+                    if (_chatSearching)
+                      const Padding(
+                        padding: EdgeInsets.symmetric(horizontal: 6),
+                        child: SizedBox(
+                            width: 14, height: 14, child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white54)),
+                      ),
+                    InkWell(
+                      onTap: _toggleChatSearch,
+                      child: const Padding(
+                        padding: EdgeInsets.all(4),
+                        child: Icon(Icons.close_rounded, size: 18, color: Colors.white54),
+                      ),
+                    ),
+                  ],
+                )
+              : Row(
+                  children: [
+                    const Expanded(
+                      child: Text('Chat', style: TextStyle(color: Colors.white70, fontSize: 13, fontWeight: FontWeight.w600)),
+                    ),
+                    InkWell(
+                      onTap: _toggleChatSearch,
+                      child: const Padding(
+                        padding: EdgeInsets.all(4),
+                        child: Icon(Icons.search_rounded, size: 18, color: Colors.white54),
+                      ),
+                    ),
+                  ],
+                ),
+        ),
         // NEW (Pass 13 §1.9): pinned-message banner. At most one by
         // backend construction (see _pinnedChatMessage/_pinChat above).
         // Not the existing Notice model — this is session-live-chat
         // scoped and tied to an actual message row, deliberately separate
         // from the classroom-wide Notice board elsewhere in this app.
-        if (pinned != null)
+        // Hidden while searching so it doesn't compete with search results.
+        if (pinned != null && !_chatSearchActive)
           Container(
             width: double.infinity,
             padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
@@ -4159,15 +5082,21 @@ class _LiveSessionScreenState extends State<LiveSessionScreen> with WidgetsBindi
             ),
           ),
         Expanded(
-          child: _chatLoading
+          child: (_chatSearchActive ? _chatSearching && displayedMessages.isEmpty : _chatLoading)
               ? const Center(child: CircularProgressIndicator(color: Colors.white54))
-              : _chatMessages.isEmpty
-                  ? const Center(child: Text('No messages yet.', style: TextStyle(color: Colors.white38)))
+              : displayedMessages.isEmpty
+                  ? Center(
+                      child: Text(
+                        _chatSearchActive ? 'No messages match your search.' : 'No messages yet.',
+                        style: const TextStyle(color: Colors.white38),
+                      ),
+                    )
                   : ListView.builder(
                       padding: const EdgeInsets.all(12),
-                      itemCount: _chatMessages.length,
+                      itemCount: displayedMessages.length,
                       itemBuilder: (_, i) {
-                        final m = _chatMessages[i];
+                        final m = displayedMessages[i];
+                        final mine = m.sender.id.toString() == _localIdentity();
                         return Padding(
                           padding: const EdgeInsets.only(bottom: 10),
                           child: GestureDetector(
@@ -4194,6 +5123,41 @@ class _LiveSessionScreenState extends State<LiveSessionScreen> with WidgetsBindi
                                         ],
                                       ),
                                       const SizedBox(height: 2),
+                                      // NEW (reply feature) — quoted preview
+                                      // of the message being replied to, if
+                                      // any. `replyToPreview` is null both
+                                      // when this message isn't a reply AND
+                                      // when the original was hard-deleted
+                                      // at the DB level; `isDeleted: true`
+                                      // on the preview covers the softer,
+                                      // far more common "original was
+                                      // moderated away" case — see
+                                      // ChatMessageSerializer.get_reply_to_detail.
+                                      if (m.replyToPreview != null)
+                                        Container(
+                                          margin: const EdgeInsets.only(bottom: 4),
+                                          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                                          decoration: BoxDecoration(
+                                            color: Colors.white.withValues(alpha: 0.06),
+                                            borderRadius: BorderRadius.circular(6),
+                                            border: const Border(left: BorderSide(color: Colors.white38, width: 2)),
+                                          ),
+                                          child: m.replyToPreview!.isDeleted
+                                              ? const Text('Original message deleted',
+                                                  style: TextStyle(color: Colors.white38, fontSize: 11.5, fontStyle: FontStyle.italic))
+                                              : Column(
+                                                  crossAxisAlignment: CrossAxisAlignment.start,
+                                                  children: [
+                                                    Text(m.replyToPreview!.sender?.fullName ?? '',
+                                                        style: const TextStyle(
+                                                            color: Colors.white60, fontSize: 10.5, fontWeight: FontWeight.w600)),
+                                                    Text(m.replyToPreview!.message ?? '',
+                                                        maxLines: 1,
+                                                        overflow: TextOverflow.ellipsis,
+                                                        style: const TextStyle(color: Colors.white54, fontSize: 11.5)),
+                                                  ],
+                                                ),
+                                        ),
                                       Text(m.message, style: const TextStyle(color: Colors.white, fontSize: 13.5)),
                                       // NEW (Pass 12 §1.1): reaction chips —
                                       // only shown once at least one exists.
@@ -4205,16 +5169,16 @@ class _LiveSessionScreenState extends State<LiveSessionScreen> with WidgetsBindi
                                         Wrap(
                                           spacing: 4,
                                           children: m.reactionCounts.entries.map((entry) {
-                                            final mine = m.myReaction == entry.key;
+                                            final mineReaction = m.myReaction == entry.key;
                                             return InkWell(
                                               borderRadius: BorderRadius.circular(10),
-                                              onTap: () => mine ? _removeChatReaction(m) : _reactToChat(m, entry.key),
+                                              onTap: () => mineReaction ? _removeChatReaction(m) : _reactToChat(m, entry.key),
                                               child: Container(
                                                 padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
                                                 decoration: BoxDecoration(
-                                                  color: mine ? Colors.white24 : Colors.white10,
+                                                  color: mineReaction ? Colors.white24 : Colors.white10,
                                                   borderRadius: BorderRadius.circular(10),
-                                                  border: mine ? Border.all(color: Colors.white54, width: 0.5) : null,
+                                                  border: mineReaction ? Border.all(color: Colors.white54, width: 0.5) : null,
                                                 ),
                                                 child: Text('${entry.key} ${entry.value}',
                                                     style: const TextStyle(color: Colors.white, fontSize: 11)),
@@ -4223,10 +5187,56 @@ class _LiveSessionScreenState extends State<LiveSessionScreen> with WidgetsBindi
                                           }).toList(),
                                         ),
                                       ],
+                                      // NEW (read receipts) — "Seen by N"
+                                      // shown only under OUR OWN messages
+                                      // (checking who read someone else's
+                                      // message isn't something this UI
+                                      // exposes). Tapping opens the full
+                                      // who-and-when list on demand rather
+                                      // than carrying it on every message —
+                                      // see ChatMessageSerializer.read_count's
+                                      // docstring in serializers.py.
+                                      if (mine && !_chatSearchActive)
+                                        Padding(
+                                          padding: const EdgeInsets.only(top: 3),
+                                          child: InkWell(
+                                            onTap: m.readCount > 0 ? () => _showReadReceipts(m) : null,
+                                            child: Row(
+                                              mainAxisSize: MainAxisSize.min,
+                                              children: [
+                                                Icon(
+                                                  m.readCount > 0 ? Icons.done_all_rounded : Icons.done_rounded,
+                                                  size: 13,
+                                                  color: m.readCount > 0 ? Colors.lightBlueAccent : Colors.white30,
+                                                ),
+                                                const SizedBox(width: 3),
+                                                Text(
+                                                  m.readCount > 0 ? 'Seen by ${m.readCount}' : 'Sent',
+                                                  style: TextStyle(
+                                                    color: m.readCount > 0 ? Colors.lightBlueAccent : Colors.white30,
+                                                    fontSize: 10.5,
+                                                  ),
+                                                ),
+                                              ],
+                                            ),
+                                          ),
+                                        ),
                                     ],
                                   ),
                                 ),
-                                if (_isHost) ...[
+                                if (!_chatSearchActive)
+                                  // NEW (reply feature) — reply is available
+                                  // to everyone (student or host), unlike
+                                  // pin/delete below which stay host-only /
+                                  // sender-only.
+                                  InkWell(
+                                    onTap: () => _startReply(m),
+                                    child: const Padding(
+                                      padding: EdgeInsets.only(left: 6, top: 2),
+                                      child: Icon(Icons.reply_rounded, size: 16, color: Colors.white24),
+                                    ),
+                                  ),
+                                if (_isHost && !_chatSearchActive) ...[
                                   // NEW (Pass 13 §1.9): pin/unpin, host-only
                                   // (same _isHost gate as delete below).
                                   InkWell(
@@ -4255,35 +5265,72 @@ class _LiveSessionScreenState extends State<LiveSessionScreen> with WidgetsBindi
                       },
                     ),
         ),
-        Container(
-          padding: const EdgeInsets.all(10),
-          decoration: const BoxDecoration(border: Border(top: BorderSide(color: Colors.white12))),
-          child: Row(
-            children: [
-              Expanded(
-                child: TextField(
-                  controller: _chatCtrl,
-                  style: const TextStyle(color: Colors.white, fontSize: 13.5),
-                  decoration: InputDecoration(
-                    hintText: 'Write a message…',
-                    hintStyle: const TextStyle(color: Colors.white30),
-                    filled: true,
-                    fillColor: Colors.white10,
-                    contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
-                    border: OutlineInputBorder(borderRadius: BorderRadius.circular(20), borderSide: BorderSide.none),
+        if (!_chatSearchActive) ...[
+          // NEW (reply feature) — quote-preview strip shown above the
+          // compose bar while replying, with a cancel (X) to drop back to a
+          // normal send. Cleared automatically on successful send (see
+          // _sendChat) or by tapping the X here.
+          if (_replyingTo != null)
+            Container(
+              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+              decoration: const BoxDecoration(border: Border(top: BorderSide(color: Colors.white12))),
+              child: Row(
+                children: [
+                  const Icon(Icons.reply_rounded, size: 14, color: Colors.white54),
+                  const SizedBox(width: 6),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text('Replying to ${_replyingTo!.sender.fullName}',
+                            style: const TextStyle(color: Colors.white70, fontSize: 11, fontWeight: FontWeight.w600)),
+                        Text(_replyingTo!.message,
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: const TextStyle(color: Colors.white54, fontSize: 11.5)),
+                      ],
+                    ),
                   ),
-                  onSubmitted: (_) => _sendChat(),
+                  InkWell(
+                    onTap: _cancelReply,
+                    child: const Padding(
+                      padding: EdgeInsets.all(4),
+                      child: Icon(Icons.close_rounded, size: 16, color: Colors.white54),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          Container(
+            padding: const EdgeInsets.all(10),
+            decoration: const BoxDecoration(border: Border(top: BorderSide(color: Colors.white12))),
+            child: Row(
+              children: [
+                Expanded(
+                  child: TextField(
+                    controller: _chatCtrl,
+                    style: const TextStyle(color: Colors.white, fontSize: 13.5),
+                    decoration: InputDecoration(
+                      hintText: _replyingTo != null ? 'Write a reply…' : 'Write a message…',
+                      hintStyle: const TextStyle(color: Colors.white30),
+                      filled: true,
+                      fillColor: Colors.white10,
+                      contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+                      border: OutlineInputBorder(borderRadius: BorderRadius.circular(20), borderSide: BorderSide.none),
+                    ),
+                    onSubmitted: (_) => _sendChat(),
+                  ),
                 ),
-              ),
-              IconButton(
-                icon: _sendingChat
-                    ? const SizedBox(width: 18, height: 18, child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white54))
-                    : const Icon(Icons.send_rounded, color: Colors.white),
-                onPressed: _sendingChat ? null : _sendChat,
-              ),
-            ],
+                IconButton(
+                  icon: _sendingChat
+                      ? const SizedBox(width: 18, height: 18, child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white54))
+                      : const Icon(Icons.send_rounded, color: Colors.white),
+                  onPressed: _sendingChat ? null : _sendChat,
+                ),
+              ],
+            ),
           ),
-        ),
+        ],
       ],
     );
   }
@@ -4419,6 +5466,24 @@ class _LiveSessionScreenState extends State<LiveSessionScreen> with WidgetsBindi
                 child: Text(p.user.fullName.isNotEmpty ? p.user.fullName.substring(0, 1).toUpperCase() : '?',
                     style: const TextStyle(color: Colors.white70)),
               ),
+              // FEATURE (Flutter Phase 1, item 5 — presence): a small
+              // green dot for anyone the socket currently has as
+              // present, same "who's actually here right now" signal as
+              // the header's live-count chip, just per-row.
+              if (_onlinePresenceUserIds.contains(p.user.id))
+                Positioned(
+                  right: -1,
+                  top: -1,
+                  child: Container(
+                    width: 10,
+                    height: 10,
+                    decoration: BoxDecoration(
+                      color: Colors.greenAccent,
+                      shape: BoxShape.circle,
+                      border: Border.all(color: Colors.black, width: 1.5),
+                    ),
+                  ),
+                ),
               if (p.handRaised)
                 Positioned(
                   right: -2,
@@ -4990,7 +6055,13 @@ class _MiniViewTile extends StatelessWidget {
 // ===========================================================================
 class _CreatePollSheet extends StatefulWidget {
   final int sessionId;
-  const _CreatePollSheet({required this.sessionId});
+  // NEW (Pass 13 frontend catch-up §1.11) — needed to fetch this
+  // classroom's saved quick-poll templates. Nullable because
+  // LiveSessionScreen._classroomId can itself be null early on (before
+  // `_session` has loaded) — the template button just hides in that case
+  // rather than crashing.
+  final int? classroomId;
+  const _CreatePollSheet({required this.sessionId, this.classroomId});
 
   @override
   State<_CreatePollSheet> createState() => _CreatePollSheetState();
@@ -5001,6 +6072,12 @@ class _CreatePollSheetState extends State<_CreatePollSheet> {
   final List<TextEditingController> _optionCtrls = [TextEditingController(), TextEditingController()];
   bool _submitting = false;
   String? _error;
+
+  // NEW (§1.11) — "Use Template" launches the poll directly via
+  // polls/quick-create/ (LiveClassApi.polls.quickCreate) instead of going
+  // through the manual question/options form below, so this is a
+  // completely separate in-flight flag from `_submitting`.
+  bool _launchingTemplate = false;
 
   @override
   void dispose() {
@@ -5014,6 +6091,44 @@ class _CreatePollSheetState extends State<_CreatePollSheet> {
   void _addOption() {
     if (_optionCtrls.length >= 6) return;
     setState(() => _optionCtrls.add(TextEditingController()));
+  }
+
+  // NEW (§1.11) — opens a second sheet listing this classroom's saved
+  // poll templates (poll-templates/?classroom=), picks one, and launches
+  // it immediately via quick-create — skipping the manual form entirely
+  // rather than just pre-filling it, since quick-create is a single call
+  // and re-typing the same question/options into this form would be
+  // pure friction for something meant to save the host time mid-class.
+  Future<void> _useTemplate() async {
+    final classroomId = widget.classroomId;
+    if (classroomId == null) return;
+    final template = await showModalBottomSheet<PollTemplate>(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: Colors.white,
+      shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(20))),
+      builder: (_) => _PollTemplatePickerSheet(classroomId: classroomId),
+    );
+    if (template == null || !mounted) return;
+    setState(() {
+      _launchingTemplate = true;
+      _error = null;
+    });
+    try {
+      await LiveClassApi.polls.quickCreate(templateId: template.id, sessionId: widget.sessionId);
+      if (!mounted) return;
+      Navigator.pop(context, true);
+    } on LiveClassApiException catch (e) {
+      setState(() {
+        _launchingTemplate = false;
+        _error = e.message;
+      });
+    } catch (_) {
+      setState(() {
+        _launchingTemplate = false;
+        _error = 'Could not launch that template.';
+      });
+    }
   }
 
   Future<void> _submit() async {
@@ -5059,6 +6174,22 @@ class _CreatePollSheetState extends State<_CreatePollSheet> {
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             const Text('New Poll', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
+            // NEW (§1.11) — only offered when we actually know the
+            // classroom (see widget.classroomId note above).
+            if (widget.classroomId != null) ...[
+              const SizedBox(height: 10),
+              Align(
+                alignment: Alignment.centerLeft,
+                child: OutlinedButton.icon(
+                  onPressed: (_submitting || _launchingTemplate) ? null : _useTemplate,
+                  style: OutlinedButton.styleFrom(foregroundColor: _kNavy, side: const BorderSide(color: _kNavy)),
+                  icon: _launchingTemplate
+                      ? const SizedBox(width: 14, height: 14, child: CircularProgressIndicator(strokeWidth: 2, color: _kNavy))
+                      : const Icon(Icons.bolt_rounded, size: 16),
+                  label: Text(_launchingTemplate ? 'Launching…' : 'Use Template'),
+                ),
+              ),
+            ],
             const SizedBox(height: 14),
             TextField(
               controller: _questionCtrl,
@@ -5094,12 +6225,115 @@ class _CreatePollSheetState extends State<_CreatePollSheet> {
               width: double.infinity,
               child: ElevatedButton(
                 style: ElevatedButton.styleFrom(backgroundColor: _kNavy, foregroundColor: Colors.white, padding: const EdgeInsets.symmetric(vertical: 13)),
-                onPressed: _submitting ? null : _submit,
+                onPressed: (_submitting || _launchingTemplate) ? null : _submit,
                 child: _submitting
                     ? const SizedBox(width: 18, height: 18, child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white))
                     : const Text('Launch Poll'),
               ),
             ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+// NEW (§1.11) — template picker used by _CreatePollSheet._useTemplate above.
+// Kept as its own small sheet (rather than inlined into _CreatePollSheet)
+// since it has its own async load + empty/error states to manage.
+class _PollTemplatePickerSheet extends StatefulWidget {
+  final int classroomId;
+  const _PollTemplatePickerSheet({required this.classroomId});
+
+  @override
+  State<_PollTemplatePickerSheet> createState() => _PollTemplatePickerSheetState();
+}
+
+class _PollTemplatePickerSheetState extends State<_PollTemplatePickerSheet> {
+  List<PollTemplate> _templates = [];
+  bool _loading = true;
+  String? _error;
+
+  @override
+  void initState() {
+    super.initState();
+    _load();
+  }
+
+  Future<void> _load() async {
+    setState(() {
+      _loading = true;
+      _error = null;
+    });
+    try {
+      final res = await LiveClassApi.pollTemplates.list(widget.classroomId);
+      if (!mounted) return;
+      setState(() {
+        _templates = res.results;
+        _loading = false;
+      });
+    } catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _loading = false;
+        _error = e is LiveClassApiException ? e.message : 'Could not load templates.';
+      });
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: EdgeInsets.only(bottom: MediaQuery.of(context).viewInsets.bottom),
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(20, 16, 20, 24),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const Text('Choose a Template', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
+            const SizedBox(height: 14),
+            if (_loading)
+              const Padding(
+                padding: EdgeInsets.symmetric(vertical: 30),
+                child: LiveClassLoading(),
+              )
+            else if (_error != null)
+              Padding(
+                padding: const EdgeInsets.symmetric(vertical: 20),
+                child: Column(
+                  children: [
+                    Text(_error!, textAlign: TextAlign.center, style: const TextStyle(fontSize: 12.5)),
+                    const SizedBox(height: 10),
+                    OutlinedButton(onPressed: _load, child: const Text('Retry')),
+                  ],
+                ),
+              )
+            else if (_templates.isEmpty)
+              Padding(
+                padding: const EdgeInsets.symmetric(vertical: 20),
+                child: Text('No saved templates for this classroom yet.',
+                    textAlign: TextAlign.center, style: TextStyle(fontSize: 12.5, color: Colors.grey.shade500)),
+              )
+            else
+              ConstrainedBox(
+                constraints: const BoxConstraints(maxHeight: 360),
+                child: ListView.separated(
+                  shrinkWrap: true,
+                  itemCount: _templates.length,
+                  separatorBuilder: (_, __) => const Divider(height: 1),
+                  itemBuilder: (_, i) {
+                    final t = _templates[i];
+                    return ListTile(
+                      contentPadding: EdgeInsets.zero,
+                      title: Text(t.question, maxLines: 2, overflow: TextOverflow.ellipsis, style: const TextStyle(fontSize: 13.5, fontWeight: FontWeight.w600)),
+                      subtitle: Text('${t.options.length} options', style: TextStyle(fontSize: 11.5, color: Colors.grey.shade500)),
+                      trailing: const Icon(Icons.chevron_right_rounded, size: 20),
+                      onTap: () => Navigator.pop(context, t),
+                    );
+                  },
+                ),
+              ),
           ],
         ),
       ),

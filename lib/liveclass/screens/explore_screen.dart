@@ -15,6 +15,7 @@ import '../services/liveclass_api_service.dart';
 import '../theme/liveclass_theme.dart';
 import 'classroom_detail_screen.dart';
 import 'classroom_form_screen.dart';
+import 'my_progress_screen.dart';
 
 // FIX (design-system drift — production readiness audit): this was the last
 // screen still fully hand-rolling its own hex-literal palette with zero tie
@@ -67,11 +68,36 @@ class _ExploreScreenState extends State<ExploreScreen> {
   bool _loadingMore = false; // subsequent pages
   String? _error;
 
+  // FEATURE (Phase 2, item 9 — personalized discovery): backend
+  // (ClassroomViewSet.recommended, GET classrooms/recommended/) was ready
+  // with no frontend caller anywhere in the module. Shown only on the
+  // default browse view (no search/language filter, "All Classes" tab) —
+  // once the person is actively filtering, a generic recommendation row
+  // just gets in the way of what they're actually looking for.
+  List<Classroom> _recommended = [];
+  bool _recommendedLoading = true;
+
   @override
   void initState() {
     super.initState();
     _scrollCtrl.addListener(_onScroll);
     _fetch(reset: true);
+    _fetchRecommended();
+  }
+
+  Future<void> _fetchRecommended() async {
+    try {
+      final res = await LiveClassApi.classrooms.recommended();
+      if (!mounted) return;
+      setState(() {
+        _recommended = res.results;
+        _recommendedLoading = false;
+      });
+    } catch (_) {
+      // Recommendations are a nice-to-have — never block Explore on them.
+      if (!mounted) return;
+      setState(() => _recommendedLoading = false);
+    }
   }
 
   @override
@@ -188,6 +214,7 @@ class _ExploreScreenState extends State<ExploreScreen> {
           slivers: [
             _buildAppBar(),
             _buildFilters(),
+            _buildRecommended(),
             _buildBody(),
           ],
         ),
@@ -220,6 +247,18 @@ class _ExploreScreenState extends State<ExploreScreen> {
           ),
         ],
       ),
+      // FEATURE (Phase 2, item 8 — student progress): my-progress/ was
+      // ready server-side with no entry point anywhere in the module.
+      // Explore is the module's own entry tab, so this doubles as the
+      // reachable entry point until this app's main menu/profile section
+      // (not part of this upload) wires its own.
+      actions: [
+        IconButton(
+          icon: const Icon(Icons.insights_outlined, color: Colors.white),
+          tooltip: 'My Progress',
+          onPressed: () => Navigator.push(context, MaterialPageRoute(builder: (_) => const MyProgressScreen())),
+        ),
+      ],
       bottom: PreferredSize(
         preferredSize: const Size.fromHeight(58),
         child: Padding(
@@ -293,6 +332,45 @@ class _ExploreScreenState extends State<ExploreScreen> {
           ),
           const SizedBox(height: 6),
         ],
+      ),
+    );
+  }
+
+  // ---------------------------------------------------------------------
+  // Recommended for you (Phase 2, item 9) — personalized horizontal row,
+  // shown only on the default unfiltered browse view.
+  // ---------------------------------------------------------------------
+  Widget _buildRecommended() {
+    final show = !_mine && _search.isEmpty && _language == null && !_recommendedLoading && _recommended.isNotEmpty;
+    if (!show) return const SliverToBoxAdapter(child: SizedBox.shrink());
+    return SliverToBoxAdapter(
+      child: Padding(
+        padding: const EdgeInsets.only(top: 6, bottom: 10),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const Padding(
+              padding: EdgeInsets.fromLTRB(16, 0, 16, 8),
+              child: Text(
+                'Recommended for you',
+                style: TextStyle(fontWeight: FontWeight.bold, fontSize: 15.5, color: _kNavy),
+              ),
+            ),
+            SizedBox(
+              height: 210,
+              child: ListView.separated(
+                scrollDirection: Axis.horizontal,
+                padding: const EdgeInsets.symmetric(horizontal: 16),
+                itemCount: _recommended.length,
+                separatorBuilder: (_, __) => const SizedBox(width: 12),
+                itemBuilder: (_, i) {
+                  final c = _recommended[i];
+                  return SizedBox(width: 150, child: _ClassroomCard(classroom: c, onTap: () => _openDetail(c)));
+                },
+              ),
+            ),
+          ],
+        ),
       ),
     );
   }

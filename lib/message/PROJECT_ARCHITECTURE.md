@@ -81,32 +81,47 @@ message/
     media_download_service.dart — download to gallery / Downloads folder
     message_cache_service.dart — SharedPreferences cache (conversations + messages)
   screens/
-    conversations_screen.dart      — MAIN chat list (search/pin/rename/select/delete)
-    conversations_list_screen.dart — ALT/older chat list (simpler, bulk-delete only)
+    conversations_screen.dart      — MAIN chat list (search/pin/rename/select/delete/draft-preview + global message-search entry)
     chat_screen.dart           — the big one: message thread UI (5000+ lines)
     call_screen.dart           — in-call UI (1:1 + group grid, controls)
     incoming_call_screen.dart  — full-screen ringing UI (swipe accept/reject)
     study_room_screen.dart     — whiteboard + video screen (4600+ lines)
     group_profile_screen.dart  — group info/settings/members/roles/invite
     create_group_screen.dart   — new group wizard (pick members, name)
-    forward_message_screen.dart — pick chat(s) to forward message(s) into
+    forward_message_screen.dart — pick chat(s) to forward message(s) into (+ optional caption, poll-exclude)
     media_viewer_screen.dart   — fullscreen swipeable/zoomable image viewer
     app_bottom_nav.dart        — shared bottom nav bar (Home/Search/Chats/Profile)
+    message_search_screen.dart — 🔥 NAYA (Phase 4): in-chat + global message search, with filters
+    read_receipt_privacy_screen.dart — 🔥 NAYA (Phase 4): mutual read-receipt toggle
+    conversations_list_screen.dart — ⚠️ RE-UPLOADED (Phase 5): re-appeared this
+      session after being marked deleted in Phase 4 — see §5.1 for status
   widgets/
-    floating_call_bar.dart     — minimized-call pill (ALT implementation)
-    minimized_call_bar.dart    — minimized-call pill (ALT implementation, FIX'd version)
+    minimized_call_bar.dart    — minimized-call pill (the current/correct implementation)
     whiteboard_painter.dart    — CustomPainter for strokes/shapes on canvas
-  patches/ (not real folder, just loose files given separately)
-    chat_screen_pagination_fix.dart — patch for _loadMoreMessages() 404 handling
+    mention_suggestions_overlay.dart — 🔥 NAYA (Phase 4): @mention autocomplete widget + `extractMentionQuery`/`insertMention` helpers
+    ~~floating_call_bar.dart~~  — 🗑️ DELETED (confirmed unwired, §6.1)
 ```
 
-Outside `message/` (referenced but **not uploaded yet** — treat as
+> **Phase 4 update (this session)**: `chat_screen_pagination_fix.dart`
+> patch is confirmed already merged into `chat_screen.dart` (404-on-
+> out-of-range-page handled, no stray `print()`s) — the standalone
+> patch file no longer needs tracking separately. See §12 for the full
+> list of this session's changes.
+
+Outside `message/` (referenced but **still not uploaded** — treat as
 external/unknown until shared):
 - `../../utils/api.dart` → `Api.baseUrl` (single source of backend base URL)
 - `../../services/auth_service.dart` → `AuthService.getToken()` / login/logout
 - `../../profile/screens/target_profile.dart`, `../../profile/api_service.dart` (as `ProfileApi`)
-- `../../home.dart` → `HomeScreen(initialIndex: ...)` (IndexedStack: Home/Search/Profile)
 - `../../widgets/sticker_picker_sheet.dart`
+- `app_bottom_nav.dart` (inside `message/screens/`, imported by
+  `conversations_screen.dart` — content not yet reviewed, only its
+  existence/usage inferred)
+
+✅ **Shared this session**: `main.dart` (`MaterialApp`, mounts only
+`MinimizedCallBar()` — see §6.1/§7.1) and `home.dart` (`HomeScreen`,
+`IndexedStack`: Home/Search/Profile — pushes `ConversationsScreen`
+separately for the Chats tab — see §5.1).
 
 ---
 
@@ -190,8 +205,8 @@ used for group send-permission errors specifically.
 | | POST/DELETE `/message/messages/<id>/react/` `{emoji}` | react/unreact |
 | | POST `/message/messages/<id>/read/` | mark one read |
 | | POST `/message/messages/forward/` `{message_ids, conversation_ids}` | forward N msgs → N chats in one call |
-| Pins | GET/POST `/message/conversations/<id>/pins/` | max 3 pinned/conversation (backend-enforced) |
-| | DELETE `/message/conversations/<id>/pins/<message_id>/` | unpin |
+| Pins | GET `/message/conversations/<id>/pinned/` | list pins (🔧 Phase 6: corrected, was documented as `/pins/`) |
+| | POST/DELETE `/message/messages/<id>/pin/` | pin/unpin — message-level action, NOT under `conversations/<id>/`; max 3 pinned/conversation (backend-enforced) |
 | Polls | POST `/message/conversations/<id>/polls/` | create |
 | | GET `/message/polls/<id>/` | live results |
 | | POST `/message/polls/<id>/vote/` `{option_ids}` | re-vote = auto-switch |
@@ -214,9 +229,20 @@ used for group send-permission errors specifically.
 | | POST `/message/groups/<id>/join-requests/<req_id>/approve\|reject/` | |
 | Blocking | GET/POST/DELETE `/profile/blocked-users/` | block/unblock/list — `profile` app, not `message` |
 | Presence | GET `/message/users/<user_id>/presence/` | online/last-seen |
-| Calls | GET `/message/calls/` , GET `/message/calls/<id>/` | history/detail (NOTE: initiate/action/missed live in `call_api_service.dart`) |
+| Calls | GET `/message/calls/history/` , GET `/message/calls/history/<id>/` | history/detail (🔧 Phase 6: corrected, was missing `history/` segment — see §17.1). NOTE: initiate/action live in `call_api_service.dart` at the bare `/calls/` prefix (different, plain-path views — that part was already correct); missed/addable-participants/add-participant also live in `call_api_service.dart`, also under `calls/history/` |
+| Search | GET `/message/conversations/<id>/search/` | in-chat search |
+| | GET `/message/conversations/search_all/` | global search (🔧 Phase 6: corrected, was `/message/search_all/` — see §17.1) |
 | Participants | POST `/message/conversations/<id>/participants/` `{user_id}` | add to existing conversation |
 | Study room state | PUT/GET/DELETE `/message/conversations/<id>/study-room-state/` `{pages}` | persist/restore/clear whiteboard pages |
+
+> 🔥 **Phase 5 finding**: `getOrCreateConversation(targetUserId)` at the
+> bottom of the file hits the exact same endpoint as `startPrivateChat`
+> (`POST /message/conversations/start_private/`), just with its own
+> inline `http.post` instead of reusing `_headers()`/`_decode()`, and
+> throws a plain `Exception` instead of `MessageApiException`. Looks
+> like a leftover/duplicate — no call-site for it was found in any file
+> uploaded so far. Flagged in §10; don't assume which one is "the" one
+> to call without checking where each is actually used.
 
 ### 4.2 `call_api_service.dart` — call + study-room-join REST
 Base URL hardcoded here (⚠️ **NOT** shared with `Api.baseUrl` — separate
@@ -251,7 +277,15 @@ socket channel — study room events are a passthrough on the same
 socket, not a separate connection).
 
 Outgoing (client→server) methods:
-- `sendMessage({text, messageType, clientId, replyTo})` → `{type:'message', ...}`
+- `sendMessage({text, messageType, clientId, replyTo, fileUrl, fileUrls,
+  thumbnailUrl, meta})` → `{type:'message', ...}` — 🔧 **FIX (Phase 4)**:
+  the four trailing params are new; previously only plain text could go
+  over the socket and media had to fall back to REST. Backend
+  `ChatConsumer.handle_new_message`/`save_message` now reads these too
+  — still upload via Dio first to get a `fileUrl`/`fileUrls`, then send.
+- `sendPin(messageId, bool pin)` → `{type:'pin', message_id, pin}` — 🔥
+  **NAYA (Phase 4)**: optional socket-side pin/unpin, mirrors the REST
+  call; server broadcasts `pin_event` either way.
 - `sendTyping(bool)` → `{type:'typing', is_typing}`
 - `sendReadReceipt(messageId)` → `{type:'read', message_id}`
 - `sendDelete(messageId, {forEveryone})` → `{type:'delete', ...}`
@@ -262,8 +296,9 @@ Outgoing (client→server) methods:
 Incoming: `events` broadcast Stream of raw `{type, ...}` maps — screens
 have a big switch on `type` (see §9).
 
-Has raw `print()` debug logging still in place (marked "hata dena baad
-me" = remove later) — noise in production logs, not removed yet.
+✅ **Phase 4**: the stray `print()` debug logging (connect/send/receive/
+onDone/onError, all marked "hata dena baad me") has been removed —
+socket layer is now clean of debug noise.
 
 ### 4.5 `inbox_socket_service.dart` — GLOBAL singleton WebSocket
 Connects: `ws(s)://<host>/ws/inbox/?token=<JWT>`. Singleton
@@ -429,15 +464,30 @@ Push `data.type` routing (background handler):
 - `incoming_call` → `CallKitService.showIncomingCall(data)`
 - `call_cancelled` → `CallKitService.endCallUiByCallId(callId)`
 - `reaction` → `_showBackgroundReactionNotification`
+- `mention` → 🔥 **NAYA (Phase 4)** `_showBackgroundMentionNotification`
+  — own `mentions` channel (Importance.max); backend sends this push
+  bypassing normal chat-mute suppression, so it must stand out even in
+  a muted chat
+- `chat_digest` → 🔥 **NAYA (Phase 4)** `_showBackgroundDigestNotification`
+  — backend's pre-formatted "X sent N messages" text shown as-is, fixed
+  per-conversation notification `id` (re-digest updates in place instead
+  of stacking), no per-message Reply action (it's a batch summary, not
+  one message)
 - anything else (chat message) → `_showBackgroundChatNotification`
   (has its own Reply action + own `FlutterLocalNotificationsPlugin`
   instance since it's a separate isolate)
+
+Both new types reuse the SAME generic tap-handler
+(`_handleNotificationResponse`) as everything else — it only ever reads
+`data.conversation_id` from the payload, so no special-case tap logic
+was needed; tapping either just opens the conversation (no jump-to-
+message for `chat_digest`, since a digest has no single `message_id`).
 
 `init()` (foreground):
 - Requests permissions, creates Android channels: `chat_messages`,
   `downloads`, `reactions`, `ongoing_call` (Importance.low, no sound/
   vibration — updates every second via chronometer, would spam as
-  heads-up otherwise)
+  heads-up otherwise), `mentions` (🔥 NAYA Phase 4, Importance.max)
 - `FirebaseMessaging.onMessage` (foreground) routing:
   - `incoming_call` + `CallManager.instance.isActive` → **call
     waiting** path: `CallManager.setWaitingCall(...)`, no screen push
@@ -448,6 +498,13 @@ Push `data.type` routing (background handler):
   - `call_cancelled` → dismiss CallKit UI + clear waiting-call state or
     pop `IncomingCallScreen`
   - `reaction` → `_showReactionNotification`
+  - `mention` → 🔥 **NAYA (Phase 4)** `_showMentionNotification` —
+    jaan-bujh kar `currentOpenConversationId` suppression check NAHI
+    lagaya; a mention should show even if that chat happens to be open
+  - `chat_digest` → 🔥 **NAYA (Phase 4)** `_showDigestNotification`, but
+    THIS one DOES still respect the `conversation_id ==
+    currentOpenConversationId` suppression (already looking at that chat
+    → digest is redundant)
   - chat message where `conversation_id == currentOpenConversationId`
     → suppressed (already looking at it)
   - else → `_showLocalNotification`
@@ -513,25 +570,40 @@ SharedPreferences-backed, best-effort (never throws to caller).
 
 ## 5. Screens Layer
 
-### 5.1 Two competing conversation-list screens ⚠️
-Both exist and both say "REDESIGN" in their header comments:
-- **`conversations_screen.dart`** — the fuller one: search (user
-  search + start new chat), long-press multi-select (delete/pin/
-  rename), local pin/label overrides, connects to
-  `InboxSocketService`, has `AppBottomNav`.
-- **`conversations_list_screen.dart`** — simpler: long-press
-  multi-select delete ONLY (no search, no pin/rename, no inbox
-  socket), also has `AppBottomNav`.
+### 5.1 ⚠️ RE-OPENED (Phase 5): `conversations_list_screen.dart` re-uploaded
+Phase 4 had marked this file **deleted** (dead code, confirmed via
+`home.dart`/`main.dart` routing — see the resolution reasoning below,
+still valid as far as routing goes). This session the file was
+re-uploaded as part of the current file set, contradicting that
+"deleted" status. Nothing else in this session's uploads (`home.dart`/
+`main.dart` were NOT re-shared this session, so routing can't be
+re-confirmed either way) references `ConversationsListScreen` by name.
 
-**Not yet confirmed which one main.dart actually routes to** — treat
-`conversations_screen.dart` as the primary/current one (richer feature
-set, matches what `chat_screen.dart` and others assume exists) unless
-told otherwise. `conversations_list_screen.dart` may be dead code or an
-earlier iteration — flag before deleting/ignoring either.
+**Current call**: treated as present-but-unwired-until-confirmed. Not
+re-marked as the live screen — `conversations_screen.dart` is still the
+one every other file's imports/pushes point at (`create_group_screen.dart`,
+`chat_screen.dart` navigation, `app_bottom_nav.dart`'s only known
+consumer, etc.). This is flagged in §10 as something to confirm with
+the user rather than silently re-deleting or silently re-adopting it.
 
-Both push `ChatScreen(conversation: ...)` on tap, `CreateGroupScreen`
-from a FAB/action (only wired in `conversations_screen.dart`'s search
-flow explicitly seen so far).
+Original Phase 4 resolution (kept for history): confirmed via
+`home.dart` (imports + `Navigator.push` both pointed ONLY at
+`ConversationsScreen`, line 29/159) and `main.dart` (no reference to
+either screen — routing lived entirely in `home.dart`).
+`conversations_list_screen.dart` was an earlier/simpler iteration with
+delete-only multi-select, no search, no pin/rename, no inbox socket.
+
+`conversations_screen.dart` (the sole survivor) has: user search
+(start new chat), long-press multi-select (delete/pin/rename), local
+pin/label overrides, `mySettings.draftText` → "Draft: ..." preview per
+row, connects to `InboxSocketService`, has `AppBottomNav`, and (🔥
+**NAYA, Phase 4**) a separate "Search messages" icon in the app bar →
+pushes `MessageSearchScreen()` (global mode) — kept as a DISTINCT icon
+from the existing "search users to start a chat" one, so the two don't
+get confused.
+
+Pushes `ChatScreen(conversation: ...)` on tap, `CreateGroupScreen` from
+the "new group" action.
 
 ### 5.2 `chat_screen.dart` (~5000 lines) — main thread UI
 State: `_ChatScreenState` (huge — owns `_messages`, `_socket`
@@ -735,10 +807,22 @@ Simple wizard: user search (`searchUsers`) + multi-select + name input
 → `_createGroup()` → `MessageApiService.createGroup(...)`.
 
 ### 5.8 `forward_message_screen.dart`
-`ForwardMessageScreen(messageIds: [...])`. Loads conversations, local
-search filter, multi-select target chats, `_send()` →
-`MessageApiService.forwardMessages(messageIds, conversationIds)`, pops
-`true` on success (caller shows confirmation snackbar).
+`ForwardMessageScreen(messages: [...])` — 🔧 **note (Phase 4)**: takes
+full `MessageModel` objects now, not just `messageIds` (needed to know
+each selected message's `type` for the caption-UI logic below; this was
+already the case when reviewed this session, no change made). Loads
+conversations, local search filter, multi-select target chats.
+
+- Optional caption `TextField`, shown only when `_captionApplicable` is
+  true (at least one selected message is non-text — media/location/etc.
+  — since backend doesn't overwrite a text message's own text with a
+  caption, showing the field for all-text selections would be confusing)
+- `_send()` defensively excludes any `MessageType.poll` from the
+  forwarded ids (backend silently drops polls anyway; this is just
+  belt-and-suspenders in case the caller didn't already block poll
+  selection)
+- `MessageApiService.forwardMessages(messageIds, conversationIds,
+  caption)`, pops `true` on success (caller shows confirmation snackbar)
 
 ### 5.9 `media_viewer_screen.dart`
 `MediaViewerScreen(urls, initialIndex, onDownload?, isDownloaded?)`.
@@ -754,31 +838,67 @@ Shared 4-tab bar: Home/Search/Chats/Profile. `AppTab` enum
 {home, search, chats, profile}. Tapping Home/Search/Profile does
 `pushAndRemoveUntil(HomeScreen(initialIndex: N))` (HomeScreen's own
 `IndexedStack` only has 3 tabs — Chats is a separately-pushed screen,
-mapped: index2→home(0), index3→home(2)). Reused by both
-`conversations_screen.dart` and `conversations_list_screen.dart`.
+mapped: index2→home(0), index3→home(2)). Used by `conversations_screen.dart`
+(only *confirmed* consumer — see §5.1 for the Phase 5 caveat about
+`conversations_list_screen.dart` re-appearing).
+
+### 5.11 🔥 NAYA (Phase 4) `message_search_screen.dart`
+`MessageSearchScreen({conversationId})` — one screen, two modes:
+- `conversationId` given → in-chat search
+  (`MessageApiService.searchMessages`); tapping a result pops the
+  screen with just the `message.id` — `ChatScreen` (already wired,
+  pre-existing) does the actual scroll+highlight via
+  `jumpToMessageId`/`_tryJumpToMessageId`.
+- `conversationId` null → global search across all conversations
+  (`MessageApiService.searchAllMessages`); each result carries a
+  `conversation_preview`. Tapping fetches the full `ConversationModel`
+  via `getConversation(preview.id)` then `pushReplacement`s straight
+  into `ChatScreen(conversation, jumpToMessageId: result.message.id)`.
+
+Debounced (400ms) client-side search, 2-char minimum before firing
+(matches backend's 400-on-short-query behaviour). Filters (`sender`,
+`dateFrom`/`dateTo`, `mediaType`, `hasMedia`) live in a bottom sheet
+(`_SearchFiltersSheet`) — sender field is a live autocomplete against
+`MessageApiService.searchUsers`. Entry points: `conversations_screen.dart`
+app bar icon (global mode) and `chat_screen.dart`'s own search icon
+(in-chat mode, pre-existing wiring — this file was the missing piece).
+
+### 5.12 🔥 NAYA (Phase 4) `read_receipt_privacy_screen.dart`
+Standalone settings screen — one `Switch` bound to
+`MessageApiService.getReadReceiptSetting()`/`setReadReceiptSetting()`.
+Optimistic toggle with rollback on failure. Explicitly calls out (in
+the UI copy) that this is a **mutual** setting — turning it off hides
+your read receipts from others AND hides others' read receipts from
+you, same wording as the backend's own contract.
+
+⚠️ **Not yet wired to any entry point** — no other screen currently
+navigates to it (by design; the doc flagged this same gap before it was
+built). Needs a link from wherever makes sense product-wise: a real
+Settings/Privacy screen (not yet uploaded), `group_profile_screen.dart`,
+or a `chat_screen.dart` 3-dot menu item.
 
 ---
 
 ## 6. Widgets Layer
 
-### 6.1 Minimized call bar — TWO implementations ⚠️
-- **`floating_call_bar.dart`** (`FloatingCallBar(navigatorKey)`) —
-  older version, takes `navigatorKey` as a constructor param, reopens
-  `CallScreen` with (incorrectly) fresh `livekitUrl:''`/`livekitToken:''`
-  placeholders (relies on `CallManager` already being connected/reused).
-- **`minimized_call_bar.dart`** (`MinimizedCallBar()`, no params) —
-  the FIXED version per its own header comment: uses the GLOBAL
-  `CallKitService.navigatorKey` instead of a locally-passed one,
-  because this widget sits in `MaterialApp.builder`'s `Stack` as a
-  SIBLING of `child` (i.e. OUTSIDE the `Navigator`), so
-  `Navigator.of(context)` from its own `BuildContext` doesn't work —
-  documented root-cause of a "back karne ke baad fullscreen wapas nahi
-  aati" bug.
+### 6.1 ✅ RESOLVED (Phase 4): only `minimized_call_bar.dart` remains
+Was previously flagged as two competing widgets — now confirmed via
+`main.dart`'s `MaterialApp.builder` (mounts ONLY `MinimizedCallBar()`)
+and a full grep across every uploaded file (`FloatingCallBar` appears
+nowhere except its own now-deleted definition).
 
-**Treat `minimized_call_bar.dart` as the current/correct one** unless
-told otherwise; `floating_call_bar.dart` is superseded (same bug it
-fixes). Both listen to `CallManager.instance` and show only when
-`isActive && isMinimized`.
+**`floating_call_bar.dart` has been deleted** (superseded — older
+version, took `navigatorKey` as a constructor param, reopened
+`CallScreen` with placeholder `livekitUrl:''`/`livekitToken:''`).
+
+`minimized_call_bar.dart` (`MinimizedCallBar()`, no params) is the
+current/correct one: uses the GLOBAL `CallKitService.navigatorKey`
+instead of a locally-passed one, because this widget sits in
+`MaterialApp.builder`'s `Stack` as a SIBLING of `child` (i.e. OUTSIDE
+the `Navigator`), so `Navigator.of(context)` from its own
+`BuildContext` doesn't work — documented root-cause of a "back karne
+ke baad fullscreen wapas nahi aati" bug. Listens to `CallManager.instance`,
+shows only when `isActive && isMinimized`.
 
 ### 6.2 `whiteboard_painter.dart`
 `WhiteboardPainter(strokes, shapes, previewShape?)` — `CustomPainter`.
@@ -790,11 +910,29 @@ finalized/broadcast). `shouldRepaint` always returns `true` (no diffing
 — fine for a whiteboard, repaints are cheap relative to draw
 frequency).
 
+### 6.3 🔥 NAYA (Phase 4) `mention_suggestions_overlay.dart`
+Two pure top-level functions + one widget, all consumed by
+`chat_screen.dart` (which already imported/called them before this file
+existed — this was the missing piece, not new wiring in `chat_screen.dart`):
+- `extractMentionQuery(text, cursorPosition)` → `String?` — null if no
+  active `@query` at the cursor (checks: nearest `@` before cursor, no
+  space/newline between it and cursor, and `@` itself is either
+  string-start or preceded by whitespace — avoids false-triggering on
+  things like `email@domain`).
+- `insertMention(TextEditingValue, UserMini)` → `TextEditingValue` —
+  replaces the active `@query` with `@username ` (trailing space) and
+  moves the cursor past it.
+- `MentionSuggestionsOverlay({members, query, onSelected})` — floating
+  card above the compose box, filters `members` (always the caller-
+  supplied group member list, e.g. `_groupMembers` — never a global user
+  search, matching the backend's own active-members-only matching),
+  username-prefix matches sorted first.
+
 ---
 
 ## 7. End-to-End Flows
 
-### 7.1 App startup (inferred, main.dart not yet shared)
+### 7.1 App startup (partially confirmed via `main.dart`, Phase 4)
 Presumed sequence based on cross-references: Firebase init →
 `PushNotificationService.instance.init()` (sets background handler,
 requests permissions, registers FCM token if logged in, starts
@@ -803,8 +941,13 @@ login (via not-yet-shared `AuthService`) → on success,
 `PushNotificationService.instance.registerToken()` (must be called
 manually right after login too, since token isn't registered until a
 user is authenticated) → `ConversationsScreen` connects
-`InboxSocketService` → `MinimizedCallBar` + presumably a
-`FloatingCallBar`-equivalent sit in `MaterialApp.builder`'s Stack.
+`InboxSocketService`. ✅ **Confirmed (Phase 4)**: `main.dart` was shared
+— `MaterialApp.builder`'s Stack mounts ONLY `MinimizedCallBar()`
+(`floating_call_bar.dart` is unused/now deleted, see §6.1); `home.dart`
+was also shared — its `IndexedStack` is Home/Search/Profile (3 tabs)
+and it separately imports+pushes `ConversationsScreen` for the Chats
+tab (see §5.1), confirming the `app_bottom_nav.dart` index-mapping
+note in §5.10.
 
 ### 7.2 Sending a text message
 1. `ChatScreen._sendMessage()` → optimistic `MessageModel` (isSending:
@@ -830,9 +973,10 @@ backend broadcasting a `chat_message` socket event server-side (per
 Multi-image sends batch through `_uploadAndSendMultipleImages`.
 
 ### 7.4 Message pin/unpin/edit/delete/forward
-- Pin/unpin: REST only (`pinMessage`/`unpinMessage`), other side learns
-  via `message_pinned`/`message_unpinned` socket events (implies
-  backend also broadcasts these — not just REST response)
+- Pin/unpin: REST (`pinMessage`/`unpinMessage`) and/or 🔥 NAYA (Phase 4)
+  socket (`ChatSocketService.sendPin(messageId, pin)`) — either path,
+  other side learns via the `pin_event` socket broadcast (🔧 corrected
+  name, see §8.1)
 - Edit: `editMessage` REST PATCH, sender-only
 - Delete: BOTH REST (`deleteMessage`, `for_everyone` flag) AND socket
   (`_socket.sendDelete`) are fired together from `_deleteMessage()` —
@@ -840,8 +984,10 @@ Multi-image sends batch through `_uploadAndSendMultipleImages`.
   change, socket = instant UI removal on other side without waiting
   for a server broadcast round-trip)
 - Forward: single REST call `forwardMessages(messageIds,
-  conversationIds)` handles 1-to-many and many-to-many in one shot;
-  target-chat delivery is server-side realtime (not client-driven)
+  conversationIds, caption)` handles 1-to-many and many-to-many in one
+  shot; `caption` is optional and only sent when the selection includes
+  a non-text message (see §5.8); target-chat delivery is server-side
+  realtime (not client-driven)
 
 ### 7.5 Polls
 Create → `createPoll()` → `_insertPollMessage(poll)` locally. Vote →
@@ -1023,16 +1169,19 @@ an error/retry state.
 Client → Server:
 | type | payload |
 |---|---|
-| `message` | `{client_id, message_type, text, reply_to}` |
+| `message` | `{client_id, message_type, text, reply_to, file_url?, file_urls?, thumbnail_url?, meta?}` — 🔧 last 4 fields NAYA (Phase 4), previously text-only |
 | `typing` | `{is_typing}` |
 | `read` | `{message_id}` |
 | `delete` | `{message_id, for_everyone}` |
 | `reaction` | `{message_id, emoji}` |
+| `pin` | `{message_id, pin}` — 🔥 NAYA (Phase 4), optional; REST pin/unpin still works standalone |
 | `study_room_event` | `{action, data}` (generic passthrough) |
 
 Server → Client (`type` field, consumed by `ChatScreen._handleSocketEvent`):
 `chat_message`, `typing`, `read`, `delete`, `reaction`, `poll_created`,
-`poll_voted`, `message_pinned`, `message_unpinned`,
+`poll_voted`, `pin_event` (🔧 corrected this session — the actual
+`case` in `chat_screen.dart` is `'pin_event'`, not the previously-noted
+`message_pinned`/`message_unpinned`; covers both pin AND unpin),
 `conversation_wallpaper_updated`, `presence`,
 `disappearing_messages_updated`, `group_deleted`, `call_event`,
 `incoming_call`, `error`
@@ -1119,14 +1268,22 @@ does — reverting these patterns will likely reintroduce the same bugs.
 
 ## 10. Known Ambiguities / Things To Confirm Before Building On Top
 
-- **Two conversation-list screens** (`conversations_screen.dart` vs
-  `conversations_list_screen.dart`) — confirm which is actually routed
-  to from `main.dart`/`home.dart` before editing either; assume
-  `conversations_screen.dart` is current (§5.1).
-- **Two minimized-call-bar widgets** (`floating_call_bar.dart` vs
-  `minimized_call_bar.dart`) — `minimized_call_bar.dart` is the fixed
-  one per its own comments (§6.1); confirm `floating_call_bar.dart`
-  isn't still wired anywhere before deleting it.
+- ⚠️ **Two conversation-list screens, re-opened (Phase 5)** — Phase 4
+  had this resolved (`conversations_list_screen.dart` deleted, see
+  §5.1 history), but the file was re-uploaded this session. `main.dart`
+  and `home.dart` were not re-shared this session so routing can't be
+  re-verified either way. **Ask the user**: is this file meant to come
+  back (replace/coexist with `conversations_screen.dart`), or was it
+  uploaded by mistake / for reference only? Don't wire it in or delete
+  it from the doc without that answer.
+- 🔥 **NEW (Phase 5)**: `message_api_service.dart` has two methods
+  hitting the same `start_private/` endpoint — `startPrivateChat` (used
+  by `conversations_screen.dart`) and `getOrCreateConversation` (no
+  known caller in anything uploaded so far). See the callout in §4.1.
+  Possibly dead code, possibly used by an unshared screen (e.g. profile
+  → "message this user").
+- ~~Two minimized-call-bar widgets~~ — ✅ RESOLVED Phase 4, see §6.1.
+  `floating_call_bar.dart` deleted.
 - `call_screen.dart` has its OWN outgoing-ring/call-waiting-tone
   `AudioPlayer`s in addition to `CallManager`'s internal ringtone
   player — potential double-audio, not yet confirmed either way.
@@ -1141,12 +1298,14 @@ does — reverting these patterns will likely reintroduce the same bugs.
 - `chat_screen.dart`'s `_enterStudyRoom` passes `initialParticipants:
   const []` with a `// TODO` to actually populate it from the group's
   member list.
-- Files referenced but not yet shared: `utils/api.dart` (`Api.baseUrl`),
-  `services/auth_service.dart` (`AuthService`), `home.dart`
-  (`HomeScreen`), `profile/screens/target_profile.dart`,
-  `profile/api_service.dart`, `widgets/sticker_picker_sheet.dart`,
-  and presumably `main.dart` itself. Don't assume their internals —
-  ask/wait if a task needs their exact behavior.
+- Files referenced but still not yet shared: `utils/api.dart`
+  (`Api.baseUrl`), `services/auth_service.dart` (`AuthService`),
+  `profile/screens/target_profile.dart`, `profile/api_service.dart`,
+  `widgets/sticker_picker_sheet.dart`, `app_bottom_nav.dart` (referenced
+  by `conversations_screen.dart`, content not yet reviewed). Don't
+  assume their internals — ask/wait if a task needs their exact
+  behavior. ✅ `main.dart` and `home.dart` WERE shared this session (see
+  §7.1, §5.1, §6.1) — no longer unknowns.
 
 ---
 
@@ -1166,6 +1325,245 @@ does — reverting these patterns will likely reintroduce the same bugs.
 
 ---
 
+## 12. 🔥 Phase 4 Changelog (this session)
+
+Cross-checked against `FRONTEND_INTEGRATION_ARCHITECTURE.md`'s §1/§2/§4
+checklist. Full detail is inline in the sections above (§2, §4.4, §4.9,
+§5.1, §5.8, §5.11, §5.12, §6.1, §6.3, §7.4, §8.1, §10) — this is just
+the flat summary.
+
+**New files created:**
+- `message/screens/message_search_screen.dart` (§5.11)
+- `message/widgets/mention_suggestions_overlay.dart` (§6.3)
+- `message/screens/read_receipt_privacy_screen.dart` (§5.12, not yet
+  wired to an entry point — see that section)
+
+**Existing files edited:**
+- `chat_socket_service.dart` — removed 5 stray `print()` debug lines
+  (§4.4). `sendMessage()`'s extra params and `sendPin()` were already
+  present when reviewed, not newly added.
+- `push_notification_service.dart` — added `mention` + `chat_digest`
+  push-type handling, foreground AND background, plus a new `mentions`
+  Android channel (§4.9).
+- `conversations_screen.dart` — added a distinct "search messages" app
+  bar icon → `MessageSearchScreen()` global mode (§5.1). Draft-preview
+  and everything else here was already complete when reviewed.
+
+**Reviewed, found already complete, NOT changed:**
+- `forward_message_screen.dart` (caption + poll-exclude already done)
+- `message_cache_service.dart` (model round-trip already handles all
+  new fields, no code change needed)
+- `chat_screen.dart`, `message_api_service.dart`, `message_models.dart`
+  (fully wired/Phase-3-complete before this session started)
+
+**Deleted (confirmed safe via `main.dart` + `home.dart` + full grep
+across every uploaded file):**
+- `conversations_list_screen.dart` (§5.1)
+- `floating_call_bar.dart` (§6.1)
+
+**Doc corrections made along the way** (stale info fixed, not new
+behaviour): the pin/unpin socket event is actually `pin_event`, not
+`message_pinned`/`message_unpinned` (§7.4, §8.1) — `chat_screen.dart`'s
+real `case` was checked directly.
+
+---
+
+## 13. 🔥 Phase 5 Changelog (this session)
+
+This session re-uploaded a batch of already-documented service files
+(`call_manager.dart`, `message_api_service.dart`,
+`push_notification_service.dart`, `study_room_call_manager.dart`,
+`ai_study_service.dart`, `call_api_service.dart`, `call_kit_service.dart`,
+`chat_socket_service.dart`, `inbox_socket_service.dart`,
+`media_download_service.dart`, `message_cache_service.dart`,
+`missed_call_watcher.dart`, `mention_suggestions_overlay.dart`,
+`minimized_call_bar.dart`, `whiteboard_painter.dart`) plus this doc
+itself. Purpose: diff current file contents against what the doc
+claimed, per user request ("code me changes hue hain, unhe doc me
+maintain karo; jo files delete hui unhe doc se hatao").
+
+**Result: no code-behaviour drift found** in any of the 15 re-uploaded
+service/widget files — method signatures, event names, endpoint paths,
+and the documented root-cause fixes (§8.x, §4.6, §4.9) all still match
+what's actually in the files. Nothing in §3, §4, §6, §8, §9, §11 needed
+correcting.
+
+**Real findings, both flagged above instead of silently resolved:**
+1. **`conversations_list_screen.dart` re-uploaded** — Phase 4 marked it
+   deleted; it came back in this session's file set. Doc updated (§2,
+   §5.1, §5.10, §10) to flag this as unresolved rather than re-asserting
+   either "deleted" or "active" — needs the user to clarify intent.
+2. **`getOrCreateConversation` duplicate found** in
+   `message_api_service.dart` — same endpoint as `startPrivateChat`, no
+   known caller yet. Added to §4.1 and §10.
+
+**Not re-uploaded this session** (so not re-verified, still resting on
+Phase 4's read): `main.dart`, `home.dart`, `chat_screen.dart`,
+`study_room_screen.dart`, `call_screen.dart`, `incoming_call_screen.dart`,
+`group_profile_screen.dart`, `create_group_screen.dart`,
+`message_search_screen.dart`, `forward_message_screen.dart`,
+`media_viewer_screen.dart`, `read_receipt_privacy_screen.dart`,
+`app_bottom_nav.dart`, `message_models.dart`, `study_room_models.dart`,
+`conversations_screen.dart`. These were re-uploaded in the *prior*
+message this session and were spot-checked then (no drift found), but
+weren't line-by-line re-diffed against this doc as part of this Phase 5
+pass specifically.
+
+**Going forward**: per the user, no more files will be shared — this
+doc is now the sole reference for all future work on this project.
+Treat every section above as current/authoritative unless a section
+explicitly says otherwise (§5.1 and §10's two Phase 5 flags above).
+
+---
+
+## 16. Backend Contract Source of Truth
+
+`CHAT_APP_DOCUMENTATION.md` (the Django `message` app's own self-sufficient
+doc — models/views/consumers/settings, ~1279 lines) is now available and
+is the **authoritative** source for every REST path, WS event name, and
+model field this frontend talks to. Where anything above (§4, §8, §11)
+disagrees with that doc, the backend doc wins — treat §4/§8/§11 as this
+project's *understanding* of the contract, not the contract itself.
+
+---
+
+## 17. 🔥 Phase 6 Changelog — Backend Contract Cross-Check
+
+Full pass: every REST endpoint path this frontend calls, checked against
+`CHAT_APP_DOCUMENTATION.md`'s §3–§6 (REST) and §8 (WebSocket) tables.
+
+### 17.1 Real bugs found & fixed (frontend called a path the backend doesn't serve)
+
+1. **`searchAllMessages` (`message_api_service.dart`)** — was
+   `GET /message/search_all/`. Backend doc §7.1 confirms global search is
+   an **action on `ConversationViewSet`**, so it's namespaced under that
+   viewset like every other action: `GET /message/conversations/search_all/`.
+   The old path would 404 — global message search (`message_search_screen.dart`'s
+   `conversationId == null` mode) was broken end-to-end. **Fixed.**
+2. **Call-history family, 4 methods across 2 files** — `CallHistoryViewSet`
+   is router-registered at `calls/history/` (confirmed repeatedly in
+   backend doc §6 "Calls": `GET /calls/history/`, `GET /calls/history/missed/`,
+   `GET /calls/history/<id>/addable-participants/`,
+   `POST /calls/history/<id>/add-participant/`). The bare `calls/` prefix
+   is reserved for the two plain-`path()` views, `CallInitiateView`
+   (`/calls/initiate/`) and `CallActionView` (`/calls/<id>/action/`) —
+   those two were already correct. The 4 that were wrong (missing
+   `history/`), all now fixed:
+   - `call_api_service.dart` → `getCallStatus(callId)` — used by
+     `CallManager._startCallStatusPoll()`'s 2s reject-detection poll
+     (§8.10/§4.6 above) — this was **always 404ing**, meaning "receiver
+     rejects → caller keeps ringing until the 30s no-answer timeout"
+     instead of the documented ~1.6s "Line busy" fast-path. Real
+     user-facing bug, not just a doc mismatch.
+   - `call_api_service.dart` → `getAddableParticipants(callId)` — group-call
+     "Add participant" picker always 404'd, sheet would show empty/error.
+   - `call_api_service.dart` → `addParticipant(callId, userId)` — same.
+   - `call_api_service.dart` → `getMissedCalls({since})` — silently
+     swallowed the 404 (it's wrapped in try/catch returning `[]` by
+     design, §4.10), so `MissedCallWatcher` never actually showed a
+     missed-call notification on reconnect, but never *errored* either —
+     the quiet-failure design masked this one.
+   - `message_api_service.dart` → `getCallHistory()` / `getCallDetail(id)`
+     — same fix, not yet confirmed to have an active caller in any
+     uploaded screen (no call-history list screen has been shared), so
+     impact unconfirmed but path corrected regardless.
+
+   Files: `call_api_service.dart`, `message_api_service.dart` (both
+   provided as corrected downloads this turn — see chat).
+
+### 17.2 Checked and confirmed already correct (no change needed)
+
+- **Message pin/unpin** (`message_api_service.dart`) — already fixed in
+  an earlier, unseen session (`🔧 FIX (backend mismatch)` comments already
+  present in the file): `POST`/`DELETE /message/messages/<id>/pin/`
+  (message-level action), `GET /message/conversations/<id>/pinned/` for
+  the list. Matches backend doc §4/§7.2 exactly. **This doc's own §4.1
+  table (written in Phase 4/5, before this cross-check) still showed the
+  stale `/conversations/<id>/pins/` shape — that table entry is corrected
+  below, §17.3.**
+- **`pin_event` WS event name** — double-checked against backend doc §7.2
+  (loose prose: `type: "pin"`) vs §8's precise table (`type: "pin_event"`,
+  method `pin_event`). §8's table is the authoritative one (it's the
+  literal client-handler-method mapping) — `chat_screen.dart`'s
+  `case 'pin_event':` is correct as-is. §7.2's wording is just a looser
+  paraphrase elsewhere in the same backend doc, not a second real event.
+- **`mentioned_users` / `mentioned_user_ids`** (`message_models.dart`) —
+  `fromJson` (REST) reads nested `mentioned_users` (full `UserMini` list),
+  `fromSocketEvent` (WS `chat_message`) reads `mentioned_user_ids`
+  (id-only) — matches backend doc §7.3/§8 exactly (different shape per
+  path, by design).
+- **Poll fields** (`message_models.dart`) — `voted_by_me`, `votes_count`,
+  `total_votes`, `is_closed` (via `closedAt != null`) all present and
+  correctly named against backend doc §7.8's `PollSerializer` shape.
+- **WS `message` event fields** (`chat_socket_service.dart`) —
+  `client_id`/`message_type`/`text`/`reply_to`/`file_url`/`file_urls`/
+  `thumbnail_url`/`meta` — exact match to backend doc §8's client→server
+  table.
+- **Draft auto-save** (`message_models.dart`'s `ConversationSettings`) —
+  `draftText`/`draftUpdatedAt` via the shared `PATCH .../settings/`
+  endpoint — matches backend doc §7.10 (no separate endpoint, server-set
+  timestamp) exactly.
+- **Disappearing messages** (`message_api_service.dart`) —
+  `PATCH /message/conversations/<id>/disappearing_messages/` matches
+  backend doc §3 exactly.
+
+### 17.3 Doc corrections (this file, §4.1 table — was stale, not the code)
+
+The Pins row in §4.1's endpoint table above still read the pre-fix shape.
+Corrected to: `POST`/`DELETE /message/messages/<id>/pin/` (message-level,
+not conversation-level) + `GET /message/conversations/<id>/pinned/` for
+the list (not `/pins/`). *(Applied directly to §4.1 above — this
+subsection is the changelog record of that edit, not a duplicate table.)*
+
+### 17.4 Backend features confirmed to exist server-side with NO frontend surface yet
+
+Not bugs — the backend doc marks these as already implemented and
+documents their contract, but nothing in any uploaded frontend file calls
+them. Flagging rather than building blind, since none of these have an
+obvious existing UI slot confirmed from what's been shared:
+
+- **`GET /message/messages/<id>/read-status/`** ("seen by" / per-user
+  read receipt list, respects the read-receipt privacy toggle) — no
+  frontend model or API method for this at all. Would need a
+  `MessageReadStatusModel` + API method + some "message info" UI (long-press
+  → "Info", WhatsApp-style) — none of that exists in any uploaded screen.
+- **`POST /message/ai/transcribe/`** (voice-note transcription,
+  `AiTranscribeThrottle`) — `ai_study_service.dart` only wraps the study-room
+  summary/quiz endpoint (`generate()` → `/message/study-room/ai-tools/`,
+  which itself is a naming mismatch — see §17.5). No call-site anywhere
+  for voice transcription, even though `chat_screen.dart`'s `_AudioBubble`
+  plays voice notes.
+- **`POST /message/ai/smart-replies/`** — `MessageApiService.getSmartReplies()`
+  already exists and matches the backend path/body/response shape
+  exactly (§4.1 above already documents it) — but no grep hit in
+  `chat_screen.dart` for a call-site was confirmed in this pass (not
+  re-searched this session, flagged for follow-up, not asserted as
+  definitely unwired).
+
+### 17.5 Naming mismatch worth flagging (not fixed — endpoint doesn't exist as named on either side yet)
+
+`ai_study_service.dart`'s `generate({mode, content})` calls
+`POST /message/study-room/ai-tools/`, with an in-code comment saying "abhi
+backend me ye endpoint add karna hoga" (still needs to be added). Backend
+doc confirms the *real*, already-implemented endpoint for this exact
+summary/quiz functionality is `POST /message/ai-study-room/`
+(`AiStudyRoomView`, §6) — different path, and it's a top-level path, not
+nested under `study-room/`. Two options, need a product call, not a
+silent fix:
+(a) point `ai_study_service.dart` at the real `/message/ai-study-room/`
+endpoint (it already exists server-side, per the backend doc — this would
+make Study Room AI tools work today), or
+(b) if `/message/study-room/ai-tools/` was intentionally meant to be a
+*different*, study-room-scoped endpoint the backend hasn't built yet,
+leave as a TODO but stop referring to it as if it might already exist.
+**Not changed this turn** — (a) looks clearly right (same feature, same
+request/response shape: `{mode, content}` → `{summary}`/`{questions}`),
+but this is a bigger behavioral change than the pure path-typo fixes in
+§17.1, so flagging for explicit confirmation rather than silently
+redirecting a working call-shape to a different host endpoint.
+
+---
+
 *(End of current doc — extend sections above as new files/behaviour
-are confirmed. Don't restart numbering; append sub-sections like §5.11,
-§7.19 etc. as needed.)*
+are confirmed. Don't restart numbering; append sub-sections like §5.13,
+§7.19, §17.6 etc. as needed.)*

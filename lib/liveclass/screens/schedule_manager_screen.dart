@@ -195,16 +195,11 @@ class _ScheduleManagerScreenState extends State<ScheduleManagerScreen> {
   Widget build(BuildContext context) {
     return Scaffold(
       backgroundColor: _kBg,
-      appBar: AppBar(
-        backgroundColor: Colors.white,
-        foregroundColor: _kNavy,
-        elevation: 0.5,
-        title: const Text('Schedule Manager', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
-      ),
+      appBar: liveClassAppBar('Schedule Manager'),
       body: _loading
-          ? const Center(child: CircularProgressIndicator(color: _kNavy))
+          ? const LiveClassLoading()
           : _error != null
-              ? _ErrorState(message: _error!, onRetry: _load)
+              ? LiveClassErrorState(message: _error!, onRetry: _load)
               : RefreshIndicator(
                   color: _kNavy,
                   onRefresh: _load,
@@ -676,36 +671,6 @@ class _ScheduleFormSheetState extends State<_ScheduleFormSheet> {
       child: InputDecorator(
         decoration: _decoration(label),
         child: Text(value, style: const TextStyle(fontSize: 13.5)),
-      ),
-    );
-  }
-}
-
-// ===========================================================================
-class _ErrorState extends StatelessWidget {
-  final String message;
-  final VoidCallback onRetry;
-  const _ErrorState({required this.message, required this.onRetry});
-
-  @override
-  Widget build(BuildContext context) {
-    return Center(
-      child: Padding(
-        padding: const EdgeInsets.all(24),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            const Icon(Icons.error_outline_rounded, size: 40, color: Colors.black38),
-            const SizedBox(height: 12),
-            Text(message, textAlign: TextAlign.center, style: const TextStyle(color: Colors.black54)),
-            const SizedBox(height: 16),
-            ElevatedButton(
-              style: ElevatedButton.styleFrom(backgroundColor: _kNavy, foregroundColor: Colors.white),
-              onPressed: onRetry,
-              child: const Text('Retry'),
-            ),
-          ],
-        ),
       ),
     );
   }

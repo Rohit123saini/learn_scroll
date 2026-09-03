@@ -78,6 +78,16 @@ class Classroom {
   final int maxParticipants;
   final double ratingAvg;
   final int ratingCount;
+  // FEATURE (item 6 — share button): CONFIRMED on ClassroomSerializer
+  // (serializers.py) — a running total, bumped by ClassroomViewSet.share().
+  final int shareCount;
+  // FEATURE (item 9 — refer & earn): CONFIRMED on ClassroomSerializer —
+  // teacher-controlled on/off + rate; gates whether the "Refer & Earn"
+  // entry point on Classroom Detail should even be shown for this
+  // classroom (ClassroomViewSet.refer_link 400s if referralEnabled is
+  // false, so checking this client-side avoids a wasted round-trip).
+  final bool referralEnabled;
+  final double referralCommissionPercent;
   final bool isActive;
   final bool isFlagged;
   final DateTime? createdAt;
@@ -100,6 +110,9 @@ class Classroom {
     this.maxParticipants = 100,
     this.ratingAvg = 0,
     this.ratingCount = 0,
+    this.shareCount = 0,
+    this.referralEnabled = false,
+    this.referralCommissionPercent = 0,
     this.isActive = true,
     this.isFlagged = false,
     this.createdAt,
@@ -123,6 +136,9 @@ class Classroom {
         maxParticipants: _int(j['max_participants']),
         ratingAvg: _num(j['rating_avg']),
         ratingCount: _int(j['rating_count']),
+        shareCount: _int(j['share_count']),
+        referralEnabled: j['referral_enabled'] ?? false,
+        referralCommissionPercent: _num(j['referral_commission_percent']),
         isActive: j['is_active'] ?? true,
         isFlagged: j['is_flagged'] ?? false,
         createdAt: _dt(j['created_at']),
@@ -144,17 +160,28 @@ class Classroom {
         'recording_enabled': recordingEnabled,
         'max_participants': maxParticipants,
         'is_active': isActive,
+        // FIX (backend cross-check): ClassroomSerializer lists these two as
+        // writable (teacher-settable, same as every other field above) but
+        // they were never sent — Refer & Earn could only ever sit at its
+        // model default (off, 0%) since the form had no way to change it.
+        'referral_enabled': referralEnabled,
+        'referral_commission_percent': referralCommissionPercent,
       };
 }
 
 /// Response shape of classrooms/{id}/my-pass/
 class MyPassStatus {
-  final String accessLevel; // owner|admin|active|expired|none (status kept for back-compat)
+  final String accessLevel; // owner|admin|active|expired|pending|none (status kept for back-compat)
   final String status;
   final bool hasAccess;
   final bool canViewInternals;
   final bool canEnterClass;
   final DateTime? expiresAt;
+  // Set only when accessLevel == 'pending' — the ClassJoinRequest.id this
+  // student is waiting on, so the UI can offer "Cancel Request" via
+  // LiveClassApi.joinRequests.cancel(pendingRequestId) without a separate
+  // lookup.
+  final int? pendingRequestId;
 
   MyPassStatus({
     required this.accessLevel,
@@ -163,6 +190,7 @@ class MyPassStatus {
     required this.canViewInternals,
     required this.canEnterClass,
     this.expiresAt,
+    this.pendingRequestId,
   });
 
   factory MyPassStatus.fromJson(Map<String, dynamic> j) => MyPassStatus(
@@ -172,6 +200,7 @@ class MyPassStatus {
         canViewInternals: j['can_view_internals'] ?? false,
         canEnterClass: j['can_enter_class'] ?? false,
         expiresAt: _dt(j['expires_at']),
+        pendingRequestId: j['pending_request_id'] == null ? null : _int(j['pending_request_id']),
       );
 }
 
@@ -298,6 +327,14 @@ class ClassSession {
   final bool isRecording;
   final bool isJoinable;
   final DateTime? createdAt;
+  // NOTE (fix — whiteboard/spotlight persistence): server-side checkpoints
+  // for the collaborative whiteboard and host spotlight/pin — see
+  // ClassSession.whiteboard_snapshot/spotlight_identity in models.py and
+  // ClassSessionViewSet.whiteboard()/spotlight() in views.py. Used by
+  // live_session_screen.dart to restore both on join/reconnect instead of
+  // relying only on whoever else happens to already be in the room.
+  final Map<String, dynamic>? whiteboardSnapshot;
+  final String? spotlightIdentity; // LiveKit identity of the pinned tile, or null = none
 
   ClassSession({
     required this.id,
@@ -314,6 +351,8 @@ class ClassSession {
     this.isRecording = false,
     this.isJoinable = false,
     this.createdAt,
+    this.whiteboardSnapshot,
+    this.spotlightIdentity,
   });
 
   factory ClassSession.fromJson(Map<String, dynamic> j) => ClassSession(
@@ -331,6 +370,10 @@ class ClassSession {
         isRecording: j['is_recording'] ?? false,
         isJoinable: j['is_joinable'] ?? false,
         createdAt: _dt(j['created_at']),
+        whiteboardSnapshot: (j['whiteboard_snapshot'] as Map?)?.cast<String, dynamic>(),
+        spotlightIdentity: j['spotlight_identity'] is String && (j['spotlight_identity'] as String).isNotEmpty
+            ? j['spotlight_identity'] as String
+            : null,
       );
 
   Map<String, dynamic> toJson() => {
@@ -405,14 +448,13 @@ class ClassPass {
   final bool isActive;
   final DateTime? createdAt;
 
-  // NEW (Pass 14 frontend catch-up §1.3) — "allow gifting" gate. The
-  // frontend doc flags this as "if backend gates gifting per-pass —
-  // confirm" (§0 module map, pass_management_screen.dart row); modeled
-  // here defaulting to true (opt-out) rather than false (opt-in) only
-  // because that matches this codebase's general bias of defaulting new
-  // boolean flags to whatever preserves prior behavior for existing rows
-  // — confirm the actual server-side default against ClassPass.models.py
-  // before relying on it, and flip the default here if wrong.
+  // CONFIRMED (backend cross-check) — "allow gifting" gate. This did NOT
+  // exist on the backend at all until now: no model field, no serializer
+  // field, and PassGiftViewSet.perform_create had nothing enforcing it —
+  // every active pass was giftable regardless of this toggle's UI state.
+  // Now backed by ClassPass.allow_gifting (models.py, defaults to True)
+  // and checked in perform_create. Requires a migration on the backend
+  // before this field actually round-trips.
   final bool allowGifting;
 
   ClassPass({
@@ -519,6 +561,15 @@ class PassPurchase {
   // on it; null/absent just means "not a gifted purchase" either way.
   final int? giftId;
   final UserMini? giftedBy;
+  // FEATURE (item 9 — refer & earn): CONFIRMED on PassPurchaseSerializer.
+  // referredBy is null for a purchase that didn't come through anyone's
+  // refer-link. The referrer's own view of these (PassPurchaseApi
+  // .referralEarnings()) is scoped to referredBy == the caller, same
+  // "own ledger only" boundary as everywhere else money moves in this app.
+  final UserMini? referredBy;
+  final double referralCommissionPercent;
+  final int referralCoinsReleased;
+  final int referralRemainingBalance;
 
   PassPurchase({
     required this.id,
@@ -550,6 +601,10 @@ class PassPurchase {
     this.renewalFailedAt,
     this.giftId,
     this.giftedBy,
+    this.referredBy,
+    this.referralCommissionPercent = 0,
+    this.referralCoinsReleased = 0,
+    this.referralRemainingBalance = 0,
   });
 
   factory PassPurchase.fromJson(Map<String, dynamic> j) => PassPurchase(
@@ -587,6 +642,10 @@ class PassPurchase {
         renewalFailedAt: _dt(j['renewal_failed_at']),
         giftId: _intN(j['gift']),
         giftedBy: j['gifted_by'] != null ? UserMini.fromJson(j['gifted_by']) : null,
+        referredBy: j['referred_by'] != null ? UserMini.fromJson(j['referred_by']) : null,
+        referralCommissionPercent: _num(j['referral_commission_percent']),
+        referralCoinsReleased: _int(j['referral_coins_released']),
+        referralRemainingBalance: _int(j['referral_remaining_balance']),
       );
 }
 
@@ -807,6 +866,21 @@ class ChatMessage {
   final bool isPinned;
   final UserMini? pinnedBy;
   final DateTime? pinnedAt;
+  // NEW (reply feature) — one-level "quote an earlier message" reference,
+  // same shape as WhatsApp's reply-to. `replyTo` is the quoted message's id
+  // (for sending/threading a new reply); `replyToPreview` is what the
+  // backend denormalizes for rendering the little quote strip above the
+  // bubble WITHOUT a second fetch (null quoted-message text/sender + a
+  // `isDeleted: true` flag if the original was soft-deleted since).
+  final int? replyTo;
+  final ChatMessageReplyPreview? replyToPreview;
+  // NEW (read receipts) — readCount is the cheap "seen by N" the bubble
+  // shows inline; seenByMe lets the client skip re-firing its own
+  // mark-as-read call for a message it already knows it has read. The full
+  // who-and-when list is fetched on demand via LiveClassApi.chatMessages
+  // .readReceipts() (see that file) rather than carried on every message.
+  final int readCount;
+  final bool seenByMe;
 
   ChatMessage({
     required this.id,
@@ -820,6 +894,10 @@ class ChatMessage {
     this.isPinned = false,
     this.pinnedBy,
     this.pinnedAt,
+    this.replyTo,
+    this.replyToPreview,
+    this.readCount = 0,
+    this.seenByMe = false,
   });
 
   factory ChatMessage.fromJson(Map<String, dynamic> j) => ChatMessage(
@@ -835,19 +913,27 @@ class ChatMessage {
         isPinned: j['is_pinned'] ?? false,
         pinnedBy: j['pinned_by'] != null ? UserMini.fromJson(j['pinned_by']) : null,
         pinnedAt: _dt(j['pinned_at']),
+        replyTo: _intN(j['reply_to']),
+        replyToPreview: j['reply_to_detail'] != null
+            ? ChatMessageReplyPreview.fromJson(j['reply_to_detail'] as Map<String, dynamic>)
+            : null,
+        readCount: _int(j['read_count'] ?? 0),
+        seenByMe: j['seen_by_me'] ?? false,
       );
 
   /// Convenience for optimistic local updates (see live_session_screen.dart's
   /// `_reactToChat`/`_removeChatReaction`/pin handlers) — returns a copy with
   /// only the given fields swapped, so a tap can update the UI immediately
-  /// and get corrected on the next `chat.reaction`/`chat.pinned` WS event or
-  /// `_loadChat` refresh.
+  /// and get corrected on the next `chat.reaction`/`chat.pinned`/`chat.read`
+  /// WS event or `_loadChat` refresh.
   ChatMessage copyWith({
     Map<String, int>? reactionCounts,
     Object? myReaction = _unset,
     bool? isPinned,
     Object? pinnedBy = _unset,
     Object? pinnedAt = _unset,
+    int? readCount,
+    bool? seenByMe,
   }) =>
       ChatMessage(
         id: id,
@@ -861,12 +947,65 @@ class ChatMessage {
         isPinned: isPinned ?? this.isPinned,
         pinnedBy: identical(pinnedBy, _unset) ? this.pinnedBy : pinnedBy as UserMini?,
         pinnedAt: identical(pinnedAt, _unset) ? this.pinnedAt : pinnedAt as DateTime?,
+        replyTo: replyTo,
+        replyToPreview: replyToPreview,
+        readCount: readCount ?? this.readCount,
+        seenByMe: seenByMe ?? this.seenByMe,
       );
 }
 
 /// Sentinel so `copyWith` above can tell "not passed" apart from
 /// "explicitly passed null" (needed to clear `myReaction`/`pinnedBy`/`pinnedAt`).
 const Object _unset = Object();
+
+/// NEW (reply feature) — the denormalized quote-preview nested inside a
+/// `ChatMessage`'s `reply_to_detail`. `message`/`sender` are both null when
+/// `isDeleted` is true (backend never leaks moderated-away text — see
+/// ChatMessageSerializer.get_reply_to_detail in serializers.py).
+class ChatMessageReplyPreview {
+  final int id;
+  final String? message;
+  final UserMini? sender;
+  final bool isDeleted;
+
+  ChatMessageReplyPreview({
+    required this.id,
+    this.message,
+    this.sender,
+    this.isDeleted = false,
+  });
+
+  factory ChatMessageReplyPreview.fromJson(Map<String, dynamic> j) => ChatMessageReplyPreview(
+        id: _int(j['id']),
+        message: j['message'],
+        sender: j['sender'] != null ? UserMini.fromJson(j['sender']) : null,
+        isDeleted: j['is_deleted'] ?? false,
+      );
+}
+
+/// NEW (read receipts) — one row of the "seen by" list returned by
+/// LiveClassApi.chatMessages.readReceipts(), oldest-first (matches the
+/// backend's ChatMessageRead.Meta.ordering).
+class ChatMessageReadReceipt {
+  final int id;
+  final int messageId;
+  final UserMini user;
+  final DateTime readAt;
+
+  ChatMessageReadReceipt({
+    required this.id,
+    required this.messageId,
+    required this.user,
+    required this.readAt,
+  });
+
+  factory ChatMessageReadReceipt.fromJson(Map<String, dynamic> j) => ChatMessageReadReceipt(
+        id: _int(j['id']),
+        messageId: _int(j['message']),
+        user: UserMini.fromJson(j['user']),
+        readAt: DateTime.parse(j['read_at']),
+      );
+}
 
 // ---------------------------------------------------------------------------
 // 9. LIVE POLL + RESPONSE
@@ -1309,8 +1448,16 @@ class Coupon {
   Map<String, dynamic> toJson() => {
         if (classroomId != null) 'classroom': classroomId,
         'code': code,
-        if (discountPercent != null) 'discount_percent': discountPercent,
-        if (discountAmount != null) 'discount_amount': discountAmount,
+        // FIX (edit-mode discount clearing): both are always sent now,
+        // explicit null and all — CouponApi.update() PATCHes this, and an
+        // omitted key on a PATCH leaves the server's existing value
+        // untouched. With the old `if (x != null)` guard, clearing the
+        // percent field in the editor (switching a coupon from % off to a
+        // flat amount) never actually cleared discount_percent server-side
+        // — both ended up set at once, contradicting what the discount %
+        // field showed as blank in the editor.
+        'discount_percent': discountPercent,
+        'discount_amount': discountAmount,
         'valid_from': _instantJson(validFrom),
         'valid_until': _instantJson(validUntil),
         if (maxUses != null) 'max_uses': maxUses,
@@ -1759,6 +1906,27 @@ class NotifType {
   static const passAutoRenewed = 'pass_auto_renewed';
   static const autoRenewFailed = 'auto_renew_failed';
   static const passGiftExpired = 'pass_gift_expired';
+  // FIX (push `type` vs NotifType vocabulary audit — 3-way sync gap):
+  // the backend has been sending these 3 (tasks.notify_classroom_shared,
+  // notify_pass_gift_received, notify_pass_gift_claimed — see
+  // Notification.NotifType.CLASSROOM_SHARED in models.py, and tasks.py's
+  // `data={"type": ...}` payloads) since Pass 14, and
+  // liveclass_notification_handler.dart's `_handledTypes`/`_giftTapTypes`
+  // already route on the raw strings — but no NotifType constant ever
+  // existed for them here, so nothing else in the app (icon mapping,
+  // preferences list) could refer to them by name.
+  static const classroomShared = 'classroom_shared';
+  static const passGiftReceived = 'pass_gift_received';
+  static const passGiftClaimed = 'pass_gift_claimed';
+  // FIX (backend cross-check — coin withdrawal / payout): Notification.
+  // NotifType in models.py has these three (see CoinWithdrawal +
+  // CoinWithdrawalViewSet in views.py) but they never got a Dart constant,
+  // so nothing here could reference them — same "constant missing" gap as
+  // the batches above, just never caught because withdrawal notifications
+  // don't currently drive any icon/switch-case, only the mute list.
+  static const withdrawalApproved = 'withdrawal_approved';
+  static const withdrawalRejected = 'withdrawal_rejected';
+  static const withdrawalPaid = 'withdrawal_paid';
   static const generic = 'generic';
 }
 
@@ -1802,62 +1970,109 @@ class AppNotification {
 }
 
 // ---------------------------------------------------------------------------
-// 21A. NOTIFICATION PREFERENCES (Pass 14) — per-notification-type channel
-// toggles. ⚠️ ARCHITECTURE SKELETON, not a confirmed field mirror like the
-// Pass 12/13 models above — Pass 14 was never written up in the backend
-// doc's own §2–§6 (see that doc's top-of-file warning and §11 Pass 16).
-// Shape assumed here: ONE settings object keyed by notif-type string, each
-// with independent push/email toggles — CONFIRM against
-// `NotificationPreferenceSerializer` before shipping; the alternative shape
-// (one row per (user, notifType)) would need a list-based model instead.
-// sms has no toggle here since notifications.py documents it as a no-op.
+// 21A. NOTIFICATION PREFERENCES (Pass 14) — CONFIRMED against
+// `NotificationPreferenceSerializer` (serializers.py) / `NotificationPreference`
+// (models.py). The old shape here (a per-notif-type push/email matrix) was
+// an unconfirmed architecture-skeleton guess and did NOT match the backend —
+// PATCHing it would have sent a body full of keys the serializer doesn't
+// have, and every row would've silently shown the all-on default forever.
+// The real model is two layers (see `allowed_channels_for()` in models.py):
+//   1. Four blanket channel toggles (push/email/sms/whatsapp_enabled) —
+//      global, not per notif-type.
+//   2. `mutedTypes` — a list of `NotifType` values the user wants silenced
+//      entirely (no channel, not even the in-app bell alert — the row still
+//      gets written, just quietly). There is no per-type-per-channel matrix.
+// Plus an independent digest-email frequency, off by default.
 // ---------------------------------------------------------------------------
-class NotifChannelPref {
-  final bool push;
-  final bool email;
-
-  const NotifChannelPref({this.push = true, this.email = true});
-
-  factory NotifChannelPref.fromJson(Map<String, dynamic> j) => NotifChannelPref(
-        push: j['push'] ?? true,
-        email: j['email'] ?? true,
-      );
-
-  Map<String, dynamic> toJson() => {'push': push, 'email': email};
-
-  NotifChannelPref copyWith({bool? push, bool? email}) =>
-      NotifChannelPref(push: push ?? this.push, email: email ?? this.email);
+class DigestFrequency {
+  static const off = 'off';
+  static const daily = 'daily';
+  static const weekly = 'weekly';
 }
 
 class NotificationPreference {
-  /// notifType string (see `NotifType`) -> that type's channel toggles. A
-  /// type missing from the map is treated as opted-in on every channel by
-  /// [forType] below — confirm this default matches the backend's own
-  /// "opted in unless explicitly turned off" behavior.
-  final Map<String, NotifChannelPref> perType;
+  final bool pushEnabled;
+  final bool emailEnabled;
+  final bool smsEnabled;
+  final bool whatsappEnabled;
+  final List<String> mutedTypes;
+  final String digestFrequency;
+  // Server-only (read_only_fields on the serializer) — round-tripped but
+  // never sent back in toJson().
+  final DateTime? lastDigestSentAt;
+  final DateTime? updatedAt;
 
-  NotificationPreference({required this.perType});
+  NotificationPreference({
+    this.pushEnabled = true,
+    this.emailEnabled = true,
+    this.smsEnabled = false,
+    this.whatsappEnabled = false,
+    this.mutedTypes = const [],
+    this.digestFrequency = DigestFrequency.off,
+    this.lastDigestSentAt,
+    this.updatedAt,
+  });
 
   factory NotificationPreference.fromJson(Map<String, dynamic> j) => NotificationPreference(
-        perType: j.map((k, v) => MapEntry(k, NotifChannelPref.fromJson(v as Map<String, dynamic>))),
+        pushEnabled: j['push_enabled'] ?? true,
+        emailEnabled: j['email_enabled'] ?? true,
+        smsEnabled: j['sms_enabled'] ?? false,
+        whatsappEnabled: j['whatsapp_enabled'] ?? false,
+        mutedTypes: (j['muted_types'] as List? ?? []).map((e) => e.toString()).toList(),
+        digestFrequency: j['digest_frequency'] ?? DigestFrequency.off,
+        lastDigestSentAt: _dt(j['last_digest_sent_at']),
+        updatedAt: _dt(j['updated_at']),
       );
 
-  Map<String, dynamic> toJson() => perType.map((k, v) => MapEntry(k, v.toJson()));
+  // PATCH body — only fields the serializer's Meta.fields lists as
+  // writable; last_digest_sent_at/updated_at are read_only there and are
+  // deliberately left out here.
+  Map<String, dynamic> toJson() => {
+        'push_enabled': pushEnabled,
+        'email_enabled': emailEnabled,
+        'sms_enabled': smsEnabled,
+        'whatsapp_enabled': whatsappEnabled,
+        'muted_types': mutedTypes,
+        'digest_frequency': digestFrequency,
+      };
 
-  NotifChannelPref forType(String notifType) => perType[notifType] ?? const NotifChannelPref();
+  bool isMuted(String notifType) => mutedTypes.contains(notifType);
 
-  /// Returns a copy with one type's prefs replaced — for a single row's
-  /// toggle flipping without resending the whole map from scratch.
-  NotificationPreference withType(String notifType, NotifChannelPref pref) {
-    final updated = Map<String, NotifChannelPref>.from(perType)..[notifType] = pref;
-    return NotificationPreference(perType: updated);
+  NotificationPreference copyWith({
+    bool? pushEnabled,
+    bool? emailEnabled,
+    bool? smsEnabled,
+    bool? whatsappEnabled,
+    List<String>? mutedTypes,
+    String? digestFrequency,
+  }) =>
+      NotificationPreference(
+        pushEnabled: pushEnabled ?? this.pushEnabled,
+        emailEnabled: emailEnabled ?? this.emailEnabled,
+        smsEnabled: smsEnabled ?? this.smsEnabled,
+        whatsappEnabled: whatsappEnabled ?? this.whatsappEnabled,
+        mutedTypes: mutedTypes ?? this.mutedTypes,
+        digestFrequency: digestFrequency ?? this.digestFrequency,
+        lastDigestSentAt: lastDigestSentAt,
+        updatedAt: updatedAt,
+      );
+
+  /// Returns a copy with one notif-type's mute state flipped — for a single
+  /// row toggling without hand-building the whole list at the call site.
+  NotificationPreference withMuted(String notifType, bool muted) {
+    final updated = List<String>.from(mutedTypes);
+    if (muted) {
+      if (!updated.contains(notifType)) updated.add(notifType);
+    } else {
+      updated.remove(notifType);
+    }
+    return copyWith(mutedTypes: updated);
   }
 }
 
-/// Every `NotifType` value the preferences screen shows a row for. Dart has
-/// no enum reflection, so this list is maintained by hand — add an entry
-/// here whenever `NotifType` above gains one (including the 3 Pass 16
-/// auto-renew/gift types once those constants exist).
+/// Every `NotifType` value the preferences screen lists in its per-type
+/// mute checklist. Dart has no enum reflection, so this list is maintained
+/// by hand — add an entry here whenever `NotifType` above gains one.
 const List<String> kAllNotifTypesForPreferences = [
   NotifType.joinRequestReceived,
   NotifType.joinRequestAccepted,
@@ -1877,6 +2092,18 @@ const List<String> kAllNotifTypesForPreferences = [
   NotifType.staffAdded,
   NotifType.reviewPosted,
   NotifType.reportReviewed,
+  NotifType.passAutoRenewed,
+  NotifType.autoRenewFailed,
+  NotifType.passGiftExpired,
+  NotifType.classroomShared,
+  NotifType.passGiftReceived,
+  NotifType.passGiftClaimed,
+  // FIX (backend cross-check): withdrawal notif types existed in
+  // Notification.NotifType (models.py) but were missing here, same gap as
+  // the constants above — a user had no way to mute withdrawal alerts.
+  NotifType.withdrawalApproved,
+  NotifType.withdrawalRejected,
+  NotifType.withdrawalPaid,
   NotifType.generic,
 ];
 
@@ -2015,19 +2242,24 @@ class LiveClassDashboard {
 }
 
 // ---------------------------------------------------------------------------
-// 22. PASS GIFTING (Pass 14) — `PassGift`. ⚠️ ARCHITECTURE SKELETON — Pass 14
-// was never written up in the backend doc's own §2–§6 (see that doc's
-// top-of-file warning). Field names below are the frontend-doc's best-guess
-// (§1.3) from the change-log description only — CONFIRM against
-// `PassGiftSerializer` in serializers.py before trusting `fromJson` on real
-// data. `giftedTo` is modeled as a nullable `UserMini` with a raw string
-// fallback since the doc flags "email/username string — confirm" as open.
+// ---------------------------------------------------------------------------
+// 22. PASS GIFTING (Pass 14) — `PassGift`. CONFIRMED against the real
+// `PassGiftSerializer` (serializers.py) — the previous version of this class
+// was a pre-upload guess (`gifted_to`/`claim_window_expires_at`, a
+// `refunded` status that doesn't exist) and has been corrected:
+//   - real field is `recipient` (nested UserMini), not `gifted_to`
+//   - real expiry field is `expires_at`, not `claim_window_expires_at`
+//   - real status choices are pending/claimed/cancelled/expired — no
+//     "refunded" (cancelling refunds the gifter as a side effect, but the
+//     gift's own status becomes CANCELLED, per PassGiftViewSet.cancel())
+//   - `coinsSpent`/`giftMessage`/`purchaseId` are real fields that were
+//     previously dropped entirely
 // ---------------------------------------------------------------------------
 class PassGiftStatus {
   static const pending = 'pending';
   static const claimed = 'claimed';
+  static const cancelled = 'cancelled';
   static const expired = 'expired';
-  static const refunded = 'refunded';
 }
 
 class PassGift {
@@ -2036,11 +2268,14 @@ class PassGift {
   final String classPassTitle;
   final String classroomTitle;
   final UserMini gifter;
-  final UserMini? giftedTo; // null if backend only ever returns raw identifier below
-  final String? giftedToRaw; // email/username as sent, if giftedTo couldn't be resolved
+  final UserMini recipient;
+  final int coinsSpent;
+  final String giftMessage;
   final String status;
-  final DateTime claimWindowExpiresAt;
+  final int? purchaseId; // set once claimed — the PassPurchase it created
   final DateTime createdAt;
+  final DateTime expiresAt;
+  final DateTime? claimedAt;
 
   PassGift({
     required this.id,
@@ -2048,35 +2283,244 @@ class PassGift {
     this.classPassTitle = '',
     this.classroomTitle = '',
     required this.gifter,
-    this.giftedTo,
-    this.giftedToRaw,
+    required this.recipient,
+    this.coinsSpent = 0,
+    this.giftMessage = '',
     this.status = PassGiftStatus.pending,
-    required this.claimWindowExpiresAt,
+    this.purchaseId,
     required this.createdAt,
+    required this.expiresAt,
+    this.claimedAt,
   });
 
   bool get isPending => status == PassGiftStatus.pending;
-  Duration get timeLeft => claimWindowExpiresAt.difference(DateTime.now());
+  Duration get timeLeft => expiresAt.difference(DateTime.now());
 
-  factory PassGift.fromJson(Map<String, dynamic> j) {
-    final giftedToJson = j['gifted_to'];
-    return PassGift(
-      id: _int(j['id']),
-      classPassId: _int(j['class_pass'] ?? j['class_pass_id']),
-      classPassTitle: j['class_pass_title'] ?? '',
-      classroomTitle: j['classroom_title'] ?? '',
-      gifter: UserMini.fromJson(j['gifter']),
-      giftedTo: (giftedToJson is Map<String, dynamic>) ? UserMini.fromJson(giftedToJson) : null,
-      giftedToRaw: (giftedToJson is String) ? giftedToJson : j['gifted_to_email'] ?? j['gifted_to_username'],
-      status: j['status'] ?? PassGiftStatus.pending,
-      claimWindowExpiresAt: DateTime.parse(j['claim_window_expires_at']),
-      createdAt: DateTime.parse(j['created_at']),
-    );
-  }
+  factory PassGift.fromJson(Map<String, dynamic> j) => PassGift(
+        id: _int(j['id']),
+        classPassId: _int(j['class_pass']),
+        classPassTitle: j['class_pass_title'] ?? '',
+        classroomTitle: j['classroom_title'] ?? '',
+        gifter: UserMini.fromJson(j['gifter']),
+        recipient: UserMini.fromJson(j['recipient']),
+        coinsSpent: _int(j['coins_spent']),
+        giftMessage: j['gift_message'] ?? '',
+        status: j['status'] ?? PassGiftStatus.pending,
+        purchaseId: _intN(j['purchase']),
+        createdAt: _dt(j['created_at'])!,
+        expiresAt: _dt(j['expires_at'])!,
+        claimedAt: j['claimed_at'] == null ? null : _dt(j['claimed_at']),
+      );
 }
 
 // ---------------------------------------------------------------------------
-// 23. SESSION ENGAGEMENT REPORT (Pass 15) — ⚠️ ARCHITECTURE SKELETON, name
+// ---------------------------------------------------------------------------
+// 22A. CLASSROOM MINI — CONFIRMED against ClassroomMiniSerializer
+// (serializers.py): lightweight nested classroom summary used wherever a
+// list references a classroom in passing (currently only
+// ClassroomMyShareSerializer) without the full Classroom payload's weight.
+// ---------------------------------------------------------------------------
+class ClassroomMini {
+  final int id;
+  final String title;
+  final String subject;
+  final String? coverImage;
+  final UserMini teacher;
+
+  ClassroomMini({
+    required this.id,
+    required this.title,
+    this.subject = '',
+    this.coverImage,
+    required this.teacher,
+  });
+
+  factory ClassroomMini.fromJson(Map<String, dynamic> j) => ClassroomMini(
+        id: _int(j['id']),
+        title: j['title'] ?? '',
+        subject: j['subject'] ?? '',
+        coverImage: j['cover_image'],
+        teacher: UserMini.fromJson(j['teacher']),
+      );
+}
+
+// ---------------------------------------------------------------------------
+// 22B. CLASSROOM SHARE — CONFIRMED against ClassroomShareSerializer /
+// ClassroomShareResultSerializer / ClassroomShareLogSerializer /
+// ClassroomMyShareSerializer (serializers.py) and ClassroomViewSet.share /
+// .share_stats / .my_shares (views.py). Only `IN_APP`/`OTHER` channel
+// values are confirmed from source — other channel strings (e.g.
+// "whatsapp"/"sms"/"copy_link") the app itself may send are passed through
+// as free-form strings either way, so a value outside these two constants
+// isn't an error, just unconfirmed against the real Channel enum (models.py
+// wasn't part of any upload).
+// ---------------------------------------------------------------------------
+class ClassroomShareChannel {
+  static const inApp = 'in_app';
+  static const other = 'other';
+}
+
+/// Response of POST classrooms/{id}/share/.
+class ClassroomShareResult {
+  final int shareId;
+  final String webUrl;
+  final String deepLink;
+  final String shareText;
+  final UserMini? sharedWith; // set only for an in-app share
+  final int shareCount;
+
+  ClassroomShareResult({
+    required this.shareId,
+    required this.webUrl,
+    required this.deepLink,
+    required this.shareText,
+    this.sharedWith,
+    required this.shareCount,
+  });
+
+  factory ClassroomShareResult.fromJson(Map<String, dynamic> j) => ClassroomShareResult(
+        shareId: _int(j['share_id']),
+        webUrl: j['web_url'] ?? '',
+        deepLink: j['deep_link'] ?? '',
+        shareText: j['share_text'] ?? '',
+        sharedWith: j['shared_with'] == null ? null : UserMini.fromJson(j['shared_with']),
+        shareCount: _int(j['share_count']),
+      );
+}
+
+/// One row of GET classrooms/{id}/share-stats/'s "recent" list, or of GET
+/// classrooms/my-shares/ minus the classroom summary (see
+/// [ClassroomMyShare] below for that variant).
+class ClassroomShareLog {
+  final int id;
+  final UserMini sharedBy;
+  final UserMini? sharedWith;
+  final String channel;
+  final DateTime createdAt;
+
+  ClassroomShareLog({
+    required this.id,
+    required this.sharedBy,
+    this.sharedWith,
+    required this.channel,
+    required this.createdAt,
+  });
+
+  factory ClassroomShareLog.fromJson(Map<String, dynamic> j) => ClassroomShareLog(
+        id: _int(j['id']),
+        sharedBy: UserMini.fromJson(j['shared_by']),
+        sharedWith: j['shared_with'] == null ? null : UserMini.fromJson(j['shared_with']),
+        channel: j['channel'] ?? ClassroomShareChannel.other,
+        createdAt: _dt(j['created_at'])!,
+      );
+}
+
+/// Response of GET classrooms/{id}/share-stats/ — teacher/co-teacher/
+/// moderator only.
+class ClassroomShareStats {
+  final int shareCount;
+  final Map<String, int> byChannel;
+  final List<ClassroomShareLog> recent;
+
+  ClassroomShareStats({required this.shareCount, required this.byChannel, required this.recent});
+
+  factory ClassroomShareStats.fromJson(Map<String, dynamic> j) => ClassroomShareStats(
+        shareCount: _int(j['share_count']),
+        byChannel: (j['by_channel'] as Map? ?? {}).map((k, v) => MapEntry(k.toString(), _int(v))),
+        recent: (j['recent'] as List? ?? []).map((e) => ClassroomShareLog.fromJson(e)).toList(),
+      );
+}
+
+/// One row of GET classrooms/my-shares/ — the sharer's own history across
+/// every classroom they've shared (unlike [ClassroomShareStats], which is
+/// one classroom's teacher looking at everyone who shared IT).
+class ClassroomMyShare {
+  final int id;
+  final ClassroomMini classroom;
+  final UserMini? sharedWith;
+  final String channel;
+  final DateTime createdAt;
+
+  ClassroomMyShare({
+    required this.id,
+    required this.classroom,
+    this.sharedWith,
+    required this.channel,
+    required this.createdAt,
+  });
+
+  factory ClassroomMyShare.fromJson(Map<String, dynamic> j) => ClassroomMyShare(
+        id: _int(j['id']),
+        classroom: ClassroomMini.fromJson(j['classroom']),
+        sharedWith: j['shared_with'] == null ? null : UserMini.fromJson(j['shared_with']),
+        channel: j['channel'] ?? ClassroomShareChannel.other,
+        createdAt: _dt(j['created_at'])!,
+      );
+}
+
+// ---------------------------------------------------------------------------
+// 22C. REFER & EARN LINK — CONFIRMED against ReferLinkResultSerializer /
+// ClassroomViewSet.refer_link. Distinct from ReferralApi's account-wide
+// referrals/my-code/ (that's referring PEOPLE to the app; this is referring
+// a specific classroom, paid out as a per-day commission on the resulting
+// purchase — see PassPurchaseApi.referralEarnings below).
+// ---------------------------------------------------------------------------
+class ReferLinkResult {
+  final String referralCode;
+  final String webUrl;
+  final String deepLink;
+  final String shareText;
+  final double commissionPercent;
+
+  ReferLinkResult({
+    required this.referralCode,
+    required this.webUrl,
+    required this.deepLink,
+    required this.shareText,
+    required this.commissionPercent,
+  });
+
+  factory ReferLinkResult.fromJson(Map<String, dynamic> j) => ReferLinkResult(
+        referralCode: j['referral_code'] ?? '',
+        webUrl: j['web_url'] ?? '',
+        deepLink: j['deep_link'] ?? '',
+        shareText: j['share_text'] ?? '',
+        commissionPercent: _num(j['commission_percent']).toDouble(),
+      );
+}
+
+// ---------------------------------------------------------------------------
+// 22D. STUDENT PROGRESS — CONFIRMED against StudentProgressSerializer /
+// StudentProgressView (GET my-progress/). Own activity only, across every
+// classroom — there's no per-classroom or per-other-student view of this.
+// ---------------------------------------------------------------------------
+class StudentProgress {
+  final int classesAttended;
+  final int classroomsEnrolled;
+  final int assignmentsSubmitted;
+  final int certificatesEarned;
+  final int currentStreakDays;
+  final int longestStreakDays;
+
+  StudentProgress({
+    required this.classesAttended,
+    required this.classroomsEnrolled,
+    required this.assignmentsSubmitted,
+    required this.certificatesEarned,
+    required this.currentStreakDays,
+    required this.longestStreakDays,
+  });
+
+  factory StudentProgress.fromJson(Map<String, dynamic> j) => StudentProgress(
+        classesAttended: _int(j['classes_attended']),
+        classroomsEnrolled: _int(j['classrooms_enrolled']),
+        assignmentsSubmitted: _int(j['assignments_submitted']),
+        certificatesEarned: _int(j['certificates_earned']),
+        currentStreakDays: _int(j['current_streak_days']),
+        longestStreakDays: _int(j['longest_streak_days']),
+      );
+}
+
 // and fields TBC (frontend doc §1.7). Read `serializers.py` before shipping;
 // this shape (attendance list + a handful of aggregate numbers) is the
 // frontend doc's best guess from the change-log description only.
@@ -2127,6 +2571,45 @@ class SessionEngagementReport {
       );
 }
 
+/// NEW (persistence fix) — one row of the session's live-caption
+/// transcript. Mirrors `SessionCaptionSerializer` (serializers.py):
+/// speaker is always who actually said it (server-set from the
+/// authenticated caller, never client-writable) — see
+/// `SessionApi.postCaption`/`getCaptionHistory` and
+/// `ClassSessionViewSet.captions()` in views.py.
+class SessionCaptionLine {
+  final int id;
+  final UserMini speaker;
+  final String text;
+  final DateTime createdAt;
+
+  SessionCaptionLine({required this.id, required this.speaker, required this.text, required this.createdAt});
+
+  factory SessionCaptionLine.fromJson(Map<String, dynamic> j) => SessionCaptionLine(
+        id: _int(j['id']),
+        speaker: UserMini.fromJson((j['speaker'] as Map).cast<String, dynamic>()),
+        text: j['text'] ?? '',
+        createdAt: _dt(j['created_at']) ?? DateTime.now(),
+      );
+}
+
+/// NEW (persistence fix) — the {"total", "counts"} summary returned by
+/// `sessions/{id}/reactions/` (GET and POST both return this shape — see
+/// `ClassSessionViewSet.reactions()` in views.py). `counts` only
+/// includes emoji that have at least one tap, same "no zero-count
+/// clutter" convention as `ChatMessage.reactionCounts` above.
+class SessionReactionSummary {
+  final int total;
+  final Map<String, int> counts;
+
+  SessionReactionSummary({required this.total, this.counts = const {}});
+
+  factory SessionReactionSummary.fromJson(Map<String, dynamic> j) => SessionReactionSummary(
+        total: _int(j['total']),
+        counts: (j['counts'] as Map? ?? {}).map((k, v) => MapEntry(k as String, _int(v))),
+      );
+}
+
 /// Generic paginated list wrapper — DRF's default pagination shape
 /// ({"count", "next", "previous", "results": [...]}).
 class PaginatedList<T> {
@@ -2143,5 +2626,24 @@ class PaginatedList<T> {
         next: j['next'],
         previous: j['previous'],
         results: (j['results'] as List? ?? []).map((e) => fromJson(e)).toList(),
+      );
+}
+
+// ---------------------------------------------------------------------------
+// REFERRAL EARNINGS — CONFIRMED against PassPurchaseViewSet.referral_earnings
+// (views.py): a paginated PassPurchaseSerializer list (every purchase
+// currently crediting the caller a commission) plus a running total_earned
+// mixed into the same payload — not a plain PaginatedList<PassPurchase>
+// since that extra top-level field doesn't fit that generic shape.
+// ---------------------------------------------------------------------------
+class ReferralEarnings {
+  final int totalEarned;
+  final PaginatedList<PassPurchase> purchases;
+
+  ReferralEarnings({required this.totalEarned, required this.purchases});
+
+  factory ReferralEarnings.fromJson(Map<String, dynamic> j) => ReferralEarnings(
+        totalEarned: _int(j['total_earned']),
+        purchases: PaginatedList.fromJson(j, PassPurchase.fromJson),
       );
 }

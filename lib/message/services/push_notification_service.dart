@@ -502,6 +502,16 @@ class PushNotificationService {
       playSound: false,
       enableVibration: false,
     );
+    // 🔥 NAYA (Phase 4, §1 #12, §4.6) — @mentions ka apna channel, normal
+    // "chat_messages" se jaan-bujh kar alag — max importance taaki muted
+    // chat me bhi mention aane par dikhe/sunai de (backend mute bypass
+    // karke ye push bhejta hai, dekho _showBackgroundMentionNotification).
+    const mentionsChannel = AndroidNotificationChannel(
+      'mentions',
+      'Mentions',
+      description: 'Someone mentioned you in a group chat',
+      importance: Importance.max,
+    );
     await _fln
         .resolvePlatformSpecificImplementation<AndroidFlutterLocalNotificationsPlugin>()
         ?.createNotificationChannel(downloadsChannel);
@@ -511,6 +521,9 @@ class PushNotificationService {
     await _fln
         .resolvePlatformSpecificImplementation<AndroidFlutterLocalNotificationsPlugin>()
         ?.createNotificationChannel(ongoingCallChannel);
+    await _fln
+        .resolvePlatformSpecificImplementation<AndroidFlutterLocalNotificationsPlugin>()
+        ?.createNotificationChannel(mentionsChannel);
 
     FirebaseMessaging.onMessage.listen((message) {
       // 🔥 FIX: call ka payload aaye to Instagram/WhatsApp jaisa CallKit
@@ -574,6 +587,29 @@ class PushNotificationService {
       // (chahe app kisi bhi screen pe ho) turant notification aani chahiye.
       if (message.data['type'] == 'reaction') {
         _showReactionNotification(message);
+        return;
+      }
+
+      // 🔥 NAYA (Phase 4, §1 #12, §4.6) — @mention push, foreground me.
+      // Backend mute-suppression bypass karke bhejta hai, isliye current-
+      // open-conversation check (neeche wale generic path me hai) yahan
+      // jaan-bujh kar NAHI lagaya — mention hamesha dikhni chahiye, chahe
+      // wahi conversation khuli bhi ho.
+      if (message.data['type'] == 'mention') {
+        _showMentionNotification(message);
+        return;
+      }
+
+      // 🔥 NAYA (Phase 4, §1 #12, §4.6) — chat digest/batch push, foreground
+      // me. Pehle-se-formatted "X sent N messages" text seedha dikha dete
+      // hain, koi per-message Reply action nahi (poore batch ka summary
+      // hai, kisi ek message ka reply nahi).
+      if (message.data['type'] == 'chat_digest') {
+        final convId = message.data['conversation_id'];
+        if (convId != null && convId == currentOpenConversationId) {
+          return; // wahi conversation already khuli hai, digest ki zaroorat nahi
+        }
+        _showDigestNotification(message);
         return;
       }
 
@@ -666,6 +702,57 @@ class PushNotificationService {
       id: message.hashCode,
       title: '$reactorName reacted $emoji',
       body: 'Tap to view the message',
+      notificationDetails: const NotificationDetails(android: androidDetails),
+      payload: jsonEncode(message.data),
+    );
+  }
+
+  // 🔥 NAYA (Phase 4, §1 #12, §4.6) — foreground me @mention push aane par
+  // dikhta hai. Apna khud ka "mentions" channel (max importance) — normal
+  // chat notification se jaan-bujh kar alag/zyada noticeable, kyunki
+  // backend ye push mute-suppression bypass karke bhejta hai.
+  Future<void> _showMentionNotification(RemoteMessage message) async {
+    final senderName = message.data['sender_name']?.toString() ?? 'Someone';
+    final text = message.data['text']?.toString();
+    const androidDetails = AndroidNotificationDetails(
+      'mentions',
+      'Mentions',
+      importance: Importance.max,
+      priority: Priority.max,
+      category: AndroidNotificationCategory.message,
+    );
+    await _fln.show(
+      id: message.hashCode,
+      title: '$senderName mentioned you',
+      body: (text != null && text.trim().isNotEmpty) ? text.trim() : 'Tap to view the message',
+      notificationDetails: const NotificationDetails(android: androidDetails),
+      payload: jsonEncode(message.data),
+    );
+  }
+
+  // 🔥 NAYA (Phase 4, §1 #12, §4.6) — foreground me chat digest/batch push.
+  // Backend ka pehle-se-formatted "X sent N messages" text seedha dikhate
+  // hain — koi per-message Reply action nahi (poore batch ka summary hai).
+  // Fixed id per-conversation taaki agar thodi der me digest phir aaye,
+  // purani notification UPDATE ho, stack na ho.
+  Future<void> _showDigestNotification(RemoteMessage message) async {
+    final title = message.data['conversation_name']?.toString() ??
+        message.data['title']?.toString() ??
+        'New messages';
+    final body = message.data['text']?.toString() ??
+        message.data['body']?.toString() ??
+        'You have new messages';
+    final convId = message.data['conversation_id']?.toString();
+    const androidDetails = AndroidNotificationDetails(
+      'chat_messages',
+      'Chat Messages',
+      importance: Importance.high,
+      priority: Priority.high,
+    );
+    await _fln.show(
+      id: convId?.hashCode ?? message.hashCode,
+      title: title,
+      body: body,
       notificationDetails: const NotificationDetails(android: androidDetails),
       payload: jsonEncode(message.data),
     );

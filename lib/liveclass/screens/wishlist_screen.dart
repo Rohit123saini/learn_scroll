@@ -96,25 +96,11 @@ class _WishlistScreenState extends State<WishlistScreen> {
   Widget build(BuildContext context) {
     return Scaffold(
       backgroundColor: _kBg,
-      appBar: AppBar(
-        backgroundColor: Colors.white,
-        foregroundColor: _kNavy,
-        elevation: 0.5,
-        title: const Text('Wishlist', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
-      ),
+      appBar: liveClassAppBar('Wishlist'),
       body: _loading
-          ? const Center(child: CircularProgressIndicator(color: _kNavy))
+          ? const LiveClassLoading()
           : _error != null
-              ? Center(
-                  child: Padding(
-                    padding: const EdgeInsets.all(24),
-                    child: Column(mainAxisSize: MainAxisSize.min, children: [
-                      Text(_error!, textAlign: TextAlign.center),
-                      const SizedBox(height: 12),
-                      ElevatedButton(onPressed: _load, child: const Text('Retry')),
-                    ]),
-                  ),
-                )
+              ? LiveClassErrorState(message: _error!, onRetry: _load)
               : RefreshIndicator(
                   color: _kNavy,
                   onRefresh: _load,

@@ -171,16 +171,8 @@ class _ClassroomPurchasesScreenState extends State<ClassroomPurchasesScreen> {
   Widget build(BuildContext context) {
     return Scaffold(
       backgroundColor: _kBg,
-      appBar: AppBar(
-        backgroundColor: Colors.white,
-        foregroundColor: _kNavy,
-        elevation: 0.5,
-        title: Text(
-          widget.classroomTitle.isNotEmpty ? 'Purchases — ${widget.classroomTitle}' : 'Purchases',
-          style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 15),
-          maxLines: 1,
-          overflow: TextOverflow.ellipsis,
-        ),
+      appBar: liveClassAppBar(
+        widget.classroomTitle.isNotEmpty ? 'Purchases — ${widget.classroomTitle}' : 'Purchases',
         actions: [
           Padding(
             padding: const EdgeInsets.only(right: 12),
@@ -201,25 +193,9 @@ class _ClassroomPurchasesScreenState extends State<ClassroomPurchasesScreen> {
         color: _kNavy,
         onRefresh: _load,
         child: _loading
-            ? const Center(child: CircularProgressIndicator(color: _kNavy))
+            ? const LiveClassLoading()
             : _error != null
-                ? ListView(
-                    children: [
-                      Padding(
-                        padding: const EdgeInsets.only(top: 100),
-                        child: Center(
-                          child: Column(
-                            mainAxisSize: MainAxisSize.min,
-                            children: [
-                              Text(_error!, textAlign: TextAlign.center),
-                              const SizedBox(height: 12),
-                              ElevatedButton(onPressed: _load, child: const Text('Retry')),
-                            ],
-                          ),
-                        ),
-                      ),
-                    ],
-                  )
+                ? LiveClassErrorState(message: _error!, onRetry: _load)
                 : _visible.isEmpty
                     ? ListView(
                         children: const [

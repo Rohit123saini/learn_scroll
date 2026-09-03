@@ -60,9 +60,17 @@ class CallApiService {
   }
 
   /// Get call status (optional - ringing check ke liye)
+  ///
+  /// 🔧 FIX (backend mismatch, confirmed against CHAT_APP_DOCUMENTATION.md
+  /// §6 "Calls") — this hits `CallHistoryViewSet`'s retrieve action, which
+  /// is router-registered at `calls/history/`, not bare `calls/` (that
+  /// prefix is only for the plain-path `CallInitiateView`/`CallActionView`
+  /// used just above). Missing `history/` segment meant this always 404'd
+  /// — the 2s reject-detection poll (`_startCallStatusPoll` in
+  /// `call_manager.dart`) never actually got a real status back.
   static Future<Map<String, dynamic>> getCallStatus(String callId) async {
     final res = await http.get(
-      Uri.parse("$baseUrl/message/calls/$callId/"),
+      Uri.parse("$baseUrl/message/calls/history/$callId/"),
       headers: await _getHeaders(),
     );
     return jsonDecode(res.body);
@@ -77,18 +85,23 @@ class CallApiService {
   // chahiye.
   //
   // Backend me 2 naye endpoints add karne honge:
-  //   GET  $baseUrl/message/calls/<call_id>/addable-participants/
+  //   GET  $baseUrl/message/calls/history/<call_id>/addable-participants/
   //     -> conversation ke un members ki list jo abhi call me NAHI hain
   //     response: [{"id": "...", "display_name": "...", "avatar": "..."}]
-  //   POST $baseUrl/message/calls/<call_id>/add-participant/
+  //   POST $baseUrl/message/calls/history/<call_id>/add-participant/
   //     body: {"user_id": "..."}
   //     -> us user ko normal incoming-call push/socket event bhejta hai
   //        (jaisa naya call start hone par jaata hai), same call_id ke
   //        saath — response: {"status": "invited"}
+  //
+  // 🔧 FIX (backend mismatch, confirmed against CHAT_APP_DOCUMENTATION.md
+  // §6 "Calls") — both actions live on `CallHistoryViewSet`, router-
+  // registered at `calls/history/`, not bare `calls/`. Missing `history/`
+  // meant "Add participant" in a group call always 404'd.
   static Future<List<Map<String, dynamic>>> getAddableParticipants(String callId) async {
     try {
       final res = await http.get(
-        Uri.parse("$baseUrl/message/calls/$callId/addable-participants/"),
+        Uri.parse("$baseUrl/message/calls/history/$callId/addable-participants/"),
         headers: await _getHeaders(),
       );
       final data = jsonDecode(res.body);
@@ -107,7 +120,7 @@ class CallApiService {
   static Future<Map<String, dynamic>> addParticipant(String callId, String userId) async {
     try {
       final res = await http.post(
-        Uri.parse("$baseUrl/message/calls/$callId/add-participant/"),
+        Uri.parse("$baseUrl/message/calls/history/$callId/add-participant/"),
         headers: await _getHeaders(),
         body: jsonEncode({"user_id": userId}),
       );
@@ -155,7 +168,7 @@ class CallApiService {
   // dikhani hai — bilkul WhatsApp jaisa "Missed call" list.
   //
   // Backend me naya endpoint add karna hoga:
-  //   GET $baseUrl/message/calls/missed/?since=<ISO8601 timestamp>
+  //   GET $baseUrl/message/calls/history/missed/?since=<ISO8601 timestamp>
   //     -> `since` ke baad ki saari calls jo is user ke liye ring hui
   //        thi lekin accept/reject nahi hui (status = missed)
   //     response: [{
@@ -166,11 +179,17 @@ class CallApiService {
   //   (agar `since` na bheja jaaye to backend apni marzi se last ~24h
   //   ki missed calls bhej sakta hai, taaki client-side clock skew se
   //   bach sake.)
+  //
+  // 🔧 FIX (backend mismatch, confirmed against CHAT_APP_DOCUMENTATION.md
+  // §6 "Calls") — `missed` is a `@action` on `CallHistoryViewSet`, router-
+  // registered at `calls/history/`, not bare `calls/`. Missing `history/`
+  // meant `MissedCallWatcher` silently got nothing back (best-effort
+  // `catch` swallowed the 404) every time it checked after a reconnect.
   static Future<List<Map<String, dynamic>>> getMissedCalls({DateTime? since}) async {
     try {
       final query = since != null ? "?since=${Uri.encodeComponent(since.toUtc().toIso8601String())}" : "";
       final res = await http.get(
-        Uri.parse("$baseUrl/message/calls/missed/$query"),
+        Uri.parse("$baseUrl/message/calls/history/missed/$query"),
         headers: await _getHeaders(),
       );
       final data = jsonDecode(res.body);

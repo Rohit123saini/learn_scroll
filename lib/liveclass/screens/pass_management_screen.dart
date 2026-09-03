@@ -152,6 +152,11 @@ class _PassManagementScreenState extends State<PassManagementScreen> {
           validityDays: pass.validityDays,
           maxClasses: pass.maxClasses,
           isActive: !pass.isActive,
+          // FIX (introduced alongside allowGifting itself): without this,
+          // toggling pause/resume here would silently reset a pass's
+          // gifting flag back to the default every time, since this
+          // rebuilds a whole new ClassPass rather than patching one field.
+          allowGifting: pass.allowGifting,
         ),
       );
       _snack(pass.isActive ? 'Pass paused.' : 'Pass activated.');

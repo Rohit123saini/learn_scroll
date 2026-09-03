@@ -77,9 +77,11 @@ import 'package:flutter/material.dart';
 import 'package:firebase_messaging/firebase_messaging.dart';
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 
+import '../models/liveclass_models.dart' show NotifType;
 import '../screens/live_session_screen.dart';
 import '../screens/classroom_detail_screen.dart';
 import '../screens/my_passes_screen.dart';
+import '../screens/pass_gift_claim_screen.dart';
 // Reuse the SAME global navigator key calling already uses — set once in
 // main.dart via CallKitService.init(navKey). No need for a second key.
 import '../../message/services/call_kit_service.dart';
@@ -89,33 +91,43 @@ import '../../message/services/call_kit_service.dart';
 /// (or just call in and let unknown types fall through to a default/no-op)
 /// instead of hardcoding a single `== 'class_reminder'` check.
 const Set<String> _handledTypes = {
-  'class_reminder',
-  'join_request_received',
-  'join_request_accepted',
-  'join_request_rejected',
-  'assignment_graded',
-  'certificate_issued',
-  'notice_posted',
-  'query_answered',
-  'waitlist_seat_open',
-  'pass_refunded',
-  'classroom_flagged',
-  'session_auto_completed',
+  'class_reminder', // no NotifType constant — reminder push, not a bell-row Notification
+  NotifType.joinRequestReceived,
+  NotifType.joinRequestAccepted,
+  NotifType.joinRequestRejected,
+  NotifType.assignmentGraded,
+  NotifType.certificateIssued,
+  NotifType.noticePosted,
+  NotifType.queryAnswered,
+  'waitlist_seat_open', // no NotifType constant — see NotifType.waitlistPromoted for the bell-row equivalent
+  NotifType.passRefunded,
+  NotifType.classroomFlagged,
+  'session_auto_completed', // no NotifType constant — teacher-only push, no bell row
   // Naye types (production notification coverage audit, dusra pass) —
   // dekho file-header comment upar exact data payload ke liye.
-  'session_live',
-  'session_cancelled',
-  'assignment_posted',
-  'submission_received',
-  'staff_added',
-  'review_posted',
-  'report_reviewed',
+  NotifType.sessionLive,
+  NotifType.sessionCancelled,
+  NotifType.assignmentPosted,
+  NotifType.submissionReceived,
+  NotifType.staffAdded,
+  NotifType.reviewPosted,
+  NotifType.reportReviewed,
   // NEW (Pass 16 frontend catch-up §1.8) — 3 more types added alongside
   // auto-renew (Pass 15) and pass gifting (Pass 14). See models.dart's
   // NotifType for the same gap-fix note.
-  'pass_auto_renewed',
-  'auto_renew_failed',
-  'pass_gift_expired',
+  NotifType.passAutoRenewed,
+  NotifType.autoRenewFailed,
+  NotifType.passGiftExpired,
+  // FIX (push `type` vs NotifType vocabulary audit): these 3 push types
+  // were being sent by the backend (tasks.notify_classroom_shared,
+  // notify_pass_gift_received, notify_pass_gift_claimed) but were never
+  // added here — meaning push_notification_service.dart's
+  // `_handledTypes.contains(...)` gate silently swallowed them and a tap
+  // on any of these 3 notification types did nothing at all. Now sourced
+  // from NotifType (models.dart), which also gained these 3 constants.
+  NotifType.classroomShared,
+  NotifType.passGiftReceived,
+  NotifType.passGiftClaimed,
 };
 
 /// These 3 aren't classroom-scoped (no `classroom_id` in payload) and
@@ -126,15 +138,29 @@ const Set<String> _handledTypes = {
 /// `pass_gift_expired` in particular could arguably open a sent-gifts
 /// view instead once `pass_gift_claim_screen.dart` exists.
 const Set<String> _passLifecycleTapTypes = {
-  'pass_auto_renewed',
-  'auto_renew_failed',
-  'pass_gift_expired',
+  NotifType.passAutoRenewed,
+  NotifType.autoRenewFailed,
+  NotifType.passGiftExpired,
+};
+
+/// FIX (PassGiftClaimScreen orphan — entry point #1 from that screen's own
+/// header comment): `pass_gift_received`/`pass_gift_claimed` DO carry a
+/// `classroom_id` (tasks.notify_pass_gift_received/notify_pass_gift_claimed,
+/// see tasks.py), so before this fix they silently fell through to the
+/// generic classroom_id branch below and opened ClassroomDetailScreen
+/// instead — not wrong, but it skipped the one screen actually built for
+/// this ("here's your gift, tap to claim it"). Route these to
+/// PassGiftClaimScreen(giftId: ...) instead, using the `pass_gift_id` key
+/// from the push payload (NOT `gift_id` — confirmed against tasks.py).
+const Set<String> _giftTapTypes = {
+  NotifType.passGiftReceived,
+  NotifType.passGiftClaimed,
 };
 
 /// `class_reminder` aur `session_live` dono isi treatment ke hakdaar hain —
 /// dono ka poora point hai user ko seedha live room me daalna, na ki use
 /// classroom detail se phir se "Enter Class" dhoondhne dena.
-const Set<String> _liveRoomTapTypes = {'class_reminder', 'session_live'};
+const Set<String> _liveRoomTapTypes = {'class_reminder', NotifType.sessionLive};
 
 class LiveClassNotificationHandler {
   LiveClassNotificationHandler._();
@@ -172,7 +198,7 @@ class LiveClassNotificationHandler {
     // FCM `notification` block for this type, so message.notification is
     // used first (see showForeground below); this is only the fallback if
     // that's ever missing.
-    if (data['type']?.toString() == 'session_live') {
+    if (data['type']?.toString() == NotifType.sessionLive) {
       return '$classroomTitle is live now';
     }
     final minutesBefore = int.tryParse(data['minutes_before']?.toString() ?? '') ?? 0;
@@ -311,6 +337,14 @@ class LiveClassNotificationHandler {
     if (_passLifecycleTapTypes.contains(type)) {
       navigator.push(MaterialPageRoute(
         builder: (_) => const MyPassesScreen(),
+      ));
+      return;
+    }
+
+    if (_giftTapTypes.contains(type)) {
+      final giftId = int.tryParse(data['pass_gift_id']?.toString() ?? '');
+      navigator.push(MaterialPageRoute(
+        builder: (_) => PassGiftClaimScreen(giftId: giftId),
       ));
       return;
     }

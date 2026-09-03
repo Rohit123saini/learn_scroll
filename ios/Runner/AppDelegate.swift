@@ -12,5 +12,8 @@ import UIKit
 
   func didInitializeImplicitFlutterEngine(_ engineBridge: FlutterImplicitEngineBridge) {
     GeneratedPluginRegistrant.register(with: engineBridge.pluginRegistry)
+    if #available(iOS 15.0, *), let controller = window?.rootViewController as? FlutterViewController {
+      PipManager.shared.attach(to: controller.binaryMessenger, rootView: controller.view)
+    }
   }
 }

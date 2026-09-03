@@ -88,6 +88,25 @@ IconData _notifIcon(String type) {
       return Icons.error_outline_rounded;
     case NotifType.passGiftExpired:
       return Icons.card_giftcard_outlined;
+    // FIX (push `type` vs NotifType vocabulary audit) — same "constant
+    // existed but icon mapping missed" gap as the 10 types above; these
+    // 3 didn't even have a NotifType constant until now (see models.dart).
+    case NotifType.classroomShared:
+      return Icons.ios_share_rounded;
+    case NotifType.passGiftReceived:
+      return Icons.card_giftcard_rounded;
+    case NotifType.passGiftClaimed:
+      return Icons.redeem_rounded;
+    // FIX (backend cross-check — coin withdrawal / payout): these 3
+    // NotifType constants existed in Notification.NotifType (models.py)
+    // but had no icon mapping here, same "constant added, icon map
+    // missed" gap as the batches noted above.
+    case NotifType.withdrawalApproved:
+      return Icons.check_circle_outline_rounded;
+    case NotifType.withdrawalRejected:
+      return Icons.highlight_off_rounded;
+    case NotifType.withdrawalPaid:
+      return Icons.account_balance_wallet_outlined;
     default:
       return Icons.notifications_none_rounded;
   }

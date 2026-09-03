@@ -196,6 +196,7 @@ class _GiftListViewState extends State<_GiftListView> {
   String? _error;
   List<PassGift> _gifts = [];
   int? _claimingId;
+  int? _cancellingId;
 
   @override
   void initState() {
@@ -246,6 +247,36 @@ class _GiftListViewState extends State<_GiftListView> {
     }
   }
 
+  /// item 10 — gifter can cancel their own gift while it's still PENDING.
+  /// Refund happens server-side (PassGift.refund_to_gifter()); we just
+  /// swap the updated (now-cancelled) gift into the list.
+  Future<void> _cancel(PassGift gift) async {
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (_) => AlertDialog(
+        title: const Text('Cancel this gift?'),
+        content: Text('${gift.coinsSpent} coins will be refunded to you.'),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('No')),
+          TextButton(onPressed: () => Navigator.pop(context, true), child: const Text('Yes, cancel')),
+        ],
+      ),
+    );
+    if (ok != true) return;
+
+    setState(() => _cancellingId = gift.id);
+    try {
+      final cancelled = await LiveClassApi.passGifts.cancel(gift.id);
+      if (!mounted) return;
+      setState(() => _gifts = _gifts.map((g) => g.id == cancelled.id ? cancelled : g).toList());
+      _snack('Gift cancelled — coins refunded.');
+    } catch (e) {
+      _snack(e is LiveClassApiException ? e.message : 'Could not cancel this gift.');
+    } finally {
+      if (mounted) setState(() => _cancellingId = null);
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     if (_loading) return const LiveClassLoading();
@@ -284,15 +315,31 @@ class _GiftListViewState extends State<_GiftListView> {
                       ),
                       const SizedBox(height: 3),
                       Text(
+                        // FIX (stale field names): PassGift's real field is
+                        // `recipient` (a non-nullable UserMini) — this
+                        // screen was never updated after liveclass_models
+                        // .dart's PassGift class got corrected against the
+                        // real PassGiftSerializer (see that class's own
+                        // doc comment); `giftedTo`/`giftedToRaw` never
+                        // existed there, so this wouldn't even compile.
                         widget.direction == _Direction.received
                             ? 'From ${g.gifter.fullName}'
-                            : 'To ${g.giftedTo?.fullName ?? g.giftedToRaw ?? "—"}',
+                            : 'To ${g.recipient.fullName}',
                         style: TextStyle(fontSize: 12, color: Colors.grey.shade600),
                       ),
                     ],
                   ),
                 ),
-                _StatusChip(status: g.status),
+                if (widget.direction == _Direction.sent && g.isPending)
+                  TextButton(
+                    onPressed: _cancellingId == g.id ? null : () => _cancel(g),
+                    child: _cancellingId == g.id
+                        ? const SizedBox(
+                            height: 14, width: 14, child: CircularProgressIndicator(strokeWidth: 2))
+                        : const Text('Cancel', style: TextStyle(fontSize: 12.5)),
+                  )
+                else
+                  _StatusChip(status: g.status),
               ],
             ),
           );
@@ -310,8 +357,14 @@ String _statusLabel(String status) {
       return 'Claimed';
     case PassGiftStatus.expired:
       return 'Expired';
-    case PassGiftStatus.refunded:
-      return 'Refunded';
+    // FIX (stale status constant): PassGiftStatus has no `refunded` value
+    // on the real backend — cancelling refunds the gifter as a side
+    // effect, but the gift row itself lands on CANCELLED, not a separate
+    // REFUNDED status (see the PassGiftStatus doc comment in
+    // liveclass_models.dart). This case referenced a constant that no
+    // longer exists and would fail to compile.
+    case PassGiftStatus.cancelled:
+      return 'Cancelled';
     default:
       return status;
   }
@@ -331,7 +384,7 @@ class _StatusChip extends StatelessWidget {
         bg = LiveClassColors.successBg;
         break;
       case PassGiftStatus.expired:
-      case PassGiftStatus.refunded:
+      case PassGiftStatus.cancelled:
         color = Colors.grey.shade700;
         bg = Colors.grey.shade200;
         break;

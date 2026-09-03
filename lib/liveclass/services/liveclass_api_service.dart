@@ -11,7 +11,12 @@
 // utils/api.dart, with "/liveclass" appended (see liveclass_models used
 // to live/services/ counterpart before this Dio rewrite).
 
+import 'dart:async';
+import 'dart:convert';
+
 import 'package:dio/dio.dart';
+import 'package:web_socket_channel/web_socket_channel.dart';
+import 'package:web_socket_channel/status.dart' as ws_status;
 
 import '../../utils/api.dart';
 import '../../services/auth_service.dart';
@@ -119,6 +124,18 @@ class LiveClassApi {
         if (classroomId != null) 'classroom': classroomId,
       });
       return TeacherEarnings.fromJson(res.data);
+    } on DioException catch (e) {
+      _throwFrom(e);
+    }
+  }
+
+  /// GET /liveclass/my-progress/ — the caller's own attendance/assignment/
+  /// certificate stats + attendance streak (item 8 — student progress).
+  static Future<StudentProgress> myProgress() async {
+    try {
+      final dio = await _Http.client();
+      final res = await dio.get('my-progress/');
+      return StudentProgress.fromJson(res.data);
     } on DioException catch (e) {
       _throwFrom(e);
     }
@@ -328,6 +345,23 @@ class ClassroomApi {
     }
   }
 
+  /// GET classrooms/{id}/recordings/ — ClassroomViewSet.recordings on the
+  /// backend; a browsable, paginated list of this classroom's past
+  /// recorded sessions (see classroom_recordings_screen.dart). Same access
+  /// tier as materials/notices — teacher/staff/anyone who has ever held a
+  /// pass, active or expired — not owner-only. Unlike `bans` above, this
+  /// one DOES go through normal DRF pagination, same shape as every other
+  /// list call in this file.
+  Future<PaginatedList<SessionRecording>> recordings(int classroomId, {int page = 1}) async {
+    try {
+      final dio = await _Http.client();
+      final res = await dio.get('classrooms/$classroomId/recordings/', queryParameters: {'page': page});
+      return PaginatedList.fromJson(res.data, SessionRecording.fromJson);
+    } on DioException catch (e) {
+      _throwFrom(e);
+    }
+  }
+
   /// POST classrooms/{id}/unban/{studentId}/ — lifts a ban. Does NOT
   /// restore the refunded pass — the student is welcome back but would
   /// need to raise a fresh join request and pay again, same as any other
@@ -354,11 +388,89 @@ class ClassroomApi {
   /// staff/anyone who has ever held a pass, active or expired. A session
   /// that was recorded but hasn't finished uploading yet (LiveKit egress
   /// webhook still pending) simply won't show up here until it does.
-  Future<PaginatedList<SessionRecording>> recordings(int classroomId, {int page = 1}) async {
+  // -----------------------------------------------------------------
+  // FEATURE (item 6 — share button + share count): backend
+  // (ClassroomViewSet.share/.share_stats/.my_shares) was fully ready with
+  // no frontend caller anywhere in the module.
+  // -----------------------------------------------------------------
+
+  /// POST classrooms/{id}/share/ — logs a share and bumps share_count.
+  /// Pass [toUserId] for an in-app share (notifies that user; channel is
+  /// forced to `in_app` server-side regardless of [channel]) — omit it for
+  /// an outside-the-app share (WhatsApp/SMS/copy-link/native share sheet),
+  /// where this call's only job is to hand back [ClassroomShareResult]'s
+  /// web_url/deep_link/share_text for the OS's own share UI to use.
+  Future<ClassroomShareResult> share(int classroomId, {int? toUserId, String? channel}) async {
     try {
       final dio = await _Http.client();
-      final res = await dio.get('classrooms/$classroomId/recordings/', queryParameters: {'page': page});
-      return PaginatedList.fromJson(res.data, SessionRecording.fromJson);
+      final res = await dio.post('classrooms/$classroomId/share/', data: {
+        if (toUserId != null) 'to_user_id': toUserId,
+        if (channel != null) 'channel': channel,
+      });
+      return ClassroomShareResult.fromJson(res.data);
+    } on DioException catch (e) {
+      _throwFrom(e);
+    }
+  }
+
+  /// GET classrooms/{id}/share-stats/ — teacher/co-teacher/moderator only:
+  /// who's sharing this classroom, via which channel, behind share_count.
+  Future<ClassroomShareStats> shareStats(int classroomId) async {
+    try {
+      final dio = await _Http.client();
+      final res = await dio.get('classrooms/$classroomId/share-stats/');
+      return ClassroomShareStats.fromJson(res.data);
+    } on DioException catch (e) {
+      _throwFrom(e);
+    }
+  }
+
+  /// GET classrooms/my-shares/ — the caller's own share history, across
+  /// every classroom they've ever shared.
+  Future<PaginatedList<ClassroomMyShare>> myShares({int page = 1}) async {
+    try {
+      final dio = await _Http.client();
+      final res = await dio.get('classrooms/my-shares/', queryParameters: {'page': page});
+      return PaginatedList.fromJson(res.data, ClassroomMyShare.fromJson);
+    } on DioException catch (e) {
+      _throwFrom(e);
+    }
+  }
+
+  // -----------------------------------------------------------------
+  // FEATURE (item 9 — refer & earn a classroom): the class-level
+  // counterpart to ReferralApi (that's referring people to the app; this
+  // is referring a specific classroom, paid out as a per-day commission —
+  // see PassPurchaseApi.referralEarnings). 400s if the classroom's teacher
+  // hasn't turned referral_enabled on — check Classroom.referralEnabled
+  // before showing the "Refer & Earn" entry point to avoid a wasted call.
+  // -----------------------------------------------------------------
+
+  /// GET classrooms/{id}/refer-link/ — the caller's own referral link for
+  /// this classroom + the commission rate it pays right now.
+  Future<ReferLinkResult> referLink(int classroomId) async {
+    try {
+      final dio = await _Http.client();
+      final res = await dio.get('classrooms/$classroomId/refer-link/');
+      return ReferLinkResult.fromJson(res.data);
+    } on DioException catch (e) {
+      _throwFrom(e);
+    }
+  }
+
+  // -----------------------------------------------------------------
+  // FEATURE (item 9 — personalized discovery): content-based recommender,
+  // scored off the caller's own purchase + wishlist history (subject/
+  // language match), falling back to rating/enrollment for a new user
+  // with no history yet. Excludes classrooms already purchased.
+  // -----------------------------------------------------------------
+
+  /// GET classrooms/recommended/ — personalized "Recommended for you" feed.
+  Future<PaginatedList<Classroom>> recommended({int limit = 10}) async {
+    try {
+      final dio = await _Http.client();
+      final res = await dio.get('classrooms/recommended/', queryParameters: {'limit': limit});
+      return PaginatedList.fromJson(res.data, Classroom.fromJson);
     } on DioException catch (e) {
       _throwFrom(e);
     }
@@ -426,21 +538,24 @@ class ClassroomReportApi {
 }
 
 // ---------------------------------------------------------------------------
-// 1B. CHAT MESSAGE REPORTS (Pass 14) — ⚠️ ARCHITECTURE SKELETON, endpoint
-// paths unconfirmed against urls.py (frontend doc §1.4). Mirrors
-// ClassroomReportApi above's shape/convention as the best guess.
+// 1B. CHAT MESSAGE REPORTS (Pass 14) — FIXED (audit): confirmed against
+// views.py (ChatMessageReportViewSet.perform_create/review).
 // ---------------------------------------------------------------------------
 class ChatMessageReportApi {
   /// POST chat-message-reports/ — any participant who's seen the message
   /// can file one (unlike ClassroomReport-style moderation actions, this
-  /// is not host-only).
-  Future<ChatMessageReport> create({required int messageId, required String reason, String description = ''}) async {
+  /// is not host-only). FIXED: backend reads 'note', not 'description' —
+  /// the old key meant every report's detail text was silently dropped
+  /// (no error; the report was still created, just always with an empty
+  /// note). Also confirmed: re-filing against the same message updates the
+  /// existing row (unique_together message+reporter) rather than erroring.
+  Future<ChatMessageReport> create({required int messageId, required String reason, String note = ''}) async {
     try {
       final dio = await _Http.client();
       final res = await dio.post('chat-message-reports/', data: {
         'message': messageId,
         'reason': reason,
-        'description': description,
+        'note': note,
       });
       return ChatMessageReport.fromJson(res.data);
     } on DioException catch (e) {
@@ -448,12 +563,17 @@ class ChatMessageReportApi {
     }
   }
 
-  /// GET chat-message-reports/ — own filed reports, or (platform staff)
-  /// every report, filterable by [status].
-  Future<PaginatedList<ChatMessageReport>> list({String? status}) async {
+  /// GET chat-message-reports/ — item 7 (teacher review queue): CONFIRMED
+  /// against ChatMessageReportViewSet.get_queryset — this endpoint is
+  /// scoped by SESSION, not classroom (?session=<id>, requires
+  /// teacher/co-teacher/moderator of that session). With no [sessionId],
+  /// a non-staff caller only ever sees reports THEY personally filed —
+  /// never a moderation queue. [status] filters either way.
+  Future<PaginatedList<ChatMessageReport>> list({int? sessionId, String? status}) async {
     try {
       final dio = await _Http.client();
       final res = await dio.get('chat-message-reports/', queryParameters: {
+        if (sessionId != null) 'session': sessionId,
         if (status != null) 'status': status,
       });
       return PaginatedList.fromJson(res.data, ChatMessageReport.fromJson);
@@ -462,13 +582,18 @@ class ChatMessageReportApi {
     }
   }
 
-  /// POST chat-message-reports/{id}/review/ — platform staff only.
-  Future<ChatMessageReport> review(int id, {required String status, String adminNote = ''}) async {
+  /// POST chat-message-reports/{id}/review/ — teacher/co-teacher/moderator,
+  /// or platform staff. FIXED: the backend's review() only reads 'status'
+  /// (actioning also soft-deletes the reported message) — there is no
+  /// admin-note field on this action at all, so the old adminNote param
+  /// was silently discarded on every call. Dropped it here rather than
+  /// keep sending a value that goes nowhere; if a moderator note is
+  /// actually needed, that has to be added on the backend first.
+  Future<ChatMessageReport> review(int id, {required String status}) async {
     try {
       final dio = await _Http.client();
       final res = await dio.post('chat-message-reports/$id/review/', data: {
         'status': status,
-        'admin_note': adminNote,
       });
       return ChatMessageReport.fromJson(res.data);
     } on DioException catch (e) {
@@ -674,6 +799,35 @@ class SessionApi {
     }
   }
 
+  /// POST sessions/{id}/whiteboard/ — any active participant. Checkpoints
+  /// the whiteboard's full current stroke map to the server (or `null` to
+  /// clear) so it survives everyone who held it in memory leaving the
+  /// room. See live_session_screen.dart's whiteboard autosave for when
+  /// this is called; live peer-to-peer sync between connected clients is
+  /// unchanged. Silent on failure — same "best-effort autosave, next tick
+  /// tries again" spirit as classroom_detail_screen's old stats poll.
+  Future<void> saveWhiteboard(int sessionId, Map<String, dynamic>? snapshot) async {
+    try {
+      final dio = await _Http.client();
+      await dio.post('sessions/$sessionId/whiteboard/', data: {'snapshot': snapshot});
+    } on DioException catch (e) {
+      _throwFrom(e);
+    }
+  }
+
+  /// POST sessions/{id}/spotlight/ — teacher/co-teacher/moderator only.
+  /// Persists the host's pinned/spotlighted participant (or `null` to
+  /// clear) so a reconnect/late join can read it straight off the session
+  /// instead of only ever seeing it via a live peer broadcast.
+  Future<void> setSpotlight(int sessionId, String? identity) async {
+    try {
+      final dio = await _Http.client();
+      await dio.post('sessions/$sessionId/spotlight/', data: {'identity': identity});
+    } on DioException catch (e) {
+      _throwFrom(e);
+    }
+  }
+
   /// POST sessions/{id}/start-recording/ — teacher/co-teacher/moderator
   /// only. The finished file's URL fills in on the session asynchronously
   /// (once LiveKit's webhook confirms it) — this call just starts the job.
@@ -720,6 +874,68 @@ class SessionApi {
         if (lastReadChatMessageId != null) 'last_read_chat_message_id': lastReadChatMessageId,
         if (lastSeenPollId != null) 'last_seen_poll_id': lastSeenPollId,
       });
+    } on DioException catch (e) {
+      _throwFrom(e);
+    }
+  }
+
+  /// NEW (persistence fix) — POST sessions/{id}/reactions/. Logs one emoji
+  /// tap server-side, in addition to (not instead of) the existing LiveKit
+  /// data-channel broadcast in live_session_screen.dart's `_sendReaction` —
+  /// live delivery to already-connected peers is unchanged; this just makes
+  /// the tap durable. Returns the session's fresh running total so the
+  /// caller can re-seed its own `_reactionTotalCount` badge. Silent on
+  /// failure — same best-effort spirit as [saveWhiteboard]: a dropped
+  /// reaction log is not worth interrupting the call over.
+  Future<int?> logReaction(int sessionId, String reaction) async {
+    try {
+      final dio = await _Http.client();
+      final res = await dio.post('sessions/$sessionId/reactions/', data: {'reaction': reaction});
+      return SessionReactionSummary.fromJson(res.data).total;
+    } on DioException catch (_) {
+      return null;
+    }
+  }
+
+  /// NEW (persistence fix) — GET sessions/{id}/reactions/. The session's
+  /// running total + per-emoji counts so far — call this on join/reconnect
+  /// to seed the reaction badge instead of starting it back at zero.
+  Future<SessionReactionSummary> reactionSummary(int sessionId) async {
+    try {
+      final dio = await _Http.client();
+      final res = await dio.get('sessions/$sessionId/reactions/');
+      return SessionReactionSummary.fromJson(res.data);
+    } on DioException catch (e) {
+      _throwFrom(e);
+    }
+  }
+
+  /// NEW (persistence fix) — POST sessions/{id}/captions/. Persists the
+  /// caller's own just-finished on-device-STT caption line, in addition to
+  /// (not instead of) the existing LiveKit data-channel broadcast in
+  /// live_session_screen.dart's `_startCaptionListenBurst` — speaker is
+  /// always resolved server-side from the authenticated caller. Silent on
+  /// failure, same best-effort spirit as [logReaction]/[saveWhiteboard]: a
+  /// caption line that fails to persist should never interrupt captioning.
+  Future<void> logCaption(int sessionId, String text) async {
+    try {
+      final dio = await _Http.client();
+      await dio.post('sessions/$sessionId/captions/', data: {'text': text});
+    } on DioException catch (_) {
+      // best-effort — the live data-channel broadcast already carried it
+    }
+  }
+
+  /// NEW (persistence fix) — GET sessions/{id}/captions/. The session's
+  /// transcript so far (oldest first, capped to the last 200 lines) —
+  /// covers every participant's OWN recognized speech (each device still
+  /// only transcribes its own mic), aggregated server-side. Call this on
+  /// join/reconnect to catch up on what was said before the caller arrived.
+  Future<List<SessionCaptionLine>> captionHistory(int sessionId) async {
+    try {
+      final dio = await _Http.client();
+      final res = await dio.get('sessions/$sessionId/captions/');
+      return (res.data as List).map((e) => SessionCaptionLine.fromJson((e as Map).cast<String, dynamic>())).toList();
     } on DioException catch (e) {
       _throwFrom(e);
     }
@@ -991,7 +1207,13 @@ class PassPurchaseApi {
   /// nobody's taught yet; coins already released to the teacher for
   /// classes actually held stay with the teacher). No dedicated screen
   /// called this before — see MyPassesScreen's Cancel Pass action.
-  /// PATCH pass-purchases/{id}/ (auto_renew field) — ⚠️ endpoint shape
+  /// POST pass-purchases/{id}/toggle-auto-renew/ — FIXED (audit): confirmed
+  /// against urls.py -> PassPurchaseViewSet only mixes in List/Retrieve
+  /// (no UpdateModelMixin), and auto_renew is deliberately read-only on
+  /// PassPurchaseSerializer "so a student can't smuggle it in through a
+  /// plain PATCH" (see toggle_auto_renew's docstring in views.py). A plain
+  /// PATCH pass-purchases/{id}/ was 405ing every time — this must go
+  /// through the dedicated action instead.
   /// unconfirmed (Pass 15 architecture skeleton, frontend doc §1.8): may
   /// turn out to be its own `.../set-auto-renew/` action instead of a
   /// plain field PATCH. Using the plain-PATCH form here since it matches
@@ -1000,7 +1222,7 @@ class PassPurchaseApi {
   Future<PassPurchase> setAutoRenew(int id, bool autoRenew) async {
     try {
       final dio = await _Http.client();
-      final res = await dio.patch('pass-purchases/$id/', data: {'auto_renew': autoRenew});
+      final res = await dio.post('pass-purchases/$id/toggle-auto-renew/', data: {'auto_renew': autoRenew});
       return PassPurchase.fromJson(res.data);
     } on DioException catch (e) {
       _throwFrom(e);
@@ -1011,6 +1233,21 @@ class PassPurchaseApi {
     try {
       final dio = await _Http.client();
       await dio.post('pass-purchases/$id/cancel/');
+    } on DioException catch (e) {
+      _throwFrom(e);
+    }
+  }
+
+  /// GET pass-purchases/referral-earnings/ — item 9: the caller's own view
+  /// of what their refer-links have brought in (own referrals only,
+  /// referred_by == caller) — every purchase currently crediting them a
+  /// commission, plus a running total so the screen doesn't have to sum
+  /// coin-transaction rows itself.
+  Future<ReferralEarnings> referralEarnings({int page = 1}) async {
+    try {
+      final dio = await _Http.client();
+      final res = await dio.get('pass-purchases/referral-earnings/', queryParameters: {'page': page});
+      return ReferralEarnings.fromJson(res.data);
     } on DioException catch (e) {
       _throwFrom(e);
     }
@@ -1126,20 +1363,37 @@ class MaterialApi {
 // channel for realtime delivery — this is the history/reload path)
 // ---------------------------------------------------------------------------
 class ChatMessageApi {
-  Future<PaginatedList<ChatMessage>> list(int sessionId) async {
+  /// [search] — NEW (message search): backend does a plain case-insensitive
+  /// substring match over `message`, scoped to this [sessionId] (never
+  /// cross-session — see ChatMessageViewSet.get_queryset in views.py). Pass
+  /// null/blank for the normal unfiltered history load.
+  Future<PaginatedList<ChatMessage>> list(int sessionId, {String? search}) async {
     try {
       final dio = await _Http.client();
-      final res = await dio.get('chat-messages/', queryParameters: {'session': sessionId});
+      final res = await dio.get('chat-messages/', queryParameters: {
+        'session': sessionId,
+        if (search != null && search.trim().isNotEmpty) 'search': search.trim(),
+      });
       return PaginatedList.fromJson(res.data, ChatMessage.fromJson);
     } on DioException catch (e) {
       _throwFrom(e);
     }
   }
 
-  Future<ChatMessage> send({required int sessionId, required String message}) async {
+  /// [replyTo] — NEW (reply feature): id of an earlier message in the same
+  /// session to quote. Omit for a normal, non-reply message. The backend
+  /// validates the quoted message actually belongs to this session
+  /// (ChatMessageSerializer.validate in serializers.py) — a mismatch comes
+  /// back as a 400, surfaced to the caller as a LiveClassApiException same
+  /// as any other validation error.
+  Future<ChatMessage> send({required int sessionId, required String message, int? replyTo}) async {
     try {
       final dio = await _Http.client();
-      final res = await dio.post('chat-messages/', data: {'session': sessionId, 'message': message});
+      final res = await dio.post('chat-messages/', data: {
+        'session': sessionId,
+        'message': message,
+        if (replyTo != null) 'reply_to': replyTo,
+      });
       return ChatMessage.fromJson(res.data);
     } on DioException catch (e) {
       _throwFrom(e);
@@ -1210,6 +1464,56 @@ class ChatMessageApi {
       _throwFrom(e);
     }
   }
+
+  // -- NEW: read receipts ---------------------------------------------------
+  // See ChatMessageRead's docstring in models.py for how this differs from
+  // SessionsApi.markRead above (that's a single per-user unread-BADGE
+  // watermark; this is per-message "who has actually seen it").
+
+  /// POST chat-messages/{id}/read/ — mark one message as seen by the
+  /// caller. Idempotent; safe to call again for an already-read message.
+  Future<ChatMessage> markMessageRead(int messageId) async {
+    try {
+      final dio = await _Http.client();
+      final res = await dio.post('chat-messages/$messageId/read/');
+      return ChatMessage.fromJson(res.data);
+    } on DioException catch (e) {
+      _throwFrom(e);
+    }
+  }
+
+  /// POST chat-messages/mark-read/ — bulk version: marks every not-yet-read,
+  /// not-own message in [sessionId] up to and including [upToMessageId] as
+  /// seen, in one call. This is what the chat panel should call when it's
+  /// first opened (or scrolled to the bottom) instead of firing one
+  /// [markMessageRead] per visible bubble. Returns how many NEW receipts
+  /// were actually recorded (already-read messages don't count again).
+  Future<int> markChatRead({required int sessionId, required int upToMessageId}) async {
+    try {
+      final dio = await _Http.client();
+      final res = await dio.post('chat-messages/mark-read/', data: {
+        'session': sessionId,
+        'up_to': upToMessageId,
+      });
+      final marked = res.data['marked_read'];
+      return marked is int ? marked : int.parse(marked.toString());
+    } on DioException catch (e) {
+      _throwFrom(e);
+    }
+  }
+
+  /// GET chat-messages/{id}/read-receipts/ — full "seen by" list (who +
+  /// when), oldest-first, for the sender (or anyone in the session) to tap
+  /// a message and check.
+  Future<List<ChatMessageReadReceipt>> readReceipts(int messageId) async {
+    try {
+      final dio = await _Http.client();
+      final res = await dio.get('chat-messages/$messageId/read-receipts/');
+      return (res.data as List).map((e) => ChatMessageReadReceipt.fromJson(e as Map<String, dynamic>)).toList();
+    } on DioException catch (e) {
+      _throwFrom(e);
+    }
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -1241,6 +1545,23 @@ class PollApi {
       final dio = await _Http.client();
       final res = await dio.post('polls/$pollId/vote/', data: {'selected_option_index': selectedOptionIndex});
       return PollResponse.fromJson(res.data);
+    } on DioException catch (e) {
+      _throwFrom(e);
+    }
+  }
+
+  /// PATCH polls/{id}/ — host-tier only (`_can_moderate_session` on the
+  /// backend, same boundary as close()/vote()). Only `question`/`options`
+  /// are meant to move here; `session` is fixed at creation and
+  /// `is_active`/`closed_at` are only ever flipped via close().
+  Future<LivePoll> update(int id, {String? question, List<String>? options}) async {
+    try {
+      final dio = await _Http.client();
+      final res = await dio.patch('polls/$id/', data: {
+        if (question != null) 'question': question,
+        if (options != null) 'options': options,
+      });
+      return LivePoll.fromJson(res.data);
     } on DioException catch (e) {
       _throwFrom(e);
     }
@@ -1345,6 +1666,22 @@ class AssignmentApi {
     }
   }
 
+  /// PATCH assignments/{id}/ — classroom manager only
+  /// (`_can_manage_classroom`, same boundary as create()/delete()).
+  Future<Assignment> update(int id, Assignment assignment, {String? attachmentPath}) async {
+    try {
+      final dio = await _Http.client();
+      final body = assignment.toJson();
+      final data = attachmentPath == null
+          ? body
+          : FormData.fromMap({...body, 'attachment': await MultipartFile.fromFile(attachmentPath)});
+      final res = await dio.patch('assignments/$id/', data: data);
+      return Assignment.fromJson(res.data);
+    } on DioException catch (e) {
+      _throwFrom(e);
+    }
+  }
+
   Future<void> delete(int id) async {
     try {
       final dio = await _Http.client();
@@ -1374,6 +1711,22 @@ class SubmissionApi {
         'file': await MultipartFile.fromFile(filePath),
       });
       final res = await dio.post('submissions/', data: data);
+      return AssignmentSubmission.fromJson(res.data);
+    } on DioException catch (e) {
+      _throwFrom(e);
+    }
+  }
+
+  /// PATCH submissions/{id}/ — the submitting student only, and only the
+  /// `file` (score/feedback stay teacher-only via grade()). Backend
+  /// (AssignmentSubmissionViewSet.perform_update) rejects this once
+  /// `graded_at` is set — a graded submission is frozen, same as it is for
+  /// delete().
+  Future<AssignmentSubmission> update(int id, {required String filePath}) async {
+    try {
+      final dio = await _Http.client();
+      final data = FormData.fromMap({'file': await MultipartFile.fromFile(filePath)});
+      final res = await dio.patch('submissions/$id/', data: data);
       return AssignmentSubmission.fromJson(res.data);
     } on DioException catch (e) {
       _throwFrom(e);
@@ -1703,6 +2056,22 @@ class ReminderApi {
     }
   }
 
+  /// PATCH reminders/{id}/ — always your own row; get_queryset() on the
+  /// backend filters to `user=self.request.user` unconditionally, so no
+  /// separate ownership check is needed there. `is_sent` stays read-only.
+  Future<ClassReminder> update(int id, {DateTime? remindAt, String? channel}) async {
+    try {
+      final dio = await _Http.client();
+      final res = await dio.patch('reminders/$id/', data: {
+        if (remindAt != null) 'remind_at': remindAt.toIso8601String(),
+        if (channel != null) 'channel': channel,
+      });
+      return ClassReminder.fromJson(res.data);
+    } on DioException catch (e) {
+      _throwFrom(e);
+    }
+  }
+
   Future<void> delete(int id) async {
     try {
       final dio = await _Http.client();
@@ -1731,6 +2100,20 @@ class HolidayApi {
     try {
       final dio = await _Http.client();
       final res = await dio.post('holidays/', data: holiday.toJson());
+      return ClassHoliday.fromJson(res.data);
+    } on DioException catch (e) {
+      _throwFrom(e);
+    }
+  }
+
+  /// PATCH holidays/{id}/ — classroom manager only
+  /// (`_can_manage_classroom`; ClassHolidayViewSet previously had no
+  /// perform_update override at all — see the backend NOTE (fix) alongside
+  /// it — closed as part of adding this wrapper).
+  Future<ClassHoliday> update(int id, ClassHoliday holiday) async {
+    try {
+      final dio = await _Http.client();
+      final res = await dio.patch('holidays/$id/', data: holiday.toJson());
       return ClassHoliday.fromJson(res.data);
     } on DioException catch (e) {
       _throwFrom(e);
@@ -1780,6 +2163,18 @@ class NoticeApi {
     }
   }
 
+  /// PATCH notices/{id}/ — classroom manager only (`_can_manage_classroom`,
+  /// same boundary as create()/delete()/pin()).
+  Future<Notice> update(int id, Notice notice) async {
+    try {
+      final dio = await _Http.client();
+      final res = await dio.patch('notices/$id/', data: notice.toJson());
+      return Notice.fromJson(res.data);
+    } on DioException catch (e) {
+      _throwFrom(e);
+    }
+  }
+
   Future<Notice> pin(int id) async {
     try {
       final dio = await _Http.client();
@@ -1809,6 +2204,22 @@ class QueryApi {
     try {
       final dio = await _Http.client();
       final res = await dio.post('queries/', data: query.toJson());
+      return ClassQuery.fromJson(res.data);
+    } on DioException catch (e) {
+      _throwFrom(e);
+    }
+  }
+
+  /// PATCH queries/{id}/ — the original asker only, and only while the
+  /// query is still open. ClassQuerySerializer keeps status/answer/
+  /// answered_by/answered_at read-only, so `question` is the only field
+  /// this can actually change; ClassQueryViewSet.perform_update (see
+  /// backend NOTE (fix) alongside it — previously missing entirely) enforces
+  /// both the ownership and the "not already answered" rule server-side.
+  Future<ClassQuery> update(int id, String question) async {
+    try {
+      final dio = await _Http.client();
+      final res = await dio.patch('queries/$id/', data: {'question': question});
       return ClassQuery.fromJson(res.data);
     } on DioException catch (e) {
       _throwFrom(e);
@@ -1882,14 +2293,14 @@ class NotificationApi {
 }
 
 // ---------------------------------------------------------------------------
-// NOTIFICATION PREFERENCES (Pass 14) — ⚠️ endpoint path assumed
-// (`notification-preferences/`, singular resource, no id — one settings
-// object per caller). Confirm against `urls.py` before shipping; same
-// architecture-skeleton caveat as the `NotificationPreference` model itself.
+// NOTIFICATION PREFERENCES (Pass 14) — FIXED (audit): confirmed against
+// urls.py -> NotificationPreferenceView is only reachable at
+// `notification-preferences/me/`, not `notification-preferences/`. Every
+// call below was 404ing before this fix.
 // ---------------------------------------------------------------------------
 class NotificationPreferenceApi {
-  /// GET notification-preferences/ — the caller's current settings. If the
-  /// caller has never saved any, expect either an empty object (client
+  /// GET notification-preferences/me/ — the caller's current settings. If
+  /// the caller has never saved any, expect either an empty object (client
   /// falls back to `NotificationPreference.forType`'s all-on default) or a
   /// pre-populated object with every `NotifType` already present —
   /// `fromJson` handles both since missing keys just fall through to the
@@ -1897,20 +2308,20 @@ class NotificationPreferenceApi {
   Future<NotificationPreference> get() async {
     try {
       final dio = await _Http.client();
-      final res = await dio.get('notification-preferences/');
+      final res = await dio.get('notification-preferences/me/');
       return NotificationPreference.fromJson(res.data);
     } on DioException catch (e) {
       _throwFrom(e);
     }
   }
 
-  /// PATCH notification-preferences/ — partial update; send only the
+  /// PATCH notification-preferences/me/ — partial update; send only the
   /// `perType` entries that changed rather than the whole object where
   /// possible, to avoid clobbering a concurrent change from another device.
   Future<NotificationPreference> update(NotificationPreference prefs) async {
     try {
       final dio = await _Http.client();
-      final res = await dio.patch('notification-preferences/', data: prefs.toJson());
+      final res = await dio.patch('notification-preferences/me/', data: prefs.toJson());
       return NotificationPreference.fromJson(res.data);
     } on DioException catch (e) {
       _throwFrom(e);
@@ -1919,22 +2330,26 @@ class NotificationPreferenceApi {
 }
 
 // ---------------------------------------------------------------------------
-// PASS GIFTING (Pass 14) — ⚠️ ARCHITECTURE SKELETON. Exact endpoint paths
-// need confirming against urls.py (frontend doc §1.3) — the shapes below
-// follow this file's own detail-action convention (`.../claim/`) used
-// elsewhere (`.../join/`, `.../token/`, etc.) as the best guess.
+// PASS GIFTING (Pass 14) — FIXED (audit): confirmed against urls.py's
+// documented body ({"recipient_id", "class_pass", "gift_message"}) and
+// views.py's PassGiftViewSet.
 // ---------------------------------------------------------------------------
 class PassGiftApi {
   /// POST pass-gifts/ — gift a pass you own/can buy to someone else.
-  /// [recipient] is a raw identifier (username or email) — this module has
-  /// no user-search endpoint anywhere (frontend doc §8), same limitation
-  /// reused here rather than inventing one.
-  Future<PassGift> send({required int classPassId, required String recipient}) async {
+  /// FIXED: was sending 'recipient', backend expects 'recipient_id'
+  /// (a numeric user id — NOT a raw username/email; there is still no
+  /// user-search endpoint anywhere in this module (frontend doc §8), so
+  /// the caller of send() must resolve a concrete user id some other way
+  /// before calling this). [giftMessage] was previously not even a
+  /// parameter here, even though the backend saves and shows it —
+  /// added so the gift-message feature is actually reachable from the app.
+  Future<PassGift> send({required int classPassId, required int recipientId, String giftMessage = ''}) async {
     try {
       final dio = await _Http.client();
       final res = await dio.post('pass-gifts/', data: {
         'class_pass': classPassId,
-        'recipient': recipient,
+        'recipient_id': recipientId,
+        'gift_message': giftMessage,
       });
       return PassGift.fromJson(res.data);
     } on DioException catch (e) {
@@ -1942,7 +2357,10 @@ class PassGiftApi {
     }
   }
 
-  /// GET pass-gifts/?direction=sent — gifts the caller has sent.
+  /// GET pass-gifts/?direction=sent — gifts the caller has sent. (The
+  /// ?direction filter previously had no effect on the backend — both
+  /// this and myGiftsReceived() returned the same sent+received mix; now
+  /// fixed server-side in PassGiftViewSet.get_queryset().)
   Future<PaginatedList<PassGift>> myGiftsSent() async {
     try {
       final dio = await _Http.client();
@@ -1971,6 +2389,20 @@ class PassGiftApi {
     try {
       final dio = await _Http.client();
       final res = await dio.post('pass-gifts/$giftId/claim/');
+      return PassGift.fromJson(res.data);
+    } on DioException catch (e) {
+      _throwFrom(e);
+    }
+  }
+
+  /// POST pass-gifts/{id}/cancel/ — item 10: gifter only, while still
+  /// PENDING. Refunds the gifter's coins server-side
+  /// (PassGift.refund_to_gifter()) — nothing further to do client-side
+  /// besides refreshing the sent-gifts list.
+  Future<PassGift> cancel(int giftId) async {
+    try {
+      final dio = await _Http.client();
+      final res = await dio.post('pass-gifts/$giftId/cancel/');
       return PassGift.fromJson(res.data);
     } on DioException catch (e) {
       _throwFrom(e);
@@ -2019,5 +2451,436 @@ class ReferralApi {
     } on DioException catch (e) {
       _throwFrom(e);
     }
+  }
+}
+// ---------------------------------------------------------------------------
+// REALTIME — WebSocket client (Flutter Phase 1, item 1)
+//
+// Backend (`consumers.py`/`realtime.py`) pushes events over a per-SESSION
+// channel: `participant.kicked`, `presence.snapshot`,
+// `presence.joined`/`presence.left`, `chat.message`,
+// `chat.message_deleted`, `chat.reaction`, `chat.pinned`/`chat.unpinned`,
+// `poll.created`, `poll.updated`, `poll.closed`, `hand.raised`/
+// `hand.lowered`, `recording.started`/`stopped`/`ready` (grep
+// `broadcast_to_session` in views.py for the full list).
+//
+// Needs `web_socket_channel` in pubspec.yaml — confirmed present
+// (`web_socket_channel: ^3.0.3`).
+//
+// WIRED IN (realtime fix pass): `live_session_screen.dart`'s
+// `_onLiveSocketEvent` now listens for every event above and patches
+// `_chatMessages`/`_polls`/`_participants`/`_handRaised`/`_isRecording`
+// directly — the old 4s/6s/8s/10s REST poll timers for chat, polls, and
+// the recording indicator were removed there in the same pass (the
+// roster/mic-mute participants poll and the notice/battery/breakout
+// timers stayed, since the backend doesn't broadcast those). See that
+// file's `_onLiveSocketEvent` for the exact call sites.
+// ---------------------------------------------------------------------------
+
+/// One event received off a live-session WebSocket:
+/// `{"type": "chat.message", "data": {...}}`. This envelope shape is an
+/// ASSUMPTION — `consumers.py` wasn't part of this upload, so the exact
+/// wrapping `broadcast_to_session` uses server-side couldn't be confirmed.
+/// If the real consumer sends something else (e.g. the event dict
+/// flattened with no separate "data" key), only [LiveSocketEvent.fromJson]
+/// needs to change — every screen listening on [LiveClassSocket.events]
+/// stays the same.
+class LiveSocketEvent {
+  final String type;
+  final Map<String, dynamic> data;
+  LiveSocketEvent(this.type, this.data);
+
+  // FIX (realtime fix pass): the real backend envelope — both
+  // SessionConsumer.session_event and UserConsumer.user_event (see
+  // consumers.py) — sends `{"event": ..., "payload": ..., "ts": ...}`,
+  // not a `{"type", "data"}` shape. This was parsing every real inbound
+  // message as `type: ''`, `data: {}` (the `?? ''`/empty-map fallbacks
+  // below silently swallowing the miss instead of throwing), which
+  // matched no downstream `switch` case anywhere this stream is
+  // consumed — every push looked like it "arrived" but was actually a
+  // no-op. Field names on this class (`type`/`data`) are kept as-is so
+  // every existing `e.type`/`e.data` call site (classroom_detail_
+  // screen.dart, live_session_screen.dart, etc.) needs no change — only
+  // the JSON keys read here change to match what the server actually
+  // sends.
+  factory LiveSocketEvent.fromJson(Map<String, dynamic> j) => LiveSocketEvent(
+        j['event'] ?? '',
+        (j['payload'] is Map) ? Map<String, dynamic>.from(j['payload'] as Map) : <String, dynamic>{},
+      );
+}
+
+enum LiveSocketStatus { connecting, connected, reconnecting, disconnected }
+
+/// Connects to a single live session's realtime channel and re-broadcasts
+/// every event as a [Stream] so any screen/widget can just `.listen()` —
+/// no REST refetch needed for anything the backend already pushes.
+///
+/// Usage (e.g. in `LiveSessionScreen`):
+/// ```dart
+/// final _socket = LiveClassSocket(widget.sessionId);
+/// StreamSubscription<LiveSocketEvent>? _socketSub;
+///
+/// @override
+/// void initState() {
+///   super.initState();
+///   _socket.connect();
+///   _socketSub = _socket.events.listen((e) {
+///     switch (e.type) {
+///       case 'participant.kicked':
+///         if (e.data['user_id'] == _myUserId) _leaveAndShowKickedDialog();
+///         break;
+///       case 'presence.snapshot':
+///       case 'presence.joined':
+///       case 'presence.left':
+///         _updateOnlineAvatars(e);
+///         break;
+///       case 'chat.message':
+///         _appendChatMessage(e.data);
+///         break;
+///       // ...poll.*, hand.*, recording.* etc.
+///     }
+///   });
+/// }
+///
+/// @override
+/// void dispose() {
+///   _socketSub?.cancel();
+///   _socket.dispose();
+///   super.dispose();
+/// }
+/// ```
+class LiveClassSocket {
+  final int sessionId;
+  WebSocketChannel? _channel;
+  StreamSubscription? _channelSub;
+  final _eventsController = StreamController<LiveSocketEvent>.broadcast();
+  final _statusController = StreamController<LiveSocketStatus>.broadcast();
+
+  bool _disposed = false;
+  bool _manuallyDisconnected = false;
+  int _reconnectAttempt = 0;
+  Timer? _reconnectTimer;
+  Timer? _pingTimer;
+
+  LiveClassSocket(this.sessionId);
+
+  /// Every event the backend pushes for this session, decoded. Survives
+  /// reconnects — cancel your subscription and call [dispose] when the
+  /// screen goes away, don't recreate [LiveClassSocket] per-reconnect.
+  Stream<LiveSocketEvent> get events => _eventsController.stream;
+
+  /// Connection lifecycle, for an optional small "reconnecting…" chip.
+  Stream<LiveSocketStatus> get status => _statusController.stream;
+
+  Future<void> connect() async {
+    if (_disposed) return;
+    _manuallyDisconnected = false;
+    await _open();
+  }
+
+  Future<void> _open() async {
+    _emitStatus(_reconnectAttempt == 0 ? LiveSocketStatus.connecting : LiveSocketStatus.reconnecting);
+
+    final token = await AuthService.getToken();
+    final wsBase = Api.baseUrl.replaceFirst('https://', 'wss://').replaceFirst('http://', 'ws://');
+    // CONFIRMED (realtime fix pass) against the real ws_auth.py/
+    // routing.py: `?token=` query-param JWT auth is correct — ws_auth.
+    // JWTAuthMiddleware reads exactly that. The path below was also
+    // wrong — routing.py's real route is `ws/liveclass/session/<id>/`
+    // (this used to guess `ws/session/<id>/`, missing the `liveclass/`
+    // prefix, which 404'd/closed every connect attempt immediately).
+    final uri = Uri.parse('$wsBase/ws/liveclass/session/$sessionId/').replace(
+      queryParameters: {if (token != null && token.isNotEmpty) 'token': token},
+    );
+
+    try {
+      final channel = WebSocketChannel.connect(uri);
+      _channel = channel;
+      _channelSub = channel.stream.listen(
+        _onMessage,
+        onDone: _onDisconnect,
+        onError: (_) => _onDisconnect(),
+        cancelOnError: true,
+      );
+      _reconnectAttempt = 0;
+      _emitStatus(LiveSocketStatus.connected);
+      _startPing();
+    } catch (_) {
+      _onDisconnect();
+    }
+  }
+
+  void _onMessage(dynamic raw) {
+    try {
+      final decoded = jsonDecode(raw as String) as Map<String, dynamic>;
+      _eventsController.add(LiveSocketEvent.fromJson(decoded));
+    } catch (_) {
+      // Malformed/unrecognised frame — ignore rather than crash the stream.
+    }
+  }
+
+  void _onDisconnect() {
+    _pingTimer?.cancel();
+    _channelSub?.cancel();
+    _channel = null;
+    if (_disposed || _manuallyDisconnected) {
+      _emitStatus(LiveSocketStatus.disconnected);
+      return;
+    }
+    _emitStatus(LiveSocketStatus.reconnecting);
+    _scheduleReconnect();
+  }
+
+  void _scheduleReconnect() {
+    _reconnectTimer?.cancel();
+    // Exponential backoff: 1s, 2s, 4s, 8s, 16s, capped at 30s.
+    const delays = [1, 2, 4, 8, 16, 30];
+    final delaySeconds = delays[_reconnectAttempt.clamp(0, delays.length - 1)];
+    _reconnectAttempt++;
+    _reconnectTimer = Timer(Duration(seconds: delaySeconds), () {
+      if (!_disposed && !_manuallyDisconnected) _open();
+    });
+  }
+
+  void _startPing() {
+    _pingTimer?.cancel();
+    // Keeps NAT/proxy connections from silently timing out an idle socket.
+    // Harmless if the backend doesn't expect a client ping frame, as long
+    // as it ignores unrecognised frame types (same as this client does).
+    _pingTimer = Timer.periodic(const Duration(seconds: 25), (_) {
+      try {
+        _channel?.sink.add(jsonEncode({'type': 'ping'}));
+      } catch (_) {}
+    });
+  }
+
+  void _emitStatus(LiveSocketStatus s) {
+    if (!_statusController.isClosed) _statusController.add(s);
+  }
+
+  /// Send a client -> server event (e.g. a typing indicator). Envelope
+  /// shape mirrors the assumed inbound one — verify against consumers.py.
+  void send(String type, [Map<String, dynamic>? data]) {
+    try {
+      _channel?.sink.add(jsonEncode({'type': type, 'data': data ?? {}}));
+    } catch (_) {}
+  }
+
+  Future<void> disconnect() async {
+    _manuallyDisconnected = true;
+    _reconnectTimer?.cancel();
+    _pingTimer?.cancel();
+    await _channelSub?.cancel();
+    await _channel?.sink.close(ws_status.normalClosure);
+    _channel = null;
+    _emitStatus(LiveSocketStatus.disconnected);
+  }
+
+  void dispose() {
+    _disposed = true;
+    disconnect();
+    _eventsController.close();
+    _statusController.close();
+  }
+}
+
+// ---------------------------------------------------------------------------
+// REALTIME — per-user WebSocket client (Flutter Phase 1, items 2 & 3)
+//
+// For events that aren't tied to a live session at all — a teacher's
+// pending-join-request badge (item 3), a student's own request flipping
+// pending -> active/none (item 2), a mid-session staff promote (Phase 4
+// item 2) — a SESSION channel is the wrong scope; these need a channel
+// keyed by user id instead.
+//
+// CONFIRMED (realtime fix pass): the backend side now exists —
+// `broadcast_to_user()` in realtime.py, `UserConsumer` in consumers.py,
+// wired to routing.py's `ws/liveclass/user/$` route (matches the path
+// below). Previously this connected to a guessed `/ws/user/`, which
+// 404'd/closed immediately since that route never existed.
+// ---------------------------------------------------------------------------
+class LiveClassUserSocket {
+  WebSocketChannel? _channel;
+  StreamSubscription? _channelSub;
+  final _eventsController = StreamController<LiveSocketEvent>.broadcast();
+  bool _disposed = false;
+  bool _manuallyDisconnected = false;
+  int _reconnectAttempt = 0;
+  Timer? _reconnectTimer;
+  Timer? _pingTimer;
+
+  Stream<LiveSocketEvent> get events => _eventsController.stream;
+
+  Future<void> connect() async {
+    if (_disposed) return;
+    _manuallyDisconnected = false;
+    await _open();
+  }
+
+  Future<void> _open() async {
+    final token = await AuthService.getToken();
+    final wsBase = Api.baseUrl.replaceFirst('https://', 'wss://').replaceFirst('http://', 'ws://');
+    final uri = Uri.parse('$wsBase/ws/liveclass/user/').replace(
+      queryParameters: {if (token != null && token.isNotEmpty) 'token': token},
+    );
+    try {
+      final channel = WebSocketChannel.connect(uri);
+      _channel = channel;
+      _channelSub = channel.stream.listen(_onMessage, onDone: _onDisconnect, onError: (_) => _onDisconnect(), cancelOnError: true);
+      _reconnectAttempt = 0;
+      _startPing();
+    } catch (_) {
+      _onDisconnect();
+    }
+  }
+
+  void _onMessage(dynamic raw) {
+    try {
+      final decoded = jsonDecode(raw as String) as Map<String, dynamic>;
+      _eventsController.add(LiveSocketEvent.fromJson(decoded));
+    } catch (_) {}
+  }
+
+  void _onDisconnect() {
+    _pingTimer?.cancel();
+    _channelSub?.cancel();
+    _channel = null;
+    if (_disposed || _manuallyDisconnected) return;
+    _reconnectTimer?.cancel();
+    const delays = [1, 2, 4, 8, 16, 30];
+    final delaySeconds = delays[_reconnectAttempt.clamp(0, delays.length - 1)];
+    _reconnectAttempt++;
+    _reconnectTimer = Timer(Duration(seconds: delaySeconds), () {
+      if (!_disposed && !_manuallyDisconnected) _open();
+    });
+  }
+
+  void _startPing() {
+    _pingTimer?.cancel();
+    _pingTimer = Timer.periodic(const Duration(seconds: 25), (_) {
+      try {
+        _channel?.sink.add(jsonEncode({'type': 'ping'}));
+      } catch (_) {}
+    });
+  }
+
+  Future<void> disconnect() async {
+    _manuallyDisconnected = true;
+    _reconnectTimer?.cancel();
+    _pingTimer?.cancel();
+    await _channelSub?.cancel();
+    await _channel?.sink.close(ws_status.normalClosure);
+    _channel = null;
+  }
+
+  void dispose() {
+    _disposed = true;
+    disconnect();
+    _eventsController.close();
+  }
+}
+
+// ---------------------------------------------------------------------------
+// REALTIME — per-CLASSROOM WebSocket client (fix — classroom stats push)
+//
+// classroom_detail_screen.dart's enrolled_count/rating used to be refreshed
+// by a plain `Timer.periodic(30s)` GET (see that file's old `_statsTimer`)
+// since there was no realtime push for it — unlike join-request badges,
+// which already go over LiveClassUserSocket above. This is that push,
+// scoped per-CLASSROOM (not per-user, since enrolled_count/rating are
+// public info any current viewer of the classroom cares about, not just
+// "my own" events) — mirrors LiveClassUserSocket exactly, just keyed by
+// classroom id instead of by the caller's own identity.
+//
+// NEEDS A BACKEND COUNTERPART not present in this pass's uploaded files:
+// `broadcast_to_classroom()` in realtime.py, a `ClassroomConsumer` in
+// consumers.py, and a `ws/liveclass/classroom/<id>/` route in routing.py —
+// see the docstring on `_broadcast_classroom_stats()` in models.py (added
+// this same pass) for the exact shape expected, mirrored off this file's
+// existing UserConsumer/`ws/liveclass/user/` pattern. Until those land,
+// this class fails to connect and classroom_detail_screen.dart's longer
+// backstop poll (see that file) is what actually keeps stats fresh.
+// ---------------------------------------------------------------------------
+class LiveClassClassroomSocket {
+  final int classroomId;
+  WebSocketChannel? _channel;
+  StreamSubscription? _channelSub;
+  final _eventsController = StreamController<LiveSocketEvent>.broadcast();
+  bool _disposed = false;
+  bool _manuallyDisconnected = false;
+  int _reconnectAttempt = 0;
+  Timer? _reconnectTimer;
+  Timer? _pingTimer;
+
+  LiveClassClassroomSocket(this.classroomId);
+
+  Stream<LiveSocketEvent> get events => _eventsController.stream;
+
+  Future<void> connect() async {
+    if (_disposed) return;
+    _manuallyDisconnected = false;
+    await _open();
+  }
+
+  Future<void> _open() async {
+    final token = await AuthService.getToken();
+    final wsBase = Api.baseUrl.replaceFirst('https://', 'wss://').replaceFirst('http://', 'ws://');
+    final uri = Uri.parse('$wsBase/ws/liveclass/classroom/$classroomId/').replace(
+      queryParameters: {if (token != null && token.isNotEmpty) 'token': token},
+    );
+    try {
+      final channel = WebSocketChannel.connect(uri);
+      _channel = channel;
+      _channelSub = channel.stream.listen(_onMessage, onDone: _onDisconnect, onError: (_) => _onDisconnect(), cancelOnError: true);
+      _reconnectAttempt = 0;
+      _startPing();
+    } catch (_) {
+      _onDisconnect();
+    }
+  }
+
+  void _onMessage(dynamic raw) {
+    try {
+      final decoded = jsonDecode(raw as String) as Map<String, dynamic>;
+      _eventsController.add(LiveSocketEvent.fromJson(decoded));
+    } catch (_) {}
+  }
+
+  void _onDisconnect() {
+    _pingTimer?.cancel();
+    _channelSub?.cancel();
+    _channel = null;
+    if (_disposed || _manuallyDisconnected) return;
+    _reconnectTimer?.cancel();
+    const delays = [1, 2, 4, 8, 16, 30];
+    final delaySeconds = delays[_reconnectAttempt.clamp(0, delays.length - 1)];
+    _reconnectAttempt++;
+    _reconnectTimer = Timer(Duration(seconds: delaySeconds), () {
+      if (!_disposed && !_manuallyDisconnected) _open();
+    });
+  }
+
+  void _startPing() {
+    _pingTimer?.cancel();
+    _pingTimer = Timer.periodic(const Duration(seconds: 25), (_) {
+      try {
+        _channel?.sink.add(jsonEncode({'type': 'ping'}));
+      } catch (_) {}
+    });
+  }
+
+  Future<void> disconnect() async {
+    _manuallyDisconnected = true;
+    _reconnectTimer?.cancel();
+    _pingTimer?.cancel();
+    await _channelSub?.cancel();
+    await _channel?.sink.close(ws_status.normalClosure);
+    _channel = null;
+  }
+
+  void dispose() {
+    _disposed = true;
+    disconnect();
+    _eventsController.close();
   }
 }

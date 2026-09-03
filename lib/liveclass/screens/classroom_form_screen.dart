@@ -81,6 +81,13 @@ class _ClassroomFormScreenState extends State<ClassroomFormScreen> {
   bool _chatEnabled = true;
   bool _recordingEnabled = true;
 
+  // FIX (backend cross-check): ClassroomSerializer lists referral_enabled /
+  // referral_commission_percent as teacher-writable (same as every other
+  // field in this form) but this screen never surfaced them — Refer &
+  // Earn could only ever sit at its model default (off, 0%).
+  bool _referralEnabled = false;
+  final _referralCommissionCtrl = TextEditingController(text: '0');
+
   XFile? _pickedCover; // newly picked, not yet uploaded
   String? _existingCoverUrl;
 
@@ -107,6 +114,10 @@ class _ClassroomFormScreenState extends State<ClassroomFormScreen> {
       _screenShareEnabled = c.screenShareEnabled;
       _chatEnabled = c.chatEnabled;
       _recordingEnabled = c.recordingEnabled;
+      _referralEnabled = c.referralEnabled;
+      _referralCommissionCtrl.text = c.referralCommissionPercent.toStringAsFixed(
+        c.referralCommissionPercent == c.referralCommissionPercent.roundToDouble() ? 0 : 1,
+      );
       _existingCoverUrl = c.coverImage;
     }
   }
@@ -118,6 +129,7 @@ class _ClassroomFormScreenState extends State<ClassroomFormScreen> {
     _descriptionCtrl.dispose();
     _organisationNameCtrl.dispose();
     _maxParticipantsCtrl.dispose();
+    _referralCommissionCtrl.dispose();
     super.dispose();
   }
 
@@ -149,6 +161,15 @@ class _ClassroomFormScreenState extends State<ClassroomFormScreen> {
       _snack('Max participants must be a valid number (at least 1).');
       return;
     }
+    // referral_commission_percent has a 0-100 MinValueValidator/
+    // MaxValueValidator on the model field (serializers.py's comment on
+    // this field) — checked client-side too so a bad value doesn't just
+    // round-trip as a 400 from the backend.
+    final referralCommission = double.tryParse(_referralCommissionCtrl.text.trim()) ?? 0;
+    if (_referralEnabled && (referralCommission < 0 || referralCommission > 100)) {
+      _snack('Referral commission must be between 0 and 100.');
+      return;
+    }
 
     setState(() => _saving = true);
     final draft = Classroom(
@@ -164,6 +185,8 @@ class _ClassroomFormScreenState extends State<ClassroomFormScreen> {
       chatEnabled: _chatEnabled,
       recordingEnabled: _recordingEnabled,
       maxParticipants: maxParticipants,
+      referralEnabled: _referralEnabled,
+      referralCommissionPercent: _referralEnabled ? referralCommission : 0,
       isActive: widget.existing?.isActive ?? true,
     );
 
@@ -382,6 +405,10 @@ class _ClassroomFormScreenState extends State<ClassroomFormScreen> {
             _sectionLabel('Features'),
             const SizedBox(height: 6),
             _featureToggles(),
+            const SizedBox(height: 20),
+            _sectionLabel('Refer & Earn'),
+            const SizedBox(height: 6),
+            _referralSection(),
             const SizedBox(height: 32),
           ],
         ),
@@ -495,6 +522,48 @@ class _ClassroomFormScreenState extends State<ClassroomFormScreen> {
         tile('Chat', Icons.chat_bubble_outline_rounded, _chatEnabled, (v) => setState(() => _chatEnabled = v)),
         tile('Recording', Icons.fiber_manual_record_outlined, _recordingEnabled, (v) => setState(() => _recordingEnabled = v)),
       ],
+    );
+  }
+
+  // -------------------------------------------------------------------
+  // Refer & Earn (FIX — backend cross-check: ClassroomSerializer's
+  // referral_enabled / referral_commission_percent are teacher-writable
+  // but had no UI here before).
+  // -------------------------------------------------------------------
+  Widget _referralSection() {
+    return Container(
+      decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(12)),
+      child: Column(
+        children: [
+          SwitchListTile(
+            value: _referralEnabled,
+            onChanged: (v) => setState(() => _referralEnabled = v),
+            activeThumbColor: LiveClassColors.navy,
+            secondary: const Icon(Icons.campaign_outlined, color: LiveClassColors.navy),
+            title: const Text('Let students refer this classroom',
+                style: TextStyle(fontSize: 13.5, fontWeight: FontWeight.w500)),
+            subtitle: const Text('Referrers earn a percentage of each resulting purchase',
+                style: TextStyle(fontSize: 11.5)),
+          ),
+          if (_referralEnabled) ...[
+            const Divider(height: 1, indent: 16, endIndent: 16),
+            Padding(
+              padding: const EdgeInsets.fromLTRB(16, 12, 16, 14),
+              child: TextFormField(
+                controller: _referralCommissionCtrl,
+                decoration: _decoration('Commission %', hint: '0-100'),
+                keyboardType: const TextInputType.numberWithOptions(decimal: true),
+                validator: (v) {
+                  if (!_referralEnabled) return null;
+                  final n = double.tryParse((v ?? '').trim());
+                  if (n == null || n < 0 || n > 100) return 'Enter a value between 0 and 100';
+                  return null;
+                },
+              ),
+            ),
+          ],
+        ],
+      ),
     );
   }
 
