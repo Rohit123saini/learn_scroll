@@ -1,8 +1,10 @@
 import uuid
 import os
 import secrets
+import logging
 from datetime import timedelta
 from django.contrib.auth import get_user_model
+from django.core.cache import cache
 from django.db import transaction
 from django.db.models import F, Prefetch, Q, Sum
 from django.http import Http404
@@ -20,6 +22,10 @@ from rest_framework.views import APIView
 from channels.layers import get_channel_layer
 from asgiref.sync import async_to_sync
 
+logger = logging.getLogger(__name__)
+
+from .attendance_utils import compute_attendance_stats
+
 from .models import (
     BlockedUser,
     CallSession,
@@ -31,6 +37,9 @@ from .models import (
     ConversationType,
     DeviceToken,
     DisappearingDuration,
+    # 🔥 NAYA — Doubt Queue (see doubt_models_addition.py)
+    DoubtQuestion,
+    DoubtUpvote,
     Group,
     GroupJoinRequest,
     GroupMedia,
@@ -43,6 +52,8 @@ from .models import (
     PollOption,
     PollVote,
     StudyRoomState,
+    # 🔥 NAYA — Feature 6: attendance/consistency streak
+    StudyRoomAttendance,
 )
 from .permissions import IsConversationParticipant, IsGroupAdminOrModerator, IsMessageSender
 from .serializers import (
@@ -51,6 +62,9 @@ from .serializers import (
     ConversationListSerializer,
     ConversationSettingsSerializer,
     ConversationWallpaperSerializer,
+    DoubtAnswerSerializer,
+    DoubtCreateSerializer,
+    DoubtQuestionSerializer,
     GroupCreateSerializer,
     GroupJoinRequestSerializer,
     GroupMediaSerializer,
@@ -99,7 +113,11 @@ from .tasks import generate_link_preview_task, transcribe_voice_message_task
 from .throttles import (
     MessageSendThrottle, CallInitiateThrottle, GroupCreateThrottle, ReactionThrottle,
     MessageSendIPThrottle, CallInitiateIPThrottle,
+    # 🔥 NAYA — Feature 9: message translate
+    TranslateThrottle,
 )
+# 🔥 NAYA — Feature 9: message translate (pluggable provider, see file docstring)
+from .translation_service import translate_text, TranslationError, TranslationServiceUnavailable
 
 # LiveKit URL env se lo, nahi to default
 LIVEKIT_WS_URL = os.getenv("LIVEKIT_WS_URL", "ws://10.93.221.189:7880")
@@ -542,6 +560,18 @@ class ConversationViewSet(viewsets.ReadOnlyModelViewSet):
         # block karne ke baad bhi dusra bandaa normally message bhej sakta
         # tha). Group conversations me ye check skip karte hain, block wahan
         # applicable hi nahi hai.
+        # 🔥 FIX (Feature 11 — Announcements): sender group admin/mod hai ya
+        # nahi, ye yahin capture kar lete hain (private chat ke liye hamesha
+        # False) — isi ek value ko aage `Message.is_announcement` aur dono
+        # push calls (`send_chat_message_push`/`send_mention_push`) me pass
+        # karenge. Pehle ye check group-permission-gate ke liye hota tha
+        # lekin result kahin store/reuse nahi hota tha, isliye announcement
+        # flag REST se bheje gaye kisi bhi message pe kabhi set hi nahi hota
+        # tha — push-side (`push_utils.py`) already sahi se handle karta hai
+        # `is_announcement=True` ko, bas ye REST path use kabhi bhejta hi
+        # nahi tha.
+        is_announcement = False
+
         if conversation.type != ConversationType.GROUP:
             other_id = conversation.memberships.filter(
                 left_at__isnull=True
@@ -563,6 +593,11 @@ class ConversationViewSet(viewsets.ReadOnlyModelViewSet):
                 allowed, reason = check_daily_message_limit(group, request.user, conversation)
                 if not allowed:
                     return Response({'detail': reason}, status=status.HTTP_429_TOO_MANY_REQUESTS)
+                # 🔥 FIX (Feature 11) — same admin/mod check jo permission-gate
+                # ke liye already ho raha hai, uska result reuse karke
+                # announcement flag decide karte hain (extra query nahi lagti,
+                # cached `is_group_admin_or_mod` hi hai).
+                is_announcement = is_group_admin_or_mod(group, request.user.id)
 
         serializer = MessageCreateSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
@@ -580,7 +615,10 @@ class ConversationViewSet(viewsets.ReadOnlyModelViewSet):
         expires_at = (timezone.now() + disappearing_delta) if disappearing_delta else None
 
         with transaction.atomic():
-            message = serializer.save(conversation=conversation, sender=request.user, expires_at=expires_at)
+            message = serializer.save(
+                conversation=conversation, sender=request.user, expires_at=expires_at,
+                is_announcement=is_announcement,
+            )
 
             conversation.last_message_text = (message.text or '')[:500]
             conversation.last_message_at = message.created_at
@@ -723,7 +761,8 @@ class ConversationViewSet(viewsets.ReadOnlyModelViewSet):
                 message_text=message.text,
                 message_type=message.type,
                 conversation_id=conversation.id,
-                message_id=message.id
+                message_id=message.id,
+                is_announcement=is_announcement,
             )
 
         if mentioned_ids:
@@ -733,6 +772,7 @@ class ConversationViewSet(viewsets.ReadOnlyModelViewSet):
                 message_text=message.text,
                 conversation_id=conversation.id,
                 message_id=message.id,
+                is_announcement=is_announcement,
             )
 
         return Response(MessageSerializer(message, context={'request': request}).data, status=status.HTTP_201_CREATED)
@@ -1154,6 +1194,8 @@ class MessageViewSet(mixins.RetrieveModelMixin, mixins.UpdateModelMixin,
     def get_throttles(self):
         if self.action == 'react':
             return [ReactionThrottle()]
+        if self.action == 'translate':
+            return [TranslateThrottle()]
         return super().get_throttles()
 
     def get_object(self):
@@ -1309,6 +1351,70 @@ class MessageViewSet(mixins.RetrieveModelMixin, mixins.UpdateModelMixin,
         )
 
         return Response(MessageReactionSerializer(reaction).data)
+
+    # ==================================================================
+    # 🔥 NAYA — Feature 9: real-time message translate
+    # ------------------------------------------------------------
+    # Deliberately per-message, on-demand (not auto-translate-everything —
+    # that would burn API quota on messages nobody ever asks to read in
+    # another language). Same `IsConversationParticipant` gate as every
+    # other single-message action (default branch of `get_permissions`
+    # above already covers `translate` since it isn't in any of the
+    # explicit lists) — you can only translate a message you could
+    # already read.
+    #
+    # Cache key includes `message.updated_at` so an edited message
+    # (`partial_update` above) automatically gets a fresh cache key
+    # instead of serving a stale translation of the old text — no
+    # separate invalidation step needed.
+    # ==================================================================
+    @action(detail=True, methods=['post'], url_path='translate')
+    def translate(self, request, pk=None):
+        message = self.get_object()
+
+        if message.type != MessageType.TEXT or not (message.text or '').strip():
+            return Response(
+                {'detail': 'Sirf text message translate ho sakta hai.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        if message.deleted_for_everyone or message.deleted_for_users.filter(id=request.user.id).exists():
+            raise Http404
+
+        target_lang = (request.data.get('target_lang') or '').strip().lower()
+        if not target_lang:
+            return Response(
+                {'detail': "'target_lang' required hai (e.g. 'hi', 'en', 'ta')."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        cache_key = f"translate:{message.id}:{int(message.updated_at.timestamp())}:{target_lang}"
+        cached = cache.get(cache_key)
+        if cached is not None:
+            return Response({
+                'message_id': str(message.id),
+                'target_lang': target_lang,
+                'source_text': message.text,
+                'translated_text': cached,
+            })
+
+        try:
+            translated = translate_text(message.text, target_lang)
+        except TranslationServiceUnavailable as e:
+            return Response({'detail': str(e)}, status=status.HTTP_503_SERVICE_UNAVAILABLE)
+        except TranslationError as e:
+            return Response({'detail': str(e)}, status=status.HTTP_502_BAD_GATEWAY)
+
+        # Message text is effectively immutable at a given `updated_at`
+        # snapshot, so a long TTL is safe — a week is generous headroom
+        # without keeping every translated message cached forever.
+        cache.set(cache_key, translated, timeout=60 * 60 * 24 * 7)
+
+        return Response({
+            'message_id': str(message.id),
+            'target_lang': target_lang,
+            'source_text': message.text,
+            'translated_text': translated,
+        })
 
     # ==================================================================
     # 🔥 NAYA (ADVANCED FEATURE) — STARRED MESSAGES (personal save/bookmark)
@@ -1875,6 +1981,22 @@ class GroupViewSet(viewsets.ModelViewSet):
     # group delete kar sakta tha. Ab `get_object()` khud hi queryset se
     # aata hai (jo already sirf group-members tak limited hai), uske baad
     # yahan explicit admin-role check lagaya hai.
+    #
+    # 🔧 GAP FIX — pehle ye seedha `conversation.delete()` (HARD delete,
+    # CASCADE) karta tha, jabki `BaseModel.is_deleted`/`soft_delete()`
+    # already model pe maujood tha aur kahin bhi use nahi ho raha tha
+    # ("dead field" — koi bhi row ise set hi nahi karti thi). Ek admin ka
+    # accidental tap poora group — saare messages/media/calls/doubts sab —
+    # permanently, unrecoverably mita deta tha. Ab `soft_delete()` use
+    # karte hain: `Conversation.objects`/`Group.objects` (default manager,
+    # `SoftDeleteManager`) is row ko turant har jagah hide kar dete hain
+    # (list/detail/messages sab — is behaviour ke liye alag se kahin bhi
+    # `.exclude(is_deleted=True)` likhne ki zaroorat nahi, manager khud
+    # karta hai), par row DB me `GROUP_SOFT_DELETE_GRACE_DAYS` din tak
+    # rehti hai — `purge_soft_deleted_conversations` (tasks.py) us window
+    # ke baad hi actually CASCADE-hard-delete karta hai. Isse ek galti se
+    # delete hui group ko us window ke andar `all_objects` se admin/support
+    # dwara recover (`.restore()`) kiya ja sakta hai.
     def destroy(self, request, *args, **kwargs):
         group = self.get_object()
         is_admin = GroupMember.objects.filter(
@@ -1891,8 +2013,9 @@ class GroupViewSet(viewsets.ModelViewSet):
         # 🔥 Delete se PEHLE broadcast karo — taaki sabhi connected members
         # (jo abhi is chat me hain) ko turant pata chal jaaye group delete
         # ho gaya, aur unki app apne-aap chat screen se conversations list
-        # pe wapas nikaal de. Delete ke BAAD `chat_{id}` group hi exist
-        # nahi karega broadcast karne ke liye, isliye order zaroori hai.
+        # pe wapas nikaal de. Soft-delete ke baad bhi `chat_{id}` group is
+        # request ke process me hi exist karta hai, par consistency ke liye
+        # order same rakha hai jo pehle tha.
         channel_layer = get_channel_layer()
         async_to_sync(channel_layer.group_send)(
             f'chat_{conversation_id}',
@@ -1904,12 +2027,10 @@ class GroupViewSet(viewsets.ModelViewSet):
             }
         )
 
-        # 🔥 `Group.conversation` FK `on_delete=CASCADE` hai, isliye
-        # `Conversation` delete karte hi Group, GroupMember,
-        # ConversationParticipant, Message (aur unki reactions/status/
-        # media/presentation/gallery) sab apne-aap CASCADE se delete ho
-        # jaate hain — alag se har table clean karne ki zaroorat nahi.
-        conversation.delete()
+        # Soft-delete — actual CASCADE hard-delete `purge_soft_deleted_
+        # conversations` grace-period ke baad karta hai (see tasks.py).
+        group.soft_delete()
+        conversation.soft_delete()
 
         return Response(status=status.HTTP_204_NO_CONTENT)
 
@@ -2222,6 +2343,172 @@ class GroupViewSet(viewsets.ModelViewSet):
         page = paginator.paginate_queryset(qs, request, view=self)
         serializer = GroupMediaSerializer(page, many=True, context={'request': request})
         return paginator.get_paginated_response(serializer.data)
+
+
+# ======================================================================
+# 🔥 NAYA — DOUBT QUEUE
+#
+# Persistent, upvotable question board per classroom (group). Hand-raise
+# (`study_room` / call flows) sirf live-moment ke liye hai; ye alag se hai
+# taaki students apna doubt kabhi bhi post kar sakein, dusre students
+# "मुझे भी yahi doubt hai" upvote kar sakein, aur teacher (admin/moderator)
+# sabse-upvoted wala pehle answer kare (`DoubtQuestion.Meta.ordering`).
+#
+# "Ask Anonymously" (per-classroom, teacher-toggleable via
+# `Group.allow_anonymous_doubts` — same PATCH `/groups/<id>/` endpoint
+# `GroupViewSet` already exposes for message/call/study-room permissions)
+# rides along in the SAME model: `is_anonymous` hides the author from
+# everyone except the asker until the teacher explicitly calls `reveal`
+# (see `DoubtQuestionSerializer.get_author` for the exact visibility rule).
+#
+# Nested under a group (`/message/groups/<group_id>/doubts/...` — see
+# urls.py), isliye `ModelViewSet`/router use nahi kiya — `GenericViewSet`
+# + explicit `list`/`create` + 3 `@action`s, group-membership `get_group()`
+# se ek hi jagah enforce hoti hai (list/create/upvote/answer/reveal sab
+# isi se guzarte hain).
+# ======================================================================
+class DoubtQuestionViewSet(mixins.ListModelMixin, viewsets.GenericViewSet):
+    permission_classes = [IsAuthenticated]
+    serializer_class = DoubtQuestionSerializer
+
+    def get_group(self):
+        group = get_object_or_404(Group, id=self.kwargs['group_id'])
+        is_member = GroupMember.objects.filter(
+            group=group, user=self.request.user, is_banned=False,
+        ).exists()
+        if not is_member:
+            raise PermissionDenied("Aap is classroom/group ke member nahi hain.")
+        return group
+
+    def get_queryset(self):
+        group = self.get_group()
+        qs = DoubtQuestion.objects.filter(group=group).select_related(
+            'author', 'answered_by',
+        ).prefetch_related('upvotes')
+        # `?status=answered` | `?status=unanswered` — Doubts tab me teacher
+        # ke liye "pehle unanswered dikhao" jaisa filter allow karta hai.
+        status_filter = self.request.query_params.get('status')
+        if status_filter == 'answered':
+            qs = qs.filter(is_answered=True)
+        elif status_filter == 'unanswered':
+            qs = qs.filter(is_answered=False)
+        return qs
+
+    def list(self, request, *args, **kwargs):
+        paginator = StandardPagination()
+        qs = self.filter_queryset(self.get_queryset())
+        page = paginator.paginate_queryset(qs, request, view=self)
+        serializer = self.get_serializer(page, many=True)
+        return paginator.get_paginated_response(serializer.data)
+
+    def create(self, request, *args, **kwargs):
+        group = self.get_group()
+        serializer = DoubtCreateSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        data = serializer.validated_data
+
+        is_anonymous = data['is_anonymous']
+        if is_anonymous and not group.allow_anonymous_doubts:
+            return Response(
+                {'detail': 'Is classroom me anonymous doubts teacher ne band kar rakhe hain.'},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+
+        doubt = DoubtQuestion.objects.create(
+            group=group, conversation=group.conversation, author=request.user,
+            text=data['text'], is_anonymous=is_anonymous,
+        )
+        out = DoubtQuestionSerializer(doubt, context={'request': request}).data
+        self._broadcast(group, 'doubt_created', out)
+        return Response(out, status=status.HTTP_201_CREATED)
+
+    # 🔥 "मुझे भी yahi doubt hai" — POST to upvote, DELETE to un-upvote.
+    # Ek user ek doubt ko ek hi baar count karta hai (`DoubtUpvote.
+    # unique_together`) — repeat POST bas idempotent no-op hai (`get_or_
+    # create`), koi error nahi.
+    @action(detail=True, methods=['post', 'delete'], url_path='upvote')
+    def upvote(self, request, pk=None, group_id=None):
+        group = self.get_group()
+        doubt = get_object_or_404(DoubtQuestion, id=pk, group=group)
+
+        if request.method == 'DELETE':
+            deleted_count, _ = DoubtUpvote.objects.filter(doubt=doubt, user=request.user).delete()
+            if deleted_count:
+                DoubtQuestion.objects.filter(id=doubt.id).update(upvotes_count=F('upvotes_count') - 1)
+        else:
+            _, created = DoubtUpvote.objects.get_or_create(doubt=doubt, user=request.user)
+            if created:
+                DoubtQuestion.objects.filter(id=doubt.id).update(upvotes_count=F('upvotes_count') + 1)
+
+        doubt.refresh_from_db()
+        out = DoubtQuestionSerializer(doubt, context={'request': request}).data
+        self._broadcast(group, 'doubt_upvoted', out)
+        return Response(out)
+
+    # 🔥 Teacher answers the (usually top-upvoted) doubt — admin/moderator
+    # only, same "single source of truth" role-check as everywhere else in
+    # this app (`is_group_admin_or_mod`, cached).
+    @action(detail=True, methods=['post'], url_path='answer')
+    def answer(self, request, pk=None, group_id=None):
+        group = self.get_group()
+        self._require_teacher(group, request.user)
+        doubt = get_object_or_404(DoubtQuestion, id=pk, group=group)
+
+        serializer = DoubtAnswerSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+
+        doubt.answer_text = serializer.validated_data['answer_text']
+        doubt.is_answered = True
+        doubt.answered_by = request.user
+        doubt.answered_at = timezone.now()
+        doubt.save(update_fields=['answer_text', 'is_answered', 'answered_by', 'answered_at'])
+
+        out = DoubtQuestionSerializer(doubt, context={'request': request}).data
+        self._broadcast(group, 'doubt_answered', out)
+        return Response(out)
+
+    # 🔥 Teacher explicitly asks to see who asked an anonymous doubt (§2 —
+    # "unless teacher explicitly reveal maange for follow-up"). One-way:
+    # once revealed it stays revealed for every future admin/moderator view
+    # of this doubt (see `DoubtQuestionSerializer.get_author`).
+    @action(detail=True, methods=['post'], url_path='reveal')
+    def reveal(self, request, pk=None, group_id=None):
+        group = self.get_group()
+        self._require_teacher(group, request.user)
+        doubt = get_object_or_404(DoubtQuestion, id=pk, group=group)
+
+        if doubt.is_anonymous and not doubt.is_revealed:
+            doubt.is_revealed = True
+            doubt.save(update_fields=['is_revealed'])
+            # Sirf broadcast karte hain agar kuch actually badla — reveal
+            # ek hi baar "news" hai, isliye WS bhi sirf pehli baar milta hai.
+            out = DoubtQuestionSerializer(doubt, context={'request': request}).data
+            self._broadcast(group, 'doubt_revealed', out)
+            return Response(out)
+
+        return Response(DoubtQuestionSerializer(doubt, context={'request': request}).data)
+
+    @staticmethod
+    def _require_teacher(group, user):
+        if not is_group_admin_or_mod(group, user.id):
+            raise PermissionDenied("Sirf group admin/moderator (teacher) ye action kar sakte hain.")
+
+    @staticmethod
+    def _broadcast(group, event, doubt_data):
+        # `chat_{conversation_id}` room reuse karte hain — `ChatConsumer`
+        # already isi group se connected hai (jaisa `pin_event`/
+        # `study_room_broadcast` karte hain), koi naya WS group nahi
+        # banana padta.
+        channel_layer = get_channel_layer()
+        async_to_sync(channel_layer.group_send)(
+            f'chat_{group.conversation_id}',
+            {
+                'type': 'doubt_broadcast',
+                'event': event,
+                'doubt': doubt_data,
+                'group_id': str(group.id),
+            }
+        )
 
 
 # ======================================================================
@@ -2644,7 +2931,16 @@ class CallHistoryViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, views
     # invited/participating logon ko exclude karke).
     @action(detail=True, methods=['get'], url_path='addable-participants')
     def addable_participants(self, request, pk=None):
-        call = get_object_or_404(CallSession, id=pk)
+        # 🔥 FIX — `get_object_or_404(CallSession, id=pk)` bypasses this
+        # ViewSet's own `get_queryset()` (which is membership-filtered:
+        # caller OR call_participant OR group member). That meant ANY
+        # authenticated user could hit this on ANY call_id and see who's
+        # addable to a call they have nothing to do with — same class of
+        # bug `CallActionView.post` already had to fix once with an
+        # explicit `is_participant` check. `self.get_object()` runs the
+        # filtered queryset (404s for anyone not caller/participant/group
+        # member), so this now matches that same guarantee.
+        call = self.get_object()
 
         if call.is_group_call and call.group_id:
             member_ids = set(
@@ -2672,7 +2968,13 @@ class CallHistoryViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, views
     # par wo isi LiveKit room me join ho jaaye.
     @action(detail=True, methods=['post'], url_path='add-participant')
     def add_participant(self, request, pk=None):
-        call = get_object_or_404(CallSession, id=pk)
+        # 🔥 FIX — same authorization bypass as `addable_participants`
+        # above: `get_object_or_404(CallSession, id=pk)` let any
+        # authenticated user add a participant to (i.e. start ringing on)
+        # a call they weren't caller/participant/group-member of.
+        # `self.get_object()` enforces the ViewSet's membership-filtered
+        # `get_queryset()` instead.
+        call = self.get_object()
         user_id = request.data.get('user_id')
         if not user_id:
             return Response({'detail': "'user_id' required hai."}, status=400)
@@ -2749,7 +3051,37 @@ class StudyRoomJoinView(APIView):
                 if not allowed:
                     return Response({"detail": reason}, status=403)
 
-        room_name = f"study_{conversation_id}"
+        # 🔥 FIX — `call_api_service.dart.joinStudyRoom(newSession: true)`
+        # sends `{"new_session": true}` specifically so the "Study Room"
+        # icon always gets a brand-new LiveKit room + fresh whiteboard,
+        # while the invite-card "join" flow sends `new_session: false` to
+        # land in whatever session is already running. This view used to
+        # ignore `request.data` entirely and always derive the same
+        # `study_<conversation_id>` room name, so "new session" silently
+        # behaved identically to "join existing" — nobody ever actually
+        # got a fresh room.
+        #
+        # A new session gets its own room name (`study_<conversation_id>_
+        # <suffix>`), a genuinely separate LiveKit room from whatever was
+        # running before. The "current session" pointer is kept in cache
+        # (same pattern as the debounce state in `push_utils.py`) rather
+        # than a new model field, so this needs no migration — a long TTL
+        # (7 days) is generous for how long a study session realistically
+        # stays "current" before someone starts a fresh one anyway.
+        current_session_key = f"studyroom:current_session:{conversation_id}"
+        new_session = bool(request.data.get('new_session', False))
+        if new_session:
+            session_suffix = uuid.uuid4().hex[:12]
+            room_name = f"study_{conversation_id}_{session_suffix}"
+            cache.set(current_session_key, session_suffix, timeout=60 * 60 * 24 * 7)
+        else:
+            session_suffix = cache.get(current_session_key)
+            room_name = (
+                f"study_{conversation_id}_{session_suffix}"
+                if session_suffix
+                else f"study_{conversation_id}"
+            )
+
         user_name = get_display_name(request.user)
         # 🔥 FIX — study rooms are long-running Meet-style sessions, unlike
         # calls; give them a much longer-lived token (8h) so an active
@@ -2776,10 +3108,39 @@ class StudyRoomJoinView(APIView):
                 "avatar_url": get_profile_photo_url(u, request=request),
             })
 
+        # 🔥 NAYA — Feature 6: attendance log. Ek row = "is user ne is
+        # conversation ke study room me is calendar-din join kiya" — same
+        # din dobara join (disconnect-reconnect) `get_or_create` ki wajah
+        # se koi duplicate row nahi banata (model's `UniqueConstraint`
+        # se bhi doubly guarded). Best-effort: agar ye kabhi fail ho
+        # (race condition / DB hiccup), study room join khud block nahi
+        # hona chahiye — sirf streak thoda stale rahega.
+        try:
+            StudyRoomAttendance.objects.get_or_create(
+                conversation=conversation,
+                user=request.user,
+                attended_date=timezone.localdate(),
+                defaults={"session_id": room_name},
+            )
+        except Exception:
+            logger.exception(
+                f"StudyRoomAttendance log failed user={request.user.id} conv={conversation_id}"
+            )
+
+        # 🔧 FIX — `study_room_call_manager`/`study_room_screen.dart` reads
+        # `data['session_id']` to key class-transcript recording (Feature
+        # 3), but this response never actually included that key — only
+        # `room_name` (which IS the session id, per the model's own
+        # docstring: "session_id: study room ka channel_name reuse karna
+        # best hai"). Transcript recording was silently never starting
+        # because of this one missing key. Exposing `room_name` as
+        # `session_id` too (keeping `room_name` for anything else already
+        # reading it) fixes this with no other behavior change.
         return Response({
             "livekit_url": LIVEKIT_WS_URL,
             "livekit_token": token,
             "room_name": room_name,
+            "session_id": room_name,
             "participants": participants,
         })
 
@@ -2830,6 +3191,40 @@ class StudyRoomStateView(APIView):
 
         StudyRoomState.objects.filter(conversation=conversation).delete()
         return Response({"detail": "cleared"})
+
+
+# ======================================================================
+# 🔥 NAYA — Feature 6: attendance / consistency streak
+# ------------------------------------------------------------
+# `StudyRoomAttendance` rows are logged in `StudyRoomJoinView.post()`
+# above, one per (conversation, user, calendar day). Streak = how many
+# CONSECUTIVE calendar days (ending today or yesterday — see below) this
+# user has at least one attendance row for, in this conversation.
+# ======================================================================
+class StudyRoomStreakView(APIView):
+    """
+    GET /message/study-room/<conversation_id>/streak/
+    Response: {
+        "current_streak": 7,
+        "longest_streak": 12,
+        "total_classes_attended": 34,
+        "last_attended": "2026-09-04"   (ISO date, or null if never)
+    }
+    """
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, conversation_id):
+        conversation = Conversation.objects.filter(
+            id=conversation_id, memberships__user=request.user
+        ).first()
+        if not conversation:
+            return Response({"detail": "Conversation not found"}, status=404)
+
+        # 🔧 Refactor (Parent Mode session) — calc moved to
+        # `attendance_utils.compute_attendance_stats` so `ParentDashboardView`
+        # (views_parent.py) can reuse the exact same logic instead of a
+        # second copy. Response shape unchanged.
+        return Response(compute_attendance_stats(conversation, request.user))
 
 
 # ======================================================================

@@ -63,6 +63,7 @@ from contextlib import contextmanager
 from urllib.parse import urljoin, urlparse
 
 import requests
+from bs4 import BeautifulSoup
 from django.core.cache import cache
 
 logger = logging.getLogger(__name__)
@@ -73,11 +74,24 @@ _TIMEOUT_SECONDS = 4
 _MAX_REDIRECTS = 3
 _CACHE_TTL = 60 * 60 * 24 * 7  # ek URL ka preview 7 din cache rehta hai
 
-_OG_TAG_RE = re.compile(
-    r'<meta[^>]+property=["\'](og:title|og:description|og:image)["\'][^>]+content=["\']([^"\']*)["\']',
-    re.IGNORECASE,
-)
-_TITLE_TAG_RE = re.compile(r'<title[^>]*>([^<]+)</title>', re.IGNORECASE)
+# 🔧 GAP FIX (this session) — parsing used to be two hand-rolled regexes
+# (`_OG_TAG_RE`/`_TITLE_TAG_RE`) matching `<meta property="og:..." ...>`
+# and `<title>` tags directly against the raw HTML string. That's brittle
+# in exactly the way real-world HTML actually varies:
+#   - attribute order flipped (`<meta content="..." property="og:title">`
+#     instead of `property` first) never matched at all;
+#   - `name="og:title"` (some sites use `name=` instead of `property=`
+#     for OG tags, technically non-standard but common) never matched;
+#   - self-closing vs not, single vs double quotes, extra whitespace/
+#     newlines inside the tag — every one of these silently produced "no
+#     preview" for an otherwise perfectly normal page, with no error to
+#     debug (by design — see module docstring: fetch failures are always
+#     silent). It didn't crash, it just quietly under-delivered.
+# A real HTML parser (BeautifulSoup, `html.parser` — stdlib, no extra
+# system dependency beyond `beautifulsoup4`) handles all of the above for
+# free since it's parsing actual DOM structure, not guessing at it via
+# string patterns. Only this parsing step changes — the SSRF-safe fetch
+# above/below (DNS-pin, private-IP block, size/time caps) is untouched.
 
 # Ek hi process ke andar overlapping fetches (e.g. do Celery tasks ek hi
 # worker-thread pool me chal rahe) ek doosre ka DNS-pin patch overwrite na
@@ -231,14 +245,31 @@ def fetch_link_preview(url: str) -> "dict | None":
         cache.set(cache_key, {}, _CACHE_TTL)
         return None
 
+    try:
+        soup = BeautifulSoup(html, 'html.parser')
+    except Exception:
+        # Malformed/truncated HTML (we only read up to `_MAX_BYTES` or the
+        # first `</head>`, so a cut-off tag is expected sometimes) — treat
+        # exactly like "no preview found", same as every other soft-fail
+        # path in this function.
+        cache.set(cache_key, {}, _CACHE_TTL)
+        return None
+
     og = {}
-    for prop, content in _OG_TAG_RE.findall(html):
-        og.setdefault(prop, content)
+    for tag in soup.find_all('meta'):
+        # Accept both `property=` (the OpenGraph spec) and `name=` (some
+        # sites use this non-standard variant for the same tags) —
+        # whichever is present, first match wins per property.
+        prop = (tag.get('property') or tag.get('name') or '').strip().lower()
+        if prop in ('og:title', 'og:description', 'og:image') and prop not in og:
+            content = (tag.get('content') or '').strip()
+            if content:
+                og[prop] = content
 
     title = og.get('og:title')
     if not title:
-        title_match = _TITLE_TAG_RE.search(html)
-        title = title_match.group(1).strip() if title_match else None
+        title_tag = soup.find('title')
+        title = title_tag.get_text(strip=True) if title_tag and title_tag.get_text(strip=True) else None
 
     if not title and not og.get('og:description'):
         cache.set(cache_key, {}, _CACHE_TTL)

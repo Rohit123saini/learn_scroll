@@ -179,6 +179,40 @@ def bump_notice_list_cache_version(classroom_id) -> None:
 
 
 # ---------------------------------------------------------------------------
+# NOTE (fix — expired notices lingering in the cache): the version counter
+# above only bumps on Notice post_save/post_delete — it has no idea that
+# time itself just passed, so a notice whose expires_at has come and gone
+# kept showing up in an already-cached page until either (a) someone
+# created/edited/deleted *any* notice in that classroom, which bumps the
+# version and busts every cached page for it, or (b) NoticeViewSet's own
+# belt-and-braces LIST_CACHE_TTL_SECONDS finally lapsed. That left a real,
+# reproducible window (up to LIST_CACHE_TTL_SECONDS) where an expired
+# notice visibly kept showing on a quiet classroom's board.
+#
+# Fix: let the CALLER (NoticeViewSet.list) ask "what's the soonest an
+# active notice in this classroom will expire?" and cap its cache write's
+# timeout to that, instead of always using the flat default. That way the
+# cache entry self-invalidates at (or just after) the moment a notice
+# actually needs to disappear, with no extra signal, cron, or task needed
+# — same DB, just one small indexed aggregate query per cache miss.
+# ---------------------------------------------------------------------------
+def seconds_until_next_notice_expiry(classroom_id, default_seconds: int) -> int:
+    """Returns `default_seconds`, or fewer if some non-expired notice in this
+    classroom expires sooner than that — never more than `default_seconds`,
+    never less than 1 (so a cache write always gets a positive timeout)."""
+    soonest = (
+        Notice.objects.filter(classroom_id=classroom_id, expires_at__gt=timezone.now())
+        .order_by("expires_at")
+        .values_list("expires_at", flat=True)
+        .first()
+    )
+    if soonest is None:
+        return default_seconds
+    seconds_left = (soonest - timezone.now()).total_seconds()
+    return max(1, min(default_seconds, int(seconds_left) + 1))
+
+
+# ---------------------------------------------------------------------------
 # NOTE (fix): none of the FileField/ImageField columns below (cover_image,
 # class materials, assignment attachments/submissions, certificate files)
 # had any size limit. An authenticated user could upload an arbitrarily
@@ -2913,7 +2947,14 @@ class Notice(models.Model):
 
     class Meta:
         ordering = ["-is_pinned", "-created_at"]
-        indexes = [models.Index(fields=["classroom", "is_pinned", "-created_at"])]
+        indexes = [
+            models.Index(fields=["classroom", "is_pinned", "-created_at"]),
+            # NOTE (fix): backs seconds_until_next_notice_expiry()'s
+            # per-classroom "soonest non-expired notice" lookup above —
+            # without this, that query would fall back to a sequential
+            # scan filtered by classroom_id alone.
+            models.Index(fields=["classroom", "expires_at"]),
+        ]
 
     def __str__(self):
         return f"{self.title} ({self.classroom.title})"

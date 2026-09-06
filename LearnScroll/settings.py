@@ -3,6 +3,7 @@ import os
 from dotenv import load_dotenv
 from datetime import timedelta
 from django.db.backends.signals import connection_created
+from django.core.exceptions import ImproperlyConfigured
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 
@@ -133,6 +134,13 @@ if SENTRY_DSN:
     )
 
 # Application definition
+# 🔧 GAP FIX — read once, up here, so both INSTALLED_APPS (needs
+# 'storages' registered before Django can use its backend) and the
+# STORAGES block further down (which sets the actual S3 credentials/
+# options) agree on the same flag. See the STORAGES section below for
+# the full explanation of what this switches on.
+USE_S3_STORAGE = os.getenv("USE_S3_STORAGE", "false").lower() == "true"
+
 INSTALLED_APPS = [
     'daphne',
     'django.contrib.admin',
@@ -151,7 +159,7 @@ INSTALLED_APPS = [
     'post',
     "message",
     'liveclass',
-]
+] + (['storages'] if USE_S3_STORAGE else [])
 
 MIDDLEWARE = [
     "corsheaders.middleware.CorsMiddleware",
@@ -253,6 +261,23 @@ else:
 # ---------------------------------------------------------------------------
 REDIS_URL = os.getenv("REDIS_URL") or os.getenv("CELERY_BROKER_URL")
 
+# 🔧 FIX (silent production failure) — the in-memory fallback below is
+# fine for local dev (one process, no scaling), but if it's ever picked
+# in production it fails SILENTLY: no crash, no error log, no exception
+# anywhere — messages just stop crossing between users connected to
+# different daphne/gunicorn workers. Nobody would know until a support
+# ticket says "my friend isn't getting my messages". Since this is
+# infra-critical (not a per-feature toggle), fail loudly and immediately
+# at startup instead — Django refuses to even boot rather than come up
+# in a broken state.
+if not REDIS_URL and not DEBUG:
+    raise ImproperlyConfigured(
+        "REDIS_URL (or CELERY_BROKER_URL) is not set and DEBUG=False. "
+        "Refusing to start with an in-memory Channel Layer in production — "
+        "it silently breaks realtime messaging across multiple workers. "
+        "Set REDIS_URL in the environment before deploying."
+    )
+
 if REDIS_URL:
     CHANNEL_LAYERS = {
         "default": {
@@ -298,14 +323,67 @@ os.makedirs(CHUNKED_UPLOAD_TMP_ROOT, exist_ok=True)
 # compression and no content-hashed filenames, so browsers can never safely
 # cache-bust a redeployed static file. CompressedManifestStaticFilesStorage
 # gives both, and is whitenoise's own recommended production setting.
-STORAGES = {
-    "default": {
-        "BACKEND": "django.core.files.storage.FileSystemStorage",
-    },
-    "staticfiles": {
-        "BACKEND": "whitenoise.storage.CompressedManifestStaticFilesStorage",
-    },
-}
+#
+# 🔧 GAP FIX (this session) — uploaded chat media (`upload_view.py`,
+# `chunked_upload_views.py` FileFields) used to ALWAYS go to local disk
+# (`FileSystemStorage`, `MEDIA_ROOT`). That's fine for a single dev box,
+# but the moment this app runs more than one app-server instance behind a
+# load balancer (or the box is just recreated on redeploy), files land on
+# whichever instance served that particular upload request — a request
+# routed to a different instance afterwards gets a 404 for a file that
+# genuinely exists, and any redeploy/restart on ephemeral disk (most PaaS/
+# container platforms) loses every uploaded file outright.
+#
+# Fix is additive/opt-in and zero-risk for existing deployments: local
+# `FileSystemStorage` stays the default. Setting `USE_S3_STORAGE=true`
+# (plus the `AWS_*` env vars below) switches `default` to S3 — same
+# `default_storage`/model-`FileField.url` API either way, so nothing else
+# in the app needs to know or care which one is active (see
+# `upload_view.py`, which was fixed in this same session to use
+# `default_storage.url()` instead of hand-building a local-only URL, so
+# it now also works correctly under S3). `USE_S3_STORAGE` itself is
+# computed once, up near INSTALLED_APPS — see the comment there.
+if USE_S3_STORAGE:
+    AWS_ACCESS_KEY_ID = os.getenv("AWS_ACCESS_KEY_ID")
+    AWS_SECRET_ACCESS_KEY = os.getenv("AWS_SECRET_ACCESS_KEY")
+    AWS_STORAGE_BUCKET_NAME = os.getenv("AWS_STORAGE_BUCKET_NAME")
+    AWS_S3_REGION_NAME = os.getenv("AWS_S3_REGION_NAME", "ap-south-1")
+    # Optional — set for S3-compatible providers (Cloudflare R2, DigitalOcean
+    # Spaces, MinIO) or to front the bucket with a CDN/custom domain.
+    AWS_S3_ENDPOINT_URL = os.getenv("AWS_S3_ENDPOINT_URL") or None
+    AWS_S3_CUSTOM_DOMAIN = os.getenv("AWS_S3_CUSTOM_DOMAIN") or None
+    # Chat media is served straight from S3, never mutated in place, so a
+    # long browser-cache lifetime is safe and reduces repeat egress cost.
+    AWS_S3_OBJECT_PARAMETERS = {"CacheControl": "max-age=86400"}
+    # Bucket policy/ACLs manage public read (or the bucket stays private
+    # and reads go through the CDN/custom domain) — the app itself never
+    # needs to set a per-object ACL on upload.
+    AWS_DEFAULT_ACL = None
+    AWS_QUERYSTRING_AUTH = False
+    AWS_S3_FILE_OVERWRITE = False
+
+    STORAGES = {
+        "default": {
+            "BACKEND": "storages.backends.s3.S3Storage",
+        },
+        "staticfiles": {
+            "BACKEND": "whitenoise.storage.CompressedManifestStaticFilesStorage",
+        },
+    }
+else:
+    STORAGES = {
+        "default": {
+            "BACKEND": "django.core.files.storage.FileSystemStorage",
+        },
+        "staticfiles": {
+            "BACKEND": "whitenoise.storage.CompressedManifestStaticFilesStorage",
+        },
+    }
+
+# NOTE: requires `django-storages[s3]` in requirements when
+# `USE_S3_STORAGE=true` (`pip install "django-storages[s3]"`), and
+# `"storages"` added to `INSTALLED_APPS`. Required env vars in that mode:
+# AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, AWS_STORAGE_BUCKET_NAME.
 
 # --- PRODUCTION AI FIX ---
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
@@ -475,11 +553,41 @@ REST_FRAMEWORK = {
         "group_create": "5/min",
         "reaction": "120/min",
         "ai_transcribe": "15/min",
+        # NOTE (fix — CRITICAL, same bug class as ai_transcribe/message_send
+        # above): `message/views_ai.py`'s `SmartReplySuggestionsView` sets
+        # throttle_scope="ai_smart_reply" via `SmartReplyThrottle`
+        # (ScopedRateThrottle), but this scope had no matching rate here —
+        # `ImproperlyConfigured` on the very first "smart reply" call, a
+        # guaranteed 500, not a rare edge case. Rate matches what's already
+        # documented as this throttle's intended rate in views_ai.py (30/min
+        # — looser than ai_transcribe since a client may reasonably call
+        # this on every incoming message).
+        "ai_smart_reply": "30/min",
         # IP-level safety net (used alongside the per-user rates above, not
         # instead of them — see MessageSendIPThrottle/CallInitiateIPThrottle
         # in throttles.py for why per-user alone isn't enough).
         "message_send_ip": "120/min",
         "call_initiate_ip": "20/min",
+        # NOTE (fix — same bug class as above, CONFIRMED missing): these
+        # scopes are already wired to real views via throttle_classes/
+        # get_throttles() but had no matching rate here — each was a
+        # guaranteed ImproperlyConfigured (500) on its very first call.
+        # Rates match each throttle class's own documented intended rate.
+        "translate": "30/min",                      # TranslateThrottle -> MessageViewSet.translate
+        "parent_code_verify_ip": "10/min",           # ParentCodeVerifyThrottle -> ParentVerifyCodeView (per-IP)
+        "ai_class_transcript_chunk": "30/min",       # ClassTranscriptChunkThrottle -> ClassTranscriptChunkUploadView
+        "ai_class_transcript_search": "60/min",      # ClassTranscriptSearchThrottle -> ClassTranscriptSearchView
+        "ai_classroom_copilot": "15/min",            # ClassroomCopilotThrottle -> ClassroomCopilotView
+        "ai_revision_deck": "10/min",                # RevisionDeckThrottle -> RevisionDeckView
+        # NOTE (fix — Feature 12, Focus Mode): `views_focus.py`'s own
+        # header comment suggests this scope (`FocusSessionThrottle`,
+        # `UserRateThrottle`, 20/min) as an optional addition. Adding the
+        # rate here now so it's ready the moment that throttle class is
+        # actually wired onto `FocusSessionView` — own-account-only entry
+        # point (no fan-out), so it isn't a crash risk without the class
+        # wired in, but keeping the rate here avoids yet another "scope
+        # exists in code, rate missing in settings" gap later.
+        "focus_session": "20/min",
     },
     # NOTE (fix — production breaking gap): NOT having this meant every
     # list endpoint (classrooms, sessions, chat-messages, notices, etc.)
@@ -551,6 +659,13 @@ DATA_UPLOAD_MAX_NUMBER_FIELDS = 10000
 FCM_SERVICE_ACCOUNT_JSON_PATH = BASE_DIR / "firebase-service-account.json"
 GOOGLE_CLIENT_ID = os.environ.get("GOOGLE_CLIENT_ID", "")
 FREESOUND_API_KEY = os.environ.get('FREESOUND_API_KEY')
+# NOTE (fix — Feature 9, Message Translate): translation_service.py's
+# translate_text() reads this via getattr(settings, 'GOOGLE_TRANSLATE_API_KEY',
+# None). It was never set anywhere, so MessageViewSet.translate 503'd with
+# TranslationServiceUnavailable on every call even after the "translate"
+# throttle-rate entry was fixed. Google Cloud Translate v2 REST API key
+# (plain API key, no service-account/SDK needed).
+GOOGLE_TRANSLATE_API_KEY = os.environ.get("GOOGLE_TRANSLATE_API_KEY", "")
 
 # ---------------------------------------------------------------------------
 # Referral program (see liveclass/models.py Referral, ReferralViewSet in
@@ -749,4 +864,24 @@ CELERY_BEAT_SCHEDULE = {
         # users ko - same cadence liveclass ke lookback-window jobs jaisa.
         "schedule": crontab(minute="*/15"),
     },
+    # 🔧 GAP FIX — `is_deleted`/`soft_delete()` (models.py `BaseModel`) ab
+    # `GroupViewSet.destroy()` se actually set hota hai (see views.py),
+    # par soft-deleted rows ko kabhi HARD-delete karne wala kuch nahi tha —
+    # matlab wo hamesha ke liye DB me pade rehte (disk bloat, aur ek admin
+    # jo galti se apna hi group delete kar de use kabhi "permanently gone"
+    # confirmation nahi milta). Ye sweep grace period ke baad unhe asli
+    # CASCADE-delete karta hai. Daily is enough — grace period din-level
+    # hai (`GROUP_SOFT_DELETE_GRACE_DAYS`), minute-level precision ki
+    # zaroorat nahi.
+    "message-purge-soft-deleted-conversations": {
+        "task": "message.purge_soft_deleted_conversations",
+        "schedule": crontab(hour=3, minute=30),
+    },
 }
+
+# 🔧 GAP FIX — grace window ke liye, dekho message/tasks.py:
+# purge_soft_deleted_conversations aur views.py: GroupViewSet.destroy().
+# Isse zyada rakhoge to soft-deleted data zyada der tak recoverable
+# rehta hai, kam rakhoge to disk jaldi clear hota hai — 7 din WhatsApp
+# jaisi apps ke "recently deleted" window se milta-julta safe default hai.
+GROUP_SOFT_DELETE_GRACE_DAYS = int(os.getenv("GROUP_SOFT_DELETE_GRACE_DAYS", "7"))

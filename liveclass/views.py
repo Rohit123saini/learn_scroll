@@ -84,6 +84,7 @@ from .models import (
     create_notification,
     get_classroom_list_cache_version,
     get_notice_list_cache_version,
+    seconds_until_next_notice_expiry,
     referral_code_for_user,
     referral_code_to_user_id,
 )
@@ -5901,7 +5902,18 @@ class NoticeViewSet(viewsets.ModelViewSet):
 
         response = super().list(request, *args, **kwargs)
         if response.status_code == status.HTTP_200_OK:
-            cache.set(cache_key, response.data, timeout=self.LIST_CACHE_TTL_SECONDS)
+            # NOTE (fix — expired notices lingering in cache, see
+            # seconds_until_next_notice_expiry() in models.py): a flat
+            # LIST_CACHE_TTL_SECONDS meant an expired notice could keep
+            # showing in an already-cached page for up to a full minute
+            # after expires_at passed, with nothing in that classroom
+            # changing to bump the version and bust it sooner. Capping the
+            # timeout to "when does the next notice in this classroom
+            # expire" makes the cache self-invalidate right when it
+            # actually needs to, without shortening the TTL for every
+            # classroom (most of which have no expires_at set at all).
+            ttl = seconds_until_next_notice_expiry(classroom_id, self.LIST_CACHE_TTL_SECONDS)
+            cache.set(cache_key, response.data, timeout=ttl)
         return response
 
     def get_queryset(self):

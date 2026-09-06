@@ -105,6 +105,14 @@ class Signup(GenericAPIView):
         serializer.is_valid(raise_exception=True)
         user = serializer.save()
 
+        # 🔥 FIX — pehle yeh view koi token return nahi karta tha (Login aur
+        # GoogleAuthView dono karte hain), matlab naya signed-up user
+        # "logged in" state mein nahi aata tha — client ko turant ek alag
+        # `Login` call karni padti, jisme dobara password bhejna padta
+        # (awkward — signup form ke paas already password hai). Ab
+        # consistent hai: signup khud hi refresh+access token de deta hai.
+        refresh = RefreshToken.for_user(user)
+
         return Response(
             {
                 "status": True,
@@ -116,7 +124,11 @@ class Signup(GenericAPIView):
                     "first_name": user.first_name,
                     "last_name": user.last_name,
                     "phone": user.phone,
-                }
+                },
+                "token": {
+                    "refresh": str(refresh),
+                    "access": str(refresh.access_token),
+                },
             },
             status=status.HTTP_201_CREATED
         )

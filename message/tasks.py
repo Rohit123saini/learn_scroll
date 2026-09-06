@@ -23,10 +23,11 @@
 # instructions), poora sweep worker process me chalega, request-response
 # cycle se bilkul alag.
 
-import json
 import logging
+from datetime import timedelta
 
 from celery import shared_task
+from django.conf import settings
 from django.db import transaction
 from django.utils import timezone
 
@@ -111,6 +112,58 @@ def send_scheduled_messages():
     return {"sent": sent, "failed": failed}
 
 
+@shared_task(name="message.purge_soft_deleted_conversations")
+def purge_soft_deleted_conversations():
+    """
+    🔧 GAP FIX — `BaseModel.is_deleted`/`soft_delete()` used to be a dead
+    field (nothing ever set it). `GroupViewSet.destroy()` (views.py) now
+    calls `.soft_delete()` on the group + its conversation instead of a
+    hard `conversation.delete()`, so an admin's group-delete tap is
+    recoverable for `settings.GROUP_SOFT_DELETE_GRACE_DAYS` days — this
+    sweep is the other half: it actually reclaims the storage once that
+    grace window has passed, by hard-deleting the `Conversation` row
+    (which CASCADEs to Group/GroupMember/ConversationParticipant/Message/
+    etc., same as the old immediate hard-delete did — just delayed).
+
+    Uses `Conversation.all_objects` (not `.objects`) since the default
+    `SoftDeleteManager` already excludes `is_deleted=True` rows — we need
+    to see exactly those rows here.
+
+    Bounded batch per run, same reasoning as the other sweeps in this
+    file (a large backlog clears itself over a few daily ticks instead of
+    one giant transaction).
+    """
+    from .models import Conversation
+
+    cutoff = timezone.now() - timedelta(days=settings.GROUP_SOFT_DELETE_GRACE_DAYS)
+    due_ids = list(
+        Conversation.all_objects.filter(is_deleted=True, updated_at__lte=cutoff)
+        .values_list('id', flat=True)[:200]
+    )
+
+    deleted = 0
+    for conversation_id in due_ids:
+        try:
+            # `updated_at__lte=cutoff` was checked against the row fetched
+            # a moment ago — re-filter on delete so a `.restore()` that
+            # landed in between (support recovering it just in time) isn't
+            # clobbered by a stale read.
+            count, _ = Conversation.all_objects.filter(
+                id=conversation_id, is_deleted=True, updated_at__lte=cutoff,
+            ).delete()
+            if count:
+                deleted += 1
+        except Exception:
+            logger.exception(
+                "purge_soft_deleted_conversations: failed to purge conversation=%s", conversation_id
+            )
+
+    if deleted:
+        logger.info("purge_soft_deleted_conversations: hard-deleted %s conversation(s)", deleted)
+
+    return {"deleted": deleted}
+
+
 @shared_task(name="message.cleanup_expired_messages")
 def cleanup_expired_messages():
     """
@@ -153,84 +206,15 @@ def cleanup_expired_messages():
 
 
 # ======================================================================
-# 🔥 FIX (this session) — Smart notification batching / digest.
-# `push_utils.send_chat_message_push` already does the accumulate-in-cache
-# half (per (user, conversation) counter + "schedule me once" flag) and
-# unconditionally does `from .tasks import flush_chat_push_digest` +
-# `.apply_async(...)` — but this task never actually existed here. That
-# meant EVERY normal chat-message push (REST, WS, AND scheduled-message
-# delivery — all three call `send_chat_message_push`) raised an
-# `ImportError` the moment it tried to schedule the flush, i.e. push
-# notifications for ordinary messages were silently broken end-to-end
-# (mentions/calls were unaffected — those use `send_mention_push` /
-# `send_incoming_call_push` directly, bypassing this path entirely).
-#
-# This is that missing counterpart: it runs once, `CHAT_PUSH_DEBOUNCE_
-# SECONDS` after the FIRST message in a window, reads back whatever
-# accumulated during that window, and sends either a normal single-
-# message push (count == 1) or a "X sent N messages" digest push
-# (count > 1) — exactly what `send_chat_digest_push` already exists for.
+# 🔧 REMOVED (WhatsApp-style push, this session) — `flush_chat_push_
+# digest` used to live here as a `countdown`-scheduled Celery task that
+# `push_utils.send_chat_message_push` called to flush a 30s debounce
+# window. That artificial wait has been removed: `send_chat_message_push`
+# now sends every push immediately (single or digest, based on a rolling
+# unread-count) with no delayed task involved. Nothing schedules this
+# task anymore, so it's gone — see `push_utils.py`'s `send_chat_message_
+# push` for the new immediate-send logic.
 # ======================================================================
-@shared_task(name="message.flush_chat_push_digest")
-def flush_chat_push_digest(user_id, conversation_id):
-    """
-    Scheduled once per debounce window by `push_utils.send_chat_message_
-    push` (via `cache.add` on the scheduled-flag key, so a burst of N
-    messages only ever enqueues this once). Reads back the count + "most
-    recent message" snapshot that accumulated in cache during the window
-    and sends exactly one push for it.
-
-    Keys are read-then-explicitly-cleared here (not just left to
-    TTL-expire) so a message that arrives in the split-second after this
-    task starts reading, but before it finishes, cleanly starts a
-    brand-new window (via `cache.add` back in `send_chat_message_push`)
-    instead of silently folding into a window whose flush is already in
-    flight.
-    """
-    from django.core.cache import cache
-    from .push_utils import (
-        _DIGEST_COUNT_KEY, _DIGEST_LAST_KEY, _DIGEST_SCHEDULED_KEY,
-        _send_single_chat_push, send_chat_digest_push,
-    )
-
-    uid = str(user_id)
-    count_key = _DIGEST_COUNT_KEY.format(user=uid, conv=conversation_id)
-    last_key = _DIGEST_LAST_KEY.format(user=uid, conv=conversation_id)
-    scheduled_key = _DIGEST_SCHEDULED_KEY.format(user=uid, conv=conversation_id)
-
-    count = cache.get(count_key)
-    last_raw = cache.get(last_key)
-
-    cache.delete(count_key)
-    cache.delete(last_key)
-    cache.delete(scheduled_key)
-
-    # Window already flushed/cleared by something else, or expired before
-    # we got to it (very slow/delayed worker) — nothing to send.
-    if not count or not last_raw:
-        return {"sent": False, "reason": "empty_window"}
-
-    try:
-        last = json.loads(last_raw)
-    except (TypeError, ValueError):
-        logger.exception(
-            "flush_chat_push_digest: bad last-message payload user=%s conv=%s",
-            uid, conversation_id,
-        )
-        return {"sent": False, "reason": "bad_payload"}
-
-    if count <= 1:
-        _send_single_chat_push(
-            [uid],
-            last.get('sender_name'),
-            last.get('text'),
-            conversation_id,
-            last.get('message_id'),
-        )
-    else:
-        send_chat_digest_push(uid, conversation_id, last.get('sender_name'), count)
-
-    return {"sent": True, "count": count}
 
 
 # ======================================================================
@@ -343,3 +327,76 @@ def transcribe_voice_message_task(self, message_id):
         message.save(update_fields=['meta', 'updated_at'])
 
     _broadcast_meta_update(message)
+
+
+# ======================================================================
+# 🔥 NAYA — ADVANCED FEATURE #3: Class transcript (chunk transcription)
+# ======================================================================
+@shared_task(
+    name="message.transcribe_class_chunk",
+    bind=True,
+    max_retries=2,
+    default_retry_delay=10,
+)
+def transcribe_class_chunk_task(self, segment_id):
+    """
+    `ClassTranscriptChunkUploadView` (views_ai.py) har naye chunk pe ye
+    task enqueue karta hai. Same `ai_service.transcribe_audio()` reuse
+    karta hai jo voice-note transcription (upar) already use karta hai —
+    ye function file_url se audio download karke Gemini ko bhejta hai,
+    result string return karta hai. Yahan sirf destination alag hai:
+    `Message.meta['transcript']` ki jagah `ClassTranscriptSegment.text`.
+
+    Fail ho jaaye (AI down, corrupt chunk, waghera) to segment
+    `status='failed'` pe chala jaata hai — search/copilot dono failed
+    segments ko silently ignore karte hain (STATUS_DONE filter), koi
+    user-facing error nahi aata, bas wo chunk transcript me missing rahega.
+    """
+    from .models import ClassTranscriptSegment
+    from .ai_service import transcribe_audio, AI_ENABLED
+
+    try:
+        segment = ClassTranscriptSegment.objects.get(id=segment_id)
+    except ClassTranscriptSegment.DoesNotExist:
+        return
+
+    if not AI_ENABLED:
+        segment.status = ClassTranscriptSegment.STATUS_FAILED
+        segment.save(update_fields=['status'])
+        return
+
+    try:
+        # Chunks `record` package se AAC-LC (.m4a) me record hote hain
+        # (chat voice-note recording jaisa hi — study_room_call_manager.dart
+        # ki chunk-recording usi encoder ko reuse karti hai), isliye same
+        # default mime type.
+        transcript = transcribe_audio(segment.audio_file_url, mime_type="audio/mp4")
+    except Exception as e:
+        logger.warning("transcribe_class_chunk_task: failed for segment=%s: %s", segment_id, e)
+        segment.status = ClassTranscriptSegment.STATUS_FAILED
+        segment.save(update_fields=['status'])
+        return
+
+    segment.text = transcript or ''
+    segment.status = ClassTranscriptSegment.STATUS_DONE
+    segment.save(update_fields=['text', 'status'])
+
+    # Live "recap" screen agar khula hai to turant naya segment dikhe,
+    # isliye same `meta_update`-jaisa passthrough pattern — naya WS event
+    # type `transcript_segment_ready` (consumers.py me ek chhota handler
+    # add karna hoga, bilkul `meta_update` jaisa hi plain-passthrough).
+    channel_layer = get_channel_layer()
+    async_to_sync(channel_layer.group_send)(
+        f'chat_{segment.conversation_id}',
+        {
+            'type': 'transcript_segment_ready',
+            'segment': {
+                'id': str(segment.id),
+                'session_id': segment.session_id,
+                'start_offset_seconds': segment.start_offset_seconds,
+                'end_offset_seconds': segment.end_offset_seconds,
+                'text': segment.text,
+                'speaker_id': str(segment.speaker_id) if segment.speaker_id else None,
+            },
+        },
+    )

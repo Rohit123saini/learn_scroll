@@ -497,3 +497,63 @@ def broadcast_to_user(user_id, event_type: str, payload: dict) -> bool:
             user_id, event_type,
         )
         return False
+
+
+def _classroom_group_name(classroom_id) -> str:
+    return f"classroom.{classroom_id}"
+
+
+# NEW (fix — classroom stats realtime push): per-CLASSROOM counterpart to
+# broadcast_to_user() above, same relationship broadcast_to_session() has
+# to broadcast_to_user() — this one just groups by classroom_id instead of
+# user_id or session_id. This is what models.py's `_broadcast_classroom_
+# stats()` calls (from refresh_rating()/refresh_enrolled_count()) — that
+# function already existed and already did `from .realtime import
+# broadcast_to_classroom`, but no such name was defined here, so both call
+# sites were an ImportError caught by that function's own try/except
+# (logged, never breaking the actual rating/enrollment recompute) instead
+# of ever actually pushing anything. See ClassroomConsumer in consumers.py
+# for the receiving end and routing.py for the `ws/liveclass/classroom/
+# <id>/` route.
+#
+# Same best-effort contract as broadcast_to_session()/broadcast_to_user():
+# NEVER raises — a rating/enrollment recompute must succeed even if the
+# channel layer is down; the frontend's backstop poll (see
+# classroom_detail_screen.dart) covers a dropped push.
+#
+# No replay/history buffer, same reasoning as broadcast_to_user(): a
+# reconnecting client just re-fetches the classroom detail REST endpoint,
+# which already has the current rating_avg/rating_count/enrolled_count —
+# there's nothing a catch-up buffer would give it that a fresh GET
+# wouldn't.
+#
+# event_type: dotted event name — currently only "classroom.stats" (see
+# _broadcast_classroom_stats' payload shape in models.py).
+# payload: JSON-serializable dict.
+def broadcast_to_classroom(classroom_id, event_type: str, payload: dict) -> bool:
+    channel_layer = get_channel_layer()
+    if channel_layer is None:
+        logger.warning(
+            "No channel layer configured — dropping realtime event %r for classroom %s.",
+            event_type, classroom_id,
+        )
+        return False
+    try:
+        async_to_sync(channel_layer.group_send)(
+            _classroom_group_name(classroom_id),
+            {
+                "type": "classroom.event",  # dispatched to ClassroomConsumer.classroom_event
+                "event": event_type,
+                "payload": payload,
+                "ts": time.time(),
+            },
+        )
+        return True
+    except Exception:
+        logger.exception(
+            "Realtime broadcast failed (classroom=%s, event=%s) — connected "
+            "clients, if any, will miss this push and rely on their next "
+            "REST call/reopen.",
+            classroom_id, event_type,
+        )
+        return False

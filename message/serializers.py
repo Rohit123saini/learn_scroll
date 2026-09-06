@@ -9,6 +9,8 @@ from .models import (
     Conversation,
     ConversationParticipant,
     ConversationType,
+    # 🔥 NAYA — Doubt Queue (see doubt_models_addition.py)
+    DoubtQuestion,
     Group,
     GroupJoinRequest,
     GroupMedia,
@@ -23,6 +25,7 @@ from .models import (
     Presentation,
     UserPresence,
 )
+from .group_rules import is_group_admin_or_mod
 from .user_display import get_display_name, get_profile_photo_url
 
 User = get_user_model()
@@ -278,6 +281,87 @@ class PollVoteSerializer(serializers.Serializer):
     option_ids = serializers.ListField(child=serializers.UUIDField(), min_length=1)
 
 
+# ======================================================================
+# DOUBT QUEUE (persistent, upvotable per-classroom question board)
+# ======================================================================
+class DoubtQuestionSerializer(serializers.ModelSerializer):
+    """
+    `GET /message/groups/<group_id>/doubts/` list + create/upvote/answer/
+    reveal response shape. Same request se dono uses cover hote hain
+    (`PollSerializer`/`PollOptionSerializer` jaisa hi pattern — `votes_count`
+    /`voted_by_me` ki tarah yahan `upvotes_count`/`upvoted_by_me`).
+    """
+    author = serializers.SerializerMethodField()
+    answered_by = UserMiniSerializer(read_only=True)
+    upvoted_by_me = serializers.SerializerMethodField()
+    is_mine = serializers.SerializerMethodField()
+
+    class Meta:
+        model = DoubtQuestion
+        fields = [
+            'id', 'group', 'author', 'text', 'is_anonymous', 'is_revealed',
+            'upvotes_count', 'upvoted_by_me', 'is_mine',
+            'is_answered', 'answer_text', 'answered_by', 'answered_at',
+            'created_at',
+        ]
+        read_only_fields = [
+            'id', 'group', 'is_revealed', 'upvotes_count', 'is_answered',
+            'answer_text', 'answered_by', 'answered_at', 'created_at',
+        ]
+
+    def get_author(self, obj):
+        # 🔒 Anonymity default-hidden hai: khud poochne wale ko hamesha
+        # apna naam dikhta hai, baaki har kisi ko (teacher samet) tab tak
+        # nahi jab tak `is_revealed` explicitly True na ho (teacher ki
+        # `reveal` action se) — "Ask Anonymously" §2 ka poora point yahi
+        # hai ki teacher ko bhi by-default identity na dikhe.
+        request = self.context.get('request')
+        if not obj.is_anonymous:
+            return UserMiniSerializer(obj.author, context=self.context).data
+        if request and getattr(request.user, 'id', None) == obj.author_id:
+            return UserMiniSerializer(obj.author, context=self.context).data
+        if obj.is_revealed:
+            return UserMiniSerializer(obj.author, context=self.context).data
+        return None
+
+    def get_upvoted_by_me(self, obj):
+        request = self.context.get('request')
+        if not request:
+            return False
+        # `.all()` — jahan `prefetch_related('upvotes')` lagi hai
+        # (`DoubtQuestionViewSet.get_queryset`) wahan 0 extra queries;
+        # jahan nahi hai wahan bhi sahi kaam karta hai — `PollOptionSerializer.
+        # get_voted_by_me` jaisa hi tradeoff.
+        return any(v.user_id == request.user.id for v in obj.upvotes.all())
+
+    def get_is_mine(self, obj):
+        request = self.context.get('request')
+        return bool(request and obj.author_id == getattr(request.user, 'id', None))
+
+
+class DoubtCreateSerializer(serializers.Serializer):
+    """`DoubtQuestionViewSet.create` request body."""
+    text = serializers.CharField(max_length=2000)
+    is_anonymous = serializers.BooleanField(default=False)
+
+    def validate_text(self, value):
+        value = value.strip()
+        if not value:
+            raise serializers.ValidationError("Doubt khali nahi ho sakta.")
+        return value
+
+
+class DoubtAnswerSerializer(serializers.Serializer):
+    """`DoubtQuestionViewSet.answer` request body (teacher/admin/mod only)."""
+    answer_text = serializers.CharField(max_length=4000)
+
+    def validate_answer_text(self, value):
+        value = value.strip()
+        if not value:
+            raise serializers.ValidationError("Answer khali nahi ho sakta.")
+        return value
+
+
 class MessageSerializer(serializers.ModelSerializer):
     """Full message representation — GET responses ke liye."""
     sender = UserMiniSerializer(read_only=True)
@@ -307,6 +391,12 @@ class MessageSerializer(serializers.ModelSerializer):
             'is_system_message', 'deleted_for_everyone', 'client_id',
             'reactions', 'is_read_by_me', 'is_pinned', 'pinned_at', 'pinned_by',
             'mentioned_users', 'is_starred', 'poll',
+            # 🔧 FIX (Feature 11 — Announcements, backend/frontend sync) —
+            # field ab model pe bhi hai (`models.py`), aur frontend
+            # (`message_models.dart`'s `MessageModel.isAnnouncement`) pehle
+            # se hi is exact key ki JSON me umeed kar raha tha — ab yahan
+            # expose kar diya, GET aur create-response dono me aayega.
+            'is_announcement',
             # 🔥 NAYA (advanced feature) — scheduled ("send later") messages.
             # Ye fields sirf tab dikhte hain jab requester khud sender ho
             # (see ConversationViewSet.messages / search / search_all —
@@ -321,7 +411,7 @@ class MessageSerializer(serializers.ModelSerializer):
             'id', 'conversation', 'sender', 'is_edited', 'is_forwarded',
             'is_system_message', 'deleted_for_everyone', 'is_pinned',
             'pinned_at', 'pinned_by', 'mentioned_users', 'is_scheduled',
-            'scheduled_for', 'created_at', 'updated_at',
+            'scheduled_for', 'created_at', 'updated_at', 'is_announcement',
         ]
 
     def get_is_read_by_me(self, obj):
@@ -490,6 +580,11 @@ class GroupSerializer(serializers.ModelSerializer):
             # ke liye (message/call/study-room permission + daily limit).
             'message_permission', 'call_permission', 'study_room_permission',
             'daily_message_limit',
+            # 🔥 NAYA — Doubt Queue ka "Ask Anonymously" per-classroom
+            # toggle (teacher/admin/mod only — enforced by the SAME
+            # `IsGroupAdminOrModerator` permission this ViewSet already
+            # uses for `update`/`partial_update`, no new endpoint needed).
+            'allow_anonymous_doubts',
         ]
         read_only_fields = [
             'id', 'conversation_id', 'created_by', 'invite_code',
@@ -590,6 +685,9 @@ class CallSessionSerializer(serializers.ModelSerializer):
         fields = [
             'id', 'type', 'status', 'is_group_call', 'conversation', 'group',
             'caller', 'channel_name', 'started_at', 'connected_at', 'ended_at',
-            'duration_seconds', 'is_recording', 'recording_url', 'created_at',
+            'duration_seconds', 'created_at',
+            # 🔧 CLEANUP — `is_recording`/`recording_url` (and the unused
+            # Agora `token` field) removed from `CallSession` (models.py) —
+            # dead columns, never set by any REST/WS code path.
         ]
         read_only_fields = fields

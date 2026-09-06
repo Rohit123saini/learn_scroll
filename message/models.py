@@ -1,5 +1,6 @@
-# chat/models.py - PRODUCTION LEVEL (Insta/FB scale)
+# chat/models.py
 import hashlib
+import secrets
 import uuid
 from datetime import timedelta
 
@@ -63,6 +64,11 @@ class BaseModel(models.Model):
     def soft_delete(self):
         """Row ko hide karo bina hard-delete kiye (moderation/cleanup ke liye)."""
         self.is_deleted = True
+        self.save(update_fields=['is_deleted', 'updated_at'])
+
+    def restore(self):
+        """Soft-deleted row wapas normal manager (`objects`) me dikhne lage."""
+        self.is_deleted = False
         self.save(update_fields=['is_deleted', 'updated_at'])
 
 
@@ -299,6 +305,15 @@ class Group(BaseModel):
     # null/blank = koi limit nahi. Admin/moderator is limit se hamesha exempt.
     daily_message_limit = models.PositiveIntegerField(null=True, blank=True)
 
+    # 🔥 NAYA — "Doubt Queue" ke anonymous-asking toggle. Teacher (admin/
+    # moderator) is group ke settings se on/off karta hai
+    # (`GroupSerializer` me already-wired 'message_permission' jaisa hi
+    # writable field — GroupViewSet ka existing PATCH endpoint reuse
+    # hota hai, koi naya endpoint nahi chahiye). Default True — students
+    # ko out-of-the-box shy-friendly experience milta hai; teacher chahe
+    # to band kar sakta hai.
+    allow_anonymous_doubts = models.BooleanField(default=True)
+
     # Fast count ke liye (signal se update karo, query se mat gino)
     members_count = models.PositiveIntegerField(default=0)
     messages_count = models.PositiveIntegerField(default=0)
@@ -462,6 +477,15 @@ class Message(BaseModel):
     # the aspirational one.
     is_encrypted = models.BooleanField(default=False, db_index=True)
     encryption_iv = models.CharField(max_length=64, blank=True, null=True)
+
+    # 🔧 FIX (Feature 11 — Announcements, backend/frontend sync) — is field
+    # ki zaroorat `views.py`'s `ConversationViewSet.messages` POST action ko
+    # pehle se thi (`serializer.save(..., is_announcement=is_announcement)`),
+    # lekin model pe column define hi nahi tha — isliye HAR REST message
+    # send (group ya private, dono) `TypeError: 'is_announcement' is an
+    # invalid keyword argument` de raha tha. True tab set hota hai jab
+    # sender us waqt group ka admin/mod ho (private chat me hamesha False).
+    is_announcement = models.BooleanField(default=False, db_index=True)
 
     class Meta(BaseModel.Meta):
         indexes = [
@@ -642,24 +666,21 @@ class CallSession(BaseModel):
     # TTL) and study rooms (8h token TTL), see livekit_utils.py
     channel_name = models.CharField(max_length=150, unique=True, db_index=True)
 
-    # ⚠️ DEPRECATED — legacy Agora field, kept only so existing rows don't
-    # break/need a migration. App LiveKit pe fully migrate ho chuka hai
-    # (`livekit_utils.generate_livekit_token`); is field ko ab kahin bhi
-    # likha/padha nahi jaata. Naya code isko use NA kare — future cleanup
-    # migration me hata dena.
-    token = models.TextField(blank=True, null=True)  # Agora token (unused)
+    # 🔧 CLEANUP (this session) — removed the legacy `token` (Agora,
+    # unused since the LiveKit migration — `livekit_utils.generate_
+    # livekit_token` generates join tokens on demand instead of storing
+    # one) and `is_recording`/`recording_url` (no REST/WS code anywhere
+    # ever set or read them — LiveKit server-side recording/egress isn't
+    # wired into this stack, see `models.py`'s ClassTranscriptSegment
+    # design note) fields that used to live here. They were pure dead
+    # weight that could mislead a client into showing a false "recording"
+    # indicator. See migration 0903_remove_callsession_legacy_agora_fields
+    # for the corresponding column drop.
 
     started_at = models.DateTimeField(default=timezone.now)
     connected_at = models.DateTimeField(null=True, blank=True)
     ended_at = models.DateTimeField(null=True, blank=True)
     duration_seconds = models.PositiveIntegerField(default=0)
-
-    # ⚠️ DEPRECATED — inke liye koi trigger/record code kahin nahi milta
-    # (na REST na WS). Ya to LiveKit recording feature implement karo aur
-    # inhe wire karo, ya inhe hata do — abhi ye sirf "recording ho rahi
-    # hai" ka jhoota signal de sakte hain agar frontend inhe read karta hai.
-    is_recording = models.BooleanField(default=False)
-    recording_url = models.URLField(blank=True, null=True)
 
     class Meta(BaseModel.Meta):
         indexes = [
@@ -733,10 +754,6 @@ class BlockedUser(BaseModel):
         indexes = [models.Index(fields=['blocker', 'blocked'])]
 
 
-
-# ======================================================================
-# ADD THIS TO models.py (kahi bhi, e.g. UserPresence ke aas paas)
-# ======================================================================
 class DeviceToken(BaseModel):
     """
     Har device ka FCM token yaha store hota hai. Ek user ke multiple
@@ -777,3 +794,558 @@ class StudyRoomState(BaseModel):
 
     class Meta:
         indexes = [models.Index(fields=['conversation'])]
+
+
+# ======================================================================
+# 🔥 NAYA — CLASS TRANSCRIPT (Feature 3: timestamped searchable recap)
+# ------------------------------------------------------------
+# Design note: LiveKit server-side room recording/egress abhi is stack
+# me wired nahi hai (`CallSession.is_recording`/`recording_url` upar
+# already dead fields hain — koi trigger/record code kahin nahi milta).
+# Isliye "poori class ki ek continuous recording" is version me nahi
+# banti. Iske bajaye har participant apna khud ka mic locally
+# chunk-record karta hai (frontend: StudyRoomCallManager, ~45s chunks,
+# `record` package — chat voice-note recording jaisa hi) aur har chunk
+# yahan ek row banata hai. Har row = ek participant ke ek chunk ka
+# transcript, session-relative offset ke saath. Combined (session_id +
+# start_offset_seconds se sorted) sab participants ke segments milke ek
+# time-ordered, searchable class transcript ban jaate hain.
+#
+# `session_id`: study room ka `channel_name` (CallSession upar, "channel_
+# name doubles as join key for both calls and study rooms") reuse karna
+# best hai agar `StudyRoomJoinView` LiveKit room ke liye wahi naming use
+# kar raha hai — isse alag se ek naya session-id-generation scheme nahi
+# banana padega, aur `new_session: true` naya room = naturally naya
+# transcript bhi ho jaata hai. Yahan plain CharField isliye rakha hai
+# (na ki FK) taaki StudyRoomJoinView chahe CallSession row banaye ya na
+# banaye, ye model kisi bhi tarah se decoupled rahe.
+# ======================================================================
+class ClassTranscriptSegment(BaseModel):
+    STATUS_PENDING = 'pending'
+    STATUS_DONE = 'done'
+    STATUS_FAILED = 'failed'
+    STATUS_CHOICES = [
+        (STATUS_PENDING, 'Pending'),
+        (STATUS_DONE, 'Done'),
+        (STATUS_FAILED, 'Failed'),
+    ]
+
+    conversation = models.ForeignKey(
+        Conversation, on_delete=models.CASCADE, related_name='transcript_segments',
+    )
+    session_id = models.CharField(max_length=150, db_index=True)
+
+    speaker = models.ForeignKey(
+        User, on_delete=models.SET_NULL, null=True, blank=True, related_name='transcript_segments',
+    )
+
+    # Session start (jab pehla participant join hua) se offset seconds me —
+    # NOT wall-clock time, taaki "jump to timestamp" ek hi consistent
+    # timeline pe kaam kare chahe kisi ka bhi phone clock skewed ho.
+    start_offset_seconds = models.FloatField()
+    end_offset_seconds = models.FloatField()
+
+    # audio chunk ka file_url (`upload_view.py` se, chat voice-note jaisa
+    # hi) — "is segment ko dobara sunna hai" ke liye rakha hai, poori class
+    # ki continuous recording ki jagah per-segment playback.
+    audio_file_url = models.URLField(max_length=500)
+
+    text = models.TextField(blank=True, default='')
+    status = models.CharField(max_length=10, choices=STATUS_CHOICES, default=STATUS_PENDING, db_index=True)
+
+    class Meta(BaseModel.Meta):
+        ordering = ['session_id', 'start_offset_seconds']
+        indexes = [
+            models.Index(fields=['conversation', 'session_id', 'start_offset_seconds']),
+            models.Index(fields=['conversation', 'status']),
+        ]
+
+    def __str__(self):
+        return f"{self.conversation_id}/{self.session_id} @{self.start_offset_seconds}s"
+
+    # 🔥 NOTE (scale upgrade path) — abhi search `text__icontains` se hota
+    # hai (views_ai.ClassTranscriptSearchView), chhoti class-transcript ke
+    # liye (ek session = usually kuch sau segments) kaafi hai. Agar scale
+    # badhe, `Message` model upar jaisa hi pattern lagao: naya
+    # `search_vector = SearchVectorField(...)` field + migration trigger +
+    # `GinIndex(fields=['search_vector'], ...)` — same approach, alag se
+    # kuch naya design nahi karna padega.
+
+
+# ======================================================================
+# 🔥 NAYA — REVISION DECK (Feature 5: auto flashcards/quiz for revision)
+# ------------------------------------------------------------
+# `ai_service.generate_revision_deck()` ka output yahan persist hota hai
+# (summary/quiz jaisa throwaway response NAHI hai — student ko exam se
+# pehle bina regenerate kiye baar-baar khud revise karna hota hai, isliye
+# ek row save karke rakhte hain). Har naya "Generate Revision Deck" tap
+# ek naya row banata hai (history rakhte hain — purana deck bhi kaam aa
+# sakta hai agar naya content thoda kam ho); frontend latest wala
+# (`-created_at` default ordering, `BaseModel.Meta`) fetch karta hai.
+# ======================================================================
+class RevisionDeck(BaseModel):
+    conversation = models.ForeignKey(
+        Conversation, on_delete=models.CASCADE, related_name='revision_decks',
+    )
+    # Optional — kis study-room session ke content se ye deck bana, taaki
+    # future me "is specific class ka revision deck do" bhi possible ho.
+    # Blank chhod sakte ho jab deck poore-conversation-level content
+    # (multiple sessions/chat combined) se bana ho.
+    session_id = models.CharField(max_length=150, blank=True, default='', db_index=True)
+
+    flashcards = models.JSONField(default=list, blank=True)
+    quiz = models.JSONField(default=list, blank=True)
+
+    generated_by = models.ForeignKey(
+        User, null=True, blank=True, on_delete=models.SET_NULL, related_name='+',
+    )
+
+    class Meta(BaseModel.Meta):
+        indexes = [
+            models.Index(fields=['conversation', '-created_at']),
+        ]
+
+    def __str__(self):
+        return f"RevisionDeck({self.conversation_id}, {len(self.flashcards)} cards)"
+
+
+# ======================================================================
+# 🔥 NAYA — STUDY ROOM ATTENDANCE (Feature 6: consistency streak)
+# ------------------------------------------------------------
+# `StudyRoomJoinView` (views.py) pehle sirf ek in-memory/cache-based
+# "current session" pointer rakhta tha — koi permanent per-user join
+# history kabhi persist nahi hoti thi (confirmed: `CallParticipant` sirf
+# 1:1/group CALLS ke liye hai, study-room join usko touch hi nahi karta).
+# Isliye "SessionParticipant se free mein nikal sakte ho" wali assumption
+# sahi nahi thi — ye table hi streak ka data-source banega, ab se har
+# study-room join yahan ek row banayega (`StudyRoomJoinView.post()` me).
+#
+# `attended_date` deliberately ek alag DateField hai (`created_at` ka
+# `.date()` nahi) — agar kabhi timezone-aware "attendance day" ko server
+# timezone ke bajaye kisi aur logic se decide karna pade (e.g. class ka
+# apna timezone), ye field independently set/backfill ho sakta hai bina
+# `created_at` (jo BaseModel khud manage karta hai) ko chhede.
+# ======================================================================
+class StudyRoomAttendance(BaseModel):
+    conversation = models.ForeignKey(
+        Conversation, on_delete=models.CASCADE, related_name='study_room_attendances',
+    )
+    user = models.ForeignKey(
+        User, on_delete=models.CASCADE, related_name='study_room_attendances',
+    )
+    session_id = models.CharField(max_length=150, blank=True, default='')
+    attended_date = models.DateField(default=timezone.localdate, db_index=True)
+
+    class Meta(BaseModel.Meta):
+        indexes = [
+            # Streak calculation ka main query: "is user ne is conversation
+            # me kin-kin dates pe attend kiya" — descending date order me.
+            models.Index(fields=['conversation', 'user', '-attended_date']),
+        ]
+        # Same din multiple baar join karna (disconnect-reconnect, leave-
+        # rejoin) ek hi din ki attendance count honi chahiye, do din ki
+        # nahi — isliye (conversation, user, attended_date) par unique.
+        constraints = [
+            models.UniqueConstraint(
+                fields=['conversation', 'user', 'attended_date'],
+                name='unique_study_room_attendance_per_day',
+            )
+        ]
+
+    def __str__(self):
+        return f"{self.user_id} attended {self.conversation_id} on {self.attended_date}"
+
+
+# ============================================================================
+# DOUBT QUEUE — persistent, upvotable per-classroom(group) question board
+# ============================================================================
+class DoubtQuestion(BaseModel):
+    """
+    Ek student ka doubt/question, ek group (classroom) ke andar. Chat ke
+    normal message-stream se ALAG hai — apna khud ka "Doubts" tab/endpoint
+    hai, taaki same doubt baar-baar alag messages me na bikhre aur
+    upvote-count se sabse common doubt upar aa jaaye.
+
+    `group` + `conversation` dono rakhe hain: `group` queries/permission ke
+    liye (`group_rules.is_group_admin_or_mod(doubt.group, ...)`), `conversation`
+    isliye taaki WS broadcast `chat_{conversation_id}` room reuse ho sake
+    (ChatConsumer already isi room se connected hai — koi naya WS group
+    banane ki zaroorat nahi).
+
+    `author` HAMESHA asli poochne wala user hi hota hai, chahe `is_anonymous`
+    True ho ya False — anonymity sirf DISPLAY-level hai
+    (`DoubtQuestionSerializer.get_author`), DB me identity kabhi khoti nahi
+    (moderation/abuse ke liye zaroori hai, aur teacher `reveal` action se
+    dobara dekh sakta hai).
+    """
+    group = models.ForeignKey(Group, on_delete=models.CASCADE, related_name='doubts')
+    conversation = models.ForeignKey(Conversation, on_delete=models.CASCADE, related_name='doubts')
+    author = models.ForeignKey(
+        User, on_delete=models.CASCADE, related_name='doubts_asked',
+    )
+    text = models.TextField(max_length=2000)
+
+    # Display-level anonymity (see docstring above) — `is_anonymous=True`
+    # par bhi `author` column me asli user hi save hota hai.
+    is_anonymous = models.BooleanField(default=False)
+    # 🔥 Teacher ne is anonymous doubt ke liye `reveal` action call ki hai —
+    # ab admin/moderator ko is doubt ke `author` ka naam dikhega (student ko
+    # khud ko aur baaki students ko abhi bhi nahi dikhega). One-way flag,
+    # kabhi wapas False nahi hota (jo dikh chuka wo dikh chuka).
+    is_revealed = models.BooleanField(default=False)
+
+    # Denormalized counter — `DoubtUpvote` ki `.count()` baar baar na chalani
+    # pade (list view sabse zyada-hit query hai, "sabse upvoted upar"
+    # ordering ke saath), `upvote`/`un-upvote` action isko `F()` se atomically
+    # update karta hai.
+    upvotes_count = models.PositiveIntegerField(default=0)
+
+    is_answered = models.BooleanField(default=False)
+    answer_text = models.TextField(blank=True, default='')
+    answered_by = models.ForeignKey(
+        User, null=True, blank=True,
+        on_delete=models.SET_NULL, related_name='doubts_answered',
+    )
+    answered_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta(BaseModel.Meta):
+        # Sabse-upvoted pehle, phir naya-pehle — "Doubts" tab default view
+        # exactly isi order me list karta hai taaki teacher ko common doubt
+        # sabse pehle dikhe.
+        ordering = ['-upvotes_count', '-created_at']
+        indexes = [
+            models.Index(fields=['group', 'is_answered', '-upvotes_count']),
+        ]
+
+
+class DoubtUpvote(BaseModel):
+    """
+    "मुझे भी yahi doubt hai" — ek user ek doubt ko sirf ek baar upvote kar
+    sakta hai (`unique_together`), toggle off karne ke liye row delete hoti
+    hai. Apna khud ka doubt bhi upvote kar sakta hai (server explicitly
+    isko block nahi karta — WhatsApp poll me bhi khud ka option select karna
+    allowed hota hai, yahan bhi wahi spirit hai; agar chaho to
+    `DoubtQuestionViewSet.upvote` me ek line se `author == user` block kar
+    sakte ho).
+    """
+    doubt = models.ForeignKey(DoubtQuestion, on_delete=models.CASCADE, related_name='upvotes')
+    user = models.ForeignKey(
+        User, on_delete=models.CASCADE, related_name='doubt_upvotes',
+    )
+
+    class Meta(BaseModel.Meta):
+        unique_together = ('doubt', 'user')
+
+
+# ======================================================================
+# 🔥 NAYA — PARENT / GUARDIAN MODE (Feature 8)
+# ------------------------------------------------------------
+# Scope, deliberately narrow: read-only, AGGREGATE-only view for a
+# parent/guardian. NEVER chat content, NEVER message text, NEVER contact
+# details beyond the student's display name. Only:
+#   - attendance (reuses `StudyRoomAttendance`, per classroom)
+#   - assignment status (new `Assignment`/`AssignmentSubmission` below —
+#     this app had NO assignment concept anywhere before this; it's new
+#     groundwork, added specifically so "assignment pending" has real
+#     data instead of being a placeholder number)
+#
+# Parents do NOT get a normal `User` row / login here. Flow:
+#   1. Student generates a "Parent Code" from their own app
+#      (`ParentAccessCodeView`, needs the student's own login).
+#   2. Student shares that code with the parent (WhatsApp/SMS/in person).
+#   3. Parent opens "Parent Mode" in the app (no student login needed),
+#      types the code in -> `ParentVerifyCodeView` checks it and returns
+#      a `parent_token` that can ONLY ever hit the `/parent/...`
+#      read-only routes (`permissions.HasValidParentToken`).
+#
+# One code = one (student, relationship-label) pair — a student can hand
+# separate codes to mom and dad and revoke either independently, without
+# touching their own main account/login at all.
+# ======================================================================
+class ParentAccessCode(BaseModel):
+    student = models.ForeignKey(
+        User, on_delete=models.CASCADE, related_name='parent_access_codes',
+    )
+    # Cosmetic — lets the STUDENT tell their own codes apart in their
+    # "Manage parent access" screen ("Mom", "Papa", ...). Never shown to
+    # the parent, no effect on access/permissions.
+    label = models.CharField(max_length=50, blank=True, default='')
+
+    # Short, easy to read-aloud/type code. NOT the long-term secret by
+    # itself — see `throttles.ParentCodeVerifyThrottle` for brute-force
+    # protection on the verify endpoint; the real bearer credential is
+    # the `ParentToken` issued after a successful verify.
+    code = models.CharField(max_length=12, unique=True, db_index=True)
+
+    is_active = models.BooleanField(default=True)
+    last_used_at = models.DateTimeField(null=True, blank=True)
+
+    # 🔧 GAP FIX — TTL / auto-expiry. Pehle code + tokens dono hamesha
+    # valid rehte the jab tak student khud revoke na kare — parent ka
+    # phone kho jaaye to unauthorized access indefinitely chalta rehta
+    # tha. Ab har code ki ek absolute expiry hai; expire hone ke baad
+    # (a) naya `ParentToken` verify NAHI ho sakta (`ParentVerifyCodeView`
+    # 410 deta hai), aur (b) is code se pehle se verify hue saare
+    # tokens bhi turant invalid ho jaate hain (`HasValidParentToken`
+    # check karta hai) — matlab ek expired code effectively `is_active
+    # =False` jaisa hi behave karta hai, bas student ke explicit revoke
+    # ke bina. Student "Renew" tap karke isi code ko fresh TTL de sakta
+    # hai bina parent ko naya code dobara share kiye (`renew()` neeche).
+    DEFAULT_TTL_DAYS = 180  # ~6 mahine — school-term jaisa reasonable default
+
+    expires_at = models.DateTimeField(null=True, blank=True, db_index=True)
+
+    # 🔧 GAP FIX — reveal-once exposure surface. Pehle GET har baar
+    # plaintext `code` return karta tha — "Manage parent access" screen
+    # khulte hi saare active codes plain text me dikh jaate the. Ab list
+    # sirf `masked_code` dikhata hai; poora plaintext sirf 2 jagah milta
+    # hai: (a) generation ke turant baad (POST response — natural
+    # "reveal once at creation" moment), (b) student explicitly
+    # `POST /parent/codes/<id>/reveal/` tap kare — throttled + audited
+    # (`last_revealed_at`), taaki compromised session/device se bulk-
+    # scrape na ho sake, aur student ko khud pata rahe last baar kab
+    # dobara dekha gaya tha.
+    last_revealed_at = models.DateTimeField(null=True, blank=True)
+
+    @property
+    def masked_code(self):
+        # e.g. "7F3K9QRT" -> "••••9QRT" — aakhri 4 chars kaafi hain
+        # student ke liye "haan yahi wala code hai" confirm karne ko,
+        # bina poora plaintext expose kiye.
+        if len(self.code) <= 4:
+            return '•' * len(self.code)
+        return ('•' * (len(self.code) - 4)) + self.code[-4:]
+
+    class Meta(BaseModel.Meta):
+        indexes = [
+            models.Index(fields=['student', 'is_active']),
+            models.Index(fields=['is_active', 'expires_at']),
+        ]
+
+    @staticmethod
+    def _generate_code():
+        # No 0/O/1/I — avoids a parent misreading/mistyping a shared code.
+        alphabet = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'
+        return ''.join(secrets.choice(alphabet) for _ in range(8))
+
+    @classmethod
+    def generate_for(cls, student, label='', ttl_days=None):
+        ttl_days = ttl_days if ttl_days is not None else cls.DEFAULT_TTL_DAYS
+        for _ in range(5):
+            code = cls._generate_code()
+            if not cls.objects.filter(code=code).exists():
+                return cls.objects.create(
+                    student=student,
+                    label=label,
+                    code=code,
+                    expires_at=timezone.now() + timedelta(days=ttl_days),
+                )
+        raise RuntimeError("Parent code generate nahi ho paaya, dobara try karo.")
+
+    @property
+    def is_expired(self):
+        return self.expires_at is not None and self.expires_at <= timezone.now()
+
+    def renew(self, ttl_days=None):
+        """Same code/devices ko fresh TTL do — parent ko dobara verify
+        karne ki zaroorat nahi padti, sirf student side se ek tap."""
+        ttl_days = ttl_days if ttl_days is not None else self.DEFAULT_TTL_DAYS
+        self.expires_at = timezone.now() + timedelta(days=ttl_days)
+        self.is_active = True
+        self.save(update_fields=['expires_at', 'is_active', 'updated_at'])
+        return self
+
+    def __str__(self):
+        return f"ParentAccessCode({self.student_id}, {self.label or 'unnamed'})"
+
+
+class ParentToken(BaseModel):
+    """
+    Verify hone ke baad ka asli bearer credential jo parent ki app store
+    karti hai (student ke `access_token` jaisa hi idea, bas scope bahut
+    chhota — sirf `/parent/...` read-only routes, kabhi bhi normal
+    chat/message/group endpoint hit nahi kar sakta — enforced in
+    `permissions.HasValidParentToken`, jo `request.user` ko bilkul chhoo
+    ta nahi, taaki ye kahin bhi "student khud request kar raha hai" jaisa
+    accidentally treat na ho jaaye).
+
+    Code se decouple isliye kiya hai: (a) parent apna phone badle to
+    student ko naya code nahi dena padta — parent dobara same code
+    verify kare, naya token mil jaata hai; (b) student jab chahe saara
+    access ek saath `ParentAccessCode.is_active=False` karke revoke kar
+    sakta hai, sabhi is code ke tokens automatically invalid ho jaate hain.
+    """
+    parent_access_code = models.ForeignKey(
+        ParentAccessCode, on_delete=models.CASCADE, related_name='tokens',
+    )
+    token = models.CharField(max_length=64, unique=True, db_index=True)
+    last_seen_at = models.DateTimeField(null=True, blank=True)
+
+    # 🔧 GAP FIX — rolling inactivity expiry, independent of the parent
+    # code's own `expires_at`. Ek device 30 din tak dashboard hit nahi
+    # karta (phone kho gaya/app uninstall/parent ne bas dekhna band kar
+    # diya) to *sirf wo device* apne aap invalid ho jaata hai — student
+    # ko manually revoke karne ki zaroorat nahi, aur baaki devices
+    # (agar koi active hain) untouched rehte hain. Note: is check ke
+    # kaam karne ke liye `last_seen_at` ko har successful dashboard
+    # fetch pe update hona zaroori hai — see `HasValidParentToken`.
+    INACTIVITY_TTL_DAYS = 30
+
+    @staticmethod
+    def generate_token():
+        return secrets.token_urlsafe(32)
+
+    @property
+    def is_expired(self):
+        reference = self.last_seen_at or self.created_at
+        if reference is None:
+            return False
+        return timezone.now() - reference > timedelta(days=self.INACTIVITY_TTL_DAYS)
+
+    def touch(self):
+        """Mark this device as seen right now — call on every authenticated
+        parent-side request so inactivity expiry is measured correctly."""
+        self.last_seen_at = timezone.now()
+        self.save(update_fields=['last_seen_at', 'updated_at'])
+
+
+# ----------------------------------------------------------------------
+# ASSIGNMENTS — minimal tracking, added so "assignment pending" in the
+# parent dashboard is real data. Nothing else in the app touches this
+# yet (no teacher-facing "create assignment" UI included here) — this is
+# intentionally the smallest schema that supports the parent-view number;
+# a teacher-facing create/submit flow can build on top without changing
+# this shape.
+#
+# 🔧 FIX (this session) — `related_name` on both FKs below renamed
+# (`assignments` -> `message_assignments`, `assignment_submissions` ->
+# `message_assignment_submissions`) because a separate `liveclass` app
+# already defines its own `Assignment`/`AssignmentSubmission` models with
+# the SAME related_names pointing at the SAME `User`/`Group` models.
+# Django can't register two identical reverse accessors on `User`, so
+# `makemigrations` failed with fields.E304/E305 until these were made
+# unique. NOTE: if `liveclass.Assignment` is meant to be the SAME concept
+# as this one (not a different feature that happens to share a name), the
+# better long-term fix is to delete this duplicate pair entirely and have
+# the parent-dashboard code query `liveclass.Assignment` instead — see
+# chat discussion. Kept here for now since that's a bigger structural
+# decision than a naming clash fix.
+# ----------------------------------------------------------------------
+class Assignment(BaseModel):
+    group = models.ForeignKey(
+        Group, on_delete=models.CASCADE, related_name='message_assignments',
+    )
+    title = models.CharField(max_length=200)
+    description = models.TextField(blank=True, default='')
+    due_at = models.DateTimeField(null=True, blank=True)
+    created_by = models.ForeignKey(
+        User, on_delete=models.SET_NULL, null=True, blank=True, related_name='+',
+    )
+
+    class Meta(BaseModel.Meta):
+        indexes = [
+            models.Index(fields=['group', 'due_at']),
+        ]
+
+    def __str__(self):
+        return f"{self.title} ({self.group_id})"
+
+
+class AssignmentSubmission(BaseModel):
+    assignment = models.ForeignKey(Assignment, on_delete=models.CASCADE, related_name='submissions')
+    student = models.ForeignKey(
+        User, on_delete=models.CASCADE, related_name='message_assignment_submissions',
+    )
+    is_submitted = models.BooleanField(default=False)
+    submitted_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta(BaseModel.Meta):
+        unique_together = ('assignment', 'student')
+        indexes = [
+            models.Index(fields=['student', 'is_submitted']),
+        ]
+
+
+# ----------------------------------------------------------------------
+# 🔧 FIX (merged from models_focus.py) — Feature 12: Smart DND / Focus
+# Mode. Was documented as a separate merge-in file that was never
+# actually pasted into models.py, so `from .models import FocusSession`
+# in views_focus.py raised ImportError the moment that file got
+# imported. `BaseModel`, `models`, and `settings` are already imported
+# at the top of this file — no new imports needed.
+# ----------------------------------------------------------------------
+class FocusSession(BaseModel):
+    """
+    Ek active "focus window" — student ne khud set kiya hai ki agle N
+    minutes/hours sirf teacher/staff ke pings aayenge, baaki sab mute.
+
+    Ek time pe user ka sirf EK active session hota hai — naya start
+    purane ko replace kar deta hai (extend/overwrite), stack nahi hote.
+    """
+
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name="focus_sessions",
+    )
+    starts_at = models.DateTimeField(auto_now_add=True)
+    ends_at = models.DateTimeField(db_index=True)
+
+    # Exception rule — kaun ke messages phir bhi through aayenge.
+    # 'teachers_only' (default) = sirf un groups ke admin/moderator jinme
+    # user member hai. 'nobody' = poora silence, koi bhi exception nahi
+    # (hard focus mode, exam jaisa).
+    class ExceptionRule(models.TextChoices):
+        TEACHERS_ONLY = "teachers_only", "Only teachers/staff"
+        NOBODY = "nobody", "Nobody — full silence"
+
+    exception_rule = models.CharField(
+        max_length=20,
+        choices=ExceptionRule.choices,
+        default=ExceptionRule.TEACHERS_ONLY,
+    )
+
+    # user ne khud jab band kiya (auto-expire se pehle) — analytics/UI ke
+    # liye useful ("cancelled early" vs "ran full duration").
+    cancelled_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        ordering = ["-starts_at"]
+        indexes = [
+            models.Index(fields=["user", "ends_at"]),
+        ]
+
+    def __str__(self):
+        return f"FocusSession(user={self.user_id}, ends_at={self.ends_at}, rule={self.exception_rule})"
+
+    @property
+    def is_active(self):
+        return self.cancelled_at is None and self.ends_at > timezone.now()
+
+    @classmethod
+    def get_active_for_user(cls, user_id):
+        """Returns the active FocusSession for a user, or None."""
+        return (
+            cls.objects.filter(
+                user_id=user_id,
+                ends_at__gt=timezone.now(),
+                cancelled_at__isnull=True,
+            )
+            .order_by("-starts_at")
+            .first()
+        )
+
+    @classmethod
+    def start_for_user(cls, user, duration_minutes, exception_rule=ExceptionRule.TEACHERS_ONLY):
+        """
+        Race-safe-ish start: purana active session (agar hai) cancel kar
+        ke naya bana do — ek user ka ek hi session zinda rehta hai.
+        """
+        cls.objects.filter(
+            user=user, ends_at__gt=timezone.now(), cancelled_at__isnull=True
+        ).update(cancelled_at=timezone.now())
+        return cls.objects.create(
+            user=user,
+            ends_at=timezone.now() + timedelta(minutes=duration_minutes),
+            exception_rule=exception_rule,
+        )

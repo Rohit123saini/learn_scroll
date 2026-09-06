@@ -17,8 +17,10 @@ banti hain):
 Plain APIViews (@action-based nahi, isliye manual path()):
     - UserPresenceView, CallInitiateView, CallActionView,
       StudyRoomJoinView, StudyRoomStateView, DeviceTokenView,
-      AiStudyRoomView, VoiceTranscribeView, SmartReplySuggestionsView
-      (all in views_ai.py), MessageUploadAPIView (upload_view.py)
+      AiStudyRoomView, VoiceTranscribeView, SmartReplySuggestionsView,
+      ClassTranscriptChunkUploadView, ClassTranscriptSearchView,
+      ClassroomCopilotView (all in views_ai.py — last 3 are NAYA, see
+      §Feature 3/4 below), MessageUploadAPIView (upload_view.py)
 
 NOTE: `views_ai.py` aur `upload_view.py` is review me upload nahi hui
 thi — sirf documentation aur `views.py`'s existing import se naam
@@ -36,11 +38,16 @@ from .views import (
     CallInitiateView,
     ConversationViewSet,
     DeviceTokenView,
+    # 🔥 NAYA — Doubt Queue ("persistent, upvotable question board per
+    # classroom" + "Ask Anonymously")
+    DoubtQuestionViewSet,
     GroupViewSet,
     MessageViewSet,
     ReadReceiptSettingsView,
     StudyRoomJoinView,
     StudyRoomStateView,
+    # 🔥 NAYA — Feature 6: attendance/consistency streak
+    StudyRoomStreakView,
     UserPresenceView,
 )
 # 🔥 FIX — `VoiceTranscribeView` (views_ai.py) is fully implemented, has
@@ -48,8 +55,33 @@ from .views import (
 # route (`POST /message/ai/transcribe/`) — but only `AiStudyRoomView` was
 # ever imported/routed here, so the transcribe endpoint was unreachable
 # (404) despite being complete. Wiring it in below.
-from .views_ai import AiStudyRoomView, VoiceTranscribeView, SmartReplySuggestionsView
+from .views_ai import (
+    AiStudyRoomView, VoiceTranscribeView, SmartReplySuggestionsView,
+    # 🔥 NAYA — class transcript (chunk upload + search) + classroom copilot
+    ClassTranscriptChunkUploadView, ClassTranscriptSearchView, ClassroomCopilotView,
+    # 🔥 NAYA — Feature 5: revision deck (flashcards + quiz from class materials)
+    RevisionDeckView,
+)
 from .upload_view import MessageUploadAPIView
+# 🔥 NAYA — Parent/Guardian Mode (Feature 8): student-side code
+# management + parent-side (no-login) verify/dashboard.
+from .views_parent import (
+    ParentAccessCodeView,
+    # 🔧 NAYA — renew an expiring/expired code without re-sharing it
+    ParentAccessCodeRenewView,
+    # 🔧 NAYA — reveal-once: explicit re-reveal of the full plaintext code
+    ParentAccessCodeRevealView,
+    ParentCodeTokenDetailView,
+    ParentCodeTokensView,
+    ParentDashboardView,
+    ParentVerifyCodeView,
+)
+# 🔧 GAP FIX — Feature 12 (Focus Mode / Smart DND): `FocusSessionView`
+# was fully coded in `views_focus.py` (its own header comment even gives
+# this exact import + path snippet) but was never actually imported/
+# routed here, so the endpoint was unreachable (404) end-to-end despite
+# `focus_mode_screen.dart` already calling it. Wiring it in below.
+from .views_focus import FocusSessionHistoryView, FocusSessionView
 
 # 🔧 GAP FIX (this session) — `PROJECT_ARCHITECTURE.md` §"API surface" and
 # `message_api_service.dart` BOTH describe the scheduled-message contract as
@@ -93,6 +125,12 @@ urlpatterns = [
     path('study-room/<uuid:conversation_id>/join/', StudyRoomJoinView.as_view(), name='study-room-join'),
     path('study-room/<uuid:conversation_id>/state/', StudyRoomStateView.as_view(), name='study-room-state'),
 
+    # --- Attendance / consistency streak (NAYA, Feature 6) ---
+    path('study-room/<uuid:conversation_id>/streak/', StudyRoomStreakView.as_view(), name='study-room-streak'),
+
+    # --- Revision Deck: flashcards + quiz from class materials (NAYA, Feature 5) ---
+    path('study-room/<uuid:conversation_id>/revision-deck/', RevisionDeckView.as_view(), name='study-room-revision-deck'),
+
     # --- Device tokens (push notifications) ---
     path('device-token/', DeviceTokenView.as_view(), name='device-token'),
 
@@ -104,6 +142,21 @@ urlpatterns = [
 
     # --- AI Smart-reply suggestions (NAYA) ---
     path('ai/smart-replies/', SmartReplySuggestionsView.as_view(), name='ai-smart-replies'),
+
+    # --- Class transcript: chunk upload + timestamped search (NAYA) ---
+    path(
+        'study-room/<uuid:conversation_id>/transcript-chunk/',
+        ClassTranscriptChunkUploadView.as_view(),
+        name='class-transcript-chunk-upload',
+    ),
+    path(
+        'study-room/<uuid:conversation_id>/transcript/',
+        ClassTranscriptSearchView.as_view(),
+        name='class-transcript-search',
+    ),
+
+    # --- Classroom Copilot: AI grounded in full classroom context (NAYA) ---
+    path('ai/classroom-copilot/', ClassroomCopilotView.as_view(), name='ai-classroom-copilot'),
 
     # --- Generic file upload (returns a URL to attach to a message) ---
     path('upload/', MessageUploadAPIView.as_view(), name='message-upload'),
@@ -130,6 +183,74 @@ urlpatterns = [
         GroupViewSet.as_view({'delete': 'remove_photo'}),
         name='group-photo-alias',
     ),
+
+    # --- Doubt Queue (NAYA) — persistent, upvotable question board per
+    # classroom/group, + "Ask Anonymously" (`Group.allow_anonymous_doubts`,
+    # toggled via the existing `PATCH /groups/<id>/` GroupSerializer field —
+    # no separate toggle endpoint needed). Nested under the group, not
+    # routed via DefaultRouter (see views.py DoubtQuestionViewSet docstring
+    # for why: group-membership is enforced once in `get_group()`, shared
+    # by every action below). ---
+    path(
+        'groups/<uuid:group_id>/doubts/',
+        DoubtQuestionViewSet.as_view({'get': 'list', 'post': 'create'}),
+        name='group-doubts',
+    ),
+    path(
+        'groups/<uuid:group_id>/doubts/<uuid:pk>/upvote/',
+        DoubtQuestionViewSet.as_view({'post': 'upvote', 'delete': 'upvote'}),
+        name='group-doubt-upvote',
+    ),
+    path(
+        'groups/<uuid:group_id>/doubts/<uuid:pk>/answer/',
+        DoubtQuestionViewSet.as_view({'post': 'answer'}),
+        name='group-doubt-answer',
+    ),
+    path(
+        'groups/<uuid:group_id>/doubts/<uuid:pk>/reveal/',
+        DoubtQuestionViewSet.as_view({'post': 'reveal'}),
+        name='group-doubt-reveal',
+    ),
+
+    # --- Parent/Guardian Mode (NAYA, Feature 8) ---
+    # Student-side (own login): generate/list/revoke parent codes.
+    path('parent/codes/', ParentAccessCodeView.as_view(), name='parent-codes'),
+    # 🔧 NAYA — extend an existing code's TTL in place (see views_parent.py)
+    path(
+        'parent/codes/<uuid:code_id>/renew/',
+        ParentAccessCodeRenewView.as_view(),
+        name='parent-code-renew',
+    ),
+    # 🔧 NAYA — reveal-once: re-show the full plaintext code on demand
+    path(
+        'parent/codes/<uuid:code_id>/reveal/',
+        ParentAccessCodeRevealView.as_view(),
+        name='parent-code-reveal',
+    ),
+    # 🔧 NEW — per-device management within one code (revoke a single lost
+    # device without killing every other device on the same shared code).
+    path(
+        'parent/codes/<uuid:code_id>/tokens/',
+        ParentCodeTokensView.as_view(),
+        name='parent-code-tokens',
+    ),
+    path(
+        'parent/codes/<uuid:code_id>/tokens/<uuid:token_id>/',
+        ParentCodeTokenDetailView.as_view(),
+        name='parent-code-token-detail',
+    ),
+    # Parent-side (no login): redeem a code, then hit the dashboard with
+    # the returned `parent_token` in an `X-Parent-Token` header.
+    path('parent/verify/', ParentVerifyCodeView.as_view(), name='parent-verify'),
+    path('parent/dashboard/', ParentDashboardView.as_view(), name='parent-dashboard'),
+
+    # --- Focus Mode / Smart DND (🔧 GAP FIX — Feature 12) ---
+    # Single path, method-differentiated: POST=start, GET=status, DELETE=cancel.
+    # See `views_focus.py`'s own header comment for the original snippet.
+    path('focus-session/', FocusSessionView.as_view(), name='focus-session'),
+    # 🔧 NAYA — past sessions (start/end/duration/exception-rule), so a
+    # student can see how much they've actually used Focus Mode.
+    path('focus-session/history/', FocusSessionHistoryView.as_view(), name='focus-session-history'),
 ]
 
 # ==============================================================================
@@ -176,10 +297,22 @@ urlpatterns = [
 #   PATCH/DELETE /groups/<id>/members/<user_id>/
 #   GET        /groups/<id>/media/
 #
+#   GET/POST   /groups/<id>/doubts/?status=answered|unanswered           (NAYA)
+#   POST/DELETE /groups/<id>/doubts/<doubt_id>/upvote/                   (NAYA)
+#   POST       /groups/<id>/doubts/<doubt_id>/answer/                    (NAYA, admin/mod)
+#   POST       /groups/<id>/doubts/<doubt_id>/reveal/                    (NAYA, admin/mod)
+#
 #   GET/POST/DELETE /blocked-users/, /blocked-users/<lookup>/
 #
 #   GET        /calls/history/
 #   GET        /calls/history/missed/?since=<iso>
 #   GET        /calls/history/<call_id>/addable-participants/
 #   POST       /calls/history/<call_id>/add-participant/
+#
+#   GET/POST/DELETE /parent/codes/        (NAYA, student login required)
+#   POST       /parent/codes/<id>/renew/  (NAYA, extend TTL in place)
+#   GET        /parent/codes/<id>/tokens/           (NAYA, per-device list)
+#   DELETE     /parent/codes/<id>/tokens/<token_id>/ (NAYA, per-device revoke)
+#   POST       /parent/verify/            (NAYA, no login — parent side; 410 if code expired)
+#   GET        /parent/dashboard/         (NAYA, X-Parent-Token header)
 # ==============================================================================

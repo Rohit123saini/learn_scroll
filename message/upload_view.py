@@ -28,7 +28,6 @@
 import os
 import uuid
 
-from django.conf import settings
 from django.core.files.storage import default_storage
 from django.utils import timezone
 from rest_framework import status
@@ -104,9 +103,23 @@ class MessageUploadAPIView(APIView):
         )
 
         saved_path = default_storage.save(relative_path, f)
-        file_url = request.build_absolute_uri(
-            settings.MEDIA_URL + saved_path.replace('\\', '/')
-        )
+
+        # 🔧 GAP FIX — this used to hand-build the URL as
+        # `request.build_absolute_uri(MEDIA_URL + saved_path)`, which only
+        # makes sense for local `FileSystemStorage` (MEDIA_URL is a
+        # relative path served by *this* app). Under S3 (`USE_S3_STORAGE`,
+        # see settings.py) `default_storage.url()` already returns a full
+        # `https://bucket.s3...` (or CDN/custom-domain) URL — running that
+        # through `build_absolute_uri` a second time would double up the
+        # scheme/host and produce a broken link. `default_storage.url()`
+        # is storage-agnostic: it returns the right thing for whichever
+        # backend is actually active, so this now works unchanged under
+        # both.
+        storage_url = default_storage.url(saved_path)
+        if storage_url.startswith('http://') or storage_url.startswith('https://'):
+            file_url = storage_url
+        else:
+            file_url = request.build_absolute_uri(storage_url)
 
         return Response(
             {

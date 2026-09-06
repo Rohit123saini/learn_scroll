@@ -96,7 +96,7 @@ from asgiref.sync import sync_to_async
 from channels.db import database_sync_to_async
 from channels.generic.websocket import AsyncJsonWebsocketConsumer
 
-from .models import ClassSession
+from .models import Classroom, ClassSession
 from .realtime import (
     broadcast_to_session,
     check_connect_rate_limit,
@@ -139,6 +139,19 @@ def _session_and_access(session_id, user):
     if session is None:
         return None, False
     return session, _has_room_access(session.classroom, user)
+
+
+@database_sync_to_async
+def _classroom_exists(classroom_id) -> bool:
+    """Existence-only check for ClassroomConsumer.connect() — mirrors
+    _session_and_access's session lookup above, but classroom.stats
+    (rating_avg/rating_count/enrolled_count — see models.py's
+    _broadcast_classroom_stats) is public marketplace info, same as
+    ClassroomViewSet's own IsAuthenticated-only (no per-object ownership
+    check) permission — so there's no access boolean to compute here,
+    just "does this id refer to a real row" (mirrors SessionConsumer's
+    4404 for a bad session_id)."""
+    return Classroom.objects.filter(pk=classroom_id).exists()
 
 
 class SessionConsumer(AsyncJsonWebsocketConsumer):
@@ -473,4 +486,93 @@ class UserConsumer(AsyncJsonWebsocketConsumer):
     # user_event) by Channels' own naming convention, the exact mechanism
     # SessionConsumer.session_event relies on for "session.event".
     async def user_event(self, message):
+        await self.send_json({"event": message["event"], "payload": message["payload"], "ts": message.get("ts")})
+
+
+# NEW (fix — classroom stats realtime push): a client connects to
+# ws/liveclass/classroom/<id>/ and gets everything views.py/models.py
+# pushes via realtime.broadcast_to_classroom() for THAT classroom —
+# currently just `classroom.stats` (rating_avg/rating_count/enrolled_count
+# — see models.py's _broadcast_classroom_stats, already called from
+# Classroom.refresh_rating()/refresh_enrolled_count()). Fixes
+# classroom_detail_screen.dart's `LiveClassClassroomSocket`, which already
+# connects to exactly this route (see that file's own "NEEDS A BACKEND
+# COUNTERPART" comment) and previously had nothing to talk to — every
+# connection attempt failed and the screen fell back to its (much longer)
+# backstop poll.
+#
+# Mirrors UserConsumer immediately above almost exactly — same
+# auth-only gate (no further per-object permission, since classroom.stats
+# is public marketplace info any current viewer cares about, matching
+# ClassroomViewSet's own IsAuthenticated-only permission), same thin
+# shape (no presence, no replay buffer, no idle watchdog), same shared
+# WS-connect rate limiter. The one addition SessionConsumer has that
+# UserConsumer doesn't: a DB existence check on connect, since (unlike
+# UserConsumer's user-scoped group, which always "exists" for any
+# authenticated caller) a client can pass an arbitrary/stale classroom id
+# in the URL and there should be a real 404 rather than silently joining
+# a group nothing will ever publish to.
+class ClassroomConsumer(AsyncJsonWebsocketConsumer):
+    async def connect(self):
+        self.classroom_id = self.scope["url_route"]["kwargs"]["classroom_id"]
+        user = self.scope.get("user")
+        if user is None or not user.is_authenticated:
+            await self.close(code=4401)  # 4401: app-defined "unauthenticated", same as Session/UserConsumer
+            return
+
+        # Shared with SessionConsumer/UserConsumer — see UserConsumer's
+        # own comment on why the same per-user budget is reused across
+        # every socket type rather than each getting its own counter.
+        allowed = await sync_to_async(check_connect_rate_limit)(user.id)
+        if not allowed:
+            await self.close(code=4429)  # 4429: app-defined "too many connection attempts"
+            return
+
+        exists = await _classroom_exists(self.classroom_id)
+        if not exists:
+            await self.close(code=4404)
+            return
+
+        self.user_id = user.id
+        self.group_name = f"classroom.{self.classroom_id}"
+        await self.channel_layer.group_add(self.group_name, self.channel_name)
+        await self.accept()
+        await self.send_json(
+            {
+                "event": "connection.ack",
+                "payload": {"classroom_id": int(self.classroom_id)},
+                "ts": time.time(),
+            }
+        )
+
+    async def disconnect(self, close_code):
+        if hasattr(self, "group_name"):
+            await self.channel_layer.group_discard(self.group_name, self.channel_name)
+
+    async def receive_json(self, content, **kwargs):
+        # Read-only, same spirit as Session/UserConsumer — see
+        # SessionConsumer's module docstring for why writes go through
+        # REST, not this socket. Only "ping" is meaningful here.
+        if content.get("type") == "ping":
+            await self.send_json({"event": "pong", "payload": {}})
+            return
+        await self.send_json(
+            {
+                "event": "error",
+                "payload": {
+                    "detail": (
+                        "This socket is read-only and only accepts \"ping\". "
+                        "All writes go through the REST API."
+                    ),
+                },
+            }
+        )
+
+    # Dispatched by Channels when realtime.broadcast_to_classroom() calls
+    # channel_layer.group_send(..., {"type": "classroom.event", ...}) —
+    # the "type" value there maps to this method name (classroom.event ->
+    # classroom_event) by Channels' own naming convention, the same
+    # mechanism SessionConsumer.session_event/UserConsumer.user_event
+    # rely on for their own dotted types.
+    async def classroom_event(self, message):
         await self.send_json({"event": message["event"], "payload": message["payload"], "ts": message.get("ts")})

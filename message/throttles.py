@@ -85,6 +85,17 @@ class ReactionThrottle(UserRateThrottle):
     scope = 'reaction'
 
 
+class TranslateThrottle(UserRateThrottle):
+    """
+    🔥 NAYA — Feature 9: message translate. External translation API
+    (Google Cloud Translate / etc.) har call pe cost karti hai, isliye
+    normal message-send se tighter — 30/min ek user ko kaafi hai, chahe
+    wo poori chat scroll karke translate spam bhi kare.
+    """
+    rate = '30/min'
+    scope = 'translate'
+
+
 # ---------------------------------------------------------------
 # WEBSOCKET SIDE — DRF throttles don't apply to Channels consumers.
 # Ye ek chhota, dependency-free sliding-window limiter hai jo Django cache
@@ -135,6 +146,20 @@ class CallInitiateIPThrottle(ScopedIPThrottle):
     rate = '20/min'
 
 
+# ---------------------------------------------------------------
+# 🔥 NAYA — Parent Mode (Feature 8): `/parent/verify/` is the ONE
+# endpoint in this whole flow that's unauthenticated (`AllowAny` — a
+# parent has no login). `ParentAccessCode.code` is an 8-char code from a
+# 32-symbol alphabet, but "hard to guess" isn't a substitute for a rate
+# limit on an endpoint anyone on the internet can hit — this is per-IP
+# since there's no user to key on yet at this point in the flow.
+# ---------------------------------------------------------------
+class ParentCodeVerifyThrottle(ScopedIPThrottle):
+    """Brute-force guard on parent-code verification (unauthenticated)."""
+    scope = 'parent_code_verify_ip'
+    rate = '10/min'
+
+
 class WSMessageRateLimiter:
     """
     Usage (ChatConsumer.handle_new_message ke start me):
@@ -171,3 +196,53 @@ class WSMessageRateLimiter:
             return False, cls.WINDOW_SECONDS
 
         return True, 0
+
+
+# message/throttles.py — ADDITIONS ONLY
+"""
+⚠️ MERGE NOTE: `throttles.py` upload nahi hui thi is batch me.
+`CHAT_APP_DOCUMENTATION.md` confirm karta hai ki wo already exist karti
+hai (`MessageSendThrottle`, `CallInitiateThrottle`, `GroupCreateThrottle`,
+`ReactionThrottle`, `ParentCodeVerifyThrottle`, `TranslateThrottle`, etc.
+sab already wahan hain). Neeche sirf 2 NAYI classes hain — apni asli
+`throttles.py` ke end me paste kar dena, existing kuch mat chhedo.
+
+Dono ke liye `settings.py`'s `DEFAULT_THROTTLE_RATES` me entry chahiye
+(is app me pehle se hi 7+ scopes is entry ke bina missing hain, jo
+`ImproperlyConfigured` crash deti hain — same category ka bug, isliye
+yahan explicitly likh raha hoon taaki ye do naye scope us list me na
+judein):
+
+    DEFAULT_THROTTLE_RATES = {
+        ...,
+        "focus_session": "20/min",
+        "parent_code_reveal": "10/hour",
+    }
+"""
+from rest_framework.throttling import UserRateThrottle
+
+
+class FocusSessionThrottle(UserRateThrottle):
+    """
+    🔧 GAP FIX — `views_focus.py`'s own header comment already suggested
+    this (scope `focus_session`, `20/min`) as an optional next step, but
+    it was never implemented. Low blast-radius (own-account only, no
+    fan-out) lekin abuse-prevention zero thi — ek user rapid-fire
+    start/cancel spam kar sakta tha (har start/cancel ek DB write hai).
+    20/min free cheez karta hai kisi genuine use-case ko friction dena
+    (koi bhi normal student 20 baar/min focus session start/stop nahi
+    karega) jabki spam-loop ko turant cap kar deta hai.
+    """
+    scope = 'focus_session'
+
+
+class ParentCodeRevealThrottle(UserRateThrottle):
+    """
+    🔧 NEW — `ParentAccessCodeRevealView` (views_parent.py) ke liye.
+    List ab sirf masked code dikhata hai; poora plaintext dobara dekhne
+    ka EK hi rasta hai — ye endpoint. 10/hour kaafi hai kisi genuine
+    "parent ne dobara maanga" case ke liye, lekin agar kisi ka session/
+    device compromise ho jaaye to bhi saare active codes ko bulk-scrape
+    karna is rate pe impractical ho jaata hai.
+    """
+    scope = 'parent_code_reveal'

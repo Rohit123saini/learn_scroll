@@ -4,6 +4,7 @@ import logging
 
 from channels.db import database_sync_to_async
 from channels.generic.websocket import AsyncWebsocketConsumer
+from django.db import transaction
 from django.db.models import Q
 from django.utils import timezone
 
@@ -92,6 +93,24 @@ class ChatConsumer(AsyncWebsocketConsumer):
             {'type': 'presence_update', 'user_id': str(self.user.id), 'is_online': True},
         )
 
+        # 🔥 NAYA — is conversation ke room-group ke alawa, is user ke
+        # baaki saare direct (1-1) chat-partners ko bhi turant batao ki
+        # ye online ho gaya — taaki unki contact-list/chat-list bhi (jo
+        # kabhi is conversation ka room join hi nahi karti) turant update
+        # ho sake, `UserPresenceView`'s cached REST poll ka wait kiye
+        # bina. See `broadcast_presence_to_partners`'s docstring aur
+        # `cache_utils.py`'s `PRESENCE_TTL` note — asli "turant
+        # offline->online hone par slow feel" wala fix push hai, sirf
+        # TTL tune karna nahi.
+        try:
+            await asyncio.wait_for(self.broadcast_presence_to_partners(True), timeout=3)
+        except asyncio.TimeoutError:
+            logger.warning(
+                "ChatConsumer.connect: presence partner-broadcast timed out user=%s", self.user.id
+            )
+        except Exception:
+            logger.exception("ChatConsumer.connect: presence partner-broadcast failed")
+
         # jo messages abhi tak deliver nahi hue the unhe deliver mark karo
         await self.mark_undelivered_as_delivered(self.conversation_id, self.user.id)
 
@@ -132,8 +151,9 @@ class ChatConsumer(AsyncWebsocketConsumer):
             logger.exception("ChatConsumer.disconnect: group_discard failed")
 
         if getattr(self, 'user', None) and self.user.is_authenticated and hasattr(self, 'room_group_name'):
+            still_online, last_seen_at = None, None
             try:
-                still_online = await asyncio.wait_for(self.set_presence(online=False), timeout=3)
+                still_online, last_seen_at = await asyncio.wait_for(self.set_presence(online=False), timeout=3)
                 await asyncio.wait_for(
                     self.channel_layer.group_send(
                         self.room_group_name,
@@ -141,6 +161,7 @@ class ChatConsumer(AsyncWebsocketConsumer):
                             'type': 'presence_update',
                             'user_id': str(self.user.id),
                             'is_online': still_online,
+                            'last_seen_at': last_seen_at.isoformat() if last_seen_at else None,
                         },
                     ),
                     timeout=3,
@@ -152,6 +173,25 @@ class ChatConsumer(AsyncWebsocketConsumer):
                 )
             except Exception:
                 logger.exception("ChatConsumer.disconnect: presence update failed")
+
+            # 🔥 NAYA — connect()'s partner-broadcast ka mirror. Sirf tab
+            # bhejte hain jab upar wala `set_presence`/room-broadcast
+            # (kam-se-kam DB write) successfully ho chuka ho — `still_online`
+            # None hona matlab upar hi fail ho gaya tha, is user ki asli
+            # state hume pata hi nahi, to galat/stale value partners ko
+            # push karne se better hai kuch na bhejna (agla connect/
+            # disconnect ya `PRESENCE_TTL` expiry khud correct kar dega).
+            if still_online is not None:
+                try:
+                    await asyncio.wait_for(
+                        self.broadcast_presence_to_partners(still_online, last_seen_at), timeout=3
+                    )
+                except asyncio.TimeoutError:
+                    logger.warning(
+                        "ChatConsumer.disconnect: presence partner-broadcast timed out user=%s", self.user.id
+                    )
+                except Exception:
+                    logger.exception("ChatConsumer.disconnect: presence partner-broadcast failed")
 
     # ---------------- RECEIVE (client -> server) ----------------
     async def receive(self, text_data=None, bytes_data=None):
@@ -314,9 +354,12 @@ class ChatConsumer(AsyncWebsocketConsumer):
         # band karke baithe hain to unhe pata chale) — @mention wale
         # members ko normal push se exclude karke unhe alag "mention"
         # push milta hai (mute state ko override karta hai).
-        await self.send_push_for_message(message, text, message_type, exclude_ids=message['mentioned_ids'])
+        await self.send_push_for_message(
+            message, text, message_type, exclude_ids=message['mentioned_ids'],
+            is_announcement=message['is_announcement'],
+        )
         if message['mentioned_ids']:
-            await self.send_mention_push_notification(message, text)
+            await self.send_mention_push_notification(message, text, is_announcement=message['is_announcement'])
 
     async def handle_typing(self, data):
         # 🔥 NAYA — har keystroke pe client `typing` event bhej sakta hai;
@@ -542,6 +585,21 @@ class ChatConsumer(AsyncWebsocketConsumer):
             'data': event['data'],
         }))
 
+    # 🔥 NAYA — Doubt Queue realtime updates. `DoubtQuestionViewSet` (views.py,
+    # `_broadcast` helper) REST se hi create/upvote/answer/reveal karke seedha
+    # `chat_{conversation_id}` room me `type: 'doubt_broadcast'` group_send
+    # karta hai (`pin_event`/`study_room_broadcast` jaisa hi pattern — client
+    # WS se doubt bhejta nahi, sirf REST call ke result ka realtime echo sunta
+    # hai, taaki group ke baaki sab connected members ka "Doubts" tab bina
+    # refresh kiye turant update ho jaaye).
+    async def doubt_broadcast(self, event):
+        await self.send(text_data=json.dumps({
+            'type': 'doubt_event',
+            'event': event.get('event'),  # 'doubt_created' | 'doubt_upvoted' | 'doubt_answered' | 'doubt_revealed'
+            'doubt': event.get('doubt'),
+            'group_id': event.get('group_id'),
+        }))
+
     # ---------------- HELPERS ----------------
     async def send_error(self, code, message):
         await self.send(text_data=json.dumps({'type': 'error', 'code': code, 'message': message}))
@@ -620,6 +678,19 @@ class ChatConsumer(AsyncWebsocketConsumer):
         disappearing_delta = conversation.get_disappearing_timedelta()
         expires_at = (timezone.now() + disappearing_delta) if disappearing_delta else None
 
+        # 🔥 FIX (Feature 11 — Announcements, same gap as REST
+        # `ConversationViewSet.messages`): WS ye value kabhi compute hi nahi
+        # karta tha, isliye WS se bheja gaya group-admin/mod ka message bhi
+        # hamesha `is_announcement=False` save hota tha — push-side
+        # (`push_utils.py`) already sahi handle karta hai, bas ye path use
+        # kabhi bhejta hi nahi tha.
+        is_announcement = False
+        if conversation.type == ConversationType.GROUP:
+            group = getattr(conversation, 'group_detail', None)
+            if group:
+                from .group_rules import is_group_admin_or_mod
+                is_announcement = is_group_admin_or_mod(group, sender_id)
+
         try:
             message = Message.objects.create(
                 conversation_id=conversation_id,
@@ -636,6 +707,7 @@ class ChatConsumer(AsyncWebsocketConsumer):
                 thumbnail_url=thumbnail_url or None,
                 meta=meta or {},
                 expires_at=expires_at,
+                is_announcement=is_announcement,
             )
         except IntegrityError:
             # duplicate client_id -> retry of an already-saved message
@@ -674,7 +746,10 @@ class ChatConsumer(AsyncWebsocketConsumer):
         # me kabhi dikhta hi nahi. Ab dono paths consistent hain.
         create_group_media_for_message(message)
 
-        return {'id': message.id, 'created_at': message.created_at.isoformat(), 'mentioned_ids': mentioned_ids}
+        return {
+            'id': message.id, 'created_at': message.created_at.isoformat(),
+            'mentioned_ids': mentioned_ids, 'is_announcement': is_announcement,
+        }
 
     @database_sync_to_async
     def mark_undelivered_as_delivered(self, conversation_id, user_id):
@@ -784,7 +859,7 @@ class ChatConsumer(AsyncWebsocketConsumer):
             .values_list('user_id', flat=True)
         )
 
-    async def send_push_for_message(self, message, text, message_type, exclude_ids=None):
+    async def send_push_for_message(self, message, text, message_type, exclude_ids=None, is_announcement=False):
         # yaha import karte hain taaki firebase_admin ki dependency sirf
         # tab load ho jab actually zaroorat ho (aur circular import se bache)
         #
@@ -814,9 +889,10 @@ class ChatConsumer(AsyncWebsocketConsumer):
             message_type,
             self.conversation_id,
             message['id'],
+            is_announcement=is_announcement,
         )
 
-    async def send_mention_push_notification(self, message, text):
+    async def send_mention_push_notification(self, message, text, is_announcement=False):
         from .push_utils import send_mention_push
 
         sender_name = get_display_name(self.user)
@@ -826,6 +902,7 @@ class ChatConsumer(AsyncWebsocketConsumer):
             text,
             self.conversation_id,
             message['id'],
+            is_announcement=is_announcement,
         )
 
     @database_sync_to_async
@@ -941,18 +1018,50 @@ class ChatConsumer(AsyncWebsocketConsumer):
     def set_presence(self, online):
         """
         Multi-device support: active_connections counter use karte hain.
-        Returns: final is_online state (true agar abhi bhi koi connection open hai).
+        Returns: (is_online, last_seen_at) — final state (is_online=true
+        agar abhi bhi koi connection open hai; last_seen_at sirf jab
+        offline hue tab set/refresh hota hai, warna row me pehle se jo
+        bhi tha wahi wapas aata hai).
+
+        🔥 FIX — race condition: pehle ye read-modify-write
+        (`get_or_create` + `.save()`) bina kisi row-lock ke ho raha tha.
+        Same user ke do connect/disconnect events (multi-device, ya ek
+        flaky network par rapid disconnect->reconnect) agar (almost) same
+        time par do alag worker/thread pe process ho jaate, to:
+          1. `active_connections` counter galat ho sakta tha (lost update
+             — dono ne purana counter value padh ke apna +1/-1 kiya, ek
+             ka update dusre ne overwrite kar diya).
+          2. Isse bhi zyada important: jo write DB pe BAAD me commit hota
+             (chahe wo actually pehle wali request thi ya baad wali),
+             wahi cache me bhi jaata — matlab ek fast disconnect->reconnect
+             me "online" wala fresher write kabhi-kabhi "offline" wale
+             purane write se clobber ho sakta tha, aur tab tak stuck rehta
+             jab tak agla event ya `PRESENCE_TTL` (cache_utils.py, 15s)
+             khatam na ho jaaye. Yahi wo "turant offline->online hone par
+             slow feel" wala asli bug tha — sirf TTL number badhaane/
+             ghataane se ye fix nahi hota, chahiye tha ki dono events ek
+             hi (sahi) order me apply ho.
+
+        `select_for_update()` se row-lock leke andar update karte hain —
+        isse dusra concurrent connect/disconnect (chahe kisi bhi
+        worker/process pe ho, ye DB-level lock hai, in-memory nahi) tab
+        tak wait karega jab tak pehla transaction commit na ho jaaye,
+        phir apna update us (ab-committed) latest value ke upar sahi
+        order me apply karega. Cache write jaan-bujhkar `.atomic()` block
+        ke BAHAR hai — row lock sirf DB update jitni der hi hold ho,
+        Redis round-trip jitni der nahi.
         """
-        presence, _ = UserPresence.objects.get_or_create(user_id=self.user.id)
-        if online:
-            presence.active_connections += 1
-            presence.is_online = True
-        else:
-            presence.active_connections = max(0, presence.active_connections - 1)
-            presence.is_online = presence.active_connections > 0
-            if not presence.is_online:
-                presence.last_seen_at = timezone.now()
-        presence.save(update_fields=['active_connections', 'is_online', 'last_seen_at'])
+        with transaction.atomic():
+            presence, _ = UserPresence.objects.select_for_update().get_or_create(user_id=self.user.id)
+            if online:
+                presence.active_connections += 1
+                presence.is_online = True
+            else:
+                presence.active_connections = max(0, presence.active_connections - 1)
+                presence.is_online = presence.active_connections > 0
+                if not presence.is_online:
+                    presence.last_seen_at = timezone.now()
+            presence.save(update_fields=['active_connections', 'is_online', 'last_seen_at'])
 
         # 🔥 FIX — cache_utils.py's own docstring says this presence cache
         # is meant to be kept warm from exactly this spot ("`ChatConsumer`'s
@@ -961,7 +1070,70 @@ class ChatConsumer(AsyncWebsocketConsumer):
         # the cache existing. Refresh the cache on every connect/disconnect
         # so reads can be served from it.
         set_presence_cache(self.user.id, presence.is_online, presence.last_seen_at)
-        return presence.is_online
+        return presence.is_online, presence.last_seen_at
+
+    @database_sync_to_async
+    def get_direct_partner_ids(self, user_id):
+        """
+        🔥 NAYA — is user ke jitne bhi ACTIVE 1-1 (direct) conversations
+        hain, un sabke doosre participant ka id (distinct). Group
+        conversations jaan-bujhke exclude kiye hain — ek group me
+        potentially sainkdon members ho sakte hain, har member ke
+        online/offline hone par sabko push karna bahut noisy/costly ho
+        jaata; real chat apps bhi generally sirf 1-1 contacts ka hi live
+        presence dikhati hain, group members ka nahi.
+        """
+        # NOTE: "direct" yahan `!= ConversationType.GROUP` se check kiya
+        # hai, `== ConversationType.DIRECT` se nahi — models.py is upload
+        # ka hissa nahi tha, isliye us doosre enum member ka exact naam
+        # yahan se confirm nahi kar sakta. Baaki poori codebase (views.py/
+        # consumers.py) me bhi har jagah isi "not GROUP" pattern se hi
+        # direct-vs-group check hota hai (`is_blocked_in_conversation`,
+        # `check_group_message_rules`, waghera) — wahi safe, already-
+        # verified pattern yahan bhi use kiya hai.
+        direct_conversation_ids = ConversationParticipant.objects.filter(
+            user_id=user_id,
+            left_at__isnull=True,
+        ).exclude(
+            conversation__type=ConversationType.GROUP,
+        ).values_list('conversation_id', flat=True)
+
+        return list(
+            ConversationParticipant.objects.filter(
+                conversation_id__in=direct_conversation_ids, left_at__isnull=True,
+            )
+            .exclude(user_id=user_id)
+            .values_list('user_id', flat=True)
+            .distinct()
+        )
+
+    async def broadcast_presence_to_partners(self, is_online, last_seen_at=None):
+        """
+        🔥 NAYA — ab tak sirf isi conversation ke room-group ko
+        `presence_update` milta tha, matlab sirf jo log ABHI wahi chat
+        khole baithe the unhe hi turant pata chalta tha. Contact-list /
+        chat-list jaisi screens jo koi specific conversation room join hi
+        nahi karti, unke liye ab tak sirf `UserPresenceView` (REST,
+        `cache_utils.PRESENCE_TTL` = 15s) hi option tha — agar wahan koi
+        periodic poll bhi lagi ho, to "abhi-abhi online hua" dikhne me
+        poore TTL jitni der lag sakti thi.
+
+        Ye har direct chat-partner ke apne personal `user_<id>` inbox
+        group (`InboxConsumer` — already notifications ke liye use ho
+        raha hai) pe seedha push kar deta hai, taaki wo screens bhi turant
+        update ho sakein, REST poll/cache-TTL ka wait kiye bina.
+        """
+        partner_ids = await self.get_direct_partner_ids(self.user.id)
+        if not partner_ids:
+            return
+        payload = {
+            'type': 'presence_update',
+            'user_id': str(self.user.id),
+            'is_online': is_online,
+            'last_seen_at': last_seen_at.isoformat() if last_seen_at else None,
+        }
+        for partner_id in partner_ids:
+            await self.channel_layer.group_send(f'user_{partner_id}', payload)
 
 
 def models_f_increment():
@@ -1032,6 +1204,23 @@ class InboxConsumer(AsyncWebsocketConsumer):
     # ---------------- GROUP EVENT HANDLER (server -> socket) ----------------
     async def inbox_update(self, event):
         await self.send(text_data=json.dumps(event))
+
+    # 🔥 NAYA — `ChatConsumer.broadcast_presence_to_partners` ab is user
+    # ke saare direct (1-1) chat-partners ke isi inbox group pe bhi
+    # presence_update bhejta hai, taaki contact-list/chat-list jaisi
+    # screens turant update ho sakein, `UserPresenceView`'s cached REST
+    # poll ka wait kiye bina. `ChatConsumer.presence_update`'s exact same
+    # shape use kiya hai consistency ke liye — NOTE (pre-existing, is
+    # task ke scope se bahar): `event` dict me khud bhi
+    # 'type': 'presence_update' hota hai (Channels dispatch ke liye zaroori),
+    # aur Python dict-unpack me baad wali key jeetti hai, isliye
+    # `{'type': 'presence', **event}` ka final JSON me asal 'type'
+    # 'presence_update' hi jaata hai, 'presence' nahi — ye
+    # `ChatConsumer.presence_update` ka bhi pehle se yahi behavior hai
+    # (aur `reaction_event`/`pin_event` ka bhi), isliye client jo bhi
+    # already handle kar raha hai wahi consistently milta rahega.
+    async def presence_update(self, event):
+        await self.send(text_data=json.dumps({'type': 'presence', **event}))
 
 
 # ======================================================================
