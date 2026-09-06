@@ -1381,11 +1381,36 @@ class ChatMessageReport {
         messageId: _int(j['message']),
         messagePreview: j['message_preview'] ?? j['message_text'] ?? '',
         sessionId: _int(j['session'] ?? j['session_id']),
-        reportedBy: UserMini.fromJson(j['reported_by']),
+        // 🔴 FIX (confirmed against ChatMessageReportSerializer, serializers.py):
+        // that serializer's field is `reporter`, not `reported_by` (that's
+        // ClassroomReportSerializer's field name, on a different model/
+        // endpoint — this class had copied that key by mistake). `reported_by`
+        // is never present on this endpoint's response, so this was always
+        // `UserMini.fromJson(null)` — a guaranteed crash on every single
+        // ChatMessageReport parsed, list screens included.
+        reportedBy: UserMini.fromJson(j['reporter']),
         reason: j['reason'] ?? '',
-        description: j['description'] ?? '',
+        // 🔴 FIX — backend field is `note`, not `description` (that's again
+        // ClassroomReportSerializer's field name). Not a crash, but the
+        // reporter's note text was silently lost on every report — this
+        // field always read as ''.
+        description: j['note'] ?? '',
         status: j['status'] ?? ReportStatus.pending,
-        reviewedById: _intN(j['reviewed_by']),
+        // 🔴 FIX — ChatMessageReportSerializer's `reviewed_by` is a nested
+        // UserMiniSerializer object ({id, username, full_name, ...}), not a
+        // bare id (unlike some other endpoints). `_intN` on a Map called
+        // `.toString()` then `int.parse()` on it, which throws
+        // FormatException — this crashed parsing of any report that had
+        // already been reviewed (i.e. every "Actioned"/"Dismissed" tab).
+        // Pulling the id back out of the nested object keeps this field's
+        // existing `int?` type (nothing else needed a full UserMini here).
+        reviewedById: _intN(j['reviewed_by'] is Map ? j['reviewed_by']['id'] : j['reviewed_by']),
+        // NOTE: ChatMessageReportSerializer has no `admin_note` field at all
+        // (confirmed — that endpoint's review() only accepts `status`, see
+        // views.py) — this key is never present, so this stays '' by design,
+        // not a bug. Kept only so existing `r.adminNote.isNotEmpty` checks
+        // in the UI keep working (they'll just never show anything, which
+        // is correct here).
         adminNote: j['admin_note'] ?? '',
         reviewedAt: _dt(j['reviewed_at']),
         createdAt: DateTime.parse(j['created_at']),
@@ -1394,7 +1419,12 @@ class ChatMessageReport {
   Map<String, dynamic> toJson() => {
         'message': messageId,
         'reason': reason,
-        'description': description,
+        // 🔴 FIX — was 'description'; ChatMessageReportViewSet.create only
+        // reads 'message'/'reason'/'note' (see ChatMessageReportApi.create
+        // in liveclass_api_service.dart, which already builds its own map
+        // with 'note' and doesn't call this method — fixing here anyway so
+        // this stays correct if anything starts using it).
+        'note': description,
       };
 }
 

@@ -23,6 +23,7 @@ import '../../services/auth_service.dart';
 import '../models/liveclass_models.dart';
 import '../services/liveclass_api_service.dart';
 import '../theme/liveclass_theme.dart';
+import '../utils/liveclass_upload_limits.dart';
 
 class SubmissionGradingScreen extends StatefulWidget {
   final Assignment assignment;
@@ -75,12 +76,32 @@ class _SubmissionGradingScreenState extends State<SubmissionGradingScreen> {
   }
 
   Future<void> _submit() async {
-    final res = await FilePicker.platform.pickFiles();
+    // FIX (file upload size/type audit — same gap already fixed in
+    // classroom_detail_screen.dart/assignments_screen.dart's pickers):
+    // no extension restriction and no size check at all before — a
+    // student could submit any file of any size, only discovering the
+    // backend's real 50MB/safelist rejection (Submission.file's
+    // MaxFileSizeValidator(50) + DOCUMENT_MEDIA_EXTENSIONS in models.py)
+    // after a full, potentially very slow upload attempt.
+    final res = await FilePicker.platform.pickFiles(
+      type: FileType.custom,
+      allowedExtensions: LiveClassUploadLimits.documentExtensions,
+    );
     if (res == null || res.files.isEmpty || res.files.first.path == null) return;
+    final picked = res.files.first;
+    final error = LiveClassUploadLimits.checkPlatformFile(
+      picked,
+      maxMB: LiveClassUploadLimits.submissionMaxMB,
+      allowedExtensions: LiveClassUploadLimits.documentExtensions,
+    );
+    if (error != null) {
+      _snack(error);
+      return;
+    }
     if (!mounted) return;
     setState(() => _submitting = true);
     try {
-      final s = await LiveClassApi.submissions.submit(assignmentId: _a.id, filePath: res.files.first.path!);
+      final s = await LiveClassApi.submissions.submit(assignmentId: _a.id, filePath: picked.path!);
       if (mounted) setState(() => _submissions = [s]);
     } on LiveClassApiException catch (e) {
       _snack(e.message);

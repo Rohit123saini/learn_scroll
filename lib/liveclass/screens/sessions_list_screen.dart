@@ -508,16 +508,14 @@ class _SessionsListScreenState extends State<SessionsListScreen> {
     );
   }
 
+  // 🔴 FIX (design-system consistency audit): exact match to LiveClassCard's
+  // defaults (white, radius 14, shadow black@0.04/blur 8/offset (0,2)) —
+  // zero-visual-change swap, same as elsewhere in the module.
   Widget _sessionCard(ClassSession s) {
     final color = _statusColor(s.status);
-    return Container(
+    return LiveClassCard(
       margin: const EdgeInsets.only(bottom: 10),
       padding: const EdgeInsets.all(14),
-      decoration: BoxDecoration(
-        color: Colors.white,
-        borderRadius: BorderRadius.circular(14),
-        boxShadow: [BoxShadow(color: Colors.black.withOpacity(0.04), blurRadius: 8, offset: const Offset(0, 2))],
-      ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [

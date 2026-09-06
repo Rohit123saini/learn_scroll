@@ -19,10 +19,12 @@ import 'chat_screen.dart';
 import 'create_group_screen.dart';
 import 'app_bottom_nav.dart'; // 🔥 NAYA
 import 'message_search_screen.dart'; // 🔥 NAYA (Phase 4, §2.1/§4.2) — global message search
+import 'focus_mode_screen.dart'; // 🔥 NAYA (Feature 12) — Smart DND / Focus Mode setup screen
 
 const _kNavy = Color(0xFF030F27);
 const _kAccent = Color(0xFFEE0979);
 const _kBg = Color(0xFFF6F7FB);
+const _kAnnouncement = Color(0xFFFF8F00); // 🔥 NAYA (Feature 11) — teacher/staff announcement highlight color
 
 class ConversationsScreen extends StatefulWidget {
   const ConversationsScreen({super.key});
@@ -62,12 +64,58 @@ class _ConversationsScreenState extends State<ConversationsScreen> {
   final Map<String, bool> _pinnedOverride = {};
   final Map<String, String> _labelOverride = {};
 
+  // 🔥 NAYA (Feature 12) — abhi Focus Mode active hai ya nahi, aur kab
+  // tak. Null = load nahi hua abhi tak ya koi active session nahi.
+  FocusSessionStatus? _focusStatus;
+  Timer? _focusTicker; // banner ka countdown live update karne ke liye
+
   @override
   void initState() {
     super.initState();
     _loadFromCacheThenNetwork();
     InboxSocketService.instance.connect();
     _inboxSub = InboxSocketService.instance.events.listen(_onInboxUpdate);
+    _loadFocusStatus(); // 🔥 NAYA
+  }
+
+  // 🔥 NAYA (Feature 12) — screen open hote hi current focus-status pata
+  // karo (agar app kill/restart hua ho to bhi banner sahi state me aaye).
+  Future<void> _loadFocusStatus() async {
+    try {
+      final status = await MessageApiService.getFocusStatus();
+      if (!mounted) return;
+      setState(() => _focusStatus = status);
+      _restartFocusTicker();
+    } catch (_) {
+      // network fail ho to bas banner nahi dikhega — chat list load hona
+      // is par depend nahi karta, isliye silently ignore.
+    }
+  }
+
+  void _restartFocusTicker() {
+    _focusTicker?.cancel();
+    if (_focusStatus == null || !_focusStatus!.active) return;
+    _focusTicker = Timer.periodic(const Duration(seconds: 30), (_) {
+      if (!mounted) return;
+      if (_focusStatus!.endsAt.isBefore(DateTime.now())) {
+        setState(() => _focusStatus = null);
+        _focusTicker?.cancel();
+      } else {
+        setState(() {}); // countdown text refresh
+      }
+    });
+  }
+
+  Future<void> _openFocusModeScreen() async {
+    final result = await Navigator.push<FocusSessionStatus?>(
+      context,
+      MaterialPageRoute(builder: (_) => FocusModeScreen(current: _focusStatus)),
+    );
+    // FocusModeScreen apna khud ka start/stop API call karke result
+    // wapas bhejti hai — yahan sirf local state refresh karna hai.
+    if (!mounted) return;
+    setState(() => _focusStatus = result);
+    _restartFocusTicker();
   }
 
   void _onInboxUpdate(Map<String, dynamic> event) {
@@ -103,6 +151,7 @@ class _ConversationsScreenState extends State<ConversationsScreen> {
     _searchController.dispose();
     _searchFocusNode.dispose();
     _inboxSub?.cancel();
+    _focusTicker?.cancel(); // 🔥 NAYA
     super.dispose();
   }
 
@@ -229,12 +278,26 @@ class _ConversationsScreenState extends State<ConversationsScreen> {
   String _displayLabel(ConversationModel c) =>
       _labelOverride[c.id] ?? c.displayTitle;
 
+  // 🔥 NAYA (Feature 11) — teacher/staff ka unread announcement hai to
+  // true. `hasUnreadAnnouncement` field `ConversationModel` me add karna
+  // hoga (backend `is_announcement` flag se derive hota hai — dekho
+  // message_models_patch.md).
+  bool _hasUnreadAnnouncement(ConversationModel c) =>
+      c.hasUnreadAnnouncement && c.unreadCount > 0;
+
   List<ConversationModel> _sortedConversations() {
     final list = List<ConversationModel>.from(_conversations);
     list.sort((a, b) {
       final pinnedA = _isPinned(a) ? 1 : 0;
       final pinnedB = _isPinned(b) ? 1 : 0;
-      if (pinnedA != pinnedB) return pinnedB - pinnedA; // pinned pehle
+      if (pinnedA != pinnedB) return pinnedB - pinnedA; // pinned sabse pehle
+
+      // 🔥 NAYA — unread announcements pinned ke turant baad, normal
+      // chit-chat se pehle. Slack ke automatic-pinned-channel jaisa feel.
+      final annA = _hasUnreadAnnouncement(a) ? 1 : 0;
+      final annB = _hasUnreadAnnouncement(b) ? 1 : 0;
+      if (annA != annB) return annB - annA;
+
       final atA = a.lastMessageAt;
       final atB = b.lastMessageAt;
       if (atA == null && atB == null) return 0;
@@ -410,6 +473,7 @@ class _ConversationsScreenState extends State<ConversationsScreen> {
       appBar: _isSelectMode ? _buildSelectionAppBar() : _buildDefaultAppBar(),
       body: Column(
         children: [
+          if (!_isSelectMode && _buildFocusBanner() != null) _buildFocusBanner()!, // 🔥 NAYA
           AnimatedSize(
             duration: const Duration(milliseconds: 220),
             curve: Curves.easeInOut,
@@ -470,8 +534,55 @@ class _ConversationsScreenState extends State<ConversationsScreen> {
             _loadConversations(silent: true);
           },
         ),
+        // 🔥 NAYA (Feature 12) — Focus Mode entry point. Active hote hi
+        // icon filled + accent color me badal jaata hai taaki ek nazar
+        // me pata chale "DND on hai" bina banner padhe bhi.
+        IconButton(
+          icon: Icon(
+            (_focusStatus?.active ?? false) ? Icons.bolt_rounded : Icons.bolt_outlined,
+            color: (_focusStatus?.active ?? false) ? _kAnnouncement : Colors.white,
+          ),
+          tooltip: 'Focus mode',
+          onPressed: _openFocusModeScreen,
+        ),
         const SizedBox(width: 4),
       ],
+    );
+  }
+
+  // 🔥 NAYA (Feature 12) — persistent banner jab Focus Mode active hai.
+  // Conversations list ke top pe rehta hai (search bar ke neeche), tap
+  // karke seedha Focus Mode screen khulti hai (extend/end karne ke liye).
+  Widget? _buildFocusBanner() {
+    final status = _focusStatus;
+    if (status == null || !status.active) return null;
+    final remaining = status.endsAt.difference(DateTime.now());
+    if (remaining.isNegative) return null;
+    final h = remaining.inHours;
+    final m = remaining.inMinutes.remainder(60);
+    final remainingText = h > 0 ? '${h}h ${m}m left' : '${m}m left';
+    final onlyTeachers = status.exceptionRule == 'teachers_only';
+
+    return InkWell(
+      onTap: _openFocusModeScreen,
+      child: Container(
+        width: double.infinity,
+        color: _kAnnouncement.withOpacity(0.12),
+        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+        child: Row(children: [
+          const Icon(Icons.bolt_rounded, size: 18, color: _kAnnouncement),
+          const SizedBox(width: 8),
+          Expanded(
+            child: Text(
+              onlyTeachers
+                  ? 'Focus mode: $remainingText · only teacher pings'
+                  : 'Focus mode: $remainingText · everything muted',
+              style: const TextStyle(fontSize: 12.5, fontWeight: FontWeight.w600, color: Color(0xFF8A5300)),
+            ),
+          ),
+          const Icon(Icons.chevron_right_rounded, size: 18, color: _kAnnouncement),
+        ]),
+      ),
     );
   }
 
@@ -642,6 +753,7 @@ class _ConversationsScreenState extends State<ConversationsScreen> {
           conversation: convo,
           displayTitle: _displayLabel(convo),
           isPinned: _isPinned(convo),
+          isAnnouncement: _hasUnreadAnnouncement(convo), // 🔥 NAYA
           isSelectMode: _isSelectMode,
           isSelected: _selectedIds.contains(convo.id),
           onTap: () => _openChat(convo),
@@ -687,6 +799,7 @@ class _ConversationTile extends StatelessWidget {
   final ConversationModel conversation;
   final String displayTitle;
   final bool isPinned;
+  final bool isAnnouncement; // 🔥 NAYA (Feature 11)
   final bool isSelectMode;
   final bool isSelected;
   final VoidCallback onTap;
@@ -695,6 +808,7 @@ class _ConversationTile extends StatelessWidget {
     required this.conversation,
     required this.displayTitle,
     required this.isPinned,
+    this.isAnnouncement = false,
     required this.isSelectMode,
     required this.isSelected,
     required this.onTap,
@@ -708,7 +822,12 @@ class _ConversationTile extends StatelessWidget {
       onTap: onTap,
       onLongPress: onLongPress,
       child: Container(
-        color: isSelected ? _kAccent.withOpacity(0.08) : Colors.white,
+        color: isSelected
+            ? _kAccent.withOpacity(0.08)
+            : (isAnnouncement ? _kAnnouncement.withOpacity(0.07) : Colors.white), // 🔥 NAYA — Slack-jaisi pinned-lane tint
+        decoration: isAnnouncement && !isSelected
+            ? const BoxDecoration(border: Border(left: BorderSide(color: _kAnnouncement, width: 3)))
+            : null,
         padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
         child: Row(
           crossAxisAlignment: CrossAxisAlignment.center,
@@ -734,6 +853,11 @@ class _ConversationTile extends StatelessWidget {
                     children: [
                       if (isPinned) ...[
                         Icon(Icons.push_pin, size: 13, color: Colors.grey[500]),
+                        const SizedBox(width: 4),
+                      ],
+                      if (isAnnouncement) ...[
+                        // 🔥 NAYA (Feature 11) — teacher/staff badge
+                        const Icon(Icons.campaign_rounded, size: 14, color: _kAnnouncement),
                         const SizedBox(width: 4),
                       ],
                       Expanded(

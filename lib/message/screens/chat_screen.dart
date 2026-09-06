@@ -37,7 +37,9 @@ import '../services/media_download_service.dart'; // 🔥 NAYA — media downloa
 import '../services/push_notification_service.dart'; // 🔥 NAYA — notification suppress
 import '../services/call_kit_service.dart'; // 🔥 NAYA — native call popup dismiss
 import '../services/call_manager.dart'; // 🔥 NAYA — call waiting check ke liye
+import '../services/ai_study_service.dart'; // 🔥 NAYA — manual voice-note transcribe button
 import '../../services/auth_service.dart';
+import 'doubts_screen.dart'; // 🔥 NAYA — "Doubts" tab (persistent upvotable question board + anonymous asking)
 import '../../profile/screens/target_profile.dart'; // 🔥 NAYA — user profile pe navigate karne ke liye
 import '../../profile/api_service.dart' as ProfileApi; // 🔥 NAYA
 import '../../home.dart'; // 🔥 NAYA — apni khud ki profile pe tap karne par Home ke Profile tab pe bhejne ke liye
@@ -49,6 +51,7 @@ import 'group_profile_screen.dart'; // 🔥 NAYA — Group info screen (public/p
 import 'media_viewer_screen.dart'; // 🔥 NAYA — fullscreen swipeable image viewer (zoom + auto-hide thumbnail strip)
 import '../../widgets/sticker_picker_sheet.dart'; // 🔥 NAYA — apne PNG stickers ka picker (assets/stickers/), chat & comments dono me reusable
 import 'message_search_screen.dart'; // 🔥 NAYA (Phase 4, §2.1) — in-chat message search
+import 'message_info_screen.dart'; // 🔥 NAYA — "Seen by" / message-info (long-press → Info)
 import '../widgets/mention_suggestions_overlay.dart'; // 🔥 NAYA (Phase 3, §2.2) — @mention autocomplete
 
 const _kEmojis = ['👍', '❤', '😂', '😮', '😢', '🙏'];
@@ -2885,6 +2888,27 @@ class _ChatScreenState extends State<ChatScreen> {
       if (msg.type != MessageType.poll)
         ListTile(leading: const Icon(Icons.forward), title: const Text("Forward"), onTap: () { Navigator.pop(context); _forwardOne(msg); }),
       ListTile(leading: const Icon(Icons.emoji_emotions_outlined), title: const Text("React"), onTap: () { Navigator.pop(context); _showReactionPicker(msg); }),
+      // 🔥 NAYA — "Seen by" / message-info (WhatsApp-style). Sirf apne
+      // bheje hue messages pe — dusre ka message "kisne dekha" tum nahi
+      // pooch sakte. Preview line ke liye plain text ya type-label bhejte
+      // hain, screen khud `getReadStatus` call karke poori list laati hai.
+      if (isMe)
+        ListTile(
+          leading: const Icon(Icons.info_outline_rounded),
+          title: const Text("Info"),
+          onTap: () {
+            Navigator.pop(context);
+            Navigator.push(
+              context,
+              MaterialPageRoute(
+                builder: (_) => MessageInfoScreen(
+                  messageId: msg.id,
+                  messagePreview: (msg.text != null && msg.text!.trim().isNotEmpty) ? msg.text : null,
+                ),
+              ),
+            );
+          },
+        ),
       // 🔥 NAYA — Pin/Unpin (backend max 3 pinned/conversation — limit
       // cross hone par _pinMessage() snackbar me error dikha dega).
       ListTile(
@@ -3227,6 +3251,32 @@ class _ChatScreenState extends State<ChatScreen> {
             },
           ),
           IconButton(icon: const Icon(Icons.cast_for_education, color: Colors.white), tooltip: "Study Room", onPressed: _openStudyRoom),
+          // 🔥 NAYA — "Doubts" tab entry point (persistent upvotable
+          // question board + anonymous asking). Sirf group chats me
+          // dikhta hai — private 1:1 chat me "classroom" concept hi nahi
+          // hota. `widget.conversation.group!.id` (GroupMini.id) hi group
+          // ka id hai; conversationId isi conversation ka id hai (jo
+          // DoubtsScreen apna khud ka WS connect karne ke liye use karta
+          // hai realtime doubt/upvote/answer updates ke liye).
+          if (widget.conversation.isGroup)
+            IconButton(
+              icon: const Icon(Icons.help_outline_rounded, color: Colors.white),
+              tooltip: "Doubts",
+              onPressed: () {
+                final group = widget.conversation.group;
+                if (group == null) return;
+                Navigator.push(
+                  context,
+                  MaterialPageRoute(
+                    builder: (_) => DoubtsScreen(
+                      groupId: group.id,
+                      conversationId: widget.conversation.id,
+                      groupName: group.name,
+                    ),
+                  ),
+                );
+              },
+            ),
           IconButton(icon: const Icon(Icons.call, color: Colors.white), tooltip: "Audio Call", onPressed: () => _startCall('audio')),
           IconButton(icon: const Icon(Icons.videocam, color: Colors.white), tooltip: "Video Call", onPressed: () => _startCall('video')),
           // 🔥 NAYA — 3-dot overflow menu: mute/unmute notification
@@ -3660,6 +3710,7 @@ class _ChatScreenState extends State<ChatScreen> {
                     if (showLoadingMore && index == 0) {
                       // 🔥 NAYA — top pe chhota spinner: "purane messages load ho rahe hain"
                       return const Padding(
+                        key: ValueKey('__loading_more_spinner__'), // 🔧 FIX — see message-row key note below
                         padding: EdgeInsets.symmetric(vertical: 14),
                         child: Center(
                           child: SizedBox(
@@ -3672,7 +3723,7 @@ class _ChatScreenState extends State<ChatScreen> {
                     }
                     final adjustedIndex = showLoadingMore ? index - 1 : index;
                     if (showTyping && adjustedIndex == filtered.length) {
-                      return const _TypingBubble(); // 🔥 NAYA — animated 3-dot bubble
+                      return const _TypingBubble(key: ValueKey('__typing_bubble__')); // 🔥 NAYA — animated 3-dot bubble
                     }
                     final msg = filtered[adjustedIndex];
                     final isMe = msg.sender?.id == _myUserId;
@@ -3711,44 +3762,65 @@ class _ChatScreenState extends State<ChatScreen> {
                         onVotePoll: _votePoll, // 🔥 NAYA
                         // 🔥 NAYA (Phase 2, §7.3) — current user mentioned hai to highlight
                         isMentioned: _myUserId != null && msg.mentionedUsers.any((u) => u.id == _myUserId),
+                        // 🔥 NAYA (Feature 11) — teacher/staff ka message, backend `is_announcement`
+                        // flag se (MessageModel me field add karna hoga — message_models_patch.md).
+                        isAnnouncement: msg.isAnnouncement,
                         // 🔥 NAYA (Phase 4, §2.1) — search-jump/reply-tap flash highlight
                         isJumpHighlighted: _highlightedMessageId == msg.id,
                       ),
                     );
 
-                    return Column(children: [
-                      if (showDateSeparator) _DateSeparator(date: msg.createdAt),
-                      // NEW — during multi-select, tapping anywhere on the
-                      // row toggles the checkbox instead of the message's
-                      // normal tap behaviour (media viewer, link open,
-                      // etc.), which is why the bubble itself is wrapped
-                      // in AbsorbPointer while selection mode is active.
-                      GestureDetector(
-                        behavior: HitTestBehavior.translucent,
-                        // 🔧 FIX (Phase 3, §4.3) — poll messages ko forward
-                        // selection se exclude karo, checkbox tap disabled.
-                        onTap: (_selectionMode && msg.type != MessageType.poll) ? () => _toggleMessageSelected(msg) : null,
-                        child: Container(
-                          color: isSelected ? const Color(0xFF3D7EFF).withOpacity(0.12) : null,
-                          child: Row(crossAxisAlignment: CrossAxisAlignment.center, children: [
-                            if (_selectionMode)
-                              Padding(
-                                padding: const EdgeInsets.only(left: 6, right: 2),
-                                child: msg.type == MessageType.poll
-                                    ? Icon(Icons.block, size: 18, color: Colors.grey[300])
-                                    : Icon(
-                                        isSelected ? Icons.check_circle : Icons.radio_button_unchecked,
-                                        size: 20,
-                                        color: isSelected ? const Color(0xFF3D7EFF) : Colors.grey,
-                                      ),
+                    return Column(
+                      // 🔧 FIX (scroll jank on pagination) — pehle is row ka
+                      // koi `key` nahi tha. Jab `_loadMoreMessages()` purane
+                      // messages `_messages` list ke SHURU me insert karta
+                      // hai (ya jab loading-spinner item show/hide hota hai),
+                      // to har already-visible item ka LIST INDEX shift ho
+                      // jaata hai. Bina key ke, Flutter naye/purane widgets ko
+                      // POSITION se match karta hai — matlab jo bubble abhi
+                      // dikh raha tha wahi Element ab ek DIFFERENT message ke
+                      // liye reuse hota hai, poora subtree (image/video/audio
+                      // player/poll) force-rebuild hota hai, chahe wo message
+                      // khud change hi na hua ho. `msg.id` se stable key dene
+                      // par Flutter Elements ko IDENTITY se match karta hai —
+                      // sirf naye (abhi-load-hue) messages ke liye naye
+                      // widgets banenge, baaki sab as-is reuse honge — load
+                      // karte waqt visible jank/flicker khatam ho jaata hai.
+                      key: ValueKey(msg.id),
+                      children: [
+                        if (showDateSeparator) _DateSeparator(date: msg.createdAt),
+                        // NEW — during multi-select, tapping anywhere on the
+                        // row toggles the checkbox instead of the message's
+                        // normal tap behaviour (media viewer, link open,
+                        // etc.), which is why the bubble itself is wrapped
+                        // in AbsorbPointer while selection mode is active.
+                        GestureDetector(
+                          behavior: HitTestBehavior.translucent,
+                          // 🔧 FIX (Phase 3, §4.3) — poll messages ko forward
+                          // selection se exclude karo, checkbox tap disabled.
+                          onTap: (_selectionMode && msg.type != MessageType.poll) ? () => _toggleMessageSelected(msg) : null,
+                          child: Container(
+                            color: isSelected ? const Color(0xFF3D7EFF).withOpacity(0.12) : null,
+                            child: Row(crossAxisAlignment: CrossAxisAlignment.center, children: [
+                              if (_selectionMode)
+                                Padding(
+                                  padding: const EdgeInsets.only(left: 6, right: 2),
+                                  child: msg.type == MessageType.poll
+                                      ? Icon(Icons.block, size: 18, color: Colors.grey[300])
+                                      : Icon(
+                                          isSelected ? Icons.check_circle : Icons.radio_button_unchecked,
+                                          size: 20,
+                                          color: isSelected ? const Color(0xFF3D7EFF) : Colors.grey,
+                                        ),
+                                ),
+                              Expanded(
+                                child: AbsorbPointer(absorbing: _selectionMode, child: bubble),
                               ),
-                            Expanded(
-                              child: AbsorbPointer(absorbing: _selectionMode, child: bubble),
-                            ),
-                          ]),
+                            ]),
+                          ),
                         ),
-                      ),
-                    ]);
+                      ],
+                    );
                   },
                 );
               }),
@@ -3978,7 +4050,7 @@ class _DateSeparator extends StatelessWidget {
 
 // 🔥 NAYA — animated 3-dot "typing..." bubble jaisa WhatsApp/Messenger me hota hai
 class _TypingBubble extends StatefulWidget {
-  const _TypingBubble();
+  const _TypingBubble({super.key});
   @override
   State<_TypingBubble> createState() => _TypingBubbleState();
 }
@@ -4058,6 +4130,10 @@ class _MessageBubble extends StatelessWidget {
   // ye flag reset karega (ek chhoti Timer ke baad), bubble apni normal
   // background pe wapas aa jaayega.
   final bool isJumpHighlighted;
+  // 🔥 NAYA (Feature 11) — teacher/staff message: alag border/badge/tint,
+  // taaki "important" lane feel bubble level pe bhi carry ho, sirf chat
+  // list me hi nahi. `isMentioned` jaisa hi pattern follow kiya hai.
+  final bool isAnnouncement;
   const _MessageBubble({
     required this.message,
     required this.isMe,
@@ -4077,6 +4153,7 @@ class _MessageBubble extends StatelessWidget {
     this.onVotePoll,
     this.isMentioned = false,
     this.isJumpHighlighted = false,
+    this.isAnnouncement = false,
   });
 
   @override
@@ -4132,11 +4209,34 @@ class _MessageBubble extends StatelessWidget {
               // 🔥 NAYA (Phase 2, §7.3) — @mention highlight: agar current
               // user is message me mentioned hai, subtle amber border +
               // thoda alag shadow (WhatsApp jaisa "you were mentioned" look).
-              border: isMentioned ? Border.all(color: const Color(0xFFFFC107), width: 1.4) : null,
-              boxShadow: [BoxShadow(color: (isMentioned ? const Color(0xFFFFC107) : Colors.black).withOpacity(isMentioned ? 0.18 : 0.07), blurRadius: 6, offset: const Offset(0, 2))],
+              // 🔥 NAYA (Feature 11) — announcement border sabse zyada priority
+              // (teacher ka message hai to mention-highlight se bhi zyada
+              // noticeable hona chahiye), phir mention, phir normal.
+              border: isAnnouncement
+                  ? Border.all(color: const Color(0xFFFF8F00), width: 1.6)
+                  : (isMentioned ? Border.all(color: const Color(0xFFFFC107), width: 1.4) : null),
+              boxShadow: [
+                BoxShadow(
+                  color: (isAnnouncement ? const Color(0xFFFF8F00) : (isMentioned ? const Color(0xFFFFC107) : Colors.black))
+                      .withOpacity(isAnnouncement ? 0.22 : (isMentioned ? 0.18 : 0.07)),
+                  blurRadius: 6,
+                  offset: const Offset(0, 2),
+                ),
+              ],
             ),
             child: Stack(children: [
               Column(crossAxisAlignment: CrossAxisAlignment.start, mainAxisSize: MainAxisSize.min, children: [
+              // 🔥 NAYA (Feature 11) — "📢 Announcement" chip, group-sender
+              // naam se bhi upar, taaki chit-chat se ek nazar me alag lage.
+              if (isAnnouncement)
+                Padding(
+                  padding: const EdgeInsets.only(left: 4, bottom: 3),
+                  child: Row(mainAxisSize: MainAxisSize.min, children: const [
+                    Icon(Icons.campaign_rounded, size: 13, color: Color(0xFFFF8F00)),
+                    SizedBox(width: 4),
+                    Text("Announcement", style: TextStyle(fontSize: 11, fontWeight: FontWeight.w700, color: Color(0xFFFF8F00))),
+                  ]),
+                ),
               // 🔥 NAYA — group chat me, apne khud ke message ko chhod ke,
               // har naye sender-block ke pehle bubble ke upar naam dikhao
               // (WhatsApp jaisa) — taaki pata chale kisne msg bheja.
@@ -5067,6 +5167,7 @@ class _AudioBubbleState extends State<_AudioBubble> {
   Duration _position = Duration.zero;
   Duration _duration = Duration.zero;
   bool _loading = false;
+  bool _transcribing = false; // 🔥 NAYA — manual "Transcribe" tap ke liye
 
   @override
   void initState() {
@@ -5123,6 +5224,34 @@ class _AudioBubbleState extends State<_AudioBubble> {
     final m = d.inMinutes.toString().padLeft(1, '0');
     final s = (d.inSeconds % 60).toString().padLeft(2, '0');
     return "$m:$s";
+  }
+
+  // 🔥 NAYA — manual fallback transcribe (auto-transcription §7.6 already
+  // hoti hai backend me, ye sirf tab kaam aata hai jab wo kisi wajah se
+  // nahi aaya — purana voice note, ya us waqt AI_ENABLED false tha).
+  // `widget.message` ka `meta` seedha mutate karte hain (same object jo
+  // parent `_messages` list me hai) taaki `meta_update` WS event jaisa
+  // hi behave ho — koi extra callback/state-lifting nahi chahiye.
+  Future<void> _transcribe() async {
+    final msg = widget.message;
+    final url = msg.fileUrl;
+    if (url == null || url.isEmpty || _transcribing) return;
+    setState(() => _transcribing = true);
+    try {
+      final transcript = await AiStudyService.transcribe(fileUrl: url);
+      if (!mounted) return;
+      setState(() {
+        msg.meta = {...?msg.meta, 'transcript': transcript};
+      });
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text("Transcribe nahi ho paya: $e")),
+        );
+      }
+    } finally {
+      if (mounted) setState(() => _transcribing = false);
+    }
   }
 
   @override
@@ -5199,15 +5328,44 @@ class _AudioBubbleState extends State<_AudioBubble> {
         // ab transcript background me generate karke `meta['transcript']`
         // me daal deta hai (`_onMetaUpdateEvent` se live update hota hai
         // agar screen already open hai). Jab tak transcript nahi aaya,
-        // kuch nahi dikhta — koi manual "transcribe" REST endpoint is
-        // session ke `message_api_service.dart` me nahi hai, isliye
-        // manual trigger button abhi add nahi kiya (⚠️ open item — agar
-        // backend manual on-demand transcribe endpoint bhi deta hai to
-        // wahi endpoint confirm karke yahan button add karna).
+        // manual "Transcribe" button dikhta hai (fallback — POST
+        // `/message/ai/transcribe/` via `AiStudyService.transcribe`,
+        // §17.4) taaki purane voice notes ya auto-transcription miss
+        // hone ki soorat me bhi user transcript pa sake.
         if (msg.transcript != null && msg.transcript!.trim().isNotEmpty)
           Padding(
             padding: const EdgeInsets.only(top: 4),
             child: _TranscriptText(text: msg.transcript!.trim(), textColor: textColor),
+          )
+        else if (url != null && url.isNotEmpty && !msg.isSending)
+          Padding(
+            padding: const EdgeInsets.only(top: 4, left: 4),
+            child: GestureDetector(
+              onTap: _transcribing ? null : _transcribe,
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  if (_transcribing)
+                    SizedBox(
+                      width: 12,
+                      height: 12,
+                      child: CircularProgressIndicator(strokeWidth: 1.5, color: textColor.withOpacity(0.7)),
+                    )
+                  else
+                    Icon(Icons.subtitles_outlined, size: 13, color: textColor.withOpacity(0.7)),
+                  const SizedBox(width: 4),
+                  Text(
+                    _transcribing ? "Transcribing..." : "Transcribe",
+                    style: TextStyle(
+                      color: textColor.withOpacity(0.7),
+                      fontSize: 11,
+                      fontWeight: FontWeight.w600,
+                      decoration: _transcribing ? TextDecoration.none : TextDecoration.underline,
+                    ),
+                  ),
+                ],
+              ),
+            ),
           ),
       ],
     );

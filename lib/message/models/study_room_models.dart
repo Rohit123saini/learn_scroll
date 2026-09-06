@@ -277,6 +277,131 @@ class WhiteboardPage {
   }
 }
 
+/// 🔥 NAYA — Class transcript segment (Feature 3: timestamped searchable
+/// recap). Ek segment = kisi ek participant ke ek local-mic-recording
+/// chunk ka transcript, session-relative offset (seconds, session start
+/// se) ke saath — NOT wall-clock time, taaki "jump to timestamp" ek hi
+/// consistent timeline pe kaam kare chahe kisi ka bhi phone clock skewed
+/// ho. `audioFileUrl` sirf isi chunk ka hai (poori class ki continuous
+/// recording nahi — us backend infra ke bina ye hi buildable tha).
+class TranscriptSegmentModel {
+  final String id;
+  final String speakerName;
+  final double startOffsetSeconds;
+  final double endOffsetSeconds;
+  final String text;
+  final String audioFileUrl;
+
+  TranscriptSegmentModel({
+    required this.id,
+    required this.speakerName,
+    required this.startOffsetSeconds,
+    required this.endOffsetSeconds,
+    required this.text,
+    required this.audioFileUrl,
+  });
+
+  /// "3:45" jaisa display format — UI me baar-baar likhna na pade.
+  String get timeLabel {
+    final total = startOffsetSeconds.round();
+    final m = total ~/ 60;
+    final s = total % 60;
+    return "$m:${s.toString().padLeft(2, '0')}";
+  }
+
+  factory TranscriptSegmentModel.fromJson(Map<String, dynamic> json) {
+    return TranscriptSegmentModel(
+      id: json['id']?.toString() ?? '',
+      speakerName: json['speaker_name']?.toString() ?? 'Unknown',
+      startOffsetSeconds: (json['start_offset_seconds'] as num?)?.toDouble() ?? 0,
+      endOffsetSeconds: (json['end_offset_seconds'] as num?)?.toDouble() ?? 0,
+      text: json['text']?.toString() ?? '',
+      audioFileUrl: json['audio_file_url']?.toString() ?? '',
+    );
+  }
+}
+
+/// 🔥 NAYA — Feature 5: Revision Deck. Ek flashcard = ek chhota
+/// question/term (front) + uska answer/definition (back), exam-revision
+/// ke liye. `flip` state yahan model me nahi rakha — purely UI-side
+/// (screen apna khud ka `isFlipped` bool rakhega per-card), taaki model
+/// sirf data ho, presentation state na ho.
+class FlashcardModel {
+  final String front;
+  final String back;
+
+  FlashcardModel({required this.front, required this.back});
+
+  factory FlashcardModel.fromJson(Map<String, dynamic> json) {
+    return FlashcardModel(
+      front: json['front']?.toString() ?? '',
+      back: json['back']?.toString() ?? '',
+    );
+  }
+}
+
+/// 🔥 NAYA — Feature 5: Revision Deck. Poore class (chat + whiteboard +
+/// transcript, server-side combine hota hai) se banaya gaya self-revision
+/// pack — flashcards + ek MCQ quiz, dono. `AiStudyService.
+/// generateRevisionDeck()`/`getSavedRevisionDeck()` isi model ko return
+/// karte hain. `quiz` ka raw `Map` format wahi hai jo `_QuizQuestionCard`
+/// (study_room_screen.dart) already expect karta hai — isliye yahan alag
+/// se koi QuizQuestionModel nahi banaya, taaki widget reuse ho sake.
+class RevisionDeckModel {
+  final List<FlashcardModel> flashcards;
+  final List<Map<String, dynamic>> quiz;
+  final DateTime? createdAt;
+
+  RevisionDeckModel({
+    required this.flashcards,
+    required this.quiz,
+    this.createdAt,
+  });
+
+  bool get isEmpty => flashcards.isEmpty && quiz.isEmpty;
+
+  factory RevisionDeckModel.fromJson(Map<String, dynamic> json) {
+    return RevisionDeckModel(
+      flashcards: ((json['flashcards'] as List?) ?? [])
+          .map((f) => FlashcardModel.fromJson((f as Map).cast<String, dynamic>()))
+          .toList(),
+      quiz: ((json['quiz'] as List?) ?? [])
+          .map((q) => (q as Map).cast<String, dynamic>())
+          .toList(),
+      createdAt: json['created_at'] != null
+          ? DateTime.tryParse(json['created_at'].toString())
+          : null,
+    );
+  }
+}
+
+/// 🔥 NAYA — Feature 6: attendance/consistency streak.
+/// `CallApiService.getStudyRoomStreak()` isi model ko return karta hai.
+class StudyStreakModel {
+  final int currentStreak;
+  final int longestStreak;
+  final int totalClassesAttended;
+  final DateTime? lastAttended;
+
+  StudyStreakModel({
+    required this.currentStreak,
+    required this.longestStreak,
+    required this.totalClassesAttended,
+    this.lastAttended,
+  });
+
+  factory StudyStreakModel.fromJson(Map<String, dynamic> json) {
+    return StudyStreakModel(
+      currentStreak: (json['current_streak'] as num?)?.toInt() ?? 0,
+      longestStreak: (json['longest_streak'] as num?)?.toInt() ?? 0,
+      totalClassesAttended: (json['total_classes_attended'] as num?)?.toInt() ?? 0,
+      lastAttended: json['last_attended'] != null
+          ? DateTime.tryParse(json['last_attended'].toString())
+          : null,
+    );
+  }
+}
+
 /// 🔥 NAYA — Collaborative Study Timer (Pomodoro-style). Sab participants
 /// ke beech `timer_update` room event se sync hota hai — countdown khud
 /// calculate karne ke bajaye `endAt` timestamp bhejte hain, taaki har

@@ -91,27 +91,52 @@ InputDecoration liveClassInputDecoration(String hint, {String? label}) => InputD
 
 /// Card container with the consistent white/rounded/shadow treatment used
 /// across every list item in the module.
+///
+/// 🔴 FIX (design-system consistency audit — "10 screens on the old
+/// pattern, hand-rolled cards instead of this widget"): most of those
+/// screens weren't skipping this widget out of neglect — several of their
+/// cards need a slightly different radius, a lighter/heavier shadow, or a
+/// conditional highlight border (e.g. a green border on a waitlist entry
+/// once a seat opens up) that this widget had no way to express, so a
+/// straight swap would have silently dropped that visual signal. Added
+/// [borderRadius]/[boxShadow]/[border]/[clipBehavior] as optional
+/// overrides — every one defaults to exactly what this widget already
+/// hardcoded, so every existing call site (unchanged) still renders
+/// byte-identical to before this fix. New/migrated call sites can now pass
+/// just the one property that actually differs instead of hand-rolling the
+/// whole Container again.
 class LiveClassCard extends StatelessWidget {
   final Widget child;
   final EdgeInsetsGeometry padding;
   final EdgeInsetsGeometry margin;
   final VoidCallback? onTap;
+  final double? borderRadius;
+  final List<BoxShadow>? boxShadow;
+  final BoxBorder? border;
+  final Clip clipBehavior;
   const LiveClassCard({
     super.key,
     required this.child,
     this.padding = const EdgeInsets.all(14),
     this.margin = const EdgeInsets.only(bottom: LiveClassSpacing.md),
     this.onTap,
+    this.borderRadius,
+    this.boxShadow,
+    this.border,
+    this.clipBehavior = Clip.none,
   });
 
   @override
   Widget build(BuildContext context) {
+    final radius = borderRadius ?? LiveClassRadius.card;
     final content = Container(
       padding: padding,
+      clipBehavior: clipBehavior,
       decoration: BoxDecoration(
         color: Colors.white,
-        borderRadius: BorderRadius.circular(LiveClassRadius.card),
-        boxShadow: const [LiveClassColors.cardShadow],
+        borderRadius: BorderRadius.circular(radius),
+        boxShadow: boxShadow ?? const [LiveClassColors.cardShadow],
+        border: border,
       ),
       child: child,
     );
@@ -121,10 +146,10 @@ class LiveClassCard extends StatelessWidget {
           ? content
           : Material(
               color: Colors.transparent,
-              borderRadius: BorderRadius.circular(LiveClassRadius.card),
+              borderRadius: BorderRadius.circular(radius),
               child: InkWell(
                 onTap: onTap,
-                borderRadius: BorderRadius.circular(LiveClassRadius.card),
+                borderRadius: BorderRadius.circular(radius),
                 child: content,
               ),
             ),
@@ -290,4 +315,24 @@ String liveClassFmtDateTime(DateTime d, [BuildContext? context]) {
   final locale = _localeOf(context);
   final local = d.toLocal();
   return '${DateFormat.yMMMd(locale).format(local)} · ${DateFormat.jm(locale).format(local)}';
+}
+
+// FIX (dedup audit — architecture doc §11 item 8, "`_fmtRelative`
+// duplicated, not shared"): notifications_screen.dart had its own
+// module-level `_fmtRelative()` with no shared home anywhere in the
+// module — same class of drift the rest of this file's date helpers were
+// already created to prevent (see the file header). Given a real shared
+// home here, kept intentionally simple/English ("2h ago", "3d ago")
+// rather than routed through `intl` like the absolute-date helpers above:
+// unlike a calendar date, a short relative-age label isn't something
+// most locales format via a `DateFormat` pattern, and `intl` doesn't
+// expose a stable public API for it. Falls back to the absolute
+// `liveClassFmtDate` past 7 days, when "Xd ago" stops being a useful unit.
+String liveClassFmtRelative(DateTime d, [BuildContext? context]) {
+  final diff = DateTime.now().difference(d);
+  if (diff.inMinutes < 1) return 'Just now';
+  if (diff.inMinutes < 60) return '${diff.inMinutes}m ago';
+  if (diff.inHours < 24) return '${diff.inHours}h ago';
+  if (diff.inDays < 7) return '${diff.inDays}d ago';
+  return liveClassFmtDate(d, context);
 }

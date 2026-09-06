@@ -6305,7 +6305,20 @@ class _PollTemplatePickerSheetState extends State<_PollTemplatePickerSheet> {
                   children: [
                     Text(_error!, textAlign: TextAlign.center, style: const TextStyle(fontSize: 12.5)),
                     const SizedBox(height: 10),
-                    OutlinedButton(onPressed: _load, child: const Text('Retry')),
+                    // FIX (design-system consistency audit): this sheet
+                    // can't use LiveClassErrorState wholesale — that widget
+                    // renders a ListView, which needs a bounded height or
+                    // an Expanded ancestor, and breaks inside this sheet's
+                    // `Column(mainAxisSize: MainAxisSize.min)`. Aligned just
+                    // the retry button to LiveClassErrorState's own
+                    // OutlinedButton.icon(refresh icon + 'Retry' label) so
+                    // it at least matches visually everywhere else in the
+                    // module.
+                    OutlinedButton.icon(
+                      onPressed: _load,
+                      icon: const Icon(Icons.refresh_rounded, size: 18),
+                      label: const Text('Retry'),
+                    ),
                   ],
                 ),
               )

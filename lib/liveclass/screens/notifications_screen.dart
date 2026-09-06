@@ -29,14 +29,11 @@ import '../theme/liveclass_theme.dart';
 import 'classroom_detail_screen.dart';
 import 'notification_preferences_screen.dart';
 
-String _fmtRelative(DateTime d) {
-  final diff = DateTime.now().difference(d);
-  if (diff.inMinutes < 1) return 'Just now';
-  if (diff.inMinutes < 60) return '${diff.inMinutes}m ago';
-  if (diff.inHours < 24) return '${diff.inHours}h ago';
-  if (diff.inDays < 7) return '${diff.inDays}d ago';
-  return liveClassFmtDate(d);
-}
+// FIX (dedup audit): was a local `_fmtRelative()` here with no shared
+// home — moved to `liveClassFmtRelative()` in liveclass_theme.dart (see
+// that file's doc comment) so a future second screen needing the same
+// "2h ago" label reuses it instead of re-writing its own copy, which is
+// exactly how this one ended up duplicated in the first place.
 
 IconData _notifIcon(String type) {
   switch (type) {
@@ -320,7 +317,7 @@ class _NotificationsScreenState extends State<NotificationsScreen> {
                       Text(n.message, style: TextStyle(fontSize: 12, color: Colors.grey.shade600), maxLines: 2, overflow: TextOverflow.ellipsis),
                     ],
                     const SizedBox(height: 4),
-                    Text(_fmtRelative(n.createdAt), style: TextStyle(fontSize: 10.5, color: Colors.grey.shade400)),
+                    Text(liveClassFmtRelative(n.createdAt, context), style: TextStyle(fontSize: 10.5, color: Colors.grey.shade400)),
                   ],
                 ),
               ),

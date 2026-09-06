@@ -41,6 +41,7 @@ import '../models/liveclass_models.dart';
 import '../services/liveclass_api_service.dart';
 import '../theme/liveclass_theme.dart';
 import '../utils/liveclass_datetime.dart';
+import '../utils/liveclass_upload_limits.dart';
 import 'banned_students_screen.dart';
 import 'chat_message_reports_screen.dart';
 import 'classroom_form_screen.dart';
@@ -48,6 +49,7 @@ import 'classroom_recordings_screen.dart';
 import 'request_join_screen.dart';
 import 'schedule_manager_screen.dart';
 import 'sessions_list_screen.dart';
+import 'submission_grading_screen.dart';
 import 'teacher_earnings_screen.dart';
 // FIX (CRITICAL — build-breaking missing class, production readiness
 // audit): this screen's _openRequestJoin() (below) has always
@@ -710,7 +712,10 @@ class _ClassroomDetailScreenState extends State<ClassroomDetailScreen> {
                       leading: const Icon(Icons.share_outlined, size: 18, color: _kNavy),
                       title: Text(log.sharedBy.fullName.isNotEmpty ? log.sharedBy.fullName : log.sharedBy.username,
                           style: const TextStyle(fontSize: 13)),
-                      subtitle: Text('${log.channel} · ${liveClassFmtDateTime(log.createdAt)}', style: const TextStyle(fontSize: 11)),
+                      // FIX (locale consistency audit): missing `context`
+                      // meant this fell back to intl's default locale
+                      // instead of the device/app one.
+                      subtitle: Text('${log.channel} · ${liveClassFmtDateTime(log.createdAt, context)}', style: const TextStyle(fontSize: 11)),
                     )),
             ],
           ),
@@ -1793,11 +1798,22 @@ class _ScheduleTabState extends State<_ScheduleTab> with AutomaticKeepAliveClien
     );
   }
 
+  // 🔴 FIX (design-system consistency audit): this file had zero
+  // LiveClassCard usage — every list item here was a hand-rolled Container
+  // with a flat radius-12/bordered/no-shadow look, repeated identically
+  // across 5 tabs (schedule/materials/doubts/reviews/assignments). None of
+  // them was an exact match to LiveClassCard's own elevated-shadow default,
+  // which is exactly why the widget grew `borderRadius`/`boxShadow`/`border`
+  // overrides — expressed here as radius 12, no shadow, grey border, so the
+  // swap is zero-visual-change while still routing through the one shared
+  // card implementation.
   Widget _scheduleCard(ClassSchedule s) {
-    return Container(
+    return LiveClassCard(
       margin: const EdgeInsets.only(bottom: 8),
       padding: const EdgeInsets.all(12),
-      decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(12), border: Border.all(color: Colors.grey.shade200)),
+      borderRadius: 12,
+      boxShadow: const [],
+      border: Border.all(color: Colors.grey.shade200),
       child: Row(
         children: [
           const Icon(Icons.repeat_rounded, color: _kNavy, size: 20),
@@ -2055,8 +2071,26 @@ class _MaterialsTabState extends State<_MaterialsTab> with AutomaticKeepAliveCli
                 else
                   OutlinedButton.icon(
                     onPressed: () async {
+                      // FIX (file upload size/type audit): no extension
+                      // restriction and no size check at all before — a
+                      // teacher could pick any file of any size here,
+                      // only discovering the backend's real 100MB/
+                      // safelist rejection (Material.file's
+                      // MaxFileSizeValidator(100) + DOCUMENT_MEDIA_EXTENSIONS
+                      // in models.py) after a full, potentially very slow
+                      // upload attempt.
                       final f = await openFile();
-                      if (f != null) setSheetState(() => picked = f);
+                      if (f == null) return;
+                      final error = await LiveClassUploadLimits.checkXFile(
+                        f,
+                        maxMB: LiveClassUploadLimits.materialMaxMB,
+                        allowedExtensions: LiveClassUploadLimits.documentExtensions,
+                      );
+                      if (error != null) {
+                        if (ctx.mounted) ScaffoldMessenger.of(ctx).showSnackBar(SnackBar(content: Text(error)));
+                        return;
+                      }
+                      setSheetState(() => picked = f);
                     },
                     icon: const Icon(Icons.attach_file),
                     label: Text(picked == null ? 'Choose file' : picked!.name, overflow: TextOverflow.ellipsis),
@@ -2151,9 +2185,13 @@ class _MaterialsTabState extends State<_MaterialsTab> with AutomaticKeepAliveCli
           else if (_items.isEmpty)
             const _InlineMessage(icon: Icons.folder_off_outlined, title: 'No materials yet', subtitle: 'Notes/PDFs added by the teacher will show up here.')
           else
-            ..._items.map((m) => Container(
+            // 🔴 FIX (design-system consistency audit): see _scheduleCard's
+            // note — same override-expressed swap to LiveClassCard.
+            ..._items.map((m) => LiveClassCard(
                   margin: const EdgeInsets.only(bottom: 8),
-                  decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(12), border: Border.all(color: Colors.grey.shade200)),
+                  borderRadius: 12,
+                  boxShadow: const [],
+                  border: Border.all(color: Colors.grey.shade200),
                   child: ListTile(
                     leading: Icon(_iconFor(m.materialType), color: _kNavy),
                     title: Text(m.title, style: const TextStyle(fontWeight: FontWeight.w600, fontSize: 13.5)),
@@ -2544,10 +2582,14 @@ class _DoubtsTabState extends State<_DoubtsTab> with AutomaticKeepAliveClientMix
           else if (_items.isEmpty)
             const _InlineMessage(icon: Icons.help_outline_rounded, title: 'No doubts yet', subtitle: '')
           else
-            ..._items.map((q) => Container(
+            // 🔴 FIX (design-system consistency audit): see _scheduleCard's
+            // note — same override-expressed swap to LiveClassCard.
+            ..._items.map((q) => LiveClassCard(
                   margin: const EdgeInsets.only(bottom: 8),
                   padding: const EdgeInsets.all(12),
-                  decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(12), border: Border.all(color: Colors.grey.shade200)),
+                  borderRadius: 12,
+                  boxShadow: const [],
+                  border: Border.all(color: Colors.grey.shade200),
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
@@ -2740,10 +2782,14 @@ class _ReviewsTabState extends State<_ReviewsTab> with AutomaticKeepAliveClientM
           else if (_items.isEmpty)
             const _InlineMessage(icon: Icons.reviews_outlined, title: 'No reviews yet', subtitle: '')
           else
-            ..._items.map((r) => Container(
+            // 🔴 FIX (design-system consistency audit): see _scheduleCard's
+            // note — same override-expressed swap to LiveClassCard.
+            ..._items.map((r) => LiveClassCard(
                   margin: const EdgeInsets.only(bottom: 8),
                   padding: const EdgeInsets.all(12),
-                  decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(12), border: Border.all(color: Colors.grey.shade200)),
+                  borderRadius: 12,
+                  boxShadow: const [],
+                  border: Border.all(color: Colors.grey.shade200),
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
@@ -2925,8 +2971,22 @@ class _AssignmentsTabState extends State<_AssignmentsTab> with AutomaticKeepAliv
   }
 
   Future<void> _submit(Assignment a) async {
+    // FIX (file upload size/type audit): no extension restriction and no
+    // size check at all before — a student could submit any file of any
+    // size, only discovering the backend's real 50MB/safelist rejection
+    // (Submission.file's MaxFileSizeValidator(50) + DOCUMENT_MEDIA_EXTENSIONS
+    // in models.py) after a full, potentially very slow upload attempt.
     final file = await openFile();
     if (file == null) return;
+    final error = await LiveClassUploadLimits.checkXFile(
+      file,
+      maxMB: LiveClassUploadLimits.submissionMaxMB,
+      allowedExtensions: LiveClassUploadLimits.documentExtensions,
+    );
+    if (error != null) {
+      _snack(error);
+      return;
+    }
     try {
       await LiveClassApi.submissions.submit(assignmentId: a.id, filePath: file.path);
       _snack('Submission sent.');
@@ -2936,12 +2996,18 @@ class _AssignmentsTabState extends State<_AssignmentsTab> with AutomaticKeepAliv
   }
 
   Future<void> _viewSubmissions(Assignment a) async {
-    showModalBottomSheet(
-      context: context,
-      isScrollControlled: true,
-      backgroundColor: Colors.white,
-      shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(18))),
-      builder: (ctx) => _SubmissionsSheet(assignment: a),
+    // FIX (duplicate grading implementations, production readiness audit):
+    // this used to open a bespoke, in-file _SubmissionsSheet — a second,
+    // independent reimplementation of the exact same "list submissions +
+    // grade" flow already built (and kept up to date with fixes: memory-safe
+    // controller disposal, timezone-safe date formatting, corrupt-cache-safe
+    // file download, error/empty states) in SubmissionGradingScreen. Same
+    // API calls, same feature, two codepaths that could silently drift out
+    // of sync. Now routes to the one real implementation instead — same
+    // navigation AssignmentsScreen already uses for this exact case.
+    await Navigator.push(
+      context,
+      MaterialPageRoute(builder: (_) => SubmissionGradingScreen(assignment: a, canManage: true)),
     );
   }
 
@@ -2980,10 +3046,14 @@ class _AssignmentsTabState extends State<_AssignmentsTab> with AutomaticKeepAliv
           else
             ..._items.map((a) {
               final overdue = a.dueDate.isBefore(DateTime.now());
-              return Container(
+              // 🔴 FIX (design-system consistency audit): see
+              // _scheduleCard's note — same override-expressed swap.
+              return LiveClassCard(
                 margin: const EdgeInsets.only(bottom: 8),
                 padding: const EdgeInsets.all(12),
-                decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(12), border: Border.all(color: Colors.grey.shade200)),
+                borderRadius: 12,
+                boxShadow: const [],
+                border: Border.all(color: Colors.grey.shade200),
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
@@ -3018,141 +3088,6 @@ class _AssignmentsTabState extends State<_AssignmentsTab> with AutomaticKeepAliv
               );
             }),
         ],
-      ),
-    );
-  }
-}
-
-// ===========================================================================
-// Submissions bottom sheet (teacher grading)
-// ===========================================================================
-class _SubmissionsSheet extends StatefulWidget {
-  final Assignment assignment;
-  const _SubmissionsSheet({required this.assignment});
-
-  @override
-  State<_SubmissionsSheet> createState() => _SubmissionsSheetState();
-}
-
-class _SubmissionsSheetState extends State<_SubmissionsSheet> {
-  List<AssignmentSubmission> _items = [];
-  bool _loading = true;
-
-  @override
-  void initState() {
-    super.initState();
-    _load();
-  }
-
-  Future<void> _load() async {
-    setState(() => _loading = true);
-    try {
-      final res = await LiveClassApi.submissions.list(widget.assignment.id);
-      if (!mounted) return;
-      setState(() {
-        _items = res.results;
-        _loading = false;
-      });
-    } catch (_) {
-      if (mounted) setState(() => _loading = false);
-    }
-  }
-
-  Future<void> _grade(AssignmentSubmission s) async {
-    // FIX (memory leak): both controllers used to be created here and never
-    // disposed — every open+close of this dialog (Grade/Regrade) leaked
-    // two TextEditingControllers for the lifetime of the app. try/finally
-    // guarantees disposal on every exit path.
-    final scoreCtrl = TextEditingController(text: s.score?.toString() ?? '');
-    final feedbackCtrl = TextEditingController(text: s.feedback);
-    try {
-      await _showGradeDialog(s, scoreCtrl, feedbackCtrl);
-    } finally {
-      scoreCtrl.dispose();
-      feedbackCtrl.dispose();
-    }
-  }
-
-  Future<void> _showGradeDialog(
-    AssignmentSubmission s,
-    TextEditingController scoreCtrl,
-    TextEditingController feedbackCtrl,
-  ) async {
-    final ok = await showDialog<bool>(
-      context: context,
-      builder: (ctx) => AlertDialog(
-        title: Text('Grade ${s.student.fullName}'),
-        content: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            TextField(
-              controller: scoreCtrl,
-              keyboardType: TextInputType.number,
-              decoration: _inputDecoration('Score (max ${widget.assignment.maxScore})'),
-            ),
-            const SizedBox(height: 10),
-            TextField(controller: feedbackCtrl, maxLines: 3, decoration: _inputDecoration('Feedback (optional)')),
-          ],
-        ),
-        actions: [
-          TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('Cancel')),
-          ElevatedButton(
-            style: ElevatedButton.styleFrom(backgroundColor: _kNavy, foregroundColor: Colors.white),
-            onPressed: () => Navigator.pop(ctx, true),
-            child: const Text('Save'),
-          ),
-        ],
-      ),
-    );
-    if (ok != true) return;
-    final score = int.tryParse(scoreCtrl.text.trim());
-    if (score == null) return;
-    try {
-      await LiveClassApi.submissions.grade(s.id, score: score, feedback: feedbackCtrl.text.trim());
-      _load();
-    } catch (e) {
-      if (!mounted) return;
-      ScaffoldMessenger.of(context)
-          .showSnackBar(SnackBar(content: Text(e is LiveClassApiException ? e.message : 'Could not save the grade.')));
-    }
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    return Padding(
-      padding: EdgeInsets.only(left: 16, right: 16, top: 16, bottom: MediaQuery.of(context).viewInsets.bottom + 16),
-      child: ConstrainedBox(
-        constraints: BoxConstraints(maxHeight: MediaQuery.of(context).size.height * 0.7),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Text('Submissions — ${widget.assignment.title}', style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 15)),
-            const SizedBox(height: 12),
-            Flexible(
-              child: _loading
-                  ? const Center(child: Padding(padding: EdgeInsets.all(30), child: CircularProgressIndicator(color: _kNavy)))
-                  : _items.isEmpty
-                      ? const Padding(padding: EdgeInsets.all(30), child: Text('No submissions yet.'))
-                      : ListView.builder(
-                          shrinkWrap: true,
-                          itemCount: _items.length,
-                          itemBuilder: (ctx, i) {
-                            final s = _items[i];
-                            return ListTile(
-                              contentPadding: EdgeInsets.zero,
-                              title: Text(s.student.fullName, style: const TextStyle(fontWeight: FontWeight.w600, fontSize: 13.5)),
-                              subtitle: Text(
-                                '${_fmtDate(s.submittedAt)}${s.isLate ? ' · Late' : ''}${s.score != null ? ' · Score: ${s.score}/${widget.assignment.maxScore}' : ''}',
-                                style: TextStyle(fontSize: 11.5, color: s.isLate ? Colors.red : Colors.grey.shade600),
-                              ),
-                              trailing: TextButton(onPressed: () => _grade(s), child: Text(s.score != null ? 'Edit' : 'Grade')),
-                            );
-                          },
-                        ),
-            ),
-          ],
-        ),
       ),
     );
   }

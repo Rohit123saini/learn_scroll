@@ -644,6 +644,41 @@ class MessageApiService {
     _decode(res);
   }
 
+  /// 🔥 NAYA — "Seen by" / message-info list.
+  /// GET /message/messages/<id>/read-status/
+  /// Backend (`MessageViewSet.read_status`) read-receipt privacy toggle
+  /// khud respect karta hai — kisi ka `read_at` hidden ho sakta hai agar
+  /// unhone ya requester ne apna `show_read_receipts` off kiya ho; client
+  /// ko is baare me kuch alag se filter nahi karna, jo bhi response me
+  /// aaye seedha `MessageReadStatusModel` me parse karke dikha do.
+  static Future<List<MessageReadStatusModel>> getReadStatus(String messageId) async {
+    final res = await http.get(
+      Uri.parse("$_base/messages/$messageId/read-status/"),
+      headers: await _headers(),
+    );
+    final data = _decode(res);
+    // 🔧 FIX — backend (`MessageViewSet.read_status`, views.py) returns
+    // `{"delivered_to": [...], "read_by": [...]}`, NOT a flat list or a
+    // `{"results": [...]}` page — the old code here would have thrown a
+    // runtime cast error (`Map` is not a `List`) on every call. A user who
+    // is fully read appears in BOTH lists (backend doesn't de-duplicate),
+    // so merge by user id, keeping the `read_by` entry (it carries
+    // `read_at`) over the `delivered_to` one for the same person.
+    final deliveredTo = ((data as Map)['delivered_to'] as List? ?? [])
+        .map((e) => MessageReadStatusModel.fromJson(e as Map<String, dynamic>));
+    final readBy = (data['read_by'] as List? ?? [])
+        .map((e) => MessageReadStatusModel.fromJson(e as Map<String, dynamic>));
+
+    final byUserId = <String, MessageReadStatusModel>{};
+    for (final s in deliveredTo) {
+      byUserId[s.user.id] = s;
+    }
+    for (final s in readBy) {
+      byUserId[s.user.id] = s; // read entry wins — it's the richer one
+    }
+    return byUserId.values.toList();
+  }
+
   /// POST /message/messages/forward/
   /// body: {"message_ids": [...], "conversation_ids": [...], "caption": "..."}
   ///
@@ -841,10 +876,12 @@ class MessageApiService {
     _decode(res);
   }
 
-  /// GET /message/groups/<id>/media/
-  static Future<List<dynamic>> getGroupMedia(String groupId) async {
-    final res = await http.get(Uri.parse("$_base/groups/$groupId/media/"),
-        headers: await _headers());
+  /// GET /message/groups/<id>/media/[?type=image|video|...]
+  static Future<List<dynamic>> getGroupMedia(String groupId, {String? type}) async {
+    final uri = Uri.parse("$_base/groups/$groupId/media/").replace(
+      queryParameters: (type != null && type.isNotEmpty) ? {'type': type} : null,
+    );
+    final res = await http.get(uri, headers: await _headers());
     final data = _decode(res);
     return data is Map && data.containsKey('results') ? data['results'] : data;
   }
@@ -1193,6 +1230,58 @@ class MessageApiService {
   static Future<void> endStudyRoomState(String conversationId) async {
     final res = await http.delete(
       Uri.parse("$_base/study-room/$conversationId/state/"),
+      headers: await _headers(),
+    );
+    _decode(res);
+  }
+
+  // ==================================================================
+  // FOCUS MODE / SMART DND (🔧 GAP FIX — Feature 12)
+  // ==================================================================
+  // `focus_mode_screen.dart` aur `conversations_screen.dart` dono ye 3
+  // methods pehle se call kar rahe the, lekin ye yahan exist hi nahi
+  // karte the — backend endpoint (`/message/focus-session/`) ab
+  // `urls.py` me wire ho chuka hai, isliye ab in methods ko add kar rahe
+  // hain. `FocusSessionStatus` DTO `message_models.dart` me hai (see
+  // note there) — dono files usi ek definition ko share karte hain.
+
+  /// GET /message/focus-session/
+  /// Session inactive hone par backend `{"active": false}` deta hai —
+  /// us case me `null` return karte hain (jaisa `focus_mode_screen.dart`
+  /// aur `conversations_screen.dart` dono already expect karte hain).
+  static Future<FocusSessionStatus?> getFocusStatus() async {
+    final res = await http.get(
+      Uri.parse("$_base/focus-session/"),
+      headers: await _headers(),
+    );
+    final data = _decode(res);
+    if (data == null || data is! Map<String, dynamic> || data['active'] != true) {
+      return null;
+    }
+    return FocusSessionStatus.fromJson(data);
+  }
+
+  /// POST /message/focus-session/  {duration_minutes, exception_rule}
+  static Future<FocusSessionStatus> startFocusSession({
+    required int durationMinutes,
+    required String exceptionRule,
+  }) async {
+    final res = await http.post(
+      Uri.parse("$_base/focus-session/"),
+      headers: await _headers(),
+      body: jsonEncode({
+        'duration_minutes': durationMinutes,
+        'exception_rule': exceptionRule,
+      }),
+    );
+    final data = _decode(res) as Map<String, dynamic>;
+    return FocusSessionStatus.fromJson(data);
+  }
+
+  /// DELETE /message/focus-session/
+  static Future<void> cancelFocusSession() async {
+    final res = await http.delete(
+      Uri.parse("$_base/focus-session/"),
       headers: await _headers(),
     );
     _decode(res);

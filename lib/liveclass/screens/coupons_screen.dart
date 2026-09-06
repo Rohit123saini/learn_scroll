@@ -167,16 +167,15 @@ class _CouponsScreenState extends State<CouponsScreen> {
     );
   }
 
+  // 🔴 FIX (design-system consistency audit — this was one of the
+  // lower-traffic screens not yet checked): exact match to LiveClassCard's
+  // defaults, same zero-visual-change swap already applied across the
+  // rest of the module.
   Widget _couponCard(Coupon c) {
     final expired = c.validUntil.isBefore(DateTime.now());
-    return Container(
+    return LiveClassCard(
       margin: const EdgeInsets.only(bottom: 12),
       padding: const EdgeInsets.all(14),
-      decoration: BoxDecoration(
-        color: Colors.white,
-        borderRadius: BorderRadius.circular(14),
-        boxShadow: [BoxShadow(color: Colors.black.withValues(alpha: 0.04), blurRadius: 8, offset: const Offset(0, 2))],
-      ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
@@ -213,7 +212,10 @@ class _CouponsScreenState extends State<CouponsScreen> {
           const Divider(height: 22),
           Row(
             children: [
-              Expanded(child: _stat('Valid', '${liveClassFmtDate(c.validFrom)} – ${liveClassFmtDate(c.validUntil)}')),
+              // FIX (locale consistency audit): both `liveClassFmtDate`
+              // calls here were missing `context`, silently falling back
+              // to intl's default locale instead of the device/app one.
+              Expanded(child: _stat('Valid', '${liveClassFmtDate(c.validFrom, context)} – ${liveClassFmtDate(c.validUntil, context)}')),
               Expanded(child: _stat('Used', '${c.usedCount}${c.maxUses != null ? ' / ${c.maxUses}' : ''}')),
             ],
           ),
@@ -411,14 +413,16 @@ class _CouponEditorSheetState extends State<_CouponEditorSheet> {
                   Expanded(
                     child: OutlinedButton(
                       onPressed: () => _pickDate(isFrom: true),
-                      child: Text('From: ${liveClassFmtDate(_validFrom)}'),
+                      // FIX (locale consistency audit): missing `context`
+                      // — same gap fixed on the read-only card above.
+                      child: Text('From: ${liveClassFmtDate(_validFrom, context)}'),
                     ),
                   ),
                   const SizedBox(width: 10),
                   Expanded(
                     child: OutlinedButton(
                       onPressed: () => _pickDate(isFrom: false),
-                      child: Text('Until: ${liveClassFmtDate(_validUntil)}'),
+                      child: Text('Until: ${liveClassFmtDate(_validUntil, context)}'),
                     ),
                   ),
                 ],

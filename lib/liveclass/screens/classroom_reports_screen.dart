@@ -289,17 +289,34 @@ class _ClassroomReportsScreenState extends State<ClassroomReportsScreen> with Si
 
   // NEW (§1.4) — same review flow as _openReviewSheet/_showReviewSheet
   // above, scoped to a ChatMessageReport instead of a ClassroomReport.
-  Future<void> _openMessageReviewSheet(ChatMessageReport r) async {
-    final noteCtrl = TextEditingController();
-    try {
-      await _showMessageReviewSheet(r, noteCtrl);
-    } finally {
-      noteCtrl.dispose();
-    }
-  }
+  // 🔴 FIX (endpoint-signature audit): this used to be a straight copy of
+  // the ClassroomReport sheet above, which is wrong on two counts, both
+  // confirmed against ChatMessageReportViewSet.review (views.py):
+  //   1. It called `chatMessageReports.review(..., adminNote: ...)` —
+  //      ChatMessageReportApi.review() has NO adminNote parameter (that
+  //      endpoint has no admin-note field at all, unlike ClassroomReport's
+  //      `admin_note`) — this was a non-compiling call.
+  //   2. Its status dropdown offered ClassroomReport's status vocabulary
+  //      ('reviewed'/'action_taken'/'dismissed') — ChatMessageReport's
+  //      Status choices are only 'actioned'/'dismissed' (models.py). Only
+  //      "Dismissed" happened to share a spelling; picking "Reviewed" or
+  //      "Action Taken" here would 400 every time even once the compile
+  //      error above was fixed.
+  // No noteCtrl needed here anymore — there's nowhere on this endpoint for
+  // a note to go.
+  //
+  // NOTE: using plain string literals here ('actioned'/'dismissed'), not a
+  // shared enum/class — liveclass_models.dart wasn't available to confirm
+  // whether one exists for ChatMessageReport's status. These two values are
+  // confirmed directly against ChatMessageReport.Status in models.py, and
+  // match the private _kStatusActioned/_kStatusDismissed constants
+  // chat_message_reports_screen.dart already uses for the same endpoint —
+  // if a shared constant/enum does exist in liveclass_models.dart, prefer
+  // that over these literals for consistency.
+  Future<void> _openMessageReviewSheet(ChatMessageReport r) => _showMessageReviewSheet(r);
 
-  Future<void> _showMessageReviewSheet(ChatMessageReport r, TextEditingController noteCtrl) async {
-    String status = ReportStatus.reviewed;
+  Future<void> _showMessageReviewSheet(ChatMessageReport r) async {
+    String status = 'actioned';
     bool submitting = false;
 
     final done = await showModalBottomSheet<bool>(
@@ -312,7 +329,7 @@ class _ClassroomReportsScreenState extends State<ClassroomReportsScreen> with Si
           Future<void> submit() async {
             setSheetState(() => submitting = true);
             try {
-              await LiveClassApi.chatMessageReports.review(r.id, status: status, adminNote: noteCtrl.text.trim());
+              await LiveClassApi.chatMessageReports.review(r.id, status: status);
               if (!mounted) return;
               Navigator.pop(ctx, true);
             } on LiveClassApiException catch (e) {
@@ -342,17 +359,10 @@ class _ClassroomReportsScreenState extends State<ClassroomReportsScreen> with Si
                   value: status,
                   decoration: liveClassInputDecoration(''),
                   items: const {
-                    ReportStatus.reviewed: 'Reviewed (no action needed)',
-                    ReportStatus.actionTaken: 'Action Taken',
-                    ReportStatus.dismissed: 'Dismissed',
+                    'actioned': 'Action Taken (removes the message)',
+                    'dismissed': 'Dismissed',
                   }.entries.map((e) => DropdownMenuItem(value: e.key, child: Text(e.value))).toList(),
                   onChanged: (v) => setSheetState(() => status = v!),
-                ),
-                const SizedBox(height: 12),
-                TextField(
-                  controller: noteCtrl,
-                  maxLines: 3,
-                  decoration: liveClassInputDecoration('Admin note (optional) — internal, visible to staff only'),
                 ),
                 const SizedBox(height: 16),
                 SizedBox(
@@ -548,15 +558,13 @@ class _ClassroomReportsScreenState extends State<ClassroomReportsScreen> with Si
   Widget _reportCard(ClassroomReport r, int pendingCountForClassroom) {
     final color = _statusColor(r.status);
     final nearAutoFlag = r.status == ReportStatus.pending && pendingCountForClassroom >= 3;
-    return Container(
+    // 🔴 FIX (design-system consistency audit): matches LiveClassCard's
+    // defaults exactly, including the conditional highlight border the
+    // widget's `border` override was added for — zero-visual-change swap.
+    return LiveClassCard(
       margin: const EdgeInsets.only(bottom: 12),
       padding: const EdgeInsets.all(14),
-      decoration: BoxDecoration(
-        color: Colors.white,
-        borderRadius: BorderRadius.circular(14),
-        boxShadow: [BoxShadow(color: Colors.black.withValues(alpha: 0.04), blurRadius: 8, offset: const Offset(0, 2))],
-        border: nearAutoFlag ? Border.all(color: Colors.red.shade300) : null,
-      ),
+      border: nearAutoFlag ? Border.all(color: Colors.red.shade300) : null,
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
@@ -645,16 +653,13 @@ class _ClassroomReportsScreenState extends State<ClassroomReportsScreen> with Si
   // minus the classroom-level "near auto-flag" grouping (that signal is
   // classroom-scoped, not defined for individual messages) and swapping
   // the classroom title/reason chip for a message preview.
+  // 🔴 FIX (design-system consistency audit): same exact-match swap as
+  // _reportCard above.
   Widget _msgReportCard(ChatMessageReport r) {
     final color = _statusColor(r.status);
-    return Container(
+    return LiveClassCard(
       margin: const EdgeInsets.only(bottom: 12),
       padding: const EdgeInsets.all(14),
-      decoration: BoxDecoration(
-        color: Colors.white,
-        borderRadius: BorderRadius.circular(14),
-        boxShadow: [BoxShadow(color: Colors.black.withValues(alpha: 0.04), blurRadius: 8, offset: const Offset(0, 2))],
-      ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [

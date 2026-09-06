@@ -169,6 +169,17 @@ class ConversationModel {
   ConversationSettings mySettings;
   final DateTime createdAt;
 
+  // 🔥 NAYA (Feature 11 — Announcements) — `conversations_screen.dart` isse
+  // sort-priority (unread announcements pinned ke turant baad) aur ek
+  // "⚡" badge ke liye use karta hai. Backend `ConversationListSerializer`
+  // abhi is field ko bilkul nahi bhejta (fields list me `has_unread_
+  // announcement`/`last_message_is_announcement` jaisa kuch nahi hai) —
+  // isliye ye hamesha `false` parse hoga jab tak backend serializer me
+  // corresponding field add na ho jaaye. Yahan add karne se sirf compile
+  // error (missing getter) fix hota hai; feature khud tab tak inactive
+  // rahega.
+  final bool hasUnreadAnnouncement;
+
   ConversationModel({
     required this.id,
     required this.type,
@@ -181,6 +192,7 @@ class ConversationModel {
     this.unreadCount = 0,
     required this.mySettings,
     required this.createdAt,
+    this.hasUnreadAnnouncement = false,
   });
 
   bool get isGroup => type == 'group';
@@ -219,6 +231,10 @@ class ConversationModel {
       mySettings: ConversationSettings.fromJson(json['my_settings']),
       createdAt: DateTime.tryParse(json['created_at']?.toString() ?? '') ??
           DateTime.now(),
+      // 🔥 NAYA (Feature 11) — see field doc above; key name is a guess
+      // (`has_unread_announcement`) until backend actually adds it —
+      // safe no-op (`?? false`) until then.
+      hasUnreadAnnouncement: json['has_unread_announcement'] ?? false,
     );
   }
 
@@ -234,6 +250,7 @@ class ConversationModel {
         'unread_count': unreadCount,
         'my_settings': mySettings.toJson(),
         'created_at': createdAt.toIso8601String(),
+        'has_unread_announcement': hasUnreadAnnouncement,
       };
 }
 
@@ -367,6 +384,16 @@ class MessageModel {
   final DateTime createdAt;
   DateTime? updatedAt;
 
+  // 🔥 NAYA (Feature 11 — Announcements) — `chat_screen.dart` bubble ke
+  // liye (orange border + "📢 Announcement" chip jab group admin/mod ne
+  // bheja ho). Backend `views.py` `Message.is_announcement` set karta hai
+  // create time pe, LEKIN `MessageSerializer.Meta.fields` isko abhi
+  // expose nahi karta — is field ke asli kaam karne se pehle
+  // `serializers.py` me `is_announcement` ko `MessageSerializer.fields`
+  // list me add karna hoga. Yahan add karna sirf compile error (missing
+  // getter) fix karta hai.
+  final bool isAnnouncement;
+
   // 🔥 NAYA (Phase 1, §3) — @Mentions. REST/history me backend
   // `mentioned_users` ke andar poori nested `UserMini` list bhejta hai;
   // WS `chat_message` event me sirf `mentioned_user_ids` (id-only) aata
@@ -420,6 +447,7 @@ class MessageModel {
     this.localFilePaths,
     List<UserMini>? mentionedUsers,
     this.poll,
+    this.isAnnouncement = false,
   })  : reactions = reactions ?? [],
         mentionedUsers = mentionedUsers ?? [];
 
@@ -488,6 +516,10 @@ class MessageModel {
       poll: json['poll'] != null
           ? PollModel.fromJson(json['poll'] as Map<String, dynamic>)
           : null,
+      // 🔥 NAYA (Feature 11) — see field doc above; backend serializer
+      // doesn't send this key yet, so this safely parses to `false` until
+      // `serializers.py`'s `MessageSerializer.fields` adds it.
+      isAnnouncement: json['is_announcement'] ?? false,
     );
   }
 
@@ -543,6 +575,9 @@ class MessageModel {
       poll: json['poll'] != null
           ? PollModel.fromJson(json['poll'] as Map<String, dynamic>)
           : null,
+      // 🔥 NAYA (Feature 11) — live socket payload key, matches
+      // `views.py`'s broadcast dict (`is_announcement=is_announcement`).
+      isAnnouncement: json['is_announcement'] ?? false,
     );
   }
 
@@ -575,6 +610,52 @@ class MessageModel {
         'updated_at': updatedAt?.toIso8601String(),
         'mentioned_users': mentionedUsers.map((u) => u.toJson()).toList(),
         'poll': poll?.toJson(),
+        'is_announcement': isAnnouncement,
+      };
+}
+
+// ======================================================================
+// 🔥 NAYA — MESSAGE READ STATUS ("Seen by" / message-info screen)
+// ======================================================================
+// `GET /message/messages/<id>/read-status/` ka per-user entry — matches
+// backend `MessageReadStatusSerializer` fields exactly:
+// `['user', 'is_delivered', 'delivered_at', 'is_read', 'read_at']`.
+// Used by `message_info_screen.dart` (long-press a sent message → Info).
+class MessageReadStatusModel {
+  final UserMini user;
+  final bool isDelivered;
+  final DateTime? deliveredAt;
+  final bool isRead;
+  final DateTime? readAt;
+
+  MessageReadStatusModel({
+    required this.user,
+    this.isDelivered = false,
+    this.deliveredAt,
+    this.isRead = false,
+    this.readAt,
+  });
+
+  factory MessageReadStatusModel.fromJson(Map<String, dynamic> json) {
+    return MessageReadStatusModel(
+      user: UserMini.fromJson(json['user'] ?? {}),
+      isDelivered: json['is_delivered'] ?? false,
+      deliveredAt: json['delivered_at'] != null
+          ? DateTime.tryParse(json['delivered_at'].toString())
+          : null,
+      isRead: json['is_read'] ?? false,
+      readAt: json['read_at'] != null
+          ? DateTime.tryParse(json['read_at'].toString())
+          : null,
+    );
+  }
+
+  Map<String, dynamic> toJson() => {
+        'user': user.toJson(),
+        'is_delivered': isDelivered,
+        'delivered_at': deliveredAt?.toIso8601String(),
+        'is_read': isRead,
+        'read_at': readAt?.toIso8601String(),
       };
 }
 
@@ -891,4 +972,154 @@ class SmartReplyModel {
       suggestions: raw is List ? raw.map((e) => e.toString()).toList() : [],
     );
   }
+}
+// ======================================================================
+// 🔥 NAYA — DOUBT QUEUE (persistent, upvotable per-classroom/group
+// question board) + "Ask Anonymously". Backend: `DoubtQuestionSerializer`
+// (serializers.py) — GET/POST /message/groups/<group_id>/doubts/,
+// upvote/answer/reveal actions (see doubts_api_service.dart).
+// ======================================================================
+class DoubtQuestionModel {
+  final String id;
+  final String groupId;
+  final UserMini? author; // null jab tak anonymous+not-yet-revealed ho
+  final String text;
+  final bool isAnonymous;
+  final bool isRevealed;
+  final int upvotesCount;
+  final bool upvotedByMe;
+  final bool isMine;
+  final bool isAnswered;
+  final String answerText;
+  final UserMini? answeredBy;
+  final DateTime? answeredAt;
+  final DateTime createdAt;
+
+  DoubtQuestionModel({
+    required this.id,
+    required this.groupId,
+    this.author,
+    required this.text,
+    this.isAnonymous = false,
+    this.isRevealed = false,
+    this.upvotesCount = 0,
+    this.upvotedByMe = false,
+    this.isMine = false,
+    this.isAnswered = false,
+    this.answerText = '',
+    this.answeredBy,
+    this.answeredAt,
+    required this.createdAt,
+  });
+
+  // UI helper — "Anonymous" chip dikhana ho to yahi ek jagah se decide ho
+  // jaata hai: apna khud ka anonymous doubt ho to bhi apna naam UI me
+  // dikhega (isMine true), baaki sabke liye author null hi aata hai jab
+  // tak reveal na ho jaaye.
+  String displayName(String myUserId) {
+    if (author != null) return author!.displayName;
+    if (isMine) return 'You';
+    return 'Anonymous';
+  }
+
+  DoubtQuestionModel copyWith({
+    UserMini? author,
+    bool? isRevealed,
+    int? upvotesCount,
+    bool? upvotedByMe,
+    bool? isAnswered,
+    String? answerText,
+    UserMini? answeredBy,
+    DateTime? answeredAt,
+  }) {
+    return DoubtQuestionModel(
+      id: id,
+      groupId: groupId,
+      author: author ?? this.author,
+      text: text,
+      isAnonymous: isAnonymous,
+      isRevealed: isRevealed ?? this.isRevealed,
+      upvotesCount: upvotesCount ?? this.upvotesCount,
+      upvotedByMe: upvotedByMe ?? this.upvotedByMe,
+      isMine: isMine,
+      isAnswered: isAnswered ?? this.isAnswered,
+      answerText: answerText ?? this.answerText,
+      answeredBy: answeredBy ?? this.answeredBy,
+      answeredAt: answeredAt ?? this.answeredAt,
+      createdAt: createdAt,
+    );
+  }
+
+  factory DoubtQuestionModel.fromJson(Map<String, dynamic> json) {
+    return DoubtQuestionModel(
+      id: json['id']?.toString() ?? '',
+      groupId: json['group']?.toString() ?? '',
+      author: json['author'] != null ? UserMini.fromJson(json['author']) : null,
+      text: json['text']?.toString() ?? '',
+      isAnonymous: json['is_anonymous'] == true,
+      isRevealed: json['is_revealed'] == true,
+      upvotesCount: (json['upvotes_count'] as num?)?.toInt() ?? 0,
+      upvotedByMe: json['upvoted_by_me'] == true,
+      isMine: json['is_mine'] == true,
+      isAnswered: json['is_answered'] == true,
+      answerText: json['answer_text']?.toString() ?? '',
+      answeredBy: json['answered_by'] != null ? UserMini.fromJson(json['answered_by']) : null,
+      answeredAt: json['answered_at'] != null ? DateTime.tryParse(json['answered_at'].toString()) : null,
+      createdAt: DateTime.tryParse(json['created_at']?.toString() ?? '') ?? DateTime.now(),
+    );
+  }
+
+  Map<String, dynamic> toJson() => {
+        'id': id,
+        'group': groupId,
+        'author': author?.toJson(),
+        'text': text,
+        'is_anonymous': isAnonymous,
+        'is_revealed': isRevealed,
+        'upvotes_count': upvotesCount,
+        'upvoted_by_me': upvotedByMe,
+        'is_mine': isMine,
+        'is_answered': isAnswered,
+        'answer_text': answerText,
+        'answered_by': answeredBy?.toJson(),
+        'answered_at': answeredAt?.toIso8601String(),
+        'created_at': createdAt.toIso8601String(),
+      };
+}
+
+
+// ============================================================
+// GAP FIX — add this class to message_models.dart
+// (moved here from focus_mode_screen.dart, see that file's header
+// note for why — message_api_service.dart needs the same DTO for
+// its new getFocusStatus()/startFocusSession() return types, and it
+// can't import focus_mode_screen.dart without creating a circular
+// import).
+// ============================================================
+
+class FocusSessionStatus {
+  final bool active;
+  final DateTime endsAt;
+  final String exceptionRule; // 'teachers_only' | 'nobody'
+  final int secondsRemaining;
+
+  FocusSessionStatus({
+    required this.active,
+    required this.endsAt,
+    required this.exceptionRule,
+    required this.secondsRemaining,
+  });
+
+  factory FocusSessionStatus.fromJson(Map<String, dynamic> json) {
+    return FocusSessionStatus(
+      active: json['active'] == true,
+      endsAt: json['ends_at'] != null
+          ? DateTime.parse(json['ends_at']).toLocal()
+          : DateTime.now(),
+      exceptionRule: json['exception_rule']?.toString() ?? 'teachers_only',
+      secondsRemaining: (json['seconds_remaining'] as num?)?.toInt() ?? 0,
+    );
+  }
+
+  static FocusSessionStatus? inactive() => null;
 }

@@ -59,6 +59,8 @@ import 'package:image_picker/image_picker.dart'; // 🔧 FIX — group photo pic
 import '../services/message_api_service.dart';
 import '../../services/auth_service.dart';
 import 'conversations_screen.dart';
+import 'group_media_screen.dart'; // 🔥 NAYA — shared media/links/docs gallery
+import 'doubts_screen.dart'; // 🔥 NAYA — "Doubts" tab entry point
 
 const _kNavy = Color(0xFF030F27);
 const _kAccent = Color(0xFFEE0979);
@@ -83,6 +85,9 @@ class _GroupProfileScreenState extends State<GroupProfileScreen> {
   String? _photoUrl;
   bool _isPrivate = false;
   String? _inviteCode;
+  // 🔥 NAYA — DoubtsScreen ko apna khud ka WS connect karne ke liye
+  // conversation id chahiye (GroupSerializer.conversation_id).
+  String? _conversationId;
   List<Map<String, dynamic>> _members = []; // normalized: {id, name, username, avatar, role, is_muted, is_banned}
 
   // 🔥 NAYA — "kaun message bhej sakta hai" aur "daily message limit"
@@ -96,6 +101,12 @@ class _GroupProfileScreenState extends State<GroupProfileScreen> {
   // `check_group_study_room_permission`), ye UI sirf settings surface hai.
   String _callPermission = 'everyone';
   String _studyRoomPermission = 'everyone';
+
+  // 🔥 NAYA — "Ask Anonymously" (Doubt Queue) per-classroom toggle.
+  // Backend `Group.allow_anonymous_doubts`, admin/moderator hi change kar
+  // sakte hain (same `updateGroup` PATCH endpoint jaisa message/call/
+  // study-room permissions ke liye already use ho raha hai).
+  bool _allowAnonymousDoubts = true;
 
   String? _myRole; // 'admin' | 'moderator' | 'member' | null
   bool get _isAdmin => _myRole == 'admin';
@@ -189,12 +200,14 @@ class _GroupProfileScreenState extends State<GroupProfileScreen> {
         _photoUrl = data['photo_url']?.toString();
         _isPrivate = data['is_private'] == true;
         _inviteCode = data['invite_code']?.toString();
+        _conversationId = data['conversation_id']?.toString();
         _messagePermission = data['message_permission']?.toString() ?? 'everyone';
         _dailyMessageLimit = data['daily_message_limit'] is int
             ? data['daily_message_limit'] as int
             : int.tryParse(data['daily_message_limit']?.toString() ?? '');
         _callPermission = data['call_permission']?.toString() ?? 'everyone';
         _studyRoomPermission = data['study_room_permission']?.toString() ?? 'everyone';
+        _allowAnonymousDoubts = data['allow_anonymous_doubts'] != false;
         _members = normalized;
         _myRole = myRole;
         _loading = false;
@@ -463,6 +476,29 @@ class _GroupProfileScreenState extends State<GroupProfileScreen> {
   }
 
   // ------------------------------------------------------------------
+  // ASK ANONYMOUSLY (Doubt Queue) — bool (admin + moderator)
+  // ------------------------------------------------------------------
+  Future<void> _updateAllowAnonymousDoubts(bool value) async {
+    if (_savingSettings || value == _allowAnonymousDoubts) return;
+    final prev = _allowAnonymousDoubts;
+    setState(() {
+      _allowAnonymousDoubts = value;
+      _savingSettings = true;
+    });
+    try {
+      await MessageApiService.updateGroup(widget.groupId, {'allow_anonymous_doubts': value});
+      if (mounted) setState(() => _savingSettings = false);
+    } catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _allowAnonymousDoubts = prev;
+        _savingSettings = false;
+      });
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text("Update fail: $e")));
+    }
+  }
+
+  // ------------------------------------------------------------------
   // GROUP PHOTO — change (upload + set) / remove (admin + moderator)
   // ------------------------------------------------------------------
   Future<void> _changeGroupPhoto() async {
@@ -724,6 +760,15 @@ class _GroupProfileScreenState extends State<GroupProfileScreen> {
                       _buildHeader(),
                       _buildPrivacyCard(),
                       _buildMessageRulesCard(),
+                      // 🔥 NAYA — "Media, links and docs" entry point (WhatsApp-style).
+                      // Backend `GET /message/groups/<id>/media/` + frontend
+                      // `MessageApiService.getGroupMedia` already existed, but had
+                      // no screen calling it — this card + `GroupMediaScreen` is
+                      // that missing surface. Visible to every member (not gated
+                      // behind admin/invite-link visibility — shared media is a
+                      // normal member-facing thing, same as WhatsApp/Telegram).
+                      _buildMediaCard(),
+                      _buildDoubtsCard(),
                       if (_canSeeMembersAndLink && _inviteCode != null) _buildInviteLinkCard(),
                       if (_isPrivate && _isAdminOrMod) _buildJoinRequestsCard(),
                       const SizedBox(height: 14),
@@ -1153,7 +1198,76 @@ class _GroupProfileScreenState extends State<GroupProfileScreen> {
               style: TextStyle(fontSize: 11, color: Colors.grey[500]),
             ),
           ),
+
+        const Divider(height: 26),
+
+        // ---------------- DOUBT QUEUE ----------------
+        const Text("Doubts", style: TextStyle(fontWeight: FontWeight.w700, fontSize: 13.5, color: _kNavy)),
+        const SizedBox(height: 10),
+        Row(children: [
+          Icon(Icons.visibility_off_outlined, color: _kNavy, size: 19),
+          const SizedBox(width: 12),
+          const Expanded(child: Text("Allow anonymous doubts", style: TextStyle(fontSize: 13.5))),
+          Switch(
+            value: _allowAnonymousDoubts,
+            activeColor: _kAccent,
+            onChanged: _savingSettings ? null : _updateAllowAnonymousDoubts,
+          ),
+        ]),
+        Padding(
+          padding: const EdgeInsets.only(top: 6),
+          child: Text(
+            "When on, students can post a doubt without their name being shown to the teacher unless it's revealed.",
+            style: TextStyle(fontSize: 11, color: Colors.grey[500]),
+          ),
+        ),
       ]),
+    );
+  }
+
+  // 🔥 NAYA — entry point for the shared media gallery. Kuch load nahi
+  // karta yahan (koi extra API call nahi) — sirf ek tappable card jo
+  // `GroupMediaScreen` push karta hai, jo khud apna `getGroupMedia` call
+  // karta hai jab open hoti hai.
+  // 🔥 NAYA — entry point for the Doubts tab (persistent upvotable
+  // question board + anonymous asking). Visible to every member (not just
+  // admin/mod) — asking/upvoting a doubt is a normal student action, only
+  // answering/revealing is gated (enforced inside DoubtsScreen + backend).
+  Widget _buildDoubtsCard() {
+    return _cardShell(
+      padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 2),
+      child: ListTile(
+        leading: const Icon(Icons.help_outline_rounded, color: _kAccent, size: 20),
+        title: const Text("Doubts", style: TextStyle(fontWeight: FontWeight.w600, fontSize: 14)),
+        subtitle: const Text("Ask, upvote and answer classroom doubts", style: TextStyle(fontSize: 11.5)),
+        trailing: const Icon(Icons.chevron_right_rounded, color: Colors.grey),
+        onTap: () {
+          Navigator.push(
+            context,
+            MaterialPageRoute(
+              builder: (_) => DoubtsScreen(
+                groupId: widget.groupId,
+                conversationId: _conversationId ?? '',
+                groupName: _name,
+              ),
+            ),
+          );
+        },
+      ),
+    );
+  }
+
+  Widget _buildMediaCard() {
+    return _cardShell(
+      padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 2),
+      child: ListTile(
+        leading: const Icon(Icons.perm_media_rounded, color: _kAccent, size: 20),
+        title: const Text("Media, links and docs", style: TextStyle(fontWeight: FontWeight.w600, fontSize: 14)),
+        trailing: const Icon(Icons.chevron_right_rounded, color: Colors.grey),
+        onTap: () {
+          Navigator.push(context, MaterialPageRoute(builder: (_) => GroupMediaScreen(groupId: widget.groupId)));
+        },
+      ),
     );
   }
 

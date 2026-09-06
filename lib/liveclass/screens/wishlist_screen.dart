@@ -155,16 +155,23 @@ class _WishlistCard extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final classroom = item.classroom;
-    return GestureDetector(
+    // 🔴 FIX (design-system consistency): migrated to LiveClassCard —
+    // this needed the widget's `clipBehavior` override (added for exactly
+    // this case) so the full-bleed cover image still gets clipped to the
+    // rounded corners; margin/padding are zeroed since GridView's own
+    // crossAxisSpacing/mainAxisSpacing already handles cell gaps and the
+    // image must bleed to the card's edge, not sit inside default padding.
+    // `onTap` moves onto LiveClassCard itself (it already wraps its child
+    // in an InkWell when onTap is given), so the separate GestureDetector
+    // this card used to need is gone.
+    return LiveClassCard(
+      margin: EdgeInsets.zero,
+      padding: EdgeInsets.zero,
+      borderRadius: 16,
+      boxShadow: [BoxShadow(color: Colors.black.withOpacity(0.06), blurRadius: 10, offset: const Offset(0, 3))],
+      clipBehavior: Clip.antiAlias,
       onTap: onTap,
-      child: Container(
-        decoration: BoxDecoration(
-          color: Colors.white,
-          borderRadius: BorderRadius.circular(16),
-          boxShadow: [BoxShadow(color: Colors.black.withOpacity(0.06), blurRadius: 10, offset: const Offset(0, 3))],
-        ),
-        clipBehavior: Clip.antiAlias,
-        child: Column(
+      child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             AspectRatio(
@@ -249,7 +256,6 @@ class _WishlistCard extends StatelessWidget {
             ),
           ],
         ),
-      ),
     );
   }
 

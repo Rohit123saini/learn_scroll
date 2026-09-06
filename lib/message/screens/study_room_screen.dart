@@ -31,6 +31,8 @@ import '../services/call_manager.dart';
 import '../services/study_room_call_manager.dart';
 import '../services/message_api_service.dart';
 import '../services/ai_study_service.dart';
+import 'class_transcript_screen.dart'; // 🔥 NAYA — Feature 3: timestamped searchable class transcript
+import 'revision_deck_screen.dart'; // 🔥 NAYA — Feature 5: auto flashcards/quiz revision deck
 import '../services/push_notification_service.dart'; // 🔥 NAYA — file downloads (annotated snapshot/all-pages PDF/original file) complete hone par bhi chat_screen jaisa hi system notification dikhane ke liye
 import '../widgets/whiteboard_painter.dart';
 
@@ -677,6 +679,27 @@ class _StudyRoomScreenState extends State<StudyRoomScreen> {
 
       await _roomCall.joinRoom(livekitUrl: livekitUrl, livekitToken: livekitToken);
       _announceSelfJoined();
+
+      // 🔥 NAYA — Feature 3: class transcript recording shuru, join ke
+      // turant baad (mic permission is point tak already handled ho
+      // chuki hai `joinRoom` ke andar). `session_id` na aaye backend se
+      // (purana/na-update-hua backend) to feature silently skip ho jaata
+      // hai — study room ka baaki sab kaam normal chalta rehta hai.
+      final sessionId = data['session_id']?.toString();
+      if (sessionId != null && sessionId.isNotEmpty) {
+        unawaited(_roomCall.startTranscriptRecording(
+          conversationId: widget.conversationId,
+          sessionId: sessionId,
+        ));
+      }
+
+      // 🔥 NAYA — Feature 6: attendance streak. Backend ne is join ke
+      // saath hi aaj ki attendance log kar li hai (StudyRoomJoinView),
+      // isliye yahan turant fetch karke dikha sakte hain. Best-effort —
+      // `getStudyRoomStreak` fail hone par null deta hai, chup-chaap
+      // skip kar dete hain (jaisa MissedCallWatcher pattern hai) taaki
+      // ek streak-fetch failure se poora study-room join na atke.
+      unawaited(_showAttendanceStreakIfAny());
     } catch (e) {
       developer.log("Study room auto-join failed: $e");
       if (mounted) {
@@ -685,6 +708,31 @@ class _StudyRoomScreenState extends State<StudyRoomScreen> {
         );
       }
     }
+  }
+
+  // 🔥 NAYA — Feature 6: attendance/consistency streak banner. Ek simple
+  // SnackBar use kiya hai (koi persistent AppBar-level badge nahi) taaki
+  // ye poore complex widget tree ko chhede bina drop-in ho jaaye — agar
+  // baad me ek persistent chip (jaise AppBar me) chahiye ho, isi
+  // `StudyStreakModel` data ko `setState` ke through kahin bhi render
+  // kiya ja sakta hai, backend/service layer badalne ki zaroorat nahi.
+  // 1-day streak (pehli hi class) ke liye banner nahi dikhate — koi bhi
+  // "streak" celebrate karne layak tabhi lagta hai jab kam-se-kam 2 din
+  // lagataar ho.
+  Future<void> _showAttendanceStreakIfAny() async {
+    final streak = await CallApiService.getStudyRoomStreak(widget.conversationId);
+    if (streak == null || streak.currentStreak < 2 || !mounted) return;
+
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        backgroundColor: const Color(0xFF1E1E2C),
+        content: Text(
+          '🔥 ${streak.currentStreak}-day streak! Lagataar attend karte raho.',
+          style: const TextStyle(color: Colors.white),
+        ),
+        duration: const Duration(seconds: 4),
+      ),
+    );
   }
 
   void _onCallManagerChanged() {
@@ -701,6 +749,7 @@ class _StudyRoomScreenState extends State<StudyRoomScreen> {
     }
     _stickerTimers.clear();
     _chatInputController.dispose();
+    _copilotQuestionController.dispose(); // 🔥 NAYA
     _socket.dispose();
     CallManager.instance.removeListener(_onCallManagerChanged);
     _roomCall.removeListener(_onCallManagerChanged);
@@ -1914,6 +1963,14 @@ class _StudyRoomScreenState extends State<StudyRoomScreen> {
               iconColor: Colors.black,
               onPressed: _openAiToolsSheet,
               tooltip: 'Ask AI',
+            ),
+            // 🔥 NAYA — Feature 3: searchable transcript / recap
+            circleButton(
+              icon: Icons.subtitles_outlined,
+              background: Colors.white12,
+              iconColor: Colors.white,
+              onPressed: _openClassTranscriptScreen,
+              tooltip: 'Class Transcript',
             ),
           ],
         ),
@@ -3845,8 +3902,201 @@ class _StudyRoomScreenState extends State<StudyRoomScreen> {
                 _runAiGeneration('quiz');
               },
             ),
+            // 🔥 NAYA — Feature 4: AI copilot poore classroom context se
+            // grounded (recent chat + whiteboard + transcript excerpts).
+            ListTile(
+              leading: const Icon(Icons.forum_outlined, color: Colors.tealAccent),
+              title: const Text('Ask About This Class', style: TextStyle(color: Colors.white)),
+              subtitle: const Text('Poore class ke content se jawab — chat, board, transcript', style: TextStyle(color: Colors.white54)),
+              onTap: () {
+                Navigator.pop(context);
+                _openClassroomCopilotSheet();
+              },
+            ),
+            // 🔥 NAYA — Feature 5: Revision Deck (flashcards + quiz from
+            // poore class ke materials — chat + whiteboard + transcript,
+            // saved server-side taaki exam se pehle dobara khol ke revise
+            // kar sake, regenerate kiye bina).
+            ListTile(
+              leading: const Icon(Icons.style_outlined, color: Colors.tealAccent),
+              title: const Text('Generate Revision Deck', style: TextStyle(color: Colors.white)),
+              subtitle: const Text('Poore class se flashcards + quiz — exam se pehle revise karo', style: TextStyle(color: Colors.white54)),
+              onTap: () {
+                Navigator.pop(context);
+                _openRevisionDeckScreen();
+              },
+            ),
           ],
         ),
+      ),
+    );
+  }
+
+  // ============================================================
+  // 🔥 NAYA — FEATURE 5: Revision Deck
+  // ============================================================
+  void _openRevisionDeckScreen() {
+    Navigator.push(
+      context,
+      MaterialPageRoute(
+        builder: (_) => RevisionDeckScreen(
+          conversationId: widget.conversationId,
+          boardContentBuilder: _collectBoardTextContent,
+        ),
+      ),
+    );
+  }
+
+  // ============================================================
+  // 🔥 NAYA — FEATURE 4: AI copilot poore classroom context se grounded
+  // ============================================================
+  final TextEditingController _copilotQuestionController = TextEditingController();
+
+  void _openClassroomCopilotSheet() {
+    showModalBottomSheet(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: const Color(0xFF1E1E2C),
+      shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(20))),
+      builder: (sheetContext) {
+        return Padding(
+          padding: EdgeInsets.only(
+            left: 20, right: 20, top: 20,
+            bottom: 20 + MediaQuery.of(sheetContext).viewInsets.bottom,
+          ),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              const Text('Ask About This Class', style: TextStyle(color: Colors.white, fontSize: 16, fontWeight: FontWeight.bold)),
+              const SizedBox(height: 4),
+              const Text(
+                'Jaise: "last class me formula kya tha jo teacher ne bataya tha"',
+                style: TextStyle(color: Colors.white38, fontSize: 12),
+              ),
+              const SizedBox(height: 14),
+              TextField(
+                controller: _copilotQuestionController,
+                autofocus: true,
+                maxLines: 2,
+                style: const TextStyle(color: Colors.white),
+                decoration: InputDecoration(
+                  hintText: 'Apna sawaal likho...',
+                  hintStyle: const TextStyle(color: Colors.white38),
+                  filled: true,
+                  fillColor: Colors.white10,
+                  border: OutlineInputBorder(borderRadius: BorderRadius.circular(12), borderSide: BorderSide.none),
+                ),
+              ),
+              const SizedBox(height: 14),
+              SizedBox(
+                width: double.infinity,
+                child: ElevatedButton.icon(
+                  icon: const Icon(Icons.auto_awesome),
+                  label: const Text('Poocho'),
+                  onPressed: () {
+                    final question = _copilotQuestionController.text.trim();
+                    if (question.isEmpty) return;
+                    Navigator.pop(sheetContext);
+                    _runClassroomCopilot(question);
+                  },
+                ),
+              ),
+            ],
+          ),
+        );
+      },
+    );
+  }
+
+  Future<void> _runClassroomCopilot(String question) async {
+    showDialog(
+      context: context,
+      barrierDismissible: false,
+      builder: (_) => const AlertDialog(
+        backgroundColor: Color(0xFF1E1E2C),
+        content: Row(
+          children: [
+            CircularProgressIndicator(color: Colors.tealAccent),
+            SizedBox(width: 20),
+            Expanded(child: Text('Class ka context dekh raha hoon…', style: TextStyle(color: Colors.white))),
+          ],
+        ),
+      ),
+    );
+
+    try {
+      final answer = await AiStudyService.askClassroomCopilot(
+        conversationId: widget.conversationId,
+        question: question,
+        boardContent: _collectBoardTextContent(),
+      );
+      if (!mounted) return;
+      Navigator.pop(context); // close loading dialog
+      _showClassroomCopilotAnswerSheet(question, answer);
+    } catch (e) {
+      if (!mounted) return;
+      Navigator.pop(context); // close loading dialog
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Copilot jawab nahi de paya: $e')),
+      );
+    }
+  }
+
+  void _showClassroomCopilotAnswerSheet(String question, String answer) {
+    showModalBottomSheet(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: const Color(0xFF1E1E2C),
+      shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(20))),
+      builder: (sheetContext) {
+        return DraggableScrollableSheet(
+          initialChildSize: 0.5,
+          minChildSize: 0.25,
+          maxChildSize: 0.85,
+          expand: false,
+          builder: (_, scrollController) => Padding(
+            padding: const EdgeInsets.all(20),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(question, style: const TextStyle(color: Colors.tealAccent, fontSize: 13, fontStyle: FontStyle.italic)),
+                const SizedBox(height: 10),
+                Expanded(
+                  child: SingleChildScrollView(
+                    controller: scrollController,
+                    child: Text(answer, style: const TextStyle(color: Colors.white70, height: 1.4)),
+                  ),
+                ),
+                const SizedBox(height: 10),
+                SizedBox(
+                  width: double.infinity,
+                  child: OutlinedButton.icon(
+                    icon: const Icon(Icons.forum_outlined, color: Colors.tealAccent),
+                    label: const Text('Aur poocho', style: TextStyle(color: Colors.tealAccent)),
+                    onPressed: () {
+                      Navigator.pop(sheetContext);
+                      _copilotQuestionController.clear();
+                      _openClassroomCopilotSheet();
+                    },
+                  ),
+                ),
+              ],
+            ),
+          ),
+        );
+      },
+    );
+  }
+
+  // ============================================================
+  // 🔥 NAYA — FEATURE 3: class transcript / recap screen
+  // ============================================================
+  void _openClassTranscriptScreen() {
+    Navigator.push(
+      context,
+      MaterialPageRoute(
+        builder: (_) => ClassTranscriptScreen(conversationId: widget.conversationId),
       ),
     );
   }

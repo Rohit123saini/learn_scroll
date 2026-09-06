@@ -41,7 +41,16 @@ const List<String> _kTimezones = ['Asia/Kolkata', 'Asia/Dubai', 'Asia/Karachi', 
 // user outside UTC. Delegates to the shared locale + `.toLocal()`-aware
 // helper now (same fix already applied to doubts/holidays/submission-
 // grading elsewhere in this module).
-String _fmtDate(DateTime d) => liveClassFmtDate(d);
+// FIX (locale consistency audit): this wrapper took no `context` param at
+// all, so it could never thread the device/app locale through to
+// liveClassFmtDate — every call site below was silently stuck on intl's
+// default locale regardless of the viewer's device language. Widened to
+// take the same optional `[BuildContext? context]` every other file's
+// local `_fmtDate`/`_fmtDateTime` wrapper already uses (see
+// classroom_purchases_screen.dart), and threaded `context` through at
+// each call site below (all of them are State instance methods, so
+// `context` is available directly).
+String _fmtDate(DateTime d, [BuildContext? context]) => liveClassFmtDate(d, context);
 
 String _recurrenceLabel(String type) {
   switch (type) {
@@ -265,22 +274,35 @@ class _ScheduleManagerScreenState extends State<ScheduleManagerScreen> {
         detail = 'Monthly on day ${s.dayOfMonth ?? '-'}';
         break;
       case RecurrenceType.specificDate:
-        detail = _fmtDate(s.startDate);
+        detail = _fmtDate(s.startDate, context);
         break;
       default:
-        detail = _fmtDate(s.startDate) + (s.endDate != null ? ' – ${_fmtDate(s.endDate!)}' : ' se aage');
+        // FIX (translation-consistency audit — Hindi/English string mix):
+        // was `' se aage'` (Hinglish for "onwards") hardcoded next to an
+        // otherwise all-English label ("18 Jun – se aage" for an
+        // open-ended recurrence with no end date) — the one leftover
+        // non-English literal in this screen. Swapped for the English
+        // "onwards" so the label reads consistently in one language,
+        // matching every other detail string this switch produces.
+        //
+        // FIX (locale consistency audit): both `_fmtDate` calls here were
+        // missing `context` — see the note on the `_fmtDate` wrapper
+        // above.
+        detail = _fmtDate(s.startDate, context) + (s.endDate != null ? ' – ${_fmtDate(s.endDate!, context)}' : ' onwards');
     }
 
+    // 🔴 FIX (design-system consistency audit): this Container's
+    // BoxDecoration was an exact match to LiveClassCard's own defaults
+    // (white, radius 14, shadow black@0.04/blur 8/offset (0,2), padding
+    // 14, margin bottom 12) — the same hand-rolled-but-identical pattern
+    // already fixed in classroom_purchases_screen.dart/wishlist_screen.dart/
+    // waitlist_screen.dart. Swapped in the shared widget: zero visual
+    // change, one less place to drift if the token values ever move.
     return Opacity(
       opacity: s.isActive ? 1 : 0.55,
-      child: Container(
+      child: LiveClassCard(
         margin: const EdgeInsets.only(bottom: 12),
         padding: const EdgeInsets.all(14),
-        decoration: BoxDecoration(
-          color: Colors.white,
-          borderRadius: BorderRadius.circular(14),
-          boxShadow: [BoxShadow(color: Colors.black.withOpacity(0.04), blurRadius: 8, offset: const Offset(0, 2))],
-        ),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
@@ -579,7 +601,7 @@ class _ScheduleFormSheetState extends State<_ScheduleFormSheet> {
                   Expanded(
                     child: _pickerField(
                       label: _recurrenceType == RecurrenceType.specificDate ? 'Date' : 'Start Date',
-                      value: _fmtDate(_startDate),
+                      value: _fmtDate(_startDate, context),
                       onTap: _pickStartDate,
                     ),
                   ),
@@ -588,7 +610,7 @@ class _ScheduleFormSheetState extends State<_ScheduleFormSheet> {
                     Expanded(
                       child: _pickerField(
                         label: 'End Date (optional)',
-                        value: _endDate != null ? _fmtDate(_endDate!) : '—',
+                        value: _endDate != null ? _fmtDate(_endDate!, context) : '—',
                         onTap: _pickEndDate,
                       ),
                     ),

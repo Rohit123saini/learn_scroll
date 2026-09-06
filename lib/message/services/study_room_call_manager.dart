@@ -13,10 +13,22 @@
 // Har StudyRoomScreen apna khud ka instance banaye (global singleton
 // nahi) — jaise: `final _roomCall = StudyRoomCallManager();` — aur
 // screen dispose hote hi `_roomCall.leaveRoom()` call karo.
+import 'dart:async';
 import 'dart:developer' as developer;
+import 'dart:io';
 import 'package:flutter/foundation.dart';
 import 'package:livekit_client/livekit_client.dart';
 import 'package:permission_handler/permission_handler.dart';
+// 🔥 NAYA — Feature 3 (class transcript): har participant apna mic
+// locally chunk-record karta hai (existing `record` package, chat
+// voice-note ki tarah — LiveKit server-side room recording/egress abhi
+// is stack me wired nahi hai, isliye "poori class ki ek continuous
+// recording" abhi possible nahi, per-participant chunked capture hi
+// buildable tha).
+import 'package:record/record.dart';
+import 'package:path_provider/path_provider.dart';
+import 'message_api_service.dart'; // same services/ folder
+import 'ai_study_service.dart'; // same services/ folder
 // 🔥 NAYA — screen share ke liye. `Helper.requestCapturePermission()`
 // `package:flutter_webrtc` se aata hai (Android par capture permission
 // maangne ke liye). `flutter_background` alag package hai, Android par
@@ -66,6 +78,16 @@ class StudyRoomCallManager extends ChangeNotifier {
   LocalVideoTrack? _localScreenTrack;
   final Map<String, VideoTrack> screenShareTracks = {};
   bool _androidBackgroundEnabled = false;
+
+  // ---- 🔥 NAYA — class transcript: chunked local mic recording ----
+  static const Duration _transcriptChunkDuration = Duration(seconds: 45);
+  final AudioRecorder _transcriptRecorder = AudioRecorder();
+  Timer? _transcriptChunkTimer;
+  String? _transcriptConversationId;
+  String? _transcriptSessionId;
+  DateTime? _transcriptSessionStart; // session-relative offsets isi se calculate hote hain
+  Duration _transcriptElapsedBeforeCurrentChunk = Duration.zero;
+  bool isRecordingTranscript = false;
 
   /// Jo bhi is waqt present kar raha hai uska video track — pehle apna
   /// (agar main present kar raha hoon), warna jo bhi remote presenter mila.
@@ -294,6 +316,126 @@ class StudyRoomCallManager extends ChangeNotifier {
   }
 
   // ============================================================
+  // 🔥 NAYA — CLASS TRANSCRIPT: chunked local mic recording
+  // ------------------------------------------------------------
+  // StudyRoomScreen ye call kare `_joinStudyRoomMedia()` ke turant baad
+  // (jab tak room join ho chuka hai — mic permission already granted hai
+  // us waqt tak, isliye alag se permission nahi maangte yahan). `sessionId`
+  // backend ke `joinStudyRoom` response se aata hai (naya field — backend
+  // ko `StudyRoomJoinView` me har session ke liye ek stable id return
+  // karna hoga, taaki naya-session-per-open ka transcript purani session
+  // se mix na ho).
+  //
+  // Recording continuous nahi hai — har ~45s pe purana chunk stop hoke
+  // upload hota hai, naya turant shuru ho jaata hai. Isse:
+  //   1. Transcript progressively aata rehta hai (poori class khatam hone
+  //      ka wait nahi karna padta result dekhne ke liye)
+  //   2. App crash/force-close ho jaaye to sirf last ~45s ka transcript
+  //      miss hota hai, poori class ka nahi
+  // ============================================================
+  Future<void> startTranscriptRecording({
+    required String conversationId,
+    required String sessionId,
+  }) async {
+    if (isRecordingTranscript) return;
+    _transcriptConversationId = conversationId;
+    _transcriptSessionId = sessionId;
+    _transcriptSessionStart = DateTime.now();
+    _transcriptElapsedBeforeCurrentChunk = Duration.zero;
+    isRecordingTranscript = true;
+
+    await _beginNextTranscriptChunk();
+    _transcriptChunkTimer = Timer.periodic(_transcriptChunkDuration, (_) => _rotateTranscriptChunk());
+  }
+
+  Future<void> _beginNextTranscriptChunk() async {
+    try {
+      final hasPermission = await _transcriptRecorder.hasPermission();
+      if (!hasPermission) return; // mic permission na ho to transcript feature bas silently skip ho jaaye, class join block nahi hona chahiye
+      final tempDir = await getTemporaryDirectory();
+      final path = "${tempDir.path}/class_chunk_${DateTime.now().millisecondsSinceEpoch}.m4a";
+      await _transcriptRecorder.start(const RecordConfig(encoder: AudioEncoder.aacLc), path: path);
+    } catch (e) {
+      developer.log("startTranscriptRecording chunk start failed: $e");
+    }
+  }
+
+  Future<void> _rotateTranscriptChunk() async {
+    if (!isRecordingTranscript) return;
+    final startOffset = _transcriptElapsedBeforeCurrentChunk;
+    final endOffset = startOffset + _transcriptChunkDuration;
+    _transcriptElapsedBeforeCurrentChunk = endOffset;
+
+    String? path;
+    try {
+      path = await _transcriptRecorder.stop();
+    } catch (e) {
+      developer.log("rotateTranscriptChunk stop failed: $e");
+    }
+
+    // Agla chunk turant shuru karo — upload background me chalta rahega,
+    // isse transcript me gap nahi aata.
+    if (isRecordingTranscript) unawaited(_beginNextTranscriptChunk());
+
+    if (path == null) return;
+    unawaited(_uploadTranscriptChunk(path, startOffset, endOffset));
+  }
+
+  Future<void> _uploadTranscriptChunk(String path, Duration startOffset, Duration endOffset) async {
+    final conversationId = _transcriptConversationId;
+    final sessionId = _transcriptSessionId;
+    if (conversationId == null || sessionId == null) return;
+
+    try {
+      // Bahut chhota chunk (koi awaz hi nahi aayi shayad) — transcribe
+      // karwane ka koi fayda nahi, storage/AI quota bachao.
+      final file = File(path);
+      final size = await file.exists() ? await file.length() : 0;
+      if (size < 2000) {
+        try { await file.delete(); } catch (_) {}
+        return;
+      }
+
+      final uploaded = await MessageApiService.uploadFile(file);
+      await AiStudyService.registerTranscriptChunk(
+        conversationId: conversationId,
+        sessionId: sessionId,
+        audioFileUrl: uploaded.fileUrl,
+        startOffset: startOffset,
+        endOffset: endOffset,
+      );
+    } catch (e) {
+      // Best-effort — ek chunk fail ho jaaye to poori class transcript
+      // sirf usi chunk jitna incomplete rahega, kuch aur break nahi hota.
+      developer.log("uploadTranscriptChunk failed: $e");
+    } finally {
+      try { await File(path).delete(); } catch (_) {}
+    }
+  }
+
+  Future<void> stopTranscriptRecording() async {
+    if (!isRecordingTranscript) return;
+    isRecordingTranscript = false;
+    _transcriptChunkTimer?.cancel();
+    _transcriptChunkTimer = null;
+
+    final startOffset = _transcriptElapsedBeforeCurrentChunk;
+    final endOffset = startOffset + (DateTime.now().difference(_transcriptSessionStart ?? DateTime.now()) - startOffset);
+    String? path;
+    try {
+      path = await _transcriptRecorder.stop();
+    } catch (e) {
+      developer.log("stopTranscriptRecording stop failed: $e");
+    }
+    if (path != null) {
+      unawaited(_uploadTranscriptChunk(path, startOffset, endOffset));
+    }
+    _transcriptConversationId = null;
+    _transcriptSessionId = null;
+    _transcriptSessionStart = null;
+  }
+
+  // ============================================================
   // PERMISSIONS
   // ------------------------------------------------------------
   // 🔥 FIX — ye method pehle poori file me kahin nahi tha. CallManager
@@ -392,6 +534,7 @@ class StudyRoomCallManager extends ChangeNotifier {
   // LEAVE — StudyRoomScreen.dispose() se call karo
   // ============================================================
   Future<void> leaveRoom() async {
+    await stopTranscriptRecording();
     try {
       await _listener?.dispose();
       await room?.disconnect();

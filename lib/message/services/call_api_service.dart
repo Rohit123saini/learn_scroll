@@ -1,12 +1,18 @@
 import 'dart:convert';
 import 'package:http/http.dart' as http;
 import 'package:shared_preferences/shared_preferences.dart';
+import '../../utils/api.dart';
+import '../models/study_room_models.dart';
 
 class CallApiService {
-  // TESTING (abhi): LAN IP hi rakho - dono phone same WiFi pe hone chahiye
-  // PRODUCTION (backend deploy hone ke baad): sirf ye ek line badalni hai, jaise:
-  //   static const String baseUrl = "https://api.yourdomain.com";
-  static const String baseUrl = "http://10.224.54.189:8000";
+  // 🔧 FIX (baseURL mismatch) — pehle yahan ek ALAG hardcoded LAN-IP
+  // constant tha (`"http://10.224.54.189:8000"`), jabki baaki saari
+  // services (`message_api_service.dart`, `chat_socket_service.dart`)
+  // `Api.baseUrl` (utils/api.dart) use karti thi. Dono ki value abhi
+  // same hai, isliye koi behavior change nahi — bas ab production me
+  // switch karte waqt sirf `utils/api.dart` ki ek line badalni hogi,
+  // yahan alag se yaad nahi rakhna padega.
+  static String get baseUrl => Api.baseUrl;
 
   static Future<Map<String, String>> _getHeaders() async {
     final prefs = await SharedPreferences.getInstance();
@@ -144,7 +150,14 @@ class CallApiService {
   //
   // Backend me naya endpoint add karna hoga:
   //   POST $baseUrl/message/study-room/<conversation_id>/join/
-  //   response: { "livekit_url": "...", "livekit_token": "..." }
+  //   response: { "livekit_url": "...", "livekit_token": "...", "session_id": "..." }
+  //
+  // 🔥 NAYA — `session_id` (Feature 3, class transcript ke liye zaroori):
+  // backend ko har session ke liye ek stable id return karna hoga (naya
+  // `new_session: true` par naya id, existing session join par purana hi
+  // id) — StudyRoomScreen isi id ko `StudyRoomCallManager.
+  // startTranscriptRecording(sessionId: ...)` me pass karta hai, taaki
+  // alag-alag sessions ka transcript mix na ho.
   // (call_id ki zaroorat nahi — room_name backend khud
   // conversation_id se derive kar sakta hai, taaki sab participants
   // ek hi persistent room me milein.)
@@ -204,6 +217,32 @@ class CallApiService {
       // Missed-call check best-effort hai — fail hone par app ko block
       // nahi karna, bas silently skip.
       return [];
+    }
+  }
+
+  // 🔥 NAYA — Feature 6: attendance/consistency streak. Backend logs one
+  // attendance row per (conversation, user, calendar day) inside
+  // `StudyRoomJoinView.post()` — this just reads that back, computed.
+  //   GET $baseUrl/message/study-room/<conversation_id>/streak/
+  //   response: {
+  //     "current_streak": 7, "longest_streak": 12,
+  //     "total_classes_attended": 34, "last_attended": "2026-09-04"
+  //   }
+  // Best-effort like `getMissedCalls` — a streak badge failing to load
+  // shouldn't block the study room from opening, so this returns null on
+  // any error instead of throwing.
+  static Future<StudyStreakModel?> getStudyRoomStreak(String conversationId) async {
+    try {
+      final res = await http.get(
+        Uri.parse("$baseUrl/message/study-room/$conversationId/streak/"),
+        headers: await _getHeaders(),
+      );
+      if (res.statusCode == 200) {
+        return StudyStreakModel.fromJson(jsonDecode(res.body) as Map<String, dynamic>);
+      }
+      return null;
+    } catch (e) {
+      return null;
     }
   }
 

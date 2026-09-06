@@ -39,7 +39,13 @@ const _kGradient = LiveClassColors.gradient;
 // shifted from what they actually experienced. Delegates to the shared
 // locale + `.toLocal()`-aware helper now (same fix already applied to
 // doubts/holidays/submission-grading elsewhere in this module).
-String _fmtDateTime(DateTime d) => liveClassFmtDateTime(d);
+// FIX (locale consistency audit): this wrapper took no `context` param,
+// so it could never thread the device/app locale through to
+// liveClassFmtDateTime — every call site below was silently stuck on
+// intl's default locale. Widened to the same optional
+// `[BuildContext? context]` pattern used elsewhere in the module and
+// threaded through at each call site (both are State instance methods).
+String _fmtDateTime(DateTime d, [BuildContext? context]) => liveClassFmtDateTime(d, context);
 
 String _coins(num n) => n == n.roundToDouble() ? n.toStringAsFixed(0) : n.toStringAsFixed(2);
 
@@ -280,25 +286,26 @@ class _JoinRequestsScreenState extends State<JoinRequestsScreen> with SingleTick
         ),
       ),
       body: _loading
-          ? const Center(child: CircularProgressIndicator(color: _kNavy))
+          // FIX (design-system consistency audit): exact match to
+          // LiveClassLoading's own rendering (Center + navy
+          // CircularProgressIndicator) — zero-visual-change swap.
+          ? const LiveClassLoading()
+          // FIX (design-system consistency audit): the loading state and
+          // both card widgets in this file were already migrated onto the
+          // shared theme widgets, but the error and empty states were
+          // still on this file's own local `_ErrorState` / a hand-rolled
+          // centered Text — left over from before liveclass_theme.dart
+          // existed. Swapped to LiveClassErrorState/LiveClassEmptyState;
+          // `_ErrorState` below is now unused and removed.
           : _error != null
-              ? _ErrorState(message: _error!, onRetry: _load)
+              ? LiveClassErrorState(message: _error!, onRetry: _load)
               : RefreshIndicator(
                   color: _kNavy,
                   onRefresh: _load,
                   child: _filtered.isEmpty
-                      ? ListView(
-                          children: [
-                            Padding(
-                              padding: const EdgeInsets.only(top: 100),
-                              child: Center(
-                                child: Text(
-                                  widget.isInbox ? 'No requests in this category.' : 'You haven\'t sent any requests yet.',
-                                  style: const TextStyle(color: Colors.black45),
-                                ),
-                              ),
-                            ),
-                          ],
+                      ? LiveClassEmptyState(
+                          icon: Icons.inbox_outlined,
+                          title: widget.isInbox ? 'No requests in this category.' : 'You haven\'t sent any requests yet.',
                         )
                       : ListView.builder(
                           padding: const EdgeInsets.fromLTRB(16, 14, 16, 24),
@@ -323,9 +330,14 @@ class _JoinRequestsScreenState extends State<JoinRequestsScreen> with SingleTick
 
   Widget _statusPill(String status) {
     final c = _statusColor(status);
+    // FIX (deprecated-API audit): `withOpacity` is deprecated in favour of
+    // `withValues(alpha:)` (precision loss on wide-gamut color — see
+    // Color.withOpacity's own deprecation note); coin_wallet_screen.dart
+    // and coupons_screen.dart already made this swap, this call site
+    // hadn't yet. Same alpha value, zero visual change.
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 3),
-      decoration: BoxDecoration(color: c.withOpacity(0.12), borderRadius: BorderRadius.circular(20)),
+      decoration: BoxDecoration(color: c.withValues(alpha: 0.12), borderRadius: BorderRadius.circular(20)),
       child: Text(_statusLabel(status).toUpperCase(), style: TextStyle(fontSize: 10, fontWeight: FontWeight.bold, color: c)),
     );
   }
@@ -333,16 +345,14 @@ class _JoinRequestsScreenState extends State<JoinRequestsScreen> with SingleTick
   // -------------------------------------------------------------------
   // Teacher inbox card
   // -------------------------------------------------------------------
+  // 🔴 FIX (design-system consistency audit): exact match to LiveClassCard's
+  // defaults (white, radius 14, shadow black@0.04/blur 8/offset (0,2)) —
+  // zero-visual-change swap, same as the rest of the module.
   Widget _inboxCard(ClassJoinRequest r) {
     final busy = _busyIds.contains(r.id);
-    return Container(
+    return LiveClassCard(
       margin: const EdgeInsets.only(bottom: 10),
       padding: const EdgeInsets.all(14),
-      decoration: BoxDecoration(
-        color: Colors.white,
-        borderRadius: BorderRadius.circular(14),
-        boxShadow: [BoxShadow(color: Colors.black.withOpacity(0.04), blurRadius: 8, offset: const Offset(0, 2))],
-      ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
@@ -371,7 +381,7 @@ class _JoinRequestsScreenState extends State<JoinRequestsScreen> with SingleTick
             Text('"${r.message}"', style: TextStyle(fontSize: 12.5, color: Colors.grey.shade700, fontStyle: FontStyle.italic)),
           ],
           const SizedBox(height: 6),
-          Text('Requested: ${_fmtDateTime(r.requestedAt)}', style: TextStyle(fontSize: 11, color: Colors.grey.shade400)),
+          Text('Requested: ${_fmtDateTime(r.requestedAt, context)}', style: TextStyle(fontSize: 11, color: Colors.grey.shade400)),
           if (r.decisionNote.isNotEmpty) ...[
             const SizedBox(height: 4),
             Text('Note: ${r.decisionNote}', style: TextStyle(fontSize: 11.5, color: Colors.grey.shade600)),
@@ -420,16 +430,16 @@ class _JoinRequestsScreenState extends State<JoinRequestsScreen> with SingleTick
   // -------------------------------------------------------------------
   // Student "My Requests" card
   // -------------------------------------------------------------------
+  // 🔴 FIX (design-system consistency audit — the inbox card above and the
+  // loading/empty states in build() were already migrated, this "My
+  // Requests" card was the one call site left still hand-rolling the
+  // Container): exact match to LiveClassCard's defaults (white, radius 14,
+  // shadow black@0.04/blur 8/offset (0,2)) — zero-visual-change swap.
   Widget _mineCard(ClassJoinRequest r) {
     final busy = _busyIds.contains(r.id);
-    return Container(
+    return LiveClassCard(
       margin: const EdgeInsets.only(bottom: 10),
       padding: const EdgeInsets.all(14),
-      decoration: BoxDecoration(
-        color: Colors.white,
-        borderRadius: BorderRadius.circular(14),
-        boxShadow: [BoxShadow(color: Colors.black.withOpacity(0.04), blurRadius: 8, offset: const Offset(0, 2))],
-      ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
@@ -446,10 +456,10 @@ class _JoinRequestsScreenState extends State<JoinRequestsScreen> with SingleTick
           _kv('Pass', r.classPassTitle.isNotEmpty ? r.classPassTitle : '—'),
           _kv('Price', '${_coins(r.classPassPrice)} coins'),
           const SizedBox(height: 6),
-          Text('Requested: ${_fmtDateTime(r.requestedAt)}', style: TextStyle(fontSize: 11, color: Colors.grey.shade400)),
+          Text('Requested: ${_fmtDateTime(r.requestedAt, context)}', style: TextStyle(fontSize: 11, color: Colors.grey.shade400)),
           if (r.decidedAt != null) ...[
             const SizedBox(height: 3),
-            Text('Decided: ${_fmtDateTime(r.decidedAt!)}', style: TextStyle(fontSize: 11, color: Colors.grey.shade400)),
+            Text('Decided: ${_fmtDateTime(r.decidedAt!, context)}', style: TextStyle(fontSize: 11, color: Colors.grey.shade400)),
           ],
           if (r.decisionNote.isNotEmpty) ...[
             const SizedBox(height: 6),
@@ -483,36 +493,4 @@ class _JoinRequestsScreenState extends State<JoinRequestsScreen> with SingleTick
           ],
         ),
       );
-}
-
-// ===========================================================================
-// Shared small widgets
-// ===========================================================================
-class _ErrorState extends StatelessWidget {
-  final String message;
-  final VoidCallback onRetry;
-  const _ErrorState({required this.message, required this.onRetry});
-
-  @override
-  Widget build(BuildContext context) {
-    return Center(
-      child: Padding(
-        padding: const EdgeInsets.all(24),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            const Icon(Icons.error_outline_rounded, size: 40, color: Colors.black38),
-            const SizedBox(height: 12),
-            Text(message, textAlign: TextAlign.center, style: const TextStyle(color: Colors.black54)),
-            const SizedBox(height: 16),
-            ElevatedButton(
-              style: ElevatedButton.styleFrom(backgroundColor: _kNavy, foregroundColor: Colors.white),
-              onPressed: onRetry,
-              child: const Text('Retry'),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
 }

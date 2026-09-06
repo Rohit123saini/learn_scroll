@@ -47,13 +47,15 @@ class _CallScreenState extends State<CallScreen> with SingleTickerProviderStateM
   // connecting/ringing (band ho jaata hai jaise hi call connect hoti hai) ----------
   late final AnimationController _pulseController;
 
-  // ---------- Outgoing ring (jab hum call kar rahe hain aur doosri taraf
-  // abhi accept nahi hui) + call-waiting tone (jab isi call ke dauraan
-  // koi doosri call aa jaaye) — dono AssetSource se play hote hain, incoming
-  // call ka ringtone/vibration IncomingCallScreen khud handle karta hai. ----------
-  final AudioPlayer _outgoingRingPlayer = AudioPlayer();
+  // ---------- Call-waiting tone (jab isi call ke dauraan koi doosri call
+  // aa jaaye) — AssetSource se play hota hai. Outgoing ring YAHAN se nahi
+  // bajta — 🔧 FIX (double audio): CallManager apna khud ka outgoing-ring
+  // AudioPlayer already play karta hai (proper AudioContext ke saath —
+  // speakerphone/alarm/stayAwake), isliye isi screen ka apna alag
+  // _outgoingRingPlayer HATA diya hai — dono ek saath bajne se do
+  // ringtones overlap ho rahi thi. Incoming call ka ringtone/vibration
+  // IncomingCallScreen khud handle karta hai (callee side, alag flow). ----------
   final AudioPlayer _waitingTonePlayer = AudioPlayer();
-  bool _outgoingRingPlaying = false;
   bool _waitingTonePlaying = false;
 
   // 🔥 NAYA — control bar (mute/speaker/etc icons) 3 second baad apne aap
@@ -130,26 +132,12 @@ class _CallScreenState extends State<CallScreen> with SingleTickerProviderStateM
     if (_cm.remoteConnected) _noAnswerTimer?.cancel();
   }
 
-  // Manager ki current state dekh kar outgoing-ring / call-waiting tone
-  // start/stop karta hai — jitni baar bhi _cm change ho, ye dobara call
-  // hota hai isliye dono sounds hamesha sahi state me rehte hain.
+  // Manager ki current state dekh kar call-waiting tone start/stop karta
+  // hai — jitni baar bhi _cm change ho, ye dobara call hota hai isliye
+  // sound hamesha sahi state me rehta hai. Outgoing ring ab yahan se
+  // control nahi hoti (🔧 FIX, double audio) — CallManager khud apna
+  // outgoing-ring player manage karta hai isCaller state ke hisaab se.
   Future<void> _syncRingSounds() async {
-    // Outgoing ring — sirf caller ke liye, jab tak doosri taraf connect
-    // (ya reconnect) na ho jaaye.
-    final shouldRing = widget.isCaller && !_cm.remoteConnected && !_cm.isReconnecting;
-    if (shouldRing && !_outgoingRingPlaying) {
-      _outgoingRingPlaying = true;
-      try {
-        await _outgoingRingPlayer.setReleaseMode(ReleaseMode.loop);
-        await _outgoingRingPlayer.play(AssetSource('sounds/outgoing_ring.wav'));
-      } catch (_) {}
-    } else if (!shouldRing && _outgoingRingPlaying) {
-      _outgoingRingPlaying = false;
-      try {
-        await _outgoingRingPlayer.stop();
-      } catch (_) {}
-    }
-
     // Call-waiting tone — jab isi call ke dauraan koi doosri incoming call
     // aa jaaye (banner dikhne tak).
     final shouldWaitTone = _cm.waitingCallId != null;
@@ -173,8 +161,6 @@ class _CallScreenState extends State<CallScreen> with SingleTickerProviderStateM
     _pulseController.dispose();
     _hideControlsTimer?.cancel();
     _noAnswerTimer?.cancel();
-    _outgoingRingPlayer.stop();
-    _outgoingRingPlayer.dispose();
     _waitingTonePlayer.stop();
     _waitingTonePlayer.dispose();
     super.dispose();

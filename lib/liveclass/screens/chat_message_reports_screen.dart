@@ -160,7 +160,13 @@ class _ChatMessageReportsScreenState extends State<ChatMessageReportsScreen> {
                 .map((s) => DropdownMenuItem(
                       value: s.id,
                       child: Text(
-                        '${liveClassFmtDate(s.scheduledStart)} · ${s.classroomTitle.isNotEmpty ? s.classroomTitle : "Session #${s.id}"}',
+                        // FIX (locale consistency audit): missing the
+                        // `context` param meant this fell back to intl's
+                        // default locale instead of the device/app one —
+                        // same class of gap already fixed for
+                        // liveClassFmtDate's other call sites in the
+                        // module (e.g. doubts_screen.dart).
+                        '${liveClassFmtDate(s.scheduledStart, context)} · ${s.classroomTitle.isNotEmpty ? s.classroomTitle : "Session #${s.id}"}',
                         overflow: TextOverflow.ellipsis,
                       ),
                     ))
@@ -238,7 +244,7 @@ class _ChatMessageReportsScreenState extends State<ChatMessageReportsScreen> {
                   style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 13.5, color: LiveClassColors.navy),
                 ),
               ),
-              Text(liveClassFmtDateTime(r.createdAt), style: TextStyle(fontSize: 10.5, color: Colors.grey.shade500)),
+              Text(liveClassFmtDateTime(r.createdAt, context), style: TextStyle(fontSize: 10.5, color: Colors.grey.shade500)),
             ],
           ),
           if (r.messagePreview.isNotEmpty) ...[

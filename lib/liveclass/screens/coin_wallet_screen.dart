@@ -202,7 +202,13 @@ class _CoinWalletScreenState extends State<CoinWalletScreen> {
               children: [
                 Text(_reasonLabel(t.reason), style: const TextStyle(fontWeight: FontWeight.w600, fontSize: 13.5)),
                 const SizedBox(height: 2),
-                Text(liveClassFmtDateTime(t.createdAt), style: TextStyle(fontSize: 11, color: Colors.grey.shade500)),
+                // FIX (locale consistency audit): missing `context` here
+                // meant this fell back to intl's default locale instead of
+                // the device/app one — every other screen in the module
+                // (my_reminders_screen.dart, notice_board_screen.dart, etc.)
+                // already threads `context` through to these helpers; this
+                // was the one call site in the module still missing it.
+                Text(liveClassFmtDateTime(t.createdAt, context), style: TextStyle(fontSize: 11, color: Colors.grey.shade500)),
               ],
             ),
           ),

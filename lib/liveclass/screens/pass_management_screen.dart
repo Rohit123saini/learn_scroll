@@ -194,15 +194,17 @@ class _PassManagementScreenState extends State<PassManagementScreen> {
 
   @override
   Widget build(BuildContext context) {
+    // 🔴 FIX (design-system consistency audit — this screen was one of the
+    // 10 still on the pre-LiveClassCard pattern): AppBar, loading spinner,
+    // error state and empty state were all hand-rolled instead of using
+    // the shared liveClassAppBar/LiveClassLoading/LiveClassErrorState/
+    // LiveClassEmptyState widgets every other screen in the module now
+    // uses. Swapped in the shared widgets — the error/empty copy below is
+    // carried over unchanged, and LiveClassErrorState's own OutlinedButton
+    // retry replaces the old ElevatedButton one-for-one.
     return Scaffold(
       backgroundColor: _kBg,
-      appBar: AppBar(
-        backgroundColor: Colors.white,
-        foregroundColor: _kNavy,
-        elevation: 0.5,
-        title: Text(widget.classroomTitle.isNotEmpty ? 'Passes — ${widget.classroomTitle}' : 'Passes',
-            style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 15), maxLines: 1, overflow: TextOverflow.ellipsis),
-      ),
+      appBar: liveClassAppBar(widget.classroomTitle.isNotEmpty ? 'Passes — ${widget.classroomTitle}' : 'Passes'),
       floatingActionButton: FloatingActionButton.extended(
         backgroundColor: _kNavy,
         onPressed: () => _openEditor(),
@@ -210,38 +212,17 @@ class _PassManagementScreenState extends State<PassManagementScreen> {
         label: const Text('New Pass'),
       ),
       body: _loading
-          ? const Center(child: CircularProgressIndicator(color: _kNavy))
+          ? const LiveClassLoading()
           : _error != null
-              ? Center(
-                  child: Padding(
-                    padding: const EdgeInsets.all(24),
-                    child: Column(mainAxisSize: MainAxisSize.min, children: [
-                      Text(_error!, textAlign: TextAlign.center),
-                      const SizedBox(height: 12),
-                      ElevatedButton(onPressed: _load, child: const Text('Retry')),
-                    ]),
-                  ),
-                )
+              ? LiveClassErrorState(message: _error!, onRetry: _load)
               : RefreshIndicator(
                   color: _kNavy,
                   onRefresh: _load,
                   child: _passes.isEmpty
-                      ? ListView(
-                          children: [
-                            const Padding(
-                              padding: EdgeInsets.only(top: 100),
-                              child: Center(
-                                child: Padding(
-                                  padding: EdgeInsets.symmetric(horizontal: 32),
-                                  child: Text(
-                                    'No pass created yet.\nUntil at least one pass is active, no student can join this classroom.',
-                                    textAlign: TextAlign.center,
-                                    style: TextStyle(color: Colors.black45),
-                                  ),
-                                ),
-                              ),
-                            ),
-                          ],
+                      ? const LiveClassEmptyState(
+                          icon: Icons.confirmation_number_outlined,
+                          title: 'No pass created yet.',
+                          subtitle: 'Until at least one pass is active, no student can join this classroom.',
                         )
                       : ListView.builder(
                           padding: const EdgeInsets.fromLTRB(16, 14, 16, 90),
@@ -252,15 +233,14 @@ class _PassManagementScreenState extends State<PassManagementScreen> {
     );
   }
 
+  // 🔴 FIX (design-system consistency audit): hand-rolled Container was an
+  // exact match to LiveClassCard's defaults (white, radius 14, shadow
+  // black@0.04/blur 8/offset (0,2)) — same zero-visual-change swap already
+  // applied across the rest of the module.
   Widget _passCard(ClassPass p) {
-    return Container(
+    return LiveClassCard(
       margin: const EdgeInsets.only(bottom: 12),
       padding: const EdgeInsets.all(14),
-      decoration: BoxDecoration(
-        color: Colors.white,
-        borderRadius: BorderRadius.circular(14),
-        boxShadow: [BoxShadow(color: Colors.black.withOpacity(0.04), blurRadius: 8, offset: const Offset(0, 2))],
-      ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
@@ -286,7 +266,10 @@ class _PassManagementScreenState extends State<PassManagementScreen> {
               Container(
                 padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 3),
                 decoration: BoxDecoration(
-                  color: (p.isActive ? Colors.green : Colors.grey).withOpacity(0.12),
+                  // FIX (deprecated-API audit): `withOpacity` →
+                  // `withValues(alpha:)`, same alpha (see
+                  // join_requests_screen.dart's matching fix).
+                  color: (p.isActive ? Colors.green : Colors.grey).withValues(alpha: 0.12),
                   borderRadius: BorderRadius.circular(20),
                 ),
                 child: Text(p.isActive ? 'ACTIVE' : 'PAUSED',
@@ -298,7 +281,11 @@ class _PassManagementScreenState extends State<PassManagementScreen> {
           Row(
             children: [
               Expanded(child: _stat('Price', '${_coins(p.price)} coins')),
-              Expanded(child: _stat('Validity', '${p.validityDays} din')),
+              // FIX (translation-consistency audit): was '${p.validityDays}
+              // din' — Hindi for "days" — hardcoded next to all-English
+              // labels on the same card ('Price', 'Max Classes'). Switched
+              // to English so the card reads consistently in one language.
+              Expanded(child: _stat('Validity', '${p.validityDays} days')),
               Expanded(child: _stat('Max Classes', p.maxClasses?.toString() ?? 'Unlimited')),
             ],
           ),

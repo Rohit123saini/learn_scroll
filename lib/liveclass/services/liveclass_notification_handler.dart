@@ -9,14 +9,27 @@
 // ✅ BACKEND SIDE AB LIVE HAI (pehle yahan note tha ki kuch bhejta hi nahi —
 // wo ab outdated hai): `liveclass.send_due_reminders` Celery Beat task
 // (har 1 min, CELERY_BEAT_SCHEDULE me registered — tasks.py + settings.py
-// dekho) due `ClassReminder` rows dhoondh ke `class_reminder` push bhejta
-// hai. Isi tarah in sab events pe bhi ab actual FCM push jaata hai (pehle
-// sirf bell-icon wali in-app `Notification` row banti thi, push kabhi nahi
-// — views.py + tasks.py me fix kiya gaya):
+// dekho) due `ClassReminder` rows dhoondh ke push bhejta hai. Isi tarah in
+// sab events pe bhi ab actual FCM push jaata hai (pehle sirf bell-icon wali
+// in-app `Notification` row banti thi, push kabhi nahi — views.py + tasks.py
+// me fix kiya gaya):
 //   join_request_received, join_request_accepted, join_request_rejected,
 //   assignment_graded, certificate_issued, notice_posted, query_answered
-// ...aur ye already push kar rahe the (tasks.py, pehle se): waitlist_seat_open,
+// ...aur ye already push kar rahe the (tasks.py, pehle se): waitlist_promoted,
 // pass_refunded, classroom_flagged, session_auto_completed.
+//
+// 🔴 FIX (push `type` vs `NotifType` vocabulary audit): this file used to
+// gate/route the reminder push on the literal string `'class_reminder'` and
+// the waitlist push on `'waitlist_seat_open'` — but `tasks.py` (the actual
+// sender, `send_due_reminders`/`notify_waitlist_promotion`) sends
+// `type: "session_reminder"` and `type: "waitlist_promoted"` respectively
+// (confirmed by reading tasks.py directly). Neither literal ever matched
+// what the backend actually sent, so BOTH of these pushes silently failed
+// the `_handledTypes.contains(...)` gate below — a due class reminder never
+// got the special "jump into the live room" notification, and a promoted
+// waitlist seat never routed anywhere on tap. Both now use the real
+// `NotifType` constants (`sessionReminder`/`waitlistPromoted`), which
+// already existed and already matched the backend's actual push type.
 //
 // ✅ NAYA (production notification coverage audit — dusra pass): in 6
 // events pe pehle KUCH bhi nahi jaata tha — na push, na in-app bell row.
@@ -30,7 +43,14 @@
 // BACKEND CONTRACT — data payload per type (confirm/adjust field names
 // against the real FCM payload if notifications.py's send_notification()
 // ever changes its data shape):
-//   class_reminder:         session_id, classroom_title, minutes_before, start_time
+//   session_reminder:       session_id, classroom_id — CONFIRMED against
+//                           tasks.send_due_reminders; that task does NOT
+//                           send classroom_title/minutes_before/start_time
+//                           despite what this table previously claimed —
+//                           _titleFor below already degrades gracefully
+//                           (falls back to "Your class"/"starting now") when
+//                           those keys are absent, so this is a doc-accuracy
+//                           fix only, not a runtime crash.
 //   join_request_received:  join_request_id, classroom_id   (recipient: teacher)
 //   join_request_accepted:  join_request_id, classroom_id   (recipient: student)
 //   join_request_rejected:  join_request_id, classroom_id   (recipient: student)
@@ -38,7 +58,7 @@
 //   certificate_issued:     certificate_id, classroom_id
 //   notice_posted:          notice_id, classroom_id
 //   query_answered:         query_id, classroom_id
-//   waitlist_seat_open:     session_id, classroom_id           (recipient: student)
+//   waitlist_promoted:      session_id, classroom_id           (recipient: student)
 //   pass_refunded:          classroom_id, pass_purchase_id
 //   classroom_flagged:      classroom_id                       (recipient: teacher)
 //   session_auto_completed: session_id, classroom_id           (recipient: teacher)
@@ -50,7 +70,7 @@
 //   review_posted:          classroom_id                       (recipient: teacher)
 //   report_reviewed:        classroom_id                       (recipient: student who filed it)
 //
-// `class_reminder` AND `session_live` both get the special "jump straight
+// `session_reminder` AND `session_live` both get the special "jump straight
 // into the live room" treatment below (LiveSessionScreen) — that's the one
 // case where a generic "open the classroom" tap isn't good enough (the
 // whole point of either push is not making the user find the join button
@@ -91,7 +111,12 @@ import '../../message/services/call_kit_service.dart';
 /// (or just call in and let unknown types fall through to a default/no-op)
 /// instead of hardcoding a single `== 'class_reminder'` check.
 const Set<String> _handledTypes = {
-  'class_reminder', // no NotifType constant — reminder push, not a bell-row Notification
+  // 🔴 FIX (push `type` vs `NotifType` vocabulary mismatch) — these two used
+  // to be the raw literals 'class_reminder' / 'waitlist_seat_open', which
+  // tasks.py never actually sends (it sends "session_reminder" /
+  // "waitlist_promoted" — see file header). Using the real NotifType
+  // constants here so this gate actually matches the real push payload.
+  NotifType.sessionReminder,
   NotifType.joinRequestReceived,
   NotifType.joinRequestAccepted,
   NotifType.joinRequestRejected,
@@ -99,7 +124,7 @@ const Set<String> _handledTypes = {
   NotifType.certificateIssued,
   NotifType.noticePosted,
   NotifType.queryAnswered,
-  'waitlist_seat_open', // no NotifType constant — see NotifType.waitlistPromoted for the bell-row equivalent
+  NotifType.waitlistPromoted,
   NotifType.passRefunded,
   NotifType.classroomFlagged,
   'session_auto_completed', // no NotifType constant — teacher-only push, no bell row
@@ -157,10 +182,12 @@ const Set<String> _giftTapTypes = {
   NotifType.passGiftClaimed,
 };
 
-/// `class_reminder` aur `session_live` dono isi treatment ke hakdaar hain —
+/// `session_reminder` aur `session_live` dono isi treatment ke hakdaar hain —
 /// dono ka poora point hai user ko seedha live room me daalna, na ki use
 /// classroom detail se phir se "Enter Class" dhoondhne dena.
-const Set<String> _liveRoomTapTypes = {'class_reminder', NotifType.sessionLive};
+/// 🔴 FIX — was `'class_reminder'`, a literal tasks.py's send_due_reminders
+/// never actually sends (real value is "session_reminder", NotifType.sessionReminder).
+const Set<String> _liveRoomTapTypes = {NotifType.sessionReminder, NotifType.sessionLive};
 
 class LiveClassNotificationHandler {
   LiveClassNotificationHandler._();
@@ -210,7 +237,7 @@ class LiveClassNotificationHandler {
 
   static const String _body = 'Tap to join the live class';
 
-  /// Both class_reminder and session_live push the exact same "jump into
+  /// Both session_reminder and session_live push the exact same "jump into
   /// the room" local notification shape — only the title copy differs
   /// (handled by _titleFor above). Everything else in _handledTypes is
   /// classroom-scoped, not session-scoped, and is expected to already be
@@ -228,7 +255,7 @@ class LiveClassNotificationHandler {
         category: AndroidNotificationCategory.reminder,
       );
 
-  /// Foreground me aaya push (app already khula hai). Sirf class_reminder
+  /// Foreground me aaya push (app already khula hai). Sirf session_reminder
   /// aur session_live ke liye — dono "seedha room me jump karo" wale
   /// special-case notifications hain. Baaki sab types (join_request_*,
   /// assignment_posted, staff_added, wagera) generic notification path se
@@ -302,7 +329,7 @@ class LiveClassNotificationHandler {
   }
 
   /// Notification pe tap hone par route decide karta hai:
-  ///   - class_reminder / session_live  -> seedha LiveSessionScreen (screen
+  ///   - session_reminder / session_live  -> seedha LiveSessionScreen (screen
   ///     khud `join()` call karke LiveKit token le lega — [initialResult]
   ///     null pass kar rahe hain).
   ///   - baaki har classroom-scoped type -> ClassroomDetailScreen(classroomId),
@@ -312,7 +339,7 @@ class LiveClassNotificationHandler {
   ///
   /// NOTE (fix): pehle ye method HAR type ke liye sirf session_id dekh kar
   /// seedha LiveSessionScreen khol deta tha — sahi tha jab sirf
-  /// class_reminder hi is handler se guzarta tha, lekin _handledTypes me
+  /// session_reminder hi is handler se guzarta tha, lekin _handledTypes me
   /// ab 18 types hain jinme se zyadatar ka session se koi lena-dena nahi
   /// (classroom_flagged, staff_added, review_posted, wagera). `type` field
   /// pe branch karke fix kiya.

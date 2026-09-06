@@ -215,7 +215,7 @@ class _ExploreScreenState extends State<ExploreScreen> {
             _buildAppBar(),
             _buildFilters(),
             _buildRecommended(),
-            _buildBody(),
+            ..._buildBody(),
           ],
         ),
       ),
@@ -377,72 +377,93 @@ class _ExploreScreenState extends State<ExploreScreen> {
 
   // ---------------------------------------------------------------------
   // Body: loading / error / empty / grid
+  //
+  // 🔴 FIX (pagination footer bug — line-by-line audit): this used to
+  // return a single sliver where the "load more" spinner was folded into
+  // the SAME SliverGrid as an extra `childCount` entry. A
+  // SliverGridDelegateWithFixedCrossAxisCount(crossAxisCount: 2, ...)
+  // lays out every child — including that extra one — as its own
+  // fixed-aspect-ratio grid cell, so the spinner rendered as a small,
+  // squashed lone cell sharing/ending a row instead of a proper full-width
+  // "loading more" footer beneath the grid. Now returns a list of slivers
+  // so the loading indicator is its own SliverToBoxAdapter after the grid,
+  // full-width, matching how every list-based screen in the module (not
+  // grid-based) already renders its "load more" footer.
   // ---------------------------------------------------------------------
-  Widget _buildBody() {
+  List<Widget> _buildBody() {
     if (_loading) {
-      return const SliverFillRemaining(
-        hasScrollBody: false,
-        child: Center(child: CircularProgressIndicator(color: _kNavy)),
-      );
+      return [
+        const SliverFillRemaining(
+          hasScrollBody: false,
+          child: Center(child: CircularProgressIndicator(color: _kNavy)),
+        ),
+      ];
     }
 
     if (_error != null && _items.isEmpty) {
-      return SliverFillRemaining(
-        hasScrollBody: false,
-        child: _MessageState(
-          icon: Icons.wifi_off_rounded,
-          title: 'Could not load',
-          subtitle: _error!,
-          actionLabel: 'Retry',
-          onAction: () => _fetch(reset: true),
+      return [
+        SliverFillRemaining(
+          hasScrollBody: false,
+          child: _MessageState(
+            icon: Icons.wifi_off_rounded,
+            title: 'Could not load',
+            subtitle: _error!,
+            actionLabel: 'Retry',
+            onAction: () => _fetch(reset: true),
+          ),
         ),
-      );
+      ];
     }
 
     if (_items.isEmpty) {
-      return SliverFillRemaining(
-        hasScrollBody: false,
-        child: _MessageState(
-          icon: _mine ? Icons.school_outlined : Icons.search_off_rounded,
-          title: _mine ? 'You haven\'t created a classroom yet' : 'No classrooms found',
-          subtitle: _mine
-              ? 'Create your first classroom and start live sessions with students.'
-              : 'Try a different search or language filter.',
-          actionLabel: _mine ? 'Create Classroom' : null,
-          onAction: _mine ? _openCreateClassroom : null,
+      return [
+        SliverFillRemaining(
+          hasScrollBody: false,
+          child: _MessageState(
+            icon: _mine ? Icons.school_outlined : Icons.search_off_rounded,
+            title: _mine ? 'You haven\'t created a classroom yet' : 'No classrooms found',
+            subtitle: _mine
+                ? 'Create your first classroom and start live sessions with students.'
+                : 'Try a different search or language filter.',
+            actionLabel: _mine ? 'Create Classroom' : null,
+            onAction: _mine ? _openCreateClassroom : null,
+          ),
         ),
-      );
+      ];
     }
 
-    return SliverPadding(
-      padding: const EdgeInsets.fromLTRB(12, 6, 12, 20),
-      sliver: SliverGrid(
-        gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
-          crossAxisCount: 2,
-          mainAxisSpacing: 12,
-          crossAxisSpacing: 12,
-          childAspectRatio: 0.68,
-        ),
-        delegate: SliverChildBuilderDelegate(
-          (context, index) {
-            if (index == _items.length) {
-              return const Center(
-                child: Padding(
-                  padding: EdgeInsets.all(12),
-                  child: SizedBox(
-                    width: 22,
-                    height: 22,
-                    child: CircularProgressIndicator(strokeWidth: 2.4, color: _kNavy),
-                  ),
-                ),
-              );
-            }
-            return _ClassroomCard(classroom: _items[index], onTap: () => _openDetail(_items[index]));
-          },
-          childCount: _items.length + (_loadingMore ? 1 : 0),
+    return [
+      SliverPadding(
+        // 🔧 FIX — `_loadingMore` is a runtime field, so this EdgeInsets
+        // can't be `const` (it was: "Not a constant expression").
+        padding: EdgeInsets.fromLTRB(12, 6, 12, _loadingMore ? 0 : 20),
+        sliver: SliverGrid(
+          gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
+            crossAxisCount: 2,
+            mainAxisSpacing: 12,
+            crossAxisSpacing: 12,
+            childAspectRatio: 0.68,
+          ),
+          delegate: SliverChildBuilderDelegate(
+            (context, index) => _ClassroomCard(classroom: _items[index], onTap: () => _openDetail(_items[index])),
+            childCount: _items.length,
+          ),
         ),
       ),
-    );
+      if (_loadingMore)
+        const SliverToBoxAdapter(
+          child: Center(
+            child: Padding(
+              padding: EdgeInsets.all(20),
+              child: SizedBox(
+                width: 22,
+                height: 22,
+                child: CircularProgressIndicator(strokeWidth: 2.4, color: _kNavy),
+              ),
+            ),
+          ),
+        ),
+    ];
   }
 }
 
@@ -538,16 +559,25 @@ class _ClassroomCard extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return GestureDetector(
+    // 🔴 FIX (design-system consistency audit — this was one of the
+    // lower-traffic screens not yet checked): was a hand-rolled
+    // GestureDetector+Container with the exact same radius-16/shadow
+    // black@0.06-blur10-offset(0,3) values already migrated to
+    // LiveClassCard's override params in wishlist_screen.dart's matching
+    // grid card — same swap here. `onTap` moves onto LiveClassCard itself
+    // (it already wraps its child in an InkWell when onTap is given), so
+    // the separate GestureDetector is gone.
+    return LiveClassCard(
+      margin: EdgeInsets.zero,
+      padding: EdgeInsets.zero,
+      borderRadius: 16,
+      // FIX (deprecated-API audit): `withOpacity` → `withValues(alpha:)` —
+      // same alpha, zero visual change (see join_requests_screen.dart's
+      // matching fix for the full rationale).
+      boxShadow: [BoxShadow(color: Colors.black.withValues(alpha: 0.06), blurRadius: 10, offset: const Offset(0, 3))],
+      clipBehavior: Clip.antiAlias,
       onTap: onTap,
-      child: Container(
-        decoration: BoxDecoration(
-          color: Colors.white,
-          borderRadius: BorderRadius.circular(16),
-          boxShadow: [BoxShadow(color: Colors.black.withOpacity(0.06), blurRadius: 10, offset: const Offset(0, 3))],
-        ),
-        clipBehavior: Clip.antiAlias,
-        child: Column(
+      child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             AspectRatio(
@@ -566,7 +596,7 @@ class _ClassroomCard extends StatelessWidget {
                   Positioned(
                     top: 8,
                     left: 8,
-                    child: _pill(classroom.language, Colors.black.withOpacity(0.55)),
+                    child: _pill(classroom.language, Colors.black.withValues(alpha: 0.55)),
                   ),
                   if (classroom.isFlagged)
                     Positioned(
@@ -645,7 +675,6 @@ class _ClassroomCard extends StatelessWidget {
             ),
           ],
         ),
-      ),
     );
   }
 

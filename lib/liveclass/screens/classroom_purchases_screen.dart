@@ -234,14 +234,13 @@ class _ClassroomPurchasesScreenState extends State<ClassroomPurchasesScreen> {
     // that's already refunded/failed/pending.
     final canRefund = p.status == 'success';
 
-    return Container(
-      margin: const EdgeInsets.only(bottom: 12),
-      padding: const EdgeInsets.all(14),
-      decoration: BoxDecoration(
-        color: Colors.white,
-        borderRadius: BorderRadius.circular(14),
-        boxShadow: [BoxShadow(color: Colors.black.withOpacity(0.04), blurRadius: 8, offset: const Offset(0, 2))],
-      ),
+    // 🔴 FIX (design-system consistency audit): was a hand-rolled Container
+    // with its own BoxDecoration (white/radius 14/shadow) — confirmed an
+    // EXACT visual match to LiveClassCard's own defaults (same radius,
+    // same shadow token math: black@0.04 alpha ≈ 0x0A, same blur/offset,
+    // same default padding/margin), so swapping in the shared widget here
+    // is a zero-visual-change consistency fix, not a redesign.
+    return LiveClassCard(
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [

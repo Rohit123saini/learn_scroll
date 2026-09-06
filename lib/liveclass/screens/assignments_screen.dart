@@ -15,6 +15,7 @@ import 'package:flutter/material.dart';
 import '../models/liveclass_models.dart';
 import '../services/liveclass_api_service.dart';
 import '../theme/liveclass_theme.dart';
+import '../utils/liveclass_upload_limits.dart';
 import 'submission_grading_screen.dart';
 
 class AssignmentsScreen extends StatefulWidget {
@@ -193,10 +194,32 @@ class _AssignmentsScreenState extends State<AssignmentsScreen> {
                 const SizedBox(height: 12),
                 OutlinedButton.icon(
                   onPressed: () async {
-                    final res = await FilePicker.platform.pickFiles();
-                    if (res != null && res.files.isNotEmpty) {
-                      setSheet(() => attachment = res.files.first);
+                    // FIX (file upload size/type audit): no extension
+                    // restriction and no size check at all before — a
+                    // teacher could attach anything of any size, only
+                    // discovering the backend's real 50MB/safelist
+                    // rejection after a full, potentially very slow
+                    // upload attempt (Assignment.attachment's
+                    // MaxFileSizeValidator(50) + DOCUMENT_MEDIA_EXTENSIONS
+                    // in models.py). Scoping the picker itself to the
+                    // allowed extensions AND re-checking size/type on the
+                    // result catches this immediately, locally.
+                    final res = await FilePicker.platform.pickFiles(
+                      type: FileType.custom,
+                      allowedExtensions: LiveClassUploadLimits.documentExtensions,
+                    );
+                    if (res == null || res.files.isEmpty) return;
+                    final picked = res.files.first;
+                    final error = LiveClassUploadLimits.checkPlatformFile(
+                      picked,
+                      maxMB: LiveClassUploadLimits.assignmentAttachmentMaxMB,
+                      allowedExtensions: LiveClassUploadLimits.documentExtensions,
+                    );
+                    if (error != null) {
+                      if (ctx.mounted) ScaffoldMessenger.of(ctx).showSnackBar(SnackBar(content: Text(error)));
+                      return;
                     }
+                    setSheet(() => attachment = picked);
                   },
                   style: OutlinedButton.styleFrom(
                     alignment: Alignment.centerLeft,

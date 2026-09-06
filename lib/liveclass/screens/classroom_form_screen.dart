@@ -26,6 +26,7 @@ import 'package:file_selector/file_selector.dart';
 import '../models/liveclass_models.dart';
 import '../services/liveclass_api_service.dart';
 import '../theme/liveclass_theme.dart';
+import '../utils/liveclass_upload_limits.dart';
 import 'pass_management_screen.dart';
 import 'schedule_manager_screen.dart';
 
@@ -140,8 +141,23 @@ class _ClassroomFormScreenState extends State<ClassroomFormScreen> {
     const typeGroup = XTypeGroup(label: 'images', extensions: ['jpg', 'jpeg', 'png', 'webp']);
     try {
       final file = await openFile(acceptedTypeGroups: [typeGroup]);
-      if (!mounted) return;
-      if (file != null) setState(() => _pickedCover = file);
+      if (!mounted || file == null) return;
+      // FIX (file upload size/type audit): the XTypeGroup above already
+      // restricts the OS picker to image extensions, but that's a picker
+      // *hint*, not an enforced guarantee on every platform/file-manager —
+      // and there was no size check at all, so a huge (legal-extension)
+      // image would only ever be caught by the backend's own
+      // MaxFileSizeValidator(5), after a full slow upload attempt.
+      final error = await LiveClassUploadLimits.checkXFile(
+        file,
+        maxMB: LiveClassUploadLimits.coverImageMaxMB,
+        allowedExtensions: LiveClassUploadLimits.coverImageExtensions,
+      );
+      if (error != null) {
+        _snack(error);
+        return;
+      }
+      setState(() => _pickedCover = file);
     } catch (_) {
       _snack('Could not select image.');
     }

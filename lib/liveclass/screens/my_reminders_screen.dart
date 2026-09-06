@@ -86,7 +86,10 @@ class _MyRemindersScreenState extends State<MyRemindersScreen> {
       context: context,
       builder: (_) => AlertDialog(
         title: const Text('Cancel Reminder?'),
-        content: Text('The reminder for ${liveClassFmtDateTime(r.remindAt)} will be removed.'),
+        // FIX (locale consistency audit): missing `context` here fell back
+        // to intl's default locale instead of the device/app one — same
+        // gap fixed at every call site in this file.
+        content: Text('The reminder for ${liveClassFmtDateTime(r.remindAt, context)} will be removed.'),
         actions: [
           TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('Go Back')),
           TextButton(
@@ -187,7 +190,7 @@ class _MyRemindersScreenState extends State<MyRemindersScreen> {
                 const SizedBox(height: 3),
                 if (session != null)
                   Text(
-                    'Session: ${liveClassFmtDateTime(session.scheduledStart)}',
+                    'Session: ${liveClassFmtDateTime(session.scheduledStart, context)}',
                     style: TextStyle(fontSize: 11.5, color: Colors.grey.shade600),
                   ),
                 const SizedBox(height: 6),
@@ -197,7 +200,7 @@ class _MyRemindersScreenState extends State<MyRemindersScreen> {
                     const SizedBox(width: 4),
                     Expanded(
                       child: Text(
-                        'Alert: ${liveClassFmtDateTime(r.remindAt)} · ${_channelLabel(r.channel)}',
+                        'Alert: ${liveClassFmtDateTime(r.remindAt, context)} · ${_channelLabel(r.channel)}',
                         style: TextStyle(fontSize: 11.5, color: Colors.grey.shade600),
                         maxLines: 1,
                         overflow: TextOverflow.ellipsis,

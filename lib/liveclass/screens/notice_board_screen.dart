@@ -280,17 +280,20 @@ class _NoticeBoardScreenState extends State<NoticeBoardScreen> {
                         itemBuilder: (ctx, i) {
                           final n = _notices[i];
                           final color = _priorityColor(n.priority);
+                          // 🔴 FIX (design-system consistency audit): was a
+                          // hand-rolled Container instead of LiveClassCard —
+                          // the priority-colored `border` here is exactly the
+                          // case the widget's `border` override was added
+                          // for (see the FIX note on LiveClassCard itself),
+                          // so this is a straight swap with zero visual
+                          // change: same radius, same shadow token, same
+                          // conditional border.
                           return Opacity(
                             opacity: n.isExpired ? 0.55 : 1,
-                            child: Container(
+                            child: LiveClassCard(
                               margin: const EdgeInsets.only(bottom: LiveClassSpacing.md),
                               padding: const EdgeInsets.all(14),
-                              decoration: BoxDecoration(
-                                color: Colors.white,
-                                borderRadius: BorderRadius.circular(LiveClassRadius.card),
-                                border: Border.all(color: color.withValues(alpha: 0.35)),
-                                boxShadow: const [LiveClassColors.cardShadow],
-                              ),
+                              border: Border.all(color: color.withValues(alpha: 0.35)),
                               child: Column(
                                 crossAxisAlignment: CrossAxisAlignment.start,
                                 children: [

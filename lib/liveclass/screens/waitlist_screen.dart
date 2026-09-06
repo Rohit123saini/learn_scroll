@@ -39,15 +39,21 @@ const _kGradient = LiveClassColors.gradient;
 // time shifted from what they'd actually see in-app elsewhere. Delegates to
 // the shared locale + `.toLocal()`-aware helper now (same fix already
 // applied to doubts/holidays/submission-grading elsewhere in this module).
-String _fmtDateTime(DateTime d) => liveClassFmtDateTime(d);
+// FIX (locale consistency audit): this wrapper took no `context` param,
+// so it could never thread the device/app locale through to
+// liveClassFmtDateTime — the call site below was silently stuck on
+// intl's default locale. Widened to the same optional
+// `[BuildContext? context]` pattern used elsewhere in the module.
+String _fmtDateTime(DateTime d, [BuildContext? context]) => liveClassFmtDateTime(d, context);
 
-String _fmtRelative(DateTime d) {
-  final diff = DateTime.now().difference(d);
-  if (diff.inMinutes < 1) return 'Just now';
-  if (diff.inMinutes < 60) return '${diff.inMinutes}m ago';
-  if (diff.inHours < 24) return '${diff.inHours}h ago';
-  return '${diff.inDays}d ago';
-}
+// 🔴 FIX (dedup audit — same duplication liveclass_theme.dart's own header
+// comment already calls out for notifications_screen.dart): this screen had
+// its own local `_fmtRelative`, identical in spirit to the shared
+// `liveClassFmtRelative` already living in liveclass_theme.dart — except
+// missing that helper's 7-day fallback to an absolute date, so a waitlist
+// entry sitting for weeks would keep showing an ever-growing "Xd ago"
+// forever instead of switching to a real date. Removed the local copy;
+// every call site below now uses the shared helper directly.
 
 // ===========================================================================
 // SCREEN
@@ -206,14 +212,16 @@ class _WaitlistScreenState extends State<WaitlistScreen> {
   // -------------------------------------------------------------------
   Widget _manageCard(SessionWaitlistEntry e, int position) {
     final busy = _busy.contains(e.id);
-    return Container(
+    // 🔴 FIX (design-system consistency): migrated to the shared
+    // LiveClassCard, using its override params to keep this card's exact
+    // current look (slightly tighter radius/shadow/padding than the
+    // default — this is a denser "who's waiting" row list, not the
+    // module's usual card spacing) rather than silently changing it.
+    return LiveClassCard(
       margin: const EdgeInsets.only(bottom: 10),
       padding: const EdgeInsets.all(12),
-      decoration: BoxDecoration(
-        color: Colors.white,
-        borderRadius: BorderRadius.circular(12),
-        boxShadow: [BoxShadow(color: Colors.black.withOpacity(0.03), blurRadius: 6, offset: const Offset(0, 2))],
-      ),
+      borderRadius: 12,
+      boxShadow: [BoxShadow(color: Colors.black.withOpacity(0.03), blurRadius: 6, offset: const Offset(0, 2))],
       child: Row(
         children: [
           Container(
@@ -232,7 +240,7 @@ class _WaitlistScreenState extends State<WaitlistScreen> {
                     style: const TextStyle(fontWeight: FontWeight.w600, fontSize: 13.5)),
                 const SizedBox(height: 2),
                 Row(children: [
-                  Text('Waiting since ${_fmtRelative(e.joinedAt)}', style: TextStyle(fontSize: 11, color: Colors.grey.shade500)),
+                  Text('Waiting since ${liveClassFmtRelative(e.joinedAt, context)}', style: TextStyle(fontSize: 11, color: Colors.grey.shade500)),
                   if (e.notified) ...[
                     const SizedBox(width: 6),
                     Container(
@@ -270,15 +278,15 @@ class _WaitlistScreenState extends State<WaitlistScreen> {
   Widget _studentCard(SessionWaitlistEntry e) {
     final busy = _busy.contains(e.id);
     final session = _sessionCache[e.sessionId];
-    return Container(
-      margin: const EdgeInsets.only(bottom: 12),
-      padding: const EdgeInsets.all(14),
-      decoration: BoxDecoration(
-        color: Colors.white,
-        borderRadius: BorderRadius.circular(14),
-        boxShadow: [BoxShadow(color: Colors.black.withOpacity(0.04), blurRadius: 8, offset: const Offset(0, 2))],
-        border: e.notified ? Border.all(color: Colors.green.shade300) : null,
-      ),
+    // 🔴 FIX (design-system consistency): migrated to LiveClassCard. This
+    // card's shape (radius 14/shadow 0.04/8/2/padding 14) already matched
+    // the widget's own defaults exactly, so nothing needed overriding
+    // there — but it also has a conditional highlight `border` when a seat
+    // has opened up, which the old LiveClassCard had no way to express.
+    // That's specifically why this couldn't be migrated until the widget
+    // itself gained a `border` override (see liveclass_theme.dart).
+    return LiveClassCard(
+      border: e.notified ? Border.all(color: Colors.green.shade300) : null,
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
@@ -299,7 +307,7 @@ class _WaitlistScreenState extends State<WaitlistScreen> {
                         style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 13.5), maxLines: 1, overflow: TextOverflow.ellipsis),
                     if (session != null) ...[
                       const SizedBox(height: 2),
-                      Text(_fmtDateTime(session.scheduledStart), style: TextStyle(fontSize: 11.5, color: Colors.grey.shade500)),
+                      Text(_fmtDateTime(session.scheduledStart, context), style: TextStyle(fontSize: 11.5, color: Colors.grey.shade500)),
                     ],
                   ],
                 ),
@@ -313,7 +321,7 @@ class _WaitlistScreenState extends State<WaitlistScreen> {
             ],
           ),
           const SizedBox(height: 10),
-          Text('Waiting since ${_fmtRelative(e.joinedAt)}', style: TextStyle(fontSize: 11.5, color: Colors.grey.shade500)),
+          Text('Waiting since ${liveClassFmtRelative(e.joinedAt, context)}', style: TextStyle(fontSize: 11.5, color: Colors.grey.shade500)),
           const SizedBox(height: 12),
           Row(
             children: [
