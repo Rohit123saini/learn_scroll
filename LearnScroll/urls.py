@@ -57,7 +57,17 @@ urlpatterns = [
     path("redoc/", SpectacularRedocView.as_view(url_name="schema"), name="redoc"),
     path('media/<path:path>', serve_media_with_range, name='media'),
     path("message/",include("message.urls")),
-    path("liveclass/", include("liveclass.urls")), 
+    path("liveclass/", include("liveclass.urls")),
+    # NEW (task 42/45/46 — core-app migration): unified notifications
+    # (NotificationViewSet + NotificationPreferenceView) now live under
+    # this prefix instead of under liveclass/. See core/urls.py for the
+    # resulting paths (core/notifications/, core/notification-preferences/me/, ...).
+    # ⚠️ liveclass/urls.py no longer registers "notifications" or
+    # "notification-preferences/me/" — this include() is the ONLY place
+    # those endpoints are now reachable from. Any frontend code still
+    # pointed at liveclass/notifications/... needs to move to
+    # core/notifications/....
+    path("core/", include("core.urls")),
 ]
 
 # if settings.DEBUG:

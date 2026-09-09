@@ -35,6 +35,15 @@ router — list/retrieve/create/update/delete on each, plus the custom
     classrooms/{id}/share/               POST              (in-app if to_user_id given, else returns a
                                                           web/deep link for outside-the-app sharing)
     classrooms/{id}/share-stats/         GET               (teacher/co-teacher/moderator)
+    classrooms/{id}/refer-link/          GET               (own shareable referral link for this classroom;
+                                                          404s via ValidationError if referral_enabled=False)
+    classrooms/{id}/referral-dashboard/  GET               (task 65 — "aapne itne log invite kiye" scoped to
+                                                          this one classroom: referred_count, commission
+                                                          earned/pending, own referral_code)
+    classrooms/{id}/create_group/        POST              (teacher only — explicit confirm, creates the
+                                                          linked chat Group — see classroom_chat_views.py)
+    classrooms/{id}/group/               GET               (teacher/co-teacher/moderator — linked
+                                                          conversation status check)
     classrooms/recommended/              GET               (?limit= — personalized by purchase/wishlist
                                                           history, falls back to rating/enrollment)
     coin-purchases/                      GET, POST         (own top-up history)
@@ -47,6 +56,13 @@ router — list/retrieve/create/update/delete on each, plus the custom
     sessions/{id}/                       GET, PUT, PATCH, DELETE
     sessions/{id}/join/                  POST
     sessions/{id}/token/                  POST             (fresh token, no participant row — reconnect/testing)
+    sessions/{id}/parent-join/            POST             (UNAUTHENTICATED — body {"parent_token": "..."};
+                                                          a parent with no platform account verifies their
+                                                          signed link and, only if it resolves to a student
+                                                          with valid access to this classroom, gets an
+                                                          observer-role LiveKit token. No participant row
+                                                          created — see ClassSessionViewSet.parent_join in
+                                                          views.py. IP-throttled, not user-throttled.)
     sessions/{id}/end/                   POST             (teacher/co-teacher/moderator)
     sessions/{id}/kick/{user_id}/        POST             (teacher/co-teacher/moderator)
     sessions/{id}/mute/{user_id}/        POST             (teacher/co-teacher/moderator — force-mutes
@@ -240,6 +256,10 @@ router — list/retrieve/create/update/delete on each, plus the custom
     referrals/my-code/                   GET               (own referral code + redemption tally)
     referrals/redeem/                    POST              (redeem someone else's referral code, once,
                                                           new-account-only; body {"code": "R..."})
+    referrals/class-referral-summary/    GET               (task 65 — global "aapne itne log invite kiye"
+                                                          dashboard: per-classroom referral commission
+                                                          earned/pending, across every classroom the
+                                                          caller has referred a student into)
 
     livekit-webhook/                     POST              (server-to-server only — point your LiveKit
                                                           project's webhook URL here; see
@@ -311,8 +331,8 @@ from .views import (
     LivePollViewSet,
     MyDashboardView,
     NoticeViewSet,
-    NotificationPreferenceView,
-    NotificationViewSet,
+    ParentMessageTemplateViewSet,
+    ParentTeacherMessageViewSet,
     PassGiftViewSet,
     PassPurchaseViewSet,
     PollTemplateViewSet,
@@ -324,6 +344,11 @@ from .views import (
 )
 
 from . import chunked_upload_views
+# 🔥 NAYA (tasks 29/30) — Classroom <-> chat-group bridge endpoints. Plain
+# APIViews, so — same as dashboard/, my-earnings/, my-progress/,
+# notification-preferences/me/ below — they need their own explicit
+# path(), router.register() won't pick them up.
+from .classroom_chat_views import ClassroomCreateGroupView, ClassroomGroupStatusView
 
 router = DefaultRouter()
 router.register(r"classrooms", ClassroomViewSet, basename="classroom")
@@ -360,7 +385,15 @@ router.register(r"reminders", ClassReminderViewSet, basename="classreminder")
 router.register(r"holidays", ClassHolidayViewSet, basename="classholiday")
 router.register(r"notices", NoticeViewSet, basename="notice")
 router.register(r"queries", ClassQueryViewSet, basename="classquery")
-router.register(r"notifications", NotificationViewSet, basename="notification")
+# NEW (task 69) — structured, template-only parent/student -> teacher
+# messaging. See the module note above ParentMessageTemplate in models.py.
+router.register(r"parent-message-templates", ParentMessageTemplateViewSet, basename="parentmessagetemplate")
+router.register(r"parent-messages", ParentTeacherMessageViewSet, basename="parentteachermessage")
+# NOTE (task 42 cleanup — core-app migration): "notifications" used to be
+# registered here. NotificationViewSet now lives in core/views.py and is
+# wired via core/urls.py under the `core/` prefix — see
+# core_app_documentation.md. Keeping both registered would have served the
+# same underlying table at two different URLs.
 router.register(r"referrals", ReferralViewSet, basename="referral")
 
 urlpatterns = [
@@ -375,13 +408,22 @@ urlpatterns = [
     # Same "plain APIView needs its own explicit path()" reasoning as
     # my-earnings/ above — StudentProgressView isn't a ViewSet either.
     path("my-progress/", StudentProgressView.as_view(), name="student-progress"),
-    # NEW (audit fix — "Per-notification-type channel preferences" +
-    # "Digest email"): NotificationPreferenceView already existed as a
-    # plain APIView in views.py but, same "APIView needs its own explicit
-    # path()" gap as my-earnings/ and my-progress/ above, was never
-    # actually reachable at any URL.
-    path("notification-preferences/me/", NotificationPreferenceView.as_view(), name="notification-preferences"),
+    # NOTE (task 42 cleanup — core-app migration): "notification-preferences/me/"
+    # used to be registered here. NotificationPreferenceView now lives in
+    # core/views.py and is wired via core/urls.py under the `core/` prefix.
     path("livekit-webhook/", LiveKitWebhookView.as_view(), name="livekit-webhook"),
+    # 🔥 NAYA (tasks 29/30) — Classroom <-> chat-group bridge. See
+    # classroom_chat_views.py for both views' full docstrings.
+    path(
+        "classrooms/<uuid:classroom_id>/create_group/",
+        ClassroomCreateGroupView.as_view(),
+        name="classroom-create-group",
+    ),
+    path(
+        "classrooms/<uuid:classroom_id>/group/",
+        ClassroomGroupStatusView.as_view(),
+        name="classroom-group-status",
+    ),
     # NOTE (production): unauthenticated DB+cache liveness/readiness probe
     # for Render's health check / an uptime monitor / a k8s readiness
     # probe. See HealthCheckView in views.py for exactly what it checks.

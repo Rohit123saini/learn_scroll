@@ -37,6 +37,40 @@ per-classroom attendance stats, and assignment pending/submitted
 counts. Before adding a field here, ask: "would this be fine on a
 report-card-style summary a parent sees?" — if it's chat content
 (even metadata like who they talked to), it does NOT belong here.
+
+🔧 GAP FIX (Gap 2 — supersedes the Gap 1 shape below) — this dashboard
+used to loop over the student's chat Groups as the PRIMARY source, which
+made any liveclass Classroom invisible here whenever chat-group linking
+hadn't happened for it (`chat_group_enabled=False` — either the teacher
+opted out, or it's an older classroom from before linking existed). A
+fully active classroom — homework, marks, report cards, attendance — was
+silently missing from a parent's view for no reason a parent could see.
+
+Fixed by making the student's `liveclass` Classrooms the PRIMARY loop
+(via `is_enrolled()`-equivalent — active OR lapsed pass, same breadth
+`ClassroomParentCodeGenerateView`/`ReportCardViewSet` already use), with
+the chat-group's own `assignments` data attached as an OPTIONAL nested
+`chat_group` block, present only when `core.classroom_chat_bridge.
+get_groups_for_classrooms()` finds a real linked Group for that
+classroom. No classroom ever disappears
+from the dashboard just because it has no chat group; it just has
+`chat_group: null` instead.
+
+This keeps the Gap 1 rule intact — liveclass homework and message-app
+assignments are still never summed into one number — just expressed via
+nesting (`homework` at the classroom's top level, `assignments` only
+inside its `chat_group`) instead of two parallel top-level lists.
+
+🔧 GAP FIX (Gap 3) — ALL attendance shown by this view now comes
+strictly from `liveclass`'s own session-attendance record (`ClassSession`
++ `SessionParticipant`, via `liveclass.models.
+compute_attendance_percent_bulk`). The message app's own
+`StudyRoomAttendance` self-check-in streak widget (`attendance_utils.
+compute_attendance_stats_bulk`) is a separate, unrelated feature — this
+app has no teacher/student/classroom concept of its own, only chat
+groups/group-study — and per product decision it is no longer used
+anywhere in this view. `chat_group` below therefore only ever carries
+`group_name` + `assignments`, never an attendance field.
 """
 from django.db.models import Count
 from django.utils import timezone
@@ -45,11 +79,10 @@ from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
-# 🔧 GAP FIX (N+1) — batched variant, see attendance_utils.py note.
-from .attendance_utils import compute_attendance_stats_bulk
 from .models import (
     Assignment,
     AssignmentSubmission,
+    Group,
     GroupMember,
     ParentAccessCode,
     ParentToken,
@@ -68,6 +101,36 @@ from .models import (
 # are unaffected by a `related_name` change.
 from .permissions import HasValidParentToken
 from .throttles import ParentCodeRevealThrottle, ParentCodeVerifyThrottle
+
+# 🔧 GAP FIX (Gap 1 — liveclass Assignment vs message Assignment collision):
+# `liveclass` has its own `Classroom` / `Assignment` / `AssignmentSubmission`
+# / `StudentReportCard` models — a completely different domain object from
+# the `Group` / `Assignment` / `AssignmentSubmission` imported above (this
+# app's own). They share class names because they model similar concepts,
+# but they are NOT the same rows and must never be summed or merged
+# together into one number on the parent dashboard. Imported here under a
+# `Liveclass*` alias so every reference below stays unambiguous about which
+# app's assignment it means. This is the mirror image of the cross-app
+# import `liveclass/parent_link_views.py` already does in the other
+# direction (`from message.models import ParentAccessCode, ...`); neither
+# app's `models.py` imports the other, so this does not create an import
+# cycle.
+from liveclass.models import (
+    Assignment as LiveclassAssignment,
+    AssignmentSubmission as LiveclassAssignmentSubmission,
+    Classroom as LiveclassClassroom,
+    PassPurchase as LiveclassPassPurchase,
+    StudentReportCard as LiveclassStudentReportCard,
+    compute_attendance_percent_bulk,
+)
+
+# 🔧 GAP FIX (Gap 2) — the ONE place that knows how a liveclass Classroom
+# maps to a chat Group (see that module's own docstring, design principle
+# 1). Deliberately reused rather than re-deriving `chat_group_enabled` +
+# `linked_conversation_id` here, so this view can never drift out of sync
+# with how `liveclass/signals.py` itself determines "does this classroom
+# have a group".
+from core.classroom_chat_bridge import get_groups_for_classrooms
 
 
 def _display_name(user):
@@ -338,41 +401,204 @@ class ParentDashboardView(APIView):
       "student_name": "...",
       "classrooms": [
         {
-          "group_name": "Physics Batch A",
-          "attendance": {
-            "current_streak": 7, "longest_streak": 12,
-            "total_classes_attended": 34, "last_attended": "2026-09-04"
+          "classroom_id": 41,
+          "classroom_title": "Physics Batch A",
+          "attendance_percent": 92.5,
+          "homework": {"pending": 1, "submitted": 6, "total": 7},
+          "latest_report_card": {
+            "period_label": "Term 1",
+            "attendance_percent": 92.5,
+            "homework_completion_percent": 85.71,
+            "average_marks": "78.50",
+            "teacher_remark": "..."
           },
-          "assignments": {"pending": 2, "submitted": 5, "total": 7}
+          "chat_group": {
+            "group_name": "Physics Batch A",
+            "assignments": {"pending": 2, "submitted": 5, "total": 7}
+          }
         }
       ]
     }
+
+    🔧 GAP FIX (Gap 2) — `liveclass` Classroom is now the PRIMARY,
+    always-present source for every entry in `classrooms` (via
+    `is_enrolled()`-equivalent: active OR lapsed pass — a lapsed pass
+    should still show classwork history, same reasoning `Classroom.
+    is_enrolled()` itself documents). `chat_group` is OPTIONAL and only
+    appears when `core.classroom_chat_bridge.get_groups_for_classrooms()`
+    finds a real linked Group AND the student is still an unbanned
+    member of it — otherwise the key is simply `null`. A classroom the
+    teacher never turned chat-group linking on for (or an older one from
+    before that existed) still shows up here in full, just with
+    `chat_group: null`.
+
+    🔧 GAP FIX (Gap 1, still enforced) — `homework` (liveclass) and
+    `chat_group.assignments` (message-app) are two independently-sourced
+    datasets from two different apps and are NEVER summed into one
+    number — see the imports above for why. Keep any future per-app
+    addition (quizzes, tests, etc.) inside its own app's part of the
+    entry the same way.
+
+    🔧 GAP FIX (Gap 3) — the ONLY `attendance_percent` anywhere in this
+    payload (top-level and inside `latest_report_card`) is liveclass's
+    own session-attendance number (`ClassSession`/`SessionParticipant`
+    via `liveclass.models.compute_attendance_percent_bulk`). `chat_group`
+    deliberately carries no attendance field at all — the message app is
+    chat/group-study only and has no classroom-attendance concept of its
+    own; its unrelated `StudyRoomAttendance` self-check-in streak widget
+    is never used here (see module docstring).
     """
     permission_classes = [HasValidParentToken]
 
     def get(self, request):
         student = request.parent_student
+        return Response({
+            'student_name': _display_name(student),
+            'classrooms': self._classrooms(student),
+        })
 
-        memberships = list(
-            GroupMember.objects.filter(
-                user=student, is_banned=False,
-            ).select_related('group', 'group__conversation')
+    @classmethod
+    def _classrooms(cls, student):
+        # ---- PRIMARY SOURCE (Gap 2): liveclass Classroom, not chat Group ----
+        classroom_ids = list(
+            LiveclassClassroom.objects.filter(
+                passes__purchases__student=student,
+                passes__purchases__status=LiveclassPassPurchase.Status.SUCCESS,
+                passes__purchases__is_active=True,
+            )
+            .distinct()
+            .values_list('id', flat=True)
         )
-        group_ids = [m.group_id for m in memberships]
-        conversation_ids = [m.group.conversation_id for m in memberships]
+        if not classroom_ids:
+            return []
 
-        # 🔧 FIX (N+1) — assignments: was 2-3 queries PER classroom,
-        # batched into 2 queries total for however many classrooms the
-        # student is in, looked up per-group in Python below.
+        # 🔧 GAP FIX (Gap 2) — also pull the two chat-link fields here,
+        # `.only(...)`, so `get_groups_for_classrooms()` below can decide
+        # per-classroom eligibility without a second query per classroom.
+        classrooms_by_id = {
+            c.id: c
+            for c in LiveclassClassroom.objects.filter(id__in=classroom_ids)
+            .only('id', 'title', 'chat_group_enabled', 'linked_conversation_id')
+        }
+
+        # ---- liveclass-side data: homework + attendance % + report card ----
+        # (unchanged from Gap 1 — see class docstring: this never merges
+        # with the message-app assignment counts below.)
+        homework_totals = dict(
+            LiveclassAssignment.objects.filter(classroom_id__in=classroom_ids)
+            .values('classroom_id')
+            .annotate(total=Count('id'))
+            .values_list('classroom_id', 'total')
+        )
+        homework_submitted = dict(
+            LiveclassAssignmentSubmission.objects.filter(
+                assignment__classroom_id__in=classroom_ids,
+                student=student,
+            )
+            .values('assignment__classroom_id')
+            .annotate(submitted=Count('id'))
+            .values_list('assignment__classroom_id', 'submitted')
+        )
+        attendance_percent_by_classroom = compute_attendance_percent_bulk(classroom_ids, student)
+
+        latest_report_card_by_classroom = {}
+        for report_card in LiveclassStudentReportCard.objects.filter(
+            classroom_id__in=classroom_ids, student=student,
+        ).order_by('classroom_id', '-id'):
+            latest_report_card_by_classroom.setdefault(report_card.classroom_id, report_card)
+
+        # ---- optional chat-group side (Gap 2) ----
+        chat_group_by_classroom = cls._chat_group_by_classroom(
+            classrooms_by_id.values(), student,
+        )
+
+        results = []
+        for classroom_id in classroom_ids:
+            classroom = classrooms_by_id.get(classroom_id)
+            if not classroom:
+                continue
+            total = homework_totals.get(classroom_id, 0)
+            submitted = homework_submitted.get(classroom_id, 0)
+            report_card = latest_report_card_by_classroom.get(classroom_id)
+
+            results.append({
+                'classroom_id': classroom_id,
+                'classroom_title': classroom.title,
+                'attendance_percent': attendance_percent_by_classroom.get(classroom_id, 0),
+                # Deliberately named 'homework', not 'assignments' — see
+                # class docstring (Gap 1).
+                'homework': {
+                    'pending': max(total - submitted, 0),
+                    'submitted': submitted,
+                    'total': total,
+                },
+                'latest_report_card': {
+                    'period_label': report_card.period_label,
+                    'attendance_percent': report_card.attendance_percent,
+                    'homework_completion_percent': report_card.homework_completion_percent,
+                    'average_marks': report_card.average_marks,
+                    'teacher_remark': report_card.teacher_remark,
+                } if report_card else None,
+                # 🔧 GAP FIX (Gap 2) — None whenever there's no linked
+                # group (or the student isn't/no-longer an unbanned member
+                # of it) — the classroom itself is still fully listed above.
+                'chat_group': chat_group_by_classroom.get(classroom_id),
+            })
+
+        return results
+
+    @staticmethod
+    def _chat_group_by_classroom(classrooms, student):
+        """
+        🔧 GAP FIX (Gap 2/3) — builds the optional `chat_group` sub-block
+        for whichever of `classrooms` actually have a linked Group. Only
+        ever `{group_name, assignments}` — no attendance field (Gap 3:
+        the message app has no classroom-attendance concept; it's
+        chat/group-study only, see module docstring). Every query here
+        is bulk (fixed count, not one per classroom):
+          1. `get_groups_for_classrooms()` — 2 queries total.
+          2. GroupMember (unbanned-membership check) — 1 query.
+          3. message-app Assignment totals/submissions — 2 queries.
+        Returns {classroom_id: {...}} — a classroom with no eligible
+        linked group is simply absent (caller does `.get(classroom_id)`).
+        """
+        group_by_classroom_id = get_groups_for_classrooms(classrooms)
+        if not group_by_classroom_id:
+            return {}
+
+        # A linked Group existing isn't enough on its own — the student
+        # must still be an unbanned member of it (same gate the OLD
+        # Group-centric loop applied via `GroupMember.filter(is_banned=
+        # False)`, preserved here so a chat-removal still hides chat data
+        # even though the classroom itself stays visible per Gap 2).
+        group_ids = [group.id for group in group_by_classroom_id.values()]
+        member_group_ids = set(
+            GroupMember.objects.filter(
+                group_id__in=group_ids, user=student, is_banned=False,
+            ).values_list('group_id', flat=True)
+        )
+
+        eligible = {
+            classroom_id: group
+            for classroom_id, group in group_by_classroom_id.items()
+            if group.id in member_group_ids
+        }
+        if not eligible:
+            return {}
+
+        eligible_group_ids = [group.id for group in eligible.values()]
+
+        # 🔧 FIX (N+1, preserved from the pre-Gap-2 loop) — bulk, not one
+        # query per classroom.
         assignment_totals = dict(
-            Assignment.objects.filter(group_id__in=group_ids)
+            Assignment.objects.filter(group_id__in=eligible_group_ids)
             .values('group_id')
             .annotate(total=Count('id'))
             .values_list('group_id', 'total')
         )
         submitted_counts = dict(
             AssignmentSubmission.objects.filter(
-                assignment__group_id__in=group_ids,
+                assignment__group_id__in=eligible_group_ids,
                 student=student,
                 is_submitted=True,
             )
@@ -381,36 +607,16 @@ class ParentDashboardView(APIView):
             .values_list('assignment__group_id', 'submitted')
         )
 
-        # 🔧 FIX (N+1) — attendance: was 1 query PER classroom via
-        # `compute_attendance_stats(conversation, student)` inside the
-        # loop. `compute_attendance_stats_bulk` fetches every classroom's
-        # attendance rows for this student in ONE query, so this whole
-        # dashboard now costs a fixed ~3 queries total regardless of how
-        # many classrooms the student is in.
-        attendance_by_conversation = compute_attendance_stats_bulk(conversation_ids, student)
-
-        classrooms = [
-            {
-                'group_name': membership.group.name,
-                'attendance': attendance_by_conversation[membership.group.conversation_id],
-                'assignments': self._assignment_summary(
-                    membership.group_id, assignment_totals, submitted_counts,
-                ),
-            }
-            for membership in memberships
-        ]
-
-        return Response({
-            'student_name': _display_name(student),
-            'classrooms': classrooms,
-        })
-
-    @staticmethod
-    def _assignment_summary(group_id, assignment_totals, submitted_counts):
-        total = assignment_totals.get(group_id, 0)
-        submitted = submitted_counts.get(group_id, 0)
         return {
-            'pending': max(total - submitted, 0),
-            'submitted': submitted,
-            'total': total,
+            classroom_id: {
+                'group_name': group.name,
+                'assignments': {
+                    'pending': max(
+                        assignment_totals.get(group.id, 0) - submitted_counts.get(group.id, 0), 0,
+                    ),
+                    'submitted': submitted_counts.get(group.id, 0),
+                    'total': assignment_totals.get(group.id, 0),
+                },
+            }
+            for classroom_id, group in eligible.items()
         }

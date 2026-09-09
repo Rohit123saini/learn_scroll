@@ -34,27 +34,33 @@ via **Celery beat + worker**.
 
 | File | Lines | Role |
 |---|---|---|
-| `models.py` | ~3200 | All DB models (~45 models) + model-level business logic + cache-version signals |
-| `serializers.py` | ~1460 | DRF serializers — 55 classes, one (or a few) per model/action |
-| `views.py` | ~5990 | DRF ViewSets/APIViews — all HTTP endpoints, permission logic, orchestration |
-| `urls.py` | ~385 | DRF router registrations + a few plain `path()`s for non-ViewSet views. **Its module docstring is itself the canonical endpoint reference** — reproduced in full in §5 below. |
-| `admin.py` | ~611 | Django admin registrations (inlines, list filters, bulk actions) — 40+ `ModelAdmin`s |
-| `signals.py` | ~375 | `@receiver`s for session-end cleanup, waitlist FCFS promotion, attendance credit (registered via `apps.py`) |
+| `models.py` | ~3460 | All DB models (~45 models) + model-level business logic + cache-version signals |
+| `serializers.py` | ~1640 | DRF serializers — 55 classes, one (or a few) per model/action |
+| `views.py` | ~6320 | DRF ViewSets/APIViews — all HTTP endpoints, permission logic, orchestration |
+| `urls.py` | ~429 | DRF router registrations + a few plain `path()`s for non-ViewSet views, incl. the two new `create_group/`/`group/` paths (tasks 29/30, §5/§6b). **Its module docstring is itself the canonical endpoint reference** — reproduced in full in §5 below. |
+| `admin.py` | 607 | Django admin registrations (inlines, list filters, bulk actions) — 33 `ModelAdmin`s (not 40+ — `NotificationAdmin`/`NotificationPreferenceAdmin` moved to `core/admin.py` per task 42, since `Notification` itself now lives in `core/models.py`; see §14). **Gap**: imports `ParentMessageTemplate`/`ParentTeacherMessage` from `.models` but never registers a `ModelAdmin` for either — see §14. |
+| `signals.py` | ~620 | `@receiver`s for session-end cleanup, waitlist FCFS promotion, attendance credit, **+ 6 NEW classroom↔chat-group sync receivers (tasks 29–40, §6b)** (registered via `apps.py`) |
 | `apps.py` | 33 | `AppConfig.ready()` — the thing that actually makes `signals.py` load |
 | `tasks.py` | ~1700 | All Celery tasks — periodic sweeps + async `notify_*` senders (~40 `@shared_task`s) |
 | `LearnScroll/celery.py` | 57 | **Project-level** Celery app bootstrap (sits next to `settings.py`, not part of the `liveclass` app itself). Creates the `Celery("LearnScroll")` instance, loads every `CELERY_*` setting from Django settings via `config_from_object(..., namespace="CELERY")`, and `autodiscover_tasks()`s a `tasks.py` in every `INSTALLED_APPS` app (`liveclass/tasks.py` included) — no manual per-task registration needed. Docstring spells out the one-time wiring: `LearnScroll/__init__.py` must do `from .celery import app as celery_app`; worker (`celery -A LearnScroll worker`) and beat (`celery -A LearnScroll beat`) are two separate long-running processes, both required. |
-| `consumers.py` | ~475 | Django Channels WebSocket consumers (`SessionConsumer`, `UserConsumer`) |
-| `routing.py` | 20 | WebSocket URL patterns (separate from `urls.py`, wired into ASGI, not WSGI) |
+| `consumers.py` | ~577 | Django Channels WebSocket consumers (`SessionConsumer`, `UserConsumer`, `ClassroomConsumer` — new, see §6) |
+| `routing.py` | 30 | WebSocket URL patterns (separate from `urls.py`, wired into ASGI, not WSGI) — 3 routes: session/user/classroom |
 | `liveclass/ws_auth.py` | 53 | JWT-over-WebSocket auth middleware — **thin re-export only** (`from LearnScroll.ws_auth import JWTAuthMiddleware, get_user_from_token`), kept so every existing `from liveclass.ws_auth import JWTAuthMiddleware` call (including `asgi.py`) keeps working unchanged after the consolidation below. |
 | `LearnScroll/ws_auth.py` | ~55 | **Project-level**, real implementation (moved here — was two independent, never-compared copies: `message/Middleware.py` vs the old `liveclass/ws_auth.py`). Pulls the JWT out of the `?token=` query string (a WS handshake can't carry a custom `Authorization` header), validates it with `rest_framework_simplejwt.tokens.AccessToken`, resolves it to a user via `get_user_from_token()` — every failure mode (bad signature, expired, malformed, deleted/deactivated user) degrades to `AnonymousUser` rather than raising, so a bad token can never crash the socket, it just connects unauthenticated. Both the `message` app (chat/calls/study-rooms) and `liveclass` import from this one file now, so the two can never silently drift out of sync again. |
-| `realtime.py` | ~500 | Low-level pub/sub helpers: Redis-backed broadcast, presence, missed-event history, connect rate-limit |
+| `realtime.py` | ~560 | Low-level pub/sub helpers: Redis-backed broadcast (session/user/classroom), presence, missed-event history, connect rate-limit |
 | `livekit_utils.py` | ~434 | LiveKit token generation, room API client, webhook signature verification |
 | `moderation.py` | 137 | Lightweight rule-based chat moderation (`screen_message`) — profanity/spam/caps detector |
 | `notifications.py` | ~260 | Single fan-out point for push/email/SMS/WhatsApp — provider-agnostic |
 | `exceptions.py` | 184 | DRF custom exception handler — normalises every error response to one JSON shape |
 | `chunked_upload_views.py` | ~607 | Chunked file upload (init/chunk/complete/abort) for large files (cover images, recordings, materials) |
+| `classroom_chat_views.py` | 95 | **NEW (tasks 29/30)** — `ClassroomCreateGroupView` (teacher-only "haan" confirm, POST) + `ClassroomGroupStatusView` (manager-tier read) for the classroom↔chat-group bridge. Deliberately its own file/own explicit `path()`s rather than `ClassroomViewSet` actions — see §6b. |
+| `core/classroom_chat_bridge.py` | — | **NEW, outside this app** (lives in the `core` app, not uploaded/audited here — only referenced, by `classroom_chat_views.py`, `signals.py`, and `test_classroom_chat_bridge.py`). The one place that knows how a `Classroom` maps to a `message` app `Group`: `create_classroom_group`, `sync_membership_on_join_accept`, `sync_membership_on_removal`, `sync_group_metadata`, `archive_group_on_classroom_close`, `promote_to_moderator`. Every function no-ops if the classroom has no linked group (`chat_group_enabled=False`) — see §6b. |
+| `test_classroom_chat_bridge.py` | 267 | **NEW (task 40)** — regression tests for `core/classroom_chat_bridge.py` (create/accept/kick/refund/metadata-sync/archive). Kept as its own `test_*.py` module (not merged into `tests.py`) — Django's test runner auto-discovers any `test*.py` per app. Reuses `LiveClassTestBase`'s fixtures + the same `LIVEKIT_PATCH`/`SAFE_DELAY_PATCH` mocking convention as `tests.py`. |
+| `throttles.py` | — | **NEW (task 9)** — app-specific `SimpleRateThrottle` subclasses that don't fit the everyday `ScopedRateThrottle` (user-keyed) pattern. Currently one class: `ParentJoinIPThrottle` (scope `session_parent_join_ip`) — see §6c. Same single-purpose-throttles-file convention `message/throttles.py` already uses. |
+| `permissions.py` | — | **ADDITIVE SNIPPET, not a full file** — the real `liveclass/permissions.py` (with `IsClassroomManager`/etc.) wasn't supplied to this task; this is one class (`HasValidParentSessionToken`) written to be pasted alongside what's already there. See §6c for what it gates and how it differs from `parent_join`'s token flow. |
+| `parent_link_views.py` | ~230 | **NEW FILE** — teacher-managed `ParentAccessCode` endpoints: Phase 2 (`ClassroomParentCodeGenerateView` — teacher generates a code for a student), Phase 4 (`ReportCardViewSet` — server-computed report cards), Phase 5 teacher-side (`ClassroomParentQueryListView` + `ParentQueryReplyView` — parent-mode query threads). Cross-app: imports `ParentAccessCode`/`ParentModeQuery`/`ParentModeQueryMessage` from `message.models` and `create_bell_rows_for_push`/`send_parent_push` from `message.services`/`message.push_utils` — the same "liveclass calls into message, never the reverse" direction as `core/classroom_chat_bridge.py`. **Not yet wired into `urls.py`** and depends on a `StudentReportCard` model that isn't defined in the uploaded `models.py` — see §6c for the full gap list. |
 | `tests.py` | ~2610 | Test suite (Django `TestCase`), 25 test classes organized by feature area — see §16 for the confirmed gap (no `StudentProgressTests`) |
-| `settings.py` | ~750 | **Project-level** Django settings (not liveclass-only — shared with `login`/`message` apps) |
+| `settings.py` | ~890 | **Project-level** Django settings (not liveclass-only — shared with `login`/`message` apps) |
 
 **Wiring dependencies to remember (all previously-broken gaps, now fixed):**
 - `signals.py` does nothing unless `apps.py` exists and `INSTALLED_APPS` points at `liveclass.apps.LiveclassConfig`.
@@ -63,6 +69,8 @@ via **Celery beat + worker**.
 - ASGI app (project-level `asgi.py`) wires `liveclass.routing.websocket_urlpatterns` through `liveclass.ws_auth.JWTAuthMiddleware`.
 - `settings.py` → `REST_FRAMEWORK["EXCEPTION_HANDLER"] = "liveclass.exceptions.liveclass_exception_handler"`.
 - `TeacherEarningsView`, `StudentProgressView`, `NotificationPreferenceView`, `HealthCheckView` are plain `APIView`s, **not** ViewSets — `router.register()` never auto-wires them; each needs its own explicit `path()` in `urls.py` (this was missing at least 3 times historically).
+- **✅ RESOLVED (classroom↔chat bridge, tasks 29–40)**: `Classroom.chat_group_enabled` (`BooleanField`, default `False`) and `Classroom.linked_conversation_id` (`UUIDField`, null/blank) are now both defined on `Classroom` in `models.py` — `models_PATCH_apply_to_Classroom.md` has landed. Every code path that assumes these two attributes (`classroom_chat_views.py`, the 6 chat-sync signal receivers in `signals.py`) is safe to run now. See §6b.
+- **⚠️ PENDING (parent access — Phases 2/4/5, `parent_link_views.py`)**: none of `ClassroomParentCodeGenerateView`, `ReportCardViewSet`, `ClassroomParentQueryListView`, `ParentQueryReplyView` have a `path()`/router registration in the uploaded `urls.py` — the file exists but nothing routes to it yet. It also imports `StudentReportCard` from `.models`, but `models.py` only has a comment (`# GAP FIX (Gap 3) — StudentReportCard.attendance_percent...`) marking where that model's attendance number should be computed from — the model class itself isn't defined anywhere in the uploaded `models.py`. `ReportCardViewSet.create()` will raise `ImportError` at module load until it's added. See §6c for the full picture, including a second, independent parent-facing mechanism (`ClassSessionViewSet.parent_join`) that already **is** live and doesn't share any code with this one.
 
 ---
 
@@ -144,6 +152,7 @@ Coin economy (platform-wide, not per-classroom):
   - `is_flagged` — auto-set once enough pending `ClassroomReport`s accumulate (`_auto_flag_classroom` signal, threshold = `AUTO_FLAG_THRESHOLD`); drops out of public Explore, teacher keeps their own access.
   - `MIN_AGE_BEFORE_DELETE_DAYS = 30` — `can_be_deleted()` blocks DELETE until the classroom is ≥30 days old **and** no student holds a paid, unexpired, un-refunded pass. To shut down early, teacher must use `/close/` instead, which refunds every active purchase first.
 - `created_at`, `updated_at`.
+- **⚠️ `chat_group_enabled` (bool, default False), `linked_conversation_id` (UUID, nullable) — NOT YET IN `models.py`.** Required by the classroom↔chat bridge (§6b): `chat_group_enabled` gates whether any of `core/classroom_chat_bridge.py`'s sync functions do anything at all, `linked_conversation_id` points at the `message` app's `Conversation` backing the linked `Group`. Referenced by `classroom_chat_views.py` and 6 signal receivers in `signals.py` today, but the field definitions themselves are only tracked in the not-yet-applied `models_PATCH_apply_to_Classroom.md` — see the §1 wiring-dependencies warning.
 - **Meta**: `ordering = ["-created_at"]`; indexes on `(teacher, is_active)`, `-rating_avg`, `language`, `classroom_type`, `is_deleted`; plus **trigram GIN indexes** on `title`/`subject`/`description` (Postgres `pg_trgm` extension required — silently ignored on other DB backends, safe to leave in `Meta.indexes` regardless) so `?search=` `icontains` filters use an index scan instead of a sequential scan.
 
 **Key methods:**
@@ -223,7 +232,7 @@ Payout request lifecycle. Coins are debited **immediately on request**, not on a
 
 ### `ClassroomBan`, `ClassroomStaff`, `SessionWaitlist`, `ClassroomReport`
 - `ClassroomBan` — issuing a ban refunds the banned student's active pass and rejects their pending join requests (see `ClassroomViewSet.ban`); `Classroom.has_access()` also independently excludes banned students as defence-in-depth.
-- `ClassroomStaff` — co-teacher/moderator roles (manager-level vs moderator-level, checked by `_org_staff_role`/`_can_manage_classroom`/`_can_moderate_session`).
+- `ClassroomStaff` — co-teacher/moderator roles (manager-level vs moderator-level, checked by `_org_staff_role`/`_can_manage_classroom`/`_can_moderate_session`). `test_classroom_chat_bridge.py` also exercises a `ClassroomStaff.Role.CO_TEACHER` choice + a `post_save`(created) signal that promotes the new staff user to `GroupMember.MODERATOR` in the linked chat group (§6b) — that exact shape (`ClassroomStaff(classroom, user, role)`) is still an *assumption* per `classroom_chat_views.py`'s own docstring, not confirmed against a real `models.py` definition.
 - `SessionWaitlist` — capacity overflow queue; FCFS promotion is compare-and-swap (`filter(notified=False).update(notified=True)`, single query — not read-then-save, which had a race where two students leaving at once could double-promote the same waitlisted student).
 - `ClassroomReport` — auto-flags the classroom at `AUTO_FLAG_THRESHOLD` pending reports (`_auto_flag_classroom` signal, `post_save`), lazy-imports `tasks.notify_classroom_flagged` so `models.py` stays importable even without Celery wired.
 
@@ -249,7 +258,7 @@ Tracks large multi-chunk uploads in progress (see §8). Indexed on `(user, statu
 
 ---
 
-## 4. Views / API (`views.py`, ~5990 lines, DRF ViewSets)
+## 4. Views / API (`views.py`, ~6320 lines, DRF ViewSets)
 
 ### Permission/role helper functions (module-level, reused everywhere — don't duplicate this logic in a new spot)
 `_org_staff_role`, `_has_room_access_no_pass`, `_has_room_access`, `_resolve_session_roles`, `_can_moderate_session`, `_can_manage_classroom`, `_can_view_classroom_internals`, `AccessLevel` (class) + `_access_level`, `_accessible_classroom_ids`.
@@ -264,44 +273,44 @@ Tracks large multi-chunk uploads in progress (see §8). Indexed on `(user, statu
 
 | ViewSet | `get_queryset`/`perform_*` | `@action`s |
 |---|---|---|
-| `ClassroomViewSet` (252) | yes, all 4 | `close`, `has_access`, `my_pass` (url `my-pass`), `start-or-join`, `stats` (GET, line 671), `share` (POST, 728), `share-stats` (GET), `my-shares` (GET, detail=False), `refer-link` (GET), `recommended` (GET, detail=False, ?limit=), `ban` (POST), `bans` (GET), `unban/(?P<student_id>...)` (POST), `recordings` (GET). Custom `list()` uses the version-based cache. |
-| `ClassroomReportViewSet` (1052) | yes | `review` (POST, staff-only decision on a report) |
-| `ClassScheduleViewSet` (1155) | yes, all 4 | standard CRUD, scoped to own classrooms |
-| `ClassSessionViewSet` (1392) | yes, create/update/destroy | `join` (POST, throttled `session_join` scope), `end` (POST), `engagement-report` (GET), `token` (POST, throttled `session_token` scope — fresh LiveKit token, no participant row, for reconnect/testing), `kick/(?P<user_id>...)` (POST), `mute/(?P<user_id>...)` (POST, body `{"muted": true|false}`), `hand` (POST, raise/lower **own** hand), `hand/(?P<user_id>...)/lower` (POST, lower **someone else's** hand), `whiteboard` (POST, `{"snapshot": {...}|null}` — **NEW**, `_has_room_access` gate, not manage-only — see whiteboard persistence note under `ClassSession` in §3), `spotlight` (POST, `{"identity": "<livekit id>"|null}` — **NEW**, `_can_moderate_session` gate, re-broadcasts `spotlight` over the session's realtime channel), `reactions` (GET+POST, `{"reaction": "heart"}` — **NEW**, throttled `session_reaction` scope, `_has_room_access` gate — durable log behind `SessionReaction`, see §3), `captions` (GET+POST, `{"text": "..."}` — **NEW**, throttled `session_caption` scope, `_has_room_access` gate — durable transcript behind `SessionCaption`, see §3), `unread` (GET), `mark-read` (POST), `start-recording` (POST), `stop-recording` (POST), `breakout` (GET+POST), `breakout/assign` (POST), `breakout/close` (POST). Helper fns `_perform_join` (2234) and `_try_promote_from_waitlist` (2417) live at module level right after this viewset. |
-| `LiveKitWebhookView` (`APIView`, 2319) | — | receives LiveKit room/participant/**egress_ended** webhooks (server-to-server only) |
-| `ClassPassViewSet` (2408) | yes, all 4 | CRUD (teacher-owned). `perform_destroy`/`perform_update` enforce the "can't shrink what active holders paid for" rule (see §5 `passes/{id}/`). |
-| `PassPurchaseViewSet` (2562) | yes | `refund` (POST), `cancel` (POST), `toggle-auto-renew` (POST, body `{"auto_renew": bool}`), `referral-earnings` (GET, detail=False). `_charge_and_create_purchase` (module-level, 2732) is the **shared** "debit coins + create purchase" logic used by both join-request-accept and gift-claim flows — single source of truth for the money-moving step. |
-| `ClassJoinRequestViewSet` (2897) | yes, create | `accept` (POST — **this is where money actually moves**, via `_charge_and_create_purchase`), `reject` (POST, no charge), `cancel` (POST, requester-only, pending-only) |
-| `PassGiftViewSet` (3267) | yes, create | `claim` (POST, recipient-only — creates the `PassPurchase`), `cancel` (POST, gifter-only, pending-only — refunds gifter) |
-| `SessionParticipantViewSet` (3447) | yes | `leave` (POST) |
-| `ClassMaterialViewSet` (3490) | yes, all 4 | standard CRUD |
-| `ChatMessageViewSet` (3734) | yes, create/destroy | `react` (POST+DELETE), `pin` (POST), `unpin` (POST), `read` (POST — **NEW**, mark one message read/seen by the caller, idempotent, only broadcasts `chat.read` on an actual new receipt), `mark-read` (POST, detail=False — **NEW**, bulk version, body `{"session": <id>, "up_to": <message_id>}`, excludes the caller's own messages), `read-receipts` (GET — **NEW**, full oldest-first "seen by" list for one message, kept out of the main list payload on purpose). `perform_create` runs `moderation.screen_message()` **after** save — a false positive must never block a real send, only add to a moderator review queue. Read/mark-read/read-receipts are looked up directly (not via `get_queryset()`) for the same reason `react`/`pin` are — the `?session=` filter only applies to `list`. |
-| `ChatMessageReportViewSet` (3779) | yes, create | `review` (POST, moderator — soft-deletes the reported message when actioned) |
-| `LivePollViewSet` (3881) | yes, all 4 | `vote` (POST), `close` (POST), `quick-create` (POST, detail=False, from a `PollTemplate`) |
-| `PollTemplateViewSet` (4059) | yes, all 4 | CRUD (reusable poll presets) |
-| `AssignmentViewSet` (4114) | yes, all 4 | — |
-| `AssignmentSubmissionViewSet` (4213) | yes, all 4 | `grade` (POST, teacher-only) |
-| `ClassroomReviewViewSet` (4354) | yes, all 4 | — |
-| `ClassroomWishlistViewSet` (4438) | yes, create/destroy | — |
-| `CouponViewSet` (4475) | yes, all 4 | `validate` (GET, detail=False, `?code=`, throttled `coupon_validate` scope — dry-run check without spending) |
-| `CoinTransactionViewSet` (4590, list-only `GenericViewSet`) | yes | `balance` (GET, detail=False) |
-| `CoinWithdrawalViewSet` (4621) | yes, create | `cancel` (POST), `approve` (POST, staff), `reject` (POST, staff), `mark-paid` (POST, staff) |
-| `_create_gateway_order(amount_inr, receipt)` / `_verify_gateway_signature(order_id, payment_id, signature)` (4765/4778, module-level) | — | Razorpay order-create + HMAC signature verify, shared by `CoinPurchaseViewSet` |
-| `CoinPurchaseViewSet` (4799) | yes | `initiate` (POST, detail=False, body `{"coins": N}`), `verify` (POST — gateway checkout callback payload), `retry` (POST — re-attempt a FAILED purchase) |
-| `ReferralViewSet` (4900, list-only `GenericViewSet`) | yes | `my-code` (GET, detail=False), `redeem` (POST, detail=False, body `{"code": "R..."}`) |
-| `TeacherEarningsView` (`APIView`, 5027) | — | dashboard, not a ViewSet — explicit `path()` in urls.py |
-| `StudentProgressView` (`APIView`, 5094) | — | dashboard, not a ViewSet — explicit `path()` in urls.py |
-| `ClassroomStaffViewSet` (5168) | yes, all 4 | manage co-teacher/moderator roles |
-| `SessionWaitlistViewSet` (5265) | yes | `promote` (POST — manual override of FCFS auto-promotion) |
-| `CertificateViewSet` (5373) | yes, create | issue (via `perform_create`) |
-| `ClassReminderViewSet` (5439) | yes, create | — |
-| `ClassHolidayViewSet` (5467) | yes, all 4 | — |
-| `NoticeViewSet` (5535) | yes, all 4 | `pin` (POST). Custom cached `list()` (per-classroom notice cache version). |
-| `ClassQueryViewSet` (5670) | yes, create/update | `answer` (POST, teacher/co-teacher/moderator) |
-| `NotificationViewSet` (5787) | yes | `unread-count` (GET, detail=False), `mark-read` (POST), `mark-all-read` (POST, detail=False) |
-| `NotificationPreferenceView` (`APIView`, 5854) | — | GET/PATCH own preferences row |
-| `MyDashboardView` (`APIView`, 5873) | — | single-call home-screen summary |
-| `HealthCheckView` (`APIView`, 5931) | — | unauthenticated DB+cache liveness probe |
+| `ClassroomViewSet` (259) | yes, all 4 | `close`, `has_access`, `my_pass` (url `my-pass`), `start-or-join`, `stats` (GET), `share` (POST), `share-stats` (GET), `my-shares` (GET, detail=False), `refer-link` (GET), `recommended` (GET, detail=False, ?limit=), `ban` (POST), `bans` (GET), `unban/(?P<student_id>...)` (POST), `recordings` (GET). Custom `list()` uses the version-based cache. |
+| `ClassroomReportViewSet` (1059) | yes | `review` (POST, staff-only decision on a report) |
+| `ClassScheduleViewSet` (1162) | yes, all 4 | standard CRUD, scoped to own classrooms |
+| `ClassSessionViewSet` (1392) | yes, create/update/destroy | `join` (POST, throttled `session_join` scope), `parent-join` (POST, `AllowAny` + `ParentJoinIPThrottle` — unauthenticated observer join for a parent holding a signed token, see §6c), `end` (POST), `engagement-report` (GET), `token` (POST, throttled `session_token` scope — fresh LiveKit token, no participant row, for reconnect/testing), `kick/(?P<user_id>...)` (POST), `mute/(?P<user_id>...)` (POST, body `{"muted": true|false}`), `hand` (POST, raise/lower **own** hand), `hand/(?P<user_id>...)/lower` (POST, lower **someone else's** hand), `whiteboard` (POST, `{"snapshot": {...}|null}`, `_has_room_access` gate, not manage-only — see whiteboard persistence note under `ClassSession` in §3), `spotlight` (POST, `{"identity": "<livekit id>"|null}`, `_can_moderate_session` gate, re-broadcasts `spotlight` over the session's realtime channel), `reactions` (GET+POST, `{"reaction": "heart"}`, throttled `session_reaction` scope, `_has_room_access` gate — durable log behind `SessionReaction`, see §3), `captions` (GET+POST, `{"text": "..."}`, throttled `session_caption` scope, `_has_room_access` gate — durable transcript behind `SessionCaption`, see §3), `unread` (GET, Pass 13), `mark-read` (POST, Pass 13), `start-recording` (POST), `stop-recording` (POST), `breakout` (GET+POST), `breakout/assign` (POST), `breakout/close` (POST). |
+| `LiveKitWebhookView` (`APIView`, 2489) | — | receives LiveKit room/participant/egress_ended webhooks (server-to-server only) |
+| `ClassPassViewSet` (2578) | yes, all 4 | CRUD (teacher-owned). `perform_destroy`/`perform_update` enforce the "can't shrink what active holders paid for" rule (see §5 `passes/{id}/`). |
+| `PassPurchaseViewSet` (2732) | yes | `refund` (POST), `cancel` (POST), `toggle-auto-renew` (POST, body `{"auto_renew": bool}` — Pass 15/16), `referral-earnings` (GET, detail=False). `_charge_and_create_purchase` (module-level) is the **shared** "debit coins + create purchase" logic used by both join-request-accept and gift-claim flows — single source of truth for the money-moving step. |
+| `ClassJoinRequestViewSet` (3067) | yes, create | `accept` (POST — **this is where money actually moves**, via `_charge_and_create_purchase`), `reject` (POST, no charge), `cancel` (POST, requester-only, pending-only) |
+| `PassGiftViewSet` (3437) | yes, create | `claim` (POST, recipient-only — creates the `PassPurchase`), `cancel` (POST, gifter-only, pending-only — refunds gifter) — Pass 14 |
+| `SessionParticipantViewSet` (3623) | yes | `leave` (POST) |
+| `ClassMaterialViewSet` (3666) | yes, all 4 | standard CRUD |
+| `ChatMessageViewSet` (3734) | yes, create/destroy | `react` (POST+DELETE), `pin` (POST, Pass 13), `unpin` (POST, Pass 13), `read` (POST — mark one message read/seen by the caller, idempotent, only broadcasts `chat.read` on an actual new receipt, Pass 13), `mark-read` (POST, detail=False — bulk version, body `{"session": <id>, "up_to": <message_id>}`, excludes the caller's own messages, Pass 13), `read-receipts` (GET — full oldest-first "seen by" list for one message, kept out of the main list payload on purpose, Pass 13). `perform_create` runs `moderation.screen_message()` **after** save (Pass 14) — a false positive must never block a real send, only add to a moderator review queue. Read/mark-read/read-receipts are looked up directly (not via `get_queryset()`) for the same reason `react`/`pin` are — the `?session=` filter only applies to `list`. |
+| `ChatMessageReportViewSet` (4098) | yes, create | `review` (POST, moderator — soft-deletes the reported message when actioned) — Pass 14 |
+| `LivePollViewSet` (4200) | yes, all 4 | `vote` (POST), `close` (POST), `quick-create` (POST, detail=False, from a `PollTemplate` — Pass 13) |
+| `PollTemplateViewSet` (4378) | yes, all 4 | CRUD (reusable poll presets) — Pass 13 |
+| `AssignmentViewSet` (4433) | yes, all 4 | — |
+| `AssignmentSubmissionViewSet` (4532) | yes, all 4 | `grade` (POST, teacher-only) |
+| `ClassroomReviewViewSet` (4673) | yes, all 4 (`perform_update`/`perform_destroy` ownership-gated — Pass 19/21 fix, see §17 item 19) | — |
+| `ClassroomWishlistViewSet` (4757) | yes, create/destroy | — |
+| `CouponViewSet` (4794) | yes, all 4 | `validate` (GET, detail=False, `?code=`, throttled `coupon_validate` scope — dry-run check without spending) |
+| `CoinTransactionViewSet` (4909, list-only `GenericViewSet`) | yes | `balance` (GET, detail=False) |
+| `CoinWithdrawalViewSet` (4940) | yes, create | `cancel` (POST), `approve` (POST, staff), `reject` (POST, staff), `mark-paid` (POST, staff) |
+| `_create_gateway_order(amount_inr, receipt)` / `_verify_gateway_signature(order_id, payment_id, signature)` (5084, module-level) | — | Razorpay order-create + HMAC signature verify, shared by `CoinPurchaseViewSet` |
+| `CoinPurchaseViewSet` (5118) | yes | `initiate` (POST, detail=False, body `{"coins": N}`), `verify` (POST — gateway checkout callback payload), `retry` (POST — re-attempt a FAILED purchase) |
+| `ReferralViewSet` (5219, list-only `GenericViewSet`) | yes | `my-code` (GET, detail=False), `redeem` (POST, detail=False, body `{"code": "R..."}`) |
+| `TeacherEarningsView` (`APIView`, 5346) | — | dashboard, not a ViewSet — explicit `path()` in urls.py |
+| `StudentProgressView` (`APIView`, 5413) | — | dashboard, not a ViewSet — explicit `path()` in urls.py |
+| `ClassroomStaffViewSet` (5487) | yes, all 4 | manage co-teacher/moderator roles |
+| `SessionWaitlistViewSet` (5584) | yes | `promote` (POST — manual override of FCFS auto-promotion) |
+| `CertificateViewSet` (5692) | yes, create | issue (via `perform_create`) |
+| `ClassReminderViewSet` (5758) | yes, create | — |
+| `ClassHolidayViewSet` (5786) | yes, all 4 (`perform_update` ownership-gated — Pass 19/21 fix, see §17 item 19) | — |
+| `NoticeViewSet` (5854) | yes, all 4 | `pin` (POST). Custom cached `list()` (per-classroom notice cache version). |
+| `ClassQueryViewSet` (6000) | yes, create/update (`perform_update` ownership-gated, frozen once `ANSWERED` — Pass 19/21 fix, see §17 item 19) | `answer` (POST, teacher/co-teacher/moderator) |
+| `NotificationViewSet` (6117) | yes | `unread-count` (GET, detail=False), `mark-read` (POST), `mark-all-read` (POST, detail=False) |
+| `NotificationPreferenceView` (`APIView`, 6184) | — | GET/PATCH own preferences row (Pass 14 — per-type channel prefs + digest) |
+| `MyDashboardView` (`APIView`, 6203) | — | single-call home-screen summary |
+| `HealthCheckView` (`APIView`, 6261) | — | unauthenticated DB+cache liveness probe |
 
 ---
 
@@ -318,6 +327,8 @@ One `DefaultRouter` with ~28 `router.register(...)` entries, mounted at project 
 | `my-earnings/` | GET | `TeacherEarningsView` — teacher-only earnings summary; optional `?classroom=<id>` |
 | `my-progress/` | GET | `StudentProgressView` — caller's own attendance/assignment/certificate stats + streak |
 | `notification-preferences/me/` | GET, PATCH | `NotificationPreferenceView` — always the caller's own row |
+| `classrooms/<uuid:classroom_id>/create_group/` | POST | `classroom_chat_views.ClassroomCreateGroupView` — NEW, tasks 29/30, see §6b |
+| `classrooms/<uuid:classroom_id>/group/` | GET | `classroom_chat_views.ClassroomGroupStatusView` — NEW, tasks 29/30, see §6b |
 | `livekit-webhook/` | POST | `LiveKitWebhookView` — server-to-server only, not for client/app use |
 | `healthz/` | GET | `HealthCheckView` — unauthenticated; 200 = healthy, 503 = a dependency is down |
 | `uploads/chunked/init/` | POST | `chunked_upload_views.chunked_upload_init` |
@@ -347,6 +358,14 @@ classrooms/{id}/ban/                 POST
 classrooms/{id}/bans/                GET
 classrooms/{id}/unban/{student_id}/  POST
 classrooms/{id}/recordings/          GET
+classrooms/{id}/create_group/        POST              (NEW, tasks 29/30 — teacher only, explicit confirm.
+                                                        Plain APIView (classroom_chat_views.py), not a
+                                                        ClassroomViewSet action — own explicit path() below
+                                                        the router block. 400 if chat_group_enabled already
+                                                        True. See §6b.)
+classrooms/{id}/group/               GET               (NEW, tasks 29/30 — manager-tier read: teacher/
+                                                        co-teacher/moderator only, not students — see §6b.
+                                                        Also a plain APIView, own explicit path().)
 
 coin-purchases/                      GET, POST         (own top-up history)
 coin-purchases/initiate/             POST              (body {"coins": N} — starts a gateway order)
@@ -360,6 +379,14 @@ sessions/                            GET, POST
 sessions/{id}/                       GET, PUT, PATCH, DELETE
 sessions/{id}/join/                  POST
 sessions/{id}/token/                 POST              (fresh token, no participant row — reconnect/testing)
+sessions/{id}/parent-join/           POST              (UNAUTHENTICATED, AllowAny — body {"parent_token":
+                                                          "..."}; a signed django.core.signing token
+                                                          decodes to a student id, observer-role LiveKit
+                                                          token issued if that student has valid access to
+                                                          this classroom. No participant row created.
+                                                          IP-throttled via ParentJoinIPThrottle, not
+                                                          user-throttled. See §6c — NOT the same mechanism
+                                                          as ParentAccessCode/parent_link_views.py below.)
 sessions/{id}/end/                   POST              (teacher/co-teacher/moderator)
 sessions/{id}/kick/{user_id}/        POST              (teacher/co-teacher/moderator)
 sessions/{id}/mute/{user_id}/        POST              (force-mutes mic without removing; body
@@ -568,6 +595,13 @@ referrals/redeem/                    POST              (redeem someone else's co
                                                         only; body {"code": "R..."})
 ```
 
+**⚠️ Not in the router/path list above (gap):** `parent_link_views.py`'s four views —
+`ClassroomParentCodeGenerateView`, `ReportCardViewSet`, `ClassroomParentQueryListView`,
+`ParentQueryReplyView` — have no matching `path()`/`router.register()` anywhere in the uploaded
+`urls.py`. Their own docstrings imply intended paths (`classrooms/<id>/participants/<user_id>/
+parent-code/`, `classrooms/<id>/report-cards/`, `classrooms/<id>/parent-queries/`,
+`parent-queries/<query_id>/reply/`) but none of them are live yet. See §6c.
+
 ---
 
 ## 6. Realtime layer
@@ -577,10 +611,12 @@ referrals/redeem/                    POST              (redeem someone else's co
 websocket_urlpatterns = [
     re_path(r"^ws/liveclass/session/(?P<session_id>\d+)/$", consumers.SessionConsumer.as_asgi()),
     re_path(r"^ws/liveclass/user/$", consumers.UserConsumer.as_asgi()),
+    re_path(r"^ws/liveclass/classroom/(?P<classroom_id>\d+)/$", consumers.ClassroomConsumer.as_asgi()),
 ]
 ```
 - `ws/liveclass/session/<session_id>/` → `SessionConsumer` — per-session realtime (chat, hand-raise, presence, polls, breakout events).
 - `ws/liveclass/user/` → `UserConsumer` — per-user channel (personal notifications/pushes not scoped to one session).
+- `ws/liveclass/classroom/<classroom_id>/` → `ClassroomConsumer` — **NEW (classroom-stats realtime fix)**: per-classroom channel for `rating_avg`/`rating_count`/`enrolled_count` pushes. See `ClassroomConsumer` below.
 
 ### `consumers.py`
 **Read-only by design**: this app accepts exactly two inbound client message types on `SessionConsumer` — `"ping"` (keepalive/RTT) and `"typing"` — and just `"ping"` on `UserConsumer`. Every real write (chat send, poll vote, hand raise) already has a validated/permission-checked/throttled REST endpoint (`ChatMessageViewSet.create`, `LivePollViewSet.vote`, `ClassSessionViewSet.hand`, etc.) — duplicating that here would mean two code paths to keep in sync, with no free `ScopedRateThrottle`/serializer-validation equivalent on a socket. Anything else a client sends gets echoed back as an `"error"` event telling it which REST endpoint to use.
@@ -598,6 +634,10 @@ websocket_urlpatterns = [
 
 **`UserConsumer(AsyncJsonWebsocketConsumer)`** — `ws/liveclass/user/`, no session id in the path; auth alone (no DB lookup) gates entry into group `user.<id>`. Delivers everything `realtime.broadcast_to_user()` sends for *this* user: `join_request.created` (teacher's pending-count badge), `join_request.decided` (student's own request flipping), `staff.added`. Deliberately thinner than `SessionConsumer`: no presence tracking, no missed-event replay buffer (every event here already has a REST-backed source of truth a normal reopen re-derives — see `broadcast_to_user()`'s own docstring), no idle-watchdog. Still answers `"ping"`/`pong` (same keepalive purpose) but has no `"typing"` (session-scoped concept only). Shares `SessionConsumer`'s same per-user rate limiter (`check_connect_rate_limit`, keyed by `user_id` not `session_id`) — a reconnect loop on either socket burns the same shared budget, the correct scope for connect-loop protection.
 
+**`ClassroomConsumer(AsyncJsonWebsocketConsumer)`** — `ws/liveclass/classroom/<classroom_id>/` (**NEW — classroom-stats realtime fix**). Auth-only gate, no further per-object permission check (classroom `rating_avg`/`rating_count`/`enrolled_count` is public marketplace info any current viewer cares about — matches `ClassroomViewSet`'s own `IsAuthenticated`-only permission). Mirrors `UserConsumer` almost exactly (same thin shape: no presence, no replay buffer, no idle-watchdog, shares the same per-user WS-connect rate limiter), plus one addition `UserConsumer` doesn't need: a DB existence check on connect (`_classroom_exists`) — a client can pass an arbitrary/stale classroom id in the URL and gets a real `4404` instead of silently joining a group nothing will ever publish to. `connect()` order: auth (4401) → rate limit (4429) → existence check (4404) → group `classroom.<id>` → accept → `connection.ack`. Only inbound message handled is `"ping"`; anything else gets the same read-only `"error"` reply pattern as the other two consumers. `classroom_event(message)` is the server→client dispatch target for `realtime.broadcast_to_classroom()`.
+
+**Why this exists**: `classroom_detail_screen.dart`'s `LiveClassClassroomSocket` already connected to exactly this route with a "NEEDS A BACKEND COUNTERPART" comment — previously nothing backed it, so every connection attempt failed and the screen silently fell back to its (much longer) backstop poll. `models.py`'s `_broadcast_classroom_stats()` (called from `Classroom.refresh_rating()` and `refresh_enrolled_count()`) already tried `from .realtime import broadcast_to_classroom`, but that name didn't exist in `realtime.py` either — both the consumer and the broadcast function were missing at the same time, so the whole path was a silent `ImportError` swallowed by `_broadcast_classroom_stats`'s own try/except (the rating/enrollment recompute itself always succeeded; only the realtime push was silently dropped).
+
 ### `realtime.py` (Redis-backed helpers used by both consumers and `views.py`/`tasks.py`)
 Why it exists: `views.py` has called `from .realtime import broadcast_to_session` from a dozen call sites (chat create/delete, poll create/vote/close, hand raise/lower, recording start/stop) since before this file existed — a guaranteed `ImportError` at app-boot until this module was added. `broadcast_to_user()` closed a second, quieter version of the same gap: `views.py`'s `_safe_broadcast_to_user()` (`ClassJoinRequestViewSet` create/accept/reject, `ClassroomStaffViewSet.perform_create`) already called it, but wrapped in a try/except that only logs — so it never crashed, it just silently no-op'd every join-request badge push and staff-promotion push.
 
@@ -612,6 +652,7 @@ Why it exists: `views.py` has called `from .realtime import broadcast_to_session
 - **WS-connect rate limiting (Pass 12)**: `check_connect_rate_limit(user_id)` — fixed-window counter (`INCR`, `EXPIRE` set only on the window's first hit so it can't keep pushing the window back), `_WS_CONNECT_LIMIT` = **20** connects per `_WS_CONNECT_WINDOW_SECONDS` = **60s**, per-user (not per-session). Meant to be called from `consumers.py`'s `connect()` *before* the DB session/access lookup, so a rate-limited attempt only costs a Redis round-trip. Deliberately a fixed-window cap, not a token bucket — a WS connect is bursty by nature (page load, or a network drop causing simultaneous reconnects across tabs), so this caps a reconnect *loop* without punishing a reconnect *burst*.
 - **Fail-open contract, applies to every function above**: no raw Redis client, or any Redis exception, degrades to the safe default (`True`/allow for the rate limiter, `False`/`[]` for history/presence reads) — realtime/abuse-guard side channels must never be the reason a chat message fails to send or a connection fails to open. Same principle `notifications.send_notification()` follows elsewhere in this app.
 - `broadcast_to_session(session_id, event_type, payload) -> bool` and `broadcast_to_user(user_id, event_type, payload) -> bool` — the two public fan-out functions; both best-effort (never raise), both log-and-return-`False` on failure. Known `event_type` values in use: `chat.message`, `chat.message_deleted`, `poll.created`, `poll.updated`, `poll.closed`, `hand.raised`, `hand.lowered`, `recording.started`, `recording.stopped`, `recording.ready`, `participant.kicked`, `presence.joined`, `presence.left` (session-scoped); `join_request.created`, `join_request.decided`, `staff.added` (user-scoped). `broadcast_to_user()` deliberately does **not** write to the replay buffer — `UserConsumer` has no `?since=` catch-up, since every event it pushes already has a REST-backed source of truth a normal reopen/`_load()` re-derives correctly.
+- `broadcast_to_classroom(classroom_id, event_type, payload) -> bool` (**NEW — classroom-stats realtime fix**) — per-classroom counterpart to `broadcast_to_user()`, same relationship `broadcast_to_session()` has to it, just grouped by `classroom_id` (`_classroom_group_name` → `"classroom.<id>"`) instead of `user_id`/`session_id`. Same best-effort/never-raises contract; also has **no** replay/history buffer, same reasoning as `broadcast_to_user()` — a reconnecting client just re-fetches the classroom-detail REST endpoint, which already has the current stats. Only `event_type` in use today: `"classroom.stats"`, payload `{classroom_id, rating_avg, rating_count, enrolled_count}` — see `models.py`'s `_broadcast_classroom_stats()`, called from `Classroom.refresh_rating()`/`refresh_enrolled_count()`. Dispatched to `ClassroomConsumer.classroom_event()` in `consumers.py`.
 
 ### `ws_auth.py`
 JWT-over-WebSocket auth. Token read from `?token=` query string (a browser/mobile WS client can't set a custom `Authorization` header on the handshake). Same short-lived lifetime as any other API call (`SIMPLE_JWT.ACCESS_TOKEN_LIFETIME`), `wss://` in production. Real implementation lives at **project-level** `LearnScroll/ws_auth.py` (neutral to both `liveclass` and `message` apps, since they must never import each other's auth middleware); `liveclass/ws_auth.py` just re-exports `JWTAuthMiddleware`/`get_user_from_token` so existing imports keep working.
@@ -638,6 +679,124 @@ application = ProtocolTypeRouter({
     ),
 })
 ```
+
+---
+
+## 6b. Classroom ↔ chat-group bridge (tasks 29–40) — **NEW, in progress**
+
+Links a `Classroom` to a `message`-app `Group`/`Conversation`, so a classroom's teacher/students get an actual group chat outside of `liveclass`'s own `ChatMessage` (which is scoped to a single `ClassSession`, not persistent across the classroom). All logic lives in `core/classroom_chat_bridge.py` (a different Django app — `core` — not uploaded/audited as part of this file); `liveclass` only calls into it.
+
+**Files touched:**
+- `classroom_chat_views.py` (new) — the two HTTP entry points (§5): `ClassroomCreateGroupView` (POST, teacher-only explicit confirm — "haan" in the docstring, i.e. deliberately opt-in per classroom, not auto-created) and `ClassroomGroupStatusView` (GET, manager-tier: teacher/co-teacher/moderator, **not** students — students discover the group through their own `message` app group list once added). Both plain `APIView`s with their own explicit `path()`, same pattern this app already uses for `dashboard/`/`my-earnings/`/etc.
+- `urls.py` — wires the two paths (§5).
+- `signals.py` — 6 receivers, all lazy-importing `core.classroom_chat_bridge` inside a `transaction.on_commit()` callback (same production-hardening contract as every other signal in this file, §13) and all wrapped in their own try/except (a broken chat-sync must never break the state change that triggered it):
+  1. `sync_chat_group_on_join_accept` (`post_save`, `ClassJoinRequest`) — fresh transition into `ACCEPTED` → `sync_membership_on_join_accept`.
+  2. Waitlist FCFS promotion (inside `on_participant_left`, §13) — same `sync_membership_on_join_accept` call, for a promoted-from-waitlist student.
+  3. `sync_chat_group_on_staff_add` (`post_save` created, `ClassroomStaff`) → `promote_to_moderator`.
+  4. `sync_chat_group_on_classroom_change` (`post_save`, `Classroom`, paired with `stash_previous_classroom_snapshot` `pre_save`) — `is_active True→False` **or** `is_deleted→True` → `archive_group_on_classroom_close` (checked first; an archived classroom's metadata is not also synced). Otherwise, if `title`/`cover_image`/`description` changed → `sync_group_metadata`.
+  5. `sync_chat_group_on_ban` (`post_save` created, `ClassroomBan`) → `sync_membership_on_removal(..., reason="kick")`.
+  6. `sync_chat_group_on_purchase_refund` (`post_save`, `PassPurchase`, paired with `stash_previous_purchase_status` `pre_save`) — fresh transition into `REFUNDED` → `sync_membership_on_removal(..., reason="refund")`.
+  - **Deliberately NOT wired**: a session-level "kick" (`SessionParticipant.kicked_at`) — that's a temporary single-session removal, not a classroom-wide ban, and must not touch chat-group membership; only a full `ClassroomBan` does.
+- `test_classroom_chat_bridge.py` (new, §1, §16) — `core/classroom_chat_bridge.py`'s own regression suite, covering create/idempotency/non-teacher-rejected, accept (direct call + signal-fired), removal (direct/ban-signal/refund-signal, all no-op safely without a group), metadata sync, archive-on-close (+ idempotent double-archive), and staff→moderator promotion (skipped gracefully if `ClassroomStaff` isn't importable — see the pending-model-patch warning below).
+
+**Every `core/classroom_chat_bridge.py` function is a no-op if the classroom has no linked group** (`chat_group_enabled=False` / `linked_conversation_id=None`) — so none of the above signal receivers need their own "is this classroom chat-enabled" check; the bridge module owns that gate centrally.
+
+**⚠️ Not yet fully wired — two known gaps as of this audit:**
+1. **`models.py` doesn't define `Classroom.chat_group_enabled`/`Classroom.linked_conversation_id` yet** (§1, §3) — every piece above already assumes they exist. Apply `models_PATCH_apply_to_Classroom.md` (referenced by name in `classroom_chat_views.py`'s and `test_classroom_chat_bridge.py`'s docstrings, but not itself supplied) before this feature can run.
+2. `classroom_chat_views.py` hand-rolls its own `_is_classroom_manager()` (teacher OR a `ClassroomStaff` row exists) instead of reusing this app's real `_can_manage_classroom()` helper (§2) — only because `views.py`'s helpers weren't available when this file was written. Swap it for `_can_manage_classroom`/`IsClassroomManager` (same shape) once wiring this in for real, so the two access checks can't drift apart.
+
+---
+
+## 6c. Parent-facing features — **two independent, unreconciled mechanisms** — **NEW, in progress**
+
+Two separate "let a parent see something" systems have been built, at different times, that **do not
+share code, a permission class, or a token format** and never reference each other. Both are real and
+both currently exist in the codebase — this section documents each, then flags the overlap as a gap
+worth resolving before either ships further.
+
+### Mechanism A — session-observer join (`ClassSessionViewSet.parent_join`, live)
+
+The **older/simpler** of the two, and the only one that's actually wired end-to-end (see §5). A parent
+has no platform account at all — instead of authenticating, they hold a **signed, stateless link**:
+
+- `generate_parent_join_token(student)` (`views.py`, next to `PARENT_JOIN_TOKEN_SALT`) — wraps
+  `{"student_id": student.id}` via `django.core.signing.dumps(..., salt="liveclass.parent_join")`. No DB
+  row, no expiry table — the signature + `max_age` (checked in `ParentJoinSerializer.validate_parent_token`,
+  `serializers.py`) is the *only* state. **Not itself exposed via any API in this task** — a separate
+  "share this classroom with a parent" flow (out of scope of the pass that added this) is what would
+  actually call it and hand the resulting link to a parent.
+- `ClassSessionViewSet.parent_join` (POST `sessions/{id}/parent-join/`, `AllowAny` + `ParentJoinIPThrottle`)
+  — decodes the token, confirms the resolved student currently `has_access()` to the session's classroom
+  and isn't `kicked_at`, then issues an **observer-role** LiveKit token (`ParticipantRole.OBSERVER`,
+  identity `parent-{student.id}` — deliberately distinct from the student's own identity so a
+  simultaneously-connected parent+child never collide in the room). **Never creates a
+  `SessionParticipant` row** — a watching parent isn't a seat/attendance/waitlist participant, same
+  reasoning `token()` already uses for skipping participant-row creation.
+- `kick()` (§4) disconnects a kicked student's linked parent too, best-effort, via the same
+  `parent-{student_id}` LiveKit identity convention — separately wrapped so a missing/already-gone
+  parent connection never turns a successful student-kick into a 503.
+- **Flagged assumptions in the code itself, still unconfirmed as of this audit**: (1) whether a
+  DB-backed parent-token model already exists elsewhere in the real codebase — if so, only
+  `generate_parent_join_token`/`ParentJoinSerializer.validate_parent_token` need to change to read/write
+  it, `parent_join()` and its URL/permission/throttle wiring stay the same either way; (2) whether
+  `ParticipantRole.OBSERVER` already exists in `livekit_utils.py` with a `can_publish=False,
+  can_subscribe=True`-equivalent grant — that file wasn't in scope when this was written.
+
+### Mechanism B — teacher-managed `ParentAccessCode` (`parent_link_views.py`, **not wired**)
+
+The **newer/broader** of the two — a durable, DB-backed code a teacher explicitly generates for one
+student, that then gates several parent-facing features, not just one session:
+
+- **`HasValidParentSessionToken`** (`permissions.py`, additive snippet) — reads an `X-Parent-Token`
+  header, resolves it via `core.classroom_chat_bridge.resolve_parent_from_token()` (same `core` app as
+  the chat bridge in §6b — a *third* cross-app dependency on that module). On success attaches
+  `request.parent_access_code` / `request.parent_student` (never touches `request.user` — a parent has
+  no `login.User` row). Mirrors the `message` app's own `HasValidParentToken` contract exactly (same
+  attribute names), but is its own class here rather than an import, since `liveclass` never imports
+  `message.models` directly (same invariant §6b's bridge module exists to enforce). **Scope limit called
+  out in its own docstring**: proves the token belongs to *some* legitimate parent, platform-wide — it
+  does **not** check `request.parent_student` has access to whatever classroom/session/report the view
+  is about; every view using it must add that second check itself.
+- **`ClassroomParentCodeGenerateView`** (POST, manage-tier via `_can_manage_classroom`) — teacher
+  generates a code on a student's behalf via `ParentAccessCode.generate_for(student, created_by=request.
+  user, ...)`, capped at `ParentAccessCode.MAX_ACTIVE_CODES` (default 5) active codes per student. Fires
+  a best-effort bell notification to the student (`create_bell_rows_for_push`) so they know a code was
+  created behind their back — never blocks the 201 if that notify fails. One-time-reveal: the raw
+  `code` only appears in this response's `share_text`, never again.
+- **`ReportCardViewSet`** (manage-tier for create/update) — `attendance_percent` is **never** accepted
+  from the request body, always computed server-side via `compute_attendance_percent_bulk()` (already
+  defined in `models.py`, §3 — deliberately built off this app's own `ClassSession`/`SessionParticipant`
+  data, explicitly **not** the unrelated `message` app's `StudyRoomAttendance` self-check-in streak, per
+  that function's own module comment — the two would silently disagree, and a report card built off the
+  wrong one would contradict what the teacher sees in their own classroom's attendance log).
+  `homework_completion_percent`/`average_marks` are likewise computed from this classroom's own
+  `Assignment`/`AssignmentSubmission` rows (`category="homework"`) — a teacher only ever supplies
+  `period_label` + `teacher_remark`. Publishing/updating a card best-effort parent-pushes every
+  `ParentAccessCode` linked to that student via `send_parent_push`.
+- **`ClassroomParentQueryListView`** / **`ParentQueryReplyView`** — teacher side of parent-initiated
+  query threads (`ParentModeQuery`/`ParentModeQueryMessage`, `message` app models — deliberately a
+  **different**, token-scoped-to-Classroom model from the existing `ClassQuery`/`ParentTeacherMessage`
+  models already in this app, left untouched). Reply sets `status=answered`, or `status=closed` if the
+  teacher explicitly passes `{"close": true}`, and best-effort parent-pushes the reply.
+
+### Known gaps — worth resolving, not yet fixed
+
+1. **Not wired into `urls.py`** — none of the four `parent_link_views.py` views have a route (§5). The
+   file can't be hit by any client yet.
+2. **`StudentReportCard` isn't a defined model** — `models.py` has only a comment marking where its
+   `attendance_percent` should be sourced from (§1); the class itself doesn't exist. `ReportCardViewSet`
+   imports it directly and will fail at module load until it's added.
+3. **Two mechanisms, zero shared code, same problem space.** Mechanism A answers "can this parent watch
+   this one live session right now" (ephemeral, per-session, no DB row). Mechanism B answers "is this
+   parent linked to this student at all" (durable, DB-backed, gates report cards + query threads).
+   Nothing currently checks whether a student has *both* — or reconciles the two if a platform-wide
+   `ParentAccessCode` should also be sufficient to mint a Mechanism-A observer token (or vice versa). As
+   both mature, decide whether Mechanism A should be rebuilt on top of `ParentAccessCode` instead of its
+   own signed-token scheme, or whether the two are deliberately meant to stay separate (event access vs.
+   ongoing dashboard access) — and document that decision here once made.
+4. **`ParentJoinIPThrottle`'s scope (`session_parent_join_ip`) still needs its `DEFAULT_THROTTLE_RATES`
+   entry cross-checked** — same recurring bug class as every other throttle scope in this app, see §15/§17
+   item 2b; not confirmed present in the uploaded `settings.py` excerpt.
 
 ---
 
@@ -769,18 +928,22 @@ Purpose: side-effects that must fire **regardless of which code path** changed t
 3. **LiveKit failures are logged and swallowed, never raised** — a LiveKit-side hiccup must never prevent the DB from correctly recording that a session ended; DB is the source of truth, LiveKit room state is a best-effort downstream mirror.
 4. **Waitlist "seat opened up" notification — fixed bug**: this used to import a `notify_waitlist_seat_open` from `liveclass.notifications` that **was never defined anywhere** — every promotion silently raised `ImportError`, swallowed by the try/except, logged-and-forgotten. No student was ever notified. Now correctly wired to two call sites from the same `on_commit()` callback: `create_notification(...)` (models.py, writes the bell-icon row — same helper every other notification uses) **and** `tasks.notify_waitlist_promotion.delay(...)` (queues the actual push, NOT called inline, so a slow/failing push provider never delays the `on_commit` callback itself) — mirrors the exact pattern `views._refund_purchase` uses for `notify_purchase_refunded.delay(...)`.
 
+**NEW — classroom↔chat-group sync (tasks 29–40, see §6b for the full picture):** 6 additional receivers, same try/except-per-step + `transaction.on_commit()` discipline as everything above, all lazy-importing `core.classroom_chat_bridge` so this app stays importable even if that module/app isn't present: `sync_chat_group_on_join_accept` (`ClassJoinRequest` → `ACCEPTED`), the waitlist-promotion path inside `on_participant_left` (item 1 above), `sync_chat_group_on_staff_add` (`ClassroomStaff` created → promote to moderator), `sync_chat_group_on_classroom_change` (`Classroom` close/soft-delete → archive, else title/cover/description change → metadata sync — paired with a `stash_previous_classroom_snapshot` `pre_save`), `sync_chat_group_on_ban` (`ClassroomBan` created → remove, `reason="kick"`), `sync_chat_group_on_purchase_refund` (`PassPurchase` → `REFUNDED` → remove, `reason="refund"`, paired with `stash_previous_purchase_status` `pre_save`). **Not yet safe to run** — depends on the `Classroom.chat_group_enabled`/`linked_conversation_id` fields that aren't in `models.py` yet, see §6b's gap list.
+
 ---
 
-## 14. Admin (`admin.py`, ~611 lines, 40+ `ModelAdmin`s)
+## 14. Admin (`admin.py`, 607 lines, 33 `ModelAdmin`s)
 
-- A patch near the top adjusts whatever `ModelAdmin` Django/another app already registered for `User` (via `@admin.register(_User)`).
+- A patch near the top adjusts whatever `ModelAdmin` Django/another app already registered for `User` (via `@admin.register(_User)`) — auto-detects if `User` is already registered (adds `search_fields` only if missing, without replacing the class) vs. registers a minimal fallback admin if it isn't registered at all yet, so every `autocomplete_fields = [..., "student"/"teacher"/...]` below has something to search regardless of registration order between apps.
 - **Inlines**: `ClassScheduleInline`, `ClassPassInline`, `ClassroomStaffInline`, `PassDailyChargeInline` (`TabularInline`) — surfaced on their parent model's admin page (e.g. schedules/passes/staff nested under `ClassroomAdmin`; daily charges nested under `PassPurchaseAdmin`).
-- **Registered `ModelAdmin`s** (one per model, list filters/search/bulk actions tuned per model): `ClassroomAdmin`, `ClassScheduleAdmin`, `ClassSessionAdmin`, `ClassPassAdmin`, `PassPurchaseAdmin`, `PassGiftAdmin`, `PassDailyChargeAdmin`, `ClassJoinRequestAdmin`, `BreakoutRoomAdmin`, `SessionParticipantAdmin`, `ClassMaterialAdmin`, `ChatMessageAdmin`, `ChatMessageReportAdmin`, `LivePollAdmin`, `PollResponseAdmin`, `AssignmentAdmin`, `AssignmentSubmissionAdmin`, `ClassroomReviewAdmin`, `ClassroomWishlistAdmin`, `CouponAdmin`, `CoinTransactionAdmin`, `CoinPurchaseAdmin`, `CoinWithdrawalAdmin`, `ClassroomStaffAdmin`, `SessionWaitlistAdmin`, `ClassroomReportAdmin`, `CertificateAdmin`, `ClassReminderAdmin`, `ClassHolidayAdmin`, `NoticeAdmin`, `ClassQueryAdmin`, `NotificationAdmin`, `ReferralAdmin`, `ClassroomBanAdmin`.
+- **Registered `ModelAdmin`s** (one per model, list filters/search/bulk actions tuned per model): `ClassroomAdmin`, `ClassScheduleAdmin`, `ClassSessionAdmin`, `ClassPassAdmin`, `PassPurchaseAdmin`, `PassGiftAdmin`, `PassDailyChargeAdmin`, `ClassJoinRequestAdmin`, `BreakoutRoomAdmin`, `SessionParticipantAdmin`, `ClassMaterialAdmin`, `ChatMessageAdmin`, `ChatMessageReportAdmin`, `LivePollAdmin`, `PollResponseAdmin`, `AssignmentAdmin`, `AssignmentSubmissionAdmin`, `ClassroomReviewAdmin`, `ClassroomWishlistAdmin`, `CouponAdmin`, `CoinTransactionAdmin`, `CoinPurchaseAdmin`, `CoinWithdrawalAdmin`, `ClassroomStaffAdmin`, `SessionWaitlistAdmin`, `ClassroomReportAdmin`, `CertificateAdmin`, `ClassReminderAdmin`, `ClassHolidayAdmin`, `NoticeAdmin`, `ClassQueryAdmin`, `ReferralAdmin`, `ClassroomBanAdmin`. That's 33, **not** the 40+ this file previously claimed — see the correction below.
+- **✅ Correction (was previously mis-documented here as `NotificationAdmin` still living in this file)**: `admin.py`'s own module comment (task 42, "core-app migration") confirms `Notification` now lives in `core/models.py`, and its admin registration moved to `core/admin.py` accordingly — importing a cross-app model into this file would have been the wrong direction (same "liveclass calls into other apps, not the reverse" invariant as §6b/§6c). `NotificationAdmin`/`NotificationPreferenceAdmin` are **not** in this file; look in `core/admin.py` (not uploaded/audited here) for them.
+- **⚠️ Gap — imported but never registered**: `ParentMessageTemplate` and `ParentTeacherMessage` (task 69's structured parent/student→teacher messaging, §5 `parent-message-templates/`/`parent-messages/`) are both imported at the top of this file from `.models`, but neither has an `@admin.register(...)`/`ModelAdmin` class anywhere in it — the import is currently dead weight, and platform staff have no admin-panel visibility into either model. Same shape of gap as the historical `PassGift`/`ChatMessageReport`/`Referral`/`ClassroomBan` fixes already called out in this file's own comments (§17-style "existed since Pass N, no admin registration" pattern) — worth the same fix.
 - Use this section as the map for "which model has admin visibility" when debugging data issues via Django admin rather than the API.
 
 ---
 
-## 15. Settings highlights (`settings.py`, ~750 lines, **project-level** — shared with `login`/`message`)
+## 15. Settings highlights (`settings.py`, ~890 lines, **project-level** — shared with `login`/`message`)
 
 - `AUTH_USER_MODEL = "login.User"` — custom user model lives in a separate `login` app.
 - `SECRET_KEY`, `DEBUG` — env-driven (`os.getenv`).
@@ -793,10 +956,30 @@ Purpose: side-effects that must fire **regardless of which code path** changed t
 - `CHUNKED_UPLOAD_TMP_ROOT = BASE_DIR / 'tmp' / 'chunked_uploads'`.
 - `GEMINI_API_KEY` — powers `tasks.transcribe_recording`/`poll_transcription_jobs`.
 - `REST_FRAMEWORK` block — includes `EXCEPTION_HANDLER = "liveclass.exceptions.liveclass_exception_handler"` (see §12).
+  - `DEFAULT_AUTHENTICATION_CLASSES = ("rest_framework_simplejwt.authentication.JWTAuthentication",)`.
+  - **`DEFAULT_PERMISSION_CLASSES = ["rest_framework.permissions.IsAuthenticated"]` — fix (defense in depth)**: every current ViewSet/APIView already sets its own `permission_classes` explicitly, so this doesn't change today's behavior. It matters for the *next* view added: DRF's own built-in default is `AllowAny`, so a future view that forgets to set `permission_classes` would silently be open to the public instead of failing closed. With this floor set, a forgotten `permission_classes` is a 401, not a leak.
+  - **`DEFAULT_THROTTLE_RATES` — fix (CRITICAL, recurring bug class)**: every `ScopedRateThrottle`/custom throttle used anywhere in the project looks its rate up from this one dict by `scope` name (`DEFAULT_THROTTLE_RATES[self.scope]`) — a scope with no matching entry raises `ImproperlyConfigured` on the *very first request* that hits it, not a rare edge case. This has happened repeatedly as new throttled actions were added to `views.py` without a matching entry added here. Liveclass-relevant scopes and their rates:
+
+    | Scope | Rate | Used by |
+    |---|---|---|
+    | `session_join` | 20/min | `ClassSessionViewSet.join` |
+    | `session_token` | 30/min | `ClassSessionViewSet.token` |
+    | `session_parent_join_ip` | **not confirmed in the uploaded `settings.py` excerpt** | `ParentJoinIPThrottle` (`throttles.py`) → `ClassSessionViewSet.parent_join` — IP-keyed, not user-keyed, since a parent has no `request.user` (see §6c); verify this entry exists before deploying `parent_join`, same recurring gap class as every row below |
+    | `coupon_validate` | 20/min | `CouponViewSet.validate` |
+    | `chat_message_create` | 20/min | `ChatMessageViewSet.create` |
+    | `chat_reaction` | 60/min | `ChatMessageViewSet.react` |
+    | `classroom_share` | 100/day | `ClassroomViewSet.share` — flat daily cap (product decision), not a burst cap; DRF's `ScopedRateThrottle` resets on a rolling 24h window per user, not a calendar-day boundary |
+    | `chunked_upload_init` | 20/min | `chunked_upload_views.py` init |
+    | `chunked_upload_chunk` | 180/min | `chunked_upload_views.py` chunk (one real upload fires this dozens of times) |
+    | `chunked_upload_complete` | 20/min | `chunked_upload_views.py` complete |
+    | `coin_withdrawal` | 10/min | `CoinWithdrawalViewSet` — money-movement, rated tighter |
+    | `coin_purchase` | 10/min | `CoinPurchaseViewSet` — money-movement, rated tighter |
+
+    (Also shares this same dict with several `message`-app-only scopes — `message_send`, `call_initiate`, `group_create`, `reaction`, `ai_transcribe`, `ai_smart_reply` — not liveclass's concern but worth knowing they live in the same table, same bug class if a new one is added there without a rate.) Plain (non-scoped) floor: `"user": "100/min"`, `"anon": "20/min"`.
 - `SIMPLE_JWT` — JWT auth config (also what `ws_auth.py` validates against for WebSockets).
-- `CORS_ALLOWED_ORIGINS` / `CORS_ALLOW_ALL_ORIGINS = DEBUG and not CORS_ALLOWED_ORIGINS`.
+- **`CORS_ALLOWED_ORIGINS` / `CORS_ALLOW_ALL_ORIGINS` — fix (security)**: `CORS_ALLOW_ALL_ORIGINS=True` outright means any website can call this API using a logged-in user's browser session/cookies. Locked to an explicit allowlist read from `CORS_ALLOWED_ORIGINS` (env, comma-separated); `CORS_ALLOW_ALL_ORIGINS = DEBUG and not CORS_ALLOWED_ORIGINS` — allow-all only ever kicks in for local dev (`DEBUG=True`) with no allowlist configured, never in production.
 - `SPECTACULAR_SETTINGS` — OpenAPI schema gen (dev-time, see `urls.py` §5).
-- `DATA_UPLOAD_MAX_MEMORY_SIZE = 10MB`, `FILE_UPLOAD_MAX_MEMORY_SIZE = 500KB`, `FILE_UPLOAD_PERMISSIONS = 0o644`, `DATA_UPLOAD_MAX_NUMBER_FIELDS = 10000`.
+- **`DATA_UPLOAD_MAX_MEMORY_SIZE = 10MB` — fix (DoS vector, was 500MB)**: this governs total size of *non-file* request data (plain text/JSON fields) — Django excludes actual uploaded file bytes from this check (those are bounded per-field instead by `MaxFileSizeValidator` in `models.py`). At the old 500MB setting, any endpoint taking a plain text/JSON field (a classroom description, a chat message, a review comment) would accept up to 500MB of non-file body before Django even rejected it — cheap to send, expensive to parse/hold in memory, a DoS lever with no file involved at all. 10MB is generous for anything this app's serializers actually accept as plain text. Also: `FILE_UPLOAD_MAX_MEMORY_SIZE = 500KB`, `FILE_UPLOAD_PERMISSIONS = 0o644`, `DATA_UPLOAD_MAX_NUMBER_FIELDS = 10000`.
 - `FCM_SERVICE_ACCOUNT_JSON_PATH` — push notifications (owned by the `message` app, reused here — see §10).
 - `GOOGLE_CLIENT_ID`, `FREESOUND_API_KEY` — other-app config living in the same settings file.
 - `REFERRAL_BONUS_COINS` (default 50), `REFERRAL_REDEEM_WINDOW_DAYS` (default 7) — signup-referral economy knobs (env-overridable).
@@ -804,7 +987,7 @@ Purpose: side-effects that must fire **regardless of which code path** changed t
 - `EMAIL_BACKEND`/`EMAIL_HOST`/`EMAIL_PORT`/`EMAIL_USE_TLS`/`EMAIL_HOST_USER`/`EMAIL_HOST_PASSWORD`/`DEFAULT_FROM_EMAIL` — SMTP.
 - `CELERY_BROKER_URL`/`CELERY_RESULT_BACKEND` (Redis), `CELERY_ACCEPT_CONTENT=["json"]`, `CELERY_TASK_SERIALIZER`/`CELERY_RESULT_SERIALIZER="json"`, `CELERY_TIMEZONE = TIME_ZONE`, `CELERY_TASK_ACKS_LATE = True`, `CELERY_TASK_REJECT_ON_WORKER_LOST = True`.
 - `CELERY_BEAT_SCHEDULE` — **the actual source of truth for task cadence**, full table reproduced in §9. Includes both `liveclass.*` and `message.*` entries in one shared schedule dict.
-- `MSG91_*` — SMS/WhatsApp provider config (see §10): `MSG91_AUTH_KEY`, `MSG91_SMS_SENDER_ID`, `MSG91_WHATSAPP_INTEGRATED_NUMBER`, `MSG91_WHATSAPP_TEMPLATE_NAME`.
+- `MSG91_*` — SMS/WhatsApp provider config (see §10): `MSG91_AUTH_KEY`, `MSG91_SMS_SENDER_ID`, `MSG91_WHATSAPP_INTEGRATED_NUMBER`, `MSG91_WHATSAPP_TEMPLATE_NAME` — all env-driven via `os.environ.get(..., "")`, so a missing one degrades to `notifications.py`'s logged-warning no-op rather than crashing. No `LIVECLASS_PROFANITY_WORDS` override configured here — `moderation.py` runs on its built-in `DEFAULT_PROFANITY_WORDS` list.
 
 ---
 
@@ -841,12 +1024,15 @@ All extend `LiveClassTestBase(TestCase)` (line 120 — shared fixtures: a teache
 | `SessionEngagementReportTests` | `compute_engagement_report()` / `build_engagement_report` correctness |
 | — | **Confirmed gap**: no `StudentProgressTests` class exists anywhere in `tests.py` (verified — only 26 test classes total, none covering `StudentProgressView`). `StudentProgressView` (§1, §4) is currently untested; add a test class here before relying on it in production. |
 
+**Sibling test module**: `test_classroom_chat_bridge.py` (§1, §6b) is a **separate** file, discovered automatically alongside `tests.py` by Django's `test*.py` convention — `python manage.py test liveclass` runs both without extra config. It reuses `tests.py`'s `LIVEKIT_PATCH`/`SAFE_DELAY_PATCH` (imported directly from `.tests`) and adds 6 test classes: `CreateClassroomGroupTests`, `JoinAcceptChatSyncTests`, `RemovalChatSyncTests`, `MetadataSyncTests`, `ArchiveOnCloseTests`, `ClassroomStaffChatSyncTests` (the last one self-skips via `self.skipTest(...)` if `ClassroomStaff` isn't importable — see §6b's pending-model-patch gap).
+
 ---
 
 ## 17. Known "fix" notes baked into the code (worth remembering — don't re-break these)
 
 1. `apps.py` must exist and be wired, or `signals.py` is dead code.
 2. `CELERY_BEAT_SCHEDULE` must actually register a task, or it silently never runs even if fully implemented — `refresh_stale_enrolled_counts`, `reconcile_stuck_coin_purchases`, `run_auto_renewals`, `expire_unclaimed_gifts`, `send_notification_digests` **all had this exact bug once** (written, tested-looking, never scheduled).
+2b. `DEFAULT_THROTTLE_RATES` (settings.py) must have a matching entry for every `ScopedRateThrottle`/custom-throttle `scope` used anywhere in `views.py` — a missing one isn't a soft degrade, it's `ImproperlyConfigured` (an unhandled 500) on the very first request that hits that endpoint. `session_join`, `session_token`, `coupon_validate`, `chat_message_create`, `chat_reaction`, `classroom_share`, `chunked_upload_init/chunk/complete`, and `coin_withdrawal`/`coin_purchase` **all had this exact bug at least once** — same "written correctly but not wired everywhere it needs to be" shape as item 2 above, just at the settings layer instead of Celery's.
 3. `TeacherEarningsView`/`StudentProgressView`/`NotificationPreferenceView` are plain `APIView`s — `router.register()` never auto-wires a non-ViewSet; each needs its own explicit `path()` in `urls.py` (all three were missing this at least once historically).
 4. `LiveKitError` must subclass DRF's `APIException` (not bare `Exception`) or it bypasses `exceptions.py` entirely and every call site has to hand-build its own error response.
 5. All File/ImageFields need `MaxFileSizeValidator`; the four plain FileFields (material, assignment attachment, assignment submission, certificate) also need a **safelist** `FileExtensionValidator` — `cover_image` is safe for free via Pillow decoding.
@@ -862,6 +1048,10 @@ All extend `LiveClassTestBase(TestCase)` (line 120 — shared fixtures: a teache
 15. `ClassPassViewSet` must refuse DELETE outright once a pass has ever been purchased (use `is_active=False` to pause) and must refuse any PATCH that would retroactively shrink what an active holder already paid for (price up, or `validity_days`/`max_classes`/`pass_type` reduced/changed) while an active paid purchase is outstanding.
 16. `notify_waitlist_promotion` must be dispatched from `signals.py`'s `on_participant_left` via `tasks.notify_waitlist_promotion.delay(...)` **and** a `create_notification(...)` bell row — a prior version imported a function (`notify_waitlist_seat_open`) that never existed anywhere in the codebase, silently swallowed by the surrounding try/except, so no student was ever notified of a freed seat.
 17. WebSocket JWT auth must live in exactly **one** place (`LearnScroll/ws_auth.py`, project-level) — `message` and `liveclass` each used to keep their own independent copy (`message/Middleware.py` vs the old `liveclass/ws_auth.py`) that was never diffed against the other, risking silent mismatch. Both apps now import the same file; `liveclass/ws_auth.py` is a re-export shim only, kept so existing `from liveclass.ws_auth import JWTAuthMiddleware` call sites don't need to change.
+18. **A `broadcast_to_*` call site and its receiving consumer must be added together, or the failure is silent.** `models.py`'s `_broadcast_classroom_stats()` called `from .realtime import broadcast_to_classroom` long before that function — or `ClassroomConsumer`/the `ws/liveclass/classroom/<id>/` route it needs — actually existed anywhere in `realtime.py`/`consumers.py`/`routing.py`. Every call was a plain `ImportError`, caught by that function's own broad try/except (by design — a realtime push must never break the rating/enrollment recompute it's attached to), so nothing ever crashed and nothing ever alerted anyone; the classroom-detail screen's socket just always failed to connect and fell back to its slower backstop poll. The general lesson: a broadcast helper's own try/except is the right fail-open contract for *runtime* Redis/channel-layer errors, but it also hides a genuinely missing counterpart at the code level — grep for the consumer/group name whenever adding a new `broadcast_to_*` call, don't assume the receiving side already exists just because the sending side compiles.
+19. **`ClassroomReviewViewSet`/`ClassHolidayViewSet`/`ClassQueryViewSet` must have their own `perform_update`/`perform_destroy` ownership checks (Pass 19, re-verified Pass 21)** — all three used to be plain `ModelViewSet`s with no override at all. Because their `classroom`/`asked_by`/etc. fields are writable on the serializer and `get_queryset()` only enforces a *read*-tier check (or none), this let any authenticated user PATCH/DELETE another student's review, a manager PATCH another classroom's holiday by guessing its id, or a manager overwrite a student's own query just by sending `?classroom=<id>` — a write reachable through a read-only boundary. Fixed shape, same in all three: `perform_update` re-checks the real ownership/manage-tier rule on `serializer.instance` (not just on the incoming payload), `perform_destroy` does the same, and any writable `classroom` field is explicitly blocked from being reassigned mid-update (mirrors the same guard already on `Assignment`/`Notice`/`LivePoll`). `ClassQueryViewSet.perform_update` additionally freezes a query once it's `ANSWERED`. Regression-covered in `tests.py`'s `ReviewHolidayQueryOwnershipTests` (§16, class 17) — if a new viewset in this file skips its own `perform_update`/`perform_destroy`, it has this exact hole by default.
+20. **A cross-app bridge module (`core/classroom_chat_bridge.py`) must ship its model dependencies alongside its call sites, or every caller is dead code.** Tasks 29–40 wired `classroom_chat_views.py`, 6 signal receivers in `signals.py`, and 2 new `urls.py` paths — all against `Classroom.chat_group_enabled`/`Classroom.linked_conversation_id`. **✅ Resolved as of this audit** — both fields are now defined in `models.py` (§1, §3). Lesson stands for the next feature that spans an app boundary: confirm the model fields it depends on are actually migrated before wiring the views/signals/urls that assume them, not after.
+21. **A new file with real logic isn't the same as a *wired* feature.** `parent_link_views.py` (Phases 2/4/5) is fully written — permission class, viewset, notification calls, ownership checks — but has zero `path()`/`router.register()` entries in `urls.py` and imports a `StudentReportCard` model that doesn't exist in `models.py`. Same lesson as item 20, one layer earlier: a file existing in the codebase says nothing about whether it's reachable. See §6c for the full gap list, including a second point worth remembering — **a new parent-facing feature was built without checking whether one already existed** (`ClassSessionViewSet.parent_join`, live since an earlier task). Before adding a new access mechanism for an existing actor type (parent, in this case), grep for what that actor type can already do.
 
 ---
 
@@ -869,11 +1059,13 @@ All extend `LiveClassTestBase(TestCase)` (line 120 — shared fixtures: a teache
 
 When continuing work in a new chat, paste this file and say what you want changed. If a change touches:
 - **Money/coins** → check `PassPurchase` (`charge_for_session`, `reverse`, `renew`, `sync_missed_charges`), `_charge_and_create_purchase` (views.py), `CoinTransaction`, the escrow-charge signal (`_charge_passes_for_completed_session`), and the related Celery sweeps (`expire_and_refund_passes`, `reconcile_stuck_coin_purchases`, `run_auto_renewals`, `expire_unclaimed_gifts`). Never let a new money-moving code path bypass `CoinTransaction` logging.
-- **Realtime** → check `consumers.py`, `realtime.py`, `routing.py`, and whichever `views.py` action broadcasts the event (`broadcast_to_session`/`broadcast_to_user`).
+- **Realtime** → check `consumers.py`, `realtime.py`, `routing.py`, and whichever `views.py`/`models.py` code broadcasts the event (`broadcast_to_session`/`broadcast_to_user`/`broadcast_to_classroom`). Adding a new `broadcast_to_*` call site? Confirm the matching consumer + group name + `routing.py` route all already exist — see §17 item 18 for what happens when they don't.
 - **Notifications** → check `notifications.py` (channel implementation), the specific `notify_*` task in `tasks.py`, and `NotificationPreference.allowed_channels_for` — and make sure any new push also creates a `create_notification()` bell row if it should be visible in-app, not just pushed.
 - **Access control** → check the `_can_*`/`_access_level`/`has_access` helpers in `views.py` and `models.py` — keep them consistent, don't duplicate the logic in a new spot. Remember the `max_classes` cap and ban checks live inside `Classroom.has_access()`.
 - **New Celery task** → it does nothing on a schedule until it's **also** added to `CELERY_BEAT_SCHEDULE` in `settings.py` (this exact bug has recurred at least 5 times in this codebase's history — see §17 item 2).
+- **New `ScopedRateThrottle` / custom throttle scope** → it crashes on its very first hit until its `scope` name also has a matching entry in `DEFAULT_THROTTLE_RATES` in `settings.py` (recurred at least 10 times across `liveclass`/`message` — see §17 item 2b).
 - **New plain `APIView`** (not a ViewSet) → it's unreachable until it also gets an explicit `path()` in `urls.py` (recurred at least 3 times — see §17 item 3).
 - **New signal handler on `ClassSession`/`SessionParticipant`** → wrap each step in its own try/except, and defer anything that isn't needed for the `.save()` itself (LiveKit calls, `.delay()`, cross-row cleanup) into `transaction.on_commit()`.
 - **File uploads** → new FileField needs both `MaxFileSizeValidator` and, if it's a plain `FileField` (not `ImageField`), a safelist `FileExtensionValidator`.
 - **Error responses** → any new exception type raised in a view should either already be a DRF `APIException` (flows through `exceptions.py` automatically) or get an entry in `_CODE_BY_EXC` if it needs a specific machine-readable `code`.
+- **Parent-facing work** → check §6c first — there are already two independent mechanisms (`ClassSessionViewSet.parent_join`'s signed-token observer flow, and `ParentAccessCode`/`parent_link_views.py`'s DB-backed teacher-managed codes). Confirm which one a new feature should extend before adding a third.

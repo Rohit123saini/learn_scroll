@@ -45,8 +45,8 @@ from .models import (
     Coupon,
     LivePoll,
     Notice,
-    Notification,
-    NotificationPreference,
+    ParentMessageTemplate,
+    ParentTeacherMessage,
     PassGift,
     PassPurchase,
     PollResponse,
@@ -1132,6 +1132,36 @@ class ReferLinkResultSerializer(serializers.Serializer):
     commission_percent = serializers.DecimalField(max_digits=5, decimal_places=2)
 
 
+class ClassroomReferralDashboardSerializer(serializers.Serializer):
+    """Response shape for ClassroomViewSet.referral_dashboard — task 65,
+    "aapne itne log invite kiye" but scoped to one classroom."""
+
+    classroom_id = serializers.IntegerField()
+    referred_count = serializers.IntegerField()
+    commission_earned = serializers.IntegerField()
+    commission_pending = serializers.IntegerField()
+    referral_code = serializers.CharField()
+
+
+class ClassReferralSummaryByClassroomSerializer(serializers.Serializer):
+    classroom_id = serializers.IntegerField()
+    classroom_title = serializers.CharField()
+    referred_count = serializers.IntegerField()
+    commission_earned = serializers.IntegerField()
+
+
+class ClassReferralSummarySerializer(serializers.Serializer):
+    """Response shape for ReferralViewSet.class_referral_summary — task 65,
+    the global "aapne itne log invite kiye" dashboard across every
+    classroom the caller has referred a student into."""
+
+    referral_code = serializers.CharField()
+    total_students_referred = serializers.IntegerField()
+    total_commission_earned = serializers.IntegerField()
+    total_commission_pending = serializers.IntegerField()
+    by_classroom = ClassReferralSummaryByClassroomSerializer(many=True)
+
+
 class ClassroomShareLogSerializer(serializers.ModelSerializer):
     """Read-only history row — used by ClassroomViewSet.share-stats so a
     teacher can see who's sharing their classroom and how, not just the
@@ -1466,6 +1496,136 @@ class ClassQueryAnswerSerializer(serializers.ModelSerializer):
 
 
 # ---------------------------------------------------------------------------
+# 20a. PARENT MESSAGE TEMPLATE / PARENT-TEACHER MESSAGE
+#
+# See the module note above ParentMessageTemplate in models.py for the full
+# misuse-prevention design (task 69): a parent/student can only ever send
+# one of a fixed set of admin-authored sentences, never free text.
+# ---------------------------------------------------------------------------
+class ParentMessageTemplateSerializer(serializers.ModelSerializer):
+    """Read-only — the picker a parent/student chooses from. Deliberately
+    does NOT expose `body_template`: the raw, unresolved sentence (still
+    holding its {child_name}/{classroom_title} placeholders) isn't meant to
+    be shown to anyone. What actually gets sent is `resolved_message` on the
+    created ParentTeacherMessage, below."""
+
+    class Meta:
+        model = ParentMessageTemplate
+        fields = ["id", "category", "title", "requires_session", "display_order"]
+        read_only_fields = fields
+        # Platform-curated content only — never created/edited/deleted through
+        # this API. See ParentMessageTemplateViewSet (views.py): list/retrieve
+        # only, managed via the Django admin.
+
+
+class ParentTeacherMessageSerializer(serializers.ModelSerializer):
+    sender = UserMiniSerializer(read_only=True)
+    replied_by = UserMiniSerializer(read_only=True)
+    template_title = serializers.CharField(source="template.title", read_only=True)
+    template_category = serializers.CharField(source="template.category", read_only=True)
+
+    class Meta:
+        model = ParentTeacherMessage
+        fields = [
+            "id", "classroom", "session", "template", "template_title", "template_category",
+            "sender", "resolved_message", "status", "teacher_reply", "replied_by", "replied_at",
+            "created_at",
+        ]
+        read_only_fields = [
+            "id", "sender", "resolved_message", "status", "teacher_reply", "replied_by",
+            "replied_at", "created_at", "template_title", "template_category",
+        ]
+        # `sender` and `resolved_message` are set server-side in
+        # ParentTeacherMessageViewSet.perform_create — `resolved_message` in
+        # particular is NEVER accepted from the client; it's always
+        # `template.resolve(...)`'s own output (see models.py). `status`/
+        # `teacher_reply`/`replied_by`/`replied_at` only ever change through
+        # the teacher-only `reply` action below — there is no update/destroy
+        # on this resource at all (see the ViewSet: create/list/retrieve only),
+        # since a sent message is a fixed audit record, not an editable draft.
+
+    def validate(self, attrs):
+        template = attrs.get("template")
+        if template is None:
+            raise serializers.ValidationError({"template": "This field is required."})
+        if not template.is_active:
+            raise serializers.ValidationError({"template": "This message template is no longer available."})
+
+        classroom = attrs.get("classroom")
+        session = attrs.get("session")
+        if template.requires_session and not session:
+            raise serializers.ValidationError({"session": "This template requires you to pick a class session."})
+        if session and not template.requires_session:
+            raise serializers.ValidationError({"session": "This template does not use a session."})
+        if session and classroom and session.classroom_id != classroom.id:
+            raise serializers.ValidationError({"session": "This session does not belong to the given classroom."})
+        return attrs
+
+
+class ParentTeacherMessageReplySerializer(serializers.ModelSerializer):
+    """Narrow serializer used only by the teacher/co-teacher/moderator-only
+    'reply' action. Deliberately free text, unlike the parent's side — see
+    the module note above ParentMessageTemplate in models.py: the
+    misuse-prevention concern this feature exists for is about what an
+    unvetted parent/student can send, not the already-trusted teacher side."""
+
+    class Meta:
+        model = ParentTeacherMessage
+        fields = ["teacher_reply"]
+
+    def validate_teacher_reply(self, value):
+        if not value.strip():
+            raise serializers.ValidationError("Reply can't be empty.")
+        return value
+
+
+# ---------------------------------------------------------------------------
+# 20b. PARENT-JOIN (task 9). Input for ClassSessionViewSet.parent_join —
+# the endpoint a parent hits with nothing but a signed `parent_token`
+# link (they have no platform account, so there's no request.user to
+# validate against). See views.py's parent_join() for what the token
+# actually decodes to and how it's checked against the classroom.
+#
+# ASSUMPTION (flagged for a follow-up confirm-pass, same convention this
+# codebase already uses — see classroom_chat_bridge.py's original
+# ASSUMPTION markers before its Task 2 gap-fix): `parent_token` here is a
+# stateless, signed token (django.core.signing) encoding a student id —
+# NOT a DB-stored code — because this task's file list deliberately does
+# not include models.py. If a parent-token DB model already exists
+# elsewhere in the real codebase, this serializer's validate() needs to
+# be swapped to look it up there instead; the endpoint's external
+# contract (POST {"parent_token": "..."}) stays the same either way.
+# ---------------------------------------------------------------------------
+class ParentJoinSerializer(serializers.Serializer):
+    parent_token = serializers.CharField(write_only=True, trim_whitespace=True)
+
+    def validate_parent_token(self, value):
+        from django.core import signing
+
+        from .views import PARENT_JOIN_TOKEN_SALT  # single source for the salt string
+
+        try:
+            payload = signing.loads(value, salt=PARENT_JOIN_TOKEN_SALT, max_age=60 * 60 * 24 * 30)
+        except signing.SignatureExpired:
+            raise serializers.ValidationError("Ye parent link expire ho chuka hai.")
+        except signing.BadSignature:
+            raise serializers.ValidationError("Ye parent link invalid hai.")
+
+        student_id = payload.get("student_id")
+        if not student_id:
+            raise serializers.ValidationError("Ye parent link invalid hai.")
+
+        User = get_user_model()
+        try:
+            student = User.objects.get(pk=student_id)
+        except User.DoesNotExist:
+            raise serializers.ValidationError("Ye parent link invalid hai.")
+
+        self.context["student"] = student
+        return value
+
+
+# ---------------------------------------------------------------------------
 # CLASSROOM STATS — composite read-only payload for Classroom.stats action.
 # Not a ModelSerializer: it wraps a plain dict assembled in the view from
 # several different sources (cached counters + a computed string + a
@@ -1481,50 +1641,11 @@ class ClassroomStatsSerializer(serializers.Serializer):
 
 
 # ---------------------------------------------------------------------------
-# 21. NOTIFICATION — read-only. Rows are only ever created server-side (see
-# create_notification()/create_bulk_notifications() in models.py), so there's
-# no writable ModelSerializer counterpart the way ClassQuery/Assignment have
-# one; the "mark read" actions on the viewset don't need a request body at
-# all, let alone this serializer.
+# NOTE (task 42 — core-app migration): NotificationSerializer and
+# NotificationPreferenceSerializer used to live here. They have moved to
+# core/serializers.py alongside the models/viewsets they serialize — see
+# core_app_documentation.md.
 # ---------------------------------------------------------------------------
-class NotificationSerializer(serializers.ModelSerializer):
-    classroom_title = serializers.CharField(source="classroom.title", read_only=True, default=None)
-
-    class Meta:
-        model = Notification
-        fields = [
-            "id", "notif_type", "title", "message",
-            "classroom", "classroom_title", "session",
-            "is_read", "created_at", "read_at",
-        ]
-        read_only_fields = fields
-
-
-# ---------------------------------------------------------------------------
-# NEW (Pass 14 — per-notification-type channel preferences + digest email).
-# One row per user (see NotificationPreference.for_user in models.py) —
-# this serializer is used both to READ the caller's own settings and to
-# PATCH them (NotificationPreferenceView in views.py), so every field is
-# writable except `last_digest_sent_at`/`updated_at` (only ever advanced
-# server-side, never by the client).
-# ---------------------------------------------------------------------------
-class NotificationPreferenceSerializer(serializers.ModelSerializer):
-    class Meta:
-        model = NotificationPreference
-        fields = [
-            "push_enabled", "email_enabled", "sms_enabled", "whatsapp_enabled",
-            "muted_types", "digest_frequency", "last_digest_sent_at", "updated_at",
-        ]
-        read_only_fields = ["last_digest_sent_at", "updated_at"]
-
-    def validate_muted_types(self, value):
-        if not isinstance(value, list):
-            raise serializers.ValidationError("muted_types must be a list of notification type strings.")
-        valid_types = set(Notification.NotifType.values)
-        invalid = [v for v in value if v not in valid_types]
-        if invalid:
-            raise serializers.ValidationError(f"Unknown notification type(s): {', '.join(invalid)}.")
-        return value
 
 
 # ---------------------------------------------------------------------------

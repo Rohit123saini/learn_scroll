@@ -1,8 +1,9 @@
-
+#post/views.py
 import os
 import re
 import logging
 import mimetypes
+from collections import Counter
 from datetime import timedelta
 
 from django.db import transaction
@@ -21,14 +22,17 @@ from rest_framework.pagination import PageNumberPagination
 from drf_spectacular.utils import extend_schema, OpenApiParameter, OpenApiExample
 from drf_spectacular.types import OpenApiTypes
 
-from.models import Post, PostMedia, PostView, PostLike, PostSave, PostComment
+from.models import Post, PostMedia, PostView, PostLike, PostSave, PostComment, Story, StoryView
 from.serializers import (
     PostCreateSerializer,
     PostListSerializer,
     PostDetailSerializer,
     PostMediaSerializer,
     PostSaveSerializer,
+    StoryCreateSerializer,
+    StorySerializer,
 )
+from.signals import decrement_posts_count_on_soft_delete
 from user_profile.models import Follow
 
 # Local import for reaction
@@ -110,7 +114,11 @@ class PostCreateAPIView(APIView):
         if serializer.is_valid():
             try:
                 post = serializer.save(user=request.user)
-                User.objects.filter(id=request.user.id).update(posts_count=F('posts_count') + 1)
+                # 🔥 FIX: posts_count increment moved to signals.py
+                # (increment_posts_count_on_create, post_save on Post).
+                # Doing it here too would double-count — see signals.py's
+                # module docstring for why the signal is now the single
+                # source of truth for this counter.
                 logger.info(f'Post created: {post.id} by {request.user.id}')
                 output_serializer = PostCreateSerializer(post, context={'request': request})
                 return Response({"success": True, "message": "Post created successfully","data": output_serializer.data}, status=status.HTTP_201_CREATED)
@@ -207,10 +215,99 @@ class PostDetailAPIView(generics.RetrieveAPIView):
             is_following = Follow.objects.filter(follower=request.user,following=instance.user,status=Follow.Status.ACCEPTED).exists()
             if not is_following and instance.user!= request.user:
                 return Response({"success": False, "message": "Only connections can view"}, status=status.HTTP_403_FORBIDDEN)
-        PostView.objects.get_or_create(post=instance, user=request.user)
-        Post.objects.filter(id=instance.id).update(views_count=F('views_count') + 1)
+        # FIX (post_app.md §14 issue #1): `views_count` used to increment
+        # unconditionally on every request, even repeat visits by the same
+        # user, even though `PostView` itself was already correctly deduped
+        # via get_or_create. Now the counter only moves on a genuinely new
+        # (post, user) pair — "unique viewers" semantics, matching what
+        # `PostView`'s own uniqueness already implies.
+        _, is_new_view = PostView.objects.get_or_create(post=instance, user=request.user)
+        if is_new_view:
+            Post.objects.filter(id=instance.id).update(views_count=F('views_count') + 1)
         serializer = self.get_serializer(instance)
         return Response({"success": True,"data": serializer.data})
+
+# ===================== POST DELETE =====================
+# NEW — checklist item 57 ("create/list/delete Post") mentioned delete but
+# no such endpoint existed anywhere in urls.py/views.py. Soft-delete only,
+# author-or-staff, mirroring CommentDeleteAPIView's pattern exactly
+# (is_deleted/deleted_at, never a real row removal).
+class PostDeleteAPIView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    @extend_schema(summary="Soft-delete a post", tags=["Post"])
+    @transaction.atomic
+    def delete(self, request, id):
+        from django.shortcuts import get_object_or_404
+
+        post = get_object_or_404(Post, id=id, is_deleted=False)
+        if post.user_id != request.user.id and not request.user.is_staff:
+            return Response({"success": False, "message": "Not allowed"}, status=status.HTTP_403_FORBIDDEN)
+
+        post.is_deleted = True
+        post.deleted_at = timezone.now()
+        post.save(update_fields=["is_deleted", "deleted_at"])
+        decrement_posts_count_on_soft_delete(post)
+
+        return Response({"success": True, "message": "Post deleted"}, status=status.HTTP_204_NO_CONTENT)
+
+
+# ===================== STORIES =====================
+# NEW — checklist items 54/55/57/60. Story model added in models.py.
+class StoryCreateAPIView(APIView):
+    permission_classes = [IsAuthenticated]
+    parser_classes = [parsers.MultiPartParser, parsers.FormParser]
+
+    @extend_schema(summary="Create a Story (24h auto-expiry)", tags=["Stories"])
+    def post(self, request):
+        serializer = StoryCreateSerializer(data=request.data, context={"request": request})
+        serializer.is_valid(raise_exception=True)
+        story = serializer.save()
+        return Response(StorySerializer(story, context={"request": request}).data, status=status.HTTP_201_CREATED)
+
+
+class StoryListAPIView(generics.ListAPIView):
+    """Active (non-expired, non-deleted) stories from people the requester
+    follows, plus their own. Expiry is enforced here in real time — the
+    `expire_old_stories` celery task (tasks.py) only does housekeeping
+    (soft-deleting rows so they don't pile up), it isn't what makes an
+    expired story stop showing up."""
+    serializer_class = StorySerializer
+    permission_classes = [IsAuthenticated]
+
+    def get_serializer_context(self):
+        return {"request": self.request}
+
+    def get_queryset(self):
+        request_user = self.request.user
+        following_ids = Follow.objects.filter(
+            follower=request_user, status=Follow.Status.ACCEPTED
+        ).values_list("following_id", flat=True)
+        return (
+            Story.objects.select_related("user")
+            .filter(is_deleted=False, expires_at__gt=timezone.now())
+            .filter(Q(user_id__in=following_ids) | Q(user=request_user))
+            .order_by("user_id", "-created_at")
+        )
+
+
+class StoryViewAPIView(APIView):
+    """Records a view (deduped per user via unique_together) and returns
+    the current view count — mirrors PostDetailAPIView's PostView tracking."""
+    permission_classes = [IsAuthenticated]
+
+    @extend_schema(summary="Mark a story as viewed", tags=["Stories"])
+    def post(self, request, story_id):
+        from django.shortcuts import get_object_or_404
+
+        story = get_object_or_404(Story, id=story_id, is_deleted=False)
+        if story.is_expired:
+            return Response({"success": False, "message": "Story expired"}, status=status.HTTP_404_NOT_FOUND)
+
+        StoryView.objects.get_or_create(story=story, user=request.user)
+        story.refresh_from_db(fields=["views_count"])
+        return Response({"success": True, "views_count": story.views_count})
+
 
 # ===================== MEDIA SERVE WITH RANGE =====================
 def serve_media_with_range(request, path):
@@ -275,6 +372,16 @@ def serve_media_with_range(request, path):
     return response
 
 # ===================== REACTION API - NEW FUNCTION ADDED =====================
+# NOTE (post_app.md §14 issue #9 — NOT auto-fixed): a second
+# `ReactionRequestSerializer` reportedly also exists in `serializers.py`.
+# I didn't consolidate this automatically because I haven't seen that
+# file's version of the class — if its `choices` list or field name ever
+# drifts from this one, blindly deleting one copy could silently change
+# validation behavior. Compare the two definitions once you have both
+# files open; if identical, delete this local copy and instead do
+# `from .serializers import ReactionRequestSerializer` up top (and drop
+# the now-unused `from rest_framework import serializers as
+# drf_serializers` import if nothing else in this file uses it).
 class ReactionRequestSerializer(drf_serializers.Serializer):
     reaction = drf_serializers.ChoiceField(choices=['like','confuse','wrong','imp','explain'])
 
@@ -420,3 +527,148 @@ class SavedPostsListAPIView(generics.ListAPIView):
         if collection:
             qs = qs.filter(saved_by__collection_name=collection)
         return qs
+
+# ===================== HASHTAG DISCOVERY (checklist: "Hashtag") =====================
+# post_app.md's overview table lists Hashtag as one of this app's core
+# responsibilities, but until now `Post.hashtags` (models.py) was
+# write-only — populated on create, never queried back out. These two
+# views are what actually make it a discovery feature instead of just
+# metadata sitting on the row.
+class HashtagPostsAPIView(generics.ListAPIView):
+    """GET /post/hashtag/<tag>/ — public posts carrying that hashtag.
+
+    Relies on PostCreateSerializer normalizing hashtags to lowercase at
+    write time (serializers.py fix) — without that, `hashtags__contains`
+    below would miss posts whose tag casing didn't happen to match.
+
+    `hashtags__contains=[tag]` is a JSONField containment lookup:
+    native on Postgres (jsonb `@>`), and supported on SQLite via the
+    JSON1 extension on Django ≥3.1 — if this app ends up on an older
+    SQLite without JSON1, swap this for a `Q(hashtags__icontains=tag)`
+    fallback (less precise — can substring-match inside a longer tag).
+    """
+    serializer_class = PostListSerializer
+    permission_classes = [IsAuthenticated]
+    pagination_class = StandardResultsSetPagination
+
+    def get_serializer_context(self):
+        return {'request': self.request}
+
+    @extend_schema(
+        summary="Posts by hashtag",
+        parameters=[OpenApiParameter(name='tag', type=str, location=OpenApiParameter.PATH)],
+        tags=["Hashtag"],
+    )
+    def get_queryset(self):
+        tag = self.kwargs['tag'].strip().lstrip('#').lower()
+        return Post.objects.select_related('user').prefetch_related('media').filter(
+            is_deleted=False, moderation_status='approved', visibility='public',
+            hashtags__contains=[tag],
+        ).annotate(
+            engagement_score=ExpressionWrapper(
+                F('likes_count') * 3.0 + F('comments_count') * 5.0 + F('shares_count') * 10.0,
+                output_field=FloatField(),
+            )
+        ).order_by('-engagement_score', '-created_at')
+
+
+class TrendingHashtagsAPIView(APIView):
+    """GET /post/hashtags/trending/?days=7&limit=20
+
+    ⚠️ Application-level counting over a bounded recent sample, not a
+    real SQL aggregation — JSONField list elements aren't natively
+    GROUP-BY-able portably across Postgres/SQLite. Same "note it, don't
+    block on it" call as checklist item 60 made for feed fan-out: fine
+    at this app's current scale (bounded to the most recent 2000 public
+    posts in the window), replace with a Redis sorted set incremented
+    in PostCreateSerializer.create() once volume actually demands it.
+    """
+    permission_classes = [IsAuthenticated]
+
+    @extend_schema(
+        summary="Trending hashtags",
+        parameters=[
+            OpenApiParameter(name='days', type=int, required=False, description='Lookback window, default 7'),
+            OpenApiParameter(name='limit', type=int, required=False, description='Max tags returned, default 20'),
+        ],
+        tags=["Hashtag"],
+    )
+    def get(self, request):
+        days = int(request.query_params.get('days', 7))
+        limit = min(int(request.query_params.get('limit', 20)), 50)
+        since = timezone.now() - timedelta(days=days)
+
+        recent_hashtag_lists = Post.objects.filter(
+            is_deleted=False, moderation_status='approved', visibility='public',
+            created_at__gte=since,
+        ).exclude(hashtags=[]).order_by('-created_at').values_list('hashtags', flat=True)[:2000]
+
+        counts = Counter()
+        for tags in recent_hashtag_lists:
+            counts.update(tags)
+
+        results = [{"hashtag": tag, "count": count} for tag, count in counts.most_common(limit)]
+        return Response({"success": True, "days": days, "results": results})
+
+
+# ===================== EXPLORE / DISCOVER (checklist: "Explore-content") =====================
+class ExploreFeedAPIView(generics.ListAPIView):
+    """GET /post/explore/?category=...
+
+    HomeFeedView (above) already has a public-posts fallback branch for
+    when a user follows nobody / their follows haven't posted recently
+    — but that only ever surfaces as a fallback *inside* the following
+    feed. There was no standalone discovery surface a user could open
+    any time regardless of who they follow (the "Explore" grid pattern)
+    — this is that endpoint.
+
+    Deliberately excludes the requester's own posts AND posts from
+    accounts they already follow, so Explore stays genuinely about
+    finding new accounts rather than duplicating the home feed.
+    """
+    serializer_class = PostListSerializer
+    permission_classes = [IsAuthenticated]
+    pagination_class = HomeFeedPagination
+
+    def get_serializer_context(self):
+        return {'request': self.request}
+
+    @extend_schema(
+        summary="Explore / discover public posts",
+        parameters=[OpenApiParameter(name='category', type=str, required=False)],
+        tags=["Explore"],
+    )
+    def get_queryset(self):
+        request_user = self.request.user
+        following_ids = Follow.objects.filter(
+            follower=request_user, status=Follow.Status.ACCEPTED
+        ).values_list('following_id', flat=True)
+
+        thirty_days_ago = timezone.now() - timedelta(days=30)
+        qs = Post.objects.select_related('user').prefetch_related('media').filter(
+            is_deleted=False, moderation_status='approved', is_sensitive=False, visibility='public',
+        ).exclude(user=request_user).exclude(user_id__in=following_ids)
+
+        category = self.request.query_params.get('category')
+        if category:
+            qs = qs.filter(category=category)
+
+        recent_qs = qs.filter(created_at__gte=thirty_days_ago).annotate(
+            engagement_score=ExpressionWrapper(
+                F('likes_count') * 3.0 + F('comments_count') * 5.0 + F('shares_count') * 10.0 + F('views_count') * 0.1,
+                output_field=FloatField(),
+            )
+        ).order_by('-engagement_score', '-created_at')
+
+        # Same defensive fallback pattern as HomeFeedView: a brand-new
+        # platform / a narrow category filter can easily have zero posts
+        # in the last 30 days — fall back to all-time top public posts
+        # rather than showing an empty grid.
+        if recent_qs.exists():
+            return recent_qs
+        return qs.annotate(
+            engagement_score=ExpressionWrapper(
+                F('likes_count') * 3.0 + F('comments_count') * 5.0 + F('shares_count') * 10.0 + F('views_count') * 0.1,
+                output_field=FloatField(),
+            )
+        ).order_by('-engagement_score', '-created_at')

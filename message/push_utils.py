@@ -1,3 +1,4 @@
+# message/push_utils.py
 import os
 import logging
 
@@ -7,6 +8,16 @@ from django.core.cache import cache
 from django.utils import timezone
 
 from .models import DeviceToken, FocusSession  # 🔥 NAYA — FocusSession, Feature 12 ke baad models.py me merge hone se yahan aayega
+
+# 🔥 NAYA (task 44 — core-app migration) — is module ka kaam ab sirf FCM
+# push bhejna nahi hai; har push ke saath ek matching bell-row
+# (core.models.Notification) bhi banta hai, taaki in-app notification
+# list bhi update ho, sirf phone ka push tray nahi. create_notification()
+# apna alag choke-point hai (core/services.py) — ye KABHI khud push nahi
+# bhejta, sirf DB row likhta hai, isliye yahan se call karna safe hai
+# (double-push ka risk nahi).
+from core.models import Notification
+from core.services import create_notification
 
 logger = logging.getLogger(__name__)
 
@@ -321,6 +332,27 @@ def send_chat_message_push(recipient_ids, sender_name, message_text, message_typ
     if not recipient_ids:
         return
 
+    # 🔥 NAYA (task 44) — bell-row per recipient, ek baar per incoming
+    # message, CHAHE push digest/instant kisi bhi branch se jaaye. Bell
+    # row jaanboojh kar push-digest counting se INDEPENDENT hai — bell
+    # icon me har message apni alag row honi chahiye ("5 unread" list me
+    # 5 alag entries), sirf push tray hi "X sent N messages" me merge
+    # hota hai (WhatsApp jaisa). Isi liye ye loop yahan hai, digest/
+    # instant branch ke andar nahi (warna digest wale messages ka bell
+    # row hi nahi banta).
+    for uid in recipient_ids:
+        create_notification(
+            recipient=uid,
+            notif_type=Notification.NotifType.CHAT_MESSAGE,
+            title=sender_name or "New message",
+            message=body,
+            data={
+                "conversation_id": str(conversation_id),
+                "message_id": str(message_id),
+                "is_announcement": is_announcement,
+            },
+        )
+
     if not CHAT_PUSH_DIGEST_ENABLED:
         # Pure instant mode — har message ka apna alag push, koi
         # counting/merging nahi. WhatsApp jaisa grouping nahi chahiye to
@@ -390,6 +422,25 @@ def send_incoming_call_push(recipient_ids, caller_name, call_type, call_id, conv
         android_priority='high',
     )
 
+    # 🔥 NAYA (task 44) — missed-call ke liye bhi bell row chahiye (agar
+    # recipient turant answer na kare, unhe baad me "X called you" list
+    # me dikhna chahiye, sirf ek CallKit popup jo miss ho gaya wo nahi).
+    # ⚠️ Jaan-boojh kar Focus Mode filter NAHI lagaya yahan (push khud
+    # kisi filter se nahi guzarta upar) — bell row bhi wahi recipients
+    # paate hain jinhe push mila.
+    for uid in recipient_ids:
+        create_notification(
+            recipient=uid,
+            notif_type=Notification.NotifType.INCOMING_CALL,
+            title=caller_name or "Incoming call",
+            message=f"{call_type} call",
+            data={
+                "call_id": str(call_id),
+                "conversation_id": str(conversation_id),
+                "channel_name": channel_name,
+            },
+        )
+
 
 def send_mention_push(recipient_ids, sender_name, message_text, conversation_id, message_id, is_announcement=False):
     """
@@ -416,6 +467,23 @@ def send_mention_push(recipient_ids, sender_name, message_text, conversation_id,
         return
 
     body = (message_text or '')[:200]
+
+    # 🔥 NAYA (task 44) — mention ka apna alag bell row, generic
+    # CHAT_MESSAGE row se ALAG (jaisa push already alag hai) — recipient
+    # ko apni notification list me bhi "X mentioned you" dikhna chahiye,
+    # generic "new message" nahi.
+    for uid in recipient_ids:
+        create_notification(
+            recipient=uid,
+            notif_type=Notification.NotifType.MENTION,
+            title=f"{sender_name} mentioned you" if sender_name else "You were mentioned",
+            message=body,
+            data={
+                "conversation_id": str(conversation_id),
+                "message_id": str(message_id),
+            },
+        )
+
     tokens = _tokens_for_users(recipient_ids)
     _send_multicast(
         tokens,

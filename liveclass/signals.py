@@ -22,6 +22,24 @@ Wired here:
          - promote the next student off the SessionWaitlist (FCFS)
          - best-effort +1 to classes_attended on the PassPurchase that
            granted access, for capped ("N-class pack") passes only
+    5. ClassJoinRequest post_save -> fresh transition into ACCEPTED: sync
+       the student into the classroom's linked chat group (task 31).
+    6. SessionWaitlist FCFS promotion (inside #4 above) -> same chat-group
+       sync as #5 (task 32).
+    7. ClassroomStaff post_save (created) -> promote the new co-teacher/
+       moderator to GroupMember.MODERATOR in the linked chat group
+       (task 33).
+    8. ClassroomBan post_save (created) -> remove the banned student from
+       the linked chat group (task 34).
+    9. PassPurchase post_save -> fresh transition into REFUNDED -> remove
+       the refunded student from the linked chat group (task 35).
+    10. Classroom post_save -> is_active True->False or is_deleted->True:
+        archive the linked chat group (task 37). title/cover_image/
+        description change (and NOT closed): sync group metadata
+        (task 36).
+    All of #5-#10 go through core/classroom_chat_bridge.py, which is a
+    complete no-op if the classroom in question has no linked chat group
+    (chat_group_enabled=False) — see that file's module docstring.
 
 PRODUCTION-HARDENING NOTES (read this before touching the code below):
     - Every step below runs as its OWN try/except. Earlier versions of this
@@ -104,14 +122,20 @@ from django.utils import timezone
 
 from .livekit_utils import LiveKitError, end_room
 from .models import (
+    ClassJoinRequest,
+    Classroom,
+    ClassroomBan,
+    ClassroomStaff,
     ClassSession,
     LivePoll,
-    Notification,
     PassPurchase,
     SessionParticipant,
     SessionWaitlist,
-    create_notification,
 )
+# 🔥 MOVED (tasks 42/43) — Notification/NotificationPreference + the
+# create_notification() helper now live in `core`, not `liveclass`.
+from core.models import Notification
+from core.services import create_notification
 
 logger = logging.getLogger(__name__)
 
@@ -317,6 +341,25 @@ def on_participant_left(sender, instance, created, **kwargs):
                     next_in_line.pk,
                 )
 
+            # 🔥 NAYA (task 32) — same classroom-chat-group bridge call as
+            # the ClassJoinRequest -> ACCEPTED path below. A promoted
+            # student already has real classroom access (that's what
+            # earned them the waitlist spot); this just makes sure
+            # they're in the linked chat group too, in case the group was
+            # created after they first got access. No-op if this
+            # classroom has no linked group — see classroom_chat_bridge.py.
+            try:
+                from core.classroom_chat_bridge import sync_membership_on_join_accept
+
+                sync_membership_on_join_accept(
+                    next_in_line.session.classroom, next_in_line.student,
+                )
+            except Exception:
+                logger.exception(
+                    "Failed syncing promoted waitlist student %s into chat group for entry %s.",
+                    next_in_line.student_id, next_in_line.pk,
+                )
+
             try:
                 # FIX (audit): this used to pass next_in_line.pk alone —
                 # the same broken pre-fix call shape views.py's own
@@ -373,3 +416,206 @@ def on_participant_left(sender, instance, created, **kwargs):
     # A seat opened up — promote the next student off the waitlist (FCFS).
     _promote_next_waitlist_entry()
     _credit_attendance()
+
+
+# ---------------------------------------------------------------------------
+# (task 31) ClassJoinRequest -> ACCEPTED: sync the accepted student into
+# the classroom's linked chat group, if one exists.
+# ---------------------------------------------------------------------------
+@receiver(pre_save, sender=ClassJoinRequest)
+def stash_previous_join_request_status(sender, instance, **kwargs):
+    previous = None
+    if instance.pk:
+        try:
+            previous = (
+                ClassJoinRequest.objects.filter(pk=instance.pk)
+                .values_list("status", flat=True)
+                .first()
+            )
+        except Exception:
+            logger.exception("Could not read previous status for ClassJoinRequest %s.", instance.pk)
+    instance._previous_status = previous
+
+
+@receiver(post_save, sender=ClassJoinRequest)
+def sync_chat_group_on_join_accept(sender, instance, created, **kwargs):
+    if created:
+        return  # a fresh row is never already ACCEPTED on creation in this app's flow
+    previous = getattr(instance, "_previous_status", None)
+    if previous == ClassJoinRequest.Status.ACCEPTED or instance.status != ClassJoinRequest.Status.ACCEPTED:
+        return  # not a fresh transition into ACCEPTED
+
+    def _sync():
+        try:
+            from core.classroom_chat_bridge import sync_membership_on_join_accept
+
+            sync_membership_on_join_accept(instance.classroom, instance.student)
+        except Exception:
+            logger.exception(
+                "Failed syncing chat group membership for accepted join-request %s.", instance.pk,
+            )
+
+    transaction.on_commit(_sync)
+
+
+# ---------------------------------------------------------------------------
+# (task 33) A co-teacher/moderator is added to a classroom -> promote them
+# to GroupMember.MODERATOR in the linked chat group (adds them first if
+# they aren't already a member).
+# ---------------------------------------------------------------------------
+@receiver(post_save, sender=ClassroomStaff)
+def sync_chat_group_on_staff_add(sender, instance, created, **kwargs):
+    if not created:
+        return  # role changes on an existing staff row don't need re-promotion
+
+    def _sync():
+        try:
+            from core.classroom_chat_bridge import promote_to_moderator
+
+            promote_to_moderator(instance.classroom, instance.user)
+        except Exception:
+            logger.exception(
+                "Failed promoting staff user %s to moderator for classroom %s.",
+                instance.user_id, instance.classroom_id,
+            )
+
+    transaction.on_commit(_sync)
+
+
+# ---------------------------------------------------------------------------
+# (task 36) Classroom title/cover_image/description update -> keep the
+# linked chat group's name/photo/description in step.
+# (task 37) Classroom close (is_active True->False) or soft-delete
+# (is_deleted False->True, if this app's BaseModel has that field like
+# message's does) -> archive the linked chat group.
+# ---------------------------------------------------------------------------
+_CLASSROOM_METADATA_FIELDS = ("title", "cover_image", "description")
+
+
+@receiver(pre_save, sender=Classroom)
+def stash_previous_classroom_snapshot(sender, instance, **kwargs):
+    previous = None
+    if instance.pk:
+        try:
+            previous = (
+                Classroom.objects.filter(pk=instance.pk)
+                .values("is_active", *_CLASSROOM_METADATA_FIELDS)
+                .first()
+            )
+        except Exception:
+            logger.exception("Could not read previous snapshot for Classroom %s.", instance.pk)
+    instance._previous_snapshot = previous
+
+
+@receiver(post_save, sender=Classroom)
+def sync_chat_group_on_classroom_change(sender, instance, created, **kwargs):
+    if created:
+        return
+    previous = getattr(instance, "_previous_snapshot", None)
+    if previous is None:
+        return  # couldn't read the old row — nothing safe to diff against
+
+    # --- task 37: close / soft-delete -> archive -----------------------
+    was_active = previous.get("is_active", True)
+    is_deleted_now = getattr(instance, "is_deleted", False)
+    if was_active and not instance.is_active or is_deleted_now:
+        def _archive():
+            try:
+                from core.classroom_chat_bridge import archive_group_on_classroom_close
+
+                archive_group_on_classroom_close(instance)
+            except Exception:
+                logger.exception("Failed archiving chat group for classroom %s close.", instance.pk)
+
+        transaction.on_commit(_archive)
+        return  # closed/deleted classroom's metadata doesn't need syncing too
+
+    # --- task 36: title/cover_image/description -> sync metadata -------
+    changed = any(
+        previous.get(field) != getattr(instance, field, None)
+        for field in _CLASSROOM_METADATA_FIELDS
+    )
+    if not changed:
+        return
+
+    def _sync():
+        try:
+            from core.classroom_chat_bridge import sync_group_metadata
+
+            sync_group_metadata(instance)
+        except Exception:
+            logger.exception("Failed syncing chat group metadata for classroom %s.", instance.pk)
+
+    transaction.on_commit(_sync)
+
+
+# ---------------------------------------------------------------------------
+# (task 34) Classroom-wide ban -> remove the student from the linked chat
+# group. (Session-level "kick" — SessionParticipant.kicked_at — is a
+# temporary, single-session removal and deliberately does NOT touch chat
+# group membership; only a full ClassroomBan does. See
+# classroom_chat_bridge.sync_membership_on_removal's reason= param, used
+# here and by the refund path below.)
+# ---------------------------------------------------------------------------
+@receiver(post_save, sender=ClassroomBan)
+def sync_chat_group_on_ban(sender, instance, created, **kwargs):
+    if not created:
+        return
+
+    def _sync():
+        try:
+            from core.classroom_chat_bridge import sync_membership_on_removal
+
+            sync_membership_on_removal(instance.classroom, instance.student, reason="kick")
+        except Exception:
+            logger.exception(
+                "Failed removing banned student %s from chat group for classroom %s.",
+                instance.student_id, instance.classroom_id,
+            )
+
+    transaction.on_commit(_sync)
+
+
+# ---------------------------------------------------------------------------
+# (task 35) PassPurchase.reverse() (refund) -> remove the student from the
+# linked chat group. Wired as a status-transition signal (same
+# pre_save-stash / post_save-diff pattern as ClassSession/ClassJoinRequest
+# above) rather than a direct call inside reverse() itself, so this fires
+# no matter which code path flips the status to REFUNDED.
+# ---------------------------------------------------------------------------
+@receiver(pre_save, sender=PassPurchase)
+def stash_previous_purchase_status(sender, instance, **kwargs):
+    previous = None
+    if instance.pk:
+        try:
+            previous = (
+                PassPurchase.objects.filter(pk=instance.pk)
+                .values_list("status", flat=True)
+                .first()
+            )
+        except Exception:
+            logger.exception("Could not read previous status for PassPurchase %s.", instance.pk)
+    instance._previous_status = previous
+
+
+@receiver(post_save, sender=PassPurchase)
+def sync_chat_group_on_purchase_refund(sender, instance, created, **kwargs):
+    if created:
+        return
+    previous = getattr(instance, "_previous_status", None)
+    if previous == PassPurchase.Status.REFUNDED or instance.status != PassPurchase.Status.REFUNDED:
+        return  # not a fresh transition into REFUNDED
+
+    def _sync():
+        try:
+            from core.classroom_chat_bridge import sync_membership_on_removal
+
+            classroom = instance.class_pass.classroom
+            sync_membership_on_removal(classroom, instance.student, reason="refund")
+        except Exception:
+            logger.exception(
+                "Failed removing refunded student %s from chat group for purchase %s.",
+                instance.student_id, instance.pk,
+            )
+
+    transaction.on_commit(_sync)

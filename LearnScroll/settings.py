@@ -159,6 +159,13 @@ INSTALLED_APPS = [
     'post',
     "message",
     'liveclass',
+    # NEW (task 42) — neutral notification + classroom<->chat bridge
+    # layer. Must be able to resolve `liveclass.Classroom`/`ClassSession`
+    # string FK references (core/models.py), so no strict load-order
+    # requirement relative to 'liveclass' here (Django resolves lazy
+    # "app_label.Model" references after all apps are loaded), but keeping
+    # it listed after 'liveclass' for readability.
+    'core',
 ] + (['storages'] if USE_S3_STORAGE else [])
 
 MIDDLEWARE = [
@@ -492,6 +499,13 @@ REST_FRAMEWORK = {
         # throttle_scope= in views.py.
         "session_join": "20/min",
         "session_token": "30/min",
+        # NEW (task 9 — parent-join): ClassSessionViewSet.parent_join is
+        # unauthenticated (see ParentJoinIPThrottle in liveclass/throttles.py
+        # for why this is a separate, IP-keyed scope rather than reusing
+        # session_token above). Rated tighter than session_token since this
+        # is the endpoint that verifies a parent_token — brute-forcing/
+        # guessing tokens is the abuse case, not legitimate retry traffic.
+        "session_parent_join_ip": "10/min",
         "coupon_validate": "20/min",
         "chat_message_create": "20/min",
         # Chunked upload (liveclass/chunked_upload_views.py) — starting a
@@ -678,6 +692,16 @@ GOOGLE_TRANSLATE_API_KEY = os.environ.get("GOOGLE_TRANSLATE_API_KEY", "")
 # ---------------------------------------------------------------------------
 REFERRAL_BONUS_COINS = int(os.environ.get("REFERRAL_BONUS_COINS", 50))
 REFERRAL_REDEEM_WINDOW_DAYS = int(os.environ.get("REFERRAL_REDEEM_WINDOW_DAYS", 7))
+
+# NEW (task 65 — classroom refer & earn, student side): one-time,
+# platform-funded coin bonus credited to a STUDENT who joins a classroom via
+# someone else's per-classroom referral link (Classroom.referral_urls),
+# awarded once from _charge_and_create_purchase (views.py). Distinct from
+# Classroom.referral_commission_percent, which is the REFERRER's ongoing cut
+# and is funded out of the teacher's own share, never the platform's — this
+# one IS a platform cost, so it defaults conservatively lower than the
+# signup bonus above.
+CLASSROOM_REFERRAL_JOIN_BONUS_COINS = int(os.environ.get("CLASSROOM_REFERRAL_JOIN_BONUS_COINS", 20))
 
 # ---------------------------------------------------------------------------
 # Coin purchase gateway (see CoinPurchase in liveclass/models.py,

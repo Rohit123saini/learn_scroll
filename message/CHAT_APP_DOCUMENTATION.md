@@ -27,6 +27,7 @@ Auth model: `AUTH_USER_MODEL` is a **custom `User`** (app `login`), primary key 
 | `Middleware.py` | JWT auth for WebSocket connections. No longer carries its own copy of the logic — re-exports `JWTAuthMiddleware`/`get_user_from_token` from project-level `LearnScroll/ws_auth.py`, which `liveclass` also now imports from *(fix — see §9.0)* |
 | `permissions.py` | DRF permission classes. `IsGroupAdminOrModerator` now confirmed on `group_rules.is_group_admin_or_mod` (cached single source of truth) instead of its own raw query. New `HasValidParentToken` *(Feature 8 — Parent Mode, see §7.16)* — header-token auth (`X-Parent-Token`) for parent-facing read-only views, deliberately not touching `request.user` |
 | `group_rules.py` | Group access-control (message/call/study-room permission, daily limit) |
+| `services.py` *(NEW — task 27, plus bell-row helper task 44)* | `GroupViewSet.create`/`add_members`/`update_member`'s core logic extracted into plain functions (`create_group`, `add_members_to_group`, `remove_group_member`, `update_group_member_role`) — decoupled from DRF so `core/classroom_chat_bridge.py` can reuse the exact same "create group / add member / change role" logic without going through an HTTP request/response cycle. Raises plain `ValueError`/`PermissionError` (not DRF exceptions) so it stays importable from non-DRF code; the caller converts them. Also re-homes `add_or_reactivate_participant` (moved here from `views.py`, which now imports it from here — single source, also reused by `offline_queue.py`). New this batch: `create_bell_rows_for_push(recipient_ids, notif_type, title, message, data=None)` — writes one `core.models.Notification` "bell" row per recipient, best-effort (logs + swallows on failure, never blocks the actual push), meant to be called alongside the existing FCM-only push helpers in `views.py` (`send_chat_message_push`/`send_mention_push`/`send_incoming_call_push`) so a bell/notification-center row exists too, not just the push itself *(exact `views.py` call-sites not independently confirmed this batch — `views.py` wasn't re-uploaded — see §9.4)* |
 | `mentions.py` | Shared `@mention` text-parsing helper (REST + WS) |
 | `translation_service.py` *(NEW this batch — Feature 9: real-time message translate)* | `translate_text(text, target_lang, source_lang=None)` — pluggable provider wrapper, default implementation calls Google Cloud Translate v2 REST API (plain API key via `settings.GOOGLE_TRANSLATE_API_KEY`, no SDK/service-account needed). Raises `TranslationServiceUnavailable` (not-configured / unreachable, → clean 503) or `TranslationError` (bad lang code / bad response, → 4xx) rather than ever surfacing as a raw 500. Also exposes `SUPPORTED_LANGUAGES` (the 10 languages in the app's language picker — en/hi/mr/ta/te/kn/bn/gu/pa/ur — kept in sync with `language_picker_sheet.dart` per its own comment, not an enforced server-side allow-list). Consumed by `MessageViewSet.translate` (referenced in this file's own docstring) — see §7.21 |
 | `push_utils.py` | Firebase Cloud Messaging (FCM) push helpers. Firebase init is **lazy** (only runs the first time a push is actually sent, not at import time) and reads either `FIREBASE_CREDENTIALS_PATH` or `settings.FCM_SERVICE_ACCOUNT_JSON_PATH` *(fix — see §9.0)*. Chat-push batching was **rewritten this batch to be WhatsApp-style immediate** — no more delayed Celery flush, see §7.13. Also filters recipients through active Focus Mode sessions (Feature 12, §7.18) and tags announcement pushes (Feature 11, §7.17) differently from normal chat pushes |
@@ -34,17 +35,18 @@ Auth model: `AUTH_USER_MODEL` is a **custom `User`** (app `login`), primary key 
 | `user_display.py` | Shared display-name / profile-photo-URL helper (REST + WS) |
 | `upload_view.py` | Generic file-upload endpoint (returns a URL to attach to a message) |
 | `ai_service.py` | Gemini calls, all cached 24h by content hash: `generate_summary`, `generate_quiz`, `transcribe_audio`, `generate_reply_suggestions`, `generate_classroom_answer` *(NEW)*, `generate_revision_deck` *(NEW — see §7.14/§7.15)*. Cache-hit check now uses a `_CACHE_MISS` sentinel instead of a truthy check, and `generate_summary` now guards against caching an empty result *(fix — see §9.0)* |
-| `views_ai.py` | REST endpoints wrapping `ai_service.py` (`AiStudyRoomView`) + voice-message transcription (`VoiceTranscribeView`) + smart-reply suggestions (`SmartReplySuggestionsView`, *NEW*) |
+| `views_ai.py` | REST endpoints wrapping `ai_service.py`: `AiStudyRoomView` (summary/quiz), `VoiceTranscribeView`, `SmartReplySuggestionsView`, `ClassTranscriptChunkUploadView`/`ClassTranscriptSearchView`, `ClassroomCopilotView`, and `RevisionDeckView` (`GET`/`GET ?history=true`/`GET ?deck_id=`/`DELETE ?deck_id=`/`POST` — list/fetch/delete/generate, see §6/§7.15) |
 | `media_utils.py` | `create_group_media_for_message(message)` — populates the `GroupMedia` gallery table; shared by REST + WS message-send |
 | `constants.py` | Single shared source for cross-file constants (currently `MAX_PINNED_PER_CONVERSATION`) |
 | `search_utils.py` *(NEW this session)* | `MIN_QUERY_LENGTH` (2), `apply_structured_filters(qs, query_params)` (sender/date_from/date_to/has_media/media_type), `search_messages(qs, query)` — Postgres-backed ranked full-text + trigram-typo search, non-Postgres fallback to plain `icontains`. `views.py`'s `ConversationViewSet.search`/`.search_all` already imported and called this module; the file itself didn't exist, so both search endpoints raised `NameError` on every call until this session. See §7.1 |
 | `cache_utils.py` | Django-cache helpers: group-role cache (`get_group_role_cached`/`invalidate_group_role_cache`, 60s TTL) behind `group_rules.is_group_admin_or_mod`, and presence cache (`get_presence_cached`/`set_presence_cache`, 15s TTL) behind `UserPresenceView` + `ChatConsumer` |
 | `throttles.py` | DRF `UserRateThrottle` subclasses for REST writes (`MessageSendThrottle`, `CallInitiateThrottle`, `GroupCreateThrottle`, `ReactionThrottle`, plus `TranslateThrottle` *(NEW this batch — Feature 9, see §7.21)*) + per-IP safety-net throttles (`MessageSendIPThrottle`, `CallInitiateIPThrottle`, both `SimpleRateThrottle` subclasses via shared `ScopedIPThrottle`) *(NEW this session)* + `ParentCodeVerifyThrottle` *(NEW this batch — per-IP brute-force guard on `ParentVerifyCodeView`, the one `AllowAny`/unauthenticated endpoint in the whole app, since there's no `request.user` to key a normal `UserRateThrottle` on at that point in the flow — see §7.16/§9.4)* + `WSMessageRateLimiter` (cache-backed sliding window) for the WS `message` event, since DRF throttles don't apply to Channels consumers |
 | `scheduled_messages.py` | "Send later" delivery half — `finalize_scheduled_message(message)`, called by the `message.send_scheduled_messages` Celery task (`tasks.py`, confirmed registered in `CELERY_BEAT_SCHEDULE`, runs every minute). Now also enqueues the link-preview/transcription tasks below for scheduled messages, same as the two live-send paths *(NEW this session)* |
+| `offline_queue.py` *(NEW — task 49, offline-first chat queue, delivery half)* | `flush_offline_queue(conversation, sender, queued_messages)` — a client reconnecting after being offline POSTs its locally-queued messages (each with a client-generated `client_id`) in one batch; this delivers them in order and returns a per-item `created`/`duplicate`/`error` result so the client can reconcile its local queue. Deliberately **duplicates** rather than shares `scheduled_messages.py`'s delivery code (same broadcast/unread-count/mentions/media/push steps) — this codebase's established convention is one delivery function per entry-point, not a shared mega-function (see the file's own docstring). Idempotency (never double-creating a message on a retried POST) is enforced at the DB level via the existing `client_id` unique constraint (§2 `Message.client_id`) + an `IntegrityError` catch, not by `get_or_create` alone, which isn't race-safe under concurrent duplicate submissions |
 | `tasks.py` | Celery tasks: `send_scheduled_messages` (delivers due "send later" messages, every minute — beat-scheduled), `cleanup_expired_messages` (hard-deletes disappearing messages past `expires_at`, every 15 min — beat-scheduled, now via a `Message.all_objects` manager — see §9.4), `generate_link_preview_task` (background OpenGraph fetch, one-shot via `.delay()`), `transcribe_voice_message_task` (background voice-note transcription, one-shot via `.delay()`), `transcribe_class_chunk_task` *(NEW — Feature: class transcript, see §7.19)* (background per-chunk classroom-audio transcription, one-shot via `.delay()`, writes to `ClassTranscriptSegment.text` and broadcasts `transcript_segment_ready`) — plus the shared `_broadcast_meta_update()` helper the link-preview/transcription tasks use to push their result live over WS. **`flush_chat_push_digest` has been removed** — chat-push batching no longer uses a delayed task, see §7.13 |
-| `link_preview.py` *(NEW this session)* | `extract_first_url(text)` + `fetch_link_preview(url)` — SSRF-safe OpenGraph fetcher (blocks private/loopback/link-local IPs, manually re-checks every redirect hop, size/time-bounded fetch, 7-day negative+positive cache) used by `generate_link_preview_task`. Also pins the validated IP for the actual connection so `requests` can't be tricked into re-resolving to a different (internal) IP via DNS rebinding between the safety check and the real request *(fix — see §9.0 and §7.5)* |
-| `admin.py` | Django admin registrations. `GroupJoinRequest`, `DeviceToken`, `StudyRoomState` models existed but were never registered — ops/support had no admin UI to inspect pending private-group join requests, debug a user's push tokens, or view a study room's saved whiteboard state without a raw DB query. Now registered like every other model *(fix — see §9.0)* |
-| `attendance_utils.py` *(NEW)* | `compute_attendance_stats(conversation, user)` — single source of truth for Study Room attendance-streak math (current streak, longest streak, total classes attended, last attended date), backed by `StudyRoomAttendance` (see §2). Shared by `StudyRoomStreakView` (student's own view) and `ParentDashboardView` (Parent Mode read-only view) so the streak logic isn't copy-pasted a second time — see §7.16 |
+| `link_preview.py` *(NEW this session)* | `extract_first_url(text)` + `fetch_link_preview(url)` — SSRF-safe OpenGraph fetcher (blocks private/loopback/link-local IPs, manually re-checks every redirect hop, size/time-bounded fetch, 7-day negative+positive cache) used by `generate_link_preview_task`. Pins the validated IP for the actual connection so `requests` can't be tricked into re-resolving to a different (internal) IP via DNS rebinding between the safety check and the real request *(fix — see §9.0 and §7.5)*. OG-tag/title parsing now uses `BeautifulSoup` instead of hand-rolled regexes *(fix — see §9.4 item 6)* |
+| `admin.py` | Django admin registrations. `GroupJoinRequest`, `DeviceToken`, `StudyRoomState` models existed but were never registered — ops/support had no admin UI to inspect pending private-group join requests, debug a user's push tokens, or view a study room's saved whiteboard state without a raw DB query. Now registered like every other model *(fix — see §9.0)*. Also adds a `SoftDeleteAdmin` for `Conversation`/`Group` *(NEW)* — see §9.0/§9.4 item 1 and its own §10 entry below for why the default admin registration alone wasn't enough once group-delete became a soft-delete |
+| `attendance_utils.py` *(NEW)* | `compute_attendance_stats(conversation, user)` — single source of truth for Study Room attendance-streak math (current streak, longest streak, total classes attended, last attended date), backed by `StudyRoomAttendance` (see §2). Used by `StudyRoomStreakView` (student's own view, single classroom). Also `compute_attendance_stats_bulk(conversation_ids, user)` *(NEW — N+1 fix)* — same math, one query for however many classrooms instead of one query per classroom; `ParentDashboardView` (Parent Mode) now uses this batched variant instead of calling the single-conversation function in a loop, see §7.16 |
 | `apps.py` | App config (`name = 'message'`) |
 | `tests.py` | Empty Django default stub — no tests written yet *(confirmed this batch)* |
 
@@ -65,8 +67,16 @@ for `UserPresenceView`, `CallInitiateView`, `CallActionView`, `StudyRoomJoinView
 Every model inherits this.
 - `id` — UUID, primary key
 - `created_at`, `updated_at` — auto timestamps
-- `is_deleted` — soft-delete flag (present but not actively used anywhere yet — no
-  queryset currently filters `is_deleted=False` by default)
+- `is_deleted` — soft-delete flag. **No longer a dead field** *(fix — see §9.0/§9.4 item
+  1)*: **now directly confirmed in `models.py`** — `SoftDeleteManager.get_queryset()`
+  filters `.filter(is_deleted=False)`, and it's wired as `objects` on `BaseModel` itself
+  (not just `Conversation`/`Group` — this applies to **every** model in the app, since all
+  of them inherit `BaseModel`), so `is_deleted=True` rows disappear from every normal
+  queryset automatically with zero per-call `.exclude(...)` needed anywhere. `all_objects =
+  models.Manager()` (also on `BaseModel`, unfiltered) is what `admin.py` and `tasks.py`'s
+  `cleanup_expired_messages` use to see soft-deleted rows too. `BaseModel.soft_delete()`/
+  `.restore()` just flip the flag and save — called by `GroupViewSet.destroy()` (§5) via
+  `group.soft_delete()`/`conversation.soft_delete()`.
 - `Meta.ordering = ['-created_at']`
 
 ### Enums
@@ -161,11 +171,12 @@ Every model inherits this.
   storage-only at the model level; the actual "teacher/staff message" behavior (distinct
   push channel/type, presumably a pinned/highlighted lane in the UI) lives in the views
   and `push_utils.py`, not in the model itself
-- Manager: `Message.objects` now appears to exclude something `Message.all_objects`
-  includes — `tasks.cleanup_expired_messages` was confirmed switched to
-  `Message.all_objects.filter(...)` for its hard-delete sweep this batch. `models.py`
-  itself wasn't part of this file batch, so the exact manager definition isn't confirmed
-  — see §9.4 for what this implies about the long-open `is_deleted` question (§9.4 item 1)
+- Manager: `Message` inherits `BaseModel`'s `objects = SoftDeleteManager()` /
+  `all_objects = models.Manager()` like every other model (§2 `BaseModel`, now confirmed
+  directly in `models.py`) — `Message.objects` excludes `is_deleted=True` rows,
+  `Message.all_objects` doesn't. `tasks.cleanup_expired_messages` deliberately uses
+  `Message.all_objects` for its hard-delete sweep so it can still catch an
+  already-soft-deleted-and-expired message.
 - Indexes: `(conversation, -created_at)`, `(sender, -created_at)`, `(type)`,
   `(reply_to)`, `(expires_at)`, `(conversation, is_pinned)` *(new)*
 
@@ -197,11 +208,12 @@ PPT/PDF/DOC metadata attached 1-1 to a `Message` — `file_url`, `file_name`, `f
 ### `GroupMedia`
 Denormalized gallery table (so gallery queries don't scan `Message`) — one row per
 media message: `group`, `conversation`, `message` (OneToOne), `sender`, `file_url`,
-`file_type`, `file_size`, `thumbnail_url`.
-⚠️ **Not currently auto-populated anywhere in `views.py`/`consumers.py`** that was read —
-no code creates a `GroupMedia` row when a media message is sent. The `GroupViewSet.media`
-action reads from it, but unless something else populates it, the gallery will stay empty.
-Worth checking / wiring up as a follow-up.
+`file_type`, `file_size`, `thumbnail_url`. **Now populated** — see `media_utils.py`
+(§1/§9.0/§9.4 item 3/§10) — `create_group_media_for_message()` is called from both the
+REST send path (`ConversationViewSet.messages`) and the WS send path
+(`ChatConsumer.save_message`), so the gallery stays in sync regardless of which path a
+message came through. The historical "not auto-populated, gallery stays empty" gap this
+note used to flag is resolved; kept only as a pointer to where the wiring lives.
 
 ### `MessageStatus` (delivery/read receipts)
 - `message`, `user`, `is_delivered`, `is_read`, `delivered_at`, `read_at`
@@ -285,45 +297,58 @@ Worth checking / wiring up as a follow-up.
   directly rather than these classmethods, for a bulk multi-user lookup in one query).
 - `ExceptionRule` is a `TextChoices` enum specifically so a future "specific people"
   option can be added without a migration touching existing rows.
-- **REST endpoints to start/cancel a focus session were not part of this file batch** —
-  only the model and its consumer (`push_utils.py`) are confirmed; flagged in §9.4.
+- REST endpoints (`FocusSessionView`, `FocusSessionHistoryView`, `views_focus.py`) are
+  confirmed wired end-to-end — see §6/§7.18/§9.0 item 17.
 
-### `DoubtQuestion` *(NEW — Doubt Queue, a persistent upvotable per-classroom question
-board; model itself not in this file batch — inferred from `serializers.py`'s
-`DoubtQuestionSerializer`, see §7.20)*
-- Confirmed fields (from the serializer): `group` (FK), `author` (FK to `User`), `text`,
-  `is_anonymous` (bool), `is_revealed` (bool), `upvotes_count`, `is_answered`,
-  `answer_text`, `answered_by` (FK), `answered_at`, `created_at`. Also has a reverse
-  `upvotes` relation (a separate upvote-tracking table/M2M, exact shape not confirmed).
+### `DoubtQuestion` / `DoubtUpvote` *(NEW — Doubt Queue, a persistent upvotable
+per-classroom question board; now directly confirmed in `models.py`)*
+- `DoubtQuestion`: `group` (FK, `related_name='doubts'`), `conversation` (FK,
+  `related_name='doubts'` — kept alongside `group` purely so the WS broadcast can reuse
+  the existing `chat_{conversation_id}` room instead of a new WS group), `author` (FK to
+  `User`, **always** the real asker regardless of `is_anonymous` — anonymity is
+  display-only, never DB-level, so moderation/`reveal` always has the real identity),
+  `text` (max 2000), `is_anonymous` (bool), `is_revealed` (bool, one-way — never flips
+  back to `False`), `upvotes_count` (denormalized `PositiveIntegerField`, updated via `F()`
+  by the upvote/un-upvote action rather than a live `.count()`), `is_answered`,
+  `answer_text`, `answered_by` (FK), `answered_at`. Default ordering
+  `['-upvotes_count', '-created_at']` — most-upvoted first, exactly how the Doubts tab
+  lists them. Index on `(group, is_answered, -upvotes_count)`.
+- `DoubtUpvote`: `doubt` (FK, `related_name='upvotes'`), `user` (FK) —
+  `unique_together = ('doubt', 'user')`, one upvote per user per doubt; toggling off
+  deletes the row. Nothing server-side blocks upvoting your own doubt.
 - **Anonymity is hidden by default even from teachers** — `DoubtQuestionSerializer.
   get_author()` only reveals the asker's identity to (a) the asker themselves, or (b)
   everyone, once a teacher/admin/mod has explicitly used a `reveal` action to flip
   `is_revealed` true. This is the actual point of `Group.allow_anonymous_doubts` (§2) —
   the toggle controls whether "Ask Anonymously" is offered at all, not whether it's
   visible once asked.
-- **Model definition itself (fields, constraints, migration) was not part of this file
-  batch** — the above is inferred from serializer usage only; confirm directly against
-  `models.py` before relying on exact field types/nullability. Flagged in §9.4.
 
-### `ParentToken` / `ParentAccessCode` *(NEW — Feature 8: Parent Mode auth; models
-themselves not in this file batch — inferred from `permissions.py`'s `HasValidParentToken`
-and its docstring reference to `views_parent.ParentVerifyCodeView`, see §7.16)*
-- Confirmed relationship (from `permissions.py`): a `ParentAccessCode` has `is_active`
-  and a `student` FK (to `User`); a `ParentToken` has a `token` field and a FK to
-  `ParentAccessCode`, plus `last_seen_at` (bumped on every authenticated parent request).
-- Flow (inferred): a parent gets a `ParentAccessCode` (presumably generated/shared by the
-  student or a teacher — mechanism not confirmed), exchanges it for a `ParentToken` via
-  `ParentVerifyCodeView` (not in this file batch), then sends that token as the
-  `X-Parent-Token` header on every subsequent Parent Mode request.
+### `ParentAccessCode` / `ParentToken` *(NEW — Feature 8: Parent Mode auth; now directly
+confirmed in `models.py`)*
+- `ParentAccessCode`: `student` (FK, `related_name='parent_access_codes'`), `label`
+  (cosmetic, student-only, never shown to the parent), `code` (8-char, unique, drawn from
+  a 32-symbol alphabet that excludes `0/O/1/I` to avoid misread/mistyped shares),
+  `is_active`, `last_used_at`, `expires_at` (absolute TTL, `DEFAULT_TTL_DAYS = 180`),
+  `last_revealed_at`. `masked_code` property shows only the last 4 characters
+  (`••••9QRT`) for the normal list view. `is_expired` property = `expires_at` in the past.
+  `generate_for(student, label, ttl_days)` retries up to 5 times on a code collision.
+  `renew(ttl_days)` gives the same code a fresh `expires_at` and re-activates it.
+- `ParentToken`: `parent_access_code` (FK, `related_name='tokens'`), `token` (64-char,
+  unique, `secrets.token_urlsafe(32)`), `last_seen_at`. `INACTIVITY_TTL_DAYS = 30` — a
+  **rolling** expiry independent of the code's own `expires_at`; `is_expired` compares
+  `now - (last_seen_at or created_at)` against that TTL, so one idle device auto-expires
+  without touching the code or any other device. `touch()` bumps `last_seen_at` — called
+  by `HasValidParentToken` on every authenticated parent request so the rolling TTL stays
+  accurate.
+- Deliberately decoupled: a lost/replaced parent phone just re-verifies the same code for
+  a new `ParentToken`, no new code needed from the student; revoking
+  `ParentAccessCode.is_active` invalidates every token issued against that code at once.
 - **Deliberately does not use `request.user`** — `HasValidParentToken` attaches
   `request.parent_access_code` and `request.parent_student` instead, specifically so no
   other permission/view could accidentally treat an authenticated parent as if they were
   the student themselves (a parent has no `User` row at all in this model).
-- **Model definitions, the verify-code exchange flow, and how a code is revoked were not
-  part of this file batch** — flagged in §9.4 (this also answers, partially, the earlier
-  "no confirmed parent↔student linking model" open question: the link is
-  `ParentAccessCode.student`, but the code-issuance/revocation flow itself is still
-  unconfirmed).
+- Parent↔student linking is a direct `ParentAccessCode.student` FK, set by the student
+  themselves when they generate the code — no separate invite/approval flow.
 
 ---
 
@@ -420,7 +445,7 @@ Queryset: groups where the user has a non-banned `GroupMember` row.
 | `POST /` | `create` | Uses `GroupCreateSerializer`. Creates `Conversation` + `Group` + creator as admin + given `member_ids` (integers, not UUIDs). Throttled 5/min/user (`GroupCreateThrottle`) |
 | `GET /`, `GET /<id>/` | list/retrieve | |
 | `PATCH /<id>/` | `partial_update` | Admin/mod only (`IsGroupAdminOrModerator`) |
-| `DELETE /<id>/` | `destroy` | **Admin role only** (not moderator). Broadcasts `group_deleted` *before* deleting (handled by `ChatConsumer.group_deleted`, see §8), then cascades delete via `Conversation.delete()` |
+| `DELETE /<id>/` | `destroy` | **Admin role only** (not moderator). Broadcasts `group_deleted` *before* deleting (handled by `ChatConsumer.group_deleted`, see §8), then **soft-deletes** (`group.soft_delete()` + `conversation.soft_delete()`) rather than hard-`.delete()`-ing *(fix — see §9.0/§9.4 item 1)* — see the note right below this table |
 | `POST /<id>/members/` | `add_members` | Body `{"user_ids": [...]}`. Public group: any member can add. Private group: admin/mod only |
 | `POST /join/` | `join` | Body `{"invite_code": "..."}`. Public: instant join. Private: creates/resets a `GroupJoinRequest` (pending) |
 | `GET /<id>/join-requests/` | `join_requests` | Admin/mod only. Lists pending requests |
@@ -429,6 +454,37 @@ Queryset: groups where the user has a non-banned `GroupMember` row.
 | `PATCH /<id>/members/<user_id>/` | `update_member` | Admin/mod only (unless acting on self). Body: any of `role`, `is_muted`, `is_banned`. Banning/unbanning also toggles `ConversationParticipant.left_at` |
 | `DELETE /<id>/members/<user_id>/` | `update_member` | Self-leave allowed; removing someone else requires admin/mod |
 | `GET /<id>/media/` | `media` | `GroupMedia` gallery, optional `?type=image/video/...` filter, paginated (`StandardPagination`). ⚠️ see `GroupMedia` note in §2 |
+
+**🔴 `create`/`add_members`/`update_member` still have their own inline logic —
+`services.py` (task 27) is NOT actually wired in**, confirmed against `views.py` this
+batch: `GroupViewSet.create()` builds `Conversation`/`Group`/`GroupMember`/
+`ConversationParticipant` rows directly, `add_members()` runs its own membership loop,
+`update_member()` sets fields directly — none of them call `services.create_group`/
+`add_members_to_group`/`remove_group_member`/`update_group_member_role`, and `views.py`'s
+import block has no `from .services import ...` line at all. The table above describes
+what `views.py` actually does today. See §7.22/§9.4 item 21 for the fuller picture —
+`services.py` should currently be treated as unused parallel code, not a completed
+refactor, and it has also produced a second, drifting copy of
+`add_or_reactivate_participant` (§9.4 item 21).
+
+**Group delete is now soft-delete, not a hard cascade** *(fix — see §9.0/§9.4 item 1)*:
+previously `destroy()` ran the `ModelViewSet` default `DestroyModelMixin` behavior
+unrestricted (**any** member, including a plain `member` role, could hard-delete the
+whole group), and it called `conversation.delete()` directly — an unrecoverable CASCADE
+that wiped every message/media/call/doubt in one accidental tap. Now: (1) `destroy()`
+explicitly re-checks the caller has `GroupMember.role == ADMIN` and `is_banned=False`,
+raising `PermissionDenied` otherwise — `get_object()`'s queryset restricting to members
+was never enough on its own to stop a member-level hard-delete; (2) the `group_deleted`
+WS broadcast still fires first, same as before; (3) instead of `.delete()`, it now calls
+`group.soft_delete()` + `conversation.soft_delete()`, which flips `is_deleted=True` and
+relies on the new `SoftDeleteManager` default manager (§2) to make the group vanish from
+every normal queryset immediately, without an unrecoverable hard-delete. The row is kept
+for `GROUP_SOFT_DELETE_GRACE_DAYS` before a `purge_soft_deleted_conversations` task
+(`tasks.py`, **now confirmed present** — `purge_soft_deleted_conversations()`, filters on
+`is_deleted=True` + a `GROUP_SOFT_DELETE_GRACE_DAYS`-day cutoff, see §10) actually
+CASCADE-hard-deletes it — during that window an accidentally-deleted group can be
+recovered via `.restore()` from the Django admin (see `admin.py`, §2/§10) instead of
+being gone the instant someone taps delete.
 
 ---
 
@@ -506,67 +562,135 @@ confirmed via `views.py`)*
   here is logged and swallowed, never blocks the join itself) — the streak view itself
   only reads.
 
-### Parent Dashboard (`ParentDashboardView`, `views_parent.py`) *(NEW — Parent Mode,
-route/response now fully confirmed via `views_parent.py`)*
+### Parent Dashboard (`ParentDashboardView`, `views_parent.py`) *(REDESIGNED this batch —
+Gap 2/Gap 3, supersedes the Group-primary shape described in earlier revisions of this doc)*
 - `GET /message/parent/dashboard/` (header `X-Parent-Token: <token>`, gated by
-  `HasValidParentToken` — §10/§12) — one classroom entry per group the student is an
-  active (`is_banned=False`) member of:
+  `HasValidParentToken` — §10/§12) — response shape changed from earlier revisions:
   ```
   {
     "student_name": "...",
     "classrooms": [
       {
-        "group_name": "Physics Batch A",
-        "attendance": {"current_streak": 7, "longest_streak": 12,
-                       "total_classes_attended": 34, "last_attended": "2026-09-04"},
-        "assignments": {"pending": 2, "submitted": 5, "total": 7}
+        "classroom_id": 41,
+        "classroom_title": "Physics Batch A",
+        "attendance_percent": 92.5,
+        "homework": {"pending": 1, "submitted": 6, "total": 7},
+        "latest_report_card": {
+          "period_label": "Term 1", "attendance_percent": 92.5,
+          "homework_completion_percent": 85.71, "average_marks": "78.50",
+          "teacher_remark": "..."
+        },
+        "chat_group": {
+          "group_name": "Physics Batch A",
+          "assignments": {"pending": 2, "submitted": 5, "total": 7}
+        }
       }
     ]
   }
   ```
-  Attendance reuses **the same** `attendance_utils.compute_attendance_stats(
-  conversation, user)` call `StudyRoomStreakView` uses (deliberately shared, per that
-  helper's own docstring — see the `IsGroupAdminOrModerator` 4-copy-drift story it calls
-  out as the reason). Assignment counts are computed inline
-  (`Assignment.objects.filter(group=group).count()` vs.
-  `AssignmentSubmission.objects.filter(assignment__group=group, student=student,
-  is_submitted=True).count()`, `pending = max(total - submitted, 0)`).
-  **`Assignment`/`AssignmentSubmission` models are therefore now confirmed to exist**
-  in `models.py` — worth noting since `views_ai.py`'s own `ClassroomCopilotView` comment
-  states no such model existed "confirmed against `CHAT_APP_DOCUMENTATION.md`" (a stale
-  assumption baked into that file, now outdated — see §9.4).
+- **🔧 GAP FIX (Gap 2) — `liveclass` `Classroom` is now the PRIMARY, always-present
+  source**, not the message app's own `Group`. Earlier, this view looped over the
+  student's chat `Group`s first — meaning a fully active classroom (homework, marks,
+  report cards, attendance) was silently invisible here whenever chat-group linking
+  hadn't happened for it (`chat_group_enabled=False` — teacher opted out, or an older
+  classroom predating the feature), with no way for a parent to tell that was even
+  happening. `classrooms` is now built from every `liveclass.Classroom` the student has
+  an active-or-lapsed pass for (`PassPurchase.status=SUCCESS, is_active=True`) — the
+  same enrollment breadth `Classroom.is_enrolled()`/`ClassroomParentCodeGenerateView`/
+  `ReportCardViewSet` already use. `chat_group` is now the OPTIONAL part: present only
+  when `core.classroom_chat_bridge.get_groups_for_classrooms()` *(a `core`-app bridge
+  function, outside this doc's `message`-app scope — see the `liveclass`/`core` app docs
+  for its implementation; only its usage contract matters here)* finds a real linked `Group` **and** the student is still an unbanned member
+  of it; otherwise `chat_group: null` — the classroom itself still shows up in full.
+- **🔧 GAP FIX (Gap 3) — attendance is now 100% liveclass-sourced.** Both
+  `attendance_percent` (top-level) and the one inside `latest_report_card` come
+  exclusively from `liveclass`'s own session-attendance record (`ClassSession`/
+  `SessionParticipant`, via `liveclass.models.compute_attendance_percent_bulk`). The
+  message app's own `StudyRoomAttendance` self-check-in streak widget
+  (`attendance_utils.compute_attendance_stats_bulk`, §7.16/§10) is **no longer used
+  anywhere in this view** — per product decision, since `message` has no
+  teacher/student/classroom concept of its own, only chat groups/group-study; that
+  helper's own §10 entry and §7.16 remain accurate for what it's still used for
+  (`StudyRoomStreakView`), just not here anymore. Consequently `chat_group` carries only
+  `group_name` + `assignments`, never an attendance field.
+- **`homework` vs `chat_group.assignments` are still never summed (Gap 1, unchanged)** —
+  two independently-sourced datasets from two different apps' same-named models
+  (`liveclass.Assignment`/`AssignmentSubmission` vs this app's own), imported here under
+  a `Liveclass*` alias specifically so no reference is ever ambiguous about which one it
+  means. `Assignment.group`'s/`AssignmentSubmission.student`'s `related_name`s were
+  separately renamed in `models.py` (`assignments`→`message_assignments`,
+  `assignment_submissions`→`message_assignment_submissions`) to resolve the reverse-
+  accessor clash between the two apps' models sharing the same `Group`/`User` — doesn't
+  affect this view since every query here goes forward through the FK, never through the
+  renamed reverse accessor.
+- **`latest_report_card` is new this batch** — `liveclass.StudentReportCard`, most recent
+  per classroom (`order_by('-id')`, first one kept per classroom in a single pass over
+  one query — not one query per classroom). `null` if the student has no report card yet
+  for that classroom.
+- Still strictly scoped, unchanged from earlier revisions: `views_parent.py`'s own module
+  docstring is explicit that this view must never return message text, media, contact
+  info, or anything beyond display name / attendance / homework / assignment counts /
+  report-card summary — "would this be fine on a report-card-style summary?" is the test
+  before adding any new field here.
 - `POST /message/parent/verify/` (`ParentVerifyCodeView`, `AllowAny`, throttled by
   `ParentCodeVerifyThrottle` — see §14 for its own confirmed-missing settings scope) —
   body `{"code": "7F3K9QRT"}` (case-insensitive, normalized to uppercase server-side).
   Looks up an active `ParentAccessCode`, bumps its `last_used_at`, mints a fresh
-  `ParentToken`, returns `{"parent_token", "student_name", "label"}`. 404 (not 401/403)
-  on an invalid/expired code — doesn't distinguish "wrong code" from "code exists but
-  expired" in the response, so a brute-force attempt can't learn anything from the error
-  shape either.
-- **Student-side management confirmed too** (`ParentAccessCodeView`, `IsAuthenticated`,
-  `/message/parent/codes/`): `GET` lists the student's own active codes (id/label/code/
-  last_used_at/created_at); `POST` generates a new one (`{"label": "Mom"}`, capped at
-  `MAX_ACTIVE_CODES = 5` active codes per student — a 400 past that, "revoke one
-  first"); `DELETE` (`{"id": "<uuid>"}`) soft-revokes (`is_active=False`) and cleans up
-  any `ParentToken`s tied to that code (cleanup only — `HasValidParentToken` already
-  filters on `is_active=True`, so the tokens would stop working regardless).
-- **Strict scope, enforced by convention not by a technical guard**: `views_parent.py`'s
-  own module docstring is explicit that `ParentDashboardView` must never return message
-  text, media, contact info, or anything beyond display name / attendance / assignment
-  counts — framed as "would this be fine on a report-card-style summary?". Worth
-  keeping in mind if this view is ever extended.
-- **TTL / renewal / per-device controls** *(NEW this batch — see §9.0 item 18)*: a
-  `ParentAccessCode` now has its own absolute `expires_at`, separate from each
-  `ParentToken`'s rolling 30-day inactivity expiry (`HasValidParentToken`,
-  `permissions.py`, enforces both). Newly routed in `urls.py`:
-  `POST /message/parent/codes/<id>/renew/` (extend an expiring/expired code without
-  re-sharing it), `GET /message/parent/codes/<id>/tokens/` /
-  `DELETE /message/parent/codes/<id>/tokens/<token_id>/` (list/revoke one device without
-  killing the whole code), and `POST /message/parent/codes/<id>/reveal/` (re-show the
-  full plaintext code — the list view now shows it masked, this is the only way to see
-  it again; throttled by `ParentCodeRevealThrottle`, §10/§14). `views_parent.py` itself
-  wasn't in this file batch, so exact request/response bodies for these four aren't
-  independently confirmed beyond `permissions.py`'s and `urls.py`'s own comments.
+  `ParentToken`, returns `{"parent_token", "student_name", "label"}`. Distinguishes two
+  failure cases: `404` if no active code matches at all (doesn't leak whether the code
+  ever existed), vs. a separate `410 Gone` if the code matches but
+  `access_code.is_expired` — deliberately split so the parent-side app can show "wrong
+  code" vs. "expired, ask the student for a new/renewed one" as different messages,
+  rather than one generic "invalid" for both.
+- **Student-side management** (`ParentAccessCodeView`, `IsAuthenticated`,
+  `/message/parent/codes/`):
+  - `GET` lists the student's own active codes: `id`, `label`, `masked_code` (e.g.
+    `"••••9QRT"` — **never the raw code**, see the reveal-once note below), `last_used_at`,
+    `created_at`, `expires_at`, `is_expired`, `active_devices` (annotated `Count('tokens')`
+    — how many `ParentToken`s/devices are currently verified against this code), and
+    `last_revealed_at` (so the student can see, in their own UI, the last time the full
+    code was shown again).
+  - `POST` generates a new one (`{"label": "Mom"}`, capped at `MAX_ACTIVE_CODES = 5`
+    active codes per student — a 400 past that: "Max 5 active parent codes allowed. Pehle
+    koi purana revoke karo"). This is the **only** place the raw `code` is ever returned
+    in a response body without going through the throttled reveal endpoint below —
+    deliberate, since generation is itself a one-time, student-initiated action, not a
+    repeatable `GET`. Also stamps `last_revealed_at` at generation time (the student did,
+    after all, just see the code).
+  - `DELETE` (`{"id": "<uuid>"}`) soft-revokes (`is_active=False`) and cleans up any
+    `ParentToken`s tied to that code (cleanup only — `HasValidParentToken` already filters
+    on `is_active=True`, so the tokens would stop working regardless).
+- **TTL / renewal / reveal-once / per-device controls** (unchanged this batch):
+  - `POST /message/parent/codes/<id>/renew/` (`ParentAccessCodeRenewView`) — gives the
+    **same** code a fresh TTL (`ParentAccessCode.renew()`, default
+    `ParentAccessCode.DEFAULT_TTL_DAYS`) and re-activates it if it had auto-expired.
+    Every `ParentToken` already verified against this code (every device) becomes valid
+    again immediately — no re-verification, no new code to re-share with every
+    parent/guardian on it. Deliberately separate from `POST /parent/codes/` (which issues
+    a brand-new code that every device must re-verify). Returns `{"id", "expires_at",
+    "is_expired"}`. 404 if the code doesn't belong to the requesting student.
+  - `POST /message/parent/codes/<id>/reveal/` (`ParentAccessCodeRevealView`, throttled by
+    `ParentCodeRevealThrottle`) — the **only** way to see the full plaintext code again
+    once the list (`GET /parent/codes/`) started masking it. Deliberately its own
+    throttled/audited action rather than a query-param on the list, so every reveal is a
+    distinct, rate-limited event, not a silent side-effect of opening the screen. Returns
+    `{"code", "last_revealed_at"}` and updates `last_revealed_at`. 404 if not found/not
+    the student's own/inactive.
+  - `GET /message/parent/codes/<id>/tokens/` (`ParentCodeTokensView`) — lists every
+    individual device/`ParentToken` currently verified against **that one code**
+    (`[{"id", "created_at", "last_seen_at"}, ...]`), so the student can tell devices on a
+    shared code apart (e.g. "3 devices on the 'Mom' code") instead of only being able to
+    see/manage the code as a whole. 404 if the code isn't the student's own or isn't
+    active.
+  - `DELETE /message/parent/codes/<id>/tokens/<token_id>/` (`ParentCodeTokenDetailView`)
+    — revokes exactly **one** device; the code itself and every other device tied to it
+    stay untouched. Ownership is checked through `parent_access_code__student`, not a
+    bare token-id lookup, so a student can never revoke a token hanging off a code that
+    isn't theirs even by guessing a UUID. **This is the actual gap fix these two token
+    endpoints exist for**: previously the only way to cut off one lost/stolen device was
+    `DELETE /parent/codes/` on the *whole* code, which killed every other device that had
+    ever verified it too (e.g. Mom's phone AND Dad's phone both verifying the same
+    "Parents" code) — now a single device can be revoked without disturbing the rest.
 
 ### Conversation Wallpaper (`ConversationViewSet.wallpaper`) *(NEW)*
 - `GET`/`PATCH /conversations/<id>/wallpaper/` — `ConversationWallpaperSerializer`,
@@ -715,10 +839,29 @@ confirmed via `views_ai.py`)*
 ### Revision Deck (`views_ai.py` → `RevisionDeckView`) *(NEW — route now fully confirmed
 via `views_ai.py`)*
 - `GET /message/study-room/<conversation_id>/revision-deck/` — returns the most
-  recently generated `RevisionDeck` for this conversation (`{"flashcards", "quiz",
-  "created_at"}`, or empty lists + `null` if none yet) **without** calling Gemini again
-  — a pure read, safe to call as often as the client wants for an offline-friendly
-  "open and revise" screen. 404 if not a member.
+  recently generated `RevisionDeck` for this conversation (`{"id", "flashcards", "quiz",
+  "created_at"}`, or `{"flashcards": [], "quiz": [], "created_at": null}` if none yet)
+  **without** calling Gemini again — a pure read, safe to call as often as the client
+  wants for an offline-friendly "open and revise" screen. 404 if not a member.
+- `GET ... ?history=true` *(NEW this session — gap fix)* — `RevisionDeck` was already
+  designed to keep every generation as its own row (per the model's own docstring: each
+  "Generate" tap makes a new row, an older deck can still be useful), but the only read
+  path ever exposed was "latest deck only" — a student could never actually get back to
+  an older deck once a newer one existed, even though the data was there. This lists
+  every deck for the conversation, newest first, capped at 50, lightweight (no
+  flashcards/quiz payload, just enough to pick one): `{"decks": [{"id", "session_id",
+  "flashcard_count", "quiz_count", "created_at", "generated_by"}, ...]}`.
+- `GET ... ?deck_id=<id>` *(NEW this session)* — fetches one specific (not necessarily
+  latest) deck's full content, for after picking one from the `?history=true` list.
+- `DELETE ... ?deck_id=<id>` *(NEW this session — gap fix)* — removes one specific deck
+  (e.g. one generated too early, before enough of the class had happened, that's now
+  just clutter). Restricted to whoever generated that specific deck
+  (`deck.generated_by_id != request.user.id` → `PermissionDenied`) — a shared study room
+  can have several members generating decks off the same class, so one member's "clean
+  up my attempt" can't delete another member's. 400 if `deck_id` is missing from the
+  query params, 404 if not found. **This resolves §9.4 item 11**, which an earlier
+  revision of this doc marked as a confirmed-absent, still-open product gap — it's since
+  been built.
 - `POST` (same path) — body `{"board_content", "session_id"}` (both optional).
   `session_id` picks which class's transcript to draw from; omitted → the most recent
   session's segments are used (revising "the last class", the common case per the
@@ -726,9 +869,9 @@ via `views_ai.py`)*
   Copilot (last 50 chat messages / whiteboard / up to 80 transcript segments, no
   keyword filtering here since a revision deck wants broad coverage, not a targeted
   answer), then calls `ai_service.generate_revision_deck(content)` (8–12 flashcards + a
-  5-question quiz) and **persists** the result as a new `RevisionDeck` row (§2) —
-  decks are kept as history, never overwritten, so there's no "list past decks"/"delete
-  a deck" endpoint yet (still open, §9.4).
+  5-question quiz) and **persists** the result as a new `RevisionDeck` row (§2) — decks
+  are kept as history, never overwritten (see the `?history=true`/`DELETE` entries above
+  for how a student actually gets back to or removes an older one).
 - Cached 24h by content hash like the rest of `ai_service.py` — a cache hit still
   creates a fresh `RevisionDeck` row from the cached data (saves the Gemini call, not
   the row-creation) — see §9.4 item 12 for why this is noted as a possibly-unintended
@@ -980,13 +1123,12 @@ note at the end)*
   `send_chat_message_push` was already calling it, breaking every ordinary chat push via
   `ImportError`) is now moot — there's no delayed task to be missing.
 
-### 7.17 Announcements *(NEW this batch — Feature 11; push-side confirmed, but see
-**critical correction** below — the REST message-send flow does NOT actually set the
-flag)*
-- Teacher/staff (group admin/moderator) messages are **designed** to be treated as a
-  distinct "announcement" lane, both visually and at the push layer, via
-  `Message.is_announcement` (§2).
-- Push side (`push_utils.py`, confirmed): **if** `is_announcement=True` is passed,
+### 7.17 Announcements *(NEW this batch — Feature 11; both push-side and message-send
+activation now confirmed working, see fix below)*
+- Teacher/staff (group admin/moderator) messages are treated as a distinct
+  "announcement" lane, both visually and at the push layer, via `Message.is_announcement`
+  (§2).
+- Push side (`push_utils.py`, confirmed): when `is_announcement=True` is passed,
   it flows correctly through `send_chat_message_push`/`send_mention_push`/
   `_send_single_chat_push`/`send_chat_digest_push`, changing both the FCM data payload
   `type` (`"announcement"`/`"announcement_digest"` vs. `"chat_message"`/`"chat_digest"`)
@@ -996,25 +1138,25 @@ flag)*
 - `is_announcement=True` also interacts with Focus Mode (§7.18): a `teachers_only`
   focus session still lets announcement pushes through, since that's the entire point of
   the "teachers only" exception rule.
-- **🔴 CRITICAL CORRECTION (this batch, now that `views.py` has actually been reviewed):
-  the previous revision of this doc assumed `views.py` sets `is_announcement` at
-  message-create time, reasoning that the sender-role check it already does for the
-  message-permission gate could be reused for free. That assumption is now
-  contradicted by the real file** — `views.py`'s message-send flow (`ConversationViewSet
-  .messages`, POST) never references `is_announcement` anywhere, and its calls to
-  `send_chat_message_push`/`send_mention_push` (both call sites checked) never pass
-  `is_announcement` as a kwarg, so it silently defaults to `False` on every REST-sent
-  message — including ones from a confirmed group admin/moderator. The model field
-  exists and the entire push-side pipeline works correctly *if* fed `True`, but nothing
-  in the REST path currently computes or passes that value, so **in practice this
-  feature does not yet activate via REST send** — every message currently gets pushed as
-  a normal chat message, teacher or not. (`consumers.py`, the WS send path, was not part
-  of this file batch, so it's possible — not confirmed — that path sets the flag
-  instead; don't assume it does without checking.)
+- **Message-send activation — fixed this session** (an earlier revision of this doc
+  found the REST send flow never actually computed/passed the flag, defaulting every
+  message to `False` regardless of sender role; that gap is now closed on both send
+  paths):
+  - **REST** (`ConversationViewSet.messages`, POST, `views.py`) — the same
+    `is_group_admin_or_mod(group, request.user.id)` check already run for the
+    `message_permission` gate is now captured into an `is_announcement` variable
+    (private chats always `False`, no group), reused with no extra query, and threaded
+    through to both `serializer.save(..., is_announcement=is_announcement)` and the push
+    call(s).
+  - **WS** (`ChatConsumer.save_message`, `consumers.py`) — same fix, same pattern:
+    `is_group_admin_or_mod(group, sender_id)` computed once before
+    `Message.objects.create()`, passed to `is_announcement=` on the row and threaded
+    through to `send_push_for_message`/`send_mention_push_notification`.
+  - See §9.4 item 17 for the full before/after — both call-sites' own comments describe
+    the identical prior bug (flag computed for the permission gate, never stored/reused).
 - **Non-push behavior (a UI-level "pinned/highlighted announcement lane", if one exists)
-  was not part of this file batch either** — only the model field and the push-side
-  handling (which is itself unreachable from REST, per above) are confirmed. Flagged as
-  a still-open wiring gap in §9.4.
+  was not part of this file batch** — only the model field and the push-side handling
+  are confirmed from this app's side; the client-side rendering isn't.
 
 ### 7.18 Focus Mode / Smart DND *(NEW this batch — Feature 12; REST endpoints now
 confirmed via `views_focus.py`, but NOT wired into `urls.py`)*
@@ -1097,14 +1239,19 @@ confirmed via `views_focus.py`, but NOT wired into `urls.py`)*
 - Live delivery: broadcasts a new WS event, `transcript_segment_ready` (see §8), the same
   plain-passthrough pattern as `meta_update` — an open "class recap" screen sees new
   segments arrive live instead of needing a refresh.
-- **`ClassTranscriptSegment` model itself (fields beyond what's used in `tasks.py`/
-  `views_ai.py` — `text`/`status`/`conversation_id`/`session_id`/
-  `start_offset_seconds`/`end_offset_seconds`/`speaker`/`audio_file_url`, all confirmed
-  via usage across both files, including `STATUS_PENDING`/`STATUS_DONE`/`STATUS_FAILED`)
-  — model definition itself (`models.py`) still wasn't part of this file batch, so its
-  exact field types/constraints/migration remain unconfirmed** — flagged in §9.4.
-  `ClassTranscriptChunkUploadView`/`ClassTranscriptSearchView` themselves are now fully
-  confirmed — see §6.
+- **`ClassTranscriptSegment` model — now directly confirmed in `models.py`**: `conversation`
+  (FK, `related_name='transcript_segments'`), `session_id` (indexed), `speaker` (FK to
+  `User`, nullable/`SET_NULL`), `start_offset_seconds`/`end_offset_seconds` (`FloatField`,
+  offsets from session start — not wall-clock, so "jump to timestamp" stays correct
+  regardless of any one participant's clock skew), `audio_file_url`, `text`, `status`
+  (`STATUS_PENDING`/`STATUS_DONE`/`STATUS_FAILED`). Ordered
+  `['session_id', 'start_offset_seconds']`; indexes on `(conversation, session_id,
+  start_offset_seconds)` and `(conversation, status)`. Search is currently plain
+  `text__icontains` (fine at current per-session scale — usually a few hundred segments);
+  the model's own comment notes the same `SearchVectorField`+`GinIndex` pattern `Message`
+  already uses as the scale-up path if needed later.
+  `ClassTranscriptChunkUploadView`/`ClassTranscriptSearchView` themselves are confirmed —
+  see §6.
 
 ### 7.20 Doubt Queue *(NEW this batch — persistent, upvotable per-classroom question
 board)*
@@ -1218,10 +1365,12 @@ board)*
   reuse, since each real generation is meant to produce its own row).
 - **Route confirmed via `views_ai.py`**: `GET`/`POST /message/study-room/
   <conversation_id>/revision-deck/`, throttled 10/min (`RevisionDeckThrottle`, scope
-  `ai_revision_deck` — **confirmed missing from `settings.py`**, see §6/§9.4/§14). No
-  "list past decks"/"delete a deck" endpoint exists — confirmed absent, not just
-  unconfirmed (only `GET` most-recent and `POST` new-deck are defined). Full
-  request/response shape in §6.
+  `ai_revision_deck` — **confirmed missing from `settings.py`**, see §6/§9.4/§14).
+  **`GET ?history=true` (list past decks), `GET ?deck_id=<id>` (fetch a specific one),
+  and `DELETE ?deck_id=<id>` (owner-only) now all exist** *(fix, this session — an
+  earlier revision of this doc said these were "confirmed absent" as a still-open
+  product gap; they've since been added — see §6/§9.4 item 11)*. Full request/response
+  shape in §6.
 
 ### 7.16 Study Room Attendance / Streak + Parent Mode *(NEW this batch — Feature 6)*
 - `StudyRoomAttendance` (§2) — one row per study-room join per user per day
@@ -1229,14 +1378,20 @@ board)*
   Before this, study-room "current session" state was in-memory/cache-only with no
   permanent join history, so a streak had nothing to compute from — confirmed
   `CallParticipant` doesn't cover this (it's calls-only).
-- `attendance_utils.compute_attendance_stats(conversation, user)` — the one place streak
-  math lives (current streak, longest streak, total classes attended, last attended
-  date), shared by both `StudyRoomStreakView` (student's own view) and the new
-  `ParentDashboardView` (`views_parent.py`, Parent Mode's read-only view). Pulled out
+- `attendance_utils.compute_attendance_stats(conversation, user)` — the one place
+  study-room streak math lives (current streak, longest streak, total classes attended,
+  last attended date), used by `StudyRoomStreakView` (student's own view). Pulled out
   into its own module specifically to avoid re-creating a bug pattern this codebase
   already fixed once — `permissions.py`'s `IsGroupAdminOrModerator` docstring documents
   4 independent copies of the same "admin/mod, not banned" rule having drifted out of
   sync before they were consolidated.
+  **⚠️ No longer used by `ParentDashboardView`** *(Gap 3, see §6)* — that view's
+  attendance now comes exclusively from `liveclass`'s own `ClassSession`/
+  `SessionParticipant` data, per product decision (this app has no
+  teacher/student/classroom concept of its own). `compute_attendance_stats_bulk` (the
+  bulk variant, still documented in §10) is therefore currently only reachable from
+  `StudyRoomStreakView`-adjacent code, not the parent dashboard — an earlier revision of
+  this doc described it as shared between the two; that's no longer accurate.
 - Current-streak logic walks backward day-by-day from today (or yesterday, if today's
   class hasn't happened/been joined yet) while consecutive attended dates continue;
   longest-streak walks the full sorted date list once, tracking the longest run of
@@ -1248,6 +1403,73 @@ board)*
   themselves via `ParentAccessCodeView.post`) — not a separate invite/linked-account
   model as previously guessed; see §9.4 for what (if anything) is still genuinely open
   here.
+
+### 7.22 Group Management Service Layer + Bell-Row Notifications *(NEW this batch — tasks 27 & 44)*
+- `services.py` pulls `GroupViewSet.create`/`add_members`/`update_member`'s logic out into
+  plain functions (`create_group`, `add_members_to_group`, `remove_group_member`,
+  `update_group_member_role`), decoupled from DRF (raises `ValueError`/`PermissionError`,
+  never `PermissionDenied`/`ValidationError`) specifically so `core/classroom_chat_bridge.py`
+  can drive "create a group" / "add a member" / "change someone's role" the same way
+  `GroupViewSet` does, without going through an HTTP request/response cycle. An
+  `actor=None` convention lets an internal/system caller (like the classroom bridge) skip
+  the admin/mod permission check — the check assumes a real acting user when one is given.
+- `add_or_reactivate_participant(conversation, user)` also now lives here (moved from
+  `views.py`) — creates a `ConversationParticipant` row, or un-sets `left_at` if the user
+  had previously left, so a re-added member reliably shows up in the chat again. Reused by
+  `services.py` itself (member add), and by `offline_queue.py` (§7.23, sender might have
+  left+rejoined while their device was offline).
+- `generate_group_invite_code()` — also moved here from wherever it previously lived,
+  generates a unique `secrets.token_urlsafe` code, retrying on collision.
+- **Bell-row notifications** *(task 44)*: `create_bell_rows_for_push(recipient_ids,
+  notif_type, title, message, data=None)` writes one `core.models.Notification` row per
+  recipient — the in-app "bell" notification-center entry, distinct from the FCM push
+  itself. Best-effort by design (wraps each row in try/except + `logger.exception`,
+  never raises) so a bell-row failure can never block the actual push a user is waiting
+  on. Intended to be called *alongside* (not instead of) the existing FCM-only helpers in
+  `views.py` (`send_chat_message_push`, `send_mention_push`, `send_incoming_call_push`),
+  mirroring the "create_notification() + send_notification() side by side" pattern
+  `liveclass/tasks.py` already uses. **The exact `views.py` call-sites are not
+  independently confirmed this batch** — `views.py` wasn't re-uploaded, and the function's
+  own comment points to a separate `views_PATCH_bell_rows_for_push.md` note (also not
+  seen) for them — see §9.4.
+
+### 7.23 Offline Message Queue *(NEW this batch — task 49, delivery half)*
+- `offline_queue.flush_offline_queue(conversation, sender, queued_messages)` — the backend
+  half of an offline-first send flow: the Flutter client is expected to queue unsent
+  messages locally (with a client-generated `client_id` per message) while offline, then
+  POST the whole queue, in composed order, to a new endpoint once connectivity returns.
+  This function processes each queued item and returns a per-item result — `{"client_id",
+  "status": "created"|"duplicate"|"error", "message_id"?}` — in the same order, so the
+  client can reconcile its local queue: drop `created`/`duplicate` items, keep `error`
+  items queued for a later retry.
+- **Idempotency is the actual backend contract here.** "Local queue + retry-on-reconnect"
+  is mostly a client concern — the one thing the backend must guarantee is that retrying
+  the same queued message (e.g. the first attempt actually succeeded server-side but the
+  response was lost before the client saw it) never creates a duplicate message. This
+  relies on the existing `Message.client_id` unique constraint (`unique_message_client_id`,
+  §2) plus an `IntegrityError` catch in `_get_or_create_queued_message` — not
+  `get_or_create()` alone, which the module's own docstring notes isn't race-safe under
+  genuinely concurrent duplicate submissions.
+- **Deliberately duplicates `scheduled_messages.py`'s delivery logic** (broadcast +
+  unread-count bump + `MessageStatus` rows + @mentions + `GroupMedia` gallery + push) in
+  its own `_deliver_queued_message`, rather than sharing one function — per the module's
+  own docstring, this codebase's established convention is one delivery function per
+  entry-point (REST send, WS send, scheduled-send, and now offline-queue-flush each have
+  their own), not a single function every path funnels through.
+- One bad item in the batch never aborts the rest — same fail-safe-per-row discipline
+  `scheduled_messages.py`'s own caller already uses, so one malformed queued message
+  (e.g. a `reply_to` pointing at a message that no longer exists) reports as `"error"`
+  for that item only, without losing the rest of the batch.
+- A delivery-side failure (broadcast/push) after the `Message` row is already created is
+  logged and still reported as `"created"` to the client — treating it as a send failure
+  and letting the client retry could otherwise create a second row if the unique
+  constraint's race window is ever hit oddly.
+- **Not independently confirmed this batch**: the actual REST endpoint/URL that calls
+  `flush_offline_queue`, and the Flutter-side queue/retry implementation, since neither
+  `views.py`/`urls.py` nor any frontend code was re-uploaded alongside this module — see
+  §9.4. The module's own docstring documents the frontend contract it expects (reuse the
+  same `client_id` on every retry of a given logical message — a fresh `client_id` per
+  retry defeats the whole idempotency guarantee).
 
 ---
 
@@ -1284,6 +1506,12 @@ disconnect indefinitely (Daphne force-kills stuck disconnects otherwise).
 | `pin` *(NEW)* | `message_id`, `pin` (bool) | `handle_pin_message` |
 | `study_room_event` | `action`, `data` | `handle_study_room_event` (generic passthrough, nothing persisted server-side) |
 
+**Server → Client, sent only right after `connect()`** (not in response to any client message):
+
+| type | Notes |
+|---|---|
+| `sync` *(NEW)* | `{conversation_id, count, messages: [...]}` — see "Missed-event replay" below |
+
 **Server → Client** (channel-group event `type` → consumer method):
 
 | type | Method | Notes |
@@ -1312,6 +1540,45 @@ through REST. Both now accept and persist `file_url`, `file_urls`, `thumbnail_ur
 `chat_message` payload now includes these fields too (previously only `text` was
 broadcast, so a WS-sent media message wouldn't show the file to other members even if
 it had been saved).
+
+**🔥 NEW — missed-event replay ("sync") on reconnect.** Previously, any message sent
+while a user was offline/backgrounded could only be recovered via a full REST
+history refetch once they reopened the chat. `connect()` now also calls
+`send_missed_events_sync()`, which sends a `sync` event (see table above) — but
+**only to this one new connection**, never broadcast to the room — containing every
+message created after the user's `last_read_message` (or `joined_at`, if they've
+never read anything in this chat) that they didn't send themselves. Bounded to 200
+messages so a very long offline gap (days/weeks) doesn't turn a reconnect into one
+heavy query — the client is expected to fall back to normal paginated REST history
+for a gap that large; this is purely a small-gap UX smoothing, not a replacement for
+history pagination.
+
+**🔥 NEW — presence broadcast to direct chat partners, not just the open room.**
+`presence_update` previously only reached users who had this specific conversation's
+room open (`chat_{conversation_id}`) — a contact-list/chat-list screen that hadn't
+opened this exact chat had no way to learn a partner just came online except polling
+`UserPresenceView` (REST, 15s cache TTL — see `cache_utils.py`). `connect()`/
+`disconnect()` now also call `broadcast_presence_to_partners()`, which pushes the
+same `presence_update` payload straight to every ACTIVE 1-1 (non-group) chat
+partner's own `user_{id}` inbox group (`InboxConsumer`, already used for
+notifications) — so a contact-list screen updates instantly instead of waiting up to
+15s. Deliberately excludes group conversations (a group could have hundreds of
+members; pushing presence to all of them on every connect/disconnect would be very
+noisy for a feature real chat apps typically only show for direct contacts anyway).
+Wrapped in a 3s timeout on `connect()` (logged and swallowed on timeout/failure,
+never blocks the connection itself from completing).
+
+**🔧 GAP FIX — presence race condition (multi-device).** `set_presence()`'s
+`active_connections` counter update used to be an unlocked read-modify-write
+(`get_or_create` + `.save()`). Two connect/disconnect events for the same user
+landing at nearly the same time (multi-device, or a flaky network doing a rapid
+disconnect→reconnect) could lose an update to the counter, and — more visibly —
+whichever write committed to the DB *last* also won in the cache, even if it wasn't
+actually the more recent event chronologically. That's the real cause behind a fast
+offline→online flip sometimes appearing stuck "offline" until the next presence
+event or the 15s cache TTL expired — not something a TTL tweak alone could fix. Now
+wrapped in `select_for_update()` so concurrent presence writes for the same user are
+serialized and always apply in a consistent, correct order.
 
 **Key server-side helpers on `ChatConsumer`:**
 - `save_message()` — creates the `Message` (now including media fields — see above),
@@ -1522,13 +1789,16 @@ computes `duration_seconds` and marks the whole `CallSession` `ENDED`.
       no new logic, both the old and new paths now work.
     - Group photo removal: `GroupViewSet.remove_photo` existed as an action but had no
       matching route; added `DELETE /message/groups/<id>/photo/`.
-20. **`ParentCodeRevealThrottle` added** (`throttles.py`, scope `parent_code_reveal`,
-    for the new `ParentAccessCodeRevealView` in item 18 above) — bounds how often the
-    full plaintext of a parent code can be re-revealed (10/hour suggested), so a
-    compromised student session/device can't be used to bulk-scrape every active code's
-    plaintext at will. `settings.py` wasn't in this file batch, so it isn't confirmed
-    whether `DEFAULT_THROTTLE_RATES["parent_code_reveal"]` has actually been added yet —
-    same failure mode as the other scope-gap entries in §9.1/§14 if it hasn't.
+20. **🔴 `ParentCodeRevealThrottle` added** (`throttles.py`, scope `parent_code_reveal`,
+    for `ParentAccessCodeRevealView`, item 18 above) — bounds how often the full plaintext
+    of a parent code can be re-revealed (10/hour suggested), so a compromised student
+    session/device can't be used to bulk-scrape every active code's plaintext at will.
+    **Now confirmed missing** (upgraded from "not confirmed" — `settings.py` has been
+    reviewed in full this session and has no `parent_code_reveal` entry) — same bug class
+    as item 15: `ParentAccessCodeRevealView`'s first call will raise
+    `ImproperlyConfigured`. 30-second fix: add `"parent_code_reveal": "10/hour"` to
+    `DEFAULT_THROTTLE_RATES`. This is now the **only** remaining missing-rate gap of this
+    kind in the app. See §14's throttle-rates table.
 
 ### 9.1 Fixed in this review
 
@@ -1637,8 +1907,18 @@ computes `duration_seconds` and marks the whole `CallSession` `ENDED`.
 
 ### 9.4 Still open
 
-1. **`is_deleted` on `BaseModel`** exists but nothing in the read code ever sets it or
-   filters by it — either dead field or a soft-delete feature that was never finished.
+1. ~~**`is_deleted` on `BaseModel`** exists but nothing in the read code ever sets it or
+   filters by it — either dead field or a soft-delete feature that was never finished.~~
+   **Resolved** — no longer a dead field, and now directly confirmed in `models.py`:
+   `SoftDeleteManager.get_queryset()` filters `is_deleted=False`, wired as `objects` on
+   `BaseModel` itself (so it applies to **every** model in the app, not just
+   `Conversation`/`Group`), with `all_objects = models.Manager()` alongside it for
+   unfiltered access. `GroupViewSet.destroy()` sets it via `group.soft_delete()`/
+   `conversation.soft_delete()` instead of hard-deleting (§5), `admin.py`'s
+   `SoftDeleteAdmin` (§10) exposes soft-deleted rows + a restore action via
+   `.all_objects`, and `tasks.purge_soft_deleted_conversations` (§10) is the scheduled
+   sweep that reclaims storage after the grace window. See §5 and the
+   `admin.py`/`BaseModel` entries in §2/§10 for the full mechanism.
 2. **`CallSession.token` / Agora fields** (`is_recording`, `recording_url`) exist on the
    model but the app has fully moved to LiveKit — `token` looks unused;
    recording start/stop code was not found anywhere.
@@ -1658,12 +1938,30 @@ computes `duration_seconds` and marks the whole `CallSession` `ENDED`.
    `upload_view.py` uses `default_storage`, so switching the backend (e.g. to S3 via
    `django-storages`) needs zero code changes, only a `settings.py` change. Not urgent
    for a single-server deployment, but local disk means uploaded files don't survive a
-   redeploy/scale-out to multiple app servers.
-6. **`link_preview.py`'s OG-tag parser is regex-based, not a real HTML parser**
-   *(NEW)* — works for the vast majority of real-world `<meta property="og:...">` tags
-   but could miss unusual attribute ordering/quoting on some sites. Fine for a
-   best-effort preview feature (fails closed to "no preview" on a parse miss, never
-   crashes); swap for `BeautifulSoup` if preview accuracy becomes a complaint.
+   redeploy/scale-out to multiple app servers. **Confirmed this batch**:
+   `MessageUploadAPIView.post()` already built its response URL the storage-agnostic way
+   (`default_storage.url(saved_path)`, only falling back to
+   `request.build_absolute_uri(...)` when that isn't already an absolute `http(s)` URL —
+   i.e. only for local `FileSystemStorage`, where it's needed). This avoids a
+   double-scheme bug an earlier, more naive version would have hit under S3: unlike local
+   storage, `default_storage.url()` under S3 already returns a full
+   `https://bucket.s3...`/CDN URL, and running that through `build_absolute_uri()` a
+   second time would have produced a broken, doubled-up URL. So the switch described in
+   this item really is a `settings.py`-only change today — `upload_view.py` doesn't need
+   a matching code change when it happens.
+6. ~~**`link_preview.py`'s OG-tag parser is regex-based, not a real HTML parser**~~
+   **Resolved this batch** — the two hand-rolled regexes (`_OG_TAG_RE`/`_TITLE_TAG_RE`)
+   have been replaced with a real HTML parser (`BeautifulSoup`, `html.parser` backend —
+   stdlib, only adds the `beautifulsoup4` dependency). This was exactly the failure mode
+   flagged here: attribute order flipped, `name=` used instead of `property=` for OG tags
+   (now explicitly accepted as a fallback, first match per property wins), quoting/
+   whitespace variance — all previously silent "no preview" misses on otherwise normal
+   pages, now handled for free by parsing real DOM structure instead of guessing at it
+   via string patterns. Only the parsing step changed; the SSRF-safe fetch (DNS-pin,
+   private-IP block, size/time caps, §9.0 item 10) is untouched. A malformed/truncated
+   `<head>` (expected sometimes, since the fetch stops at `_MAX_BYTES` or the first
+   `</head>`) is still treated as a soft "no preview found", same as every other
+   fail-path in this function — never crashes.
 7. ~~**`ai_smart_reply` throttle scope needs a `DEFAULT_THROTTLE_RATES` entry**~~
    **Resolved/confirmed present this batch** — `settings.py` (reviewed in full this
    batch) has `"ai_smart_reply": "30/min"`. No action needed.
@@ -1688,10 +1986,12 @@ computes `duration_seconds` and marks the whole `CallSession` `ENDED`.
     unlikely given the 5-active-codes cap and student-initiated revoke, grants the same
     read access a deliberately-shared code would), not a missing feature.
 11. ~~**`RevisionDeck` has no confirmed "list past decks" or "delete a deck" endpoint.**~~
-    **Confirmed absent this batch** (not just unconfirmed) — `RevisionDeckView`
-    (`views_ai.py`) only defines `get` (most-recent deck only) and `post` (generate a
-    new one); no list-all or delete action exists. Still genuinely open as a product gap
-    if students are expected to browse older decks before an exam.
+    **Resolved this session** — `RevisionDeckView` (`views_ai.py`) now defines
+    `GET ?history=true` (list every deck for the conversation, newest first, capped at
+    50, lightweight — no flashcards/quiz payload), `GET ?deck_id=<id>` (fetch one
+    specific deck's full content), and `delete` (`?deck_id=<id>`, restricted to whoever
+    generated that specific deck). See §6/§7.15 for full shapes. The product gap this
+    item used to flag (students needing to browse older decks before an exam) is closed.
 12. **`generate_revision_deck`'s 24h content-hash cache sits a bit awkwardly against the
     model's "always create a new persisted row" design** — a cache hit still means the
     caller creates a fresh `RevisionDeck` row from the cached data, so the cache saves a
@@ -1711,52 +2011,75 @@ computes `duration_seconds` and marks the whole `CallSession` `ENDED`.
     `translation_service.py`, but it cannot currently serve a single successful request
     (missing throttle-rate entry + missing API key, both confirmed absent from
     `settings.py`).
-15. **🔴 Six throttle scopes are wired to real views via `throttle_classes`/
-    `get_throttles()` but have NO `DEFAULT_THROTTLE_RATES` entry in `settings.py`**
-    *(NEW this batch, CONFIRMED — `settings.py` was reviewed in full)* — every one of
-    these will raise `ImproperlyConfigured` (a guaranteed 500) on its very first call,
-    the exact same bug class `settings.py`'s own comment history documents having hit
-    `message_send`/`call_initiate`/`group_create`/`reaction`/`ai_transcribe`/
-    `ai_smart_reply` before (all six of those are now fixed and confirmed present):
-    | Scope | Throttle class | View | 30-second fix |
-    |---|---|---|---|
-    | `translate` | `TranslateThrottle` (`throttles.py`) | `MessageViewSet.translate` | add `"translate": "30/min"` |
-    | `parent_code_verify_ip` | `ParentCodeVerifyThrottle` (`throttles.py`) | `ParentVerifyCodeView` | add `"parent_code_verify_ip": "10/min"` |
-    | `ai_class_transcript_chunk` | `ClassTranscriptChunkThrottle` (`views_ai.py`) | `ClassTranscriptChunkUploadView` | add `"ai_class_transcript_chunk": "30/min"` |
-    | `ai_class_transcript_search` | `ClassTranscriptSearchThrottle` (`views_ai.py`) | `ClassTranscriptSearchView` | add `"ai_class_transcript_search": "60/min"` |
-    | `ai_classroom_copilot` | `ClassroomCopilotThrottle` (`views_ai.py`) | `ClassroomCopilotView` | add `"ai_classroom_copilot": "15/min"` |
-    | `ai_revision_deck` | `RevisionDeckThrottle` (`views_ai.py`) | `RevisionDeckView` | add `"ai_revision_deck": "10/min"` |
-
-    Rates in the table are each throttle class's own `rate =` attribute (its intended
-    rate, per its own comment) — same reasoning `settings.py` used for every prior fix
-    of this exact bug class. This means **Feature 9 (translate), Parent Mode's
+15. ~~**🔴 Six throttle scopes are wired to real views via `throttle_classes`/
+    `get_throttles()` but have NO `DEFAULT_THROTTLE_RATES` entry in `settings.py`**~~
+    **Resolved this session** — `settings.py` now has all six: `"translate": "30/min"`,
+    `"parent_code_verify_ip": "10/min"`, `"ai_class_transcript_chunk": "30/min"`,
+    `"ai_class_transcript_search": "60/min"`, `"ai_classroom_copilot": "15/min"`,
+    `"ai_revision_deck": "10/min"` — each matching its throttle class's own intended rate.
+    `"focus_session": "20/min"` is present too. Feature 9 (translate), Parent Mode's
     unauthenticated verify endpoint, and all 4 of the newest AI endpoints (transcript
-    chunk upload, transcript search, classroom copilot, revision deck) are all
-    currently guaranteed to 500 on first use.**
-16. **🔴 `GOOGLE_TRANSLATE_API_KEY` is not set anywhere in `settings.py`** *(NEW this
-    batch, CONFIRMED)* — even after item 15's throttle fix, every call to
-    `MessageViewSet.translate` would still fail, this time with a clean `503`
-    (`TranslationServiceUnavailable`) rather than a 500, since
-    `translation_service.translate_text`'s `getattr(settings, 'GOOGLE_TRANSLATE_API_KEY',
-    None)` finds nothing. Feature 9 needs both fixes (throttle rate + API key) before it
-    can serve a single real translation. See §13/§14.
-17. **🔴 Announcements (§7.17, Feature 11) does not actually activate via the REST
-    message-send path** *(NEW this batch, CONFIRMED — corrects a wrong assumption in the
-    previous revision of this doc)* — `views.py`'s `ConversationViewSet.messages` (the
-    REST send flow) never sets `Message.is_announcement` and never passes
-    `is_announcement=True` to `send_chat_message_push`/`send_mention_push`, even for a
-    confirmed group admin/moderator sender. The model field and the entire push-side
-    handling (`push_utils.py`) are correctly built and would work immediately if fed
-    `True` — the gap is purely that nothing in the REST path computes/passes the flag.
-    Fix would be small: capture the `is_group_admin_or_mod(...)` (or
-    `cache_utils.get_group_role_cached`) result already available at the
-    message-permission-check point in `ConversationViewSet.messages`, pass it as
-    `is_announcement=` to both push calls, and set it on the `Message` row itself
-    (`serializer.save(..., is_announcement=<bool>)`). `consumers.py` (the WS send path)
-    wasn't part of this file batch, so it's unconfirmed whether the same gap exists
-    there or not — check before assuming either way.
+    chunk upload, transcript search, classroom copilot, revision deck) no longer 500 on
+    first use. See §14's throttle-rates table for the current per-scope status.
+16. ~~**🔴 `GOOGLE_TRANSLATE_API_KEY` is not set anywhere in `settings.py`**~~
+    **Resolved this session** — `settings.py` now sets
+    `GOOGLE_TRANSLATE_API_KEY = os.environ.get("GOOGLE_TRANSLATE_API_KEY", "")`. Feature 9
+    still needs the actual env var populated at deploy time (an empty string is falsy, so
+    `translate_text` still 503s until `GOOGLE_TRANSLATE_API_KEY` is actually set in the
+    environment) — but the code-side wiring gap (item 15 + this item) is fully closed.
+    See §13/§14.
+17. ~~**🔴 Announcements (§7.17, Feature 11) does not actually activate via the REST
+    message-send path.**~~ **Resolved this session** — `ConversationViewSet.messages`
+    (REST) now captures `is_announcement = is_group_admin_or_mod(group, request.user.id)`
+    at the same point it already checks `message_permission` (reusing that result, no
+    extra query), and passes it both into `serializer.save(..., is_announcement=
+    is_announcement)` and through to the push calls. `consumers.py` (WS send path, now
+    confirmed in this batch — previously flagged as unconfirmed here) has the identical
+    fix: `save_message()` computes the same `is_group_admin_or_mod(group, sender_id)`
+    check before `Message.objects.create()` and threads `is_announcement` through to
+    `send_push_for_message`/`send_mention_push_notification` too. Both call-sites'
+    fix comments describe the exact same prior gap this item used to flag (the flag was
+    computed for the permission gate but never stored/reused, so it silently defaulted
+    to `False` on every message regardless of sender role) — the model field and
+    push-side handling (`push_utils.py`) were already correct; only the REST and WS
+    send paths needed to actually compute and pass the value, and now both do.
 18. ~~**`FocusSessionView` (§7.18, Feature 12) is fully coded but not wired into
     `urls.py`**~~ — **RESOLVED this batch**, see §9.0.
+19. **🔴 `services.create_bell_rows_for_push` (§7.22, task 44) is confirmed NOT called
+    anywhere.** With `views.py` now available: no `from .services import` line exists in
+    `views.py` at all (checked its full import block), and there is no
+    `create_bell_rows_for_push`/`Notification`/`core.services` reference anywhere in the
+    file. The function is fully implemented and safe to call, but it is dead code today —
+    zero bell/notification-center rows are being created for chat messages, mentions, or
+    calls, despite `services.py`'s own comments describing it as already wired in
+    alongside `send_chat_message_push`/`send_mention_push`/`send_incoming_call_push`.
+    Needs an actual `views.py` change to close, not just a doc update.
+20. **🔴 `offline_queue.flush_offline_queue` (§7.23, task 49) is confirmed to have no
+    REST endpoint anywhere.** `views.py` and `urls.py` are both now available and neither
+    imports nor references `offline_queue`/`flush_offline_queue` in any form — no
+    `@action`, no `path()` entry, nothing. The delivery function itself is complete and
+    correct, but there is currently **no way for a client to reach it** — it's an
+    unreachable capability, not just an unconfirmed one.
+21. **🔴 `services.py`'s `create_group`/`add_members_to_group`/`remove_group_member`/
+    `update_group_member_role` are confirmed NOT used by `GroupViewSet`.** With `views.py`
+    now available: `GroupViewSet.create`/`add_members`/`update_member` each still carry
+    their own complete, independent inline implementation (verified directly — `create()`
+    builds the `Conversation`/`Group`/`GroupMember` rows itself, `add_members()` does its
+    own `get_or_create` loop, `update_member()` does its own field-by-field update), and
+    `views.py`'s import block has no `from .services import ...` line at all. Worse: `views.py`
+    still defines its **own** module-level `add_or_reactivate_participant(conversation,
+    user)` (line ~157) — the exact function `services.py`'s docstring claims was "moved
+    here from `views.py`, which now imports it from here". It wasn't moved; it was
+    copied, and `views.py` kept using its own original. That means this codebase now has
+    **two independent copies** of `add_or_reactivate_participant` (one in `views.py`, one
+    in `services.py`) that can silently drift apart — precisely the failure pattern
+    `permissions.py`'s `IsGroupAdminOrModerator` docstring and `constants.py`'s
+    `MAX_PINNED_PER_CONVERSATION` docstring both describe this codebase having already
+    been burned by once. `services.py` as a whole should currently be treated as
+    **unused/parallel code**, not a refactor that already happened — `GroupViewSet`
+    still self-contains all its own group-management logic (correctly, and using
+    `is_group_admin_or_mod`/`invalidate_group_role_cache` directly, same as the rest of
+    the ViewSet — see `_require_admin`, §5).
 
 ---
 
@@ -1768,6 +2091,86 @@ computes `duration_seconds` and marks the whole `CallSession` `ENDED`.
   `permission_field` ∈ `{'message_permission','call_permission','study_room_permission'}`
 - `check_daily_message_limit(group, user, conversation) -> (allowed, reason)` — admin/mod
   exempt; simple day-boundary `Message.count()` query (no extra table)
+
+### `services.py` *(NEW — task 27 + task 44, see §5/§7.22)*
+- `create_group(created_by, name, description='', photo_url=None, is_private=False,
+  member_ids=()) -> Group` — creates the `Conversation` + `Group` in one transaction,
+  creator as `ADMIN`, given `member_ids` as plain `MEMBER` (creator auto-excluded from
+  that list if present, never double-added)
+- `add_members_to_group(group, actor, user_ids) -> list[User]` — `actor=None` skips the
+  private-group admin/mod check (internal/system callers, e.g. `classroom_chat_bridge`);
+  already-member users are silently skipped, not an error. Returns only the
+  newly-added users
+- `remove_group_member(group, actor, user_id) -> None` — self-remove needs no permission
+  check; removing someone else requires admin/mod (skipped if `actor=None`)
+- `update_group_member_role(group, actor, user_id, data) -> GroupMember` — `data` may set
+  any of `role`/`is_muted`/`is_banned`; banning/unbanning also toggles the matching
+  `ConversationParticipant.left_at`
+- `require_group_admin_or_mod(group, user) -> None` — raises plain `PermissionError` (not
+  DRF's) if `user` isn't admin/mod; caller converts to whatever error shape it needs
+- `add_or_reactivate_participant(conversation, user)` — moved here from `views.py`;
+  creates a `ConversationParticipant` or un-sets `left_at` on an existing one. Reused by
+  `offline_queue.py` (§7.23)
+- `generate_group_invite_code() -> str` — unique `secrets.token_urlsafe` code, retries on
+  collision
+- `create_bell_rows_for_push(recipient_ids, notif_type, title, message, data=None)`
+  *(NEW — task 44)* — one `core.models.Notification` "bell" row per recipient,
+  best-effort (never raises — logs and swallows per-recipient failures). Meant to run
+  alongside the existing FCM push helpers, not replace them; exact `views.py` call-sites
+  not independently confirmed this batch — see §9.4 item 19
+
+### `offline_queue.py` *(NEW — task 49, see §7.23)*
+- `flush_offline_queue(conversation, sender, queued_messages) -> list[dict]` — processes a
+  batch of locally-queued messages (each with a required `client_id`), in order, returning
+  one `{"client_id", "status": "created"|"duplicate"|"error", "message_id"?, "detail"?}`
+  per item so the client can reconcile its local queue
+- `_get_or_create_queued_message(conversation, sender, item) -> (Message, created: bool)`
+  — idempotent create backed by the DB-level `unique_message_client_id` constraint
+  (§2) + an `IntegrityError` catch, not `get_or_create()` alone (not race-safe under
+  genuinely concurrent duplicate submissions)
+- `_deliver_queued_message(message)` — same 4 things `finalize_scheduled_message`
+  (`scheduled_messages.py`) does for scheduled messages and the live REST/WS send paths
+  do for a real-time send: denormalized conversation last-message fields, unread-count
+  bump, `MessageStatus` rows, @mentions, `GroupMedia` gallery, WS broadcast
+  (`chat_message` + `inbox_update`), and push (mute/mention/Focus-Mode-aware, same as
+  every other send path) — tagged with `delivered_from_offline_queue: True` in the WS
+  payload so the client can distinguish it from a live send if it wants to
+- Kept as its own delivery function rather than sharing code with
+  `scheduled_messages.finalize_scheduled_message` — deliberate, per this codebase's
+  established one-function-per-entry-point convention (see the file's own docstring)
+
+### `link_preview.py` *(NEW this session — see §7.5, File Map)*
+- `extract_first_url(text) -> str | None` — first `http(s)://` URL found in message text
+- `fetch_link_preview(url) -> dict | None` — returns `{"url", "title", "description",
+  "image"}`, or `None` on any failure (unsafe URL, timeout, non-200, non-HTML, too many
+  redirects) — every failure mode is a silent `None`, never an exception, since a preview
+  is a nice-to-have that must never affect message delivery
+- SSRF-safe by construction: only `http`/`https`; hostname resolved and every candidate
+  IP checked against private/loopback/link-local/multicast/reserved/unspecified ranges
+  (`_resolve_safe_ip`) — an attacker can't hide a malicious IP behind a multi-A-record
+  hostname, since ANY private IP in the set fails the whole hostname; redirects are
+  followed manually (not via `requests`' own `allow_redirects`) so each hop gets the same
+  IP check, not just the original URL
+- **DNS-rebinding (TOCTOU) fix**: `_pinned_dns()` is a scoped context manager that
+  monkey-patches `socket.getaddrinfo` for the duration of one fetch, so the IP address
+  `requests` actually connects to is guaranteed to be the exact same IP `_resolve_safe_ip`
+  already validated — without this, `requests` would re-resolve the hostname itself at
+  connect time, and an attacker controlling their own domain's DNS (TTL=0) could return a
+  safe public IP for the check and a private/internal IP moments later for the real
+  connection. Guarded by a module-level lock (`_dns_pin_lock`) so overlapping fetches in
+  the same process can't clobber each other's patch — safe under Celery's default prefork
+  worker pool (each worker is its own process); would need a per-thread/per-greenlet
+  resolver override instead if ever switched to a threaded/gevent pool.
+- OG-tag/title parsing uses `BeautifulSoup` (`html.parser` backend), not hand-rolled
+  regexes — the previous regex approach silently produced "no preview" for attribute
+  order variations, `name=` instead of `property=` on OG tags, quote style, etc., with no
+  way to tell a real "no preview available" apart from "the parser just didn't recognize
+  this valid HTML". Accepts both `property=` (spec) and `name=` (common non-standard
+  variant) for OG tags.
+- Bounded fetch: 4s timeout, 300KB / stops at `</head>` (whichever first) — only the
+  `<head>` is ever needed, not the full page
+- 7-day cache by URL, including negative results (`{}` for "no preview found") — a
+  permanently-dead or non-HTML URL isn't refetched on every subsequent message
 
 ### `mentions.py` *(NEW)*
 - `extract_mentioned_user_ids(text, conversation) -> list[int]`
@@ -1922,22 +2325,47 @@ computes `duration_seconds` and marks the whole `CallSession` `ENDED`.
 
 ### `attendance_utils.py` *(NEW — see §2/§7.16)*
 - `compute_attendance_stats(conversation, user) -> dict` — the single source of truth for
-  attendance-streak math, shared by `StudyRoomStreakView` and `ParentDashboardView` (both
-  call this instead of each having their own copy — see §7.16 for why that mattered
-  here specifically).
+  attendance-streak math. Used by `StudyRoomStreakView` (single classroom, student's own
+  view — see §7.16 for why a shared helper mattered here specifically, given this
+  codebase's history of the same rule drifting across copies).
 - Returns `{"current_streak", "longest_streak", "total_classes_attended",
   "last_attended"}` (the last as an ISO date string, or `None` if the user has never
   attended). Reads distinct `attended_date`s from `StudyRoomAttendance`, descending.
 - Current streak: walks backward day-by-day from today (falling back to yesterday if
   today's date isn't in the set yet — i.e. today's class hasn't happened/been joined).
   Longest streak: single pass over the full sorted date list, tracking the longest run
-  of consecutive days.
+  of consecutive days. Both the single and bulk variant below funnel through one shared
+  private helper (`_stats_from_sorted_dates`) so this math can never drift between the
+  two entry points.
+- `compute_attendance_stats_bulk(conversation_ids, user) -> {conversation_id: dict}`
+  *(NEW — N+1 fix)* — `ParentDashboardView` previously called `compute_attendance_stats`
+  once **per classroom** the student is in (1 query per classroom). This variant fetches
+  every `StudyRoomAttendance` row for all the given `conversation_ids` in a single query,
+  groups the dates by conversation in Python, then runs each group through the same
+  `_stats_from_sorted_dates` helper the single-conversation function uses — so the result
+  is guaranteed identical to calling `compute_attendance_stats` per classroom, just at a
+  fixed ~1 query total regardless of how many classrooms the student is in. Every
+  requested `conversation_id` is guaranteed a key in the result (an all-zero dict if the
+  student never attended that classroom), so `ParentDashboardView` doesn't need any
+  missing-key handling. See §7.16/§6 (Parent Dashboard) for where this is now used.
 
 ### `admin.py` *(fix — see §9.0)*
 - Registers every model in `models.py`, including `GroupJoinRequest`, `DeviceToken`, and
   `StudyRoomState` — previously unregistered despite being in active use, leaving
   ops/support without an admin UI for pending join requests, push tokens, or saved
   whiteboard state.
+- `SoftDeleteAdmin(admin.ModelAdmin)` *(NEW — used for `Conversation` and `Group`)* —
+  plain `admin.site.register()` uses a model's default manager (`.objects`) for its
+  changelist queryset, and `Conversation`/`Group` now default to a `SoftDeleteManager`
+  (§2/§5) that filters out `is_deleted=True` rows — so without this, a soft-deleted group
+  (`GroupViewSet.destroy()`, §5) would simply vanish from the admin too, with no way for
+  ops/support to find it, inspect it, or undo the delete during the
+  `GROUP_SOFT_DELETE_GRACE_DAYS` window before the hard-delete purge task runs. Instead,
+  `SoftDeleteAdmin.get_queryset()` points the changelist at `self.model.all_objects.all()`
+  so soft-deleted rows stay visible, adds an `is_deleted` column/filter to the changelist,
+  and adds a bulk **"Restore selected (undo soft-delete)"** admin action
+  (`queryset.update(is_deleted=False)`) so a group deleted by accident can be recovered
+  without a raw DB query.
 
 ### `search_utils.py` *(NEW this session — see §7.1, §9.0 item 4)*
 - `MIN_QUERY_LENGTH = 2` — queries shorter than this should be rejected by the caller
@@ -1972,7 +2400,11 @@ computes `duration_seconds` and marks the whole `CallSession` `ENDED`.
 - Presence cache: `get_presence_cached(user_id)` / `set_presence_cache(user_id,
   is_online, last_seen_at)` — 15s TTL (presence changes far more often than a role
   does). Read from `UserPresenceView`, written from `ChatConsumer.set_presence()` on
-  every connect/disconnect.
+  every connect/disconnect. `invalidate_presence_cache(user_id)` also exists (same
+  `cache.delete()` pattern as `invalidate_group_role_cache`) but **isn't imported or
+  called anywhere in `consumers.py`/`views.py` this batch** — presence currently relies
+  entirely on the 15s TTL expiring rather than an explicit invalidate-on-write, so this
+  helper is available but effectively unused right now.
 
 ### `throttles.py`
 - REST (DRF `UserRateThrottle` subclasses, per-authenticated-user, cache-backed):
@@ -1994,12 +2426,21 @@ computes `duration_seconds` and marks the whole `CallSession` `ENDED`.
   (skip_locked=True)` + bounded 200/run batch so overlapping beat ticks can't
   double-send. See §10's `scheduled_messages.py` entry below.
 - `cleanup_expired_messages` — beat-scheduled every 15 min; hard-deletes disappearing
-  messages past `expires_at` (bounded 500/batch loop). Confirmed this batch to query via
-  `Message.all_objects` rather than the default `Message.objects` manager — implies a
-  custom default manager exists that filters something out (most likely `is_deleted`,
-  see §9.4 item 1) and this sweep deliberately needs to see filtered-out rows too, so it
-  can still hard-delete an already-soft-deleted-and-expired message. `models.py` wasn't
-  in this file batch, so the manager's exact filtering logic isn't confirmed.
+  messages past `expires_at` (bounded 500/batch loop). Uses `Message.all_objects` (not
+  `.objects`) — since `BaseModel`'s default `objects = SoftDeleteManager()` filters
+  `is_deleted=True` out of every model including `Message`, this sweep deliberately opts
+  into the unfiltered manager so it can still hard-delete an already-soft-deleted-and-
+  expired message.
+- `purge_soft_deleted_conversations` — **now directly confirmed in `tasks.py` +
+  `settings.py`**: beat-scheduled daily at 03:30 (`"message-purge-soft-deleted-
+  conversations"` in `CELERY_BEAT_SCHEDULE`). Queries `Conversation.all_objects.filter(
+  is_deleted=True, updated_at__lte=cutoff)` (bounded 200/run batch), where `cutoff = now -
+  GROUP_SOFT_DELETE_GRACE_DAYS` (`settings.py`, default `7`, env-overridable). Re-filters
+  on the actual delete (`is_deleted=True, updated_at__lte=cutoff` again) so a `.restore()`
+  that lands in the gap between the initial fetch and the delete isn't clobbered by a
+  stale read. This is the other half of `GroupViewSet.destroy()`'s soft-delete (§5): the
+  soft-delete makes a group-delete recoverable for the grace window, this sweep actually
+  reclaims storage (CASCADE hard-delete of the `Conversation`) once that window passes.
 - `generate_link_preview_task` / `transcribe_voice_message_task` — one-shot,
   `.delay(message_id)`-triggered right after a message is created (REST/WS/scheduled),
   not beat-scheduled. See §7.5/§7.6. Share `_broadcast_meta_update()` to push their
@@ -2135,7 +2576,7 @@ computes `duration_seconds` and marks the whole `CallSession` `ENDED`.
 | `CHAT_PUSH_DIGEST_ENABLED` *(NEW this batch)* | `push_utils.py` | Default `True`. Set `False` to disable all push grouping — every message gets its own plain push via `_send_single_chat_push`, no streak counter involved at all |
 | `MEDIA_ABSOLUTE_BASE_URL` (Django setting, not env strictly) | `user_display.py` | Used only when no `request` context is available (WS payloads) |
 | `REDIS_URL` (or `CELERY_BROKER_URL` as fallback) | `settings.py` → `CHANNEL_LAYERS`, `CACHES`, Celery | **Not `message`-specific**, but this app's realtime broadcast, all its caches, and its Celery tasks all depend on it being set in production — see §14 |
-| `GOOGLE_TRANSLATE_API_KEY` *(NEW this batch)* | `translation_service.py` (Feature 9) | **🔴 Confirmed NOT SET anywhere in `settings.py`** — `translate_text()`'s `getattr(settings, 'GOOGLE_TRANSLATE_API_KEY', None)` finds nothing, so `MessageViewSet.translate` currently 503s (`TranslationServiceUnavailable`) even once the missing `translate` throttle rate (§9.4 item 15) is fixed. See §9.4 item 16 |
+| `GOOGLE_TRANSLATE_API_KEY` | `translation_service.py` (Feature 9) | **Now wired in `settings.py`** *(fix — see §9.4 item 16)* — `GOOGLE_TRANSLATE_API_KEY = os.environ.get("GOOGLE_TRANSLATE_API_KEY", "")`. Code-side gap is closed; the actual key still needs to be set in the deploy environment, or `translate_text()` will 503 (`TranslationServiceUnavailable`) on an empty string same as before |
 
 ---
 
@@ -2202,11 +2643,12 @@ This app doesn't ship its own settings — everything below lives in the project
     disappearing-message sweep follows.
 
 ### REST throttle rates (`REST_FRAMEWORK["DEFAULT_THROTTLE_RATES"]`)
-`settings.py` reviewed in full this batch. 8 of the `message`/`liveclass`-adjacent
-custom throttle scopes relevant to this app are **confirmed present** (including
-`ai_smart_reply`, previously flagged as unconfirmed — now resolved). **6 scopes wired to
-real views are confirmed MISSING** — a guaranteed `ImproperlyConfigured` (500) on each
-one's first call. See §9.4 item 15 for the full writeup and one-line fixes.
+`settings.py` re-reviewed in full this session. 15 of the 16 `message`-relevant custom
+throttle scopes are **confirmed present**, including all 6 that were confirmed missing in
+the previous review (`translate`, `parent_code_verify_ip`, `ai_class_transcript_chunk`,
+`ai_class_transcript_search`, `ai_classroom_copilot`, `ai_revision_deck`) plus
+`focus_session` — see §9.4 items 15/16 (resolved). **Exactly 1 scope wired to a real view
+is still confirmed MISSING**: `parent_code_reveal` — see §9.0 item 20.
 
 | Scope | Rate | Throttle class | Guards | Status |
 |---|---|---|---|---|
@@ -2218,15 +2660,15 @@ one's first call. See §9.4 item 15 for the full writeup and one-line fixes.
 | `reaction` | 120/min | `ReactionThrottle` | `MessageViewSet.react` | ✅ present |
 | `ai_study` | 20/min | `AiStudyThrottle` | `AiStudyRoomView` | ✅ present |
 | `ai_transcribe` | 15/min | `AiTranscribeThrottle` | `VoiceTranscribeView` | ✅ present |
-| `ai_smart_reply` | 30/min | `SmartReplyThrottle` | `SmartReplySuggestionsView` | ✅ present *(resolved this batch)* |
-| `translate` | 30/min (intended) | `TranslateThrottle` | `MessageViewSet.translate` | 🔴 **MISSING** — see §9.4 item 15/16 |
-| `parent_code_verify_ip` | 10/min (intended) | `ParentCodeVerifyThrottle` | `ParentVerifyCodeView`, per-IP | 🔴 **MISSING** — see §9.4 item 15 |
-| `ai_class_transcript_chunk` | 30/min (intended) | `ClassTranscriptChunkThrottle` | `ClassTranscriptChunkUploadView` | 🔴 **MISSING** — see §9.4 item 15 |
-| `ai_class_transcript_search` | 60/min (intended) | `ClassTranscriptSearchThrottle` | `ClassTranscriptSearchView` | 🔴 **MISSING** — see §9.4 item 15 |
-| `ai_classroom_copilot` | 15/min (intended) | `ClassroomCopilotThrottle` | `ClassroomCopilotView` | 🔴 **MISSING** — see §9.4 item 15 |
-| `ai_revision_deck` | 10/min (intended) | `RevisionDeckThrottle` | `RevisionDeckView` | 🔴 **MISSING** — see §9.4 item 15 |
-| `focus_session` | 20/min | `FocusSessionThrottle` | `FocusSessionView` *(now wired — Gap Fix #2)* | ✅ present — rate + throttle class + `urls.py` route (§9.0 item 17) all now in place |
-| `parent_code_reveal` *(NEW this batch)* | 10/hour (suggested) | `ParentCodeRevealThrottle` | `ParentAccessCodeRevealView` | ⚠️ **not confirmed** — `settings.py` wasn't in this file batch; see §9.0 item 20 |
+| `ai_smart_reply` | 30/min | `SmartReplyThrottle` | `SmartReplySuggestionsView` | ✅ present |
+| `translate` | 30/min | `TranslateThrottle` | `MessageViewSet.translate` | ✅ present *(fixed this session — was missing, §9.4 item 15)* |
+| `parent_code_verify_ip` | 10/min | `ParentCodeVerifyThrottle` | `ParentVerifyCodeView`, per-IP | ✅ present *(fixed this session)* |
+| `ai_class_transcript_chunk` | 30/min | `ClassTranscriptChunkThrottle` | `ClassTranscriptChunkUploadView` | ✅ present *(fixed this session)* |
+| `ai_class_transcript_search` | 60/min | `ClassTranscriptSearchThrottle` | `ClassTranscriptSearchView` | ✅ present *(fixed this session)* |
+| `ai_classroom_copilot` | 15/min | `ClassroomCopilotThrottle` | `ClassroomCopilotView` | ✅ present *(fixed this session)* |
+| `ai_revision_deck` | 10/min | `RevisionDeckThrottle` | `RevisionDeckView` | ✅ present *(fixed this session)* |
+| `focus_session` | 20/min | `FocusSessionThrottle` | `FocusSessionView` | ✅ present |
+| `parent_code_reveal` | 10/hour (intended) | `ParentCodeRevealThrottle` | `ParentAccessCodeRevealView` | 🔴 **MISSING** — confirmed this session; see §9.0 item 20 |
 
 Project-wide floor (applies to `message`'s views too, on top of the above where set):
 `DEFAULT_THROTTLE_CLASSES = [UserRateThrottle, AnonRateThrottle]`, rates `user: 100/min`,
@@ -2282,23 +2724,24 @@ Plus the "Still open" items in §9.4 — smaller than the above, but worth clear
 new facilities are stacked on top.
 
 *(Classroom Copilot, Revision Deck, and Study Room Attendance/Streak + Parent Mode were
-not previously tracked in this doc at all — added this batch as §7.14–§7.16/§2/§10, from
+not previously tracked in this doc at all — added as §7.14–§7.16/§2/§10, from
 `ai_service.py`, `models.py`, and `attendance_utils.py`. Their REST endpoints
-(`views.py`/`views_ai.py`/`views_parent.py`/`urls.py`) weren't part of this file batch,
-so those four features carry an "endpoint details not independently confirmed" flag —
-see §9.4 items 9–12. Confirm against those files before building further on top of
-them.)*
+(`views.py`/`views_ai.py`/`views_parent.py`/`urls.py`) are now confirmed — see §6 and
+§9.4 items 9–12 (all resolved).)*
 
 *(Announcements, Focus Mode/Smart DND, Class Transcript, Doubt Queue, and Message
-Translation were also not previously tracked in this doc — added this batch as
-§7.17–§7.21/§2/§6/§10, from `models_focus.py`, `permissions.py`, `push_utils.py`,
-`tasks.py`, `serializers.py`, `throttles.py`, and `translation_service.py`. Of these,
-Announcements and Focus Mode are confirmed end-to-end on the push side
-(`push_utils.py`); Message Translation is confirmed on the service/throttle side only.
-All five still carry an "endpoint/route not independently confirmed" flag for their
-`views.py`/`views_parent.py`/`views_ai.py`/`urls.py` half — see §9.4 items 9 and 14, and
-§6/§7.16/§7.20/§7.21 for exactly what is vs. isn't confirmed per feature. This session's
-`urls.py` reconstruction (from `views.py`'s actual action names) also did **not**
-surface a `translate` route anywhere, including its own "router auto-generates"
-reference comment — worth double-checking whether the endpoint is wired at all yet, not
-just undocumented.)*
+Translation were also not previously tracked in this doc — added as §7.17–§7.21/§2/§6/§10,
+from `models_focus.py`, `permissions.py`, `push_utils.py`, `tasks.py`, `serializers.py`,
+`throttles.py`, `translation_service.py`, and now `models.py`/`settings.py`. All five are
+confirmed end-to-end: model, service/push layer, and route (`POST
+/message/messages/<id>/translate/` for Translation — see §6/§9.1 item — plus the matching
+`DEFAULT_THROTTLE_RATES` entries, §9.4 items 15/16, and `GOOGLE_TRANSLATE_API_KEY`, §13).
+The one remaining gap in this group is unrelated to routing: `parent_code_reveal`'s
+throttle rate is still missing from `settings.py` — see §9.0 item 20.)*
+
+*(The Group Management Service Layer, Bell-Row Notifications, and Offline Message Queue
+were also not previously tracked in this doc — added as §5/§7.22–§7.23/§10, from
+`services.py` (tasks 27 & 44) and `offline_queue.py` (task 49). Unlike most of the groups
+above, these are **not** end-to-end confirmed: `views.py`/`urls.py` weren't re-uploaded
+this batch, so the REST wiring that would actually reach `services.py`'s functions and
+`offline_queue.flush_offline_queue` is unverified — see §9.4 items 19–21.)*

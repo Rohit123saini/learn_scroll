@@ -1,5 +1,6 @@
 from rest_framework import serializers
-from .models import User
+from .models import User, phone_validator
+from django.core.exceptions import ValidationError as DjangoValidationError
 import re
 
 
@@ -38,6 +39,30 @@ def validate_strong_password(value):
             "Password must contain one special character."
         )
 
+    return value
+
+
+def validate_phone_format(value):
+    """
+    Shared phone-format rule used by both SignupSerializer and
+    CompleteProfileSerializer, so the two never silently drift apart —
+    same spirit as validate_strong_password above.
+
+    Reuses login.models.phone_validator (the same RegexValidator declared
+    on User.phone) instead of a separate isdigit()+len() check. Before
+    this, the old serializer-level check (plain isdigit(), max 15 chars)
+    was LOOSER than the model's validator (which requires 8-15 digits,
+    no leading zero, optional leading '+') — since these serializers
+    override `phone` with a plain CharField(), the model's validators
+    never actually ran (DRF only auto-attaches a model field's
+    validators when it builds the field itself, not when you redeclare
+    it). That gap meant bad phone numbers (too short, leading zero)
+    could reach the DB without ever being rejected.
+    """
+    try:
+        phone_validator(value)
+    except DjangoValidationError as exc:
+        raise serializers.ValidationError(exc.message)
     return value
 
 
@@ -107,15 +132,7 @@ class SignupSerializer(serializers.ModelSerializer):
 
         value = value.strip()
 
-        if not value.isdigit():
-            raise serializers.ValidationError(
-                "Phone number must contain digits only."
-            )
-
-        if len(value) > 15:
-            raise serializers.ValidationError(
-                "Phone number is too long."
-            )
+        value = validate_phone_format(value)
 
         if User.objects.filter(phone=value).exists():
             raise serializers.ValidationError(
@@ -210,14 +227,8 @@ class CompleteProfileSerializer(serializers.Serializer):
     def validate_phone(self, value):
         value = value.strip()
 
-        if not value.isdigit():
-            raise serializers.ValidationError(
-                "Phone number must contain digits only."
-            )
-        if len(value) > 15:
-            raise serializers.ValidationError(
-                "Phone number must be valid."
-            )
+        value = validate_phone_format(value)
+
         if User.objects.filter(phone=value).exists():
             raise serializers.ValidationError(
                 "Phone number already exists."

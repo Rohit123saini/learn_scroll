@@ -34,7 +34,8 @@ from .models import (
     Coupon,
     LivePoll,
     Notice,
-    Notification,
+    ParentMessageTemplate,
+    ParentTeacherMessage,
     PassDailyCharge,
     PassGift,
     PassPurchase,
@@ -558,16 +559,10 @@ class ClassQueryAdmin(admin.ModelAdmin):
 
 
 # ---------------------------------------------------------------------------
-# 21. Notification
+# NOTE (task 42 — core-app migration): NotificationAdmin used to live here.
+# Notification now lives in core/models.py, so its admin registration moved
+# to core/admin.py to avoid importing a cross-app model into this admin.py.
 # ---------------------------------------------------------------------------
-@admin.register(Notification)
-class NotificationAdmin(admin.ModelAdmin):
-    list_display = ("recipient", "notif_type", "title", "classroom", "session", "is_read", "created_at")
-    list_filter = ("notif_type", "is_read")
-    search_fields = ("recipient__username", "title", "message")
-    autocomplete_fields = ["recipient", "classroom", "session"]
-    readonly_fields = ("created_at",)
-    date_hierarchy = "created_at"
 
 
 # ---------------------------------------------------------------------------

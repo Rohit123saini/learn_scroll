@@ -51,6 +51,8 @@ from rest_framework.test import APIClient
 
 from login.models import User
 
+from core.models import Notification, NotificationPreference
+
 from .models import (
     ChatMessage,
     ChatMessageReport,
@@ -67,8 +69,8 @@ from .models import (
     CoinTransaction,
     CoinWithdrawal,
     Coupon,
-    Notification,
-    NotificationPreference,
+    ParentMessageTemplate,
+    ParentTeacherMessage,
     PassDailyCharge,
     PassGift,
     PassPurchase,
@@ -677,6 +679,42 @@ class ClassReferralCommissionTests(LiveClassTestBase):
         self.assertFalse(
             CoinTransaction.objects.filter(reason=CoinTransaction.Reason.CLASS_REFERRAL_COMMISSION).exists()
         )
+
+    # --- task 65: student-side one-time join bonus ---
+
+    def test_referred_student_gets_one_time_join_bonus(self):
+        before = self.student.coin
+        self._buy_referred()
+        self.student.refresh_from_db()
+        bonus = django_settings.CLASSROOM_REFERRAL_JOIN_BONUS_COINS
+        # student paid coins_spent for the pass AND separately received the bonus
+        txn = CoinTransaction.objects.get(
+            user=self.student, reason=CoinTransaction.Reason.CLASS_REFERRAL_JOIN_BONUS
+        )
+        self.assertEqual(txn.amount, bonus)
+        self.assertEqual(self.student.coin, before - self.class_pass.price + bonus)
+
+    def test_unreferred_purchase_gets_no_join_bonus(self):
+        _charge_and_create_purchase(self.student, self.class_pass, coupon_code="")
+        self.assertFalse(
+            CoinTransaction.objects.filter(reason=CoinTransaction.Reason.CLASS_REFERRAL_JOIN_BONUS).exists()
+        )
+
+    def test_referral_dashboard_reports_referred_count_and_earnings(self):
+        purchase = self._buy_referred()
+        session = self.make_session(status_=ClassSession.Status.COMPLETED, actual_end=timezone.now())
+        purchase.charge_for_session(session)
+
+        self.client.force_authenticate(self.referrer)
+        resp = self.client.get(f"/liveclass/classrooms/{self.classroom.id}/referral-dashboard/")
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.data["referred_count"], 1)
+        self.assertEqual(resp.data["commission_earned"], 2)
+
+        resp2 = self.client.get("/liveclass/referrals/class-referral-summary/")
+        self.assertEqual(resp2.status_code, 200)
+        self.assertEqual(resp2.data["total_students_referred"], 1)
+        self.assertEqual(resp2.data["total_commission_earned"], 2)
 
     def test_referral_disabled_at_accept_time_pays_nothing_even_if_requested_with_a_code(self):
         # Mirrors ClassJoinRequestViewSet.accept()'s re-check: when the
@@ -2608,3 +2646,241 @@ class SessionEngagementReportTests(LiveClassTestBase):
 
         self.assertEqual(second.data["computed_at"], first_computed_at)
         self.assertEqual(second.data["chat_message_count"], 1)  # still the original count
+
+
+# ===========================================================================
+# 23. PARENT -> TEACHER STRUCTURED-TEMPLATE MESSAGING (task 69)
+#
+# Covers the actual misuse-prevention guarantee the feature exists for: a
+# sender can only ever pick one of the fixed, admin-authored templates —
+# never write their own wording — and the resolved sentence sent to the
+# teacher is always server-computed, never taken from the request body.
+# ===========================================================================
+class ParentTeacherMessageTests(LiveClassTestBase):
+    def setUp(self):
+        super().setUp()
+        # self.student needs an actual SUCCESS pass to pass
+        # _can_view_classroom_internals — the base fixture only creates the
+        # ClassPass template, not a purchase.
+        PassPurchase.objects.create(
+            student=self.student,
+            class_pass=self.class_pass,
+            amount_paid=Decimal("100"),
+            coins_spent=100,
+            status=PassPurchase.Status.SUCCESS,
+            is_active=True,
+            expires_at=timezone.now() + timedelta(days=10),
+        )
+        self.other_student = User.objects.create_user(
+            username="unenrolled_student", password="pass12345", email="unenrolled@example.com"
+        )
+
+        self.template = ParentMessageTemplate.objects.create(
+            category=ParentMessageTemplate.Category.LEAVE_REQUEST,
+            title="My child will be absent today",
+            body_template="{child_name} will be absent from {classroom_title} today.",
+        )
+        self.session_template = ParentMessageTemplate.objects.create(
+            category=ParentMessageTemplate.Category.ATTENDANCE,
+            title="Question about today's class",
+            body_template="{child_name} has a question about today's session in {classroom_title}.",
+            requires_session=True,
+        )
+        self.inactive_template = ParentMessageTemplate.objects.create(
+            category=ParentMessageTemplate.Category.OTHER,
+            title="Retired template",
+            body_template="This template is retired.",
+            is_active=False,
+        )
+        self.session = self.make_session()
+
+    def _client_for(self, user):
+        client = APIClient()
+        client.force_authenticate(user)
+        return client
+
+    # --- ParentMessageTemplateViewSet (the picker) ---
+    def test_template_list_only_returns_active_templates(self):
+        resp = self._client_for(self.student).get(reverse("parentmessagetemplate-list"))
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        ids = {row["id"] for row in resp.data}
+        self.assertIn(self.template.id, ids)
+        self.assertNotIn(self.inactive_template.id, ids)
+
+    def test_template_list_category_filter(self):
+        url = reverse("parentmessagetemplate-list") + "?category=" + ParentMessageTemplate.Category.ATTENDANCE
+        resp = self._client_for(self.student).get(url)
+        ids = {row["id"] for row in resp.data}
+        self.assertEqual(ids, {self.session_template.id})
+
+    def test_template_list_never_exposes_raw_body_template(self):
+        # The whole point is the sender never sees/edits the raw
+        # placeholder-bearing sentence — only the resolved one, and only
+        # after they've sent it.
+        resp = self._client_for(self.student).get(reverse("parentmessagetemplate-list"))
+        for row in resp.data:
+            self.assertNotIn("body_template", row)
+
+    # --- create() ---
+    def test_create_resolves_placeholders_server_side(self):
+        url = reverse("parentteachermessage-list")
+        resp = self._client_for(self.student).post(
+            url, {"classroom": self.classroom.pk, "template": self.template.pk}, format="json"
+        )
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
+        expected = f"student1 will be absent from {self.classroom.title} today."
+        self.assertEqual(resp.data["resolved_message"], expected)
+        self.assertEqual(resp.data["sender"]["id"], self.student.id)
+
+    def test_create_ignores_client_supplied_resolved_message_and_sender(self):
+        # resolved_message/sender are read_only on the serializer — a
+        # tampered payload must not be able to plant arbitrary "sent"
+        # wording or spoof the sender.
+        url = reverse("parentteachermessage-list")
+        resp = self._client_for(self.student).post(
+            url,
+            {
+                "classroom": self.classroom.pk,
+                "template": self.template.pk,
+                "resolved_message": "totally different free text",
+                "sender": self.other_student.pk,
+            },
+            format="json",
+        )
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
+        self.assertNotEqual(resp.data["resolved_message"], "totally different free text")
+        self.assertEqual(resp.data["sender"]["id"], self.student.id)
+
+    def test_create_requires_pass_or_manage_access(self):
+        url = reverse("parentteachermessage-list")
+        resp = self._client_for(self.other_student).post(
+            url, {"classroom": self.classroom.pk, "template": self.template.pk}, format="json"
+        )
+        self.assertEqual(resp.status_code, status.HTTP_403_FORBIDDEN)
+
+    def test_create_rejects_inactive_template(self):
+        url = reverse("parentteachermessage-list")
+        resp = self._client_for(self.student).post(
+            url, {"classroom": self.classroom.pk, "template": self.inactive_template.pk}, format="json"
+        )
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_create_requires_session_when_template_needs_one(self):
+        url = reverse("parentteachermessage-list")
+        resp = self._client_for(self.student).post(
+            url, {"classroom": self.classroom.pk, "template": self.session_template.pk}, format="json"
+        )
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("session", resp.data)
+
+    def test_create_with_session_from_wrong_classroom_rejected(self):
+        other_session = self.make_session(classroom=self.other_classroom)
+        url = reverse("parentteachermessage-list")
+        resp = self._client_for(self.student).post(
+            url,
+            {
+                "classroom": self.classroom.pk,
+                "template": self.session_template.pk,
+                "session": other_session.pk,
+            },
+            format="json",
+        )
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_create_with_matching_session_succeeds(self):
+        url = reverse("parentteachermessage-list")
+        resp = self._client_for(self.student).post(
+            url,
+            {
+                "classroom": self.classroom.pk,
+                "template": self.session_template.pk,
+                "session": self.session.pk,
+            },
+            format="json",
+        )
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
+
+    def test_create_rejects_session_when_template_does_not_use_one(self):
+        url = reverse("parentteachermessage-list")
+        resp = self._client_for(self.student).post(
+            url,
+            {"classroom": self.classroom.pk, "template": self.template.pk, "session": self.session.pk},
+            format="json",
+        )
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+
+    # --- visibility (mirrors ClassQuery's split) ---
+    def test_sender_only_sees_own_messages_without_classroom_filter(self):
+        mine = ParentTeacherMessage.objects.create(
+            classroom=self.classroom, template=self.template, sender=self.student,
+            resolved_message="mine",
+        )
+        ParentTeacherMessage.objects.create(
+            classroom=self.classroom, template=self.template, sender=self.teacher,
+            resolved_message="not mine",
+        )
+        resp = self._client_for(self.student).get(reverse("parentteachermessage-list"))
+        ids = {row["id"] for row in resp.data["results"]}
+        self.assertEqual(ids, {mine.id})
+
+    def test_manager_sees_all_messages_via_classroom_filter(self):
+        ParentTeacherMessage.objects.create(
+            classroom=self.classroom, template=self.template, sender=self.student,
+            resolved_message="from student",
+        )
+        url = reverse("parentteachermessage-list") + "?classroom=" + str(self.classroom.pk)
+        resp = self._client_for(self.teacher).get(url)
+        self.assertEqual(len(resp.data["results"]), 1)
+
+    def test_non_manager_classroom_filter_still_scoped_to_own_messages(self):
+        # A non-manager passing ?classroom=<id> must NOT get every
+        # message in that classroom back — only their own.
+        ParentTeacherMessage.objects.create(
+            classroom=self.classroom, template=self.template, sender=self.teacher,
+            resolved_message="someone else's",
+        )
+        url = reverse("parentteachermessage-list") + "?classroom=" + str(self.classroom.pk)
+        resp = self._client_for(self.student).get(url)
+        self.assertEqual(resp.data["results"], [])
+
+    # --- reply() ---
+    def test_manager_can_reply(self):
+        message = ParentTeacherMessage.objects.create(
+            classroom=self.classroom, template=self.template, sender=self.student,
+            resolved_message="Absent today.",
+        )
+        url = reverse("parentteachermessage-reply", args=[message.pk])
+        resp = self._client_for(self.teacher).post(url, {"teacher_reply": "Noted, thanks!"}, format="json")
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        message.refresh_from_db()
+        self.assertEqual(message.status, ParentTeacherMessage.Status.RESPONDED)
+        self.assertEqual(message.replied_by_id, self.teacher.id)
+        self.assertIsNotNone(message.replied_at)
+
+    def test_non_manager_cannot_reply(self):
+        message = ParentTeacherMessage.objects.create(
+            classroom=self.classroom, template=self.template, sender=self.student,
+            resolved_message="Absent today.",
+        )
+        url = reverse("parentteachermessage-reply", args=[message.pk])
+        resp = self._client_for(self.student).post(url, {"teacher_reply": "hijacked"}, format="json")
+        self.assertEqual(resp.status_code, status.HTTP_403_FORBIDDEN)
+
+    def test_cannot_reply_twice(self):
+        message = ParentTeacherMessage.objects.create(
+            classroom=self.classroom, template=self.template, sender=self.student,
+            resolved_message="Absent today.", status=ParentTeacherMessage.Status.RESPONDED,
+            replied_by=self.teacher, replied_at=timezone.now(), teacher_reply="Already replied.",
+        )
+        url = reverse("parentteachermessage-reply", args=[message.pk])
+        resp = self._client_for(self.teacher).post(url, {"teacher_reply": "again"}, format="json")
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_reply_rejects_empty_text(self):
+        message = ParentTeacherMessage.objects.create(
+            classroom=self.classroom, template=self.template, sender=self.student,
+            resolved_message="Absent today.",
+        )
+        url = reverse("parentteachermessage-reply", args=[message.pk])
+        resp = self._client_for(self.teacher).post(url, {"teacher_reply": "   "}, format="json")
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)

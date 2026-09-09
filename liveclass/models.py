@@ -409,6 +409,38 @@ class Classroom(models.Model):
     deleted_at = models.DateTimeField(null=True, blank=True)
     is_flagged = models.BooleanField(default=False)
 
+    # ---------------------------------------------------------------------
+    # 🔧 GAP FIX (Gap 2 prerequisite) — `core/classroom_chat_bridge.py`
+    # already reads these two fields (`_get_group_for_classroom`) and
+    # writes them (`create_classroom_group`), but they never actually
+    # existed on this model — that file's own docstring flags them under
+    # "ASSUMPTIONS" as best-guess names pending confirmation. Added here
+    # with exactly those names so the bridge (and the Gap 2 parent-
+    # dashboard restructure, which reads `chat_group_enabled` to decide
+    # whether a classroom has an optional chat block) actually works
+    # instead of raising AttributeError on every call.
+    #
+    # `linked_conversation_id` is a plain UUIDField, NOT a ForeignKey —
+    # deliberately, to keep `liveclass` decoupled from `message`'s models
+    # (see the bridge file's module docstring, point 1). `message.
+    # Conversation`'s primary key is a UUID (see `message/models.py`
+    # `BaseModel.id`), so the type must match even though there's no DB-
+    # level FK constraint enforcing it — the bridge is the only code that
+    # ever writes this field, and it always writes a real Conversation id.
+    #
+    # `chat_group_enabled` is opt-in per classroom: False until a teacher
+    # explicitly creates a group (`create_classroom_group()`) — so an
+    # older classroom, or one a teacher deliberately never linked, has
+    # `chat_group_enabled=False, linked_conversation_id=None` and is
+    # simply skipped by every bridge sync function (documented as a
+    # best-effort no-op there) and by the dashboard's optional chat block.
+    #
+    # NOTE: adding these fields requires a migration
+    # (`manage.py makemigrations liveclass`) before they take effect.
+    # ---------------------------------------------------------------------
+    chat_group_enabled = models.BooleanField(default=False)
+    linked_conversation_id = models.UUIDField(null=True, blank=True)
+
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -1757,6 +1789,88 @@ class SessionParticipant(models.Model):
 
 
 # ---------------------------------------------------------------------------
+# 🔧 GAP FIX (Gap 3) — `StudentReportCard.attendance_percent` (and the
+# parent dashboard's per-classroom `attendance_percent`) must be computed
+# from THIS app's own session-attendance record — `ClassSession` +
+# `SessionParticipant` above, the exact same data `Classroom.has_access()`
+# and `enrolled_count` are already built on — and nothing else.
+#
+# The message app separately has its own `StudyRoomAttendance`, which
+# drives a self-check-in "study room" streak widget
+# (`current_streak`/`longest_streak`, via `attendance_utils.
+# compute_attendance_stats_bulk`). That is a different, unrelated feature
+# — group-study self-check-in, not real classroom attendance — and per
+# product decision it has NOTHING to do with liveclass at all (message
+# app is chat/group-study only; it has no teacher/student/classroom
+# concept). It is left completely untouched, is never imported here, and
+# must never feed a report card or a liveclass-side attendance number —
+# a student could self-check-in to a study room daily and never once
+# attend an actual class, or the reverse, and a report card silently
+# built off the wrong one would disagree with what the teacher sees in
+# their own classroom's attendance log.
+# ---------------------------------------------------------------------------
+def compute_attendance_percent_bulk(classroom_ids, user):
+    """
+    `classroom_ids`: iterable of Classroom ids.
+    `user`: the student.
+
+    Returns: {classroom_id: float} — percent (0-100, rounded to 2
+    decimal places) of this classroom's COMPLETED sessions the student
+    attended (had at least one `SessionParticipant` row with
+    role=STUDENT for that session). A classroom with zero COMPLETED
+    sessions yet gets 0, never a divide-by-zero. Every requested
+    classroom_id is guaranteed a key, same "no missing-key handling for
+    the caller" contract `compute_attendance_stats_bulk` (message app)
+    already follows.
+
+    Only COMPLETED sessions count in the denominator — a SCHEDULED
+    session hasn't happened yet and a CANCELLED one was never held, so
+    neither should be held against (or credited to) attendance. This
+    mirrors `PassPurchase.charge_for_session`'s own rule that a day only
+    "counts" once its session actually reached COMPLETED.
+
+    Bulk — a fixed 2 queries total no matter how many classroom_ids are
+    passed in, not one query per classroom.
+    """
+    classroom_ids = list(classroom_ids)
+    if not classroom_ids:
+        return {}
+
+    total_by_classroom = dict(
+        ClassSession.objects.filter(
+            classroom_id__in=classroom_ids, status=ClassSession.Status.COMPLETED,
+        )
+        .values('classroom_id')
+        .annotate(total=models.Count('id'))
+        .values_list('classroom_id', 'total')
+    )
+
+    # `Count('session_id', distinct=True)` — a student can have more than
+    # one `SessionParticipant` row for the SAME session (rejoin after a
+    # disconnect creates a new row per `unique_together = (session, user,
+    # joined_at)`), so a plain count would over-count a single attended
+    # session as several. This counts each attended session once.
+    attended_by_classroom = dict(
+        SessionParticipant.objects.filter(
+            session__classroom_id__in=classroom_ids,
+            session__status=ClassSession.Status.COMPLETED,
+            user=user,
+            role=SessionParticipant.Role.STUDENT,
+        )
+        .values('session__classroom_id')
+        .annotate(attended=models.Count('session_id', distinct=True))
+        .values_list('session__classroom_id', 'attended')
+    )
+
+    result = {}
+    for classroom_id in classroom_ids:
+        total = total_by_classroom.get(classroom_id, 0)
+        attended = attended_by_classroom.get(classroom_id, 0)
+        result[classroom_id] = round((attended / total) * 100, 2) if total else 0
+    return result
+
+
+# ---------------------------------------------------------------------------
 # 7. CLASS MATERIALS (notes, PPT/PDF, links shared by teacher)
 # ---------------------------------------------------------------------------
 class ClassMaterial(models.Model):
@@ -2339,6 +2453,18 @@ class CoinTransaction(models.Model):
         # of a specific classroom's escrow release — see
         # PassPurchase.charge_for_session.
         CLASS_REFERRAL_COMMISSION = "class_referral_commission", "Class Referral Commission"
+        # NEW (task 65 — classroom refer & earn, student side): one-time,
+        # platform-funded bonus credited to the STUDENT when they join a
+        # classroom via someone else's referral link (Classroom.referral_urls)
+        # and referral_enabled=True at accept-time. Distinct from
+        # CLASS_REFERRAL_COMMISSION above, which pays the REFERRER an
+        # ongoing per-day cut out of the teacher's own share — this one is a
+        # flat top-up funded by the platform (see
+        # settings.CLASSROOM_REFERRAL_JOIN_BONUS_COINS), mirroring how
+        # REFERRAL_BONUS already rewards both sides of a signup referral.
+        # Awarded once per PassPurchase, from _charge_and_create_purchase
+        # (views.py) at the same moment referred_by is set.
+        CLASS_REFERRAL_JOIN_BONUS = "class_referral_join_bonus", "Class Referral Join Bonus"
         REFUND = "refund", "Refund"
         # NEW (Pass 14 — gifting a pass): distinct from PASS_PURCHASE/REFUND
         # so a wallet-history screen can tell "I bought this for myself" and
@@ -2857,6 +2983,49 @@ class Certificate(models.Model):
 
 
 # ---------------------------------------------------------------------------
+# 16b. STUDENT REPORT CARD
+#
+# GAP FIX — message/views_parent.py already imports and uses
+# `StudentReportCard as LiveclassStudentReportCard` (parent dashboard
+# "latest report card" block: period_label, attendance_percent,
+# homework_completion_percent, average_marks, teacher_remark), but the
+# model itself was never defined here — that import was failing with
+# ImportError at Django startup. Shape below matches exactly what
+# StudentReportCardList._build_results() in views_parent.py reads off
+# each row; `.order_by('classroom_id', '-id')` there relies on the
+# default auto `id` pk, so no custom ordering is imposed beyond
+# newest-first for direct queries against this model on its own.
+# ---------------------------------------------------------------------------
+class StudentReportCard(models.Model):
+    classroom = models.ForeignKey(Classroom, on_delete=models.CASCADE, related_name="report_cards")
+    student = models.ForeignKey(User, on_delete=models.CASCADE, related_name="report_cards")
+
+    # e.g. "October 2026", "Term 1", "Week 12" — teacher-defined free text,
+    # not a structured date range, since reporting cadence varies per
+    # classroom/subject.
+    period_label = models.CharField(max_length=100)
+
+    attendance_percent = models.DecimalField(max_digits=5, decimal_places=2, default=0)
+    homework_completion_percent = models.DecimalField(max_digits=5, decimal_places=2, default=0)
+    average_marks = models.DecimalField(max_digits=5, decimal_places=2, null=True, blank=True)
+    teacher_remark = models.TextField(blank=True)
+
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+        indexes = [
+            # Matches the exact query shape in views_parent.py:
+            # filter(classroom_id__in=..., student=...).order_by('classroom_id', '-id')
+            models.Index(fields=["classroom", "student"]),
+        ]
+
+    def __str__(self):
+        return f"Report card: {self.student} - {self.classroom.title} ({self.period_label})"
+
+
+# ---------------------------------------------------------------------------
 # 17. CLASS REMINDERS (scheduled notifications before a session starts)
 # ---------------------------------------------------------------------------
 class ClassReminder(models.Model):
@@ -3007,247 +3176,177 @@ class ClassQuery(models.Model):
 
 
 # ---------------------------------------------------------------------------
-# 21. NOTIFICATION (in-app notification feed / bell icon)
+# 20B. PARENT -> TEACHER STRUCTURED-TEMPLATE MESSAGING (task 69)
 #
-# NOTE (gap fix): the app already has FCM configured (see
-# FCM_SERVICE_ACCOUNT_JSON_PATH in settings.py) and a Celery task pipeline
-# for reminders/waitlist promotion, so a push alert can reach a user's
-# device — but there was nowhere for the user to see a HISTORY of what
-# happened (join request accepted/rejected, submission graded, doubt
-# answered, certificate issued, refund processed, etc.) once the push
-# banner disappears, and no unread-count for a bell icon. This model is
-# that missing persisted record. It's deliberately separate from — not a
-# replacement for — the push layer: create_notification() below is the one
-# place that writes the in-app row; call it right alongside (not instead
-# of) any existing push/email dispatch in tasks.py/signals.py.
+# WHY THIS EXISTS: ClassQuery above already lets a student/parent send free
+# text to a classroom's teacher, but that's exactly the surface a platform
+# this size can't leave wide open for what's meant to be lightweight parent
+# outreach (attendance check, fee query, leave intimation, a callback
+# request) rather than an academic doubt/discussion thread. Free text there
+# means: no floor on what a parent can type (spam, harassment, scraped
+# links, personal-detail phishing dressed up as a "question"), no
+# consistent way for a teacher juggling many classrooms/parents to triage
+# what a message is even about, and no way for the platform to reason
+# about volume/abuse patterns across message types.
+#
+# The fix is structural, not a content filter: a parent can ONLY select
+# from a small, platform-curated set of ParentMessageTemplate rows
+# (managed exclusively via the Django admin — see ParentMessageTemplateAdmin
+# in admin.py; there is deliberately no create/update endpoint for
+# templates anywhere in this app's public API) and, for templates that
+# need it, ONE additional closed choice: a ClassSession FK constrained to
+# that classroom's own sessions — never free text. ParentTeacherMessage
+# resolves the chosen template into a snapshot (`resolved_message`) at
+# send-time in ParentTeacherMessageViewSet.perform_create, so the actual
+# wording a teacher receives is always one of the platform's own authored
+# sentences — never anything a parent typed.
+#
+# The teacher's reply is deliberately NOT template-locked (`teacher_reply`
+# is free text) — the teacher/co-teacher/moderator side is already gated by
+# `_can_manage_classroom` (views.py), the same trusted-staff boundary
+# ClassQuery.answer relies on, so the misuse concern this feature exists
+# for doesn't apply to that side of the conversation.
 # ---------------------------------------------------------------------------
-class Notification(models.Model):
-    class NotifType(models.TextChoices):
-        JOIN_REQUEST_RECEIVED = "join_request_received", "Join Request Received"
-        JOIN_REQUEST_ACCEPTED = "join_request_accepted", "Join Request Accepted"
-        JOIN_REQUEST_REJECTED = "join_request_rejected", "Join Request Rejected"
-        PASS_REFUNDED = "pass_refunded", "Pass Refunded"
-        SESSION_REMINDER = "session_reminder", "Session Reminder"
-        ASSIGNMENT_GRADED = "assignment_graded", "Assignment Graded"
-        QUERY_ANSWERED = "query_answered", "Doubt Answered"
-        CERTIFICATE_ISSUED = "certificate_issued", "Certificate Issued"
-        WAITLIST_PROMOTED = "waitlist_promoted", "Waitlist Promoted"
-        CLASSROOM_FLAGGED = "classroom_flagged", "Classroom Flagged"
-        NOTICE_POSTED = "notice_posted", "Notice Posted"
-        # NOTE (fix — production notification coverage audit): these six
-        # were real events with no notification of any kind (not even the
-        # in-app bell row) before this pass. Added alongside their
-        # create_notification()/notify_*.delay() call sites in views.py —
-        # see tasks.py for the matching push tasks.
-        SESSION_LIVE = "session_live", "Class Started"
-        SESSION_CANCELLED = "session_cancelled", "Session Cancelled"
-        ASSIGNMENT_POSTED = "assignment_posted", "New Assignment"
-        SUBMISSION_RECEIVED = "submission_received", "New Submission"
-        STAFF_ADDED = "staff_added", "Added As Staff"
-        REVIEW_POSTED = "review_posted", "New Review"
-        REPORT_REVIEWED = "report_reviewed", "Report Reviewed"
-        # NOTE (feature add — coin withdrawal / payout): see CoinWithdrawal
-        # in this file and CoinWithdrawalViewSet in views.py.
-        WITHDRAWAL_APPROVED = "withdrawal_approved", "Withdrawal Approved"
-        WITHDRAWAL_REJECTED = "withdrawal_rejected", "Withdrawal Rejected"
-        WITHDRAWAL_PAID = "withdrawal_paid", "Withdrawal Paid"
-        # NOTE (feature add — classroom sharing): see ClassroomShare above
-        # and ClassroomViewSet.share in views.py.
-        CLASSROOM_SHARED = "classroom_shared", "Classroom Shared With You"
-        # NEW (Pass 14 — gifting a pass): the two notification moments a
-        # gift needs — the recipient finding out they got one, and the
-        # gifter finding out it was actually claimed (they already paid
-        # at send time, so "claimed" is their confirmation the coins
-        # went somewhere, not a new charge). See PassGiftViewSet in
-        # views.py.
-        PASS_GIFT_RECEIVED = "pass_gift_received", "Pass Gift Received"
-        PASS_GIFT_CLAIMED = "pass_gift_claimed", "Pass Gift Claimed"
-        # NEW (fix — auto-renew/gift-expiry sweep tasks added: see
-        # tasks.run_auto_renewals/expire_unclaimed_gifts): these three
-        # events had no NotifType of their own even though the
-        # underlying flows (PassPurchase.renew(), PassGift.
-        # refund_to_gifter()) already existed — pure enum additions, no
-        # migration needed since choices aren't a schema change.
-        PASS_AUTO_RENEWED = "pass_auto_renewed", "Pass Auto-Renewed"
-        AUTO_RENEW_FAILED = "auto_renew_failed", "Auto-Renewal Failed"
-        PASS_GIFT_EXPIRED = "pass_gift_expired", "Gift Expired & Refunded"
-        GENERIC = "generic", "Generic"
+class ParentMessageTemplate(models.Model):
+    """A platform-curated message a parent/student can send to a
+    classroom's teacher. Deliberately NOT parent/teacher-editable — see the
+    module note above for why. `body_template` may reference the
+    `{child_name}` and `{classroom_title}` placeholders, both filled in
+    server-side from data the platform already trusts (the sender's own
+    profile name, the classroom's own title) — never from anything typed
+    in the request."""
 
-    recipient = models.ForeignKey(User, on_delete=models.CASCADE, related_name="notifications")
-    notif_type = models.CharField(max_length=30, choices=NotifType.choices, default=NotifType.GENERIC)
+    class Category(models.TextChoices):
+        ATTENDANCE = "attendance", "Attendance"
+        FEE_OR_PASS = "fee_or_pass", "Fee / Pass"
+        LEAVE_REQUEST = "leave_request", "Leave request"
+        TECHNICAL_ISSUE = "technical_issue", "Technical issue"
+        CALLBACK_REQUEST = "callback_request", "Request a callback"
+        FEEDBACK = "feedback", "Feedback"
+        OTHER = "other", "Other"
 
-    title = models.CharField(max_length=150)
-    message = models.CharField(max_length=255, blank=True)
-
-    # Optional deep-link targets — whichever applies to notif_type. Both
-    # SET_NULL (not CASCADE): a classroom/session being deleted later
-    # shouldn't wipe out a user's notification history, just orphan the link.
-    classroom = models.ForeignKey(
-        Classroom, on_delete=models.SET_NULL, null=True, blank=True, related_name="notifications"
+    category = models.CharField(max_length=20, choices=Category.choices)
+    title = models.CharField(
+        max_length=120,
+        help_text="Short label shown in the template picker, e.g. 'My child will be absent today'.",
     )
-    session = models.ForeignKey(
-        ClassSession, on_delete=models.SET_NULL, null=True, blank=True, related_name="notifications"
+    body_template = models.TextField(
+        help_text=(
+            "The exact sentence sent to the teacher. May use {child_name} and "
+            "{classroom_title} placeholders — both filled in server-side, never "
+            "from user input."
+        )
     )
-
-    is_read = models.BooleanField(default=False)
+    requires_session = models.BooleanField(
+        default=False,
+        help_text=(
+            "If set, the sender must also pick one of the classroom's own sessions "
+            "(e.g. 'About today's class') — a closed choice, never free text."
+        ),
+    )
+    is_active = models.BooleanField(
+        default=True,
+        help_text=(
+            "Retire a template without deleting it — past messages that used it keep "
+            "their resolved_message snapshot either way (see ParentTeacherMessage.template, "
+            "on_delete=PROTECT)."
+        ),
+    )
+    display_order = models.PositiveSmallIntegerField(default=0)
     created_at = models.DateTimeField(auto_now_add=True)
-    read_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        ordering = ["display_order", "category", "title"]
+
+    def __str__(self):
+        return f"[{self.get_category_display()}] {self.title}"
+
+    def resolve(self, *, child_name: str, classroom_title: str) -> str:
+        """Fill the two whitelisted placeholders. Falls back to the raw
+        template rather than raising if a template author used an
+        unsupported placeholder key — a typo in admin-authored copy should
+        never break a parent's ability to send a message."""
+        try:
+            return self.body_template.format(child_name=child_name, classroom_title=classroom_title)
+        except (KeyError, IndexError):
+            logging.getLogger(__name__).warning(
+                "ParentMessageTemplate %s body_template has an unsupported placeholder; "
+                "sending it unresolved.", self.pk,
+            )
+            return self.body_template
+
+
+class ParentTeacherMessage(models.Model):
+    """One structured message from an enrolled parent/student to a
+    classroom's teacher, built entirely from a ParentMessageTemplate — see
+    the module note above. Visibility/permission split mirrors ClassQuery:
+    the sender only ever sees their own messages unless they manage the
+    classroom (see ParentTeacherMessageViewSet.get_queryset)."""
+
+    class Status(models.TextChoices):
+        OPEN = "open", "Open"
+        RESPONDED = "responded", "Responded"
+
+    classroom = models.ForeignKey(Classroom, on_delete=models.CASCADE, related_name="parent_messages")
+    session = models.ForeignKey(
+        ClassSession,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="parent_messages",
+        help_text="Set only when the chosen template has requires_session=True.",
+    )
+    template = models.ForeignKey(
+        ParentMessageTemplate,
+        on_delete=models.PROTECT,
+        related_name="messages",
+        help_text=(
+            "PROTECT, not CASCADE/SET_NULL: a template must never be hard-deleted while "
+            "any sent message still references it — retire it via is_active instead."
+        ),
+    )
+    sender = models.ForeignKey(User, on_delete=models.CASCADE, related_name="parent_messages_sent")
+
+    # Snapshot of template.resolve(...) taken at send time (see
+    # ParentTeacherMessageViewSet.perform_create) — never editable after
+    # creation. This is the audit trail of what was ACTUALLY sent,
+    # independent of any later edit to the template's own body_template in
+    # admin. editable=False keeps it out of ModelForm/admin-form writes;
+    # the DRF serializer separately marks it read_only.
+    resolved_message = models.TextField(editable=False)
+
+    status = models.CharField(max_length=10, choices=Status.choices, default=Status.OPEN)
+
+    teacher_reply = models.TextField(blank=True)
+    replied_by = models.ForeignKey(
+        User, on_delete=models.SET_NULL, null=True, blank=True, related_name="parent_messages_replied"
+    )
+    replied_at = models.DateTimeField(null=True, blank=True)
+
+    created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
         ordering = ["-created_at"]
-        indexes = [models.Index(fields=["recipient", "is_read", "-created_at"])]
+        indexes = [
+            # ParentTeacherMessageViewSet.get_queryset's teacher-side
+            # "?classroom=<id>" listing filters exactly this shape.
+            models.Index(fields=["classroom", "status", "-created_at"]),
+            # "my sent messages" listing (no classroom filter).
+            models.Index(fields=["sender", "-created_at"]),
+        ]
 
     def __str__(self):
-        return f"{self.recipient} - {self.title}"
-
-    def mark_read(self):
-        if not self.is_read:
-            self.is_read = True
-            self.read_at = timezone.now()
-            self.save(update_fields=["is_read", "read_at"])
+        return f"{self.sender} -> {self.classroom.title}: {self.template.title} ({self.get_status_display()})"
 
 
 # ---------------------------------------------------------------------------
-# NEW (Pass 14 — per-notification-type channel preferences). One row per
-# user. Two layers, cheapest-first:
-#   1. Four blanket toggles (push/email/sms/whatsapp_enabled) — the "I
-#      never want SMS at all" switch most users will actually touch.
-#   2. `muted_types` — a JSON list of NotifType values the user wants
-#      silenced entirely (no channel, not even the in-app bell row),
-#      e.g. muting NOTICE_POSTED on a classroom they're only half-
-#      following. Deliberately NOT a per-type-per-channel matrix (that's
-#      a settings-screen nobody asks for in practice) — see
-#      `allowed_channels_for()` below for exactly how the two layers
-#      combine.
-# ---------------------------------------------------------------------------
-class NotificationPreference(models.Model):
-    user = models.OneToOneField(User, on_delete=models.CASCADE, related_name="notification_preference")
-
-    push_enabled = models.BooleanField(default=True)
-    email_enabled = models.BooleanField(default=True)
-    sms_enabled = models.BooleanField(default=False)  # opt-IN: SMS costs real money per send (see notifications.py)
-    whatsapp_enabled = models.BooleanField(default=False)  # opt-IN, same reasoning as sms_enabled
-
-    muted_types = models.JSONField(default=list, blank=True, help_text="List of Notification.NotifType values.")
-
-    # Digest email (Pass 14): instead of one email per event, batch
-    # everything since the last digest into a single daily/weekly email.
-    # Independent of email_enabled above — a user can want digest-only
-    # (no per-event email, still wants the roundup) or both off.
-    class DigestFrequency(models.TextChoices):
-        OFF = "off", "Off"
-        DAILY = "daily", "Daily"
-        WEEKLY = "weekly", "Weekly"
-
-    digest_frequency = models.CharField(max_length=10, choices=DigestFrequency.choices, default=DigestFrequency.OFF)
-    last_digest_sent_at = models.DateTimeField(null=True, blank=True)
-
-    updated_at = models.DateTimeField(auto_now=True)
-
-    def __str__(self):
-        return f"Notification prefs for {self.user}"
-
-    def allowed_channels_for(self, notif_type: str) -> list[str]:
-        """What notifications.dispatch_notification() should actually try
-        for this (user, notif_type) — an empty list means "in-app bell row
-        only, no push/email/sms/whatsapp send at all", which is what a
-        muted type collapses to (the Notification row itself is still
-        created — a user muting reminders shouldn't lose the in-app
-        history, just the interruption)."""
-        if notif_type in (self.muted_types or []):
-            return []
-        allowed = []
-        if self.push_enabled:
-            allowed.append("push")
-        if self.email_enabled:
-            allowed.append("email")
-        if self.sms_enabled:
-            allowed.append("sms")
-        if self.whatsapp_enabled:
-            allowed.append("whatsapp")
-        return allowed
-
-    @classmethod
-    def for_user(cls, user) -> "NotificationPreference":
-        """Every user gets sane defaults (all-on push/email, opt-in
-        sms/whatsapp, no mutes) without needing a migration data-load or a
-        signal on User creation — get_or_create on first touch, same lazy
-        pattern already used elsewhere in this app (see e.g.
-        Classroom.refresh_rating being callable on demand rather than
-        requiring a row to pre-exist)."""
-        pref, _ = cls.objects.get_or_create(user=user)
-        return pref
-
-
-def create_notification(
-    recipient: User,
-    notif_type: str,
-    title: str,
-    message: str = "",
-    classroom: "Classroom | None" = None,
-    session: "ClassSession | None" = None,
-) -> "Notification | None":
-    """Single choke point for writing an in-app notification row. Swallows
-    and logs its own errors rather than raising — a notification failing to
-    save should never roll back or fail the request/transaction (a coin
-    charge, a grade, an accept()) that triggered it. Returns None on
-    failure instead of raising, same reasoning as the notify_classroom_flagged
-    try/except pattern already used in the signal below."""
-    try:
-        return Notification.objects.create(
-            recipient=recipient,
-            notif_type=notif_type,
-            title=title,
-            message=message,
-            classroom=classroom,
-            session=session,
-        )
-    except Exception:
-        logging.getLogger(__name__).exception(
-            "Failed to create in-app notification (%s) for user %s", notif_type, getattr(recipient, "id", None)
-        )
-        return None
-
-
-def create_bulk_notifications(
-    recipients,
-    notif_type: str,
-    title: str,
-    message: str = "",
-    classroom: "Classroom | None" = None,
-    session: "ClassSession | None" = None,
-) -> None:
-    """Bulk variant for fan-out cases (e.g. an urgent notice to every
-    enrolled student) — one INSERT instead of N, and skips read_at/is_read
-    defaults being touched per-row. recipients can be any iterable of User
-    (or user id) — deduplicated defensively since a teacher/co-teacher could
-    otherwise appear twice (once as staff, once as an enrolled student)."""
-    recipient_ids = {getattr(r, "id", r) for r in recipients}
-    recipient_ids.discard(None)
-    if not recipient_ids:
-        return
-    try:
-        Notification.objects.bulk_create(
-            [
-                Notification(
-                    recipient_id=rid,
-                    notif_type=notif_type,
-                    title=title,
-                    message=message,
-                    classroom=classroom,
-                    session=session,
-                )
-                for rid in recipient_ids
-            ],
-            batch_size=500,
-        )
-    except Exception:
-        logging.getLogger(__name__).exception(
-            "Failed to bulk-create in-app notifications (%s) for %d recipients", notif_type, len(recipient_ids)
-        )
-
-
-
+# NOTE (task 42 — core-app migration): Notification, NotificationPreference,
+# create_notification(), and create_bulk_notifications() used to live here.
+# They have moved to core/models.py and core/services.py respectively (the
+# DB tables are unchanged — see core/migrations/0001_move_notification_models.py
+# for the zero-data-copy SeparateDatabaseAndState move). Every call-site in
+# this app now imports them from `core.models` / `core.services` instead of
+# `.models`. See core_app_documentation.md for the full design.
 # ---------------------------------------------------------------------------
 # 12. CHUNKED UPLOAD (large-file uploads in pieces, assembled server-side)
 # ---------------------------------------------------------------------------

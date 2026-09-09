@@ -1,10 +1,13 @@
+# post/models.py--
 import uuid
+from datetime import timedelta
 from django.db import models
 from django.contrib.auth import get_user_model
 from django.core.validators import FileExtensionValidator
 from django.db.models.signals import post_save, post_delete
 from django.dispatch import receiver
 from django.conf import settings
+from django.utils import timezone
 User = get_user_model()
 
 
@@ -290,19 +293,38 @@ class PostSave(models.Model):
         ]
 
 
-@receiver(post_save, sender=PostLike)
-@receiver(post_delete, sender=PostLike)
-def update_likes_count(sender, instance, **kwargs):
-    Post.objects.filter(id=instance.post_id).update(
-        likes_count=PostLike.objects.filter(post_id=instance.post_id).count()
-    )
-
-@receiver(post_save, sender=PostComment)
-@receiver(post_delete, sender=PostComment)
-def update_comments_count(sender, instance, **kwargs):
-    Post.objects.filter(id=instance.post_id).update(
-        comments_count=PostComment.objects.filter(post_id=instance.post_id, is_deleted=False).count()
-    )
+# NOTE (fix, see post_app.md §14 issues #3 & #4):
+#
+# `update_likes_count` REMOVED — it duplicated `update_reaction_counts`
+# (defined further below), which already recomputes `likes_count` as the
+# sum of all per-reaction-type counts. Having both fire on every
+# PostLike save/delete meant two separate COUNT queries + two separate
+# UPDATE statements per like/unlike, always converging on the same
+# number — pure redundancy, no correctness bug, just wasted DB round
+# trips. `update_reaction_counts` is the superset (it also sets
+# like_count/confuse_count/wrong_count/imp_count/explain_count and the
+# auto-flag-on-5-wrong logic), so it's the one kept.
+#
+# `update_comments_count` REMOVED ENTIRELY — this one WAS a real
+# correctness bug, not just redundant work. It recomputed
+# `Post.comments_count` to the true absolute count on every
+# PostComment save (create AND soft-delete). But `views.py`'s
+# CommentCreateAPIView and `comment_view.py`'s CommentDeleteAPIView
+# *also* separately do `F('comments_count') + 1` / `- 1` right after
+# calling `.save()`/`.create()` — which fires this signal first. Net
+# effect: every top-level comment create double-incremented
+# comments_count by 1 extra, and every top-level delete
+# double-decremented it by 1 extra. The count would silently drift
+# further from reality with every create/delete.
+#
+# Removing the signal fixes both directions at once, because the
+# manual F()-based updates already scattered through the views
+# (create/+1, delete/-1) are correct on their own — same pattern
+# already used for `replies_count`, which never had a signal and never
+# had this bug. CommentHideAPIView is unaffected: it never relied on
+# this signal (the signal doesn't know about `is_hidden`), it already
+# does its own manual +1/-1 — see post_app.md §14 issue #3's note,
+# which is still accurate for the hide/unhide path specifically.
 @receiver(post_save, sender=PostShare)
 @receiver(post_delete, sender=PostShare)
 def update_shares_count(sender, instance, **kwargs):
@@ -337,6 +359,11 @@ from django.db.models.signals import post_save
 from django.dispatch import receiver
 
 
+import logging as _logging
+
+_thumb_logger = _logging.getLogger("post.thumbnails")
+
+
 @receiver(post_save, sender=PostMedia)
 def auto_generate_video_thumbnail(sender, instance, created, **kwargs):
     """
@@ -351,8 +378,26 @@ def auto_generate_video_thumbnail(sender, instance, created, **kwargs):
     )
 
     if created and is_video and instance.file and not instance.thumbnail:
+        # FIX (post_app.md §14 issue #5): `.file.path` only exists for
+        # FileSystemStorage — on S3/GCS/any remote backend this raises
+        # NotImplementedError, and the old bare `except Exception` below
+        # would swallow it silently via `print()` (invisible in prod
+        # logs). Check up front and log properly with `logger.warning`
+        # instead, so cloud-storage deployments get a clear, searchable
+        # signal that thumbnails are being skipped, rather than a silent
+        # no-op.
         try:
             video_input_path = instance.file.path
+        except NotImplementedError:
+            _thumb_logger.warning(
+                "Skipping video thumbnail for PostMedia %s — storage backend "
+                "doesn't support local file paths (likely S3/cloud storage). "
+                "Thumbnail generation currently requires FileSystemStorage.",
+                instance.id,
+            )
+            return
+
+        try:
             base_name = os.path.splitext(os.path.basename(video_input_path))[0]
 
             # Temporary dynamic output folder construction
@@ -386,10 +431,16 @@ def auto_generate_video_thumbnail(sender, instance, created, **kwargs):
                     os.remove(temp_output_path)
 
         except ffmpeg.Error as e:
-            print("FFmpeg Error stdout:", e.stdout.decode('utf8') if e.stdout else "")
-            print("FFmpeg Error stderr:", e.stderr.decode('utf8') if e.stderr else "")
+            _thumb_logger.error(
+                "FFmpeg thumbnail extraction failed for PostMedia %s — stdout: %s | stderr: %s",
+                instance.id,
+                e.stdout.decode("utf8") if e.stdout else "",
+                e.stderr.decode("utf8") if e.stderr else "",
+            )
         except Exception as e:
-            print(f"Thumbnail Extraction Error: {e}")
+            _thumb_logger.error(
+                "Thumbnail extraction failed for PostMedia %s: %s", instance.id, e, exc_info=True
+            )
 
 
 from django.db.models import Count
@@ -471,3 +522,93 @@ def update_comment_reaction_counts(sender, instance, **kwargs):
     comment_id = instance.comment_id
     total = CommentLike.objects.filter(comment_id=comment_id).count()
     PostComment.objects.filter(id=comment_id).update(likes_count=total)
+
+# ---------------------------------------------------------------------------
+# Story / StoryView (checklist items 54/55/57/60).
+#
+# Added here for real — the previously-uploaded Tasks.py assumed this
+# model already existed and it didn't. Follows the exact same pattern as
+# the rest of this app: UUID pk, soft-delete (is_deleted/deleted_at),
+# `-created_at` ordering, denormalized counter kept in sync by a signal
+# (same shape as update_saves_count/update_shares_count above).
+# ---------------------------------------------------------------------------
+def default_story_expiry():
+    return timezone.now() + timedelta(hours=24)
+
+
+class Story(models.Model):
+    MEDIA_TYPE_CHOICES = [
+        ('image', 'Image'),
+        ('video', 'Video'),
+    ]
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    user = models.ForeignKey(User, on_delete=models.CASCADE, related_name='stories')
+
+    media = models.FileField(
+        upload_to='stories/%Y/%m/%d/',
+        validators=[FileExtensionValidator(allowed_extensions=['jpg', 'jpeg', 'png', 'gif', 'mp4', 'mov'])],
+    )
+    media_type = models.CharField(max_length=10, choices=MEDIA_TYPE_CHOICES, default='image')
+    caption = models.CharField(max_length=300, blank=True)
+
+    # Denormalized — kept in sync by update_story_views_count below, same
+    # pattern as Post.saves_count / Post.shares_count.
+    views_count = models.PositiveIntegerField(default=0)
+
+    is_deleted = models.BooleanField(default=False, db_index=True)
+    deleted_at = models.DateTimeField(blank=True, null=True)
+
+    created_at = models.DateTimeField(auto_now_add=True, db_index=True)
+    # NOT auto_now_add — this is a fixed future timestamp set once at
+    # creation, not "now" at save time. Overridable per-story (e.g. a
+    # shorter-lived story) by passing expires_at explicitly on create.
+    expires_at = models.DateTimeField(default=default_story_expiry, db_index=True)
+
+    class Meta:
+        db_table = 'stories'
+        ordering = ['-created_at']
+        indexes = [
+            models.Index(fields=['user', '-created_at']),
+            models.Index(fields=['expires_at', 'is_deleted']),
+        ]
+
+    def __str__(self):
+        return f"{self.user.username} story - {self.created_at}"
+
+    @property
+    def is_expired(self):
+        return timezone.now() >= self.expires_at
+
+    def soft_delete(self):
+        """Mirrors CommentDeleteAPIView's pattern in comment_view.py — a
+        real DB write, not just an in-memory flag flip, so it's visible to
+        any other query immediately."""
+        self.is_deleted = True
+        self.deleted_at = timezone.now()
+        self.save(update_fields=['is_deleted', 'deleted_at'])
+
+
+class StoryView(models.Model):
+    """One row per (story, viewer) pair — mirrors PostView's job for posts,
+    and is what auto_expiry/analytics can query without recomputing from
+    scratch."""
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    story = models.ForeignKey(Story, on_delete=models.CASCADE, related_name='views')
+    user = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True, related_name='story_views')
+    viewed_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = 'story_views'
+        unique_together = ['story', 'user']
+        indexes = [
+            models.Index(fields=['story', '-viewed_at']),
+        ]
+
+
+@receiver(post_save, sender=StoryView)
+@receiver(post_delete, sender=StoryView)
+def update_story_views_count(sender, instance, **kwargs):
+    Story.objects.filter(id=instance.story_id).update(
+        views_count=StoryView.objects.filter(story_id=instance.story_id).count()
+    )

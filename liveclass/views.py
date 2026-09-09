@@ -32,7 +32,7 @@ from rest_framework.decorators import action
 from rest_framework.exceptions import NotFound, PermissionDenied, ValidationError
 from rest_framework.filters import OrderingFilter
 from rest_framework.generics import get_object_or_404
-from rest_framework.permissions import IsAuthenticated
+from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.throttling import ScopedRateThrottle
 from rest_framework.views import APIView
@@ -69,8 +69,8 @@ from .models import (
     Coupon,
     LivePoll,
     Notice,
-    Notification,
-    NotificationPreference,
+    ParentMessageTemplate,
+    ParentTeacherMessage,
     PassDailyCharge,
     PassGift,
     PassPurchase,
@@ -80,14 +80,16 @@ from .models import (
     SessionParticipant,
     SessionReadState,
     SessionWaitlist,
-    create_bulk_notifications,
-    create_notification,
     get_classroom_list_cache_version,
     get_notice_list_cache_version,
     seconds_until_next_notice_expiry,
     referral_code_for_user,
     referral_code_to_user_id,
 )
+# NOTE (task 42 — core-app migration): Notification, NotificationPreference,
+# create_notification, and create_bulk_notifications moved to the `core` app.
+from core.models import Notification, NotificationPreference
+from core.services import create_notification, create_bulk_notifications
 from .livekit_utils import (
     LIVEKIT_URL,
     LiveKitError,
@@ -102,6 +104,10 @@ from .livekit_utils import (
 )
 from .realtime import broadcast_to_session
 from .moderation import screen_message
+# 🔥 NAYA (task 9) — parent-join is unauthenticated, so it needs its own
+# IP-keyed throttle instead of the usual ScopedRateThrottle-on-request.user
+# pattern; see throttles.py's module docstring for why.
+from .throttles import ParentJoinIPThrottle
 from .serializers import (
     AssignmentGradeSerializer,
     AssignmentSerializer,
@@ -126,6 +132,8 @@ from .serializers import (
     ClassScheduleSerializer,
     ClassSessionSerializer,
     ClassroomBanSerializer,
+    ClassReferralSummarySerializer,
+    ClassroomReferralDashboardSerializer,
     ClassroomReportSerializer,
     ClassroomReviewSerializer,
     ClassroomSerializer,
@@ -145,8 +153,10 @@ from .serializers import (
     LivePollSerializer,
     MyReferralCodeSerializer,
     NoticeSerializer,
-    NotificationSerializer,
-    NotificationPreferenceSerializer,
+    ParentJoinSerializer,
+    ParentMessageTemplateSerializer,
+    ParentTeacherMessageReplySerializer,
+    ParentTeacherMessageSerializer,
     PassGiftSerializer,
     PassPurchaseSerializer,
     PassPurchaseAutoRenewSerializer,
@@ -867,6 +877,36 @@ class ClassroomViewSet(viewsets.ModelViewSet):
         )
 
     # -----------------------------------------------------------------
+    # NEW (task 65 — referral-dashboard, "aapne itne log invite kiye"):
+    # per-classroom view of how this user's own refer-link (refer_link
+    # above) has performed for THIS classroom specifically — distinct from
+    # ReferralViewSet.class_referral_summary (views.py), which aggregates
+    # the same PassPurchase.referred_by data across EVERY classroom the
+    # caller has ever referred someone into. Open to the same audience as
+    # refer_link (anyone who can see the classroom), since a zero-referral
+    # dashboard for a classroom you haven't shared yet is a valid, harmless
+    # answer, not something to gate.
+    # -----------------------------------------------------------------
+    @action(detail=True, methods=["get"], url_path="referral-dashboard")
+    def referral_dashboard(self, request, pk=None):
+        classroom = self.get_object()
+        referred_qs = PassPurchase.objects.filter(
+            referred_by=request.user, class_pass__classroom=classroom
+        )
+        commission_earned = referred_qs.aggregate(
+            total=Sum("referral_coins_released")
+        )["total"] or 0
+        pending_commission = sum(p.referral_remaining_balance for p in referred_qs)
+        data = {
+            "classroom_id": classroom.id,
+            "referred_count": referred_qs.values("student_id").distinct().count(),
+            "commission_earned": commission_earned,
+            "commission_pending": pending_commission,
+            "referral_code": referral_code_for_user(request.user.id),
+        }
+        return Response(ClassroomReferralDashboardSerializer(data).data)
+
+    # -----------------------------------------------------------------
     # FEATURE (personalized discovery): Explore used to be pure manual
     # filtering (search/language/subject/price/rating — see get_queryset)
     # with no signal from what THIS user actually likes. Content-based,
@@ -1389,6 +1429,46 @@ def _accessible_classroom_ids(user):
     return set(managed) | set(enrolled)
 
 
+# ---------------------------------------------------------------------------
+# 🔥 NAYA (task 9) — parent-join. A parent has no platform account, so
+# there's nothing to authenticate them as — instead they hold a signed
+# link (POST body: {"parent_token": "..."}) that decodes, via Django's
+# own `django.core.signing`, to their child's user id. No DB row, no
+# expiry table to clean up — the signature + `max_age` (see
+# ParentJoinSerializer.validate_parent_token) is the only state.
+#
+# ASSUMPTION (flagged for a follow-up confirm-pass — see
+# ParentJoinSerializer's own ASSUMPTION note in serializers.py for the
+# full reasoning): this task's file list didn't include models.py, so
+# there's no way to check whether a DB-backed parent-token model already
+# exists elsewhere in the real codebase. If it does, only
+# `generate_parent_join_token`/`ParentJoinSerializer.validate_parent_token`
+# need to change to read/write that table instead — `parent_join()` below
+# and its URL/permission/throttle wiring stay exactly the same either way.
+#
+# ASSUMPTION #2: `ParticipantRole.OBSERVER` is assumed to exist (or need
+# adding) in `.livekit_utils` — that file wasn't in this task's file list
+# either, so this couldn't be confirmed against the real enum. If
+# `OBSERVER` doesn't exist there yet, `livekit_utils.py` needs a small
+# follow-up: LiveKit's own room-participant grant needs
+# `can_publish=False, can_subscribe=True` (or equivalent) for whatever
+# value ParticipantRole.OBSERVER maps to, same as how HOST/CO_HOST/
+# STUDENT presumably already map to their own publish/subscribe grants.
+# ---------------------------------------------------------------------------
+PARENT_JOIN_TOKEN_SALT = "liveclass.parent_join"
+
+
+def generate_parent_join_token(student) -> str:
+    """Not exposed via any API in this task — a separate 'share this
+    classroom with a parent' flow (out of scope here) is what would
+    actually call this and hand the resulting link to a parent. Kept
+    here, next to parent_join()/PARENT_JOIN_TOKEN_SALT, as the one place
+    that documents the token's shape so the two stay in sync."""
+    from django.core import signing
+
+    return signing.dumps({"student_id": student.id}, salt=PARENT_JOIN_TOKEN_SALT)
+
+
 class ClassSessionViewSet(viewsets.ModelViewSet):
     """NOTE (fix): same gap as ClassScheduleViewSet above — a session's
     scheduled_start/room_id/etc is internal detail, not public listing
@@ -1684,6 +1764,77 @@ class ClassSessionViewSet(viewsets.ModelViewSet):
             status=200,
         )
 
+    # NOTE: no throttle_scope="..." kwarg here (unlike join()/token() above)
+    # — ScopedRateThrottle keys off request.user, which doesn't exist for
+    # an unauthenticated caller. ParentJoinIPThrottle sets its own `scope`
+    # class attribute instead (see throttles.py) — that's what
+    # DEFAULT_THROTTLE_RATES["session_parent_join_ip"] in settings.py
+    # actually keys against.
+    @action(
+        detail=True, methods=["post"], url_path="parent-join",
+        permission_classes=[AllowAny],
+        throttle_classes=[ParentJoinIPThrottle],
+    )
+    def parent_join(self, request, pk=None):
+        """A parent (no platform account — see PARENT_JOIN_TOKEN_SALT's
+        module note above) verifies a signed `parent_token`, and — only
+        if it decodes to a student who currently has valid access to
+        THIS classroom — gets an observer-role LiveKit token for this
+        session. Never creates a SessionParticipant row: a watching
+        parent isn't a seat/attendance/waitlist participant, so this
+        deliberately mirrors token() (issue-only) rather than join()
+        (which creates one) — same reasoning token()'s own docstring
+        already gives for why it skips participant-row creation.
+        """
+        # get_object() is deliberately NOT used here: it goes through
+        # get_queryset(), which scopes by
+        # _accessible_classroom_ids(self.request.user) — meaningless (and
+        # would just 404 everyone) for an AnonymousUser. Fetch directly
+        # instead, same as ClassroomCreateGroupView/ClassroomGroupStatusView
+        # do for the same underlying reason.
+        session = get_object_or_404(
+            ClassSession.objects.select_related("classroom"), pk=pk
+        )
+
+        serializer = ParentJoinSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        student = serializer.context["student"]
+
+        classroom = session.classroom
+        if not classroom.has_access(student):
+            raise PermissionDenied("Ye bachcha is classroom ka valid student nahi hai.")
+        if not session.is_joinable(is_host=False):
+            raise ValidationError("Ye session abhi joinable nahi hai.")
+        if session.participants.filter(user=student, kicked_at__isnull=False).exists():
+            raise PermissionDenied(
+                "Is student ko is session se remove kiya gaya hai — parent bhi is waqt join nahi kar sakte."
+            )
+
+        room_name = str(session.room_id)
+        ensure_room(room_name=room_name, max_participants=session.classroom.max_participants)
+        # Distinct LiveKit identity from the student's own — a parent
+        # watching alongside their (possibly also-connected) child must
+        # never collide with the child's own room identity.
+        livekit_token = generate_livekit_token(
+            room_name=room_name,
+            user_id=f"parent-{student.id}",
+            user_name=f"{student.get_full_name() or student.username} (Parent)",
+            role=ParticipantRole.OBSERVER,
+        )
+
+        return Response(
+            {
+                "room_id": room_name,
+                "role": "observer",
+                "livekit_role": ParticipantRole.OBSERVER,
+                "livekit_url": LIVEKIT_URL,
+                "livekit_token": livekit_token,
+                "student_id": student.id,
+                "student_name": student.get_full_name() or student.username,
+            },
+            status=200,
+        )
+
     @action(detail=True, methods=["post"], url_path="kick/(?P<user_id>[^/.]+)")
     def kick(self, request, pk=None, user_id=None):
         """Teacher/co-teacher/moderator: remove a disruptive participant from
@@ -1705,6 +1856,22 @@ class ClassSessionViewSet(viewsets.ModelViewSet):
         # instead of catching it just to hand-build a Response — see
         # token()'s NOTE above for why.
         remove_participant(str(session.room_id), identity=str(user_id))
+
+        # 🔥 NAYA (task 10) — a kicked student's linked parent (if
+        # currently watching via parent_join()'s observer token — see
+        # that action's own docstring for the "parent-{student_id}"
+        # identity convention) must be disconnected too, not left
+        # watching an empty seat. Best-effort and separately wrapped
+        # (unlike the student's own remove_participant() call above,
+        # which is allowed to propagate and fail the whole request):
+        # most kicks have no parent connected at all, so LiveKit
+        # returning "participant not found" here is the everyday case,
+        # not an error — it must never turn a successful student-kick
+        # into a 503 for the teacher.
+        try:
+            remove_participant(str(session.room_id), identity=f"parent-{user_id}")
+        except LiveKitError:
+            pass
 
         now = timezone.now()
         session.participants.filter(user_id=user_id, left_at__isnull=True).update(
@@ -3043,6 +3210,28 @@ def _charge_and_create_purchase(
     )
     if coupon:
         Coupon.objects.filter(pk=coupon.pk).update(used_count=F("used_count") + 1)
+
+    # NEW (task 65 — classroom refer & earn, student side): one-time,
+    # platform-funded join bonus to the STUDENT, awarded exactly once per
+    # purchase, the same moment referred_by is attributed. Separate credit
+    # from the coin_wallet debit above (that block only runs when
+    # coins_spent > 0; a free pass can still carry a referral and should
+    # still pay this bonus), so re-lock the wallet here rather than reuse
+    # `user` from that block, which may not exist on this code path.
+    if referred_by is not None:
+        bonus = django_settings.CLASSROOM_REFERRAL_JOIN_BONUS_COINS
+        if bonus > 0:
+            locked_student = type(student).objects.select_for_update().get(pk=student.pk)
+            locked_student.coin += bonus
+            locked_student.save(update_fields=["coin"])
+            CoinTransaction.objects.create(
+                user=locked_student,
+                txn_type=CoinTransaction.TxnType.CREDIT,
+                reason=CoinTransaction.Reason.CLASS_REFERRAL_JOIN_BONUS,
+                amount=bonus,
+                balance_after=locked_student.coin,
+                reference_id=f"class_referral_join:{purchase.id}",
+            )
 
     return purchase
 
@@ -5245,6 +5434,49 @@ class ReferralViewSet(mixins.ListModelMixin, viewsets.GenericViewSet):
         }
         return Response(MyReferralCodeSerializer(data).data)
 
+    # -----------------------------------------------------------------
+    # NEW (task 65 — referral-dashboard, "aapne itne log invite kiye"):
+    # global counterpart to ClassroomViewSet.referral_dashboard above —
+    # this one aggregates across EVERY classroom the caller has ever
+    # referred a student into (via any classroom's refer-link), not just
+    # one. Kept on ReferralViewSet since it reads the same
+    # PassPurchase.referred_by attribution my_code/redeem already deal
+    # with, just for the class-level (not signup-level) referral program.
+    # -----------------------------------------------------------------
+    @action(detail=False, methods=["get"], url_path="class-referral-summary")
+    def class_referral_summary(self, request):
+        user = request.user
+        referred_qs = PassPurchase.objects.filter(referred_by=user)
+        commission_earned = referred_qs.aggregate(
+            total=Sum("referral_coins_released")
+        )["total"] or 0
+        pending_commission = sum(p.referral_remaining_balance for p in referred_qs)
+        per_classroom = (
+            referred_qs
+            .values("class_pass__classroom_id", "class_pass__classroom__title")
+            .annotate(
+                referred_count=Count("student_id", distinct=True),
+                commission_earned=Sum("referral_coins_released"),
+            )
+            .order_by("-commission_earned")
+        )
+        data = {
+            "referral_code": referral_code_for_user(user.id),
+            "total_students_referred": referred_qs.values("student_id").distinct().count(),
+            "total_commission_earned": commission_earned,
+            "total_commission_pending": pending_commission,
+            "by_classroom": [
+                {
+                    "classroom_id": row["class_pass__classroom_id"],
+                    "classroom_title": row["class_pass__classroom__title"],
+                    "referred_count": row["referred_count"],
+                    "commission_earned": row["commission_earned"] or 0,
+                }
+                for row in per_classroom
+            ],
+        }
+        return Response(ClassReferralSummarySerializer(data).data)
+
     @action(detail=False, methods=["post"])
     def redeem(self, request):
         """Redeem someone else's referral code — one-time, new-account-only
@@ -6087,6 +6319,147 @@ class ClassQueryViewSet(viewsets.ModelViewSet):
         _safe_delay(notify_query_answered, query.id)
         return Response(ClassQuerySerializer(query).data)
 
+
+# ---------------------------------------------------------------------------
+# 20a. PARENT MESSAGE TEMPLATE / PARENT-TEACHER MESSAGE (task 69)
+#
+# See the module note above ParentMessageTemplate in models.py for the full
+# design. In short: a parent/student can only ever send one of a fixed set
+# of admin-authored template sentences to a classroom's teacher — never
+# free text — which is why ParentMessageTemplateViewSet below is read-only
+# (list/retrieve; managed via the Django admin) and
+# ParentTeacherMessageSerializer.resolved_message is always the server's
+# own `template.resolve(...)` output, never anything taken from the request
+# body. The teacher's reply is deliberately NOT template-locked (see
+# ParentTeacherMessageReplySerializer) since that side is already gated by
+# _can_manage_classroom, the same trusted-staff boundary ClassQuery.answer
+# relies on above.
+# ---------------------------------------------------------------------------
+class ParentMessageTemplateViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, viewsets.GenericViewSet):
+    """Read-only catalog of the platform-curated templates a parent/student
+    can pick from. Not classroom-scoped — this is a single, global list
+    (like PollTemplate but platform-authored rather than per-teacher) — so
+    every authenticated user sees the same active templates. Optional
+    `?category=<ParentMessageTemplate.Category>` filter for the picker UI.
+    """
+
+    serializer_class = ParentMessageTemplateSerializer
+    permission_classes = [IsAuthenticated]
+    queryset = ParentMessageTemplate.objects.filter(is_active=True)
+    pagination_class = None  # small, fixed catalog — no pagination needed
+
+    def get_queryset(self):
+        qs = super().get_queryset()
+        category = self.request.query_params.get("category")
+        if category:
+            qs = qs.filter(category=category)
+        return qs
+
+
+class ParentTeacherMessageViewSet(
+    mixins.ListModelMixin, mixins.RetrieveModelMixin, mixins.CreateModelMixin, viewsets.GenericViewSet
+):
+    """An enrolled parent/student sends one of the fixed templates to a
+    classroom's teacher; the classroom's teacher/co-teacher/moderator
+    replies via the `reply` action. No update/destroy on this resource at
+    all — a sent message is a fixed audit record (see resolved_message's
+    docstring in models.py), not something either side edits after the fact.
+
+    Visibility mirrors ClassQueryViewSet:
+        - GET .../parent-messages/?classroom=<id> — if the caller manages
+          that classroom, they see every message sent to it; anyone else
+          only sees the ones they personally sent.
+        - GET .../parent-messages/ (no classroom filter) — "my sent
+          messages" across every classroom.
+    """
+
+    serializer_class = ParentTeacherMessageSerializer
+    permission_classes = [IsAuthenticated]
+    pagination_class = LiveClassPagination
+    queryset = ParentTeacherMessage.objects.select_related(
+        "classroom", "session", "template", "sender", "replied_by"
+    )
+
+    # NOTE (fix — misuse-prevention gap, task 69 itself): the whole point of
+    # this feature is that a parent/student can't spam a teacher with
+    # free text — but with no rate limit at all on create(), the same
+    # abuser could still spam a teacher with the fixed templates instead,
+    # one create() call per second, exactly like ChatMessageViewSet.create
+    # could before its own chat_message_create scope was added above. Same
+    # pattern here: scoped so it only throttles create(), never
+    # list()/retrieve(), and add e.g. {"parent_message_create": "10/min"}
+    # to DRF's DEFAULT_THROTTLE_RATES in settings.py for this to take
+    # effect — see session_join/coupon_validate/chat_message_create for
+    # the established pattern (skipping this step raises
+    # ImproperlyConfigured on the very first message a parent sends).
+    def get_throttles(self):
+        if self.action == "create":
+            self.throttle_scope = "parent_message_create"
+            return [ScopedRateThrottle()]
+        return super().get_throttles()
+
+    def get_queryset(self):
+        qs = super().get_queryset()
+        classroom_id = self.request.query_params.get("classroom")
+        if classroom_id:
+            qs = qs.filter(classroom_id=classroom_id)
+            classroom = Classroom.objects.filter(pk=classroom_id).first()
+            if classroom and _can_manage_classroom(classroom, self.request.user):
+                return qs
+        return qs.filter(sender=self.request.user)
+
+    def perform_create(self, serializer):
+        classroom = serializer.validated_data["classroom"]
+        if not _can_view_classroom_internals(classroom, self.request.user):
+            raise PermissionDenied("A pass (active or expired) is required to message this classroom's teacher.")
+
+        user = self.request.user
+        template = serializer.validated_data["template"]
+        resolved_message = template.resolve(
+            child_name=user.get_full_name() or user.username,
+            classroom_title=classroom.title,
+        )
+        message = serializer.save(sender=user, resolved_message=resolved_message)
+
+        create_notification(
+            recipient=classroom.teacher,
+            notif_type=Notification.NotifType.PARENT_MESSAGE_RECEIVED,
+            title="New message from a parent/student",
+            message=f"{user.get_full_name() or user.username}: {resolved_message[:80]}",
+            classroom=classroom,
+            session=message.session,
+        )
+        # NOTE: no _safe_delay(notify_parent_message_received, ...) push/
+        # digest queue here yet — every sibling action in this file queues
+        # one (see notify_query_answered above), but the real Celery
+        # task module wasn't part of this review, so a task import here
+        # can't be verified against it. The in-app Notification row above
+        # is created regardless; wire up the push/WhatsApp fan-out task the
+        # same way once tasks.py is available.
+
+    @action(detail=True, methods=["post"])
+    def reply(self, request, pk=None):
+        message = self.get_object()
+        if not _can_manage_classroom(message.classroom, request.user):
+            raise PermissionDenied("Only the classroom's teacher, co-teacher, or moderator can reply.")
+        if message.status == ParentTeacherMessage.Status.RESPONDED:
+            raise ValidationError("This message has already been replied to.")
+        serializer = ParentTeacherMessageReplySerializer(message, data=request.data, partial=True)
+        serializer.is_valid(raise_exception=True)
+        serializer.save(
+            replied_by=request.user, replied_at=timezone.now(), status=ParentTeacherMessage.Status.RESPONDED
+        )
+        create_notification(
+            recipient=message.sender,
+            notif_type=Notification.NotifType.PARENT_MESSAGE_REPLIED,
+            title="Your message was replied to",
+            message=f"'{message.resolved_message[:60]}' got a reply in '{message.classroom.title}'.",
+            classroom=message.classroom,
+            session=message.session,
+        )
+        return Response(ParentTeacherMessageSerializer(message).data)
+
+
 # ---------------------------------------------------------------------------
 # HOME DASHBOARD — single-call summary for the app's home/landing screen.
 #
@@ -6102,103 +6475,13 @@ class ClassQueryViewSet(viewsets.ModelViewSet):
 # /sessions/, /certificates/, etc. for full lists — this is a summary only).
 # ---------------------------------------------------------------------------
 # ---------------------------------------------------------------------------
-# 22. NOTIFICATION (read-only; rows are only ever created server-side — see
-# create_notification()/create_bulk_notifications() in models.py)
-#
-# NOTE (fix — unreachable feature): Notification, NotificationSerializer, and
-# every notif_type-producing call site (join-request decisions, grading,
-# certificate issuance, waitlist promotion, classroom flagging, notices,
-# doubt answers, ...) already existed, but nothing ever exposed them over
-# the API — no ViewSet, no route. Every user had a growing pile of
-# notification rows created on their behalf with absolutely no way to
-# read, count, or clear them from the client. This viewset is the missing
-# other half of that pipeline.
+# NOTE (task 42 — core-app migration): NotificationViewSet and
+# NotificationPreferenceView used to live here. They have moved to
+# core/views.py and are wired via core/urls.py (see core_app_documentation.md).
+# `liveclass/urls.py` no longer registers `notifications/` or
+# `notification-preferences/me/` — those paths are now served under the
+# `core/` prefix wired in the root urlconf.
 # ---------------------------------------------------------------------------
-class NotificationViewSet(
-    mixins.ListModelMixin,
-    mixins.RetrieveModelMixin,
-    mixins.DestroyModelMixin,
-    viewsets.GenericViewSet,
-):
-    """Own notifications only — nobody can read or clear anyone else's.
-
-    GET    notifications/                 list, newest first (?is_read=true/false to filter)
-    GET    notifications/{id}/            retrieve one
-    DELETE notifications/{id}/            clear one (own only)
-    GET    notifications/unread-count/    badge count for the bell icon
-    POST   notifications/{id}/mark-read/  mark one as read
-    POST   notifications/mark-all-read/   mark every unread one as read
-    """
-
-    serializer_class = NotificationSerializer
-    permission_classes = [IsAuthenticated]
-    pagination_class = LiveClassPagination
-
-    def get_queryset(self):
-        qs = Notification.objects.filter(recipient=self.request.user).select_related("classroom", "session")
-        is_read = self.request.query_params.get("is_read")
-        if is_read is not None:
-            qs = qs.filter(is_read=_is_truthy(is_read))
-        return qs
-
-    @action(detail=False, methods=["get"], url_path="unread-count")
-    def unread_count(self, request):
-        count = Notification.objects.filter(recipient=request.user, is_read=False).count()
-        return Response({"unread_count": count})
-
-    @action(detail=True, methods=["post"], url_path="mark-read")
-    def mark_read(self, request, pk=None):
-        notification = self.get_object()
-        notification.mark_read()
-        return Response(NotificationSerializer(notification).data)
-
-    @action(detail=False, methods=["post"], url_path="mark-all-read")
-    def mark_all_read(self, request):
-        # NOTE (perf): bulk UPDATE instead of looping + calling .mark_read()
-        # per row — a user with hundreds of unread notifications shouldn't
-        # cost hundreds of UPDATE statements for one "clear my badge" tap.
-        updated = Notification.objects.filter(recipient=request.user, is_read=False).update(
-            is_read=True, read_at=timezone.now()
-        )
-        return Response({"marked_read": updated})
-
-
-# ---------------------------------------------------------------------------
-# NEW (Pass 14 audit — per-notification-type channel preferences + digest
-# email, audit priority #2/#3). One row per user (NotificationPreference.
-# for_user in models.py lazily creates it with sane defaults on first
-# touch — see that classmethod's docstring). Both features share the same
-# model/serializer, so one settings endpoint covers both:
-#   - push/email/sms/whatsapp_enabled + muted_types: which channels fire
-#     per notification type (NotificationPreference.allowed_channels_for
-#     is what notifications.dispatch_notification() actually consults).
-#   - digest_frequency (off/daily/weekly): batches events into a single
-#     roundup email instead of one-per-event — independent of
-#     email_enabled, see the model's own docstring. Sending the digest
-#     itself is a scheduled task (tasks.py), out of scope for this
-#     settings endpoint; this is just where the user sets the frequency.
-#
-#   GET   notification-preferences/me/   read the caller's own settings
-#   PATCH notification-preferences/me/   partial-update any of the above
-# ---------------------------------------------------------------------------
-class NotificationPreferenceView(APIView):
-    """Always exactly one row: the caller's own. There is no id in the
-    URL and no way to read or write anyone else's preferences — same
-    "own data only" boundary as NotificationViewSet above."""
-
-    permission_classes = [IsAuthenticated]
-
-    def get(self, request):
-        pref = NotificationPreference.for_user(request.user)
-        return Response(NotificationPreferenceSerializer(pref).data)
-
-    def patch(self, request):
-        pref = NotificationPreference.for_user(request.user)
-        serializer = NotificationPreferenceSerializer(pref, data=request.data, partial=True)
-        serializer.is_valid(raise_exception=True)
-        serializer.save()
-        return Response(serializer.data)
-
 
 class MyDashboardView(APIView):
     """GET /liveclass/dashboard/ — the logged-in user's home-screen summary:

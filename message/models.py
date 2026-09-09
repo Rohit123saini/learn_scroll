@@ -1,4 +1,4 @@
-# chat/models.py
+# message or chat /models.py
 import hashlib
 import secrets
 import uuid

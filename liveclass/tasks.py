@@ -21,6 +21,30 @@ Design discipline (same as views.py/signals.py):
     - notification delivery (reminders, waitlist promotion) never raises
       past send_notification() — a bad/unconfigured channel is logged in
       notifications.py, never lets a notification failure block anything.
+
+🔧 GAP FIX (this pass) — `notify_pass_auto_renewed`, `notify_auto_renew_failed`,
+and `notify_gift_expired` were still importing `create_notification` from
+`.models` and calling it with the PRE-migration positional signature
+(`create_notification(user, "type_string", title, message, classroom=...)`).
+Per the task-42 core-app migration note in `models.py`, `Notification` /
+`create_notification()` no longer live in `liveclass.models` at all — they
+moved to `core.models` / `core.services`, with a new keyword-only signature
+(`recipient=`, `notif_type=Notification.NotifType.X`, `title=`, `message=`,
+`data={}`) — the exact shape `message/push_utils.py` already uses. The old
+import would raise `ImportError` the moment either task actually ran (Celery
+imports are lazy/local per-task here, so this wouldn't surface until the
+first auto-renewal or gift-expiry actually fired in production — easy to
+miss in a quick smoke test). All three are fixed below to match the
+post-migration contract.
+
+⚠️ ASSUMPTION (flagged, search this word): `Notification.NotifType.
+PASS_AUTO_RENEWED` / `.AUTO_RENEW_FAILED` / `.PASS_GIFT_EXPIRED` are
+assumed to exist as enum members on `core.models.Notification.NotifType`,
+inferred from the matching lowercase `"type"` string values these same
+three tasks already pass to `send_notification(..., data={"type": "..."})`
+a few lines below each fix. `core/models.py` wasn't available to confirm
+the exact member names — if they differ, only the three `NotifType.X`
+references below need updating, the rest of each function is unaffected.
 """
 
 import logging
@@ -764,8 +788,18 @@ def notify_pass_auto_renewed(purchase_id):
     (create_notification() for the bell row, send_notification() for
     push), same pattern signals.py already uses for its own
     signal-triggered (non-request) notifications.
+
+    🔧 FIXED (this pass): was importing `create_notification` from
+    `.models` and calling it with the pre-task-42 positional signature
+    (`create_notification(user, "pass_auto_renewed", title, message,
+    classroom=classroom)`). `Notification`/`create_notification` moved to
+    `core.models`/`core.services` — imports and call updated to match
+    the post-migration keyword contract (see module docstring's GAP FIX
+    note for the ⚠️ ASSUMPTION on the exact NotifType member name).
     """
-    from .models import PassPurchase, create_notification
+    from .models import PassPurchase
+    from core.models import Notification
+    from core.services import create_notification
     from .notifications import send_notification
 
     purchase = (
@@ -784,7 +818,11 @@ def notify_pass_auto_renewed(purchase_id):
         f"{purchase.expires_at:%d %b %Y}."
     )
     create_notification(
-        purchase.student, "pass_auto_renewed", title, message, classroom=classroom,
+        recipient=purchase.student,
+        notif_type=Notification.NotifType.PASS_AUTO_RENEWED,
+        title=title,
+        message=message,
+        data={"classroom_id": str(classroom.id), "pass_purchase_id": str(purchase.id)},
     )
     return send_notification(
         purchase.student, title, message, channel="push",
@@ -805,8 +843,15 @@ def notify_auto_renew_failed(purchase_id):
     know their access is about to lapse and *why*, or the exact
     "I lost access and don't know why" gap notify_purchase_refunded's
     own docstring already flagged for manual refunds happens all over
-    again, just for a silent subscription lapse instead of a refund."""
-    from .models import PassPurchase, create_notification
+    again, just for a silent subscription lapse instead of a refund.
+
+    🔧 FIXED (this pass): same stale `.models` import + pre-migration
+    positional `create_notification(...)` call as
+    `notify_pass_auto_renewed` above — same fix applied.
+    """
+    from .models import PassPurchase
+    from core.models import Notification
+    from core.services import create_notification
     from .notifications import send_notification
 
     purchase = (
@@ -824,7 +869,11 @@ def notify_auto_renew_failed(purchase_id):
         f"your coin balance is too low. Top up and renew manually to keep your access."
     )
     create_notification(
-        purchase.student, "auto_renew_failed", title, message, classroom=classroom,
+        recipient=purchase.student,
+        notif_type=Notification.NotifType.AUTO_RENEW_FAILED,
+        title=title,
+        message=message,
+        data={"classroom_id": str(classroom.id), "pass_purchase_id": str(purchase.id)},
     )
     return send_notification(
         purchase.student, title, message, channel="push",
@@ -844,8 +893,15 @@ def notify_gift_expired(gift_id):
     notify_pass_auto_renewed. A third, distinct gift moment alongside
     the two NotifType.PASS_GIFT_RECEIVED/PASS_GIFT_CLAIMED already cover
     (see Notification in models.py) — uses its own PASS_GIFT_EXPIRED
-    type rather than overloading either of those."""
-    from .models import PassGift, create_notification
+    type rather than overloading either of those.
+
+    🔧 FIXED (this pass): same stale `.models` import + pre-migration
+    positional `create_notification(...)` call as the two tasks above —
+    same fix applied.
+    """
+    from .models import PassGift
+    from core.models import Notification
+    from core.services import create_notification
     from .notifications import send_notification
 
     gift = PassGift.objects.select_related("gifter", "class_pass__classroom").filter(pk=gift_id).first()
@@ -859,7 +915,11 @@ def notify_gift_expired(gift_id):
         f"{PassGift.CLAIM_WINDOW_DAYS} days — {gift.coins_spent} coin(s) credited back to your wallet."
     )
     create_notification(
-        gift.gifter, "pass_gift_expired", title, message, classroom=classroom,
+        recipient=gift.gifter,
+        notif_type=Notification.NotifType.PASS_GIFT_EXPIRED,
+        title=title,
+        message=message,
+        data={"classroom_id": str(classroom.id), "pass_gift_id": str(gift.id)},
     )
     return send_notification(
         gift.gifter, title, message, channel="push",
@@ -1569,6 +1629,7 @@ def _chunked_upload_dir_size(path: str) -> int:
             except OSError:
                 pass
     return total
+
 
 @shared_task(name="liveclass.transcribe_recording")
 def transcribe_recording(session_id):

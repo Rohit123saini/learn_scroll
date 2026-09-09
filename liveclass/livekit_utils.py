@@ -179,14 +179,52 @@ class ParticipantRole:
     HOST = "host"
     CO_HOST = "co_host"
     STUDENT = "student"
+    # Task 8 — Phase 2 "parent as one-to-one live-session observer" feature
+    # (see core.classroom_chat_bridge.resolve_parent_from_token +
+    # liveclass.permissions.HasValidParentSessionToken). A parent is never
+    # a room participant in the normal sense — see _grants_for_role below.
+    PARENT_OBSERVER = "parent_observer"
 
 
 # ---------------------------------------------------------------------------
 # Token issuance
 # ---------------------------------------------------------------------------
 def _grants_for_role(role: str) -> api.VideoGrants:
-    """Role → permission matrix. Host/co-host = moderation power; student = nahi."""
+    """Role → permission matrix. Host/co-host = moderation power; student =
+    normal publish+subscribe; parent-observer = SUBSCRIBE-ONLY.
+
+    PARENT_OBSERVER is deliberately the most restricted grant in this
+    file — a parent must be able to watch/listen to the session their
+    child is in, and nothing else:
+        can_publish=False       -> no camera/mic; can never be seen/heard
+        can_publish_data=False  -> no chat / data-channel messages either
+        can_update_own_metadata=False -> can't relabel themselves in the room
+        room_admin=False / room_record=False -> no moderation power, obviously
+        hidden=True             -> excluded from the room's own participant
+                                    list/tiles (LiveKit's standard grant for
+                                    a silent observer, same mechanism used
+                                    for recording bots) — the teacher/
+                                    student see a normal class, not an
+                                    extra tile for every watching parent.
+    A parent token that were somehow inspected/replayed client-side still
+    can't be used to publish audio/video/chat or moderate the room — same
+    "even if the token were inspected" reasoning this module's own docstring
+    already applies to the STUDENT/HOST split above.
+    """
     is_host = role in (ParticipantRole.HOST, ParticipantRole.CO_HOST)
+
+    if role == ParticipantRole.PARENT_OBSERVER:
+        return api.VideoGrants(
+            room_join=True,
+            can_publish=False,
+            can_subscribe=True,
+            can_publish_data=False,
+            can_update_own_metadata=False,
+            room_admin=False,
+            room_record=False,
+            hidden=True,
+        )
+
     return api.VideoGrants(
         room_join=True,
         can_publish=True,

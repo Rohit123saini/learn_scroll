@@ -2,4 +2,8 @@ from django.apps import AppConfig
 
 
 class PostConfig(AppConfig):
-    name = 'post'
+    default_auto_field = "django.db.models.BigAutoField"
+    name = "post"
+
+    def ready(self):
+        import post.signals  # noqa: F401  — registers the post_save/post_delete receivers
