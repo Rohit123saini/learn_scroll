@@ -7,8 +7,19 @@ sessions, join requests, staff, bans) aur `message` (Groups/chat). Koi bhi
 cross-app coupling isi ek file se guzarta hai — `liveclass/signals.py`,
 `liveclass/views.py`, aur `notify_session_live` task in 9 functions ko
 call karte hain (pehle 8 the — Task 5 ne `resolve_parent_from_token()`
-add ki, neeche dekho), khud kabhi `message.models`/`message.services` ko
-seedha import nahi karte. Isse:
+add ki, neeche dekho).
+
+🔧 Docstring fix: is module ke total **10** public entry points hain, na
+ki 9 — upar wale "9 functions" count sirf un functions ka hai jinhe
+`liveclass` khud call karta hai (functions 1-9, neeche numbered). 10wa
+entry point `get_groups_for_classrooms()` (bulk helper — neeche dekho)
+hai, jise `liveclass` nahi balki `message/views_parent.py` seedha call
+karta hai — isliye wo upar wali "9 functions" ginti me shaamil nahi tha,
+lekin module-level doc pehle isko clarify nahi karta tha. Ab dono counts
+explicit hain: 9 liveclass-facing + 1 message-facing = 10 total.
+
+Module khud kabhi `message.models`/`message.services` ko seedha import
+nahi karta (sirf local imports, function ke andar). Isse:
     1. `liveclass` app `message` app ke internal implementation details
        (Group ka exact shape, GroupMember role enum, ...) se decoupled
        rehta hai — sirf yahi ek jagah dono taraf ka contract jaanta hai.

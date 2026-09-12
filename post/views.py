@@ -31,12 +31,11 @@ from.serializers import (
     PostSaveSerializer,
     StoryCreateSerializer,
     StorySerializer,
+    ReactionRequestSerializer,
 )
 from.signals import decrement_posts_count_on_soft_delete
+from.services import notify_post_liked
 from user_profile.models import Follow
-
-# Local import for reaction
-from rest_framework import serializers as drf_serializers
 
 User = get_user_model()
 logger = logging.getLogger(__name__)
@@ -310,12 +309,31 @@ class StoryViewAPIView(APIView):
 
 
 # ===================== MEDIA SERVE WITH RANGE =====================
+# TASK 25 — dev-only fallback. Only ever mounted when
+# `settings.SERVE_MEDIA_VIA_DJANGO` is True (see post/urls.py and
+# settings.py's SERVE_MEDIA_VIA_DJANGO comment) — in production, media is
+# served by nginx straight off disk (deploy/nginx.conf) or by S3/CloudFront
+# (deploy/S3_CLOUDFRONT_SETUP.md), never through this view.
 def serve_media_with_range(request, path):
+    if settings.USE_S3_STORAGE:
+        # Shouldn't be reachable — settings.py raises ImproperlyConfigured
+        # at startup if SERVE_MEDIA_VIA_DJANGO=true and USE_S3_STORAGE=true
+        # together. Fail loudly instead of a confusing "file not found" if
+        # someone still manages to wire this route in anyway (e.g. a
+        # `re_path` added by hand elsewhere): with S3 storage active,
+        # MEDIA_ROOT is not where uploaded files live.
+        raise Http404("Media is served from S3/CloudFront when USE_S3_STORAGE=True, not local disk.")
+    # 🔒 FIX — path-traversal check moved BEFORE any filesystem access.
+    # It previously ran *after* `os.path.exists()`/`os.path.isfile()` on
+    # the unvalidated path, which let an attacker use response timing/
+    # behavior as an existence oracle for arbitrary paths (e.g.
+    # `../../.env`) before the traversal guard ever fired. Reject first,
+    # touch disk second.
+    if '..' in path or path.startswith('/'):
+        raise Http404("Invalid path")
     file_path = os.path.join(settings.MEDIA_ROOT, path)
     if not os.path.exists(file_path) or not os.path.isfile(file_path):
         raise Http404("File not found")
-    if '..' in path or path.startswith('/'):
-        raise Http404("Invalid path")
     content_type, _ = mimetypes.guess_type(file_path)
     content_type = content_type or 'application/octet-stream'
     file_size = os.path.getsize(file_path)
@@ -372,19 +390,11 @@ def serve_media_with_range(request, path):
     return response
 
 # ===================== REACTION API - NEW FUNCTION ADDED =====================
-# NOTE (post_app.md §14 issue #9 — NOT auto-fixed): a second
-# `ReactionRequestSerializer` reportedly also exists in `serializers.py`.
-# I didn't consolidate this automatically because I haven't seen that
-# file's version of the class — if its `choices` list or field name ever
-# drifts from this one, blindly deleting one copy could silently change
-# validation behavior. Compare the two definitions once you have both
-# files open; if identical, delete this local copy and instead do
-# `from .serializers import ReactionRequestSerializer` up top (and drop
-# the now-unused `from rest_framework import serializers as
-# drf_serializers` import if nothing else in this file uses it).
-class ReactionRequestSerializer(drf_serializers.Serializer):
-    reaction = drf_serializers.ChoiceField(choices=['like','confuse','wrong','imp','explain'])
-
+# 🔥 TASK 22 — consolidated. This file used to define its own local
+# `ReactionRequestSerializer` (identical `choices` list to the one in
+# `serializers.py`, just single- vs double-quoted — no actual drift, so
+# safe to collapse) instead of importing the canonical one. Now imported
+# from `.serializers` above, like every other serializer this view uses.
 class PostReactionAPIView(APIView):
     permission_classes = [IsAuthenticated]
     def get_permissions(self):
@@ -421,6 +431,10 @@ class PostReactionAPIView(APIView):
             PostLike.objects.create(post=post, user=user, reaction_type=reaction_type) # LIKE -> +1
             status_msg = "liked"
             my_reaction = reaction_type
+            # Task 11 fix — only a genuinely new like notifies; a
+            # reaction *change* (the `existing.reaction_type != reaction_type`
+            # branch above) intentionally does not, same as unlike doesn't.
+            notify_post_liked(post, user)
 
         post.refresh_from_db()
         return Response({

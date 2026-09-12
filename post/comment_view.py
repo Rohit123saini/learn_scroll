@@ -28,6 +28,7 @@ from drf_spectacular.utils import extend_schema
 
 from.models import Post, PostComment, CommentMedia, ChunkedUpload, CommentLike
 from.comment_serializers import CreateCommentSerializer, PostCommentSerializer
+from.services import notify_post_commented
 
 def get_media_type(file):
     content_type = getattr(file, 'content_type', '') or ''
@@ -95,10 +96,28 @@ class CommentCreateAPIView(APIView):
                 mime_type=getattr(f, 'content_type', '')
             )
 
+        # Task 24 CORRECTION — see models.py's own note (search
+        # "update_comments_count REMOVED ENTIRELY") for why this manual
+        # F() update belongs here and NOT in a signal. A previous pass on
+        # this file did the opposite — added a signal-based
+        # `update_comments_count` and removed this manual update — which
+        # re-introduces exactly the bug models.py documents fixing: this
+        # is a soft-delete-based app, so a signal recomputing/adjusting
+        # `comments_count` on every PostComment save can't distinguish
+        # "new comment", "content edit", and "hide/unhide toggle" without
+        # a lot of fragile state-tracking, whereas the manual +1/-1 here
+        # (mirrored by CommentDeleteAPIView's -1) is simple and already
+        # correct — same pattern `replies_count` has always used safely.
+        # `post/signals.py` deliberately has NO PostComment receiver.
         if parent:
             PostComment.objects.filter(id=parent.id).update(replies_count=F('replies_count') + 1)
         else:
             Post.objects.filter(id=post.id).update(comments_count=F('comments_count') + 1)
+            # Task 11 fix — only a new TOP-LEVEL comment notifies the post
+            # owner (matches notify_post_commented()'s own docstring); a
+            # reply to another comment doesn't spam the post owner for
+            # every sub-thread reply.
+            notify_post_commented(post, comment)
 
         return Response(PostCommentSerializer(comment, context={'request': request}).data, status=201)
 
@@ -202,6 +221,28 @@ def chunked_upload_complete(request):
             return Response({"error": "upload_id required"}, status=400)
 
         upload = get_object_or_404(ChunkedUpload, upload_id=upload_id, user=request.user)
+
+        # Task 13 fix — re-check is_comments_disabled here too, not just
+        # at init(). init's check (see chunked_upload_init's own FIX
+        # comment above) only guards the START of what can be a
+        # long-running, multi-request upload (up to 4GB) — the post
+        # owner can flip is_comments_disabled at any point during that
+        # window, and complete() used to resolve post/parent (and create
+        # the comment) without ever looking at the flag again. Resolved
+        # and checked here, BEFORE assembling the chunks into the final
+        # file (not after), so a now-blocked upload fails cheaply instead
+        # of first paying the disk I/O to stitch together a multi-GB file
+        # it's about to reject anyway. `post`/`parent` are reused below
+        # instead of being re-queried a second time after assembly.
+        if upload.parent_id:
+            parent = get_object_or_404(PostComment, id=upload.parent_id)
+            post = parent.post
+        else:
+            parent = None
+            post = get_object_or_404(Post, id=upload.post_id)
+        if post.is_comments_disabled:
+            return Response({"error": "Comments disabled"}, status=403)
+
         temp_dir = os.path.join(settings.MEDIA_ROOT, 'temp_chunks', upload_id)
         final_dir = os.path.join(settings.MEDIA_ROOT, 'comment_media', str(timezone.now().year), f"{timezone.now().month:02d}", f"{timezone.now().day:02d}")
         os.makedirs(final_dir, exist_ok=True)
@@ -225,14 +266,6 @@ def chunked_upload_complete(request):
         except:
             pass
 
-        post = None
-        parent = None
-        if upload.parent_id:
-            parent = get_object_or_404(PostComment, id=upload.parent_id)
-            post = parent.post
-        else:
-            post = get_object_or_404(Post, id=upload.post_id)
-
         comment = PostComment.objects.create(
             post=post, user=request.user, parent=parent, content=upload.content or ""
         )
@@ -251,10 +284,18 @@ def chunked_upload_complete(request):
             mime_type='video/mp4' if media_type=='video' else 'application/octet-stream'
         )
 
+        # Task 24 CORRECTION — same reasoning as CommentCreateAPIView.post()
+        # above: the manual F() update belongs here (matches models.py's
+        # documented decision), there is no comments_count signal.
         if parent:
             PostComment.objects.filter(id=parent.id).update(replies_count=F('replies_count') + 1)
         else:
             Post.objects.filter(id=post.id).update(comments_count=F('comments_count') + 1)
+            # Task 11 fix — same top-level-only notify as the regular
+            # CommentCreateAPIView path above; a large video comment
+            # finished via chunked upload is still a new top-level
+            # comment and should notify the post owner the same way.
+            notify_post_commented(post, comment)
 
         upload.is_completed = True
         upload.save(update_fields=['is_completed'])
@@ -356,6 +397,14 @@ class CommentDeleteAPIView(APIView):
         comment.is_deleted = True
         comment.deleted_at = timezone.now()
         comment.save(update_fields=['is_deleted', 'deleted_at'])
+        # Task 24 CORRECTION — restored. models.py explicitly documents
+        # removing the old `update_comments_count` signal *because* this
+        # manual decrement (mirroring the manual +1 in
+        # CommentCreateAPIView) is the correct, intended mechanism — see
+        # that file's "update_comments_count REMOVED ENTIRELY" note.
+        # CommentHideAPIView's own separate manual comments_count
+        # adjustment (below) is unrelated — it toggles is_hidden, not
+        # is_deleted — and stays exactly as-is.
         if comment.parent_id:
             PostComment.objects.filter(id=comment.parent_id).update(replies_count=F('replies_count') - 1)
         else:

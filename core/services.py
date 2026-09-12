@@ -33,6 +33,7 @@ def create_notification(
     classroom=None,
     session=None,
     data: dict | None = None,
+    actor=None,
 ) -> "Notification | None":
     """Single choke point for writing an in-app notification row.
 
@@ -41,6 +42,16 @@ def create_notification(
     not hydrated User objects, so accepting either avoids an extra query
     per push at every call-site.
 
+    `actor` (G-3, RestrictUser wiring): the user whose action triggered
+    this notification — who commented, liked, followed, etc. — if any.
+    System/admin-triggered notifications (pass auto-renewal, a broadcast)
+    have no actor and should not pass one; the restrict check below is
+    skipped for those. When `actor` IS given and `recipient` has
+    restricted them (user_profile.RestrictUser), the notification row is
+    silently skipped — restrict is defined to be invisible to the
+    restricted user, so this must be a silent no-op, not a logged error,
+    and it must never raise.
+
     Swallows and logs its own errors rather than raising — a notification
     failing to save should never roll back or fail the request/
     transaction (a coin charge, a grade, an accept(), an incoming chat
@@ -48,6 +59,22 @@ def create_notification(
     raising.
     """
     recipient_id = getattr(recipient, "id", recipient)
+
+    if actor is not None:
+        actor_id = getattr(actor, "id", actor)
+        # Lazy import (same pattern as campus/bridge.py): core must not
+        # hard-depend on user_profile at module-import time, to avoid a
+        # circular import between the two apps. Reuses the same
+        # is_restricted_between() user_profile.views already exposes for
+        # is_blocked_between()-style checks, rather than re-querying
+        # RestrictUser directly here. Django FK filters accept a raw pk
+        # in place of an instance, so passing the ids straight through
+        # (instead of fetching User objects) costs no extra query.
+        from user_profile.views import is_restricted_between
+
+        if is_restricted_between(recipient_id, actor_id):
+            return None
+
     try:
         return Notification.objects.create(
             recipient_id=recipient_id,

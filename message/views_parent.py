@@ -31,6 +31,45 @@ PARENT SIDE (no student login — code/token only):
     GET    /message/parent/dashboard/  -> read-only summary
            (header: X-Parent-Token: <parent_token>)
 
+🔧 GAP FIX (G-6 — mutual consent) — previously ANY device that had the
+plain-text `code` string (leaked, screenshotted, shoulder-surfed) could
+`POST /parent/verify/` and get an immediately-live `parent_token` with
+full dashboard read-access — the student never saw or approved that a
+new device had joined. `ParentVerifyCodeView` now creates every new
+`ParentToken` as `status=PENDING` instead of implicitly-active; it is
+NOT usable against `ParentDashboardView` until the student explicitly
+approves it (see `ParentCodeTokenApproveView` /
+`ParentPendingRequestsView` below). The code itself still gates WHO can
+request access (unchanged — that's the shared-secret step), but a
+successful verify no longer equals live access on its own; the student
+is now the second, mandatory party in the loop, same as a
+"new-device-login" confirmation pattern.
+
+    STUDENT SIDE (continued):
+    GET    /message/parent/pending-requests/
+           -> every PENDING token across all of the student's active
+              codes — 🔧 NEW, see `ParentPendingRequestsView`. Lets the
+              app show a single "New parent device wants access" badge
+              without the student having to open each code separately.
+    POST   /message/parent/codes/<code_id>/tokens/<token_id>/approve/
+           -> flips that one PENDING token to APPROVED — 🔧 NEW, see
+              `ParentCodeTokenApproveView`. Only after this does the
+              device's `parent_token` work against the dashboard.
+    DELETE /message/parent/codes/<code_id>/tokens/<token_id>/
+           -> unchanged endpoint, now doubles as "reject" for a PENDING
+              token and "revoke" for an already-APPROVED one — both
+              cases are just "this token should stop existing", so one
+              endpoint covers both instead of adding a separate reject
+              action.
+
+NOTE — this view file alone can't fully close the gap: `ParentToken`
+needs a new `status` field in `models.py` (PENDING/APPROVED/REJECTED,
+default PENDING, + `approved_at`), and `HasValidParentToken` in
+`permissions.py` needs to additionally require `status=APPROVED` (not
+just `is_active`/not-expired) before it lets a request through to
+`ParentDashboardView`. Both files are outside what was provided here —
+flagging explicitly rather than silently assuming their shape.
+
 STRICT SCOPE — `ParentDashboardView` must NEVER return message text,
 media, contact info, or anything beyond: the student's display name,
 per-classroom attendance stats, and assignment pending/submitted
@@ -295,7 +334,14 @@ class ParentCodeTokensView(APIView):
        code" apart and decide which one to cut, instead of only being
        able to nuke the whole code.
 
-    [{"id": "...", "created_at": "...", "last_seen_at": "..." | null}, ...]
+    [{"id": "...", "status": "pending"|"approved"|"rejected",
+      "created_at": "...", "approved_at": "..." | null,
+      "last_seen_at": "..." | null}, ...]
+
+    🔧 GAP FIX (G-6) — `status` added so the student's app can visually
+    flag PENDING devices ("Dad's phone — waiting for your approval")
+    separately from already-APPROVED ones, instead of every verified
+    device looking identically live.
     """
     permission_classes = [IsAuthenticated]
 
@@ -313,8 +359,75 @@ class ParentCodeTokensView(APIView):
         return Response([
             {
                 'id': str(t.id),
+                'status': t.status,
                 'created_at': t.created_at,
+                'approved_at': t.approved_at,
                 'last_seen_at': t.last_seen_at,
+            }
+            for t in tokens
+        ])
+
+
+class ParentCodeTokenApproveView(APIView):
+    """
+    POST /message/parent/codes/<code_id>/tokens/<token_id>/approve/
+
+    🔧 NEW (G-6 — mutual consent). Flips exactly one PENDING device to
+    APPROVED. Until this is called, that device's `parent_token` is
+    valid-but-inert — `HasValidParentToken` (permissions.py) rejects it
+    against `ParentDashboardView` the same way an expired/revoked one
+    is rejected. Ownership goes through `parent_access_code__student`,
+    same guard as `ParentCodeTokenDetailView.delete` below — a student
+    can only approve devices on codes that are actually theirs.
+    """
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, code_id, token_id):
+        token = ParentToken.objects.filter(
+            id=token_id,
+            parent_access_code_id=code_id,
+            parent_access_code__student=request.user,
+        ).first()
+        if not token:
+            return Response({'detail': 'Device not found'}, status=status.HTTP_404_NOT_FOUND)
+
+        if token.status != ParentToken.Status.PENDING:
+            return Response(
+                {'detail': f"Ye request already '{token.status}' hai — dobara approve nahi ho sakti."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        token.status = ParentToken.Status.APPROVED
+        token.approved_at = timezone.now()
+        token.save(update_fields=['status', 'approved_at'])
+        return Response({'id': str(token.id), 'status': token.status, 'approved_at': token.approved_at})
+
+
+class ParentPendingRequestsView(APIView):
+    """
+    GET /message/parent/pending-requests/
+
+    🔧 NEW (G-6 — mutual consent). Every PENDING `ParentToken` across
+    ALL of the student's active codes, newest first — a single place
+    the app can poll/badge ("1 new parent device wants access") without
+    the student having to open each code's own tokens list to notice a
+    new request came in.
+    """
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        tokens = ParentToken.objects.filter(
+            parent_access_code__student=request.user,
+            parent_access_code__is_active=True,
+            status=ParentToken.Status.PENDING,
+        ).select_related('parent_access_code').order_by('-created_at')
+
+        return Response([
+            {
+                'id': str(t.id),
+                'code_id': str(t.parent_access_code_id),
+                'code_label': t.parent_access_code.label,
+                'created_at': t.created_at,
             }
             for t in tokens
         ])
@@ -350,7 +463,20 @@ class ParentCodeTokenDetailView(APIView):
 class ParentVerifyCodeView(APIView):
     """
     POST /message/parent/verify/  {"code": "7F3K9QRT"}
-    -> {"parent_token": "...", "student_name": "...", "label": "Mom"}
+    -> {"parent_token": "...", "student_name": "...", "label": "Mom",
+        "approval_status": "pending"}
+
+    🔧 GAP FIX (G-6 — mutual consent) — a successful verify used to mean
+    immediately-live dashboard access to anyone holding the code string,
+    leaked/screenshotted copies included. The `parent_token` returned
+    here is still generated (parent app stores it — it's what gets sent
+    later as `X-Parent-Token`), but the underlying `ParentToken` now
+    starts `status=PENDING`: it will get a 403 from `ParentDashboardView`
+    (`HasValidParentToken` in permissions.py, not shown here, needs to
+    check `status=APPROVED`) until the STUDENT approves this specific
+    device via `ParentCodeTokenApproveView`. `approval_status` is
+    returned so the parent-side app can show a "waiting for approval"
+    screen instead of assuming the dashboard is ready to load.
     """
     permission_classes = [AllowAny]
     throttle_classes = [ParentCodeVerifyThrottle]
@@ -381,15 +507,25 @@ class ParentVerifyCodeView(APIView):
         access_code.last_used_at = timezone.now()
         access_code.save(update_fields=['last_used_at', 'updated_at'])
 
+        # 🔧 GAP FIX (G-6) — starts PENDING, not implicitly live. See
+        # class docstring + `ParentCodeTokenApproveView`.
         token = ParentToken.objects.create(
             parent_access_code=access_code,
             token=ParentToken.generate_token(),
+            status=ParentToken.Status.PENDING,
         )
+
+        # TODO(notifications) — this is where the student should get a
+        # push/in-app "new parent device wants access" ping so
+        # `ParentPendingRequestsView` isn't the only way they'd find out.
+        # No notification service was in the provided files to wire this
+        # into, so left as an explicit follow-up rather than guessed at.
 
         return Response({
             'parent_token': token.token,
             'student_name': _display_name(access_code.student),
             'label': access_code.label,
+            'approval_status': token.status,
         }, status=status.HTTP_200_OK)
 
 

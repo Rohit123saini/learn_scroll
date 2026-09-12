@@ -227,33 +227,14 @@ def update_group_member_role(*, group: Group, actor, user_id, data: dict) -> Gro
 
     return membership
 
-
 # ---------------------------------------------------------------------------
-# 🔥 NAYA (task 44) — bell-row helper for the FCM-only push call sites in
-# views.py (`send_chat_message_push`, `send_mention_push`,
-# `send_incoming_call_push`). Each of those stays exactly as-is (still
-# does the real FCM send, unmodified — we don't have `push_utils.py`'s
-# source to safely rewrite it) — this helper is called ALONGSIDE each of
-# them (same "create_notification() + send_notification() side by side"
-# pattern `liveclass/tasks.py` already uses everywhere, see
-# `core/services.py`'s docstring), so a bell-row now exists too, not just
-# the push. See `views_PATCH_bell_rows_for_push.md` for the exact call
-# sites this plugs into.
+# 🔧 REMOVED (was dead code) — `create_bell_rows_for_push` used to live
+# here, written back when `push_utils.py`'s source wasn't available to
+# check against. Now that it is: `push_utils.py` already creates its own
+# bell rows, inline, per event (`send_chat_message_push` /
+# `send_mention_push` / `send_incoming_call_push` each call `core.
+# services.create_notification()` directly — see that file). This helper
+# had zero callers anywhere in the codebase and duplicated a job that was
+# already done a different way, so it's gone rather than left to drift
+# from the real implementation.
 # ---------------------------------------------------------------------------
-def create_bell_rows_for_push(*, recipient_ids: Iterable, notif_type: str, title: str, message: str, data: Optional[dict] = None) -> None:
-    """One `core.models.Notification` row per recipient. Best-effort —
-    a bell-row failure must never block the actual push, so this never
-    raises; it logs and swallows."""
-    import logging
-
-    from core.services import create_notification
-
-    logger = logging.getLogger(__name__)
-    User_ = get_user_model()
-    for user in User_.objects.filter(id__in=list(recipient_ids)):
-        try:
-            create_notification(user, notif_type, title, message, data=data)
-        except Exception:
-            logger.exception(
-                "Failed creating bell-row notification (%s) for user %s.", notif_type, user.pk,
-            )

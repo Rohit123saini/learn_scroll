@@ -49,7 +49,47 @@ class TranslationServiceUnavailable(Exception):
     """Provider not configured / not reachable right now."""
 
 
+class UnsupportedLanguageError(TranslationError):
+    """
+    `target_lang` (or `source_lang`) isn't in `SUPPORTED_LANGUAGES`.
+
+    TASK 29 — before this, `SUPPORTED_LANGUAGES` above was purely
+    documentation: the app's language picker only offered these codes,
+    but the API itself would happily forward ANY ISO code straight to
+    Google (which accepts far more than the 10 we advertise/support in
+    the UI). That meant a client bug, a stale app build, or someone
+    calling the endpoint directly with e.g. `target_lang=fr` would
+    silently succeed against Google and return a "supported" response
+    for a language the rest of the product (UI strings, RTL handling,
+    font fallback for `language_picker_sheet.dart`, etc.) was never
+    built to handle. Raising here — before the network call — turns
+    that into a clean, catchable, obviously-a-client-bug error instead
+    of a translation that quietly works today and breaks some other
+    part of the UI.
+
+    Kept as a `TranslationError` subclass (not a new top-level class) so
+    any existing `except TranslationError` call site still catches it
+    without changes; callers that want to handle "unsupported language"
+    differently from "provider returned garbage" can catch this
+    subclass specifically first.
+    """
+
+
 def translate_text(text: str, target_lang: str, source_lang: Optional[str] = None) -> str:
+    target_lang = (target_lang or '').strip().lower()
+    if target_lang not in SUPPORTED_LANGUAGES:
+        raise UnsupportedLanguageError(
+            f"'{target_lang}' abhi supported nahi hai. Supported: "
+            f"{', '.join(sorted(SUPPORTED_LANGUAGES))}."
+        )
+    if source_lang:
+        source_lang = source_lang.strip().lower()
+        if source_lang not in SUPPORTED_LANGUAGES:
+            raise UnsupportedLanguageError(
+                f"'{source_lang}' abhi supported nahi hai. Supported: "
+                f"{', '.join(sorted(SUPPORTED_LANGUAGES))}."
+            )
+
     api_key = getattr(settings, 'GOOGLE_TRANSLATE_API_KEY', None)
     if not api_key:
         raise TranslationServiceUnavailable(

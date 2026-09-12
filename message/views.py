@@ -1,6 +1,6 @@
+# message/view.py
 import uuid
 import os
-import secrets
 import logging
 from datetime import timedelta
 from django.contrib.auth import get_user_model
@@ -87,7 +87,25 @@ from .push_utils import (
     send_push_to_users, send_chat_message_push, send_incoming_call_push,
     send_call_cancelled_push, send_mention_push,
 )
-from .livekit_utils import generate_livekit_token
+# 🔧 FIX — `GroupViewSet.create`/`add_members`/`update_member` had their
+# own inline copies of exactly what `services.py` already implements
+# (task 27 extracted this precisely so it could be reused, e.g. by a
+# future `core/classroom_chat_bridge.py`), and `add_or_reactivate_
+# participant` existed in BOTH files verbatim — two copies of the same
+# rule that could silently drift apart. Views now call into `services.py`
+# instead of duplicating its logic; see each action below for how
+# `ValueError`/`PermissionError` (services.py's plain, DRF-free
+# exceptions) get converted to the DRF equivalents at this boundary.
+from .services import (
+    add_or_reactivate_participant, create_group, add_members_to_group,
+    remove_group_member, update_group_member_role,
+)
+# 🔧 GAP FIX (task 49) — `flush_offline_queue` was fully implemented in
+# `offline_queue.py` but had no caller anywhere — no `@action`, no
+# `path()`. See `ConversationViewSet.offline_queue_flush` below for the
+# actual endpoint.
+from .offline_queue import flush_offline_queue
+from .livekit_utils import EgressError, generate_livekit_token, start_room_recording, stop_room_recording
 from .user_display import build_user_mini, get_display_name, get_profile_photo_url
 from .group_rules import check_group_permission, check_daily_message_limit, is_group_admin_or_mod
 from .cache_utils import invalidate_group_role_cache, get_presence_cached, set_presence_cache
@@ -117,7 +135,13 @@ from .throttles import (
     TranslateThrottle,
 )
 # 🔥 NAYA — Feature 9: message translate (pluggable provider, see file docstring)
-from .translation_service import translate_text, TranslationError, TranslationServiceUnavailable
+# TASK 29 — `UnsupportedLanguageError` added so `translate()` below can
+# return a clean 400 (client sent a language we don't support) instead
+# of letting an unsupported code fall through to Google and back.
+from .translation_service import (
+    translate_text, TranslationError, TranslationServiceUnavailable,
+    UnsupportedLanguageError, SUPPORTED_LANGUAGES,
+)
 
 # LiveKit URL env se lo, nahi to default
 LIVEKIT_WS_URL = os.getenv("LIVEKIT_WS_URL", "ws://10.93.221.189:7880")
@@ -140,28 +164,13 @@ def is_blocked_pair(user_a_id, user_b_id):
     ).exists()
 
 
-# 🔥 FIX — `ConversationParticipant.objects.get_or_create(conversation=..,
-# user=..)` alone is NOT enough to re-add someone who previously left / was
-# removed from a conversation. `unique_together = ('conversation', 'user')`
-# means get_or_create() finds their OLD row (with `left_at` still set to a
-# past timestamp) and returns it AS-IS — it never resets `left_at` back to
-# None. Every membership check in this app (`ConversationViewSet.get_queryset`,
-# `ChatConsumer.is_conversation_member`, message/call permission checks, the
-# chat-list query, ...) filters on `left_at__isnull=True`, so that user would
-# be "added" (a `GroupMember` row exists, `add_members`/`join`/
-# `approve_join_request`/`add_participant_to_conversation` all return success)
-# but stay silently locked out — no error is ever shown, the conversation
-# just never appears for them and every membership check keeps failing. This
-# helper is used everywhere a user is (re-)added to a conversation so access
-# is actually restored.
-def add_or_reactivate_participant(conversation, user):
-    participant, created = ConversationParticipant.objects.get_or_create(
-        conversation=conversation, user=user,
-    )
-    if not created and participant.left_at is not None:
-        participant.left_at = None
-        participant.save(update_fields=['left_at'])
-    return participant, created
+# 🔧 FIX — `add_or_reactivate_participant` used to be defined here AND in
+# `services.py` verbatim (two copies of the same "re-add a user whose
+# `left_at` is still set" rule that could silently drift). Now imported
+# from `.services` above (single source) — see that module for the full
+# rationale (`get_or_create` alone doesn't reset `left_at`, so every
+# membership check filtering on `left_at__isnull=True` would keep a
+# re-added user silently locked out otherwise).
 
 
 class MessagePagination(PageNumberPagination):
@@ -280,10 +289,15 @@ class ConversationViewSet(viewsets.ReadOnlyModelViewSet):
     # 🔥 FIX — see throttles.py's own setup comment: message-send spam/abuse
     # guard was written but never actually applied here.
     def get_throttles(self):
-        if self.action == 'messages' and self.request.method == 'POST':
+        if self.action in ('messages', 'offline_queue_flush') and self.request.method == 'POST':
             # 🔥 NAYA — per-user (`MessageSendThrottle`) ke SAATH per-IP
             # safety net bhi (`MessageSendIPThrottle`). DRF dono list me hon
             # to dono check karta hai — jo bhi pehle trip ho, request block.
+            # `offline_queue_flush` yahan bhi shamil hai kyunki wo bhi
+            # (batch me) real messages banata hai — same abuse surface,
+            # ek nayi throttle-scope banane ki zaroorat nahi (wo hi
+            # ek-scope-settings.py-me-add-karna-bhool-jaana bug class hai
+            # jo throttles.py me pehle bhi mila tha).
             return [MessageSendThrottle(), MessageSendIPThrottle()]
         return super().get_throttles()
 
@@ -306,6 +320,116 @@ class ConversationViewSet(viewsets.ReadOnlyModelViewSet):
             qs = qs.exclude(is_muted=True)
         total = qs.aggregate(total=Sum('unread_count'))['total'] or 0
         return Response({'unread_count': total})
+
+    # ======================================================================
+    # 🔥 NAYA (TASK 29 — suggested facility) — CHAT / MEDIA EXPORT
+    # ======================================================================
+    # GET /message/conversations/<id>/export/
+    #   ?type=chat   (default) -> full text transcript: every message this
+    #                              user can still see (same "still visible
+    #                              to me" rule as everywhere else — skips
+    #                              deleted-for-everyone and deleted-for-me)
+    #   ?type=media             -> only messages carrying a file, detected
+    #                              by `file_url`/`file_urls` being set —
+    #                              not a hardcoded MessageType list, since
+    #                              this pass doesn't have visibility into
+    #                              every media MessageType this app defines
+    #   ?since=<ISO datetime>   -> only messages at/after this time
+    #   ?until=<ISO datetime>   -> only messages strictly before this time
+    #
+    # Returned as one JSON payload with a `Content-Disposition: attachment`
+    # header so hitting this URL downloads a file instead of rendering an
+    # in-app API response.
+    #
+    # Scope/limits (documented rather than silently hit):
+    #   - This bundles metadata + URLs, not the media bytes themselves.
+    #     Actually fetching and zipping every file would mean downloading
+    #     each one inside this request — for a media-heavy chat that's
+    #     slow, memory-heavy work that belongs in a background job (this
+    #     app already runs Celery for other async work in `tasks.py`), not
+    #     something to bolt onto a synchronous GET. Not built here because
+    #     the task list didn't specify the desired bundle format (zip? one
+    #     archive per media type?) and guessing that wrong would mean
+    #     redoing it — the client gets the direct file URLs instead and
+    #     can fetch/zip them itself, or this can become a real async
+    #     export job once the desired format is confirmed.
+    #   - Hard-capped at `EXPORT_MAX_MESSAGES` per call (with `has_more` in
+    #     the response) instead of an unbounded query, so exporting a
+    #     multi-year group chat can't turn into one giant blocking request.
+    #     A caller that needs the rest pages forward with `until` set to
+    #     the oldest `created_at` it already has.
+    @action(detail=True, methods=['get'], url_path='export')
+    def export(self, request, pk=None):
+        conversation = self.get_object()
+
+        export_type = (request.query_params.get('type') or 'chat').strip().lower()
+        if export_type not in ('chat', 'media'):
+            return Response(
+                {'detail': "'type' must be 'chat' or 'media'."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        messages_qs = (
+            Message.objects.filter(conversation=conversation)
+            .exclude(deleted_for_everyone=True)
+            .exclude(deleted_for_users=request.user)
+            .select_related('sender')
+            .order_by('created_at')
+        )
+
+        since = request.query_params.get('since')
+        if since:
+            parsed = parse_datetime(since)
+            if not parsed:
+                return Response({'detail': "'since' must be an ISO datetime."}, status=status.HTTP_400_BAD_REQUEST)
+            messages_qs = messages_qs.filter(created_at__gte=parsed)
+
+        until = request.query_params.get('until')
+        if until:
+            parsed = parse_datetime(until)
+            if not parsed:
+                return Response({'detail': "'until' must be an ISO datetime."}, status=status.HTTP_400_BAD_REQUEST)
+            messages_qs = messages_qs.filter(created_at__lt=parsed)
+
+        EXPORT_MAX_MESSAGES = 5000
+        # Fetch one extra row so we can tell "exactly at the cap" apart
+        # from "more exist beyond the cap" without a separate count query.
+        rows = list(messages_qs[:EXPORT_MAX_MESSAGES + 1])
+        has_more = len(rows) > EXPORT_MAX_MESSAGES
+        rows = rows[:EXPORT_MAX_MESSAGES]
+
+        if export_type == 'media':
+            rows = [m for m in rows if m.file_url or m.file_urls]
+
+        items = [
+            {
+                'message_id': str(m.id),
+                'type': m.type,
+                'sender_id': str(m.sender_id) if m.sender_id else None,
+                'sender_username': getattr(m.sender, 'username', None),
+                'text': m.text,
+                'file_url': m.file_url,
+                'file_urls': m.file_urls,
+                'thumbnail_url': m.thumbnail_url,
+                'is_forwarded': m.is_forwarded,
+                'is_edited': getattr(m, 'is_edited', False),
+                'created_at': m.created_at.isoformat(),
+            }
+            for m in rows
+        ]
+
+        payload = {
+            'conversation_id': str(conversation.id),
+            'exported_by': str(request.user.id),
+            'exported_at': timezone.now().isoformat(),
+            'type': export_type,
+            'count': len(items),
+            'has_more': has_more,
+            'messages': items,
+        }
+
+        filename = f"chat_export_{conversation.id}_{export_type}.json"
+        return Response(payload, headers={'Content-Disposition': f'attachment; filename="{filename}"'})
 
     @action(detail=False, methods=['post'], url_path='start_private')
     def start_private(self, request):
@@ -776,6 +900,69 @@ class ConversationViewSet(viewsets.ReadOnlyModelViewSet):
             )
 
         return Response(MessageSerializer(message, context={'request': request}).data, status=status.HTTP_201_CREATED)
+
+    # ======================================================================
+    # 🔧 GAP FIX (task 49) — offline-queue flush endpoint. `offline_queue.
+    # flush_offline_queue()` was fully implemented but unreachable — no
+    # `@action`, no `path()`, so the Flutter client's reconnect flow (see
+    # that module's own "FRONTEND CONTRACT" footer) had nowhere to POST
+    # its locally-queued messages. Registered on `ConversationViewSet`
+    # (router-based, so no urls.py change needed — same as `messages`/
+    # `pinned`/etc. above) since it's conceptually the same "send into
+    # this conversation" action, just batched + idempotent.
+    # ======================================================================
+    # POST /message/conversations/<id>/offline-queue/
+    #   body: {"messages": [{"client_id": "...", "type": "text", ...}, ...]}
+    #   (see `offline_queue.flush_offline_queue`'s docstring for the full
+    #   per-item shape and the response shape it returns)
+    #
+    # ⚠️ Same permission/block gating as the live `messages()` POST above
+    # — this can create real messages too, so it needs the exact same
+    # guards, not a lighter set just because it's a reconnect/batch path.
+    # `check_daily_message_limit` is checked once for the whole batch
+    # (not per item) — it's a "is this conversation over its daily cap
+    # right now" gate, same as the live path calls it once per request.
+    MAX_OFFLINE_QUEUE_BATCH = 100  # defensive cap — one reconnect shouldn't be able to submit an unbounded batch in a single request
+
+    @action(detail=True, methods=['post'], url_path='offline-queue')
+    def offline_queue_flush(self, request, pk=None):
+        conversation = self.get_object()
+
+        queued_messages = request.data.get('messages')
+        if not isinstance(queued_messages, list) or not queued_messages:
+            return Response(
+                {'detail': "'messages' (non-empty list) required hai."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        if len(queued_messages) > self.MAX_OFFLINE_QUEUE_BATCH:
+            return Response(
+                {'detail': f"Ek baar me zyada se zyada {self.MAX_OFFLINE_QUEUE_BATCH} messages flush kiye ja sakte hain."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        if conversation.type != ConversationType.GROUP:
+            other_id = conversation.memberships.filter(
+                left_at__isnull=True
+            ).exclude(user_id=request.user.id).values_list('user_id', flat=True).first()
+            if other_id and is_blocked_pair(request.user.id, other_id):
+                return Response(
+                    {'detail': 'Block hone ki wajah se message nahi bheja ja sakta.'},
+                    status=status.HTTP_403_FORBIDDEN,
+                )
+        else:
+            group = getattr(conversation, 'group_detail', None)
+            if group:
+                allowed, reason = check_group_permission(group, request.user.id, 'message_permission')
+                if not allowed:
+                    return Response({'detail': reason}, status=status.HTTP_403_FORBIDDEN)
+                allowed, reason = check_daily_message_limit(group, request.user, conversation)
+                if not allowed:
+                    return Response({'detail': reason}, status=status.HTTP_429_TOO_MANY_REQUESTS)
+
+        results = flush_offline_queue(
+            conversation=conversation, sender=request.user, queued_messages=queued_messages,
+        )
+        return Response({'results': results})
 
     # ======================================================================
     # 🔥 NAYA — POLL MESSAGES (WhatsApp-style group poll)
@@ -1386,6 +1573,21 @@ class MessageViewSet(mixins.RetrieveModelMixin, mixins.UpdateModelMixin,
                 {'detail': "'target_lang' required hai (e.g. 'hi', 'en', 'ta')."},
                 status=status.HTTP_400_BAD_REQUEST,
             )
+        # TASK 29 — reject an unsupported code here, before even hitting
+        # the cache, so a bad language never produces a cached "success"
+        # entry. `translate_text` re-checks this too (it's the shared,
+        # reusable enforcement point for every caller of that function),
+        # but checking it here as well lets us return 400 with the full
+        # supported-language list without having to parse that back out
+        # of the exception message.
+        if target_lang not in SUPPORTED_LANGUAGES:
+            return Response(
+                {
+                    'detail': f"'{target_lang}' abhi supported nahi hai.",
+                    'supported_languages': sorted(SUPPORTED_LANGUAGES),
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
 
         cache_key = f"translate:{message.id}:{int(message.updated_at.timestamp())}:{target_lang}"
         cached = cache.get(cache_key)
@@ -1399,6 +1601,13 @@ class MessageViewSet(mixins.RetrieveModelMixin, mixins.UpdateModelMixin,
 
         try:
             translated = translate_text(message.text, target_lang)
+        except UnsupportedLanguageError as e:
+            # Defensive — the explicit check above already covers this
+            # for the normal `target_lang` path, but `translate_text`
+            # also validates `source_lang` (not accepted from the client
+            # today, only used if a future caller passes one), so this
+            # keeps that path from ever surfacing as a raw 502.
+            return Response({'detail': str(e)}, status=status.HTTP_400_BAD_REQUEST)
         except TranslationServiceUnavailable as e:
             return Response({'detail': str(e)}, status=status.HTTP_503_SERVICE_UNAVAILABLE)
         except TranslationError as e:
@@ -1660,7 +1869,17 @@ class MessageViewSet(mixins.RetrieveModelMixin, mixins.UpdateModelMixin,
     # saare votes clear karke naye set se replace karta hai), isliye ek
     # option untick karne ke liye bhi client bas naya (chhota) list bhejta
     # hai, alag "unvote" endpoint ki zaroorat nahi.
-    @action(detail=True, methods=['post'], url_path='poll/vote')
+    #
+    # TASK 29 — "clear my vote entirely": `option_ids: []` above already
+    # reads as "my vote list is now empty" for the multi-choice case, but
+    # for a single-choice poll `PollVoteSerializer` requires at least one
+    # option (a bare empty POST body doesn't map to "no opinion" cleanly
+    # for that shape), and there was no way at all to go from "voted" back
+    # to "no vote" without picking some other option first. `DELETE` on
+    # this same route is the explicit, unambiguous version of that: it
+    # removes every vote this user has on this poll and nothing else,
+    # regardless of single/multi-choice.
+    @action(detail=True, methods=['post', 'delete'], url_path='poll/vote')
     def poll_vote(self, request, pk=None):
         message = self.get_object()
         if message.type != MessageType.POLL:
@@ -1671,6 +1890,26 @@ class MessageViewSet(mixins.RetrieveModelMixin, mixins.UpdateModelMixin,
             return Response({'detail': 'Poll data nahi mila.'}, status=status.HTTP_404_NOT_FOUND)
         if poll.is_closed:
             return Response({'detail': 'Ye poll band ho chuka hai, ab vote nahi ho sakta.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        if request.method == 'DELETE':
+            PollVote.objects.filter(option__poll=poll, user=request.user).delete()
+            poll_data = PollSerializer(poll, context={'request': request}).data
+            async_to_sync(get_channel_layer().group_send)(
+                f'chat_{message.conversation_id}',
+                {
+                    'type': 'poll_update',
+                    'message_id': str(message.id),
+                    'poll': poll_data,
+                    # 🔥 NAYA — `voted_by` (POST) ke parallel `cleared_by`,
+                    # taaki client ye differentiate kar sake ki ye event
+                    # "kisi ne vote diya" hai ya "kisi ne apna vote hataya".
+                    'cleared_by': str(request.user.id),
+                },
+            )
+            # Updated poll (fresh tallies) return karte hain, 204 nahi —
+            # `POST` yahi karta hai, aur client ko refresh ke liye alag
+            # GET nahi karna padta clear ke turant baad.
+            return Response(poll_data)
 
         serializer = PollVoteSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
@@ -1789,27 +2028,44 @@ class MessageViewSet(mixins.RetrieveModelMixin, mixins.UpdateModelMixin,
         # before this, which defeated the point of "disappearing" — a
         # message that vanished from the chat could be resurrected in a
         # brand new chat with a fresh (non-expiring) copy.
-        # 🔥 NAYA — poll messages bhi exclude kiye hain: forward yahan
-        # sirf plain field-copy karta hai (text/file_url/meta), poll ka
-        # asal data alag `Poll`/`PollOption` rows me hota hai jo copy nahi
-        # hote — forward karne se ek "POLL type ka message bina Poll data
-        # ke" ban jaata, jo client pe crash/blank card dikhata. Poll
-        # forward abhi supported nahi hai (future: naya Poll+options
-        # explicitly clone karna padega, sirf Message field-copy se nahi).
+        # TASK 29 — poll forwarding is now supported. Plain field-copy
+        # (text/file_url/meta) is still not enough for a POLL message —
+        # the actual poll data lives in separate `Poll`/`PollOption`
+        # rows — so a poll message additionally gets its `Poll` +
+        # `PollOption` rows explicitly cloned below (see the loop
+        # further down). Deliberately NOT cloned:
+        #   - `PollVote` rows: a forwarded poll is a fresh poll in a
+        #     (possibly totally different) chat — carrying over votes
+        #     from the original audience would misrepresent who voted
+        #     in the new conversation, and could leak "who voted what"
+        #     to people who were never in the source chat to begin with.
+        #   - `is_closed` / `closed_at` / `closed_by`: the forwarded copy
+        #     always starts OPEN, regardless of whether the source poll
+        #     was closed — it's a new poll, so people in the target chat
+        #     should be able to vote on it.
+        # A poll message with no `Poll` row at all (shouldn't normally
+        # happen, but defensive) is silently dropped from the forward
+        # rather than creating a client-crashing "POLL type with no poll
+        # data" message — see the `ordered_messages` filter below.
         source_messages = list(
             Message.objects.filter(id__in=message_ids, conversation__memberships__user=request.user)
             .filter(Q(expires_at__isnull=True) | Q(expires_at__gt=timezone.now()))
             .exclude(deleted_for_everyone=True)
             .exclude(deleted_for_users=request.user)
-            .exclude(type=MessageType.POLL)
             .select_related('conversation')
+            .prefetch_related('poll', 'poll__options')
         )
         if not source_messages:
             return Response({'detail': 'Koi valid message nahi mila.'}, status=status.HTTP_404_NOT_FOUND)
 
         # preserve the order the client selected them in, not DB order
         by_id = {str(m.id): m for m in source_messages}
-        ordered_messages = [by_id[str(mid)] for mid in message_ids if str(mid) in by_id]
+        ordered_messages = [
+            m for m in (by_id[str(mid)] for mid in message_ids if str(mid) in by_id)
+            if m.type != MessageType.POLL or getattr(m, 'poll', None) is not None
+        ]
+        if not ordered_messages:
+            return Response({'detail': 'Koi valid message nahi mila.'}, status=status.HTTP_404_NOT_FOUND)
 
         # Only target conversations the user is currently a member of.
         target_conversations = list(
@@ -1828,8 +2084,9 @@ class MessageViewSet(mixins.RetrieveModelMixin, mixins.UpdateModelMixin,
 
         with transaction.atomic():
             for conversation in target_conversations:
-                created_messages = [
-                    Message.objects.create(
+                created_messages = []
+                for src in ordered_messages:
+                    msg = Message.objects.create(
                         conversation=conversation,
                         sender=request.user,
                         type=src.type,
@@ -1837,7 +2094,11 @@ class MessageViewSet(mixins.RetrieveModelMixin, mixins.UpdateModelMixin,
                         # khud koi non-empty text nahi tha (media/location
                         # message) — text message ka apna text hamesha
                         # priority pe rehta hai, caption tab silently
-                        # ignore ho jaati hai.
+                        # ignore ho jaati hai. Poll messages ka `text`
+                        # hamesha poll question hota hai (non-empty), to
+                        # ye caption bhi unke liye automatically ignore
+                        # ho jaati hai — koi alag POLL-specific check
+                        # nahi chahiye.
                         text=(caption if (caption and not (src.text or '').strip()) else src.text),
                         file_url=src.file_url,
                         file_urls=src.file_urls,
@@ -1845,8 +2106,29 @@ class MessageViewSet(mixins.RetrieveModelMixin, mixins.UpdateModelMixin,
                         meta=src.meta,
                         is_forwarded=True,
                     )
-                    for src in ordered_messages
-                ]
+
+                    # TASK 29 — poll forward: clone `Poll` + `PollOption`
+                    # rows onto the new message. Votes and closed-state
+                    # are intentionally NOT carried over — see the big
+                    # comment above `source_messages` for why.
+                    if src.type == MessageType.POLL:
+                        src_poll = src.poll
+                        new_poll = Poll.objects.create(
+                            message=msg,
+                            question=src_poll.question,
+                            allow_multiple_answers=src_poll.allow_multiple_answers,
+                        )
+                        PollOption.objects.bulk_create([
+                            PollOption(poll=new_poll, text=opt.text, order=opt.order)
+                            for opt in src_poll.options.all().order_by('order')
+                        ])
+                        # Cache the reverse `msg.poll` lookup so the
+                        # broadcast loop below (after this transaction
+                        # commits) doesn't need an extra query to fetch
+                        # what we just created.
+                        msg.poll = new_poll
+
+                    created_messages.append(msg)
 
                 last = created_messages[-1]
                 conversation.last_message_text = (last.text or '')[:500]
@@ -1868,31 +2150,38 @@ class MessageViewSet(mixins.RetrieveModelMixin, mixins.UpdateModelMixin,
         for conversation in target_conversations:
             created_messages = created_by_conversation[str(conversation.id)]
             for msg in created_messages:
-                async_to_sync(channel_layer.group_send)(
-                    f'chat_{conversation.id}',
-                    {
-                        'type': 'chat_message',
-                        'event': 'message',
-                        'id': str(msg.id),
-                        'conversation_id': str(conversation.id),
-                        'sender_id': str(request.user.id),
-                        'sender_name': sender_name,
-                        'sender_username': sender['username'],
-                        'sender_first_name': sender['first_name'],
-                        'sender_last_name': sender['last_name'],
-                        'sender_profile_photo': sender['profile_photo'],
-                        'message_type': msg.type,
-                        'text': msg.text,
-                        'file_url': msg.file_url,
-                        'file_urls': msg.file_urls,
-                        'thumbnail_url': msg.thumbnail_url,
-                        'meta': msg.meta,
-                        'reply_to': None,
-                        'is_forwarded': True,
-                        'client_id': None,
-                        'created_at': msg.created_at.isoformat(),
-                    }
-                )
+                payload = {
+                    'type': 'chat_message',
+                    'event': 'message',
+                    'id': str(msg.id),
+                    'conversation_id': str(conversation.id),
+                    'sender_id': str(request.user.id),
+                    'sender_name': sender_name,
+                    'sender_username': sender['username'],
+                    'sender_first_name': sender['first_name'],
+                    'sender_last_name': sender['last_name'],
+                    'sender_profile_photo': sender['profile_photo'],
+                    'message_type': msg.type,
+                    'text': msg.text,
+                    'file_url': msg.file_url,
+                    'file_urls': msg.file_urls,
+                    'thumbnail_url': msg.thumbnail_url,
+                    'meta': msg.meta,
+                    'reply_to': None,
+                    'is_forwarded': True,
+                    'client_id': None,
+                    'created_at': msg.created_at.isoformat(),
+                }
+                # TASK 29 — forwarded poll needs its `poll` data in the
+                # live event too, same as `create_poll` sends for a
+                # brand-new poll — otherwise a client that's already open
+                # on the target chat would render a POLL-type bubble with
+                # no options until the next full refetch.
+                if msg.type == MessageType.POLL:
+                    poll_obj = getattr(msg, 'poll', None)
+                    if poll_obj:
+                        payload['poll'] = PollSerializer(poll_obj, context={'request': request}).data
+                async_to_sync(channel_layer.group_send)(f'chat_{conversation.id}', payload)
 
             other_recipients = list(
                 ConversationParticipant.objects.filter(conversation=conversation)
@@ -2039,40 +2328,18 @@ class GroupViewSet(viewsets.ModelViewSet):
         serializer.is_valid(raise_exception=True)
         data = serializer.validated_data
 
-        with transaction.atomic():
-            conversation = Conversation.objects.create(type=ConversationType.GROUP)
-            group = Group.objects.create(
-                conversation=conversation,
-                name=data['name'],
-                description=data.get('description', ''),
-                photo_url=data.get('photo_url'),
-                is_private=data.get('is_private', False),
-                invite_code=self._generate_invite_code(),
-                created_by=request.user,
-            )
-
-            # 🔥 FIX: `member_ids` ab `GroupCreateSerializer` me
-            # `IntegerField()` list hai (User pk integer hai, UUID nahi),
-            # isliye yahan bhi seedha integers use karo — pehle `str(uid)`
-            # bana ke `User.objects.filter(id__in=member_ids)` chalaya ja
-            # raha tha, jo integer pk ke against string set match hi nahi
-            # karta (Django ORM `id__in` me type mismatch pe silently 0
-            # results deta hai) — matlab members select hote hue bhi group
-            # me kabhi add hi nahi hote the.
-            member_ids = set(data.get('member_ids', []))
-            member_ids.discard(request.user.id)
-            valid_users = list(User.objects.filter(id__in=member_ids))
-
-            memberships = [ConversationParticipant(conversation=conversation, user=request.user)]
-            group_members = [GroupMember(group=group, user=request.user, role=GroupMember.Role.ADMIN)]
-            for user in valid_users:
-                memberships.append(ConversationParticipant(conversation=conversation, user=user))
-                group_members.append(GroupMember(group=group, user=user, added_by=request.user))
-
-            ConversationParticipant.objects.bulk_create(memberships)
-            GroupMember.objects.bulk_create(group_members)
-            Group.objects.filter(id=group.id).update(members_count=len(group_members))
-            group.refresh_from_db()
+        # 🔧 FIX — this used to duplicate `services.create_group()`
+        # line-for-line inline (see that function for the `member_ids`
+        # integer-type note, which still applies — `GroupCreateSerializer`
+        # already gives us ints, so no `str(uid)` conversion needed).
+        group = create_group(
+            created_by=request.user,
+            name=data['name'],
+            description=data.get('description', ''),
+            photo_url=data.get('photo_url'),
+            is_private=data.get('is_private', False),
+            member_ids=data.get('member_ids', []),
+        )
 
         return Response(GroupSerializer(group, context={'request': request}).data, status=status.HTTP_201_CREATED)
 
@@ -2104,34 +2371,20 @@ class GroupViewSet(viewsets.ModelViewSet):
         # object()` khud hi queryset se aata hai (jo already sirf group-
         # members tak limited hai), isliye caller ka member hona to already
         # confirm hai, bas role-check yahan manually lagana hai.
-        if group.is_private:
-            self._require_admin(group.id, request.user)
-
+        #
+        # 🔧 FIX — this used to duplicate `services.add_members_to_group()`
+        # inline (permission check, existing-member filtering, `bulk`
+        # add-or-reactivate loop, cache invalidation — all of it). That
+        # function raises plain `PermissionError`/`ValueError` (by design —
+        # see `services.py`'s header comment), converted to their DRF
+        # equivalents right here.
         user_ids = request.data.get('user_ids', [])
-        if not user_ids:
-            return Response({'detail': "'user_ids' required hai."}, status=status.HTTP_400_BAD_REQUEST)
-
-        existing_ids = set(str(uid) for uid in group.group_members.values_list('user_id', flat=True))
-        new_ids = [uid for uid in user_ids if str(uid) not in existing_ids]
-        users = User.objects.filter(id__in=new_ids)
-
-        with transaction.atomic():
-            for user in users:
-                add_or_reactivate_participant(group.conversation, user)
-                GroupMember.objects.get_or_create(group=group, user=user, defaults={'added_by': request.user})
-            Group.objects.filter(id=group.id).update(
-                members_count=group.group_members.filter(is_banned=False).count()
-            )
-
-        # 🔥 FIX — cache_utils.py's own setup docstring explicitly names
-        # `add_members` as a required invalidation call-site (alongside
-        # `update_member`/`approve_join_request`/member-remove), but it was
-        # never added here. Without it, a user who was checked (and cached
-        # as "not a member") just before being added here — e.g. by trying
-        # an admin-only action — could keep reading as a non-member for up
-        # to the 60s TTL.
-        for user in users:
-            invalidate_group_role_cache(group.id, user.id)
+        try:
+            users = add_members_to_group(group=group, actor=request.user, user_ids=user_ids)
+        except PermissionError as e:
+            raise PermissionDenied(str(e))
+        except ValueError as e:
+            return Response({'detail': str(e)}, status=status.HTTP_400_BAD_REQUEST)
 
         return Response(GroupSerializer(group, context={'request': request}).data)
 
@@ -2245,15 +2498,11 @@ class GroupViewSet(viewsets.ModelViewSet):
         join_request.save(update_fields=['status', 'responded_by', 'responded_at'])
         return Response({'detail': 'Request reject ho gayi.'}, status=status.HTTP_200_OK)
 
-    @staticmethod
-    def _generate_invite_code():
-        # `secrets.token_urlsafe` URL-safe base64 deta hai (letters/digits/
-        # -/_), 8 chars kaafi hai collision-avoid karne ke liye; phir bhi
-        # loop laga rakha hai taaki DB-level uniqueness kabhi na tooté.
-        while True:
-            code = secrets.token_urlsafe(6)[:8]
-            if not Group.objects.filter(invite_code=code).exists():
-                return code
+    # 🔧 FIX — invite-code generation used to be duplicated here too
+    # (identical `secrets.token_urlsafe` + uniqueness-loop). `create()`
+    # now goes through `services.create_group()`, which calls `services.
+    # generate_group_invite_code()` — this static method has no remaining
+    # caller.
 
     @staticmethod
     def _require_admin(group_id, user):
@@ -2273,61 +2522,28 @@ class GroupViewSet(viewsets.ModelViewSet):
     @action(detail=True, methods=['patch', 'delete'], url_path=r'members/(?P<user_id>[^/.]+)')
     def update_member(self, request, pk=None, user_id=None):
         group = self.get_object()
-        membership = get_object_or_404(GroupMember, group=group, user_id=user_id)
-        is_self = str(request.user.id) == str(user_id)
 
+        # 🔧 FIX — both branches used to duplicate `services.
+        # remove_group_member()` / `services.update_group_member_role()`
+        # inline (self-removal bypass, admin/mod gate, the `is_banned` <->
+        # `left_at` sync, cache invalidation — all of it, verbatim). Both
+        # services functions raise plain `PermissionError` on the same
+        # rule `_require_admin` used to check directly; converted to DRF's
+        # `PermissionDenied` right here, at the view boundary, exactly as
+        # `services.py`'s header comment describes.
         if request.method == 'DELETE':
-            if not is_self:
-                self._require_admin(group.id, request.user)
-            membership.delete()
-            ConversationParticipant.objects.filter(
-                conversation=group.conversation, user_id=user_id
-            ).update(left_at=timezone.now())
-            Group.objects.filter(id=group.id).update(
-                members_count=group.group_members.filter(is_banned=False).count()
-            )
-            # 🔥 FIX — member remove hone ke baad (khaaskar agar wo khud
-            # admin/mod tha) is_group_admin_or_mod cache ab stale ho gayi
-            # hai (member row hi delete ho gaya, par cache abhi bhi purana
-            # role/is_banned dikha sakti thi TTL khatam hone tak). Turant
-            # invalidate karo taaki access-check turant sahi reflect kare.
-            invalidate_group_role_cache(group.id, user_id)
+            try:
+                remove_group_member(group=group, actor=request.user, user_id=user_id)
+            except PermissionError as e:
+                raise PermissionDenied(str(e))
             return Response(status=status.HTTP_204_NO_CONTENT)
 
-        self._require_admin(group.id, request.user)
-        was_banned = membership.is_banned
-        for field in ('role', 'is_muted', 'is_banned'):
-            if field in request.data:
-                setattr(membership, field, request.data[field])
-        membership.save()
-
-        # 🔥 CRITICAL FIX — role ya is_banned change hone ke baad group-role
-        # cache (`cache_utils.get_group_role_cached`, `group_rules.
-        # is_group_admin_or_mod` ke peeche) turant invalidate karna ZAROORI
-        # hai. Bina is call ke, ek demote/ban kiye gaye admin ke paas agle
-        # 60s (cache TTL) tak bhi pin/message/call/study-room jaisi
-        # admin-only actions ka access reh sakta tha — cache add karne se
-        # pehle ye gap exist hi nahi karta tha (har check seedha DB se
-        # hota tha), isliye ye is session ki caching change ka direct
-        # side-effect hai aur usi ke saath fix hona chahiye tha.
-        invalidate_group_role_cache(group.id, user_id)
-
-        # 🔥 FIX — pehle sirf `GroupMember.is_banned` set hota tha.
-        # Har permission check (`IsConversationParticipant`, chat list
-        # queryset, message-send) `ConversationParticipant.left_at` pe
-        # depend karta hai, `is_banned` pe nahi — isliye "banned" user
-        # ban hone ke baad bhi normally chat kar/dekh pa raha tha. Ab
-        # ban hote hi (jaisa DELETE/remove me already hota hai) left_at
-        # set karo taaki access turant revoke ho; unban pe wapas active
-        # karo.
-        if membership.is_banned and not was_banned:
-            ConversationParticipant.objects.filter(
-                conversation=group.conversation, user_id=user_id
-            ).update(left_at=timezone.now())
-        elif was_banned and not membership.is_banned:
-            ConversationParticipant.objects.filter(
-                conversation=group.conversation, user_id=user_id
-            ).update(left_at=None)
+        try:
+            membership = update_group_member_role(
+                group=group, actor=request.user, user_id=user_id, data=request.data,
+            )
+        except PermissionError as e:
+            raise PermissionDenied(str(e))
 
         return Response(GroupMemberSerializer(membership, context={'request': request}).data)
 
@@ -2883,6 +3099,118 @@ class CallActionView(APIView):
             "detail": f"call {action} done",
             "livekit_url": LIVEKIT_WS_URL if livekit_token else None,
             "livekit_token": livekit_token,
+        })
+
+
+class CallRecordingView(APIView):
+    """
+    POST /calls/<call_id>/recording/  {"action": "start" | "stop"}
+
+    🔥 TASK 21 — LiveKit server-side room-composite recording, wired up
+    for real: `CallSession.is_recording`/`recording_url` used to be
+    fields with no start/stop code behind them anywhere (see the
+    remove-then-restore history on those fields in models.py). This
+    calls into `livekit_utils.start_room_recording`/`stop_room_recording`
+    (LiveKit's Egress REST API) and persists the result on the call.
+
+    Recording control is host-only (`call.caller`) — unlike
+    `CallActionView`, where each participant only ever controls their
+    own leg (accept/reject/end), recording affects everyone in the room,
+    so this mirrors Zoom/Meet's "only the host can start/stop the
+    recording" convention rather than letting any participant flip it.
+    """
+    permission_classes = [IsAuthenticated]
+
+    VALID_ACTIONS = ('start', 'stop')
+
+    def post(self, request, call_id):
+        rec_action = request.data.get('action')
+        if rec_action not in self.VALID_ACTIONS:
+            return Response(
+                {"detail": f"'action' must be one of {self.VALID_ACTIONS}."},
+                status=400,
+            )
+
+        call = CallSession.objects.filter(id=call_id).first()
+        if not call:
+            return Response({"detail": "Call not found"}, status=404)
+
+        if call.caller_id != request.user.id:
+            return Response({"detail": "Sirf call host recording control kar sakta hai."}, status=403)
+
+        if call.status != CallStatus.ONGOING:
+            return Response({"detail": "Recording sirf ongoing call me start/stop ho sakti hai."}, status=400)
+
+        if rec_action == 'start':
+            if call.is_recording:
+                return Response({
+                    "detail": "Recording already chal rahi hai.",
+                    "is_recording": True,
+                    "recording_url": call.recording_url,
+                })
+
+            try:
+                egress_id, output_path = start_room_recording(call.channel_name)
+            except EgressError:
+                # 🔥 NOTE: EgressError subclasses RuntimeError, so this
+                # branch MUST come before the plain RuntimeError one below
+                # — except clauses are checked in order, and the broader
+                # type would otherwise swallow this one silently.
+                logger.exception("LiveKit egress start failed for call=%s", call_id)
+                return Response({"detail": "Recording start nahi ho payi, dobara try karo."}, status=502)
+            except RuntimeError as exc:
+                # Missing LIVEKIT_API_KEY/SECRET — same lazy-config error
+                # shape `generate_livekit_token` raises elsewhere in this
+                # view module.
+                return Response({"detail": str(exc)}, status=503)
+
+            call.is_recording = True
+            call.recording_egress_id = egress_id
+            call.recording_started_at = timezone.now()
+            call.recording_output_path = output_path
+            call.save(update_fields=[
+                'is_recording', 'recording_egress_id', 'recording_started_at', 'recording_output_path',
+            ])
+            event = 'recording_started'
+        else:
+            if not call.is_recording or not call.recording_egress_id:
+                return Response({"detail": "Koi active recording nahi hai."}, status=400)
+
+            try:
+                recording_url = stop_room_recording(call.recording_egress_id, call.recording_output_path)
+            except EgressError:
+                # See the matching NOTE in the 'start' branch above — this
+                # must stay before the plain RuntimeError except clause.
+                logger.exception("LiveKit egress stop failed for call=%s", call_id)
+                return Response({"detail": "Recording stop nahi ho payi, dobara try karo."}, status=502)
+            except RuntimeError as exc:
+                return Response({"detail": str(exc)}, status=503)
+
+            call.is_recording = False
+            update_fields = ['is_recording']
+            if recording_url:
+                call.recording_url = recording_url
+                update_fields.append('recording_url')
+            call.save(update_fields=update_fields)
+            event = 'recording_stopped'
+
+        channel_layer = get_channel_layer()
+        async_to_sync(channel_layer.group_send)(
+            f'call_{call_id}',
+            {
+                'type': 'call_signal',
+                'data': {
+                    'event': event,
+                    'call_id': str(call_id),
+                    'is_recording': call.is_recording,
+                },
+            }
+        )
+
+        return Response({
+            "detail": f"recording {rec_action} done",
+            "is_recording": call.is_recording,
+            "recording_url": call.recording_url,
         })
 
 

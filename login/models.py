@@ -57,6 +57,17 @@ OTPVerification:
 7. `register_failed_attempt` now wrapped so `is_locked()` can be trusted
    immediately after — no behavioural change, just documented the
    invariant since `check_otp` callers depend on it.
+8. Added `is_verified` (task 15 — signup server-side OTP-verified check).
+   Previously "OTP was verified" lived nowhere in the DB for the
+   signup (no-existing-user) branch of VerifyOTPView — that view just
+   returned `user_exists: False` and left the OTPVerification row
+   sitting there, unconsumed, trusting the *client* to only call
+   /signup/ after a successful /verify-otp/ response. Nothing stopped
+   a client from skipping straight to /signup/ with no OTP step at
+   all. `is_verified` is now the durable, server-side fact
+   SignupSerializer checks before creating an account, and the row is
+   deleted once signup consumes it (see serializers.py) so it can't be
+   replayed for a second signup.
 """
 from datetime import timedelta
 
@@ -170,6 +181,18 @@ class OTPVerification(models.Model):
     # combinations, so a failed-attempt counter with a hard cap is
     # required, not optional.
     attempts = models.PositiveSmallIntegerField(default=0)
+
+    # Task 15: set True by VerifyOTPView the moment `check_otp()` succeeds
+    # for a target with no matching user yet (i.e. the signup branch).
+    # SignupSerializer.validate() requires this to be True (and the row
+    # unexpired) before it will create an account — that's the actual
+    # server-side link between "OTP verified" and "signup allowed";
+    # without it, that link only ever existed in the frontend's call
+    # ordering, which a direct API call could simply skip. Left False
+    # (irrelevant) for the login branch, since that branch deletes the
+    # row immediately on success instead of persisting it — see
+    # VerifyOTPView / task 16.
+    is_verified = models.BooleanField(default=False)
 
     created_at = models.DateTimeField(auto_now_add=True, db_index=True)
 

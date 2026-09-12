@@ -1,6 +1,12 @@
 # `core` App — Documentation
 
-> Ye document `core` Django app ke andar jo bhi kaam hua hai (tasks 28, 42-48) uska single source of truth hai. Koi bhi is app pe kaam continue kare, sabse pehle ye file padhe — har file ka purpose, har function ka contract, aur sab `ASSUMPTION` markers ek jagah pe hain.
+> Ye document `core` Django app ke andar jo bhi kaam hua hai (tasks 28, 42-48, F-4) uska single source of truth hai. Koi bhi is app pe kaam continue kare, sabse pehle ye file padhe — har file ka purpose, har function ka contract, aur sab `ASSUMPTION` markers ek jagah pe hain.
+
+> **Reconciliation pass (latest — is update):** source files firse check kiye gaye (campus app ke liye jaisi pass abhi-abhi hui thi, wahi tarika yahan bhi). Do real gaps mile:
+> - **`search.py` (F-4) — poora naya file, is doc me ab tak bilkul mention hi nahi tha.** `core`'s unified cross-app "search everything" layer (Postgres FTS + trigram, `message/search_utils.py` ke strategy ka extension) — naya **§6.2** isko poora document karta hai; §2 aur §8 (dependency graph) bhi update kiye.
+> - **`test_parent_bridge.py` test-count galat tha** — §2 aur §6.1 "10 tests" bolte the, real file me **11** hain (`test_second_students_parent_token_never_resolves_to_first_student` count me chhoot gaya tha). Fix kar diya.
+>
+> Baaki sab (`models.py`, `services.py`, `notification_batching.py`, `classroom_chat_bridge.py`'s 8+1 sync/parent functions, `views.py`/`serializers.py`/`urls.py`, `admin.py`, `tests.py`) already is doc se match kar rahe the — in files me koi naya drift nahi mila.
 
 ---
 
@@ -21,16 +27,17 @@ Pehle notifications aur classroom↔chat coupling `liveclass` app ke andar bikhr
 |---|---|
 | `models.py` | `Notification`, `NotificationPreference` — dono models `liveclass` se yahan move hue (task 42) |
 | `services.py` | `create_notification()` + `create_bulk_notifications()` — sirf bell-row(s) banate hain, push kabhi nahi bhejte |
-| `notification_batching.py` | `create_batched_notification()` — burst events (5 likes ek saath) ko ek notification me collapse karta hai. **⚠️ Uploaded content is broken — see §5.** |
-| `classroom_chat_bridge.py` | `liveclass` ↔ `message` app ke beech ka pura coupling — 8 documented sync functions + `resolve_parent_from_token()` (Task 5, parent-portal auth — see §6) |
+| `notification_batching.py` | `create_batched_notification()` — burst events (5 likes ek saath) ko ek notification me collapse karta hai. ✅ **Real implementation ab uploaded hai — see §5** (pehle yahan broken-content warning thi). |
+| `classroom_chat_bridge.py` | `liveclass` ↔ `message` app ke beech ka pura coupling — 8 sync functions + `get_groups_for_classrooms()` (bulk helper) + `resolve_parent_from_token()` (Task 5, parent-portal auth) — **poora file ab uploaded hai, body-not-available warning resolved — see §6/§6.1** |
+| `search.py` | **NEW row, F-4 — is doc me pehle bilkul mention nahi tha** — unified cross-app "search everything" (Postgres FTS + trigram, `message/search_utils.py` ka extension). `message` (wired) + `campus.Notice` (wired) sources abhi live hain; `post`/`liveclass.ClassMaterial` STUB hain (model uploads na hone ki wajah se). Pure ranking/merging layer hai — koi bhi permission-scoping khud nahi karta, caller ka pehle se scoped queryset leta hai. Naya **§6.2** dekho. |
 | `serializers.py` | **NEW row (wasn't in this table before)** — real DRF `ModelSerializer`s (`NotificationSerializer`, `NotificationPreferenceSerializer`), replacing this doc's own original `to_dict` suggestion — see §7 |
 | `views.py` | `NotificationViewSet` (list/retrieve/destroy + custom actions) + `NotificationPreferenceView` |
 | `urls.py` | Router wiring — root urlconf me `include("core.urls")` karna hai |
 | `admin.py` | **✅ NOT empty anymore** — `NotificationAdmin` + `NotificationPreferenceAdmin` dono registered hain, see §3b |
 | `apps.py` | Standard `CoreConfig` |
 | `tests.py` | `Notification`/`NotificationPreference`/`create_notification`/viewset ke tests |
-| `test_notification_batching.py` | `create_batched_notification` ke 6 tests (contract confirm karte hain — see §5) |
-| `test_parent_bridge.py` | **NEW row** — `resolve_parent_from_token()` (Task 5) ke 10 tests, `message.models.ParentAccessCode`/`ParentToken` ke against — see §6 |
+| `test_notification_batching.py` | `create_batched_notification` ke **5** tests (contract confirm karte hain — see §5) |
+| `test_parent_bridge.py` | **NEW row** — `resolve_parent_from_token()` (Task 5) ke **11** tests (count fix — pehle "10" likha tha), `message.models.ParentAccessCode`/`ParentToken` ke against — see §6 |
 
 ---
 
@@ -51,10 +58,20 @@ Ye section pehle assume karta tha ki `core/models.py` khaali hai aur design sugg
 | `classroom` | FK → `liveclass.Classroom` | nullable, `SET_NULL` — sirf liveclass-specific types ke liye |
 | `session` | FK → `liveclass.ClassSession` | nullable, `SET_NULL` |
 | `data` | JSONField (dict, `default=dict`) | task 44: generic free-form context (e.g. `conversation_id`, deep-linking) jo liveclass FKs me fit nahi hota — additive column, same 0002 migration |
-| `is_read` | BooleanField | koi standalone `db_index=True` nahi — composite `Meta.indexes` (`recipient`, `is_read`, `-created_at`) hi per-user unread queries cover karta hai |
+| `is_read` | BooleanField | koi standalone `db_index=True` nahi — composite `Meta.indexes` cover karte hain (neeche, ab **do** hain) |
 | `read_at` | DateTimeField | nullable, sirf `mark_read()` se set hota hai |
-| `created_at` | auto (`auto_now_add`) | indexed (composite index ka part), `ordering = ["-created_at"]` |
+| `created_at` | auto (`auto_now_add`) | indexed (dono composite indexes ka part), `ordering = ["-created_at"]` |
 | — | **no `updated_at`** | Original liveclass model me bhi nahi tha — `mark_read()` hi iski sirf mutation hai, alag `updated_at` redundant hoti (batching cache khud apna staleness track karta hai, is model pe nahi) |
+
+**⚠️ NEW (production hardening pass, koi schema-breaking change nahi — sirf 2 additive index) — pehle iss doc me nahi tha:**
+
+- `notif_type` ab `db_index=True` hai. Reasoning (module docstring se): recipient-scoped composite index "kitne SESSION_LIVE notifications aaj gaye, sab recipients milake" jaisi ops/admin-dashboard query ko cover nahi karta — wo ek bilkul alag query shape hai, upar wale kisi bhi index ka duplicate nahi.
+- `Meta.indexes` ab **do** hain, ek nahi:
+  1. `(recipient, is_read, -created_at)` — unread-badge/unread-list queries (pehle se documented).
+  2. `(recipient, -created_at)` — **naya**. Reasoning: pehla index sirf un queries ko fully-sorted run deta hai jo `is_read` pe bhi filter karti hain. Bahut common "meri saari notifications, newest first" query (combined feed, `is_read` filter ke bina) us index se ORDER BY nahi le sakti across different `is_read` values. Ye dusra index seedha isी query-shape ke liye hai.
+- **`Notification.objects` — naya custom manager/queryset**, ab `NotificationQuerySet` (`.for_user(user)`, `.unread()`) se banta hai (`objects = NotificationQuerySet.as_manager()`). Iska matlab: koi bhi jagah jo pehle `Notification.objects.filter(recipient=u, is_read=False).count()` inline likhti thi, ab `Notification.objects.for_user(u).unread().count()` likh sakti hai — aur agar is query-shape ko kabhi tune karna pade, sirf **ek** jagah (ye manager) badalni padegi. `views.py`/`tests.py` abhi bhi purane `.filter(...)` style se hi likhe hain (nayi manager methods ka istemal optional hai, backward-compatible) — ye ek available convenience hai, koi jagah force-migrate nahi ki gayi.
+
+Do additive indexes + ek convenience manager ke alawa kuch aur nahi badla — field list, `db_table`, choices, sab wahi hai jo neeche/upar describe hai.
 
 **`Meta.db_table` — DELIBERATELY pinned, ab implementation-confirmed:**
 - `Notification` → `db_table = "liveclass_notification"`
@@ -171,30 +188,21 @@ create_batched_notification(
 - Deliberately **decoupled** kisi specific push function se — caller (liveclass/message/future Posts app) apna `send_push_fn` pass karta hai.
 - Agar cache kehta hai row hai par DB me nahi milti (user ne beech me delete kar diya), to gracefully fresh batch start ho jata hai (exception nahi).
 
-### ⚠️ Open item
-`message/push_utils.py` (jisme already ek chat-push debounce mechanism hai jise "mirror" karna tha) **kabhi upload nahi hua**. Iska sirf evidence ek comment hai (`message/views.py` → `StudyRoomJoinView`: "same pattern as the debounce state in `push_utils.py`"). Is module ne wahi cache-based debounce shape **reimplement** kiya hai apne taur pe. **Agar `push_utils.py` mil jaye, isko uske real debounce helper se replace karna hai** taaki do parallel implementations na rahe.
+### ✅ RESOLVED — real implementation ab uploaded hai (pehle yahan 🔴 CRITICAL warning thi)
 
-### 🔴 CRITICAL — uploaded `notification_batching.py` me actual implementation missing hai
+Is doc ka pehla version yahan warn karta tha ki uploaded `notification_batching.py` me `create_batched_notification()` ki koi definition nahi thi — uski jagah `test_notification_batching.py` ka ek duplicate/earlier draft (khud apne hi module se self-import karta ek `TestCase`) galti se is path pe save ho gaya tha, jo module-load pe `ImportError` deta. **Latest upload me ye fix ho chuka hai** — `notification_batching.py` me ab asli `create_batched_notification()` implementation hai (bilkul upar wale "Kaise kaam karta hai" design contract ke mutabik), aur `NotificationBatchingTests` test-class content ab sirf `test_notification_batching.py` me hai, jahan uska hona chahiye. File ka apna docstring ye fix explicitly note karta hai.
 
-Jo `notification_batching.py` upload hui, uska content ye **nahi** hai jo upar describe kiya gaya — uske andar `create_batched_notification()` ki koi definition hi nahi hai. Uske bajaye us file ke andar ek Django `TestCase` class (`NotificationBatchingTests`) baithi hai, aur woh **khud apne hi module se import kar rahi hai**:
+**Naya, is pass me confirm hua real bug-fix — `_hydrate_actors()` helper:** Implementation se pehle `actors` list ka **type call-to-call inconsistent** raha hoga — fresh-batch branch me `actors = [actor]` (caller jo bhi de: `User` instance ya raw id, dono docstring allow karta hai), lekin folded-batch branch me `actors` hamesha hydrated `User` instances ki list thi (`User.objects.filter(id__in=actor_ids)`). Koi bhi `title_fn`/`message_fn` jo `actor.display_name`/`actor.username` jaisi attribute access karta (jaisa "X and 4 others liked your post" banane ke liye zaroori hai), **pehle event pe** silently crash ya galat output deta agar caller ne raw id pass kiya tha. Fix: dono branches (fresh aur folded) ab isi ek `_hydrate_actors(actor_ids)` helper se guzarte hain, taaki `actors` **hamesha** hydrated `User` list ho, chahe pehla event ho ya 50wa. Same fix `message_fn`'s teesre arg (`latest_actor`) ko bhi lagi — pehle raw `actor` param seedha pass ho raha tha (raw id ho sakta tha), ab hydrated actors list se lookup hota hai.
 
-```python
-# notification_batching.py ke andar, literally:
-from .notification_batching import create_batched_notification
-```
+### ✅ RESOLVED — `message/push_utils.py` open item
 
-Ye ek self-import hai — jis module ke andar ye line hai, wahi module `create_batched_notification` ko khud se import karne ki koshish kar raha hai, jabki us function ki definition file me kahin hai hi nahi. Django app-load pe ye `ImportError`/circular-import crash dega, kyunki jab tak module ka poora load complete nahi hota, `create_batched_notification` uske apne namespace me exist nahi karta.
+Is doc ka §5 pehle bolta tha ki `push_utils.py` kabhi upload nahi hua aur uske real debounce se is module ko replace karna hai taaki do parallel implementations na rahen. **Latest `notification_batching.py`'s apna docstring confirm karta hai ki `push_utils.py` ab mil gaya hai aur check kar liya gaya hai** — aur nateeja "replace karo" nahi, balki **"dono jaanboojh kar alag hain, merge mat karo"** hai:
 
-**Sabse zyada mumkin wajah:** `test_notification_batching.py` ka content (ya uska ek earlier/duplicate draft) galti se `notification_batching.py` ke path pe save ho gaya — dono files ka test-class shape bahut milta-julta hai (`NotificationBatchingTests` vs `test_notification_batching.py`'s tests), bas assertions/test-count thoda alag hai.
+- `push_utils.py`'s debounce (`_DIGEST_COUNT_KEY`, `cache.add`/`incr`) ek plain per-`(user, conversation)` **counter** hai jo sirf push-**tray copy** decide karta hai ("1 message" vs "X sent N messages") — ye kabhi kisi `Notification` row ko merge/update nahi karta; har chat message ki apni alag bell-row banti rehti hai (`create_notification()` se, har baar).
+- `notification_batching.py` fundamentally alag kaam karta hai — **same `Notification` row ko update** karta hai jab tak actor-set badhta rahe (5 logo ne post like kiya = 1 row).
+- Dono mechanisms merge karna galat hota: chat ko per-message row chahiye (unread count, message-level tap-through), burst events (likes/reactions) ko collapsed-row chahiye. **Ye do jaanboojh kar alag implementations hain — merge nahi karna.** §9 ke pending-items list se ye item ab hata diya gaya hai (neeche dekho).
 
-**Impact:**
-- `create_batched_notification()` ka **real implementation is upload me kahin nahi hai** — na sliding-window Redis-cache logic, na `window_seconds` handling, na `send_push_fn` dispatch. Upar diya poora "Kaise kaam karta hai" section is doc ka **design contract** hai (test files se confirm hota hai — neeche dekho), implementation ka description nahi.
-- `test_notification_batching.py` (jo real hai, alag file) `from .notification_batching import create_batched_notification` karti hai — agar `notification_batching.py` sach me is broken state me deploy hui, to **ye test suite bhi load-time pe crash karegi**, koi bhi test chalne se pehle.
-- `test_parent_bridge.py`, `tests.py`, aur `services.py` is bug se affected nahi hain — unka apna import chain saaf hai.
-
-**Fix:** `create_batched_notification()` ka asli implementation (jo iss section me design-level pe already describe hai) `notification_batching.py` me likho/restore karo; `NotificationBatchingTests` wala test-class content wahan se hata ke sirf `test_notification_batching.py` me rehne do.
-
-**Contract jo test files confirm karte hain (dono `notification_batching.py`'s galat content aur `test_notification_batching.py` ke test-cases se ek jaisa nikalta hai) — implementation isi ko satisfy karni chahiye:**
+**Contract jo test files se confirm hota hai (ab implementation se bhi match karta hai):**
 - Cache key = `(recipient_id, notif_type, target_id)`.
 - Pehla event → `Notification` row + `send_push_fn` call (agar diya ho).
 - Same window me doosra event (chahe naya actor ho ya repeat actor) → **wahi row update**, koi naya push nahi.
@@ -203,11 +211,24 @@ Ye ek self-import hai — jis module ke andar ye line hai, wahi module `create_b
 - Window expire ho jaye (ya cache key clear ho jaye) → agla event ek **fresh** row + fresh push deta hai.
 - Agar batched row cache ke expect karne ke bawajood DB se delete ho chuki ho (user ne beech me clear kar diya) → gracefully naya batch start, `DoesNotExist` raise nahi karta.
 
+**Test-count correction:** iss doc ke §2 me `test_notification_batching.py` ko "6 tests" bola gaya tha — real file me **5** hain (`test_first_event_creates_a_row_and_sends_push`, `test_second_event_within_window_updates_same_row_no_new_push`, `test_repeat_actor_does_not_inflate_count`, `test_different_targets_batch_separately`, `test_window_expiry_starts_a_fresh_batch`). §2 update kar diya gaya hai.
+
 ---
 
 ## 6. `classroom_chat_bridge.py` — Liveclass ↔ Message bridge
 
-**Golden rule:** `liveclass/signals.py`, `liveclass/views.py`, aur `notify_session_live` task — koi bhi seedha `message.models` / `message.services` import NAHI karta. Sab is ek file ke **9 functions** se guzarta hai (pehle 8 the — Task 5 ne `resolve_parent_from_token()` add ki, neeche §6.1).
+**Golden rule:** `liveclass/signals.py`, `liveclass/views.py`, aur `notify_session_live` task — koi bhi seedha `message.models` / `message.services` import NAHI karta. Sab is ek file se guzarta hai.
+
+✅ **Poora `classroom_chat_bridge.py` ab uploaded hai** (pehle sirf indirect evidence se contract infer kiya gaya tha) — file me total **10 public/semi-public entry points** hain: 8 sync functions + `get_groups_for_classrooms()` (bulk helper) + `resolve_parent_from_token()` (Task 5).
+
+✅ **FIXED (docstring bug):** module ka apna docstring pehle khud ko "9 functions" bolta tha bina clarify kiye ki `get_groups_for_classrooms()` us ginti me kyun nahi hai — koi functional bug nahi tha (code sahi kaam kar raha tha), sirf ambiguous/stale documentation thi jo naye reader ko confuse kar sakti thi. Ab docstring explicit hai: "9 functions" sirf un ko refer karta hai jinhe `liveclass` khud call karta hai (functions 1-9, neeche numbered); `get_groups_for_classrooms()` module ka **10wa** entry point hai — ek bulk/"GAP FIX" twin of `_get_group_for_classroom()`, parent dashboard ke liye add kiya gaya (neeche dekho), aur `liveclass` nahi balki `message/views_parent.py` seedha isko call karta hai, isliye wo "9 liveclass-facing functions" ki ginti se bahar tha. Dono counts (9 liveclass-facing + 1 message-facing = 10 total) ab module docstring me khud explicit hain.
+
+### `get_groups_for_classrooms(classrooms)` — **NEW, iss doc me pehle mention nahi tha**
+
+- **Kyu:** `message/views_parent.py`'s `StudentReportCardList._chat_group_by_classroom` ko ek poore page ke classrooms ke liye ek saath "is classroom ka linked chat Group hai kya" chahiye — `_get_group_for_classroom()` ko per-classroom loop me call karna N+1 hota (ek SELECT per classroom). Ye function wahi kaam **ek single bulk query** me karta hai, chahe kitne bhi classrooms pass ho.
+- **Signature:** `classrooms` — Classroom instances ka koi bhi iterable (ya `.id`/`.chat_group_enabled`/`.linked_conversation_id` wala kuch bhi, jaisa caller `.only(...)` se already deta hai).
+- **Return:** `{classroom_id: Group}` — sirf un classrooms ke liye jinke paas `chat_group_enabled=True`, non-null `linked_conversation_id`, **aur** ek Group row jo us conversation ke liye abhi bhi exist karti hai (`_get_group_for_classroom`'s apna DoesNotExist → skip-and-log behaviour, bas batched). Jis classroom ka eligible group nahi milta, wo result dict me simply absent hai — same "absent, not None" contract jo `_get_group_for_classroom` ke saare callers already rely karte hain.
+- **Public** (no leading underscore) — `message/views_parent.py` isko seedha import karta hai: `from core.classroom_chat_bridge import get_groups_for_classrooms`. Isse `message` app par `core` ki ek public-function dependency ban gayi hai — abhi tak §8 ka dependency graph isko show nahi karta tha, update kar diya gaya hai.
 
 **Kyu:**
 1. `liveclass` ko `message` app ke internal shape (Group ka structure, GroupMember role enum) se decouple rakhta hai.
@@ -256,13 +277,16 @@ Ye sab functions/models `message` app me already exist maane gaye hain — agar 
 
 ---
 
-## 6.1. `resolve_parent_from_token()` — **NEW (Task 5), 9th function**
+## 6.1. `resolve_parent_from_token()` — Task 5, parent-portal auth
 
-⚠️ **Implementation body iss upload me nahi hai** — `classroom_chat_bridge.py` ke content me sirf 8 sync functions hain, `resolve_parent_from_token` unme nahi. Iska existence aur poora behavioral contract sirf indirectly confirm hota hai:
-- `liveclass/permissions.py`'s `HasValidParentSessionToken` isko import + call karta hai (`from core.classroom_chat_bridge import resolve_parent_from_token`) — **see LEARNSCROLL_LIVECLASS.md §6c**.
-- `core/test_parent_bridge.py` — 10 dedicated unit tests, jo poora contract exercise karte hain.
+✅ **RESOLVED — implementation body ab uploaded hai.** Is doc ka pehla version yahan warn karta tha ki `classroom_chat_bridge.py` ke content me sirf 8 sync functions the, `resolve_parent_from_token` unme nahi tha, aur contract sirf indirectly (`liveclass/permissions.py`'s import + `test_parent_bridge.py`'s 11 tests se) infer kiya gaya tha. **Latest upload me poora function body maujood hai**, aur neeche ka pura "Confirmed contract" section ab function-body se line-by-line verify ho chuka hai — §9's corresponding open item (6) resolved kar diya gaya hai.
 
-**Confirmed contract (tests se, function-body-verify pending):**
+**Do naye details jo sirf real code se pata chale (tests se infer nahi ho sakte the):**
+- **Exact check order:** (1) `ParentToken.DoesNotExist` / koi bhi unexpected lookup error → deny; (2) token ka apna rolling inactivity window (`last_seen_at is None` ya `> INACTIVITY_TTL_DAYS` purana) → deny; (3) `parent_access_code.is_active == False` (revocation) → deny; (4) `parent_access_code.expires_at` (absolute expiry) → deny. Doc ka pehla version revocation-check ko access-code-expiry ke baad describe karta tha — real code me revocation check pehle aata hai, expiry check baad me (dono hi pass hone zaroori hain, to result same hai, bas exact order ye hai).
+- **`last_seen_at` touch bhi apne try/except me hai — agar wahi save fail ho jaye, to bhi access deny hota hai** (naya detail, doc me pehle nahi tha). Yani "success" sirf tab return hota hai jab lookup + saare checks + touch-write, sab pass ho jayein — touch-write khud ek aur fail-closed point hai, sirf ek "best-effort touch, ignore failure" nahi.
+- **`ParentTokenResolution`** ek chhota result-class hai (`__slots__ = ("student", "parent_access_code")`) — `.student` aur `.parent_access_code` do attributes, jo `HasValidParentSessionToken` seedha `request.parent_student`/`request.parent_access_code` pe copy karta hai. `select_related` do fields pe hai: `"parent_access_code"` aur `"parent_access_code__student"` (poora chain ek hi query me).
+
+**Confirmed contract (ab function-body se verified, sirf tests se infer nahi):**
 
 ```python
 resolve_parent_from_token(token: str) -> resolution | None
@@ -278,7 +302,56 @@ resolve_parent_from_token(token: str) -> resolution | None
 - **Fail-closed on everything** — unknown token, empty/`None` token, expired token, expired code, deactivated code, **ya koi bhi unexpected DB/lookup error** (e.g. ek patched `select_related` jo `RuntimeError` deta hai) — sab `None` return karte hain, kabhi exception raise nahi hota. Ye `create_classroom_group()`-jaisa "real errors raise karo" pattern se **deliberately alag** hai: ye function ek live audio/video room (aur report-card/query-thread data) ka access-gate hai, isliye "fail open, log kar do" wala best-effort pattern galat hoga — har unexpected condition **deny** honi chahiye, silently allow nahi.
 - Do independent parent/student pairs ke tokens kabhi cross-resolve nahi karte — `test_second_students_parent_token_never_resolves_to_first_student` isko specifically guard karta hai.
 
-**Open item:** function ka real code body abhi tak kisi upload me nahi mila — agla pass jab `classroom_chat_bridge.py` ka poora, latest version aaye, is contract ko line-by-line verify karo (khaas kar fail-closed try/except ka exact scope, aur `select_related` kis field pe hai).
+~~**Open item:** function ka real code body abhi tak kisi upload me nahi mila...~~ ✅ **Resolved** — body ab uploaded aur verified hai (upar dekho); `select_related` exact fields = `"parent_access_code"`, `"parent_access_code__student"`.
+
+---
+
+## 6.2. `search.py` — F-4, unified cross-app search (NEW, is doc me pehle bilkul nahi tha)
+
+`core` ka "search everything" layer — messages, campus notices, (future) posts, (future) classroom materials, sab ek hi endpoint se. `message/search_utils.py` ne jo Postgres FTS (tsvector) + trigram-similarity strategy `Message` ke liye already establish ki thi, usi ka extension hai, generalized har us model ke liye jiske paas apna stored `search_vector` column nahi hai.
+
+**Kyu `core` me, `message` me nahi:** `core` already is project ka shared cross-app integration point hai (`Notification`'s seedhe `liveclass` FKs, `campus/bridge.py`'s "campus ka ONLY door core/message hai" golden rule — jo `core` khud ko kisi app me reach karne se restrict nahi karti). Yahan rakhne se `message`/`liveclass`/`campus`/`post` ko ek search-box ke liye ek-dusre ko seedha import nahi karna padta — sab sirf `core` se baat karte hain.
+
+**🔒 GOLDEN RULE jo ye file follow karti hai (`message/search_utils.py` jaisa hi):** har function neeche ek **already permission-scoped queryset** input leta hai. Ye module KABHI decide nahi karta ki kaun kya dekh sakta hai — wo decision (kaun si conversations ka participant hai, kaun se notices kisi student ke enrollment/parent-link/staff-profile se entitled hain, kaun se posts kisi blocked user ke nahi hain) hamesha us app ke apne view/queryset-building code me hi rehta hai, jaisa `message` ke liye pehle se hai. Ye logic yahan bhi partially reimplement karna (sirf `Notice` ke liye bhi) ek DOOSRI, independently-maintained copy ban jaati — do copies drift karti hain, aur ek search endpoint jo ek row leak kar de jo us app ka apna view deny karta — ye is feature ke exist hi na karne se bhi bura outcome hai. Isliye ye file **pure ranking/merging layer** hai, kabhi permission layer nahi.
+
+### Status (is pass tak)
+
+| Source | Status |
+|---|---|
+| `message` (chat messages) | ✅ WIRED — `message.search_utils.search_messages` ko seedha reuse karta hai (`Message` ke paas already stored `search_vector` + trigger hai) |
+| `campus_notice` (`campus.Notice`, `title`/`body`) | ✅ WIRED — `_search_generic_model()` ke through, kyunki `campus/models.py` iss pass me available tha. Caller ko phir bhi khud ek properly-scoped `Notice` queryset pass karna hai (golden rule upar) — ye file campus/department/section visibility rules khud nahi jaanti/guess karti. |
+| `post` (post app) | ❌ **STUB ONLY** — `post/models.py` kabhi kisi upload ka hissa nahi raha, isliye `Post`'s searchable field(s) ka naam pata nahi. Wire karne ke liye `SOURCES` me ek naya `SearchSource` add karna hai (`NOTICE_SOURCE` jaisi shape) jab wo model milega. |
+| `class_material` (`liveclass.ClassMaterial`) | ❌ **STUB ONLY**, same reason — class exist karti hai (ek pehli `liveclass/models.py` upload me confirm hui thi) par uski field-list kabhi nahi dekhi gayi. |
+
+**Finish karne ke liye chahiye:** `post/models.py` (searchable field(s) + confirm karna ki `post` visibility kaise scope karta hai — shayad `user_profile.BlockUser`/`RestrictUser` se, taaki ye us logic ko duplicate na kare) aur `ClassMaterial` model definition (same do sawaal). Dono milne pe bas `SOURCES` me ek-ek `SearchSource` entry aur view-side scoped-queryset builder add karna hai — is file me aur kuch badalna nahi hai.
+
+### `_search_generic_model(qs, query, *, fields, order_field='created_at')`
+
+`Message`-jaisa OR(ranked-FTS, trigram) strategy, generalize kiya kisi bhi model ke liye jiske paas — `Message` ke ulat — koi stored `search_vector` column nahi hai. `SearchVector(*fields)` **fresh, har query pe** compute karta hai (trigger-maintained column padhne ke bajaye) — ye strictly slower hai load ke neeche (Postgres har candidate row ka text query-time pe tokenize karta hai, write-time pe nahi) aur `Message.search_vector` jaisa GIN index use nahi kar sakta. Ek low-volume, already-narrowly-scoped table (jaise ek campus ki notices) ke liye theek hai — kisi large ya ungated table pe as-is point mat karo. Jis source ko scale chahiye, use apna stored `search_vector` column + trigger migration lena chahiye, `Message` jaisa, is generic path pe forever bharosa karne ke bajaye.
+
+`fields` me searchable text column name(s) jaate hain (e.g. `("title", "body")`) — trigram similarity sirf **pehle** field ke against chalti hai (Postgres trigram similarity concatenated columns ke across utni cleanly compose nahi karti jitna ek tsvector karta hai), isliye sabse important searchable field pehle pass karo. Postgres na ho (sqlite/local dev) to unranked `icontains` fallback deta hai, saare fields OR ke saath.
+
+### `SearchSource` (dataclass) aur `search_everything()`
+
+`SearchSource(name, run, serialize)` — ek pluggable source. `run(qs, query)` caller ka scoped queryset leta hai, ranked queryset deta hai (same contract `message.search_utils.search_messages(qs, query)` ka). `serialize(obj)` ek result row ko common dict shape me convert karta hai, taaki heterogeneous models ek list me merge ho sakein: `{"source", "id", "title", "snippet", "created_at", "rank", "similarity", "extra"}`.
+
+```python
+search_everything(
+    scoped_querysets: dict,   # {"message": <scoped Message qs>, "campus_notice": <scoped Notice qs>, ...}
+    query: str,
+    *, sources=None,          # limit to a subset of SOURCES keys
+    limit_per_source: int = 10,
+    total_limit: int = 30,
+)
+```
+
+- Sirf wo keys jo `scoped_querysets` **aur** `SOURCES` (aur agar diya ho to `sources`) dono me hon, actually search hoti hain — ek unregistered ya unscoped source silently skip hota hai, error nahi. Isse caller hamesha apne saare scoped querysets pass kar sakta hai, chahe upar ka koi source abhi wired na ho.
+- Result: ek flat list, sabhi sources se merged, `rank` (fallback `similarity`, phir `created_at`) se sorted — pehle har source apne `limit_per_source` tak capped hota hai (taaki ek noisy source baaki sabko crowd out na kare), phir poori list `total_limit` tak.
+- **CAVEAT (bug nahi, inherent limit):** `rank`/`similarity` alag-alag models/content ke liye independently-computed Postgres scores hain — cross-source directly comparable guarantee nahi hai (ek notice ka rank aur ek message ka rank same "unit" nahi hain). Agar UI me ye matter karta hai (jaise ek "top result" callout), results ko source-wise group/section karna consider karo, ek single global sort order pe bharosa karne ke bajaye.
+- `query` `MIN_QUERY_LENGTH` (message/search_utils.py se reused constant) se chhota ho to `ValueError` raise karta hai — same check jo `message/search_utils.py`'s callers `search_messages` tak pahunchne se pehle already karte hain, yahan ek hi jagah har source ke liye.
+- Ek source ka query error hona (e.g. caller ne ek expected field-missing queryset pass kar diya) baaki sources ko down nahi le jaata — `logger.exception` + continue, wahi "degrade, crash mat karo" posture jo `campus/bridge.py` ek missing bridge function ke liye already leta hai.
+
+**Koi naya `views.py`/`urls.py` endpoint abhi is pass me nahi bana** — `search.py` sirf ye library function expose karta hai; ek `SearchView`/URL wire karna caller-side follow-up hai (naya open item, §9 me add kiya).
 
 ---
 
@@ -337,15 +410,27 @@ Ye path root urlconf me diye gaye prefix pe depend karta hai — **jaise hi `cor
 
 ```
 liveclass  ──uses──▶  core.services.create_notification
-liveclass  ──uses──▶  core.classroom_chat_bridge (8 functions)
+liveclass  ──uses──▶  core.classroom_chat_bridge (8 sync functions)
                             │
                             ├──local-import──▶ message.models (Group, Message, MessageType, GroupMember)
                             └──local-import──▶ message.services (create_group, add_members_to_group,
                                                                    remove_group_member, update_group_member_role)
 
+liveclass.permissions.HasValidParentSessionToken ──uses──▶ core.classroom_chat_bridge.resolve_parent_from_token
+                            └──local-import──▶ message.models (ParentAccessCode, ParentToken)
+
 message    ──(pending, task 44)──▶  core.services.create_notification   [bell-row for FCM pushes]
 
+message.views_parent.StudentReportCardList  ──uses──▶  core.classroom_chat_bridge.get_groups_for_classrooms  [NEW]
+                            └──local-import──▶ message.models (Group)
+
 core.models.Notification  ──FK (SET_NULL)──▶  liveclass.Classroom, liveclass.ClassSession
+
+core.search.search_everything  ──uses──▶  message.search_utils.search_messages   [NEW, F-4]
+                            └── caller (a future view) ──must pass──▶ already permission-scoped
+                                 querysets for each source (message/campus.Notice/...) — core.search
+                                 itself never queries `campus`/`message`/`post`/`liveclass` models
+                                 directly, only ranks/merges what the caller hands it.
 ```
 
 `liveclass` aur `message` **kabhi ek dusre ko seedha nahi jaante** — sab kuch `core.classroom_chat_bridge` se guzarta hai. Ye invariant future me bhi maintain karna hai.
@@ -354,15 +439,19 @@ core.models.Notification  ──FK (SET_NULL)──▶  liveclass.Classroom, liv
 
 ## 9. Pending / Open items (agla kaam yahi se shuru hoga)
 
-1. **`message/push_utils.py` chahiye** — real debounce mechanism dekh ke `notification_batching.py` ko usse align karna hai (abhi parallel implementation hai).
-2. **Task 44 incomplete:** `message/push_utils.py` ke `send_chat_message_push` / `send_incoming_call_push` / `send_mention_push` me `create_notification()` call add karni hai (bell-row currently missing for these).
+1. ✅ ~~`message/push_utils.py` chahiye, `notification_batching.py` ko usse align karna hai~~ — resolved: `push_utils.py` check ho chuka hai, aur nateeja "align/replace" nahi tha — dono jaanboojh kar alag mechanisms hain (§5 dekho), merge nahi karna.
+2. **Task 44 abhi bhi incomplete:** `message/push_utils.py` ke `send_chat_message_push` / `send_incoming_call_push` / `send_mention_push` me `create_notification()` call add karni hai (bell-row currently missing for these) — ye item alag hai item 1 se (jo batching-vs-debounce ka tha), aur abhi bhi open hai.
 3. **`liveclass/urls.py` cleanup** — purane `notifications` router + `notification-preferences/me/` path hatao jab `core.urls` wire ho jaye.
 4. **Root urlconf** me `path("core/", include("core.urls"))` (ya jo prefix decide karo) add karna hai — abhi tak nahi hua.
 5. **`db_table` names verify karo** DB me (`liveclass_notification`, `liveclass_notificationpreference`) migration chalane se pehle.
-6. **`classroom_chat_bridge.py` ke field-name assumptions** — ✅ resolved (§6 dekho), lekin `resolve_parent_from_token()` (§6.1) ka function body abhi bhi kisi upload me nahi aaya — verify pending.
+6. ✅ ~~`classroom_chat_bridge.py` ke field-name assumptions + `resolve_parent_from_token()` ka function body~~ — dono resolved. Poora file ab uploaded hai, field-names verified the pehle se, function body ab bhi verified hai (§6.1).
 7. **`NotificationViewSetTests`** ka hardcoded URL path (`/core/notifications/...`) root urlconf wiring ke baad confirm karo.
 8. ✅ ~~`NotifType` enum incomplete~~ — resolved, poori 31-value list §3 me confirmed hai.
 9. ✅ ~~`NotificationSerializer` plain `to_dict`~~ — resolved, real `ModelSerializer` implementation ho chuki hai (§7 dekho).
+10. ✅ ~~`notification_batching.py` uploaded content broken (self-import)~~ — resolved, real implementation ab hai (§5).
+11. ✅ ~~`classroom_chat_bridge.py`'s apna module docstring khud ko "9 functions" bolta hai lekin `get_groups_for_classrooms()` (10wa entry point) us count me nahi hai~~ — **resolved.** Module docstring ab explicitly clarify karta hai ki "9 functions" sirf `liveclass`-facing count hai (functions 1-9); `get_groups_for_classrooms()` module ka 10wa entry point hai, `message/views_parent.py` se seedha call hota hai, isliye us 9 ki ginti me nahi tha. Koi functional bug nahi tha, sirf docstring stale/ambiguous tha — ab dono counts (9 liveclass-facing + 1 message-facing = 10 total) explicit hain.
+12. **NEW open item:** `models.py`'s naye `NotificationQuerySet.for_user()`/`.unread()` manager methods abhi kahin bhi call-site pe use nahi ho rahe (`views.py`/`tests.py` purane `.filter(...)` style se hi likhe hain) — functional issue nahi (dono equivalent hain), bas ek available convenience hai jo abhi adopt nahi hui.
+13. **NEW open item (F-4, `search.py`):** koi `views.py`/`urls.py` endpoint abhi `search_everything()` ko expose nahi karta — ye sirf ek library function hai abhi tak, koi caller wire nahi hua. `post`/`liveclass.ClassMaterial` sources bhi stub hain (§6.2) un models ke upload hone tak.
 
 ---
 

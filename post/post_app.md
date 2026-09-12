@@ -7,6 +7,12 @@ serializers → comment_serializers → views → comment_view → urls → admi
 apps.py) yahin milega, saath me har piece kya kaam karta hai uski
 explanation bhi.
 
+> **Latest pass:** §20 (Addendum 5) — the `PostLike` duplicate-signal
+> issue tracked since §19.2 (B-5) is now resolved, a new restrict-aware
+> comment-preview feature (G-3) was added, and two stale doc sections
+> (`urls.py` §8, `admin.py` §9's trailing note) were synced back up with
+> code that had already changed earlier.
+
 ---
 
 ## 1. App Overview
@@ -21,8 +27,10 @@ video comments), nested replies, edit, soft-delete, hide (post-owner
 moderation), and 5-type comment reactions. Also serves media files with
 HTTP Range support for video/audio streaming.
 
-**Tech stack:** Django + DRF + `drf-spectacular` (OpenAPI docs) + `ffmpeg-python`
-(auto video-thumbnail generation) + Django signals (denormalized counters).
+**Tech stack:** Django + DRF + `drf-spectacular` (OpenAPI docs) + Celery
+(async video-thumbnail generation, Story expiry — see §19 Addendum 4) +
+the `ffmpeg` CLI via `subprocess` (**not** the `ffmpeg-python` pip package
+— see §19.4) + Django signals (denormalized counters).
 
 **Depends on other apps:**
 - `login` app's custom `User` model (`AUTH_USER_MODEL`) — needs
@@ -43,7 +51,7 @@ HTTP Range support for video/audio streaming.
 | `urls.py` | URL routing for `views.py`, `comment_view.py`, and Stories |
 | `admin.py` | Django admin registration (incl. Story/StoryView) |
 | `apps.py` | App config (`name = 'post'`), registers `post.signals` in `ready()` |
-| `services.py` | Notification hookup (post-liked/commented) + share-to-conversation helper. See §16. |
+| `services.py` | Notification hookup (post-liked/commented, wired in) + share-to-conversation helper. See §19.1 (supersedes §16.5/§17.1). |
 | `signals.py` | `posts_count` sync on `User` (create via signal, soft-delete via explicit call) |
 | `tasks.py` | Celery: Story auto-expiry (soft-delete) + weekly hard-purge of old soft-deleted stories |
 | `tests.py` | Post create/delete, reaction idempotency, comment threading, save toggle, Story expiry |
@@ -59,7 +67,8 @@ INSTALLED_APPS = [
     'rest_framework',
     'drf_spectacular',
     'login',          # provides AUTH_USER_MODEL
-    'user_profile',   # provides the Follow model used by this app
+    'user_profile',   # provides the Follow model used by this app, and
+                       # (as of G-3) RestrictUser — see §4
     'post',
 ]
 
@@ -71,20 +80,34 @@ MEDIA_ROOT = BASE_DIR / "media"
 
 Packages needed (pip):
 ```
-djangorestframework drf-spectacular ffmpeg-python
+djangorestframework drf-spectacular celery
 ```
-Plus the **`ffmpeg` binary itself** must be installed on the server/OS
-(not just the Python wrapper) for automatic video-thumbnail generation to
-work — `ffmpeg-python` just shells out to it.
+Plus the **`ffmpeg` binary itself** must be installed on the server/OS —
+`post/services.py`/`post/tasks.py` shell out to it directly via
+`subprocess` (see §19.4); there is **no `ffmpeg-python` pip dependency**
+(TASK 27 removed it — the older draft of `models.py` used to import it,
+see §3's model notes). Celery + a broker (Redis, etc.) must be running
+for video-thumbnail generation (§19.4) and the Story-expiry tasks (§16.2)
+to actually execute — without a worker, `generate_video_thumbnail.delay()`
+/ the beat schedule just enqueue and nothing consumes them.
+
+Two more settings this app now reads, both optional (safe defaults if
+unset — see §19.3):
+```python
+SERVE_MEDIA_VIA_DJANGO = False   # gates the /media/ Range-serving fallback route — see §8, §19.3
+USE_S3_STORAGE = False           # if True together with SERVE_MEDIA_VIA_DJANGO=True, settings.py should raise ImproperlyConfigured at startup — see §19.3
+```
 
 Root `urls.py`:
 ```python
 path('post/', include('post.urls')),   # or your chosen prefix — see §9
 ```
 
-⚠️ `views.py` imports `from user_profile.models import Follow` directly —
-this app **cannot run** unless the `user_profile` app (see its own
-reference doc) is installed and migrated first.
+⚠️ `views.py` imports `from user_profile.models import Follow` directly,
+and (as of G-3) `serializers.py`'s `PostDetailSerializer.get_comments()`
+does a lazy `from user_profile.models import RestrictUser` inside the
+method — this app **cannot run** unless the `user_profile` app (see its
+own reference doc) is installed and migrated first.
 
 ---
 
@@ -394,9 +417,11 @@ class PostSave(models.Model):
 # PostLike save/delete meant two separate COUNT queries + two separate
 # UPDATE statements per like/unlike, always converging on the same
 # number — pure redundancy, no correctness bug, just wasted DB round
-# trips. `update_reaction_counts` is the superset (it also sets
+# trips. `update_reaction_counts` was the superset (it also set
 # like_count/confuse_count/wrong_count/imp_count/explain_count and the
-# auto-flag-on-5-wrong logic), so it's the one kept.
+# auto-flag-on-5-wrong logic) — see B-5 further down: that receiver has
+# since been removed from this file too, in favor of the equivalent
+# (and now sole) `post.signals.sync_post_reaction_counts`.
 #
 # `update_comments_count` REMOVED ENTIRELY — this one WAS a real
 # correctness bug, not just redundant work. It recomputed
@@ -433,136 +458,55 @@ def update_saves_count(sender, instance, **kwargs):
     )
 
 
-# settings ya models.py me add karein
-import os
-import tempfile
-import ffmpeg
-from django.core.files import File
-from django.db.models.signals import post_save
-from django.dispatch import receiver
+# ---------------------------------------------------------------------------
+# TASK 27 — video thumbnail generation moved OUT of models.py.
+#
+# What used to live here (`auto_generate_video_thumbnail`, a `post_save`
+# receiver on `PostMedia`) had two real problems, on top of not belonging
+# in models.py in the first place (business logic mixed into the model
+# module, an `ffmpeg-python` import pulled in just for this one signal):
+#
+#   1. It ran ffmpeg SYNCHRONOUSLY inside the `post_save` signal — i.e.
+#      inline in whatever request created the `PostMedia` row
+#      (`PostCreateAPIView.post()`). Every video upload's response time
+#      included however long ffmpeg took to extract a frame.
+#   2. On S3/GCS (`USE_S3_STORAGE=true`, task 26) it detected
+#      `instance.file.path` raising `NotImplementedError`, logged a
+#      warning, and just... gave up. Cloud-storage uploads never got a
+#      thumbnail at all — not a crash, but not a fix either.
+#
+# Replaced by (see post/signals.py, post/tasks.py, post/services.py):
+#   - `post.signals.queue_video_thumbnail_on_create` — the ONLY thing
+#     still triggered by `PostMedia`'s `post_save`; it does nothing but
+#     `generate_video_thumbnail.delay(instance.id)` and return.
+#   - `post.tasks.generate_video_thumbnail` — the actual Celery task.
+#     Runs off the request path, so ffmpeg's runtime no longer affects
+#     upload latency.
+#   - `post.services.download_storage_file_to_temp` /
+#     `.generate_video_thumbnail_file` — read the source file via the
+#     storage API (`.open()` + chunked read) instead of `.path`, which
+#     works identically for local disk AND S3/GCS. This is what actually
+#     fixes case 2 above instead of just logging around it: cloud-stored
+#     videos now get real thumbnails too, not a permanent skip.
+#   - Uses the `ffmpeg` CLI via `subprocess` (already a hard runtime
+#     dependency either way — a server without the `ffmpeg` binary
+#     installed couldn't run the old `ffmpeg-python` wrapper either)
+#     instead of the `ffmpeg-python` package, so no extra pip dependency
+#     was added for this fix.
+# ---------------------------------------------------------------------------
 
 
-# Maan lijiye aapka PostMedia model yahan defined hai...
-import os
-import tempfile
-import ffmpeg
-from django.core.files.storage import default_storage
-from django.core.files.base import ContentFile
-from django.db.models.signals import post_save
-from django.dispatch import receiver
-
-
-import logging as _logging
-
-_thumb_logger = _logging.getLogger("post.thumbnails")
-
-
-@receiver(post_save, sender=PostMedia)
-def auto_generate_video_thumbnail(sender, instance, created, **kwargs):
-    """
-    Ekdum fail-safe signal jo direct DB row ko update karega bina loop crash ke.
-    """
-    # 1. 'video' keyword check logic robust rakhein (chahe mime_type dynamic stream ho)
-    is_video = (
-
-            instance.media_type == 'video' or
-            'video' in getattr(instance, 'mime_type', '') or
-            instance.file.name.lower().endswith(('.mp4', '.mov', '.avi', '.mkv'))
-    )
-
-    if created and is_video and instance.file and not instance.thumbnail:
-        # FIX (post_app.md §14 issue #5): `.file.path` only exists for
-        # FileSystemStorage — on S3/GCS/any remote backend this raises
-        # NotImplementedError, and the old bare `except Exception` below
-        # would swallow it silently via `print()` (invisible in prod
-        # logs). Check up front and log properly with `logger.warning`
-        # instead, so cloud-storage deployments get a clear, searchable
-        # signal that thumbnails are being skipped, rather than a silent
-        # no-op.
-        try:
-            video_input_path = instance.file.path
-        except NotImplementedError:
-            _thumb_logger.warning(
-                "Skipping video thumbnail for PostMedia %s — storage backend "
-                "doesn't support local file paths (likely S3/cloud storage). "
-                "Thumbnail generation currently requires FileSystemStorage.",
-                instance.id,
-            )
-            return
-
-        try:
-            base_name = os.path.splitext(os.path.basename(video_input_path))[0]
-
-            # Temporary dynamic output folder construction
-            temp_dir = tempfile.gettempdir()
-            temp_output_path = os.path.join(temp_dir, f"{base_name}_thumb.jpg")
-
-            # 2. FFmpeg Command to extract frame at 1st second
-            (
-                ffmpeg
-                .input(video_input_path, ss=1.0)
-                .output(temp_output_path, vframes=1)
-                .overwrite_output()
-                .run(capture_stdout=True, capture_stderr=True)
-            )
-
-            # 3. Save thumbnail manually directly through storage layer to avoid infinite loops
-            if os.path.exists(temp_output_path):
-                with open(temp_output_path, 'rb') as thumb_file:
-                    # File direct dynamic save paths configuration matching your format
-                    thumb_name = f"posts/thumbnails/{instance.created_at.strftime('%Y/%m/%d')}/{base_name}_thumb.jpg" if hasattr(
-                        instance, 'created_at') and instance.created_at else f"posts/thumbnails/{base_name}_thumb.jpg"
-
-                    # Storage save handles directory making automatically
-                    saved_path = default_storage.save(thumb_name, ContentFile(thumb_file.read()))
-
-                    # Core loop breaker: Direct database update bypasses signals
-                    PostMedia.objects.filter(id=instance.id).update(thumbnail=saved_path)
-
-                # Dynamic os environment absolute file clean up
-                if os.path.exists(temp_output_path):
-                    os.remove(temp_output_path)
-
-        except ffmpeg.Error as e:
-            _thumb_logger.error(
-                "FFmpeg thumbnail extraction failed for PostMedia %s — stdout: %s | stderr: %s",
-                instance.id,
-                e.stdout.decode("utf8") if e.stdout else "",
-                e.stderr.decode("utf8") if e.stderr else "",
-            )
-        except Exception as e:
-            _thumb_logger.error(
-                "Thumbnail extraction failed for PostMedia %s: %s", instance.id, e, exc_info=True
-            )
-
-
-from django.db.models import Count
-from django.dispatch import receiver
-from django.db.models.signals import post_save, post_delete
-
-@receiver(post_save, sender=PostLike)
-@receiver(post_delete, sender=PostLike)
-def update_reaction_counts(sender, instance, **kwargs):
-    post_id = instance.post_id
-
-    # 1. Sab reaction ka count ek sath nikalo
-    reactions = PostLike.objects.filter(post_id=post_id).values('reaction_type').annotate(c=Count('id'))
-    counts = {r['reaction_type']: r['c'] for r in reactions}
-
-    # 2. Pehle sirf counts update karo - ye hamesha chalega
-    Post.objects.filter(id=post_id).update(
-        likes_count=sum(counts.values()),
-        like_count=counts.get('like', 0),
-        confuse_count=counts.get('confuse', 0),
-        wrong_count=counts.get('wrong', 0),
-        imp_count=counts.get('imp', 0),
-        explain_count=counts.get('explain', 0),
-    )
-
-    # 3. Alag se flag check karo - isse upar wala fail nahi hoga
-    wrong = counts.get('wrong', 0)
-    if wrong >= 5:
-        Post.objects.filter(id=post_id).update(moderation_status='flagged')
+# NOTE (fix, see B-5): `update_reaction_counts` REMOVED FROM HERE.
+#
+# It was a second `post_save`/`post_delete` receiver on `PostLike`,
+# running alongside `post.signals.sync_post_reaction_counts` — both
+# converged on the same numbers (not a correctness bug), but every
+# like/unlike paid for two full aggregate-recompute + UPDATE round
+# trips on the app's hottest write path. `sync_post_reaction_counts`
+# is the superset (same per-type + total counts) and is the one kept;
+# its 5+-wrong auto-flag logic now lives there too, folded into the
+# same aggregate query and the same UPDATE instead of a second one —
+# see post/signals.py.
 
 
 
@@ -708,21 +652,36 @@ def update_story_views_count(sender, instance, **kwargs):
 ```
 
 ### Model notes
-- **Two separate signal handlers update `Post.likes_count`**:
-  `update_likes_count` (simple count) and `update_reaction_counts`
-  (per-reaction-type breakdown, which *also* recomputes and overwrites
-  `likes_count = sum(counts.values())`). Both fire on every `PostLike`
-  save/delete — harmless (same final value) but redundant DB writes; could
-  be merged into one handler.
-- **`update_reaction_counts` auto-flags a post** (`moderation_status =
-  'flagged'`) once it accumulates **5 or more `wrong` reactions** — a
-  built-in lightweight community-moderation signal.
-- **`auto_generate_video_thumbnail`** only fires when a `PostMedia` row is
-  first `created` (not on updates), needs `instance.file.path` (so **local
-  filesystem storage only** — won't work on S3/cloud storage without
-  changes), and requires the `ffmpeg` binary on the host machine. Uses
-  `.update()` on the queryset (not `.save()`) specifically to avoid
-  re-triggering this same `post_save` signal recursively.
+- **`update_likes_count` was removed** (see the `NOTE (fix...)` comment in
+  the code above, still accurate) — it duplicated `update_reaction_counts`,
+  which already recomputed `likes_count` as the sum of all per-reaction-type
+  counts. `update_reaction_counts` was kept as the superset — at the time.
+- ✅ **RESOLVED (B-5) — the duplicate-receiver issue this doc previously
+  flagged as "NEW ISSUE (not yet fixed)" is now fixed.** `models.py`'s own
+  `update_reaction_counts` — the second `@receiver` on `PostLike`'s
+  `post_save`/`post_delete` that ran alongside `signals.py`'s
+  `sync_post_reaction_counts_on_save`/`_on_delete` — has been **deleted
+  from this file**, along with its now-unused `from django.db.models
+  import Count` import. `signals.py`'s version is the one that survived
+  (see the `NOTE (fix, see B-5)` comment in the code above, and §19.2
+  which now records this as resolved). Every like/unlike/reaction-change
+  runs a single aggregate-recompute-and-UPDATE pass again, not two.
+- **The 5+-`wrong` auto-flag logic moved, not disappeared.** It used to
+  live in `models.py`'s `update_reaction_counts` (`moderation_status =
+  'flagged'` once a post accumulates 5+ `wrong` reactions); now that
+  receiver is gone, the same check has been folded into `signals.py`'s
+  `sync_post_reaction_counts` — using the `wrong_count` already computed
+  in that function's own aggregate query, and written in the same
+  `UPDATE` rather than a second one. Behavior is unchanged (still only
+  ever *sets* `flagged`, never auto-clears it); only where the logic
+  lives changed.
+- **Video thumbnail generation is no longer here** — see the "TASK 27"
+  comment block in the code above. `PostMedia`'s `post_save` now only
+  triggers `post.signals.queue_video_thumbnail_on_create`, which enqueues
+  `post.tasks.generate_video_thumbnail` (Celery) instead of running ffmpeg
+  inline. Storage-agnostic (works on local disk and S3/GCS) since it reads
+  the file via the storage API, not `.path`. Full details in §19 Addendum 4
+  and in `services.py`/`signals.py`/`tasks.py`'s own docstrings.
 - **`ChunkedUpload`** is a temporary staging record for the 4GB
   chunked-upload flow (see §7) — `post_id`/`parent_id` are stored as plain
   `CharField`, not FKs (so no referential integrity check at the DB
@@ -1065,8 +1024,35 @@ class PostDetailSerializer(PostListSerializer):
         fields = PostListSerializer.Meta.fields + ["comments", "metadata"]
 
     def get_comments(self, obj):
-        comments = obj.comments.filter(parent=None, is_deleted=False, is_hidden=False)[:10]
+        # G-3: RestrictUser existed but nothing consumed it — a post
+        # owner's restrict list had zero effect on who could see comments
+        # on their own posts. Lazy import (matches campus/bridge.py's
+        # pattern, and how user_profile/views.py's own is_blocked_between
+        # is consumed elsewhere) to avoid a hard post -> user_profile
+        # dependency at module-import time.
+        from user_profile.models import RestrictUser
+
         request = self.context.get("request")
+        viewer = getattr(request, "user", None)
+        viewer_id = getattr(viewer, "id", None) if viewer and viewer.is_authenticated else None
+
+        comments = obj.comments.filter(parent=None, is_deleted=False, is_hidden=False)
+
+        # Restrict is scoped to the post owner's restrict list, not the
+        # viewer's — it's the owner's space being protected. Excluded at
+        # the queryset level (not per-row) so the [:10] slice below still
+        # returns up to 10 *visible* comments instead of coming up short
+        # because restricted ones were filtered out after slicing.
+        restricted_ids = set(
+            RestrictUser.objects.filter(user_id=obj.user_id).values_list("restricted_id", flat=True)
+        )
+        # A restricted user must still see their own comments exactly as
+        # before — restrict is defined to be invisible to them.
+        restricted_ids.discard(viewer_id)
+        if restricted_ids:
+            comments = comments.exclude(user_id__in=restricted_ids)
+
+        comments = comments[:10]
         return PostCommentPreviewSerializer(comments, many=True, context={"request": request}).data
 
 
@@ -1201,6 +1187,27 @@ longer be confused by name.
 - **NEW:** `StoryCreateSerializer` / `StorySerializer` — Story feature
   serializers (see §16.2), used by `StoryCreateAPIView`/`StoryListAPIView`
   in §6.
+- **NEW (G-3):** `PostDetailSerializer.get_comments()` now consumes
+  `user_profile.RestrictUser` for the first time — a comment from a user
+  the *post owner* has restricted is excluded from the inline preview
+  list of top-level comments, at the queryset level (before the `[:10]`
+  slice, so restricted comments don't crowd out visible ones from the
+  page). Restrict is checked against `obj.user_id` (the post owner), not
+  the viewer — matching restrict's "protects the owner's space" semantics
+  documented on `RestrictUser` itself (user_profile/models.py). A
+  restricted user still sees their own comments normally when they view
+  the post themselves (`restricted_ids.discard(viewer_id)`). Lazy-imports
+  `user_profile.models.RestrictUser` inside the method rather than at
+  module level, so `post` doesn't take a hard import-time dependency on
+  `user_profile` — same pattern already used elsewhere for cross-app
+  lookups (see the comment in the code above). This is the first real
+  consumer of `RestrictUser.is_restricted_between()`'s underlying data
+  from outside `user_profile` itself — previously flagged in
+  `user_profile_app_reference.md` §11 as "restrict's effects are not
+  consumed anywhere." Comment *visibility* elsewhere (the full comment
+  endpoints in `comment_view.py`/§7, `CommentListAPIView`, etc.) is
+  **not** touched by this change — only the inline preview on
+  `PostDetailSerializer` is restrict-aware so far.
 
 ---
 
@@ -1525,12 +1532,11 @@ from.serializers import (
     PostSaveSerializer,
     StoryCreateSerializer,
     StorySerializer,
+    ReactionRequestSerializer,
 )
 from.signals import decrement_posts_count_on_soft_delete
+from.services import notify_post_liked
 from user_profile.models import Follow
-
-# Local import for reaction
-from rest_framework import serializers as drf_serializers
 
 User = get_user_model()
 logger = logging.getLogger(__name__)
@@ -1804,12 +1810,31 @@ class StoryViewAPIView(APIView):
 
 
 # ===================== MEDIA SERVE WITH RANGE =====================
+# TASK 25 — dev-only fallback. Only ever mounted when
+# `settings.SERVE_MEDIA_VIA_DJANGO` is True (see post/urls.py and
+# settings.py's SERVE_MEDIA_VIA_DJANGO comment) — in production, media is
+# served by nginx straight off disk (deploy/nginx.conf) or by S3/CloudFront
+# (deploy/S3_CLOUDFRONT_SETUP.md), never through this view.
 def serve_media_with_range(request, path):
+    if settings.USE_S3_STORAGE:
+        # Shouldn't be reachable — settings.py raises ImproperlyConfigured
+        # at startup if SERVE_MEDIA_VIA_DJANGO=true and USE_S3_STORAGE=true
+        # together. Fail loudly instead of a confusing "file not found" if
+        # someone still manages to wire this route in anyway (e.g. a
+        # `re_path` added by hand elsewhere): with S3 storage active,
+        # MEDIA_ROOT is not where uploaded files live.
+        raise Http404("Media is served from S3/CloudFront when USE_S3_STORAGE=True, not local disk.")
+    # 🔒 FIX — path-traversal check moved BEFORE any filesystem access.
+    # It previously ran *after* `os.path.exists()`/`os.path.isfile()` on
+    # the unvalidated path, which let an attacker use response timing/
+    # behavior as an existence oracle for arbitrary paths (e.g.
+    # `../../.env`) before the traversal guard ever fired. Reject first,
+    # touch disk second.
+    if '..' in path or path.startswith('/'):
+        raise Http404("Invalid path")
     file_path = os.path.join(settings.MEDIA_ROOT, path)
     if not os.path.exists(file_path) or not os.path.isfile(file_path):
         raise Http404("File not found")
-    if '..' in path or path.startswith('/'):
-        raise Http404("Invalid path")
     content_type, _ = mimetypes.guess_type(file_path)
     content_type = content_type or 'application/octet-stream'
     file_size = os.path.getsize(file_path)
@@ -1866,19 +1891,11 @@ def serve_media_with_range(request, path):
     return response
 
 # ===================== REACTION API - NEW FUNCTION ADDED =====================
-# NOTE (post_app.md §14 issue #9 — NOT auto-fixed): a second
-# `ReactionRequestSerializer` reportedly also exists in `serializers.py`.
-# I didn't consolidate this automatically because I haven't seen that
-# file's version of the class — if its `choices` list or field name ever
-# drifts from this one, blindly deleting one copy could silently change
-# validation behavior. Compare the two definitions once you have both
-# files open; if identical, delete this local copy and instead do
-# `from .serializers import ReactionRequestSerializer` up top (and drop
-# the now-unused `from rest_framework import serializers as
-# drf_serializers` import if nothing else in this file uses it).
-class ReactionRequestSerializer(drf_serializers.Serializer):
-    reaction = drf_serializers.ChoiceField(choices=['like','confuse','wrong','imp','explain'])
-
+# 🔥 TASK 22 — consolidated. This file used to define its own local
+# `ReactionRequestSerializer` (identical `choices` list to the one in
+# `serializers.py`, just single- vs double-quoted — no actual drift, so
+# safe to collapse) instead of importing the canonical one. Now imported
+# from `.serializers` above, like every other serializer this view uses.
 class PostReactionAPIView(APIView):
     permission_classes = [IsAuthenticated]
     def get_permissions(self):
@@ -1915,6 +1932,10 @@ class PostReactionAPIView(APIView):
             PostLike.objects.create(post=post, user=user, reaction_type=reaction_type) # LIKE -> +1
             status_msg = "liked"
             my_reaction = reaction_type
+            # Task 11 fix — only a genuinely new like notifies; a
+            # reaction *change* (the `existing.reaction_type != reaction_type`
+            # branch above) intentionally does not, same as unlike doesn't.
+            notify_post_liked(post, user)
 
         post.refresh_from_db()
         return Response({
@@ -2169,15 +2190,27 @@ class ExploreFeedAPIView(generics.ListAPIView):
 ```
 
 ### View notes
-- `PostReactionAPIView` defines a **local** `ReactionRequestSerializer`
-  identical in shape to the one already in `serializers.py` (§4). Since
-  `views.py` only imports specific names (not `import *`), there's no
-  actual name collision at runtime — but it's duplicated logic worth
-  consolidating.
-- `serve_media_with_range()` is a plain Django view function (not DRF) —
-  wired in `urls.py` only when `settings.DEBUG` is `True` (see §8). In
-  production you'd typically serve `/media/` via nginx/S3/CDN directly
-  instead of through Django.
+- ✅ **RESOLVED (TASK 22)** — `PostReactionAPIView` used to define a
+  **local** `ReactionRequestSerializer` identical in shape to the one in
+  `serializers.py` (§4). Now imported from `.serializers` like every
+  other serializer this file uses; the local copy is gone. Closes §14
+  issue #9.
+- ✅ **TASK 11** — `PostReactionAPIView.post()` now calls
+  `notify_post_liked(post, user)` (imported from `.services`) on a
+  genuinely new like only — not on unlike, and not on a reaction-type
+  change. See §19 Addendum 4 for the full notification-wiring story.
+- ✅ **TASK 25** — `serve_media_with_range()` is a plain Django view
+  function (not DRF) — wired in `urls.py` only when
+  `settings.SERVE_MEDIA_VIA_DJANGO` is `True` (see §8; this replaces the
+  old bare `settings.DEBUG` gate). It also now raises `Http404` up front
+  if `settings.USE_S3_STORAGE` is `True` (shouldn't be reachable if
+  settings.py enforces the two being mutually exclusive), and the
+  path-traversal check (`'..' in path`) now runs **before** any
+  filesystem access instead of after — see the function's own comments
+  and §19.3. Still a local-dev/small-scale convenience even so: no
+  auth/permission checks of its own, every request re-reads the file
+  from disk in a Python worker, and there's no CDN/shared cache in front
+  of it. Real production media serving is nginx or S3/CloudFront.
 
 ---
 
@@ -2221,6 +2254,7 @@ from drf_spectacular.utils import extend_schema
 
 from.models import Post, PostComment, CommentMedia, ChunkedUpload, CommentLike
 from.comment_serializers import CreateCommentSerializer, PostCommentSerializer
+from.services import notify_post_commented
 
 def get_media_type(file):
     content_type = getattr(file, 'content_type', '') or ''
@@ -2288,10 +2322,28 @@ class CommentCreateAPIView(APIView):
                 mime_type=getattr(f, 'content_type', '')
             )
 
+        # Task 24 CORRECTION — see models.py's own note (search
+        # "update_comments_count REMOVED ENTIRELY") for why this manual
+        # F() update belongs here and NOT in a signal. A previous pass on
+        # this file did the opposite — added a signal-based
+        # `update_comments_count` and removed this manual update — which
+        # re-introduces exactly the bug models.py documents fixing: this
+        # is a soft-delete-based app, so a signal recomputing/adjusting
+        # `comments_count` on every PostComment save can't distinguish
+        # "new comment", "content edit", and "hide/unhide toggle" without
+        # a lot of fragile state-tracking, whereas the manual +1/-1 here
+        # (mirrored by CommentDeleteAPIView's -1) is simple and already
+        # correct — same pattern `replies_count` has always used safely.
+        # `post/signals.py` deliberately has NO PostComment receiver.
         if parent:
             PostComment.objects.filter(id=parent.id).update(replies_count=F('replies_count') + 1)
         else:
             Post.objects.filter(id=post.id).update(comments_count=F('comments_count') + 1)
+            # Task 11 fix — only a new TOP-LEVEL comment notifies the post
+            # owner (matches notify_post_commented()'s own docstring); a
+            # reply to another comment doesn't spam the post owner for
+            # every sub-thread reply.
+            notify_post_commented(post, comment)
 
         return Response(PostCommentSerializer(comment, context={'request': request}).data, status=201)
 
@@ -2395,6 +2447,28 @@ def chunked_upload_complete(request):
             return Response({"error": "upload_id required"}, status=400)
 
         upload = get_object_or_404(ChunkedUpload, upload_id=upload_id, user=request.user)
+
+        # Task 13 fix — re-check is_comments_disabled here too, not just
+        # at init(). init's check (see chunked_upload_init's own FIX
+        # comment above) only guards the START of what can be a
+        # long-running, multi-request upload (up to 4GB) — the post
+        # owner can flip is_comments_disabled at any point during that
+        # window, and complete() used to resolve post/parent (and create
+        # the comment) without ever looking at the flag again. Resolved
+        # and checked here, BEFORE assembling the chunks into the final
+        # file (not after), so a now-blocked upload fails cheaply instead
+        # of first paying the disk I/O to stitch together a multi-GB file
+        # it's about to reject anyway. `post`/`parent` are reused below
+        # instead of being re-queried a second time after assembly.
+        if upload.parent_id:
+            parent = get_object_or_404(PostComment, id=upload.parent_id)
+            post = parent.post
+        else:
+            parent = None
+            post = get_object_or_404(Post, id=upload.post_id)
+        if post.is_comments_disabled:
+            return Response({"error": "Comments disabled"}, status=403)
+
         temp_dir = os.path.join(settings.MEDIA_ROOT, 'temp_chunks', upload_id)
         final_dir = os.path.join(settings.MEDIA_ROOT, 'comment_media', str(timezone.now().year), f"{timezone.now().month:02d}", f"{timezone.now().day:02d}")
         os.makedirs(final_dir, exist_ok=True)
@@ -2418,14 +2492,6 @@ def chunked_upload_complete(request):
         except:
             pass
 
-        post = None
-        parent = None
-        if upload.parent_id:
-            parent = get_object_or_404(PostComment, id=upload.parent_id)
-            post = parent.post
-        else:
-            post = get_object_or_404(Post, id=upload.post_id)
-
         comment = PostComment.objects.create(
             post=post, user=request.user, parent=parent, content=upload.content or ""
         )
@@ -2444,10 +2510,18 @@ def chunked_upload_complete(request):
             mime_type='video/mp4' if media_type=='video' else 'application/octet-stream'
         )
 
+        # Task 24 CORRECTION — same reasoning as CommentCreateAPIView.post()
+        # above: the manual F() update belongs here (matches models.py's
+        # documented decision), there is no comments_count signal.
         if parent:
             PostComment.objects.filter(id=parent.id).update(replies_count=F('replies_count') + 1)
         else:
             Post.objects.filter(id=post.id).update(comments_count=F('comments_count') + 1)
+            # Task 11 fix — same top-level-only notify as the regular
+            # CommentCreateAPIView path above; a large video comment
+            # finished via chunked upload is still a new top-level
+            # comment and should notify the post owner the same way.
+            notify_post_commented(post, comment)
 
         upload.is_completed = True
         upload.save(update_fields=['is_completed'])
@@ -2549,6 +2623,14 @@ class CommentDeleteAPIView(APIView):
         comment.is_deleted = True
         comment.deleted_at = timezone.now()
         comment.save(update_fields=['is_deleted', 'deleted_at'])
+        # Task 24 CORRECTION — restored. models.py explicitly documents
+        # removing the old `update_comments_count` signal *because* this
+        # manual decrement (mirroring the manual +1 in
+        # CommentCreateAPIView) is the correct, intended mechanism — see
+        # that file's "update_comments_count REMOVED ENTIRELY" note.
+        # CommentHideAPIView's own separate manual comments_count
+        # adjustment (below) is unrelated — it toggles is_hidden, not
+        # is_deleted — and stays exactly as-is.
         if comment.parent_id:
             PostComment.objects.filter(id=comment.parent_id).update(replies_count=F('replies_count') - 1)
         else:
@@ -2599,20 +2681,37 @@ class CommentHideAPIView(APIView):
 ```
 
 ### comment_view.py notes
-- `CommentDeleteAPIView` decrements `replies_count`/`comments_count`
-  directly, but `models.py`'s `update_comments_count` **signal** already
-  recomputes `comments_count` from scratch on every `PostComment`
-  save/delete (`is_deleted=False` filter). Since soft-delete is a
-  `.save()` (not a real delete), the signal fires and recomputes the
-  correct count anyway — so the explicit `F('comments_count') - 1` in the
-  view is redundant with (but not contradicted by) the signal. No bug,
-  just double-computation.
-- `CommentHideAPIView`'s manual `comments_count -1/+1` on hide/unhide has
-  the **same redundancy** — but note `is_hidden` is **not** part of the
-  signal's filter (`is_deleted=False` only), so the view's manual
-  adjustment here is actually the **only** thing keeping `comments_count`
-  accurate for hidden comments. Don't remove this one without also
-  updating the signal.
+- ✅ **TASK 24 CORRECTION** — an earlier draft of this doc (and, for a
+  while, the actual code) assumed a `models.py` signal called
+  `update_comments_count` recomputed `Post.comments_count` on every
+  `PostComment` save/delete, making `CommentCreateAPIView`'s /
+  `CommentDeleteAPIView`'s manual `F('comments_count') ± 1` calls merely
+  redundant with it. That signal **no longer exists** — see §3's
+  models.py, "`update_comments_count` REMOVED ENTIRELY" — because it was
+  a real correctness bug, not just redundant work: it fired on every
+  save (create, edit, hide/unhide) and couldn't tell those apart from a
+  genuine create/soft-delete, so combined with the manual F() updates it
+  double-counted in both directions. The manual F() update here (and in
+  `CommentCreateAPIView`, and in `chunked_upload_complete`) is now the
+  **only** mechanism keeping `comments_count` accurate — `post/signals.py`
+  deliberately has no `PostComment` receiver at all. Same pattern
+  `replies_count` has always safely used.
+- `CommentHideAPIView`'s manual `comments_count ∓1` on hide/unhide is
+  unrelated to the above — it toggles `is_hidden`, not `is_deleted` — and
+  is unaffected by the TASK 24 correction; it was never redundant with
+  anything, and stays exactly as it was.
+- ✅ **TASK 11** — `CommentCreateAPIView.post()` and
+  `chunked_upload_complete()` now both call `notify_post_commented(post,
+  comment)` (imported from `.services`), but **only** on the branch where
+  the new comment is top-level (`parent is None`) — a reply to another
+  comment doesn't notify the post owner. See §19 Addendum 4.
+- ✅ **TASK 13** — `chunked_upload_complete()` now re-checks
+  `post.is_comments_disabled` itself, immediately after resolving
+  `post`/`parent` and *before* assembling the chunks into the final file.
+  Previously only `chunked_upload_init()` checked the flag, so a post
+  owner flipping `is_comments_disabled` mid-upload (uploads can span
+  multiple requests over a long window for files up to 4GB) had no
+  effect on an upload already in progress.
 - `CommentListAPIView`/`CommentRepliesAPIView` are `permission_classes =
   [AllowAny]` — publicly readable without login (unlike almost everything
   else in this app).
@@ -2707,12 +2806,23 @@ urlpatterns = [
     path("comment/<uuid:comment_id>/update/", CommentUpdateAPIView.as_view(), name="comment-update"),
 ]
 
-# ⚠️ Dev-only: `serve_media_with_range` has no auth/permission checks of its
-# own (see views.py notes) and re-reads the file from disk on every request
-# with no CDN caching in front of it — fine for local development, not
-# something to rely on in production. Configure nginx/S3/CDN for real
-# media serving there instead (post_app.md §14 issue #6).
-if settings.DEBUG:
+# TASK 25 — production media serving.
+#
+# ⚠️ `serve_media_with_range` has no auth/permission checks of its own
+# (see views.py notes), streams every request through a Python worker
+# instead of the webserver's sendfile path, and has zero CDN/shared-cache
+# in front of it. It is a local-dev convenience, not a production media
+# server.
+#
+# Gated on `settings.SERVE_MEDIA_VIA_DJANGO` rather than bare `DEBUG` so
+# ops can tell at a glance (in settings.py) exactly when this route is
+# live, and so a production box that hasn't wired up nginx yet 404s
+# loudly on `/media/` instead of silently working via this fallback.
+# Real production media serving is nginx (`deploy/nginx.conf`, local-disk
+# storage) or S3/CloudFront (`deploy/S3_CLOUDFRONT_SETUP.md`, when
+# `USE_S3_STORAGE=true` — that path never even reaches this route, since
+# `default_storage.url()` already points straight at S3/CloudFront).
+if settings.SERVE_MEDIA_VIA_DJANGO:
     urlpatterns += [
         re_path(r"^media/(?P<path>.*)$", serve_media_with_range, name="serve-media"),
     ]
@@ -2752,11 +2862,13 @@ if settings.DEBUG:
   live and working; the file had a leftover **commented-out** duplicate
   route (`comment/<uuid:comment_id>/edit/` → `CommentUpdateAPIView`,
   disabled) — only one active route exists, no conflict.
-- ⚠️ `serve_media_with_range` is only wired up when `DEBUG=True`. In
-  production you must serve `MEDIA_URL` some other way (nginx `X-Accel-
-  Redirect`, S3 signed URLs, a CDN, etc.) — Range-request video/audio
-  streaming will **not work** through this app's own URL config in
-  production as currently written.
+- ✅ **RESOLVED (TASK 25):** `serve_media_with_range` used to be gated on
+  bare `DEBUG=True`; it's now gated on its own `settings.
+  SERVE_MEDIA_VIA_DJANGO` flag (see the code above and §2). In
+  production you must still serve `MEDIA_URL` some other way (nginx
+  `X-Accel-Redirect`, S3 signed URLs, a CDN, etc.) — this view remains a
+  local-dev convenience either way, just with a clearer, purpose-built
+  flag gating it instead of overloading `DEBUG`.
 - ✅ **Resolved:** the earlier `from .views import *` / `from .comment_view
   import *` wildcard imports (which pulled in four names —
   `CommentDeleteView`, `FeedView`, `PostViewSet`, `StoryViewSet` — that
@@ -2901,11 +3013,11 @@ class StoryViewAdmin(admin.ModelAdmin):
     search_fields = ("story__id", "user__username")
 ```
 
-Note: `ChunkedUpload` and `CommentLike` (both defined in `models.py`) are
-**not** registered in admin — you won't see them in `/admin/` unless you
-add `admin.site.register(ChunkedUpload)` / `admin.site.register(CommentLike)`
-yourself. Not a bug, just something to be aware of if you need to inspect
-those tables via admin.
+✅ **RESOLVED:** `ChunkedUpload` and `CommentLike` (both defined in
+`models.py`) **are now registered** — see `ChunkedUploadAdmin` and
+`CommentLikeAdmin` in the code above. This doc used to note them as
+unregistered; that gap is closed (along with `Story`/`StoryView`, also
+newly registered above). Nothing further to do here.
 
 ---
 
@@ -3092,14 +3204,15 @@ browser) vs. `attachment` for office docs/archives (forced download).
 
 ## 14. Known Issues / Things To Double-Check
 
-1. **`Post.views_count` isn't deduped even though `PostView` is**
-   (§13.3) — `PostView.objects.get_or_create(post=instance, user=request.user)`
-   only creates one *view record* per user, but the very next line
-   (`Post.objects.filter(id=instance.id).update(views_count=F('views_count') + 1)`)
-   increments the counter **unconditionally on every request**, including
-   repeat visits by the same user. If you want "unique viewers" semantics
-   for the count (not just the log table), only increment when
-   `get_or_create`'s `created` flag is `True`.
+1. ✅ **RESOLVED** — `Post.views_count` used to not be deduped even though
+   `PostView` was (§13.3): `PostView.objects.get_or_create(post=instance,
+   user=request.user)` only created one *view record* per user, but the
+   very next line (`Post.objects.filter(id=instance.id).update(views_count=F('views_count') + 1)`)
+   incremented the counter **unconditionally on every request**, including
+   repeat visits by the same user. Fixed in `PostDetailAPIView.retrieve()` —
+   the counter now only increments when `get_or_create`'s `created` flag is
+   `True` (see the `FIX (post_app.md §14 issue #1)` comment at that call
+   site), giving real "unique viewers" semantics.
 2. ✅ **RESOLVED** — the two different, same-named `PostCommentSerializer`
    classes (one in `serializers.py`, simple; one in
    `comment_serializers.py`, full, with media/reactions) no longer share
@@ -3111,19 +3224,34 @@ browser) vs. `attachment` for office docs/archives (forced download).
    manual adjustment, however, **is load-bearing** (the signal doesn't
    know about `is_hidden`) — don't remove it without updating the signal
    too. See §7 note.
-4. **Two signal handlers on `PostLike`** (`update_likes_count` and
-   `update_reaction_counts`) both recompute `Post.likes_count` on every
-   save/delete — redundant, could be merged into one handler.
-5. **`auto_generate_video_thumbnail` requires local filesystem storage**
-   (`instance.file.path`) and the **`ffmpeg` binary installed on the
-   host** — will silently fail (caught exception, just prints) on cloud
-   storage backends (S3/GCS) or if ffmpeg isn't installed. Since it only
-   `print()`s errors (not `logger`), these failures won't show up in
-   normal Django logging unless you're watching stdout.
-6. **`serve_media_with_range` only active when `DEBUG=True`** — you must
-   set up real media serving (nginx, S3, CDN) for production; Range-
-   request video seeking won't work through this app's own routing in
-   prod as-is. See §8 note.
+4. ✅ **RESOLVED (B-5)** — `models.py`'s own `update_reaction_counts` (a
+   second signal handler recomputing `Post.likes_count`/per-type counts on
+   every `PostLike` save/delete, redundant with `signals.py`'s
+   `sync_post_reaction_counts_on_save`/`_on_delete`) has been deleted from
+   `models.py`. `signals.py`'s version — including the 5+-`wrong`
+   auto-flag check, now folded into it — is the sole receiver. See §3
+   Model notes and §19.2.
+5. ✅ **RESOLVED (TASK 27)** — `auto_generate_video_thumbnail` used to
+   require local filesystem storage (`instance.file.path`) and only
+   `print()`d failures instead of logging them. It's been removed from
+   `models.py` entirely and replaced by `signals.py`'s
+   `queue_video_thumbnail_on_create` (enqueue-only) →
+   `tasks.generate_video_thumbnail` (Celery) →
+   `services.download_storage_file_to_temp`/`generate_video_thumbnail_file`
+   (storage-API based, works on local disk **and** S3/GCS; every failure
+   path goes through `logger`, not `print()`). Full writeup: §19.1.
+6. ✅ **RESOLVED (TASK 25)** — `serve_media_with_range` used to be gated
+   on bare `DEBUG=True`. It's now gated on its own
+   `settings.SERVE_MEDIA_VIA_DJANGO` flag instead, so ops can tell at a
+   glance when the fallback route is live and a prod box that hasn't wired
+   up nginx yet 404s loudly instead of silently working through this
+   route. You still need real media serving (nginx, S3, CDN) in
+   production — this only changed the flag it's gated on, not removed the
+   underlying local-dev-only nature of the view itself. See §8.
+   Additionally add a new item here worth tracking: **`ChunkedUpload` and
+   `CommentLike` are now both registered in `admin.py`** — an earlier
+   version of this doc's §9 said they weren't; that's since been fixed
+   too (see §9).
 7. **`ChunkedUpload.post_id`/`parent_id` are plain `CharField`, not FKs**
    — no DB-level referential integrity; a stale/invalid `post_id` passed
    to `chunked_upload_complete` will only fail at `get_object_or_404`
@@ -3134,11 +3262,14 @@ browser) vs. `attachment` for office docs/archives (forced download).
    `serializers.py`, once locally inside `views.py`. No functional
    collision (explicit imports), but worth consolidating to one
    definition.
-10. **`is_comments_disabled` is only enforced in `CommentCreateAPIView`**
-    (regular upload path) — the **chunked upload path**
-    (`chunked_upload_init`/`_complete`) does **not** check
-    `post.is_comments_disabled` before accepting a video comment. If this
-    flag matters to you, add the same check to the chunked flow.
+10. ✅ **RESOLVED** — `is_comments_disabled` used to only be enforced in
+    `CommentCreateAPIView` (regular upload path); the **chunked upload
+    path** (`chunked_upload_init`) didn't check it before accepting a
+    video comment. Fixed: `chunked_upload_init` now resolves the target
+    `Post` (via `post_id` or the parent comment's post) and 403s with
+    `"Comments disabled"` up front — see the `FIX (post_app.md §14 issue
+    #10)` comment at that call site — so a blocked upload fails at
+    `init` time instead of after the client has already pushed chunks.
 
 ---
 
@@ -3540,3 +3671,169 @@ counts sum correctly across different authors) and `ExploreFeedTests`
 (excludes own + followed posts, excludes private posts, category
 filter) — both in `tests.py` (§17.5), following the same `reverse()`-
 based pattern as the rest of that file.
+
+---
+
+## 19. Addendum 4 — services.py notification wiring reconciled (TASK 11), PostLike duplicate-signal issue (since resolved — see §20)
+
+Several earlier sections (§3's Model notes, §16.5's "still unwired",
+§17.1's "still unwired") point forward to "§19 Addendum 4" for two
+things that were promised but never actually written up: the real,
+final state of the notification hookup, and the still-open duplicate
+`PostLike` signal. This section is that write-up, against the latest
+uploaded `Services.py` (renamed `services.py` — same case-sensitivity
+reasoning as §16.1/§17).
+
+### 19.1 `services.py` — TASK 11: wired, single-notification path (batching dropped), unguarded-import crash fixed
+
+§16.5 and §17.1 both describe `services.py` as **still unwired**, with
+`notify_post_liked` routed through
+`core.notification_batching.create_batched_notification` (to avoid one
+notification per like in a burst) and `notify_post_commented` through
+`core.services.create_notification`, using placeholder `NotifType`
+constants pending `core`'s real enum. The latest uploaded `Services.py`
+has moved past all three of those points, labeled in its own docstring
+as "TASK 11 FIX":
+
+- **Both** `notify_post_liked` and `notify_post_commented` now call
+  **`core.services.create_notification`** — the batching approach for
+  likes was dropped in favor of the simpler single-notification path.
+  (If burst-deduping likes still matters, that's a follow-up, not
+  something the current file attempts.)
+- They use real `_Notification.NotifType.POST_LIKED` /
+  `.POST_COMMENTED` values (not the placeholder constants §17.1
+  described) — implying `core`'s `NotifType` enum has since picked up
+  both values. Not independently re-verified against a real
+  `core/models.py` in this thread; if `core`'s enum still lacks these,
+  both calls will raise `AttributeError` on `_Notification.NotifType`,
+  not silently no-op.
+- **Now actually wired**: `notify_post_liked` is called from
+  `PostReactionAPIView.post()` (only the `status_msg == "liked"`
+  branch — confirmed present in the current `views.py`, matching §16.5's
+  original plan), and `notify_post_commented` from both
+  `CommentCreateAPIView.post()` and the chunked-upload completion view
+  in `comment_view.py` (only for new top-level comments, i.e.
+  `parent is None` — a large video comment finished via chunked upload
+  notifies the post owner exactly the same way a regular comment does).
+  §16.5/§17.1's "still unwired" is now stale — this supersedes it.
+- **New in this version, not documented anywhere before now — a real
+  production-crash fix**: `notify_post_liked`/`notify_post_commented`
+  used to do `from core.models import Notification` as an *unguarded*
+  local import inside each function. The module-level `try/except
+  ImportError` around `_create_notification_row` (the thing §16.5/§17.1
+  both point to as "the soft dependency") never covered this second,
+  separate import — so if `core` genuinely wasn't installed in some
+  environment, that unguarded import raised `ImportError` straight out
+  of **every single like and every top-level comment**, i.e. crashed the
+  two hottest write paths in this app. That's a worse outcome than the
+  "log + no-op" the module docstring promises. Fixed the same way
+  `_create_notification_row` already is: `from core.models import
+  Notification as _Notification` is now wrapped in its own
+  `try/except ImportError` at module scope, falling back to
+  `_Notification = None`; both notify functions now check `if
+  _Notification is None: return` before touching it.
+- `share_post_to_conversation()` — functionally unchanged from
+  §16.5/§17.1 (`post.user`/`post.content`,
+  `PostShare.objects.get_or_create`, `message.services.send_message`
+  still a best-guess import, still no `/share/` route in `urls.py`).
+
+Net effect: `services.py`'s "Kept, fixed field names, still unwired"
+bullet in §16.5 and all of §17.1's `create_batched_notification`
+framing describe a state this app has since moved past. Treat this
+section (§19.1) as the current source of truth for `services.py`;
+§16.5/§17.1 remain useful history for *why* the module path/signature
+were wrong in the first place, but not for what the file does today.
+
+### 19.2 `models.py` / `signals.py` — the duplicate `PostLike` signal — ✅ RESOLVED as of B-5 (see §20)
+
+Cross-referenced from §3's Model notes and §14 issue #4. **This was
+confirmed present** in an earlier uploaded `models.py` (history kept
+below for context) and **is now fixed** in the current file set — see
+§20 for the write-up of what changed. Original finding, for the record:
+
+`signals.py`'s TASK 23 docstring claimed to have *replaced*
+`update_likes_count` / `update_reaction_counts` with a single
+consolidated `sync_post_reaction_counts_on_save`/`_on_delete` pair — but
+at the time, only `update_likes_count` had actually been deleted.
+`update_reaction_counts` was still defined and still
+`@receiver`-registered on `PostLike`'s `post_save`/`post_delete`
+alongside `signals.py`'s newer pair, so both fired on every
+like/unlike/reaction-change:
+
+- Not a correctness bug — both recomputed the same aggregate from the
+  same `PostLike` rows and landed on identical numbers.
+- It **was** real duplicated work (two full aggregate-recompute + UPDATE
+  passes instead of one) on the hottest write path in this app, and it
+  directly contradicted what the TASK 23 docstring said was done.
+- The two were **not** fully interchangeable: `models.py`'s
+  `update_reaction_counts` also auto-set `moderation_status='flagged'`
+  once a post accumulated 5+ `wrong` reactions — a lightweight
+  community-moderation signal that `signals.py`'s
+  `sync_post_reaction_counts` did not replicate.
+
+**Fix applied (B-5), as recommended here:** the 5+-`wrong` auto-flag
+check was moved into `signals.py`'s `sync_post_reaction_counts` (using
+the per-type counts already in hand from its own aggregate query — no
+extra query needed), and `update_reaction_counts` plus its now-unused
+`from django.db.models import Count` / receiver imports were deleted
+from `models.py` entirely. See §3's code block and Model notes, §14
+issue #4, and §20 for the current state.
+
+### 19.3 TASK 27 (video thumbnails) — no new information, consolidated pointer only
+
+§3's Model notes and the inline "TASK 27" comment blocks across
+`models.py`, `signals.py`, `services.py`, and `tasks.py` already fully
+document this move (sync ffmpeg-in-signal → async Celery task,
+`.path`-based file access → storage-API-based, `print()` → `logger`).
+Nothing in the latest uploaded files changes that account; §14 issue #5
+above now points here for the resolved status instead of restating it.
+
+---
+
+## 20. Addendum 5 — this pass: B-5 finally resolved, G-3 (RestrictUser) new feature, doc-sync fixes
+
+Two files actually changed logic in this pass: `models.py` (B-5) and
+`serializers.py` (G-3). Everything else (`views.py`, `comment_view.py`,
+`comment_serializers.py`, `admin.py`, `apps.py`, `tests.py`) is
+byte-for-byte what this doc already described — the remaining items
+below are this doc catching up to sections that had drifted out of sync
+with files that *hadn't* changed (`urls.py`'s §8 code block, `admin.py`'s
+trailing note), not new code.
+
+1. **B-5 — `PostLike` duplicate-signal issue is resolved.** `models.py`'s
+   `update_reaction_counts` (the second receiver on `PostLike`'s
+   `post_save`/`post_delete`, redundant with `signals.py`'s
+   `sync_post_reaction_counts`) has been deleted, along with its
+   now-unused `Count` import. Its 5+-`wrong` auto-flag-to-`flagged`
+   check was folded into `signals.py`'s `sync_post_reaction_counts`
+   instead of being dropped. This is exactly the "recommended fix, not
+   yet applied" that §19.2 used to describe — now applied. Updated: §3
+   code block + Model notes, §14 issue #4, §19.2.
+2. **G-3 — new feature: restrict-aware comment previews.** `serializers.
+   py`'s `PostDetailSerializer.get_comments()` now excludes comments from
+   users the **post owner** has restricted (`user_profile.RestrictUser`),
+   applied before the `[:10]` slice so restricted comments don't crowd
+   out visible ones. A restricted user still sees their own comments
+   when viewing the post themselves. This is the first place outside
+   `user_profile` itself that actually consumes restrict data — see §4's
+   code block and Serializer notes, and §2's external-dependencies note
+   (now mentions `RestrictUser` alongside `Follow`). No test coverage
+   yet for this path — `tests.py`'s class list (§11) is unchanged from
+   §17.5/§18.3.
+3. **Doc-sync fix — `urls.py` §8 code block was stale.** The actual file
+   has used `settings.SERVE_MEDIA_VIA_DJANGO` (TASK 25) for a while —
+   this doc's §2, §14 issue #6, and the endpoint-table area already said
+   so — but the §8 code block itself still showed the older bare
+   `if settings.DEBUG:` gate. Code block and its "Notes" paragraph are
+   now updated to match the real file. No actual code changed here; only
+   this document did.
+4. **Doc-sync fix — `admin.py`'s trailing note was self-contradicting.**
+   The §9 code block already showed `ChunkedUploadAdmin` and
+   `CommentLikeAdmin` registered, but a leftover note right below it
+   still claimed those two models "are not registered in admin." Note
+   corrected to match the code directly above it (and to also mention
+   `Story`/`StoryView`, which are newly registered too).
+
+No migration-shape changes in this pass — B-5 and the doc-sync items
+touch signal wiring and documentation only; G-3 adds no new field or
+model, just a cross-app read in a serializer method.

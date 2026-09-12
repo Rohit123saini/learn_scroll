@@ -267,6 +267,7 @@ urlpatterns = [
 #   POST       /conversations/bulk_delete/
 #   POST       /conversations/<id>/participants/
 #   GET/POST   /conversations/<id>/messages/
+#   POST       /conversations/<id>/offline-queue/       (NAYA, task 49 — see offline_queue.py)
 #   POST       /conversations/<id>/read_all/
 #   GET        /conversations/<id>/search/?q=...
 #   GET        /conversations/search_all/?q=...

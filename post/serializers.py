@@ -307,8 +307,35 @@ class PostDetailSerializer(PostListSerializer):
         fields = PostListSerializer.Meta.fields + ["comments", "metadata"]
 
     def get_comments(self, obj):
-        comments = obj.comments.filter(parent=None, is_deleted=False, is_hidden=False)[:10]
+        # G-3: RestrictUser existed but nothing consumed it — a post
+        # owner's restrict list had zero effect on who could see comments
+        # on their own posts. Lazy import (matches campus/bridge.py's
+        # pattern, and how user_profile/views.py's own is_blocked_between
+        # is consumed elsewhere) to avoid a hard post -> user_profile
+        # dependency at module-import time.
+        from user_profile.models import RestrictUser
+
         request = self.context.get("request")
+        viewer = getattr(request, "user", None)
+        viewer_id = getattr(viewer, "id", None) if viewer and viewer.is_authenticated else None
+
+        comments = obj.comments.filter(parent=None, is_deleted=False, is_hidden=False)
+
+        # Restrict is scoped to the post owner's restrict list, not the
+        # viewer's — it's the owner's space being protected. Excluded at
+        # the queryset level (not per-row) so the [:10] slice below still
+        # returns up to 10 *visible* comments instead of coming up short
+        # because restricted ones were filtered out after slicing.
+        restricted_ids = set(
+            RestrictUser.objects.filter(user_id=obj.user_id).values_list("restricted_id", flat=True)
+        )
+        # A restricted user must still see their own comments exactly as
+        # before — restrict is defined to be invisible to them.
+        restricted_ids.discard(viewer_id)
+        if restricted_ids:
+            comments = comments.exclude(user_id__in=restricted_ids)
+
+        comments = comments[:10]
         return PostCommentPreviewSerializer(comments, many=True, context={"request": request}).data
 
 

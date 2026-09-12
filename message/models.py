@@ -666,16 +666,43 @@ class CallSession(BaseModel):
     # TTL) and study rooms (8h token TTL), see livekit_utils.py
     channel_name = models.CharField(max_length=150, unique=True, db_index=True)
 
-    # 🔧 CLEANUP (this session) — removed the legacy `token` (Agora,
+    # 🔧 CLEANUP (earlier session) — removed the legacy `token` (Agora,
     # unused since the LiveKit migration — `livekit_utils.generate_
     # livekit_token` generates join tokens on demand instead of storing
-    # one) and `is_recording`/`recording_url` (no REST/WS code anywhere
-    # ever set or read them — LiveKit server-side recording/egress isn't
-    # wired into this stack, see `models.py`'s ClassTranscriptSegment
-    # design note) fields that used to live here. They were pure dead
-    # weight that could mislead a client into showing a false "recording"
-    # indicator. See migration 0903_remove_callsession_legacy_agora_fields
-    # for the corresponding column drop.
+    # one). See migration 0903_remove_callsession_legacy_agora_fields for
+    # that column drop. `token` is NOT coming back — LiveKit never needed
+    # a stored token the way Agora did.
+
+    # 🔥 TASK 21 — `is_recording`/`recording_url` were dropped in that
+    # same cleanup as more dead Agora leftovers (nothing set or read them
+    # then). Bringing them back now that recording is actually wired up:
+    # `CallRecordingView` (views.py) calls `livekit_utils.start_room_
+    # recording`/`stop_room_recording`, which hit LiveKit's Egress REST
+    # API to start/stop server-side room-composite recording. See
+    # migration 0910_add_callsession_recording_fields for the columns.
+    is_recording = models.BooleanField(default=False)
+    # LiveKit's own id for the in-progress/most-recent egress job on this
+    # call — needed to call `stop_room_recording(egress_id)` later, since
+    # LiveKit has no "stop the recording for room X" call, only "stop
+    # egress job Y". Cleared implicitly by `is_recording` going False;
+    # kept around (not nulled) after stop so support/debugging can still
+    # see which egress job produced a given `recording_url`.
+    recording_egress_id = models.CharField(max_length=100, blank=True, null=True)
+    recording_started_at = models.DateTimeField(null=True, blank=True)
+    # The `output_filepath` `livekit_utils.start_room_recording()` chose
+    # at start time — needed again at stop time to resolve the finished
+    # file's public URL (see `stop_room_recording`'s docstring). Stored
+    # here rather than kept in memory because start and stop are two
+    # separate HTTP requests, sometimes handled by different worker
+    # processes — nothing in-process survives between them.
+    recording_output_path = models.CharField(max_length=255, blank=True, null=True)
+    # Filled in once the egress job actually finishes and LiveKit reports
+    # back where the file landed (`stop_room_recording`'s return value —
+    # best-effort/synchronous for now; see that function's docstring for
+    # why a webhook is the more correct long-term source of truth). Null
+    # while `is_recording=True`, and can stay null after stop if LiveKit
+    # hasn't finished muxing yet.
+    recording_url = models.URLField(max_length=500, blank=True, null=True)
 
     started_at = models.DateTimeField(default=timezone.now)
     connected_at = models.DateTimeField(null=True, blank=True)
@@ -799,14 +826,17 @@ class StudyRoomState(BaseModel):
 # ======================================================================
 # 🔥 NAYA — CLASS TRANSCRIPT (Feature 3: timestamped searchable recap)
 # ------------------------------------------------------------
-# Design note: LiveKit server-side room recording/egress abhi is stack
-# me wired nahi hai (`CallSession.is_recording`/`recording_url` upar
-# already dead fields hain — koi trigger/record code kahin nahi milta).
-# Isliye "poori class ki ek continuous recording" is version me nahi
-# banti. Iske bajaye har participant apna khud ka mic locally
-# chunk-record karta hai (frontend: StudyRoomCallManager, ~45s chunks,
-# `record` package — chat voice-note recording jaisa hi) aur har chunk
-# yahan ek row banata hai. Har row = ek participant ke ek chunk ka
+# Design note (updated, TASK 21): `CallSession.is_recording`/
+# `recording_url` upar ab wired hain — `CallRecordingView` LiveKit's
+# Egress API se poore room ki ek single composite video file bana sakta
+# hai. Ye model us se REPLACE nahi hota, ALAG use-case solve karta hai:
+# a single MP4 egress file isn't searchable text and (depending on
+# LiveKit egress storage config) can be an expensive/slow thing to scrub
+# through for "what did the teacher say about X". Iske bajaye har
+# participant apna khud ka mic locally chunk-record karta hai (frontend:
+# StudyRoomCallManager, ~45s chunks, `record` package — chat voice-note
+# recording jaisa hi) aur har chunk yahan ek row banata hai. Har row =
+# ek participant ke ek chunk ka
 # transcript, session-relative offset ke saath. Combined (session_id +
 # start_offset_seconds se sorted) sab participants ke segments milke ek
 # time-ordered, searchable class transcript ban jaate hain.
@@ -893,6 +923,16 @@ class RevisionDeck(BaseModel):
     # (multiple sessions/chat combined) se bana ho.
     session_id = models.CharField(max_length=150, blank=True, default='', db_index=True)
 
+    # 🔧 GAP FIX (G-7) — sha256 of the exact `content` string that was fed
+    # to Gemini for this deck (see `views_ai.RevisionDeckView.post()`).
+    # `content` itself is deliberately NOT persisted (same reasoning
+    # `ai_service.py` already applies to its own 24h cache key) — only the
+    # hash, so `post()` can look up "is there already a row for this exact
+    # content, in this conversation+session, within the last 24h" and
+    # return it instead of inserting a duplicate. Blank for deck rows that
+    # predate this field.
+    content_hash = models.CharField(max_length=64, blank=True, default='', db_index=True)
+
     flashcards = models.JSONField(default=list, blank=True)
     quiz = models.JSONField(default=list, blank=True)
 
@@ -903,6 +943,11 @@ class RevisionDeck(BaseModel):
     class Meta(BaseModel.Meta):
         indexes = [
             models.Index(fields=['conversation', '-created_at']),
+            # 🔧 GAP FIX (G-7) — matches the dedup lookup in
+            # `views_ai.RevisionDeckView.post()` exactly (conversation +
+            # session_id + content_hash, newest first), so that lookup
+            # stays an index hit instead of a table scan as decks grow.
+            models.Index(fields=['conversation', 'session_id', 'content_hash', '-created_at']),
         ]
 
     def __str__(self):

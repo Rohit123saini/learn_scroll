@@ -1,3 +1,4 @@
+# login/urls.py
 from django.urls import path
 from rest_framework_simplejwt.views import TokenRefreshView
 
@@ -11,6 +12,15 @@ urlpatterns = [
     path("auth/change-password/", ChangePasswordAPIView.as_view(), name="change-password"),
     path("auth/google/", GoogleAuthView.as_view(), name="google-auth"),
     path("auth/complete-profile/", CompleteProfileView.as_view(), name="complete-profile"),
+
+    # 🔥 FIX (B-7) — dedicated forgot-password flow. Two steps, neither of
+    # which returns a session: request a code for a known account, then
+    # spend that code + a new password to actually change it. See
+    # ForgotPasswordView / ResetPasswordView docstrings in views.py for why
+    # this isn't just VerifyOTPView reused — that view's OTP-login branch
+    # logs the user in and never touches the password, a different feature.
+    path("auth/forgot-password/", ForgotPasswordView.as_view(), name="forgot-password"),
+    path("auth/reset-password/", ResetPasswordView.as_view(), name="reset-password"),
 
     # 🔥 FIX — koi refresh-token redeem endpoint nahi tha. Tokens already
     # standard `RefreshToken.for_user()` se ban rahe the (Login/Signup/

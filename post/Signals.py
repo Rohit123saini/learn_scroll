@@ -31,14 +31,34 @@ new `PostDeleteAPIView.delete()` in views.py (soft-delete never fires
 `post_delete`, so it can't be a signal). `decrement_posts_count_on_hard_delete`
 is registered for whenever/if a genuine hard-delete path is ever added
 (e.g. an admin purge command) — inert today, harmless to leave wired up.
+
+🔥 TASK 23 — `PostLike` used to have two separate signal handlers
+(`update_likes_count`, `update_reaction_counts`) both firing on every
+PostLike save/delete and both writing `Post.likes_count` independently.
+Beyond the redundant writes, that split was a correctness risk: a
+*reaction change* (`PostReactionAPIView.post()` does `existing.
+reaction_type = new_type; existing.save()` — same row, not a create or
+delete) doesn't move the total (`likes_count`), only the per-type
+breakdown (`like_count`/`confuse_count`/`wrong_count`/`imp_count`/
+`explain_count`) — nothing guaranteed both handlers agreed on how to
+treat that case, and an incremental `F(...) + 1`/`- 1` style counter
+only even makes sense on create/delete in the first place.
+
+Replaced both with `sync_post_reaction_counts` below: a single receiver
+on PostLike's `post_save`/`post_delete` that recomputes every reaction
+count directly from the actual `PostLike` rows via one aggregate query,
+then writes all of them in one `UPDATE`. An aggregate recompute can't
+drift out of sync the way two independent incremental counters can, and
+it's naturally correct for create, delete, *and* the in-place reaction
+change case, with no special-casing needed for any of the three.
 """
 import logging
 
-from django.db.models import F
+from django.db.models import Count, F, Q
 from django.db.models.signals import post_delete, post_save
 from django.dispatch import receiver
 
-from .models import Post
+from .models import Post, PostLike, PostMedia
 
 logger = logging.getLogger(__name__)
 
@@ -80,3 +100,106 @@ def decrement_posts_count_on_soft_delete(post):
     if not hasattr(User, "posts_count"):
         return
     User.objects.filter(pk=post.user_id).update(posts_count=F("posts_count") - 1)
+
+
+# ----------------------------------------------------------------------
+# TASK 23 — PostLike reaction counts (see module docstring for why this
+# replaces the old `update_likes_count` / `update_reaction_counts` pair).
+# ----------------------------------------------------------------------
+# Must stay in sync with `ReactionRequestSerializer.reaction`'s
+# `choices` (serializers.py) — that's the only other place this set of
+# reaction types is spelled out, and each entry here maps directly to a
+# `Post.<type>_count` field.
+REACTION_TYPES = ("like", "confuse", "wrong", "imp", "explain")
+
+
+def sync_post_reaction_counts(post_id):
+    """
+    Single source of truth for a `Post`'s reaction counters. Recomputes
+    every per-type count (`like_count`, `confuse_count`, `wrong_count`,
+    `imp_count`, `explain_count`) plus the `likes_count` total straight
+    from `PostLike` rows, in one aggregate query, then writes all of
+    them (plus the auto-flag below, when it applies) in one `UPDATE` —
+    so the two never disagree the way two separately-maintained
+    incremental counters could.
+
+    Not `@receiver`-decorated itself (that's `_on_save`/`_on_delete`
+    below) so it can also be called directly wherever `PostLike` rows
+    might be touched outside a normal save/delete — e.g. a future
+    moderation bulk-remove or a data-migration backfill — the same way
+    `decrement_posts_count_on_soft_delete` above is called explicitly
+    for its own out-of-band case.
+
+    Trade-off, noted deliberately: this is a full recompute (one
+    `COUNT`-style aggregate) rather than an incremental +1/-1, which
+    costs one extra query per like/unlike compared to the old approach.
+    That's the right trade for a reaction feature — a post's total like
+    count staying wrong is a worse bug than one more cheap indexed
+    COUNT — but if a single post's `PostLike` volume ever gets large
+    enough for this to matter, the field to revisit is scale on this
+    query, not going back to incremental counters.
+
+    FIX (B-5) — this used to be duplicated by a second receiver,
+    `update_reaction_counts` in models.py, which independently
+    recomputed the same counts AND carried its own 5+-`wrong`
+    auto-flag-to-`flagged` check as a *second* `UPDATE` right after the
+    first. Both receivers were registered on the same PostLike
+    post_save/post_delete signals, so every like/unlike paid for two
+    full aggregate-recompute + UPDATE round trips converging on
+    identical numbers — pure waste on the app's hottest write path.
+    `update_reaction_counts` has been deleted from models.py; its
+    auto-flag check is folded in here instead, using the `wrong_count`
+    already sitting in `counts` (no extra query needed), and merged
+    into the same `UPDATE` as the counts themselves rather than firing
+    a second one. Matches the old behavior exactly: it only ever sets
+    `flagged`, never clears it back once `wrong_count` drops below 5.
+    """
+    counts = PostLike.objects.filter(post_id=post_id).aggregate(
+        **{f"{rt}_count": Count("id", filter=Q(reaction_type=rt)) for rt in REACTION_TYPES},
+        likes_count=Count("id"),
+    )
+    if counts["wrong_count"] >= 5:
+        counts["moderation_status"] = "flagged"
+    Post.objects.filter(pk=post_id).update(**counts)
+
+
+@receiver(post_save, sender=PostLike)
+def sync_post_reaction_counts_on_save(sender, instance, **kwargs):
+    """
+    Deliberately does NOT branch on `created` the way
+    `increment_posts_count_on_create` above does — a reaction *change*
+    (`PostReactionAPIView.post()`: `existing.reaction_type = new_type;
+    existing.save()`) is a save with `created=False` that still needs
+    the per-type breakdown recomputed (old type's count -1, new type's
+    +1 — even though the `likes_count` total doesn't move). Since
+    `sync_post_reaction_counts` recomputes from scratch rather than
+    incrementing, running it unconditionally on every save handles
+    create AND change identically and correctly, with no special case.
+    """
+    sync_post_reaction_counts(instance.post_id)
+
+
+@receiver(post_delete, sender=PostLike)
+def sync_post_reaction_counts_on_delete(sender, instance, **kwargs):
+    sync_post_reaction_counts(instance.post_id)
+
+
+# ----------------------------------------------------------------------
+# TASK 27 — video thumbnail generation, enqueue-only.
+#
+# This receiver's ONLY job is to hand off to Celery
+# (`post.tasks.generate_video_thumbnail`) — it deliberately does not call
+# ffmpeg or touch storage itself. `post_save` runs synchronously inside
+# whatever request/transaction created this `PostMedia` row
+# (`PostCreateAPIView.post()`); running ffmpeg (a slow subprocess against
+# a real video file) inline here would block that request's response for
+# however long ffmpeg takes, on every single video upload. `.delay()`
+# just enqueues and returns immediately.
+# ----------------------------------------------------------------------
+@receiver(post_save, sender=PostMedia)
+def queue_video_thumbnail_on_create(sender, instance, created, **kwargs):
+    if not created or instance.media_type != "video":
+        return
+    from .tasks import generate_video_thumbnail
+
+    generate_video_thumbnail.delay(instance.id)

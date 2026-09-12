@@ -33,12 +33,19 @@ Design — sliding window, Redis/Django-cache-based:
   (user ne beech me clear kar diya), gracefully fresh batch start ho
   jaata hai — DoesNotExist kabhi raise nahi hoti.
 
-⚠️ Open item (see core_app_documentation.md §5): `message/push_utils.py`
-me already ek chat-push debounce mechanism hone ka zikr hai, jise ye
-module "mirror" karne wala tha, lekin wo file kabhi upload nahi hui. Ye
-module apna independent cache-based reimplementation hai — agar
-`push_utils.py` mil jaye, isko uske real debounce helper se replace karo
-taaki do parallel implementations na rahein.
+✅ Resolved (was an open item): `message/push_utils.py` ab mil gaya hai
+aur check kar liya — uska "debounce" (`_DIGEST_COUNT_KEY`, `cache.add`/
+`incr`) sirf ek plain per-(user, conversation) COUNTER hai jo push-TRAY
+ki copy decide karta hai ("1 message" vs "X sent N messages"); wo kabhi
+kisi `Notification` row ko merge/update nahi karta — har chat message ki
+apni alag bell-row banti rehti hai (`create_notification()` se, har
+baar). Ye module fundamentally alag kaam karta hai: same *Notification*
+row ko update karta hai jab tak actor-set badhta rahe (5 logo ne ek post
+like kiya = 1 row, "5 people liked" ban ke). Dono mechanisms ko merge
+karna galat hota — chat ko per-message row chahiye (unread count,
+message-level tap-through), burst-events (likes/reactions) ko
+collapsed-row chahiye. Isliye ye do jaanboojh kar ALAG implementations
+hain, "parallel duplicate" nahi — merge nahi karna.
 """
 import logging
 
@@ -51,6 +58,26 @@ logger = logging.getLogger(__name__)
 
 def _batch_cache_key(recipient_id, notif_type: str, target_id) -> str:
     return f"core:notif_batch:{recipient_id}:{notif_type}:{target_id}"
+
+
+def _hydrate_actors(actor_ids):
+    """
+    🔧 FIX — pehle `actors` list ka TYPE call-to-call inconsistent tha:
+    fresh-batch branch me `actors = [actor]` (jo bhi caller ne diya —
+    User instance YA raw id, docstring dono allow karta hai), lekin
+    folded-batch branch me `actors` HAMESHA hydrated `User` instances ki
+    list thi (`User.objects.filter(id__in=actor_ids)`). Koi bhi `title_fn`
+    jo `actor.display_name`/`actor.username` jaisi attribute access karta
+    (jaisa "X and 4 others liked your post" banane ke liye zaroori hai)
+    pehle event pe silently crash ya galat output deta agar caller ne
+    raw id pass kiya tha. Ab dono branches isi ek helper se guzarte hain —
+    `actors` HAMESHA hydrated `User` list hoti hai, har call pe, chahe
+    pehla event ho ya 50wa. Local import (module-level nahi) — login/core
+    ke beech circular-import se bachne ke liye, jaisa pehle bhi tha.
+    """
+    from login.models import User
+
+    return list(User.objects.filter(id__in=actor_ids))
 
 
 def create_batched_notification(
@@ -98,9 +125,13 @@ def create_batched_notification(
         # Fresh batch: no cache entry, expired window, or a dangling
         # cache entry whose row no longer exists.
         actor_ids = {actor_id}
-        actors = [actor]
+        # 🔧 FIX — hydrate here too (see `_hydrate_actors` docstring above)
+        # so `title_fn`/`message_fn` get the same `User`-instance type on
+        # the first event as on every folded event after it.
+        actors = _hydrate_actors(actor_ids)
+        latest_actor = next((a for a in actors if a.id == actor_id), actor)
         title = title_fn(len(actor_ids), actors)
-        message = message_fn(len(actor_ids), actors, actor) if message_fn else ""
+        message = message_fn(len(actor_ids), actors, latest_actor) if message_fn else ""
 
         notification = Notification.objects.create(
             recipient_id=recipient_id,
@@ -134,15 +165,19 @@ def create_batched_notification(
     actor_ids = set(batch.get("actor_ids") or [])
     actor_ids.add(actor_id)
 
-    from login.models import User
-
-    actors = list(User.objects.filter(id__in=actor_ids))
+    actors = _hydrate_actors(actor_ids)
+    # 🔧 FIX — 3rd arg to `message_fn` is documented as "latest_actor";
+    # it was being passed the raw `actor` param verbatim (could be a raw
+    # id per the docstring's own contract), while `actors` right next to
+    # it was always hydrated `User` instances — same inconsistency as the
+    # fresh-batch branch above, fixed the same way.
+    latest_actor = next((a for a in actors if a.id == actor_id), actor)
     title = title_fn(len(actor_ids), actors)
 
     update_fields = ["title"]
     notification.title = title
     if message_fn is not None:
-        notification.message = message_fn(len(actor_ids), actors, actor)
+        notification.message = message_fn(len(actor_ids), actors, latest_actor)
         update_fields.append("message")
     notification.save(update_fields=update_fields)
 

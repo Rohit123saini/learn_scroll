@@ -33,6 +33,21 @@ changes beyond two additive indexes):
    all — that's a from-scratch index for a different query shape, not a
    duplicate of anything above.
 
+4. (this pass) Added 10 new NotifType choices for the testseries,
+   assignment, and campus-gamification apps: TESTSERIES_POSTED,
+   TESTSERIES_CHECKED, TESTSERIES_PAYOUT_RELEASED, ASSIGNMENT_POSTED,
+   ASSIGNMENT_GRADED, ASSIGNMENT_DUE_SOON, CAMPUS_REWARD_EARNED,
+   TESTSERIES_REVIEW_RECEIVED, TESTSERIES_QUERY_RECEIVED,
+   TESTSERIES_QUERY_ANSWERED. Pure addition — no existing choice was
+   renamed or removed, and choices-only changes need no migration.
+   NOTE: ASSIGNMENT_POSTED and ASSIGNMENT_GRADED already existed above
+   under the task-44/46 block (ASSIGNMENT_POSTED, ASSIGNMENT_GRADED) —
+   reused rather than duplicated with a new string, since NotifType.values
+   must stay a set of unique choice values. Only ASSIGNMENT_DUE_SOON was
+   actually new for that pair (ASSIGNMENT_DUE_REMINDER already exists
+   under the campus block and is a distinct value/label — kept both since
+   they're two different apps' reminder events, not aliases).
+
 Everything else (fields, db_table, choices, on_delete choices, the
 task-44/46 comments) is unchanged from the original — it was already
 correct.
@@ -100,9 +115,57 @@ class Notification(models.Model):
         MENTION = "mention", "You Were Mentioned"
         INCOMING_CALL = "incoming_call", "Incoming Call"
 
+        # --- task 11 (post app) — new types for post/services.py's
+        # notify_post_liked()/notify_post_commented(). These are neither
+        # a liveclass type nor a message-app type (see MESSAGE_APP_TYPES
+        # below, which stays unchanged — post-app types are a third,
+        # separate source, not folded into that set). Adding choices is
+        # not a schema change (no migration needed for the enum itself).
+        POST_LIKED = "post_liked", "Post Liked"
+        POST_COMMENTED = "post_commented", "Post Commented"
+
+        # --- campus app (campus_app_design.md §10) — new types for
+        # campus/bridge.py's notify(). NOTICE_POSTED is intentionally NOT
+        # redefined here — campus.bridge.NotifTypes.NOTICE_POSTED already
+        # points at the existing NOTICE_POSTED value above, per that
+        # class's own docstring, so campus reuses it instead of adding a
+        # duplicate choice with the same string. Every value below must
+        # match campus.bridge.NotifTypes verbatim (that mirror class is
+        # what campus imports instead of this enum — see this app's
+        # golden rule against campus importing core.models directly).
+        CAMPUS_SESSION_SCHEDULED = "campus_session_scheduled", "Campus Session Scheduled"
+        CAMPUS_SESSION_LIVE = "campus_session_live", "Campus Session Live"
+        LOW_ATTENDANCE_ALERT = "low_attendance_alert", "Low Attendance Alert"
+        ASSIGNMENT_POSTED_CAMPUS = "assignment_posted_campus", "New Campus Assignment"
+        ASSIGNMENT_DUE_REMINDER = "assignment_due_reminder", "Assignment Due Reminder"
+        RESULT_PUBLISHED = "result_published", "Result Published"
+        FEE_DUE_REMINDER = "fee_due_reminder", "Fee Due Reminder"
+        STAFF_ASSIGNMENT_APPROVED = "staff_assignment_approved", "Staff Assignment Approved"
+        STAFF_ASSIGNMENT_REJECTED = "staff_assignment_rejected", "Staff Assignment Rejected"
+
+        # --- testseries / assignment / campus-gamification apps — new
+        # types added in this pass. TESTSERIES_* cover posting, checking
+        # (grading), and payout-release notifications for the testseries
+        # app; TESTSERIES_REVIEW_RECEIVED / TESTSERIES_QUERY_RECEIVED /
+        # TESTSERIES_QUERY_ANSWERED cover the review/doubt-query flow on
+        # test series. ASSIGNMENT_DUE_SOON is the assignment-app deadline
+        # reminder (distinct from campus's own ASSIGNMENT_DUE_REMINDER
+        # above — two different apps' reminder events, not aliases).
+        # CAMPUS_REWARD_EARNED covers campus gamification payouts/rewards.
+        # ASSIGNMENT_POSTED / ASSIGNMENT_GRADED already exist above (task
+        # 44/46 block) and are reused as-is rather than duplicated. ---
+        TESTSERIES_POSTED = "testseries_posted", "New Test Series"
+        TESTSERIES_CHECKED = "testseries_checked", "Test Series Checked"
+        TESTSERIES_PAYOUT_RELEASED = "testseries_payout_released", "Test Series Payout Released"
+        ASSIGNMENT_DUE_SOON = "assignment_due_soon", "Assignment Due Soon"
+        CAMPUS_REWARD_EARNED = "campus_reward_earned", "Campus Reward Earned"
+        TESTSERIES_REVIEW_RECEIVED = "testseries_review_received", "New Test Series Review"
+        TESTSERIES_QUERY_RECEIVED = "testseries_query_received", "New Test Series Query"
+        TESTSERIES_QUERY_ANSWERED = "testseries_query_answered", "Test Series Query Answered"
+
     recipient = models.ForeignKey(User, on_delete=models.CASCADE, related_name="notifications")
     # max_length=30 kept as-is — the longest current NotifType value
-    # ("join_request_received", 22 chars) still fits comfortably.
+    # ("testseries_payout_released", 27 chars) still fits comfortably.
     # Revisit only if a future notif_type value exceeds 30.
     notif_type = models.CharField(
         max_length=30, choices=NotifType.choices, default=NotifType.GENERIC, db_index=True
@@ -163,6 +226,29 @@ class Notification(models.Model):
     #: Keep in sync with NotifType above whenever a new message-app type
     #: is added.
     MESSAGE_APP_TYPES = frozenset({NotifType.CHAT_MESSAGE, NotifType.MENTION, NotifType.INCOMING_CALL})
+
+    #: campus app — same "which NotifType values came from app X" pattern
+    #: as MESSAGE_APP_TYPES above, for whatever views.py/serializers.py
+    #: routing campus's own notification list ends up needing. NOTICE_POSTED
+    #: deliberately excluded — it predates campus and is shared/generic,
+    #: not campus-exclusive, matching the same reasoning MESSAGE_APP_TYPES
+    #: already applies to types it doesn't claim.
+    CAMPUS_APP_TYPES = frozenset({
+        NotifType.CAMPUS_SESSION_SCHEDULED, NotifType.CAMPUS_SESSION_LIVE,
+        NotifType.LOW_ATTENDANCE_ALERT, NotifType.ASSIGNMENT_POSTED_CAMPUS,
+        NotifType.ASSIGNMENT_DUE_REMINDER, NotifType.RESULT_PUBLISHED,
+        NotifType.FEE_DUE_REMINDER, NotifType.STAFF_ASSIGNMENT_APPROVED,
+        NotifType.STAFF_ASSIGNMENT_REJECTED,
+    })
+
+    #: testseries / assignment-app / campus-gamification — same
+    #: "which NotifType values came from app X" pattern as the two sets
+    #: above, for testseries's own notification-list routing.
+    TESTSERIES_APP_TYPES = frozenset({
+        NotifType.TESTSERIES_POSTED, NotifType.TESTSERIES_CHECKED,
+        NotifType.TESTSERIES_PAYOUT_RELEASED, NotifType.TESTSERIES_REVIEW_RECEIVED,
+        NotifType.TESTSERIES_QUERY_RECEIVED, NotifType.TESTSERIES_QUERY_ANSWERED,
+    })
 
     def mark_read(self):
         """Idempotent — only writes (and only touches these two columns)

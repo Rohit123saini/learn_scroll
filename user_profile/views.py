@@ -1,3 +1,4 @@
+# user_profile/views.py
 from django.contrib.auth import get_user_model
 from django.db import IntegrityError, transaction
 from django.db.models import F, Q
@@ -11,13 +12,26 @@ from rest_framework.parsers import FormParser, MultiPartParser
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 
-from .models import BlockUser, Follow
+from . import fraud
+from .models import (
+    BlockUser,
+    CoinLedger,
+    CoinPurchaseRequest,
+    CoinWithdrawalRequest,
+    Follow,
+    RestrictUser,
+)
 from .serializers import (
     BlockUserSerializer,
+    CoinLedgerSerializer,
+    CoinPurchaseConfirmSerializer,
+    CoinPurchaseRequestSerializer,
+    CoinWithdrawalRequestSerializer,
     FollowActionResponseSerializer,
     MessageContactSearchSerializer,
     ProfileUpdateSerializer,
     RestrictedTargetUserProfileSerializer,
+    RestrictUserSerializer,
     TargetUserProfileSerializer,
     UserProfileDetailResponseSerializer,
     UserProfileSerializer,
@@ -39,6 +53,24 @@ def is_blocked_between(user_a, user_b):
     return BlockUser.objects.filter(
         Q(blocker=user_a, blocked=user_b) | Q(blocker=user_b, blocked=user_a)
     ).exists()
+
+
+def is_restricted_between(user, other):
+    """
+    TASK 18 — true if `user` has restricted `other`. Deliberately ONE-
+    WAY (unlike `is_blocked_between`, which is symmetric): restrict
+    only affects what *the restricting user* experiences from `other`,
+    never the reverse, and `other` must never be able to detect it from
+    this check's result — see RestrictUser's docstring in models.py.
+
+    Other apps (posts, message, notifications) should filter through
+    this the same way they'd filter through `is_blocked_between` for
+    block, once they're ready to apply restrict's actual effects
+    (hiding comments from everyone but their author, muting read-
+    receipts/online-status, suppressing notifications) — that
+    integration is out of scope for user_profile itself.
+    """
+    return RestrictUser.objects.filter(user=user, restricted=other).exists()
 
 
 class ProfileView(GenericAPIView):
@@ -127,6 +159,13 @@ class UserProfileDetailView(GenericAPIView):
         else:
             profile_data = TargetUserProfileSerializer(target_user).data
 
+        # TASK 18: whether *I* restrict the target — never the reverse
+        # (see is_restricted_between's docstring). False for your own
+        # profile since self-restrict is impossible.
+        am_i_restricting = (
+            not is_self and is_restricted_between(request.user, target_user)
+        )
+
         return Response(
             {
                 "status": True,
@@ -140,6 +179,7 @@ class UserProfileDetailView(GenericAPIView):
                 "their_follow_status": their_follow_obj.status if their_follow_obj else None,
                 "their_follow_id": their_follow_obj.id if their_follow_obj else None,
                 "is_restricted_view": is_restricted_view,
+                "am_i_restricting": am_i_restricting,
                 "data": profile_data,
             },
             status=status.HTTP_200_OK,
@@ -658,3 +698,397 @@ class UnblockUserView(GenericAPIView):
             "status": True,
             "message": "User unblocked successfully.",
         }, status=status.HTTP_200_OK)
+
+
+# TASK 18 — Restrict / Unrestrict user
+# Deliberately mirrors BlockedUsersView/UnblockUserView just above (same
+# request/response shape, POST body {"restricted": <user_id>}) for
+# frontend consistency. The one functional difference from block's POST
+# handler: restricting someone does NOT touch Follow rows or
+# followers/following counts — see RestrictUser's docstring in
+# models.py for why (restrict is silent and non-blocking by design).
+class RestrictedUsersView(GenericAPIView):
+    """
+    GET  /profile/restricted-users/                -> maine jinko restrict kiya hai unki list
+    POST /profile/restricted-users/  {"restricted": <user_id>} -> restrict karo
+    """
+    permission_classes = [IsAuthenticated]
+    serializer_class = RestrictUserSerializer
+
+    @extend_schema(
+        responses={200: RestrictUserSerializer(many=True)},
+        description="List of users restricted by the current user",
+    )
+    def get(self, request):
+        qs = RestrictUser.objects.filter(user=request.user).select_related("restricted")
+        serializer = self.get_serializer(qs, many=True)
+        return Response({
+            "status": True,
+            "message": "Restricted users fetched successfully.",
+            "data": serializer.data,
+        }, status=status.HTTP_200_OK)
+
+    @extend_schema(
+        request=RestrictUserSerializer,
+        responses={201: RestrictUserSerializer, 200: RestrictUserSerializer},
+        description="Restrict a user (silent — the restricted user is never notified).",
+    )
+    def post(self, request):
+        serializer = self.get_serializer(data=request.data, context={"request": request})
+        if not serializer.is_valid():
+            return Response({
+                "status": False,
+                "message": "Validation failed.",
+                "errors": serializer.errors,
+            }, status=status.HTTP_400_BAD_REQUEST)
+
+        restricted_user = serializer.validated_data["restricted"]
+
+        # get_or_create, not create — same idempotency reasoning as
+        # BlockedUsersView.post: a double-tap/retry should return the
+        # existing record instead of a 400 from the UniqueConstraint.
+        restrict_obj, created = RestrictUser.objects.get_or_create(
+            user=request.user,
+            restricted=restricted_user,
+        )
+
+        # No Follow/count changes here on purpose (unlike block) —
+        # restrict must not change what either party can see or do,
+        # only what the restricting user is exposed to from the other
+        # side, and only once posts/message/notifications consume
+        # `is_restricted_between()`.
+
+        return Response({
+            "status": True,
+            "message": "User restricted successfully." if created else "User already restricted.",
+            "data": self.get_serializer(restrict_obj).data,
+        }, status=status.HTTP_201_CREATED if created else status.HTTP_200_OK)
+
+
+class UnrestrictUserView(GenericAPIView):
+    """
+    DELETE /profile/restricted-users/<id>/
+
+    Same `<id>` flexibility as UnblockUserView — either the RestrictUser
+    record's own id, or the target user's id directly.
+    """
+    permission_classes = [IsAuthenticated]
+    serializer_class = RestrictUserSerializer
+
+    @extend_schema(description="Unrestrict a user (accepts RestrictUser id or target user id)")
+    def delete(self, request, id):
+        restrict_obj = RestrictUser.objects.filter(
+            Q(pk=id) | Q(restricted_id=id),
+            user=request.user,
+        ).first()
+
+        if not restrict_obj:
+            return Response({
+                "status": False,
+                "message": "Restrict record not found.",
+            }, status=status.HTTP_404_NOT_FOUND)
+
+        restrict_obj.delete()
+        return Response({
+            "status": True,
+            "message": "User unrestricted successfully.",
+        }, status=status.HTTP_200_OK)
+
+
+# TASK 19 — coin transaction history
+# Read-only, deliberately (see CoinLedgerSerializer's docstring for why
+# there's no POST here). The actual write path —
+# `CoinLedger.objects.record_transaction()` — is called from wherever a
+# coin-changing action happens (a purchase completing in the liveclass
+# app, a gift being sent in the message app, an admin adjustment
+# endpoint if/when one gets built); none of those views were part of
+# this upload, so this is the read side only: "let me see why my
+# balance is what it is", which had no path at all before this.
+class CoinLedgerListView(ListAPIView):
+    """
+    GET /profile/coin-ledger/
+
+    The authenticated user's own coin transaction history, newest
+    first (CoinLedger.Meta.ordering already gives us that for free).
+    """
+    permission_classes = [IsAuthenticated]
+    serializer_class = CoinLedgerSerializer
+
+    def get_queryset(self):
+        return CoinLedger.objects.filter(user=self.request.user)
+
+    @extend_schema(
+        responses={200: CoinLedgerSerializer(many=True)},
+        description="List of the current user's coin transaction history (newest first).",
+    )
+    def list(self, request, *args, **kwargs):
+        queryset = self.filter_queryset(self.get_queryset())
+        page = self.paginate_queryset(queryset)
+        if page is not None:
+            serializer = self.get_serializer(page, many=True)
+            data = self.get_paginated_response(serializer.data).data
+        else:
+            serializer = self.get_serializer(queryset, many=True)
+            data = serializer.data
+
+        return Response({
+            "status": True,
+            "message": "Coin transaction history fetched successfully.",
+            "data": data,
+        }, status=status.HTTP_200_OK)
+
+
+# 🔥 TASK 3 — Buy-Coin flow
+# Two-step, same shape as any pending -> confirmed payment flow: this
+# view only ever creates/returns a PENDING `CoinPurchaseRequest` — it
+# never touches `User.coin`. The actual credit happens in
+# `BuyCoinConfirmView` below, via `CoinPurchaseRequest.objects.
+# confirm_success()`, which is the only path that calls
+# `CoinLedger.objects.record_transaction()` for a purchase.
+class BuyCoinView(GenericAPIView):
+    """
+    POST /profile/buy-coin/
+    {"gateway_reference": "<gateway's txn id>", "amount": "99.00", "coins": 100, "gateway": "razorpay"}
+
+    Starts a coin purchase. Idempotent on `gateway_reference`: calling
+    this again with the same reference returns the existing request
+    (whatever its current status) instead of creating a duplicate — safe
+    for a client retrying after a dropped response.
+    """
+    permission_classes = [IsAuthenticated]
+    serializer_class = CoinPurchaseRequestSerializer
+
+    @extend_schema(
+        request=CoinPurchaseRequestSerializer,
+        responses={201: CoinPurchaseRequestSerializer, 200: CoinPurchaseRequestSerializer},
+        description="Start a coin purchase (creates a pending request; idempotent on "
+        "gateway_reference). Does not credit coins — see /buy-coin/confirm/.",
+    )
+    def post(self, request):
+        serializer = self.get_serializer(data=request.data)
+        if not serializer.is_valid():
+            return Response({
+                "status": False,
+                "message": "Validation failed.",
+                "errors": serializer.errors,
+            }, status=status.HTTP_400_BAD_REQUEST)
+
+        data = serializer.validated_data
+        purchase, created = CoinPurchaseRequest.objects.start_purchase(
+            user=request.user,
+            gateway_reference=data["gateway_reference"],
+            amount=data["amount"],
+            coins=data["coins"],
+            gateway=data.get("gateway", ""),
+        )
+
+        # `gateway_reference` is globally unique (it's the gateway's own
+        # id), so if it already exists under a DIFFERENT user, this is
+        # either a client bug or a replayed/guessed reference — never
+        # silently let the caller read or "adopt" someone else's pending
+        # purchase.
+        if purchase.user_id != request.user.id:
+            return Response({
+                "status": False,
+                "message": "This gateway_reference is already associated with another purchase.",
+            }, status=status.HTTP_409_CONFLICT)
+
+        return Response({
+            "status": True,
+            "message": "Coin purchase started." if created
+            else "Coin purchase already exists for this reference.",
+            "data": self.get_serializer(purchase).data,
+        }, status=status.HTTP_201_CREATED if created else status.HTTP_200_OK)
+
+
+class BuyCoinConfirmView(GenericAPIView):
+    """
+    POST /profile/buy-coin/confirm/
+    {"gateway_reference": "<gateway's txn id>", "status": "success", "failure_reason": ""}
+
+    Confirms a pending purchase as successful (credits `coins` through
+    `CoinLedger.objects.record_transaction()`) or failed (wallet
+    untouched). Idempotent and safe to call more than once for the same
+    `gateway_reference` — see `CoinPurchaseRequest.objects.
+    confirm_success()`/`mark_failed()` (models.py) for exactly what
+    happens on a repeat call.
+
+    🚧 NOT a real webhook endpoint as-is: no payment-gateway integration
+    was part of this upload, so there's no gateway signature to verify
+    here — `IsAuthenticated` + "must be your own purchase" stand in so
+    the flow is testable end-to-end. Before this goes live behind an
+    actual gateway callback, that verification should replace (or gate)
+    the checks below; a genuine webhook call isn't "acting as" any
+    particular authenticated user.
+    """
+    permission_classes = [IsAuthenticated]
+    serializer_class = CoinPurchaseConfirmSerializer
+
+    @extend_schema(
+        request=CoinPurchaseConfirmSerializer,
+        responses={200: CoinPurchaseRequestSerializer, 404: OpenApiTypes.OBJECT},
+        description="Confirm a coin purchase as success or failed. Idempotent — safe to retry "
+        "(e.g. a duplicated webhook delivery).",
+    )
+    def post(self, request):
+        serializer = self.get_serializer(data=request.data)
+        if not serializer.is_valid():
+            return Response({
+                "status": False,
+                "message": "Validation failed.",
+                "errors": serializer.errors,
+            }, status=status.HTTP_400_BAD_REQUEST)
+
+        gateway_reference = serializer.validated_data["gateway_reference"]
+        outcome = serializer.validated_data["status"]
+
+        purchase = CoinPurchaseRequest.objects.filter(
+            gateway_reference=gateway_reference
+        ).first()
+        if purchase is None:
+            return Response({
+                "status": False,
+                "message": "Coin purchase request not found.",
+            }, status=status.HTTP_404_NOT_FOUND)
+
+        # See the class docstring above re: this check standing in for
+        # real webhook-signature verification.
+        if purchase.user_id != request.user.id:
+            raise Http404
+
+        try:
+            if outcome == "success":
+                purchase = CoinPurchaseRequest.objects.confirm_success(
+                    gateway_reference=gateway_reference
+                )
+                message = "Coin purchase confirmed and wallet credited."
+            else:
+                purchase = CoinPurchaseRequest.objects.mark_failed(
+                    gateway_reference=gateway_reference,
+                    reason=serializer.validated_data.get("failure_reason", ""),
+                )
+                message = "Coin purchase marked as failed."
+        except ValueError as exc:
+            # confirm_success()/mark_failed() raise this for an invalid
+            # state transition (e.g. trying to fail an already-succeeded
+            # purchase) — a 409, not a 400: the request body was valid,
+            # the request's current state just doesn't allow this move.
+            return Response({
+                "status": False,
+                "message": str(exc),
+            }, status=status.HTTP_409_CONFLICT)
+
+        return Response({
+            "status": True,
+            "message": message,
+            "data": CoinPurchaseRequestSerializer(purchase).data,
+        }, status=status.HTTP_200_OK)
+
+# 🔥 TASK 4 — Withdraw-Coin flow
+# Mirror image of BuyCoinView/BuyCoinConfirmView above (money direction
+# reversed), but ONE view instead of two: CoinWithdrawalRequestManager.
+# request_withdrawal() debits the coins the moment the request is made
+# (escrow-style — see its own docstring in models.py for why), so
+# there's no separate "confirm" step the way a coin purchase needs one.
+# mark_processing()/confirm_success()/reject() (models.py) aren't wired
+# to an endpoint in this pass — same "views weren't part of this
+# upload" scope-out CoinLedger's docstring already applies to the
+# actions that would eventually create a ledger entry from outside this
+# app; here it applies to whatever admin/ops surface will eventually
+# call those three.
+class CoinWithdrawalRequestView(GenericAPIView):
+    """
+    GET  /profile/coin-withdrawals/            -> current user's own withdrawal requests
+    POST /profile/coin-withdrawals/ {"coins": 200, "payout_method": "upi", "payout_details": {"upi_id": "a@bank"}}
+
+    Debits `coins` immediately via CoinWithdrawalRequestManager.
+    request_withdrawal(). Insufficient balance is a clean 402 with no
+    partial debit and no request row left behind — the debit and the
+    row creation share one transaction.atomic() block inside the
+    manager, so a ValueError there (bubbled up from CoinLedger.objects.
+    record_transaction) rolls both back together.
+
+    TASK 5 (this pass): before any of that, `fraud.
+    is_withdrawal_eligible(request.user, coins)` is checked. This is a
+    read-only check — it runs BEFORE `request_withdrawal()`, so a
+    rejection here never touches the balance and never creates a
+    request row (satisfies the "balance must not shrink" acceptance
+    criterion directly, rather than relying on a rollback). Distinct
+    from the 402 below on purpose: 402 means "you don't have enough
+    coins, period"; this is "you have enough coins, but not enough
+    *withdrawal-eligible* ones" — a different, policy-level rejection,
+    so it gets its own 403 rather than reusing 402's "add more funds"
+    implication.
+    """
+    permission_classes = [IsAuthenticated]
+    serializer_class = CoinWithdrawalRequestSerializer
+
+    @extend_schema(
+        responses={200: CoinWithdrawalRequestSerializer(many=True)},
+        description="List of the current user's coin withdrawal requests (newest first).",
+    )
+    def get(self, request):
+        qs = CoinWithdrawalRequest.objects.filter(user=request.user)
+        serializer = self.get_serializer(qs, many=True)
+        return Response({
+            "status": True,
+            "message": "Withdrawal requests fetched successfully.",
+            "data": serializer.data,
+        }, status=status.HTTP_200_OK)
+
+    @extend_schema(
+        request=CoinWithdrawalRequestSerializer,
+        responses={
+            201: CoinWithdrawalRequestSerializer,
+            402: OpenApiTypes.OBJECT,
+            403: OpenApiTypes.OBJECT,
+        },
+        description="Request a coin withdrawal. Only coins purchased or received as a gift are "
+        "withdrawal-eligible (403 if the requested amount isn't covered by eligible coins); "
+        "debits the wallet immediately once eligible, with insufficient balance returning 402 "
+        "and no partial debit or request row left behind either way.",
+    )
+    def post(self, request):
+        serializer = self.get_serializer(data=request.data)
+        if not serializer.is_valid():
+            return Response({
+                "status": False,
+                "message": "Validation failed.",
+                "errors": serializer.errors,
+            }, status=status.HTTP_400_BAD_REQUEST)
+
+        data = serializer.validated_data
+
+        # TASK 5: fraud/eligibility check runs before any coins move —
+        # see the class docstring above for why this is a 403, distinct
+        # from the 402 below.
+        is_eligible, reason = fraud.is_withdrawal_eligible(request.user, data["coins"])
+        if not is_eligible:
+            return Response({
+                "status": False,
+                "message": reason,
+            }, status=status.HTTP_403_FORBIDDEN)
+
+        try:
+            withdrawal = CoinWithdrawalRequest.objects.request_withdrawal(
+                user=request.user,
+                coins=data["coins"],
+                payout_method=data.get("payout_method", ""),
+                payout_details=data.get("payout_details", {}),
+            )
+        except ValueError as exc:
+            # Insufficient balance — 402, same "request was well-formed,
+            # the wallet just can't cover it" shape campus's
+            # FeePaymentViewSet.pay uses. Distinct from the 409s above
+            # (BuyCoinConfirmView) which are for an invalid *state
+            # transition*, not a money shortfall.
+            return Response({
+                "status": False,
+                "message": str(exc),
+            }, status=status.HTTP_402_PAYMENT_REQUIRED)
+
+        return Response({
+            "status": True,
+            "message": "Withdrawal requested successfully.",
+            "data": self.get_serializer(withdrawal).data,
+        }, status=status.HTTP_201_CREATED)

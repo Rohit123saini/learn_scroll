@@ -1,6 +1,8 @@
+# login/serializers.py
 from rest_framework import serializers
-from .models import User, phone_validator
+from .models import User, OTPVerification, phone_validator
 from django.core.exceptions import ValidationError as DjangoValidationError
+from django.db.models import Q
 import re
 
 
@@ -155,10 +157,44 @@ class SignupSerializer(serializers.ModelSerializer):
 
             })
 
+        # Task 15 (server-side OTP-verified check): the comment two lines
+        # below this used to say "email OTP verify-otp step se pehle hi ho
+        # chuka hota hai" and set `is_verified=True` on that trust alone —
+        # but nothing here ever confirmed that step actually happened.
+        # /verify-otp/ and /signup/ were two independent endpoints linked
+        # only by the *frontend* calling them in order; hitting /signup/
+        # directly with no prior OTP step worked exactly the same. This
+        # now requires a real, unexpired, `is_verified=True`
+        # OTPVerification row (set by VerifyOTPView — see models.py
+        # OTPVerification.is_verified) for either the submitted email or
+        # phone before an account can be created at all.
+        email = attrs.get("email")
+        phone = attrs.get("phone")
+
+        otp_obj = (
+            OTPVerification.objects.filter(
+                Q(target=email) | Q(target=phone),
+                is_verified=True,
+            )
+            .order_by("-created_at")
+            .first()
+        )
+
+        if not otp_obj or otp_obj.is_expired():
+            raise serializers.ValidationError(
+                "Please verify your email or phone with OTP before signing up."
+            )
+
+        # Stashed for create() — consumed (deleted) once the account is
+        # actually made, so this same verified OTP can't be replayed for
+        # a second signup.
+        attrs["_otp_obj"] = otp_obj
+
         return attrs
 
     def create(self, validated_data):
 
+        otp_obj = validated_data.pop("_otp_obj")
         validated_data.pop("confirm_password")
 
         user = User.objects.create_user(
@@ -169,11 +205,14 @@ class SignupSerializer(serializers.ModelSerializer):
             last_name=validated_data["last_name"],
             phone=validated_data["phone"],
             password=validated_data["password"],
-            # ✅ email OTP verify-otp step se pehle hi ho chuka hota hai
-            # (signup flow me), isliye account ko verified mark kar rahe hain.
+            # ✅ Actually true now — gated by the `validate()` check above
+            # instead of assumed.
             is_verified=True,
 
         )
+
+        # Consume the OTP row so it can't be reused for another signup.
+        otp_obj.delete()
 
         return user
 
@@ -238,3 +277,45 @@ class CompleteProfileSerializer(serializers.Serializer):
 
 class GoogleLoginSerializer(serializers.Serializer):
     id_token = serializers.CharField(required=True)
+
+
+#-------------  forgot / reset password (B-7)  ---------------------------
+#
+# Dedicated two-step flow, separate from VerifyOTPView's OTP-login branch
+# (see Task 16's note on that view in views.py): that branch is an
+# intentional passwordless-login shortcut and logs the user straight in
+# on a correct OTP — reusing it for password reset would blur "proved I
+# own this email" with "here is a session", exactly the ambiguity B-7
+# flagged. These two serializers back a flow that never returns a
+# session: ForgotPasswordView only sends a code, ResetPasswordView only
+# spends that code on setting a new password.
+
+class ForgotPasswordSerializer(serializers.Serializer):
+    email_or_phone = serializers.CharField(max_length=100, required=True)
+
+
+class ResetPasswordSerializer(serializers.Serializer):
+    email_or_phone = serializers.CharField(max_length=255, required=True)
+    otp = serializers.CharField(max_length=6, required=True)
+
+    new_password = serializers.CharField(
+        write_only=True,
+        style={"input_type": "password"},
+    )
+    confirm_password = serializers.CharField(
+        write_only=True,
+        style={"input_type": "password"},
+    )
+
+    def validate_new_password(self, value):
+        # Same shared rule as signup/change-password — see
+        # validate_strong_password's docstring at the top of this file.
+        return validate_strong_password(value)
+
+    def validate(self, attrs):
+        if attrs["new_password"] != attrs["confirm_password"]:
+            raise serializers.ValidationError({
+                "confirm_password":
+                    "Password and Confirm Password do not match."
+            })
+        return attrs

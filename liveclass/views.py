@@ -88,6 +88,7 @@ from .models import (
 )
 # NOTE (task 42 — core-app migration): Notification, NotificationPreference,
 # create_notification, and create_bulk_notifications moved to the `core` app.
+from core.classroom_chat_bridge import resolve_parent_from_token
 from core.models import Notification, NotificationPreference
 from core.services import create_notification, create_bulk_notifications
 from .livekit_utils import (
@@ -153,7 +154,6 @@ from .serializers import (
     LivePollSerializer,
     MyReferralCodeSerializer,
     NoticeSerializer,
-    ParentJoinSerializer,
     ParentMessageTemplateSerializer,
     ParentTeacherMessageReplySerializer,
     ParentTeacherMessageSerializer,
@@ -1430,40 +1430,65 @@ def _accessible_classroom_ids(user):
 
 
 # ---------------------------------------------------------------------------
-# 🔥 NAYA (task 9) — parent-join. A parent has no platform account, so
-# there's nothing to authenticate them as — instead they hold a signed
-# link (POST body: {"parent_token": "..."}) that decodes, via Django's
-# own `django.core.signing`, to their child's user id. No DB row, no
-# expiry table to clean up — the signature + `max_age` (see
-# ParentJoinSerializer.validate_parent_token) is the only state.
+# 🔧 CONSOLIDATION FIX (post-Task-9/11 gap-fix pass) — parent-join used to
+# authenticate a parent via a bespoke, stateless *signed* token
+# (`django.core.signing`, salt=PARENT_JOIN_TOKEN_SALT below) that had
+# nothing to do with the `ParentAccessCode`/`ParentToken` DB rows the rest
+# of the parent-portal feature set (teacher-generated codes, report
+# cards, parent-mode query threads — see `parent_link_views.py`) already
+# runs on. That was a genuine, unreconciled two-mechanism problem: a
+# parent given a `ParentAccessCode` code had no way to actually join a
+# live session with it (this endpoint only accepted a signed link), and a
+# parent given a signed join-link had no way to see report cards or ask
+# a query (those only accept a `ParentAccessCode`-backed token). Signed
+# links also could never be revoked — no DB row to flip `is_active` on,
+# unlike a `ParentAccessCode`.
 #
-# ASSUMPTION (flagged for a follow-up confirm-pass — see
-# ParentJoinSerializer's own ASSUMPTION note in serializers.py for the
-# full reasoning): this task's file list didn't include models.py, so
-# there's no way to check whether a DB-backed parent-token model already
-# exists elsewhere in the real codebase. If it does, only
-# `generate_parent_join_token`/`ParentJoinSerializer.validate_parent_token`
-# need to change to read/write that table instead — `parent_join()` below
-# and its URL/permission/throttle wiring stay exactly the same either way.
+# Fixed by switching `parent_join()` below onto the SAME resolution every
+# other parent-facing endpoint uses —
+# `core.classroom_chat_bridge.resolve_parent_from_token()`, the exact
+# function `liveclass/permissions.py`'s `HasValidParentSessionToken` was
+# always meant to gate this endpoint with (see that class's own
+# docstring, which already named this action as its intended caller).
+# One parent identity, one revocable code, works for every parent-facing
+# feature now.
 #
-# ASSUMPTION #2: `ParticipantRole.OBSERVER` is assumed to exist (or need
-# adding) in `.livekit_utils` — that file wasn't in this task's file list
-# either, so this couldn't be confirmed against the real enum. If
-# `OBSERVER` doesn't exist there yet, `livekit_utils.py` needs a small
-# follow-up: LiveKit's own room-participant grant needs
-# `can_publish=False, can_subscribe=True` (or equivalent) for whatever
-# value ParticipantRole.OBSERVER maps to, same as how HOST/CO_HOST/
-# STUDENT presumably already map to their own publish/subscribe grants.
+# NOTE — `resolve_parent_from_token()` is called directly in the view
+# body below rather than via `HasValidParentSessionToken` as a
+# `permission_class`. DRF's `APIView.initial()` runs `check_permissions()`
+# BEFORE `check_throttles()`; if the permission class rejected a bad
+# token, `ParentJoinIPThrottle` below would never even see (and so never
+# count) the failed attempt — quietly defeating the one thing that
+# throttle exists for (rate-limiting brute-forced/replayed token
+# guesses). Keeping `permission_classes=[AllowAny]` on the action and
+# resolving the token inside the body — same structural position the old
+# `ParentJoinSerializer.is_valid()` call used to occupy — keeps
+# "throttle counts every attempt, valid or not" true exactly as it was
+# before this change.
+#
+# `PARENT_JOIN_TOKEN_SALT`/`generate_parent_join_token()` below are now
+# DEAD CODE as far as `parent_join()` is concerned — nothing in this file
+# calls either any more. Left in place (not deleted) only because
+# `generate_parent_join_token` was never wired to any API in the first
+# place ("not exposed via any API in this task" — its own docstring) and
+# something outside this task's file set may already import it; deleting
+# blind risked an ImportError this pass couldn't see. Recommended
+# follow-up: grep the rest of the codebase for both names and delete them
+# once confirmed unused, so a future reader doesn't mistake this for a
+# second, still-live parent-auth path.
 # ---------------------------------------------------------------------------
-PARENT_JOIN_TOKEN_SALT = "liveclass.parent_join"
+PARENT_JOIN_TOKEN_SALT = "liveclass.parent_join"  # DEPRECATED — see note above; parent_join() no longer uses this.
 
 
 def generate_parent_join_token(student) -> str:
-    """Not exposed via any API in this task — a separate 'share this
-    classroom with a parent' flow (out of scope here) is what would
-    actually call this and hand the resulting link to a parent. Kept
-    here, next to parent_join()/PARENT_JOIN_TOKEN_SALT, as the one place
-    that documents the token's shape so the two stay in sync."""
+    """DEPRECATED — parent_join() no longer accepts this token shape (see
+    the CONSOLIDATION FIX note above); it now resolves a `parent_token`
+    against `ParentAccessCode`/`ParentToken` via
+    `core.classroom_chat_bridge.resolve_parent_from_token()` instead, same
+    as every other parent-facing endpoint. Kept only because nothing in
+    this task's visibility confirmed it's unused elsewhere — do not wire
+    this into any new code; use `ParentAccessCode.generate_for()` /
+    `ClassroomParentCodeGenerateView` to issue a parent a working token."""
     from django.core import signing
 
     return signing.dumps({"student_id": student.id}, salt=PARENT_JOIN_TOKEN_SALT)
@@ -1776,11 +1801,17 @@ class ClassSessionViewSet(viewsets.ModelViewSet):
         throttle_classes=[ParentJoinIPThrottle],
     )
     def parent_join(self, request, pk=None):
-        """A parent (no platform account — see PARENT_JOIN_TOKEN_SALT's
-        module note above) verifies a signed `parent_token`, and — only
-        if it decodes to a student who currently has valid access to
-        THIS classroom — gets an observer-role LiveKit token for this
-        session. Never creates a SessionParticipant row: a watching
+        """A parent (no platform account) presents the `parent_token`
+        their `ParentAccessCode`/`ParentToken` was issued (see
+        `ClassroomParentCodeGenerateView` / the student's own
+        self-generate flow in the `message` app) — resolved via
+        `core.classroom_chat_bridge.resolve_parent_from_token()`, the
+        same call every other parent-facing endpoint uses (see the
+        CONSOLIDATION FIX module note above `PARENT_JOIN_TOKEN_SALT` for
+        why this replaced the old bespoke signed-token scheme). Only if
+        it resolves to a student who currently has valid access to THIS
+        classroom does the parent get an observer-role LiveKit token for
+        this session. Never creates a SessionParticipant row: a watching
         parent isn't a seat/attendance/waitlist participant, so this
         deliberately mirrors token() (issue-only) rather than join()
         (which creates one) — same reasoning token()'s own docstring
@@ -1796,9 +1827,17 @@ class ClassSessionViewSet(viewsets.ModelViewSet):
             ClassSession.objects.select_related("classroom"), pk=pk
         )
 
-        serializer = ParentJoinSerializer(data=request.data)
-        serializer.is_valid(raise_exception=True)
-        student = serializer.context["student"]
+        # Resolved here in the body (NOT via HasValidParentSessionToken as
+        # a permission_class) so ParentJoinIPThrottle above still counts
+        # every attempt, valid or not — see the CONSOLIDATION FIX module
+        # note above PARENT_JOIN_TOKEN_SALT for the full reasoning
+        # (permission_classes run before check_throttles in DRF, so
+        # gating here via a permission class would let a bad-token guess
+        # skip the throttle counter entirely).
+        resolution = resolve_parent_from_token(request.data.get("parent_token"))
+        if resolution is None:
+            raise PermissionDenied("Ye parent link invalid ya expire ho chuka hai.")
+        student = resolution.student
 
         classroom = session.classroom
         if not classroom.has_access(student):
@@ -5127,9 +5166,25 @@ class CoinTransactionViewSet(mixins.ListModelMixin, viewsets.GenericViewSet):
 # here — this viewset only covers the withdrawal direction.
 # ---------------------------------------------------------------------------
 class CoinWithdrawalViewSet(
-    mixins.CreateModelMixin, mixins.ListModelMixin, mixins.RetrieveModelMixin, viewsets.GenericViewSet
+    mixins.ListModelMixin, mixins.RetrieveModelMixin, viewsets.GenericViewSet
 ):
-    """Own withdrawal requests only, UNLESS the caller is platform staff
+    """TASK 6 — READ-ONLY as of this pass. Withdrawal *requests* now go
+    through `user_profile`'s `CoinWithdrawalRequestView` (Task 4), which
+    writes through `CoinLedger.objects.record_transaction()` — the one
+    shared ledger every coin-changing action across the codebase should
+    use, per that model's own docstring. Creating (and cancel/approve/
+    reject/mark-paid) here would keep debiting/crediting `User.coin`
+    through this app's own bespoke path, which is exactly the two
+    parallel, driftable ledgers this migration exists to collapse into
+    one.
+
+    `list`/`retrieve` stay wired so existing "my withdrawal history" UI
+    keeps working unchanged against pre-migration rows. Every
+    state-changing action below now returns 410 Gone with a pointer at
+    the new endpoint instead of touching a balance — see
+    `_deprecated_write_response` above `CoinPurchaseViewSet`.
+
+    Own withdrawal requests only, UNLESS the caller is platform staff
     (`is_staff`), who see every request across every user — staff are the
     ones who actually action a payout, so they need the full queue, not
     just their own wallet. Same "?classroom= opts a manager into a wider
@@ -5140,8 +5195,6 @@ class CoinWithdrawalViewSet(
     serializer_class = CoinWithdrawalSerializer
     permission_classes = [IsAuthenticated]
     pagination_class = LiveClassPagination
-    throttle_scope = "coin_withdrawal"
-    throttle_classes = [ScopedRateThrottle]
 
     def get_queryset(self):
         base = CoinWithdrawal.objects.select_related("user", "reviewed_by")
@@ -5152,110 +5205,29 @@ class CoinWithdrawalViewSet(
             return base
         return base.filter(user=self.request.user)
 
-    def perform_create(self, serializer):
-        # NOTE: coins/amount_inr/status are never trusted from the client —
-        # CoinWithdrawal.create_request() does the actual balance check +
-        # debit atomically. serializer.save() is deliberately NOT called
-        # here (there's nothing to save yet — create_request() creates the
-        # row itself); perform_create just needs to hand the instance back
-        # to DRF's CreateModelMixin via serializer.instance.
-        try:
-            instance = CoinWithdrawal.create_request(
-                user=self.request.user,
-                coins=serializer.validated_data["coins"],
-                payout_method=serializer.validated_data["payout_method"],
-                payout_details=serializer.validated_data["payout_details"],
-            )
-        except DjangoValidationError as exc:
-            raise ValidationError(exc.messages if hasattr(exc, "messages") else str(exc))
-        serializer.instance = instance
+    @action(detail=False, methods=["post"])
+    def create(self, request):
+        # NOTE: not a DRF CreateModelMixin.create — this is a plain
+        # @action so the route stays registered (old clients hitting
+        # POST .../coin-withdrawals/ get a clear redirect instead of a
+        # 404) without wiring a create path back onto this viewset.
+        return _deprecated_write_response("/api/user-profile/coin-withdrawals/")
 
     @action(detail=True, methods=["post"])
     def cancel(self, request, pk=None):
-        """Self-service: the requester cancels their OWN still-pending
-        request and gets the coins back immediately."""
-        withdrawal = get_object_or_404(CoinWithdrawal, pk=pk)
-        if withdrawal.user_id != request.user.id:
-            raise PermissionDenied("You can only cancel your own withdrawal request.")
-        try:
-            with transaction.atomic():
-                locked = CoinWithdrawal.objects.select_for_update().get(pk=withdrawal.pk)
-                locked.cancel()
-        except DjangoValidationError as exc:
-            raise ValidationError(exc.messages if hasattr(exc, "messages") else str(exc))
-        return Response(CoinWithdrawalSerializer(locked).data)
+        return _deprecated_write_response("/api/user-profile/coin-withdrawals/")
 
     @action(detail=True, methods=["post"])
     def approve(self, request, pk=None):
-        """Staff-only: marks intent to pay. No coin movement here — the
-        coins already left the wallet at request time; this just moves the
-        request into the "queued for payout" state."""
-        if not request.user.is_staff:
-            raise PermissionDenied("Only platform staff can approve a withdrawal.")
-        withdrawal = get_object_or_404(CoinWithdrawal, pk=pk)
-        try:
-            with transaction.atomic():
-                locked = CoinWithdrawal.objects.select_for_update().get(pk=withdrawal.pk)
-                locked.approve(request.user)
-        except DjangoValidationError as exc:
-            raise ValidationError(exc.messages if hasattr(exc, "messages") else str(exc))
-        create_notification(
-            recipient=locked.user,
-            notif_type=Notification.NotifType.WITHDRAWAL_APPROVED,
-            title="Withdrawal approved",
-            message=f"Your withdrawal of {locked.coins} coins (₹{locked.amount_inr}) has been approved and is queued for payout.",
-        )
-        return Response(CoinWithdrawalSerializer(locked).data)
+        return _deprecated_write_response("/api/user-profile/coin-withdrawals/")
 
     @action(detail=True, methods=["post"])
     def reject(self, request, pk=None):
-        """Staff-only: refunds the coins back to the user's wallet.
-        Body: {"reason": "..."} — stored as admin_note and shown to the user."""
-        if not request.user.is_staff:
-            raise PermissionDenied("Only platform staff can reject a withdrawal.")
-        reason = (request.data.get("reason") or "").strip()
-        if not reason:
-            raise ValidationError({"reason": "A rejection reason is required."})
-        withdrawal = get_object_or_404(CoinWithdrawal, pk=pk)
-        try:
-            with transaction.atomic():
-                locked = CoinWithdrawal.objects.select_for_update().get(pk=withdrawal.pk)
-                locked.reject(request.user, reason)
-        except DjangoValidationError as exc:
-            raise ValidationError(exc.messages if hasattr(exc, "messages") else str(exc))
-        create_notification(
-            recipient=locked.user,
-            notif_type=Notification.NotifType.WITHDRAWAL_REJECTED,
-            title="Withdrawal rejected",
-            message=f"Your withdrawal of {locked.coins} coins was rejected: {reason}. The coins have been returned to your wallet.",
-        )
-        return Response(CoinWithdrawalSerializer(locked).data)
+        return _deprecated_write_response("/api/user-profile/coin-withdrawals/")
 
     @action(detail=True, methods=["post"], url_path="mark-paid")
     def mark_paid(self, request, pk=None):
-        """Staff-only: records that the actual bank/UPI transfer (done
-        outside this app, e.g. via the bank's own portal) has gone through.
-        Body: {"external_reference": "<UTR / UPI txn id>"} — kept for audit
-        and for the user to reconcile against their own bank statement."""
-        if not request.user.is_staff:
-            raise PermissionDenied("Only platform staff can mark a withdrawal as paid.")
-        external_reference = (request.data.get("external_reference") or "").strip()
-        if not external_reference:
-            raise ValidationError({"external_reference": "A bank UTR or UPI transaction id is required."})
-        withdrawal = get_object_or_404(CoinWithdrawal, pk=pk)
-        try:
-            with transaction.atomic():
-                locked = CoinWithdrawal.objects.select_for_update().get(pk=withdrawal.pk)
-                locked.mark_paid(request.user, external_reference)
-        except DjangoValidationError as exc:
-            raise ValidationError(exc.messages if hasattr(exc, "messages") else str(exc))
-        create_notification(
-            recipient=locked.user,
-            notif_type=Notification.NotifType.WITHDRAWAL_PAID,
-            title="Withdrawal paid",
-            message=f"₹{locked.amount_inr} has been sent to your {locked.get_payout_method_display()}.",
-        )
-        return Response(CoinWithdrawalSerializer(locked).data)
+        return _deprecated_write_response("/api/user-profile/coin-withdrawals/")
 
 
 # ---------------------------------------------------------------------------
@@ -5270,6 +5242,13 @@ class CoinWithdrawalViewSet(
 # functions for a different gateway's SDK calls and everything above them
 # keeps working unchanged.
 # ---------------------------------------------------------------------------
+# TASK 6: `_create_gateway_order` / `_verify_gateway_signature` are no
+# longer called from this file now that `initiate`/`verify`/`retry` are
+# deprecated stubs above — left in place (not deleted) since
+# `tasks.reconcile_stuck_coin_purchases` (referenced in
+# CoinPurchaseViewSet's old docstring, not part of this upload) may still
+# import and use them against pre-migration PENDING rows. Confirm that
+# task's own status before deleting these.
 def _create_gateway_order(amount_inr, receipt: str) -> str:
     """STUB — replace with a real order-create call, e.g.:
         client = razorpay.Client(auth=(settings.RAZORPAY_KEY_ID, settings.RAZORPAY_KEY_SECRET))
@@ -5304,95 +5283,62 @@ def _verify_gateway_signature(order_id: str, payment_id: str, signature: str) ->
     return hmac.compare_digest(expected, signature)
 
 
-class CoinPurchaseViewSet(
-    mixins.CreateModelMixin, mixins.ListModelMixin, mixins.RetrieveModelMixin, viewsets.GenericViewSet
-):
-    """Own purchases only. Three-step flow, matching how every Indian PG's
-    checkout SDK actually works client-side:
-      1. `POST .../initiate/` `{"coins": N}` — creates a PENDING
-         `CoinPurchase` + a gateway order server-side (amount is always
-         derived from `coins * CoinWithdrawal.COIN_TO_INR_RATE`, NEVER
-         trusted from the client), returns `order_id` for the client's
-         checkout SDK to open.
-      2. Client completes payment inside the gateway's own checkout UI —
-         nothing on this server is involved in that step.
-      3. `POST .../{id}/verify/` with the gateway's checkout callback
-         payload — signature checked, wallet credited exactly once
-         (`CoinPurchase.mark_success` is idempotent, so a retried verify
-         call or a webhook arriving on top of it is a safe no-op).
-    If verification fails (or the client never calls verify at all and a
-    reconciliation sweep — see `tasks.reconcile_stuck_coin_purchases` —
-    times it out), the row ends up FAILED. `POST .../{id}/retry/` then
-    creates a fresh PENDING row (new order_id, linked via `retry_of`) for
-    the same coins/amount, so a failed payment is never a dead end for
-    the student — this is the actual "payment retry" gap being closed.
+# TASK 6 — shared by CoinWithdrawalViewSet and CoinPurchaseViewSet below.
+# Both apps' write paths now live in `user_profile` (Task 3/4), writing
+# through `CoinLedger.objects.record_transaction()` — the one shared
+# ledger every coin-changing action should use, per that model's own
+# docstring. Every state-changing action on the two viewsets below is
+# replaced with this: a 410 Gone that names the replacement endpoint,
+# instead of silently 404ing (route removed) or — worse — silently still
+# accepting writes into this app's now-deprecated balance path.
+def _deprecated_write_response(new_path: str) -> Response:
+    return Response(
+        {
+            "detail": (
+                "This action has moved. Coin purchases and withdrawals are now "
+                f"handled at {new_path} — this endpoint is read-only history "
+                "going forward."
+            ),
+            "new_endpoint": new_path,
+        },
+        status=status.HTTP_410_GONE,
+    )
+
+
+class CoinPurchaseViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, viewsets.GenericViewSet):
+    """TASK 6 — READ-ONLY as of this pass, mirroring CoinWithdrawalViewSet
+    above. Buying coins now goes through `user_profile`'s
+    `CoinPurchaseRequest` flow (Task 3) — `start_purchase` /
+    `confirm_success` / `mark_failed`, writing through `CoinLedger.
+    objects.record_transaction()`. `list`/`retrieve` stay wired so
+    existing "my purchase history" UI keeps working against
+    pre-migration rows; `initiate`/`verify`/`retry` now return 410 Gone
+    instead of touching a balance.
+
+    Original three-step flow (kept here for history / what the rows
+    below mean): 1) `initiate` created a PENDING `CoinPurchase` + gateway
+    order, 2) client paid inside the gateway's checkout UI, 3) `verify`
+    checked the signature and credited the wallet exactly once.
     """
 
     serializer_class = CoinPurchaseSerializer
     permission_classes = [IsAuthenticated]
     pagination_class = LiveClassPagination
-    throttle_scope = "coin_purchase"
-    throttle_classes = [ScopedRateThrottle]
 
     def get_queryset(self):
         return CoinPurchase.objects.filter(user=self.request.user)
 
     @action(detail=False, methods=["post"])
     def initiate(self, request):
-        serializer = CoinPurchaseInitiateSerializer(data=request.data)
-        serializer.is_valid(raise_exception=True)
-        coins = serializer.validated_data["coins"]
-        # Reuses the withdrawal side's conversion constant so buy/sell rate
-        # stays in one place — if the product wants a different (e.g.
-        # marked-up) buy rate later, split this into its own
-        # COIN_TOPUP_RATE constant rather than overloading this one.
-        amount_inr = coins * CoinWithdrawal.COIN_TO_INR_RATE
-        order_id = _create_gateway_order(amount_inr, receipt=f"user{request.user.id}-{uuid.uuid4().hex[:8]}")
-        purchase = CoinPurchase.objects.create(
-            user=request.user, coins=coins, amount_inr=amount_inr, order_id=order_id,
-        )
-        return Response(CoinPurchaseSerializer(purchase).data, status=status.HTTP_201_CREATED)
+        return _deprecated_write_response("/api/user-profile/coin-purchases/initiate/")
 
     @action(detail=True, methods=["post"])
     def verify(self, request, pk=None):
-        purchase = get_object_or_404(CoinPurchase, pk=pk, user=request.user)
-        if purchase.status != CoinPurchase.Status.PENDING:
-            raise ValidationError("This purchase has already been resolved.")
-
-        serializer = CoinPurchaseVerifySerializer(data=request.data)
-        serializer.is_valid(raise_exception=True)
-        data = serializer.validated_data
-
-        if data["razorpay_order_id"] != purchase.order_id:
-            raise ValidationError("order_id does not match this purchase.")
-
-        if not _verify_gateway_signature(
-            data["razorpay_order_id"], data["razorpay_payment_id"], data["razorpay_signature"]
-        ):
-            with transaction.atomic():
-                locked = CoinPurchase.objects.select_for_update().get(pk=purchase.pk)
-                locked.mark_failed("Signature verification failed.")
-            raise ValidationError("Payment could not be verified. You can retry this purchase.")
-
-        with transaction.atomic():
-            locked = CoinPurchase.objects.select_for_update().get(pk=purchase.pk)
-            locked.mark_success(data["razorpay_payment_id"], data["razorpay_signature"])
-        locked.refresh_from_db()
-        return Response(CoinPurchaseSerializer(locked).data)
+        return _deprecated_write_response("/api/user-profile/coin-purchases/")
 
     @action(detail=True, methods=["post"])
     def retry(self, request, pk=None):
-        failed = get_object_or_404(CoinPurchase, pk=pk, user=request.user)
-        if failed.status != CoinPurchase.Status.FAILED:
-            raise ValidationError("Only a failed purchase can be retried.")
-        order_id = _create_gateway_order(
-            failed.amount_inr, receipt=f"user{request.user.id}-retry-{uuid.uuid4().hex[:8]}"
-        )
-        retry_purchase = CoinPurchase.objects.create(
-            user=request.user, coins=failed.coins, amount_inr=failed.amount_inr,
-            order_id=order_id, retry_of=failed,
-        )
-        return Response(CoinPurchaseSerializer(retry_purchase).data, status=status.HTTP_201_CREATED)
+        return _deprecated_write_response("/api/user-profile/coin-purchases/initiate/")
 
 
 # ---------------------------------------------------------------------------

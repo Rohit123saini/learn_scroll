@@ -45,14 +45,30 @@ PostShare, PostView, PostSave, ChunkedUpload, CommentLike.
 What's kept below is genuinely additive — logic the views/signals don't
 already provide:
 
-- The `core.create_notification` soft-dependency probe (checklist item
-  63 / Phase 3's hub) — fixed to use `post.user` (the real FK) instead of
-  the nonexistent `post.author`, and to take a `PostComment` instance
-  instead of the nonexistent `Comment`. Nothing calls
-  `notify_post_liked` / `notify_post_commented` yet — wire them into
+- The `core.create_notification` hookup (checklist item 63 / Phase 3's
+  hub) — fixed to use `post.user` (the real FK) instead of the
+  nonexistent `post.author`, and to take a `PostComment` instance instead
+  of the nonexistent `Comment`.
+  ⚠️ TASK 11 FIX — this used to probe `core.notifications.create_notification`,
+  a module that doesn't exist (the real function is
+  `core.services.create_notification`), so the probe's `except ImportError`
+  always fired and every call silently fell through to the debug-log
+  no-op stub below — no bell row was ever created, even after this
+  function started being called. On top of that, the stub's own
+  signature (`recipient, actor, verb, target_type, target_id, payload`)
+  never matched the real `core.services.create_notification`'s signature
+  (`recipient, notif_type, title, message=None, data=None` — see
+  `core/tests.py` for confirmed call shapes), so fixing only the import
+  path would have raised a `TypeError` on the very first real call.
+  Both fixed below: the import now points at `core.services`, and
+  `notify_post_liked`/`notify_post_commented` build the
+  (notif_type, title, message, data) shape that function actually
+  expects, using the new `Notification.NotifType.POST_LIKED`/
+  `POST_COMMENTED` choices added in `core/models.py`.
+  Now wired: `notify_post_liked` is called from
   `PostReactionAPIView.post()` (only the `status_msg == "liked"` branch)
-  and `CommentCreateAPIView.post()` (only for new top-level comments)
-  once `core.notifications` actually exists.
+  and `notify_post_commented` from `CommentCreateAPIView.post()` (only
+  for new top-level comments, i.e. `parent is None`) — see those files.
 - `share_post_to_conversation()` (checklist item 61) — fixed to use
   `post.user` / `post.content` instead of `post.author` / `post.caption`,
   and `PostShare.objects.get_or_create` instead of `.create()` (the real
@@ -66,26 +82,153 @@ already provide:
   send-function path is confirmed.
 """
 import logging
+import os
+import shutil
+import subprocess
+import tempfile
 
 logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# TASK 27 — cloud-storage-safe file access for external binaries (ffmpeg,
+# and anything else that needs a real local path: virus scanners, image
+# processors, etc).
+#
+# The old `auto_generate_video_thumbnail` read `instance.file.path`
+# directly. `.path` only exists for `FileSystemStorage` — it raises
+# `NotImplementedError` on `storages.backends.s3.S3Storage` (there is no
+# local filesystem path for a remote object), and the old code caught
+# that failure with a bare `print()` instead of `logger`, so the moment
+# `USE_S3_STORAGE=true` (task 26) was flipped on, thumbnail generation
+# started silently no-op-ing for every video with nothing showing up in
+# Sentry/logs to say why.
+#
+# `.open("rb")` + chunked read, below, works identically for every
+# storage backend Django/django-storages supports — local disk today,
+# S3 after task 26, GCS/Azure if this ever moves again — because it goes
+# through the storage API instead of assuming a local filesystem.
+# ---------------------------------------------------------------------------
+def download_storage_file_to_temp(file_field, suffix=""):
+    """Copy a Django FileField's content to a local NamedTemporaryFile,
+    regardless of which storage backend is behind it, and return the
+    local path. ffmpeg (and most other external binaries) need an actual
+    path on disk to read from — they have no concept of S3/GCS.
+
+    Caller owns the returned path and MUST delete it (e.g. in a
+    `finally:` block) once done — this function only creates it.
+    """
+    tmp = tempfile.NamedTemporaryFile(suffix=suffix, delete=False)
+    try:
+        with file_field.open("rb") as src:
+            for chunk in src.chunks():
+                tmp.write(chunk)
+    finally:
+        tmp.close()
+    return tmp.name
+
+
+def generate_video_thumbnail_file(video_path, time_offset="00:00:01", timeout=30):
+    """Run ffmpeg against a LOCAL video file path (already downloaded via
+    `download_storage_file_to_temp` above — ffmpeg has no concept of S3)
+    and return the local path to a generated JPEG thumbnail, or `None` if
+    generation failed for any reason. Every failure path is logged via
+    `logger` (not `print()`, task 27's other reported gap) so a bad
+    upload or a missing ffmpeg binary actually shows up in production
+    logs/Sentry instead of silently vanishing.
+
+    Caller owns the returned path and MUST delete it once done, same as
+    `download_storage_file_to_temp`.
+    """
+    if shutil.which("ffmpeg") is None:
+        # Infra problem (ffmpeg not installed in the app image/container),
+        # not a per-file problem — log once per call so it's loud in
+        # aggregated logs, but don't raise: one video with no thumbnail
+        # yet is a much better failure mode than crashing the upload.
+        logger.error(
+            "ffmpeg binary not found on PATH — cannot generate video "
+            "thumbnails. Install ffmpeg in the app image/container."
+        )
+        return None
+
+    thumb_fd, thumb_path = tempfile.mkstemp(suffix=".jpg")
+    os.close(thumb_fd)  # ffmpeg writes the actual bytes; we only needed the path
+
+    cmd = [
+        "ffmpeg", "-y",
+        "-ss", time_offset,
+        "-i", video_path,
+        "-frames:v", "1",
+        "-vf", "scale=480:-1",
+        thumb_path,
+    ]
+    try:
+        result = subprocess.run(cmd, capture_output=True, timeout=timeout, check=False)
+    except subprocess.TimeoutExpired:
+        logger.error("ffmpeg timed out (%ss) generating thumbnail for %s", timeout, video_path)
+        if os.path.exists(thumb_path):
+            os.unlink(thumb_path)
+        return None
+    except OSError as exc:
+        # e.g. ffmpeg binary present in `which` but not actually executable,
+        # or disappeared between the check above and this call.
+        logger.exception("ffmpeg failed to start for %s: %s", video_path, exc)
+        if os.path.exists(thumb_path):
+            os.unlink(thumb_path)
+        return None
+
+    if result.returncode != 0 or not os.path.exists(thumb_path) or os.path.getsize(thumb_path) == 0:
+        logger.error(
+            "ffmpeg failed generating thumbnail for %s (rc=%s): %s",
+            video_path,
+            result.returncode,
+            result.stderr.decode(errors="replace")[:500] if result.stderr else "",
+        )
+        if os.path.exists(thumb_path):
+            os.unlink(thumb_path)
+        return None
+
+    return thumb_path
 
 # ---------------------------------------------------------------------------
 # Notification hookup (checklist item 63 / Phase 3's hub).
 #
-# `core.create_notification` doesn't exist yet. Probe once, fall back to a
-# no-op + log line, so this app doesn't hard-crash every request until
-# Phase 3 ships `core/notifications.py`. Once it exists with a matching
-# signature, this file needs zero changes.
+# TASK 11 FIX: `core.notifications` never existed — the real module is
+# `core.services`, and its `create_notification()` takes
+# `(recipient, notif_type, title, message=None, data=None)`, not the
+# `(recipient, actor, verb, target_type, target_id, payload)` shape this
+# file's fallback stub used to have. Both are fixed below. The
+# `except ImportError` guard is kept (not because `core.services` is
+# expected to be missing — it isn't, `core` is a required app — but so
+# this app degrades to a logged no-op instead of a hard crash on every
+# like/comment in the unlikely event the `core` app isn't installed in a
+# given environment, e.g. a stripped-down test settings module).
 # ---------------------------------------------------------------------------
 try:
-    from core.notifications import create_notification  # type: ignore
-except ImportError:  # pragma: no cover - expected until Phase 3 ships
-    def create_notification(*, recipient, actor, verb, target_type, target_id, payload=None):
+    from core.services import create_notification as _create_notification_row
+except ImportError:  # pragma: no cover - only if the `core` app isn't installed
+    def _create_notification_row(recipient, notif_type, title, message=None, data=None):
         logger.debug(
-            "core.notifications not available yet — skipping notification "
-            "(%s -> %s: %s on %s:%s)",
-            actor, recipient, verb, target_type, target_id,
+            "core.services.create_notification not available — skipping notification "
+            "(%s: %s -> %s)", notif_type, title, recipient,
         )
+        return None
+
+
+# PRODUCTION FIX — `notify_post_liked`/`notify_post_commented` used to do
+# `from core.models import Notification` as an *unguarded* local import.
+# If `core` genuinely isn't installed in some environment (the exact case
+# the try/except above claims to handle gracefully), that unguarded
+# import raised ImportError straight out of every single like and every
+# top-level comment — i.e. it crashed the two hottest write paths in this
+# app, which is a much worse outcome than the "log + no-op" the module
+# docstring promises. Guarded the same way as `_create_notification_row`
+# above, so `core` being absent degrades this to a no-op everywhere, not
+# just in the create_notification call itself.
+try:
+    from core.models import Notification as _Notification
+except ImportError:  # pragma: no cover - only if the `core` app isn't installed
+    _Notification = None
 
 
 def notify_post_liked(post, actor):
@@ -94,12 +237,15 @@ def notify_post_liked(post, actor):
     reaction-change."""
     if post.user_id == actor.id:
         return  # don't notify yourself
-    create_notification(
-        recipient=post.user,
-        actor=actor,
-        verb="liked",
-        target_type="post",
-        target_id=str(post.id),
+    if _Notification is None:
+        return  # `core` app not installed — nothing to notify with
+
+    actor_name = actor.get_full_name() or actor.username
+    _create_notification_row(
+        post.user,
+        _Notification.NotifType.POST_LIKED,
+        f"{actor_name} liked your post",
+        data={"post_id": str(post.id), "actor_id": str(actor.id)},
     )
 
 
@@ -108,13 +254,16 @@ def notify_post_commented(post, comment):
     PostComment is created. `comment` is a PostComment instance."""
     if post.user_id == comment.user_id:
         return
-    create_notification(
-        recipient=post.user,
-        actor=comment.user,
-        verb="commented",
-        target_type="post",
-        target_id=str(post.id),
-        payload={"comment_id": str(comment.id)},
+    if _Notification is None:
+        return  # `core` app not installed — nothing to notify with
+
+    actor_name = comment.user.get_full_name() or comment.user.username
+    _create_notification_row(
+        post.user,
+        _Notification.NotifType.POST_COMMENTED,
+        f"{actor_name} commented on your post",
+        (comment.content or "")[:200],
+        data={"post_id": str(post.id), "comment_id": str(comment.id)},
     )
 
 

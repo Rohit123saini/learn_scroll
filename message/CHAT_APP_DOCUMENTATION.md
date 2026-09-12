@@ -12,6 +12,26 @@ Auth model: `AUTH_USER_MODEL` is a **custom `User`** (app `login`), primary key 
 **integer** (not UUID). Fields used across this app: `id`, `username`, `first_name`,
 `last_name`, `profile_photo` (ImageField), `is_active`.
 
+> **Reconciliation pass (latest — TASK 21, call recording)**: `models.py`, `consumers.py`,
+> `admin.py`, `ai_service.py`, `apps.py`, `attendance_utils.py`, `cache_utils.py`,
+> `constants.py`, `group_rules.py`, `link_preview.py`, `livekit_utils.py`,
+> `media_utils.py`, `mentions.py`, `Middleware.py`, and `models_focus.py` were
+> re-checked against this doc. One genuinely new/undocumented piece of logic was found
+> and is now covered: **LiveKit Egress call recording (TASK 21)** —
+> `livekit_utils.start_room_recording`/`stop_room_recording`/`EgressError`, and
+> `CallSession`'s five recording fields (`is_recording`, `recording_egress_id`,
+> `recording_started_at`, `recording_output_path`, `recording_url`), previously flagged
+> in this doc (old §9.4 item 2) as dead fields with no trigger code anywhere — see §2
+> `CallSession`, §6 Calls, §7.24, §9.0 item 21, §10, §13. Also corrected in the same pass:
+> `CallSession.token` (legacy Agora field) no longer exists — dropped in an earlier
+> migration, mistakenly still listed as present — and the `models_focus.py` file-map
+> entry now notes `FocusSession` is confirmed **merged** into `models.py` itself, not
+> still a separate pending-merge file. A new §2 entry was added for `message`'s own
+> `Assignment`/`AssignmentSubmission` models (distinct from `liveclass.Assignment`),
+> which existed in `models.py` and were already referenced elsewhere in this doc (Parent
+> Dashboard §6) but had no dedicated model-section entry. Everything else checked came
+> back an exact match to what was already written — no other changes were needed.
+
 ---
 
 ## 1. File Map
@@ -19,19 +39,19 @@ Auth model: `AUTH_USER_MODEL` is a **custom `User`** (app `login`), primary key 
 | File | Purpose |
 |---|---|
 | `models.py` | All DB models |
-| `models_focus.py` *(NEW — merge-in file, not a standalone app module)* | `FocusSession` model for Feature 12 (Smart DND) — shipped as a separate file with its own docstring instructing it be pasted into the end of `models.py` (or `from .models_focus import *`), then `makemigrations`/`migrate` run. Also documents the one-field addition `Message.is_announcement` needed for Feature 11 — see §2/§7.17/§7.18 |
+| `models_focus.py` *(merge-in file, not a standalone app module — **now merged**)* | `FocusSession` model for Feature 12 (Smart DND) — originally shipped as a separate file with its own docstring instructing it be pasted into the end of `models.py`. **Confirmed done**: `models.py` itself now carries `FocusSession` directly (with a `🔧 FIX (merged from models_focus.py)` comment noting `views_focus.py`'s `from .models import FocusSession` was raising `ImportError` until this merge landed), so `models_focus.py` is now historical/reference-only — its content is superseded by, not additional to, what's in `models.py`. Also documents the one-field addition `Message.is_announcement` needed for Feature 11 — see §2/§7.17/§7.18 |
 | `serializers.py` | DRF serializers. Includes `DoubtQuestionSerializer`/`DoubtCreateSerializer`/`DoubtAnswerSerializer` *(NEW — Doubt Queue, see §7.20)*, `ConversationWallpaperSerializer` *(NEW — per-chat wallpaper, see §6)*, and an N+1 fix in `ConversationListSerializer` (see §9.0) |
 | `views.py` | REST views/viewsets (the bulk of the app logic) |
 | `consumers.py` | Django Channels WebSocket consumers |
 | `routing.py` | WS URL patterns |
 | `Middleware.py` | JWT auth for WebSocket connections. No longer carries its own copy of the logic — re-exports `JWTAuthMiddleware`/`get_user_from_token` from project-level `LearnScroll/ws_auth.py`, which `liveclass` also now imports from *(fix — see §9.0)* |
-| `permissions.py` | DRF permission classes. `IsGroupAdminOrModerator` now confirmed on `group_rules.is_group_admin_or_mod` (cached single source of truth) instead of its own raw query. New `HasValidParentToken` *(Feature 8 — Parent Mode, see §7.16)* — header-token auth (`X-Parent-Token`) for parent-facing read-only views, deliberately not touching `request.user` |
+| `permissions.py` | DRF permission classes. `IsGroupAdminOrModerator` now confirmed on `group_rules.is_group_admin_or_mod` (cached single source of truth) instead of its own raw query. `HasValidParentToken` *(Feature 8 — Parent Mode, see §7.16)* — header-token auth (`X-Parent-Token`) for parent-facing read-only views, deliberately not touching `request.user`. **🔧 GAP FIX (G-6, mutual consent) — NEW this session**: a verified-but-not-yet-`status=APPROVED` token is now rejected here just like an expired/revoked one — closes old §9.4 item 10, see there and §2/§6 |
 | `group_rules.py` | Group access-control (message/call/study-room permission, daily limit) |
-| `services.py` *(NEW — task 27, plus bell-row helper task 44)* | `GroupViewSet.create`/`add_members`/`update_member`'s core logic extracted into plain functions (`create_group`, `add_members_to_group`, `remove_group_member`, `update_group_member_role`) — decoupled from DRF so `core/classroom_chat_bridge.py` can reuse the exact same "create group / add member / change role" logic without going through an HTTP request/response cycle. Raises plain `ValueError`/`PermissionError` (not DRF exceptions) so it stays importable from non-DRF code; the caller converts them. Also re-homes `add_or_reactivate_participant` (moved here from `views.py`, which now imports it from here — single source, also reused by `offline_queue.py`). New this batch: `create_bell_rows_for_push(recipient_ids, notif_type, title, message, data=None)` — writes one `core.models.Notification` "bell" row per recipient, best-effort (logs + swallows on failure, never blocks the actual push), meant to be called alongside the existing FCM-only push helpers in `views.py` (`send_chat_message_push`/`send_mention_push`/`send_incoming_call_push`) so a bell/notification-center row exists too, not just the push itself *(exact `views.py` call-sites not independently confirmed this batch — `views.py` wasn't re-uploaded — see §9.4)* |
+| `services.py` *(NEW — task 27)* | `GroupViewSet.create`/`add_members`/`update_member`'s core logic extracted into plain functions (`create_group`, `add_members_to_group`, `remove_group_member`, `update_group_member_role`) — decoupled from DRF so `core/classroom_chat_bridge.py` can reuse the exact same "create group / add member / change role" logic without going through an HTTP request/response cycle. Raises plain `ValueError`/`PermissionError` (not DRF exceptions) so it stays importable from non-DRF code; the caller converts them. Also re-homes `add_or_reactivate_participant` (moved here from `views.py`, which now imports it from here — single source, also reused by `offline_queue.py`) — **and both this and the `GroupViewSet` delegation are now confirmed actually wired in `views.py`**, see §5/§9.4 item 21. `create_bell_rows_for_push` (task 44) **used to live here but has been removed** — see §7.22/§10 `push_utils.py` for where bell-row creation actually happens |
 | `mentions.py` | Shared `@mention` text-parsing helper (REST + WS) |
 | `translation_service.py` *(NEW this batch — Feature 9: real-time message translate)* | `translate_text(text, target_lang, source_lang=None)` — pluggable provider wrapper, default implementation calls Google Cloud Translate v2 REST API (plain API key via `settings.GOOGLE_TRANSLATE_API_KEY`, no SDK/service-account needed). Raises `TranslationServiceUnavailable` (not-configured / unreachable, → clean 503) or `TranslationError` (bad lang code / bad response, → 4xx) rather than ever surfacing as a raw 500. Also exposes `SUPPORTED_LANGUAGES` (the 10 languages in the app's language picker — en/hi/mr/ta/te/kn/bn/gu/pa/ur — kept in sync with `language_picker_sheet.dart` per its own comment, not an enforced server-side allow-list). Consumed by `MessageViewSet.translate` (referenced in this file's own docstring) — see §7.21 |
 | `push_utils.py` | Firebase Cloud Messaging (FCM) push helpers. Firebase init is **lazy** (only runs the first time a push is actually sent, not at import time) and reads either `FIREBASE_CREDENTIALS_PATH` or `settings.FCM_SERVICE_ACCOUNT_JSON_PATH` *(fix — see §9.0)*. Chat-push batching was **rewritten this batch to be WhatsApp-style immediate** — no more delayed Celery flush, see §7.13. Also filters recipients through active Focus Mode sessions (Feature 12, §7.18) and tags announcement pushes (Feature 11, §7.17) differently from normal chat pushes |
-| `livekit_utils.py` | LiveKit JWT token generation (calls + study rooms). Credential check (`LIVEKIT_API_KEY`/`LIVEKIT_API_SECRET`) is now **lazy** — only fires when a token is actually requested, not at module-import time *(fix — see §9.0)*. Per-call `ttl` param: calls default 2h, `StudyRoomJoinView` overrides to 8h |
+| `livekit_utils.py` | LiveKit JWT token generation (calls + study rooms). Credential check (`LIVEKIT_API_KEY`/`LIVEKIT_API_SECRET`) is now **lazy** — only fires when a token is actually requested, not at module-import time *(fix — see §9.0)*. Per-call `ttl` param: calls default 2h, `StudyRoomJoinView` overrides to 8h. **Egress (call recording) added — TASK 21 *(NEW)***: `start_room_recording(room_name)` / `stop_room_recording(egress_id, output_filepath=None)`, async-under-the-hood LiveKit Egress REST calls bridged with `asyncio.run()` since the Egress/Room service client is async-only (unlike the plain-JWT `generate_livekit_token` above, which needs no event loop at all); raises the dedicated `EgressError` (LiveKit rejected/failed the call → 502-able) separately from the existing lazy-credential `RuntimeError` (not configured → 503-able), so `CallRecordingView` can tell the two apart without string-matching. See §2 `CallSession`, §6 Calls, §7.24, §10, §13 |
 | `user_display.py` | Shared display-name / profile-photo-URL helper (REST + WS) |
 | `upload_view.py` | Generic file-upload endpoint (returns a URL to attach to a message) |
 | `ai_service.py` | Gemini calls, all cached 24h by content hash: `generate_summary`, `generate_quiz`, `transcribe_audio`, `generate_reply_suggestions`, `generate_classroom_answer` *(NEW)*, `generate_revision_deck` *(NEW — see §7.14/§7.15)*. Cache-hit check now uses a `_CACHE_MISS` sentinel instead of a truthy check, and `generate_summary` now guards against caching an empty result *(fix — see §9.0)* |
@@ -226,10 +246,36 @@ note used to flag is resolved; kept only as a pointer to where the wiring lives.
 ### `CallSession`
 - `type` (audio/video), `status`, `is_group_call`
 - `conversation` (nullable), `group` (nullable), `caller`
-- `channel_name` (unique — also the LiveKit room name), `token` (legacy Agora field,
-  unused now that LiveKit is used)
+- `channel_name` (unique — also the LiveKit room name)
+- **`token` (legacy Agora field) is GONE** — dropped in an earlier cleanup
+  (migration `0903_remove_callsession_legacy_agora_fields`) once
+  `livekit_utils.generate_livekit_token` took over generating join tokens
+  on demand; LiveKit never needed a stored token the way Agora did, and
+  it is not coming back.
 - `started_at`, `connected_at`, `ended_at`, `duration_seconds`
-- `is_recording`, `recording_url` (fields exist; no recording-trigger code was found)
+- **Recording — TASK 21, now wired up** *(previously "fields exist; no
+  recording-trigger code was found" — that gap is closed, see §7.24)*:
+  `is_recording` (bool), `recording_egress_id` (LiveKit's id for the
+  in-progress/most-recent Egress job on this call — needed because LiveKit
+  has no "stop the recording for room X" call, only "stop egress job Y";
+  kept around after stop rather than nulled, so support can still trace
+  which job produced a given `recording_url`), `recording_started_at`,
+  `recording_output_path` (the storage path `livekit_utils.
+  start_room_recording()` chose at start time, needed again at stop time
+  to resolve the finished file's public URL), `recording_url` (filled in
+  from `stop_room_recording()`'s return value — best-effort/synchronous
+  for now; see §10's `livekit_utils.py` entry for why a LiveKit
+  `egress_ended` webhook, not yet built, would be the more correct
+  long-term source of truth — can stay null after stop if egress hasn't
+  finished muxing yet). See migration
+  `0910_add_callsession_recording_fields`. `CallRecordingView` (`views.py`
+  — not in this file batch, so its exact request/response shape is
+  inferred from `livekit_utils.py`'s own docstrings, not independently
+  confirmed here) drives these fields via `livekit_utils.
+  start_room_recording`/`stop_room_recording`. Distinct from Class
+  Transcript (§7.19) — this is one whole-room composite MP4 via LiveKit
+  Egress, not per-participant searchable text; see that model's own
+  design note (`models.py`) for why both exist side by side.
 
 ### `CallParticipant`
 - `call`, `user`, `joined_at`, `left_at`
@@ -348,7 +394,59 @@ confirmed in `models.py`)*
   other permission/view could accidentally treat an authenticated parent as if they were
   the student themselves (a parent has no `User` row at all in this model).
 - Parent↔student linking is a direct `ParentAccessCode.student` FK, set by the student
-  themselves when they generate the code — no separate invite/approval flow.
+  themselves when they generate the code.
+- **🔧 GAP FIX (G-6, mutual consent) — NEW this session, supersedes "no separate
+  invite/approval flow" from earlier revisions of this doc.** `permissions.py`'s
+  `HasValidParentToken` now filters on `status=ParentToken.Status.APPROVED` in addition to
+  the existing `is_active`/expiry checks — a token that has merely completed
+  `ParentVerifyCodeView` (verified the code) but has not yet been approved by the student
+  is rejected exactly like an expired/revoked one (same generic denial message,
+  deliberately not distinguishing "pending" from "invalid", so a guessed/leaked code can't
+  be used to probe whether it's real-but-unapproved vs. simply wrong). Every new
+  `ParentToken` is expected to start `status=PENDING`, flipped to `APPROVED` only by the
+  student, via a `views_parent.ParentCodeTokenApproveView` referenced in
+  `permissions.py`'s own comments. This closes the trust-model gap flagged in old §9.4
+  item 10 (a leaked/screenshotted code previously granted immediately-live access with the
+  student never in the loop) — see §6/§9.4 item 10 for the product-level framing and
+  **§9.4's new open item** for a confirmed inconsistency this introduces: `models.py` (as
+  reviewed this session) does **not** yet define a `status`/`Status` field on `ParentToken`
+  at all, so `ParentToken.Status.APPROVED` and the `status=...` filter `permissions.py` now
+  references would raise `AttributeError`/`FieldError` until the model catches up.
+  **Confirmed missing** (upgraded from "unconfirmed" now that `urls.py` has been fully
+  reviewed): `views_parent.ParentCodeTokenApproveView` isn't among the `views_parent`
+  imports/routes there at all (only `ParentAccessCodeView`, `...RenewView`,
+  `...RevealView`, `ParentCodeTokensView`, `ParentCodeTokenDetailView`,
+  `ParentDashboardView`, `ParentVerifyCodeView` are) — so even once `ParentToken.status`
+  exists on the model, there is currently **no way for a student to ever approve a
+  pending token** at all; every parent token would be permanently stuck at `PENDING` and
+  `HasValidParentToken` would reject it forever. `views_parent.py` itself still isn't in
+  this file set, so whether `ParentVerifyCodeView` sets `status=PENDING` on create can't
+  be directly confirmed either — only inferred from `permissions.py`'s comments.
+
+### `Assignment` / `AssignmentSubmission` (`message`'s own — distinct from
+`liveclass.Assignment`)
+- `Assignment`: `group` (FK, `related_name='message_assignments'`), `title`,
+  `description` (blank ok), `due_at` (nullable), `created_by` (`SET_NULL`,
+  `related_name='+'`). Index on `(group, due_at)`.
+- `AssignmentSubmission`: `assignment` (FK, `related_name='submissions'`),
+  `student` (FK, `related_name='message_assignment_submissions'`),
+  `is_submitted`, `submitted_at`. `unique_together = ('assignment',
+  'student')` — one submission row per student per assignment. Index on
+  `(student, is_submitted)`.
+- **Deliberately renamed `related_name`s** (`assignments` →
+  `message_assignments`, `assignment_submissions` →
+  `message_assignment_submissions`) — `liveclass` has its own, separately-
+  built `Assignment`/`AssignmentSubmission` models sharing the same
+  `Group`/`User` targets; Django can't register two identical reverse
+  accessors on the same target model, so `makemigrations` failed
+  (`fields.E304`/`E305`) until these were made unique. **Not yet resolved
+  which one is authoritative** — see §6 Parent Dashboard's "Gap 1" note:
+  if `liveclass.Assignment` is meant to be the same concept as this one
+  (not a genuinely different feature that happens to share a name), the
+  cleaner long-term fix is deleting this duplicate pair and pointing
+  parent-dashboard code at `liveclass.Assignment` instead; that's a
+  bigger structural call than this pass makes unilaterally, so both
+  models currently coexist, unmerged.
 
 ---
 
@@ -375,6 +473,8 @@ max 50).
 | `GET /<id>/search/` *(NEW)* | `search` | `?q=...` (min 2 chars, `search_utils.MIN_QUERY_LENGTH`) + optional structured filters `sender`, `date_from`, `date_to`, `has_media`, `media_type`. Ranked full-text + typo-tolerant search within this conversation — see §7.1 |
 | `GET /search_all/` *(NEW)* | `search_all` | Same `q` + filter params as above. Global search across every conversation the user is active in. Returns `MessageSearchResultSerializer` (adds `conversation_preview`) |
 | `GET /<id>/pinned/` *(NEW)* | `pinned` | List of currently pinned messages in this conversation |
+| `GET /<id>/export/` *(NEW — TASK 29)* | `export` | `?type=chat\|media` (default `chat`), optional `?since=`/`?until=` (ISO datetimes). Returns one JSON payload (`Content-Disposition: attachment`) of metadata + URLs for every still-visible message, capped at `EXPORT_MAX_MESSAGES=5000` with `has_more` for paging via `until`. See §7.25 |
+| `POST /<id>/offline-queue/` *(NEW — task 49, now wired)* | `offline_queue_flush` | Body `{"messages": [...]}` (max 100/batch), each item shaped per `offline_queue.flush_offline_queue`'s docstring. Same block/permission/daily-limit gating as `messages` POST, throttled the same way (`MessageSendThrottle`/IP throttle). See §7.23 |
 
 ### Message-send flow (`ConversationViewSet.messages`, POST) — step by step
 1. If group: enforce `message_permission` + `daily_message_limit` (`group_rules.py`)
@@ -455,17 +555,19 @@ Queryset: groups where the user has a non-banned `GroupMember` row.
 | `DELETE /<id>/members/<user_id>/` | `update_member` | Self-leave allowed; removing someone else requires admin/mod |
 | `GET /<id>/media/` | `media` | `GroupMedia` gallery, optional `?type=image/video/...` filter, paginated (`StandardPagination`). ⚠️ see `GroupMedia` note in §2 |
 
-**🔴 `create`/`add_members`/`update_member` still have their own inline logic —
-`services.py` (task 27) is NOT actually wired in**, confirmed against `views.py` this
-batch: `GroupViewSet.create()` builds `Conversation`/`Group`/`GroupMember`/
-`ConversationParticipant` rows directly, `add_members()` runs its own membership loop,
-`update_member()` sets fields directly — none of them call `services.create_group`/
-`add_members_to_group`/`remove_group_member`/`update_group_member_role`, and `views.py`'s
-import block has no `from .services import ...` line at all. The table above describes
-what `views.py` actually does today. See §7.22/§9.4 item 21 for the fuller picture —
-`services.py` should currently be treated as unused parallel code, not a completed
-refactor, and it has also produced a second, drifting copy of
-`add_or_reactivate_participant` (§9.4 item 21).
+**✅ RESOLVED this batch — `create`/`add_members`/`update_member` now actually call
+`services.py` (task 27)**, confirmed against the current `views.py`: it now imports
+`add_or_reactivate_participant, create_group, add_members_to_group, remove_group_member,
+update_group_member_role` from `.services`, and the ViewSet's own module-level duplicate
+of `add_or_reactivate_participant` has been removed (a comment left in its place points
+at `.services` as the single source). `GroupViewSet.create()` now just validates via
+`GroupCreateSerializer` and calls `services.create_group(...)`; `add_members()` calls
+`services.add_members_to_group(...)`, converting its plain `PermissionError`/`ValueError`
+to `PermissionDenied`/400; `update_member`/`remove_group_member`'s DELETE branch likewise
+now delegate to `services.remove_group_member`/`update_group_member_role`. The
+previously-flagged risk of two independently-drifting copies of
+`add_or_reactivate_participant` is gone — there is now exactly one, in `services.py`. See
+§7.22/§9.4 item 21 (now marked resolved).
 
 **Group delete is now soft-delete, not a hard cascade** *(fix — see §9.0/§9.4 item 1)*:
 previously `destroy()` ran the `ModelViewSet` default `DestroyModelMixin` behavior
@@ -536,6 +638,19 @@ being gone the instant someone taps delete.
   conversation members not yet in the call
 - `POST /calls/history/<call_id>/add-participant/` — `add_participant` — adds someone to
   an ongoing group call; sends `incoming_call` push+event with the SAME `call_id`
+- **`CallRecordingView` — call recording, TASK 21 *(NEW)*, see §2 `CallSession`/§7.24.**
+  Not in this file batch (`views.py` itself wasn't re-uploaded), so the exact route/
+  method/body shape below is inferred from `livekit_utils.py`'s own docstrings, not
+  independently confirmed — treat it as high-confidence, not as-built-verified the way
+  the rest of this table is. Start path calls `livekit_utils.start_room_recording
+  (room_name)`, stores the returned `(egress_id, output_filepath)` on `CallSession.
+  recording_egress_id`/`recording_output_path`, flips `is_recording=True` and sets
+  `recording_started_at`. Stop path calls `livekit_utils.stop_room_recording(egress_id,
+  output_filepath)`, sets `recording_url` from its return value (may be `None` if
+  `LIVEKIT_EGRESS_PUBLIC_BASE_URL` isn't configured or egress hasn't finished muxing
+  yet), flips `is_recording=False`. Should catch both `RuntimeError` (LiveKit not
+  configured → 503) and `EgressError` (LiveKit rejected/failed the call → 502) from
+  `livekit_utils.py` rather than letting either surface as a raw 500.
 
 ### Study Room (`StudyRoomJoinView`, `StudyRoomStateView`)
 - `POST /study-room/<conversation_id>/join/` — group: `study_room_permission` check.
@@ -642,6 +757,18 @@ Gap 2/Gap 3, supersedes the Group-primary shape described in earlier revisions o
   `access_code.is_expired` — deliberately split so the parent-side app can show "wrong
   code" vs. "expired, ask the student for a new/renewed one" as different messages,
   rather than one generic "invalid" for both.
+  **🔧 GAP FIX (G-6, mutual consent) — NEW this session**: the minted `ParentToken` is now
+  expected to start out un-approved (`status=PENDING`) rather than immediately usable —
+  see §2/§10/§12 `HasValidParentToken` for the enforcement side and the confirmed
+  model-field gap this depends on. `permissions.py`'s comments reference a
+  `ParentCodeTokenApproveView` (student-authenticated) as the only way a token moves to
+  `APPROVED`, but with `urls.py` now fully reviewed, **this view is confirmed not routed
+  anywhere** — the `views_parent` import block there only pulls in `ParentAccessCodeView`,
+  `ParentAccessCodeRenewView`, `ParentAccessCodeRevealView`, `ParentCodeTokensView`,
+  `ParentCodeTokenDetailView`, `ParentDashboardView`, `ParentVerifyCodeView`. So even
+  setting aside the missing model field (§2/§9.4), a student currently has **no endpoint
+  at all** to approve a pending parent token — see §9.4's new item for the full
+  end-to-end consequence.
 - **Student-side management** (`ParentAccessCodeView`, `IsAuthenticated`,
   `/message/parent/codes/`):
   - `GET` lists the student's own active codes: `id`, `label`, `masked_code` (e.g.
@@ -1025,11 +1152,23 @@ elsewhere in this doc still point at the right item.*
   (plain passthrough handler, same pattern as `meta_update`) carrying the full updated
   `Poll` (all options + current vote counts) — an open chat screen sees vote counts
   change live without a refresh.
-- **Not supported yet**: voting via WebSocket (REST-only, same as `schedule_message`);
-  forwarding a poll (`MessageViewSet.forward` explicitly excludes `type=poll` — see §2);
-  a dedicated "clear my vote entirely" call (`option_ids` requires at least 1 — to fully
-  un-vote today, resend the vote list without the option, or the client just doesn't
-  call vote until the user picks something).
+- **Clear vote entirely** *(NEW — TASK 29)*: `DELETE /message/messages/<id>/poll/vote/`
+  (same route as the vote POST, method-differentiated) removes every `PollVote` row this
+  user has on the poll, regardless of single/multi-choice, and broadcasts the same
+  `poll_update` event as a normal vote. Added because `option_ids: []` already worked for
+  "no opinion" on a multi-choice poll, but `PollVoteSerializer` requires at least one
+  option for single-choice, so there was previously no way back to "no vote" without
+  picking some other option first.
+- **Forwarding a poll** *(NEW — TASK 29)*: `MessageViewSet.forward` no longer excludes
+  `type=poll`. The `Poll` + `PollOption` rows are explicitly cloned onto the new message
+  (plain field-copy isn't enough since poll data lives in separate tables) — the forwarded
+  copy always starts **open** and carries **no votes**, regardless of the source poll's
+  state, so the new audience's votes are never mixed with the original chat's and closing
+  the source poll doesn't close the forward. A poll message whose `Poll` row is somehow
+  missing is silently dropped from the forward batch rather than producing a
+  client-crashing empty poll bubble. The live WS `chat_message` event for a forwarded poll
+  now includes the nested `poll` object too, same as a brand-new poll send.
+- **Not supported yet**: voting via WebSocket (REST-only, same as `schedule_message`).
 - `MessageSerializer.poll` — new field, a nested `PollSerializer` (question, options
   with per-option `votes_count`/`voted_by_me`, `total_voters`, `is_closed`) — `null` for
   every non-poll message type.
@@ -1042,9 +1181,10 @@ elsewhere in this doc still point at the right item.*
   or appended to. If the caption is set and the source was e.g. an image with no
   caption, the forwarded copy's `text` becomes the caption (WhatsApp-style "add a note
   while forwarding").
-- Poll messages (`type=poll`) are now excluded from `forward` entirely (see §2/§7.8) —
-  this was a pre-existing gap made visible while adding polls, not something the
-  caption change itself introduced.
+- Poll messages (`type=poll`) **are now forwardable** *(TASK 29 — previously excluded,
+  see §7.8)*: a poll's own `text` (the question) is always non-empty, so the caption is
+  automatically ignored for a forwarded poll, same as for any other message that already
+  had its own text.
 
 ### 7.10 Server-Side Draft Auto-Save *(NEW this session)*
 - `ConversationParticipant.draft_text` + `draft_updated_at` (see §2) — reuses the
@@ -1289,10 +1429,17 @@ board)*
   timeout (8s) → also `TranslationServiceUnavailable`, logged at `warning`.
 - `SUPPORTED_LANGUAGES` — the 10-language picker the Flutter client currently offers
   (English, Hindi, Marathi, Tamil, Telugu, Kannada, Bengali, Gujarati, Punjabi, Urdu),
-  kept in sync with `language_picker_sheet.dart` per the module's own comment. **Not** an
-  enforced allow-list server-side — Google's API silently accepts many more ISO codes
-  than these 10, so a client could technically request an unlisted target language and
-  still get a translation back.
+  kept in sync with `language_picker_sheet.dart` per the module's own comment.
+  **Now server-enforced** *(TASK 29 — previously it wasn't)*: `translate_text` raises a
+  new `UnsupportedLanguageError` (a `TranslationError` subclass) if `target_lang` (or a
+  `source_lang`, if a future caller passes one) isn't in `SUPPORTED_LANGUAGES`, checked
+  before the network call. Previously Google's API would silently accept far more ISO
+  codes than these 10 and hand back a translation the rest of the product (RTL handling,
+  font fallback, UI strings) was never built to support — that gap is now closed.
+  `MessageViewSet.translate` also re-checks `target_lang` itself, before even hitting the
+  cache, purely so it can return a 400 with the full `supported_languages` list without
+  parsing that back out of the exception string; `UnsupportedLanguageError` is still
+  caught defensively for the `source_lang` path.
 - Throttled by `TranslateThrottle` (`throttles.py`, scope `translate`, `30/min` —
   tighter than plain message-send since every call is a billed external API hit, and a
   user could otherwise translate-spam an entire scroll-back).
@@ -1303,13 +1450,18 @@ board)*
   to (`translate` isn't in any of that method's explicit action lists) — same gate as
   every other single-message action, i.e. you can only translate a message you could
   already read. Guards: only `MessageType.TEXT` messages with non-blank text (400
-  otherwise); 404 if the message was deleted-for-everyone or deleted-for-you. Caches the
+  otherwise); 404 if the message was deleted-for-everyone or deleted-for-you; **400 with
+  `{"detail", "supported_languages"}` if `target_lang` isn't in `SUPPORTED_LANGUAGES`**
+  *(TASK 29 — checked before the cache lookup, so an unsupported code never produces a
+  cached "success" entry)*. Caches the
   translated result for a week, keyed on `message.id` + `int(message.updated_at
   .timestamp())` + `target_lang` — editing the message (`partial_update`, which bumps
   `updated_at`) automatically busts the cache with no separate invalidation step.
   Response: `{"message_id", "target_lang", "source_text", "translated_text"}`.
   `TranslationServiceUnavailable` → `503`; `TranslationError` → `502` (not a generic
-  4xx as previously guessed — confirmed `HTTP_502_BAD_GATEWAY`).
+  4xx as previously guessed — confirmed `HTTP_502_BAD_GATEWAY`); `UnsupportedLanguageError`
+  → `400` (caught defensively even though the explicit check above already covers the
+  normal `target_lang` path).
 - **🔴 CRITICAL — CONFIRMED (not just "not yet checked") this batch: this endpoint will
   crash on its very first real call, twice over:**
   1. **`translate` has no `DEFAULT_THROTTLE_RATES` entry in `settings.py`.**
@@ -1404,7 +1556,9 @@ board)*
   model as previously guessed; see §9.4 for what (if anything) is still genuinely open
   here.
 
-### 7.22 Group Management Service Layer + Bell-Row Notifications *(NEW this batch — tasks 27 & 44)*
+### 7.22 Group Management Service Layer *(tasks 27; NOW CONFIRMED WIRED this batch — see
+§5/§9.4 item 21)* + Bell-Row Notifications *(task 44; now confirmed to live in
+`push_utils.py`, not `services.py` — see §9.4 items 19/22)*
 - `services.py` pulls `GroupViewSet.create`/`add_members`/`update_member`'s logic out into
   plain functions (`create_group`, `add_members_to_group`, `remove_group_member`,
   `update_group_member_role`), decoupled from DRF (raises `ValueError`/`PermissionError`,
@@ -1413,25 +1567,27 @@ board)*
   `GroupViewSet` does, without going through an HTTP request/response cycle. An
   `actor=None` convention lets an internal/system caller (like the classroom bridge) skip
   the admin/mod permission check — the check assumes a real acting user when one is given.
+  **`GroupViewSet` now actually calls these** (confirmed this batch, see §5) — this is a
+  completed refactor, not parallel/dead code.
 - `add_or_reactivate_participant(conversation, user)` also now lives here (moved from
-  `views.py`) — creates a `ConversationParticipant` row, or un-sets `left_at` if the user
+  `views.py`, and the `views.py` copy has since been removed — single source confirmed) —
+  creates a `ConversationParticipant` row, or un-sets `left_at` if the user
   had previously left, so a re-added member reliably shows up in the chat again. Reused by
   `services.py` itself (member add), and by `offline_queue.py` (§7.23, sender might have
   left+rejoined while their device was offline).
 - `generate_group_invite_code()` — also moved here from wherever it previously lived,
   generates a unique `secrets.token_urlsafe` code, retrying on collision.
-- **Bell-row notifications** *(task 44)*: `create_bell_rows_for_push(recipient_ids,
-  notif_type, title, message, data=None)` writes one `core.models.Notification` row per
-  recipient — the in-app "bell" notification-center entry, distinct from the FCM push
-  itself. Best-effort by design (wraps each row in try/except + `logger.exception`,
-  never raises) so a bell-row failure can never block the actual push a user is waiting
-  on. Intended to be called *alongside* (not instead of) the existing FCM-only helpers in
-  `views.py` (`send_chat_message_push`, `send_mention_push`, `send_incoming_call_push`),
-  mirroring the "create_notification() + send_notification() side by side" pattern
-  `liveclass/tasks.py` already uses. **The exact `views.py` call-sites are not
-  independently confirmed this batch** — `views.py` wasn't re-uploaded, and the function's
-  own comment points to a separate `views_PATCH_bell_rows_for_push.md` note (also not
-  seen) for them — see §9.4.
+- **Bell-row notifications** *(task 44)* — **do NOT live in `services.py`.** A
+  `create_bell_rows_for_push(recipient_ids, notif_type, title, message, data=None)`
+  function used to be documented here, but it has since been **removed from `services.py`
+  entirely** (confirmed via that file's own "REMOVED — was dead code" comment this
+  batch): it had zero callers anywhere, because `push_utils.py` was already doing the
+  same job a different way — calling `core.services.create_notification()` directly,
+  inline, at each of its three push call-sites (`send_chat_message_push`,
+  `send_incoming_call_push`, `send_mention_push`), one `Notification` row per recipient
+  per event, rather than through a shared batch helper. **Bell-row notifications are
+  fully wired and working** — see §10 `push_utils.py` for the confirmed details. This
+  item is resolved, not open — see §9.4 items 19/22.
 
 ### 7.23 Offline Message Queue *(NEW this batch — task 49, delivery half)*
 - `offline_queue.flush_offline_queue(conversation, sender, queued_messages)` — the backend
@@ -1464,12 +1620,88 @@ board)*
   logged and still reported as `"created"` to the client — treating it as a send failure
   and letting the client retry could otherwise create a second row if the unique
   constraint's race window is ever hit oddly.
-- **Not independently confirmed this batch**: the actual REST endpoint/URL that calls
-  `flush_offline_queue`, and the Flutter-side queue/retry implementation, since neither
-  `views.py`/`urls.py` nor any frontend code was re-uploaded alongside this module — see
-  §9.4. The module's own docstring documents the frontend contract it expects (reuse the
-  same `client_id` on every retry of a given logical message — a fresh `client_id` per
-  retry defeats the whole idempotency guarantee).
+- **✅ RESOLVED this batch — REST endpoint is now wired**: `POST
+  /message/conversations/<id>/offline-queue/` (`ConversationViewSet.offline_queue_flush`,
+  router-based `@action`, no `urls.py` change needed). Body `{"messages": [...]}`, capped
+  at `MAX_OFFLINE_QUEUE_BATCH=100` items/request (400 if exceeded). Runs the exact same
+  block-check / group `message_permission` / `daily_message_limit` gates as the live
+  `messages()` POST — `daily_message_limit` is checked once for the whole batch, not per
+  item, same as the live path checks it once per request. Throttled the same way as a
+  live send (`MessageSendThrottle` + `MessageSendIPThrottle`, via `get_throttles()`
+  treating `offline_queue_flush` as equivalent to `messages` POST). Response:
+  `{"results": [...]}` — the per-item list `flush_offline_queue` returns. See §3 table.
+  **Still not independently confirmed**: the Flutter-side queue/retry implementation
+  itself (no frontend code in this batch). The module's own docstring documents the
+  frontend contract it expects (reuse the same `client_id` on every retry of a given
+  logical message — a fresh `client_id` per retry defeats the whole idempotency
+  guarantee).
+
+### 7.24 Call Recording via LiveKit Egress *(NEW this batch — TASK 21)*
+- Closes a gap this doc previously flagged as open (old §9.4 item 2: `CallSession.
+  is_recording`/`recording_url` "exist on the model but... recording start/stop code was
+  not found anywhere"). That code now exists, in `livekit_utils.py`.
+- **What it does**: server-side room-composite recording — every participant's
+  audio/video mixed into one file — via LiveKit's Egress REST API, not a client-side
+  screen-record. `start_room_recording(room_name)` starts an
+  `EncodedFileOutput`/`RoomCompositeEgressRequest` (MP4, `layout="speaker"`), uploading to
+  S3 if `LIVEKIT_EGRESS_S3_BUCKET` is configured (falls back to local disk on the egress
+  worker otherwise — fine for dev, not for prod) and returns `(egress_id,
+  output_filepath)`. `stop_room_recording(egress_id, output_filepath)` stops that job and
+  best-effort-builds a public `recording_url` from `LIVEKIT_EGRESS_PUBLIC_BASE_URL` +
+  `output_filepath`, or `None` if that base URL isn't configured.
+- **Async bridged into sync**: LiveKit's Egress/Room service client is async-only
+  (`httpx.AsyncClient` under the hood) — unlike `generate_livekit_token`, which just signs
+  a JWT locally and needs no event loop at all. Every caller here is a synchronous DRF
+  view, so `_run_async()` bridges with a plain `asyncio.run()` per call rather than
+  pushing async/await onto the view layer for what's otherwise one blocking HTTP
+  round-trip.
+- **Two distinct failure modes, two distinct exceptions** — `RuntimeError` (missing
+  `LIVEKIT_API_KEY`/`LIVEKIT_API_SECRET`, same lazy check `generate_livekit_token` already
+  uses) vs. the new `EgressError` (LiveKit itself rejected/failed the start/stop call).
+  Deliberately separate so a caller can tell "not configured on this deployment" (503)
+  apart from "LiveKit rejected the request, might be worth a retry" (502) without
+  string-matching an error message.
+- **⚠️ `stop_room_recording`'s `recording_url` is best-effort, not authoritative** — a
+  successful `stop_egress` call means LiveKit *accepted* the stop request, not that the
+  file has finished uploading/muxing on the egress worker. The correct long-term source of
+  truth would be LiveKit's `egress_ended` webhook, which is **not wired into this app** —
+  no webhook endpoint exists for it anywhere in this file batch. Until that's added, a
+  `recording_url` handed back right after "stop" may 404 for a few seconds.
+- `LIVEKIT_HTTP_URL` (the Egress API's base URL) defaults to deriving itself from
+  `LIVEKIT_WS_URL` (`ws://`→`http://`, `wss://`→`https://`) rather than requiring a
+  second env var for every deployment — only set `LIVEKIT_URL` explicitly if egress
+  genuinely sits behind a different ingress than the media server. See §13.
+- **Not independently confirmed this batch**: `CallRecordingView` itself (`views.py`
+  wasn't re-uploaded) — its route/method/body shape in §6 is inferred from
+  `livekit_utils.py`'s own docstrings, not directly read from the view. See §9.4.
+
+### 7.25 Chat / Media Export *(NEW this batch — TASK 29; moved out of §15 "Suggested Next
+Facilities" now that it's implemented)*
+- `GET /message/conversations/<id>/export/` (`ConversationViewSet.export`) —
+  `?type=chat` (default, full text transcript) or `?type=media` (only messages carrying
+  a file, detected by `file_url`/`file_urls` being set — not a hardcoded `MessageType`
+  list). Optional `?since=`/`?until=` ISO-datetime bounds. Same "still visible to me"
+  rule as everywhere else: skips messages deleted-for-everyone or deleted-for-this-user.
+  Response is one JSON payload with a `Content-Disposition: attachment; filename="chat_
+  export_<conversation_id>_<type>.json"` header, so hitting the URL downloads a file
+  instead of rendering an in-app API response — `{"conversation_id", "exported_by",
+  "exported_at", "type", "count", "has_more", "messages": [{"message_id", "type",
+  "sender_id", "sender_username", "text", "file_url", "file_urls", "thumbnail_url",
+  "is_forwarded", "is_edited", "created_at"}, ...]}`.
+- **Bundles metadata + URLs, not the media bytes themselves** — deliberately, per the
+  view's own comment: actually fetching and zipping every file inside a synchronous GET
+  would be slow, memory-heavy work that belongs in a background Celery job (this app
+  already runs Celery for other async work, see §10 `tasks.py`), and the desired bundle
+  format (zip? one archive per media type?) wasn't specified. The client gets direct file
+  URLs today and can fetch/zip them itself; this can become a real async export job later
+  once that format is confirmed.
+- **Hard-capped, not unbounded**: `EXPORT_MAX_MESSAGES = 5000` per call, with `has_more`
+  in the response so exporting a multi-year group chat can't turn into one giant blocking
+  request. A caller that needs the rest pages forward by setting `until` to the oldest
+  `created_at` it already has.
+- No dedicated throttle class for this action — falls through to whatever
+  `get_throttles()`'s default branch resolves to for `ConversationViewSet` (not
+  `MessageSendThrottle`, since `export` isn't a POST to `messages`/`offline_queue_flush`).
 
 ---
 
@@ -1799,6 +2031,17 @@ computes `duration_seconds` and marks the whole `CallSession` `ENDED`.
     `ImproperlyConfigured`. 30-second fix: add `"parent_code_reveal": "10/hour"` to
     `DEFAULT_THROTTLE_RATES`. This is now the **only** remaining missing-rate gap of this
     kind in the app. See §14's throttle-rates table.
+21. **Call recording (TASK 21) wired up end-to-end** *(NEW this batch, CONFIRMED)* —
+    closes old §9.4 item 2, which flagged `CallSession.is_recording`/`recording_url` as
+    dead fields with no recording-trigger code anywhere. `livekit_utils.py` now has
+    `start_room_recording`/`stop_room_recording` (LiveKit Egress REST calls, bridged
+    async→sync via `asyncio.run()`) and a dedicated `EgressError`; `models.py` brought
+    `is_recording`/`recording_url` back plus three new fields
+    (`recording_egress_id`/`recording_started_at`/`recording_output_path`) needed to
+    actually drive a start→stop lifecycle across two separate HTTP requests. See §2
+    `CallSession`, §6 Calls, §7.24, §10, §13. `CallRecordingView` itself (the view that
+    calls these) is not in this file batch, so its route/shape is inferred, not
+    independently confirmed — see §9.4.
 
 ### 9.1 Fixed in this review
 
@@ -1919,9 +2162,14 @@ computes `duration_seconds` and marks the whole `CallSession` `ENDED`.
    `.all_objects`, and `tasks.purge_soft_deleted_conversations` (§10) is the scheduled
    sweep that reclaims storage after the grace window. See §5 and the
    `admin.py`/`BaseModel` entries in §2/§10 for the full mechanism.
-2. **`CallSession.token` / Agora fields** (`is_recording`, `recording_url`) exist on the
+2. ~~**`CallSession.token` / Agora fields** (`is_recording`, `recording_url`) exist on the
    model but the app has fully moved to LiveKit — `token` looks unused;
-   recording start/stop code was not found anywhere.
+   recording start/stop code was not found anywhere.~~
+   **Resolved.** `token` is confirmed gone (dropped in migration
+   `0903_remove_callsession_legacy_agora_fields`, not coming back) and recording is now
+   fully wired — TASK 21, see §2 `CallSession`, §6 Calls, §7.24, §9.0 item 21, §10, §13.
+   The only remaining unconfirmed piece is `CallRecordingView` itself, not in this file
+   batch — see the note at the end of this list.
 3. ~~**`media_utils.py`'s `file_size`** is read from `message.meta.get("size")`...~~
    **Resolved this session** — `_resolve_file_size(message, file_url)` now falls back to
    asking the storage backend directly (`default_storage.size(relative_path)`, works for
@@ -1979,12 +2227,17 @@ computes `duration_seconds` and marks the whole `CallSession` `ENDED`.
    `settings.py` — see item 15 below (this is now a definite bug, not an open question).
 10. ~~**No confirmed parent↔student linking model.**~~ **Resolved this batch** —
     `ParentAccessCode.student` is a direct FK the student themselves sets by generating
-    the code (`ParentAccessCodeView.post`, `views_parent.py`) — there's no separate
-    invite/approval flow; whoever holds a valid, unexpired code the student generated can
-    link to that student's data. This is a simpler trust model than a mutual-consent
-    link — worth a product-level gut-check (a leaked/screenshotted code, however
-    unlikely given the 5-active-codes cap and student-initiated revoke, grants the same
-    read access a deliberately-shared code would), not a missing feature.
+    the code (`ParentAccessCodeView.post`, `views_parent.py`).
+    ~~There's no separate invite/approval flow; whoever holds a valid, unexpired code the
+    student generated can link to that student's data. This is a simpler trust model than
+    a mutual-consent link — worth a product-level gut-check.~~ **The mutual-consent gap
+    itself is now resolved this session (G-6)** — `permissions.py`'s `HasValidParentToken`
+    requires `status=ParentToken.Status.APPROVED` in addition to the existing checks, and
+    a merely-verified token sits at `status=PENDING` until the student approves it via
+    (per `permissions.py`'s own comments) `views_parent.ParentCodeTokenApproveView`. A
+    leaked/screenshotted code alone no longer grants live access — see §2/§6/§12. **This
+    does introduce a new confirmed gap, tracked below**, since the `status` field itself
+    isn't in `models.py` yet.
 11. ~~**`RevisionDeck` has no confirmed "list past decks" or "delete a deck" endpoint.**~~
     **Resolved this session** — `RevisionDeckView` (`views_ai.py`) now defines
     `GET ?history=true` (list every deck for the conversation, newest first, capped at
@@ -2045,41 +2298,61 @@ computes `duration_seconds` and marks the whole `CallSession` `ENDED`.
     send paths needed to actually compute and pass the value, and now both do.
 18. ~~**`FocusSessionView` (§7.18, Feature 12) is fully coded but not wired into
     `urls.py`**~~ — **RESOLVED this batch**, see §9.0.
-19. **🔴 `services.create_bell_rows_for_push` (§7.22, task 44) is confirmed NOT called
-    anywhere.** With `views.py` now available: no `from .services import` line exists in
-    `views.py` at all (checked its full import block), and there is no
-    `create_bell_rows_for_push`/`Notification`/`core.services` reference anywhere in the
-    file. The function is fully implemented and safe to call, but it is dead code today —
-    zero bell/notification-center rows are being created for chat messages, mentions, or
-    calls, despite `services.py`'s own comments describing it as already wired in
-    alongside `send_chat_message_push`/`send_mention_push`/`send_incoming_call_push`.
-    Needs an actual `views.py` change to close, not just a doc update.
-20. **🔴 `offline_queue.flush_offline_queue` (§7.23, task 49) is confirmed to have no
-    REST endpoint anywhere.** `views.py` and `urls.py` are both now available and neither
-    imports nor references `offline_queue`/`flush_offline_queue` in any form — no
-    `@action`, no `path()` entry, nothing. The delivery function itself is complete and
-    correct, but there is currently **no way for a client to reach it** — it's an
-    unreachable capability, not just an unconfirmed one.
-21. **🔴 `services.py`'s `create_group`/`add_members_to_group`/`remove_group_member`/
-    `update_group_member_role` are confirmed NOT used by `GroupViewSet`.** With `views.py`
-    now available: `GroupViewSet.create`/`add_members`/`update_member` each still carry
-    their own complete, independent inline implementation (verified directly — `create()`
-    builds the `Conversation`/`Group`/`GroupMember` rows itself, `add_members()` does its
-    own `get_or_create` loop, `update_member()` does its own field-by-field update), and
-    `views.py`'s import block has no `from .services import ...` line at all. Worse: `views.py`
-    still defines its **own** module-level `add_or_reactivate_participant(conversation,
-    user)` (line ~157) — the exact function `services.py`'s docstring claims was "moved
-    here from `views.py`, which now imports it from here". It wasn't moved; it was
-    copied, and `views.py` kept using its own original. That means this codebase now has
-    **two independent copies** of `add_or_reactivate_participant` (one in `views.py`, one
-    in `services.py`) that can silently drift apart — precisely the failure pattern
-    `permissions.py`'s `IsGroupAdminOrModerator` docstring and `constants.py`'s
-    `MAX_PINNED_PER_CONVERSATION` docstring both describe this codebase having already
-    been burned by once. `services.py` as a whole should currently be treated as
-    **unused/parallel code**, not a refactor that already happened — `GroupViewSet`
-    still self-contains all its own group-management logic (correctly, and using
-    `is_group_admin_or_mod`/`invalidate_group_role_cache` directly, same as the rest of
-    the ViewSet — see `_require_admin`, §5).
+19. ~~**`services.create_bell_rows_for_push` (§7.22, task 44) is confirmed NOT called
+    anywhere.**~~ — **RESOLVED this batch, but not the way it sounds**: this function has
+    since been **removed from `services.py` entirely** (confirmed via that file's own
+    "REMOVED — was dead code" comment). It's not that `views.py` needs to start calling
+    it — it's that `push_utils.py` was **already** creating bell rows a different way the
+    whole time: `send_chat_message_push`, `send_incoming_call_push`, and
+    `send_mention_push` each call `core.services.create_notification()` directly, inline,
+    one row per recipient per event. Bell/notification-center rows for chat messages,
+    calls, and mentions are all confirmed being created today. See §10 `push_utils.py`
+    and §7.22.
+20. ~~**`offline_queue.flush_offline_queue` (§7.23, task 49) is confirmed to have no
+    REST endpoint anywhere.**~~ — **RESOLVED this batch**: `views.py` now has
+    `ConversationViewSet.offline_queue_flush` (`POST
+    /conversations/<id>/offline-queue/`, router-based, no `urls.py` change needed),
+    importing and calling `flush_offline_queue` directly, with the same block/permission/
+    daily-limit gating and throttling as a live send. See §3/§7.23.
+21. ~~**`services.py`'s `create_group`/`add_members_to_group`/`remove_group_member`/
+    `update_group_member_role` are confirmed NOT used by `GroupViewSet`.**~~ —
+    **RESOLVED this batch**: `views.py` now imports `add_or_reactivate_participant,
+    create_group, add_members_to_group, remove_group_member, update_group_member_role`
+    from `.services`, and `GroupViewSet.create`/`add_members`/`update_member` each call
+    into those functions instead of duplicating the logic inline (converting the plain
+    `PermissionError`/`ValueError` they raise to `PermissionDenied`/400 at the DRF
+    boundary). The module-level duplicate of `add_or_reactivate_participant` that used to
+    live in `views.py` has been removed — `services.py` is now the single source, exactly
+    as its own docstring always claimed. See §5/§7.22.
+22. **🔴 NEW this session — `ParentToken.status`/`ParentToken.Status.APPROVED` referenced
+    by `permissions.py` (`HasValidParentToken`, the G-6 mutual-consent gap fix — see §2/§6)
+    does not exist in `models.py` as reviewed this session.** `ParentToken` currently only
+    has `parent_access_code`, `token`, `last_seen_at`, `INACTIVITY_TTL_DAYS`/`is_expired`,
+    `touch()` — no `status` field, no `Status` `TextChoices` inner class, no `PENDING`/
+    `APPROVED`/`REJECTED` values. As written, `HasValidParentToken.has_permission()`'s
+    `.filter(..., status=ParentToken.Status.APPROVED)` would raise an `AttributeError`
+    (`ParentToken` has no `Status`) at request time — every Parent Mode dashboard/read
+    request would 500, not just silently deny, until the model is updated to match. This
+    is the same class of gap this doc has flagged before (`ai_service.py`'s
+    `generate_classroom_answer` being imported before it was defined, §9.0) — a
+    permission/view-layer change shipped ahead of its model. **Worse, now that `urls.py`
+    has been fully reviewed this session (its `views_parent` import block is confirmed
+    complete: `ParentAccessCodeView`, `ParentAccessCodeRenewView`,
+    `ParentAccessCodeRevealView`, `ParentCodeTokensView`, `ParentCodeTokenDetailView`,
+    `ParentDashboardView`, `ParentVerifyCodeView` — no more, no less), item (c) below is
+    no longer just unconfirmed, it's a confirmed second gap on top of the first**: there
+    is no `ParentCodeTokenApproveView` route anywhere, so even after the model field is
+    added, a student would have zero way to ever flip a token to `APPROVED` — every
+    parent token would be stuck at `PENDING` forever and Parent Mode would be completely
+    unusable end-to-end, not just broken by a 500. Needed to close this out: (a) add
+    `status` (`CharField`, `choices=Status.choices, default=Status.PENDING`) to
+    `ParentToken` in `models.py` + a migration, (b) confirm `views_parent.
+    ParentVerifyCodeView` actually sets `status=PENDING` on the `ParentToken` it creates
+    (still not confirmed — `views_parent.py` itself has never been part of any file batch
+    so far), and (c) **build and route** `ParentCodeTokenApproveView` (student-side
+    approval action, referenced only in `permissions.py`'s comments — e.g. something like
+    `POST /message/parent/codes/<id>/tokens/<token_id>/approve/`) since it does not exist
+    today.
 
 ---
 
@@ -2092,7 +2365,9 @@ computes `duration_seconds` and marks the whole `CallSession` `ENDED`.
 - `check_daily_message_limit(group, user, conversation) -> (allowed, reason)` — admin/mod
   exempt; simple day-boundary `Message.count()` query (no extra table)
 
-### `services.py` *(NEW — task 27 + task 44, see §5/§7.22)*
+### `services.py` *(NEW — task 27, confirmed wired into `GroupViewSet` this batch, see
+§5/§7.22; the task-44 bell-row helper that used to be documented here has been removed —
+see §10 `push_utils.py`)*
 - `create_group(created_by, name, description='', photo_url=None, is_private=False,
   member_ids=()) -> Group` — creates the `Conversation` + `Group` in one transaction,
   creator as `ADMIN`, given `member_ids` as plain `MEMBER` (creator auto-excluded from
@@ -2113,11 +2388,12 @@ computes `duration_seconds` and marks the whole `CallSession` `ENDED`.
   `offline_queue.py` (§7.23)
 - `generate_group_invite_code() -> str` — unique `secrets.token_urlsafe` code, retries on
   collision
-- `create_bell_rows_for_push(recipient_ids, notif_type, title, message, data=None)`
-  *(NEW — task 44)* — one `core.models.Notification` "bell" row per recipient,
-  best-effort (never raises — logs and swallows per-recipient failures). Meant to run
-  alongside the existing FCM push helpers, not replace them; exact `views.py` call-sites
-  not independently confirmed this batch — see §9.4 item 19
+- ~~`create_bell_rows_for_push(...)`~~ — **removed from this file** (confirmed dead code,
+  zero callers — `push_utils.py` already writes bell rows inline at each push call-site
+  via `core.services.create_notification()`, see §10 `push_utils.py` and §7.22).
+- **Now confirmed actually used by `GroupViewSet`** (§5) — `create_group`,
+  `add_members_to_group`, `remove_group_member`, `update_group_member_role`, and
+  `add_or_reactivate_participant` are all called from `views.py`, not parallel/dead code.
 
 ### `offline_queue.py` *(NEW — task 49, see §7.23)*
 - `flush_offline_queue(conversation, sender, queued_messages) -> list[dict]` — processes a
@@ -2179,9 +2455,13 @@ computes `duration_seconds` and marks the whole `CallSession` `ENDED`.
 - `translate_text(text, target_lang, source_lang=None) -> str` — default provider is
   Google Cloud Translate v2 REST (plain API key, `settings.GOOGLE_TRANSLATE_API_KEY`).
   Raises `TranslationServiceUnavailable` (not configured / provider unreachable, 8s
-  timeout) or `TranslationError` (provider reachable but rejected the request/returned
-  something unparseable) — designed so `MessageViewSet.translate` can map these to a
-  clean 503 / 4xx respectively instead of a raw 500.
+  timeout), `TranslationError` (provider reachable but rejected the request/returned
+  something unparseable), or `UnsupportedLanguageError` *(NEW — TASK 29, a
+  `TranslationError` subclass)* if `target_lang`/`source_lang` isn't in
+  `SUPPORTED_LANGUAGES`, checked before the network call — designed so
+  `MessageViewSet.translate` can map these to a clean 503 / 502 / 400 respectively
+  instead of a raw 500. Kept as a `TranslationError` subclass so any existing
+  `except TranslationError` still catches it unchanged.
 - `SUPPORTED_LANGUAGES` — dict of the 10 ISO codes the Flutter language picker offers
   (en/hi/mr/ta/te/kn/bn/gu/pa/ur); documentation only, not a server-side allow-list.
 - `GOOGLE_TRANSLATE_ENDPOINT` — the v2 REST URL, module-level constant.
@@ -2220,15 +2500,74 @@ computes `duration_seconds` and marks the whole `CallSession` `ENDED`.
 - **Removed this batch:** the old debounced-flush design (a cache window + one delayed
   Celery task per burst) — see §7.13's history note and §9.0 item 13. There is no
   `flush_chat_push_digest` in this file or in `tasks.py` anymore.
+- **Bell-row notifications (task 44) — now confirmed, and they live HERE, not in
+  `services.py`**: this module imports `core.services.create_notification` and
+  `core.models.Notification` directly (module docstring: `create_notification()` never
+  sends a push itself, only writes a DB row, so calling it from here carries no
+  double-push risk). Three call-sites, each writing one `Notification` row **per
+  recipient**:
+  - `send_chat_message_push` — one `NotifType.CHAT_MESSAGE` row per recipient, for
+    *every* incoming message, deliberately outside/independent of the digest-counting
+    branch below it — the bell/notification-center list should show one entry per
+    message ("5 unread" = 5 rows) even though the push tray itself collapses multiple
+    messages into one digest push (WhatsApp-style). So a message that ends up as a
+    digest push still gets its own bell row.
+  - `send_incoming_call_push` — one `NotifType.INCOMING_CALL` row per recipient, so a
+    missed/unanswered call still shows up later in the notification list, not just as a
+    CallKit popup that vanished. Deliberately **not** filtered through Focus Mode (the
+    push call above it isn't either) — bell rows go to the same recipients as the push.
+  - `send_mention_push` — one `NotifType.MENTION` row per recipient, kept as its own
+    `notif_type` distinct from `CHAT_MESSAGE` so a mention reads as "X mentioned you" in
+    the notification list, not a generic "new message".
+  - This **supersedes** `services.py`'s own `create_bell_rows_for_push` — that function
+    has since been **removed from `services.py` entirely** as dead code once `push_utils.
+    py`'s real content was available to check: it had zero callers anywhere, and this
+    file was already doing the same job a different way (calling `core.services.
+    create_notification()` inline, per event, rather than through a shared batch
+    helper). Bell-row notifications are **not** an open gap — see §7.22/§9.4 items
+    19/22 (resolved).
 
-### `livekit_utils.py` (env: `LIVEKIT_API_KEY`, `LIVEKIT_API_SECRET`)
+### `livekit_utils.py` (env: `LIVEKIT_API_KEY`, `LIVEKIT_API_SECRET`, plus egress env
+vars below — TASK 21)
 - `generate_livekit_token(room_name, user_id, user_name, ttl=timedelta(hours=2)) -> str`
-  — calls use the 2h default; `StudyRoomJoinView` overrides to 8h
+  — calls use the 2h default; `StudyRoomJoinView` overrides to 8h. Local JWT signing only
+  — never talks to the LiveKit server, needs no event loop.
 - `_get_livekit_credentials()` *(fix — see §9.0)* — lazily validates the two env vars are
   set, called only from inside `generate_livekit_token()` (i.e. only when a token is
   actually about to be generated). Previously this check ran at **module import time**,
   meaning a missing LiveKit config crashed the whole Django process at boot (`views.py`
   imports this module), not just the call/study-room features that actually need it.
+  **Now also the credential check for the egress functions below** — same lazy pattern,
+  same `RuntimeError` if unset.
+- **Egress (call recording) — `start_room_recording`/`stop_room_recording`** *(NEW —
+  TASK 21, see §2/§6/§7.24/§9.0 item 21)*:
+  - `start_room_recording(room_name) -> (egress_id, output_filepath)` — starts a LiveKit
+    `RoomCompositeEgressRequest` (all participants mixed into one MP4, `layout="speaker"`),
+    uploading to S3 if `LIVEKIT_EGRESS_S3_BUCKET` is set. `output_filepath` is
+    `recordings/{room_name}-{uuid4().hex}.mp4`, generated here (not by LiveKit) so it's
+    known immediately, before the egress job finishes.
+  - `stop_room_recording(egress_id, output_filepath=None) -> recording_url | None` — stops
+    the egress job; builds a best-effort public URL from
+    `LIVEKIT_EGRESS_PUBLIC_BASE_URL` + `output_filepath` if both are available, else
+    returns `None`. **Not authoritative** — a successful stop means LiveKit *accepted*
+    the request, not that the file finished uploading; the correct long-term source of
+    truth (LiveKit's `egress_ended` webhook) isn't wired into this app anywhere.
+  - `EgressError(RuntimeError)` — raised when the Egress start/stop HTTP call itself
+    fails (bad response, network error, room not found), kept deliberately distinct from
+    the plain `RuntimeError` `_get_livekit_credentials()` raises for "not configured at
+    all" — callers can tell "not configured" (503) apart from "LiveKit rejected/failed
+    the request" (502) without string-matching.
+  - `_run_async(coro)` — LiveKit's Egress/Room service client is async-only
+    (`httpx.AsyncClient`); every caller here is a synchronous DRF view, so this bridges
+    with a plain `asyncio.run()` per call rather than pushing async/await onto the view
+    layer for what's otherwise one blocking HTTP round-trip.
+  - `LIVEKIT_HTTP_URL` — the Egress API's base URL. Defaults to deriving itself from
+    `LIVEKIT_WS_URL` (`ws://`→`http://`, `wss://`→`https://`, both stripped/replaced) so
+    most deployments (egress + media server behind the same host) need no extra env var;
+    `LIVEKIT_URL` overrides this only if egress genuinely sits behind different ingress.
+  - `LIVEKIT_EGRESS_S3_BUCKET` / `LIVEKIT_EGRESS_PUBLIC_BASE_URL` — see §13. Neither is
+    required for recording to *work* (egress falls back to local disk / `recording_url`
+    just comes back `None`), only for it to produce a usable public URL in production.
 
 ### `user_display.py`
 - `get_display_name(user)` — "First Last" → username → `str(user)`, never blank
@@ -2559,6 +2898,13 @@ computes `duration_seconds` and marks the whole `CallSession` `ENDED`.
 - `IsMessageSender` — `obj.sender_id == request.user.id`
 - `IsGroupAdminOrModerator` — view-level: requester is admin/mod (non-banned) of the
   `group_id`/`pk` in `view.kwargs`
+- `HasValidParentToken` *(Feature 8 — Parent Mode)* — reads `X-Parent-Token` header,
+  requires a matching `ParentToken` where the parent `ParentAccessCode.is_active=True`,
+  **and now (G-6, mutual consent — NEW this session) `status=ParentToken.Status.APPROVED`**
+  in addition to the pre-existing `ParentAccessCode.is_expired`/`ParentToken.is_expired`
+  (30-day rolling inactivity) checks — all four must pass, any failure returns the same
+  generic denial (`request.user` untouched throughout; see §2/§9.4 for the confirmed
+  model-field gap this introduces).
 
 ---
 
@@ -2569,7 +2915,10 @@ computes `duration_seconds` and marks the whole `CallSession` `ENDED`.
 | `GEMINI_API_KEY` | `ai_service.py` | Required for AI features to init |
 | `GEMINI_MODEL` | `ai_service.py` | Default `gemini-2.5-flash`. Scheduled to retire Oct 16 2026 — change this env var when that happens, no code/deploy needed (see §10) |
 | `LIVEKIT_API_KEY`, `LIVEKIT_API_SECRET` | `livekit_utils.py` | **No longer raises at import time** *(fix — see §9.0)* — the check is now lazy, firing only when `generate_livekit_token()` is actually called (call initiate / study-room join), so a missing config no longer crashes the whole process at boot |
-| `LIVEKIT_WS_URL` | `views.py` | Default `ws://10.93.221.189:7880` — looks like a dev/internal IP, confirm for prod |
+| `LIVEKIT_WS_URL` | `views.py`, `livekit_utils.py` | Default `ws://10.93.221.189:7880` — looks like a dev/internal IP, confirm for prod. Also the fallback source `livekit_utils.py` derives `LIVEKIT_HTTP_URL` from (`ws://`→`http://`, `wss://`→`https://`) for Egress/recording calls *(NEW — TASK 21, see §7.24/§10)* |
+| `LIVEKIT_URL` *(NEW — TASK 21)* | `livekit_utils.py` | Only needed if the Egress/recording API sits behind different ingress than the media server clients join via `LIVEKIT_WS_URL` — otherwise `LIVEKIT_HTTP_URL` is derived automatically, no extra var required |
+| `LIVEKIT_EGRESS_S3_BUCKET` *(NEW — TASK 21)* | `livekit_utils.py` | Where a finished call recording gets uploaded. If unset, egress falls back to writing to local disk on the egress worker — fine for dev, not for prod |
+| `LIVEKIT_EGRESS_PUBLIC_BASE_URL` *(NEW — TASK 21)* | `livekit_utils.py` | Public base URL (e.g. a CloudFront domain in front of the S3 bucket above) used to build `CallSession.recording_url` after a recording stops. If unset, `stop_room_recording()` returns `None` instead of guessing a URL that would 404 |
 | `FIREBASE_CREDENTIALS_PATH` | `push_utils.py` | Path to Firebase service-account JSON. **Lazy init as of this session (see §9.0)** — no longer raises at import/process-startup time; only raised (and logged, not crashed) the first time a push is actually sent with no path configured. Falls back to `settings.FCM_SERVICE_ACCOUNT_JSON_PATH` if unset |
 | `CHAT_PUSH_SESSION_SECONDS` *(NEW this batch)* | `push_utils.py` | Default `300`. TTL of the per-`(user,conversation)` "unread streak" counter that decides single-push vs. digest-push — **not a wait/delay**, every push still sends immediately (see §7.13). Falls back to `CHAT_PUSH_DEBOUNCE_SECONDS` if this newer var isn't set |
 | `CHAT_PUSH_DEBOUNCE_SECONDS` | `push_utils.py` | Back-compat alias, read only if `CHAT_PUSH_SESSION_SECONDS` is unset. **Meaning changed this batch** — used to be a genuine push-delay wait time (old debounced-flush design); now, if read at all, it's used as the streak TTL like `CHAT_PUSH_SESSION_SECONDS` above (see §7.13's "history" note) |
@@ -2702,9 +3051,9 @@ doesn't change current behavior, only protects a future view that forgets to).
 
 ## 15. Suggested Next Facilities (not yet implemented)
 
-- Chat/media export
-- Poll "clear my vote entirely" action (currently `option_ids` requires min 1 — see §7.8)
-- Poll forwarding (currently excluded from `forward`, see §2/§7.8/§7.9)
+*(TASK 29, this batch, implemented the three items previously listed here — chat/media
+export, poll "clear my vote entirely", and poll forwarding — see §7.8/§7.9/§7.25. None
+currently pending.)*
 
 *(Scheduled messages, voice-message transcription, link previews, per-IP throttling,
 poll messages, forward-with-caption, server-side draft auto-save, and the read-receipt
@@ -2741,7 +3090,13 @@ throttle rate is still missing from `settings.py` — see §9.0 item 20.)*
 
 *(The Group Management Service Layer, Bell-Row Notifications, and Offline Message Queue
 were also not previously tracked in this doc — added as §5/§7.22–§7.23/§10, from
-`services.py` (tasks 27 & 44) and `offline_queue.py` (task 49). Unlike most of the groups
-above, these are **not** end-to-end confirmed: `views.py`/`urls.py` weren't re-uploaded
-this batch, so the REST wiring that would actually reach `services.py`'s functions and
-`offline_queue.flush_offline_queue` is unverified — see §9.4 items 19–21.)*
+`services.py` (task 27) and `offline_queue.py` (task 49). With `views.py`/`urls.py`
+now reviewed, all three are **confirmed resolved**, though not all in the way originally
+expected: `GroupViewSet.create`/`add_members`/`update_member` now actually call
+`services.py`'s functions (§5/§9.4 item 21), `offline_queue.flush_offline_queue` now has
+a real REST endpoint (§7.23/§9.4 item 20), and bell-row notifications turned out to
+already be fully working all along — just implemented directly in `push_utils.py`
+(`core.services.create_notification()` calls inline at each push call-site) rather than
+through the `services.create_bell_rows_for_push` helper this doc used to describe, which
+has since been removed from `services.py` as dead code (§9.4 item 19, §10 `push_utils.
+py`).)*

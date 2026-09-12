@@ -81,6 +81,20 @@ class HasValidParentToken(permissions.BasePermission):
     jaisa treat ho sakta tha. Poori tarah alag, single-purpose attribute
     rakha hai taaki blast-radius chhota rahe.
 
+    🔧 GAP FIX (G-6 — mutual consent) — a valid, unexpired token used to
+    be sufficient on its own, which meant anyone who got hold of the
+    plain-text `code` (leaked/screenshotted) and completed `verify` had
+    immediately-live access — the student was never in the loop. Every
+    new `ParentToken` now starts `status=PENDING`
+    (`views_parent.ParentVerifyCodeView`) and this check now requires
+    `status=APPROVED` too — set only by the student via
+    `views_parent.ParentCodeTokenApproveView`. A merely-verified-but-
+    not-yet-approved token is rejected here exactly like an
+    expired/revoked one (same generic denial message — deliberately not
+    distinguishing "pending" from "invalid" in the response, so a
+    guessed/stolen token can't be used to probe whether it's real-but-
+    unapproved vs. simply wrong).
+
     🔧 GAP FIX — TTL/expiry. Pehle sirf `parent_access_code__is_active
     =True` check hota tha — code/token dono hamesha valid rehte the jab
     tak student khud revoke na kare (parent ka phone kho jaaye to
@@ -108,7 +122,12 @@ class HasValidParentToken(permissions.BasePermission):
         parent_token = ParentToken.objects.select_related(
             'parent_access_code', 'parent_access_code__student',
         ).filter(
-            token=token, parent_access_code__is_active=True,
+            token=token,
+            parent_access_code__is_active=True,
+            # 🔧 GAP FIX (G-6) — the mutual-consent gate itself. Without
+            # this, a PENDING (or REJECTED) token would pass every other
+            # check here and reach the dashboard exactly as before.
+            status=ParentToken.Status.APPROVED,
         ).first()
         if not parent_token:
             return False

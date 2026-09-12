@@ -1,6 +1,10 @@
 # message/views_ai.py
+import hashlib
 import logging
+from datetime import timedelta
+
 from django.db import models
+from django.utils import timezone
 from rest_framework.views import APIView
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.exceptions import PermissionDenied
@@ -524,6 +528,37 @@ class RevisionDeckView(APIView):
     Fetch one specific (not necessarily latest) deck's full content —
     used after picking one from the `?history=true` list above.
 
+    🔧 GAP FIX (G-7 — cache-hit still inserted a duplicate row) —
+    `generate_revision_deck()` already has its own 24h content-hash
+    cache (same pattern as summary/quiz/reply-suggestions, see
+    `SmartReplySuggestionsView` docstring above), so a cache-hit means
+    Gemini isn't re-called — but `post()` used to unconditionally
+    `RevisionDeck.objects.create(...)` afterwards anyway, so tapping
+    "Generate" twice in a row on an unchanged class (no new messages/
+    board/transcript since the last deck) silently produced two
+    identical `RevisionDeck` rows.
+
+    The model's own "keep history" design (see its docstring — every
+    *meaningfully new* Generate tap is meant to keep the old deck
+    around too) is intentional and preserved here; what's fixed is
+    specifically the *duplicate-of-unchanged-content* case. `post()`
+    now hashes the same `content` string that's fed to Gemini
+    (`content_hash`, sha256) and, if a `RevisionDeck` with that exact
+    hash already exists for this `conversation_id` (+ `session_id`)
+    within the last 24h (same TTL as the Gemini-side cache, so the two
+    windows never disagree), that existing row is returned as-is
+    (200, no new row, no Gemini call at all — content is byte-identical
+    to what a cache-hit would've regenerated anyway). Only genuinely
+    new content (new messages/board/transcript since last generate)
+    produces a fresh row (201), same as before.
+
+    `content_hash` (CharField, db_index=True) now exists on `RevisionDeck`
+    in `models.py`, plus a composite index matching this exact lookup
+    (`conversation`, `session_id`, `content_hash`, `-created_at`) — run
+    `makemigrations`/`migrate` for `message` after pulling this. `content`
+    itself is deliberately NOT persisted (same reasoning `ai_service.py`
+    already applies to its own cache key), just its hash.
+
     DELETE /message/study-room/<conversation_id>/revision-deck/?deck_id=<id>
     🔧 GAP FIX (this session) — no way to remove a deck existed at all
     (e.g. one generated too early, before enough of the class had
@@ -668,6 +703,29 @@ class RevisionDeckView(APIView):
             )
 
         content = "\n\n---\n\n".join(context_sections)
+        content_hash = hashlib.sha256(content.encode("utf-8")).hexdigest()
+
+        # 🔧 GAP FIX (G-7) — same content (nothing new since last
+        # generate) within the same 24h window `generate_revision_deck`
+        # itself caches on -> return that existing deck instead of
+        # inserting a duplicate row (or calling Gemini again).
+        existing = (
+            RevisionDeck.objects.filter(
+                conversation_id=conversation_id,
+                session_id=session_id,
+                content_hash=content_hash,
+                created_at__gte=timezone.now() - timedelta(hours=24),
+            )
+            .order_by('-created_at')
+            .first()
+        )
+        if existing:
+            return Response({
+                "id": str(existing.id),
+                "flashcards": existing.flashcards,
+                "quiz": existing.quiz,
+                "created_at": existing.created_at.isoformat(),
+            }, status=200)
 
         try:
             deck = generate_revision_deck(content)
@@ -678,12 +736,14 @@ class RevisionDeckView(APIView):
         saved = RevisionDeck.objects.create(
             conversation_id=conversation_id,
             session_id=session_id,
+            content_hash=content_hash,
             flashcards=deck["flashcards"],
             quiz=deck["quiz"],
             generated_by=request.user,
         )
 
         return Response({
+            "id": str(saved.id),
             "flashcards": saved.flashcards,
             "quiz": saved.quiz,
             "created_at": saved.created_at.isoformat(),

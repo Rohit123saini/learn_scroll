@@ -301,9 +301,11 @@ class PostSave(models.Model):
 # PostLike save/delete meant two separate COUNT queries + two separate
 # UPDATE statements per like/unlike, always converging on the same
 # number — pure redundancy, no correctness bug, just wasted DB round
-# trips. `update_reaction_counts` is the superset (it also sets
+# trips. `update_reaction_counts` was the superset (it also set
 # like_count/confuse_count/wrong_count/imp_count/explain_count and the
-# auto-flag-on-5-wrong logic), so it's the one kept.
+# auto-flag-on-5-wrong logic) — see B-5 further down: that receiver has
+# since been removed from this file too, in favor of the equivalent
+# (and now sole) `post.signals.sync_post_reaction_counts`.
 #
 # `update_comments_count` REMOVED ENTIRELY — this one WAS a real
 # correctness bug, not just redundant work. It recomputed
@@ -340,137 +342,54 @@ def update_saves_count(sender, instance, **kwargs):
     )
 
 
-# settings ya models.py me add karein
-import os
-import tempfile
-import ffmpeg
-from django.core.files import File
-from django.db.models.signals import post_save
-from django.dispatch import receiver
+# ---------------------------------------------------------------------------
+# TASK 27 — video thumbnail generation moved OUT of models.py.
+#
+# What used to live here (`auto_generate_video_thumbnail`, a `post_save`
+# receiver on `PostMedia`) had two real problems, on top of not belonging
+# in models.py in the first place (business logic mixed into the model
+# module, an `ffmpeg-python` import pulled in just for this one signal):
+#
+#   1. It ran ffmpeg SYNCHRONOUSLY inside the `post_save` signal — i.e.
+#      inline in whatever request created the `PostMedia` row
+#      (`PostCreateAPIView.post()`). Every video upload's response time
+#      included however long ffmpeg took to extract a frame.
+#   2. On S3/GCS (`USE_S3_STORAGE=true`, task 26) it detected
+#      `instance.file.path` raising `NotImplementedError`, logged a
+#      warning, and just... gave up. Cloud-storage uploads never got a
+#      thumbnail at all — not a crash, but not a fix either.
+#
+# Replaced by (see post/signals.py, post/tasks.py, post/services.py):
+#   - `post.signals.queue_video_thumbnail_on_create` — the ONLY thing
+#     still triggered by `PostMedia`'s `post_save`; it does nothing but
+#     `generate_video_thumbnail.delay(instance.id)` and return.
+#   - `post.tasks.generate_video_thumbnail` — the actual Celery task.
+#     Runs off the request path, so ffmpeg's runtime no longer affects
+#     upload latency.
+#   - `post.services.download_storage_file_to_temp` /
+#     `.generate_video_thumbnail_file` — read the source file via the
+#     storage API (`.open()` + chunked read) instead of `.path`, which
+#     works identically for local disk AND S3/GCS. This is what actually
+#     fixes case 2 above instead of just logging around it: cloud-stored
+#     videos now get real thumbnails too, not a permanent skip.
+#   - Uses the `ffmpeg` CLI via `subprocess` (already a hard runtime
+#     dependency either way — a server without the `ffmpeg` binary
+#     installed couldn't run the old `ffmpeg-python` wrapper either)
+#     instead of the `ffmpeg-python` package, so no extra pip dependency
+#     was added for this fix.
+# ---------------------------------------------------------------------------
 
-
-# Maan lijiye aapka PostMedia model yahan defined hai...
-import os
-import tempfile
-import ffmpeg
-from django.core.files.storage import default_storage
-from django.core.files.base import ContentFile
-from django.db.models.signals import post_save
-from django.dispatch import receiver
-
-
-import logging as _logging
-
-_thumb_logger = _logging.getLogger("post.thumbnails")
-
-
-@receiver(post_save, sender=PostMedia)
-def auto_generate_video_thumbnail(sender, instance, created, **kwargs):
-    """
-    Ekdum fail-safe signal jo direct DB row ko update karega bina loop crash ke.
-    """
-    # 1. 'video' keyword check logic robust rakhein (chahe mime_type dynamic stream ho)
-    is_video = (
-
-            instance.media_type == 'video' or
-            'video' in getattr(instance, 'mime_type', '') or
-            instance.file.name.lower().endswith(('.mp4', '.mov', '.avi', '.mkv'))
-    )
-
-    if created and is_video and instance.file and not instance.thumbnail:
-        # FIX (post_app.md §14 issue #5): `.file.path` only exists for
-        # FileSystemStorage — on S3/GCS/any remote backend this raises
-        # NotImplementedError, and the old bare `except Exception` below
-        # would swallow it silently via `print()` (invisible in prod
-        # logs). Check up front and log properly with `logger.warning`
-        # instead, so cloud-storage deployments get a clear, searchable
-        # signal that thumbnails are being skipped, rather than a silent
-        # no-op.
-        try:
-            video_input_path = instance.file.path
-        except NotImplementedError:
-            _thumb_logger.warning(
-                "Skipping video thumbnail for PostMedia %s — storage backend "
-                "doesn't support local file paths (likely S3/cloud storage). "
-                "Thumbnail generation currently requires FileSystemStorage.",
-                instance.id,
-            )
-            return
-
-        try:
-            base_name = os.path.splitext(os.path.basename(video_input_path))[0]
-
-            # Temporary dynamic output folder construction
-            temp_dir = tempfile.gettempdir()
-            temp_output_path = os.path.join(temp_dir, f"{base_name}_thumb.jpg")
-
-            # 2. FFmpeg Command to extract frame at 1st second
-            (
-                ffmpeg
-                .input(video_input_path, ss=1.0)
-                .output(temp_output_path, vframes=1)
-                .overwrite_output()
-                .run(capture_stdout=True, capture_stderr=True)
-            )
-
-            # 3. Save thumbnail manually directly through storage layer to avoid infinite loops
-            if os.path.exists(temp_output_path):
-                with open(temp_output_path, 'rb') as thumb_file:
-                    # File direct dynamic save paths configuration matching your format
-                    thumb_name = f"posts/thumbnails/{instance.created_at.strftime('%Y/%m/%d')}/{base_name}_thumb.jpg" if hasattr(
-                        instance, 'created_at') and instance.created_at else f"posts/thumbnails/{base_name}_thumb.jpg"
-
-                    # Storage save handles directory making automatically
-                    saved_path = default_storage.save(thumb_name, ContentFile(thumb_file.read()))
-
-                    # Core loop breaker: Direct database update bypasses signals
-                    PostMedia.objects.filter(id=instance.id).update(thumbnail=saved_path)
-
-                # Dynamic os environment absolute file clean up
-                if os.path.exists(temp_output_path):
-                    os.remove(temp_output_path)
-
-        except ffmpeg.Error as e:
-            _thumb_logger.error(
-                "FFmpeg thumbnail extraction failed for PostMedia %s — stdout: %s | stderr: %s",
-                instance.id,
-                e.stdout.decode("utf8") if e.stdout else "",
-                e.stderr.decode("utf8") if e.stderr else "",
-            )
-        except Exception as e:
-            _thumb_logger.error(
-                "Thumbnail extraction failed for PostMedia %s: %s", instance.id, e, exc_info=True
-            )
-
-
-from django.db.models import Count
-from django.dispatch import receiver
-from django.db.models.signals import post_save, post_delete
-
-@receiver(post_save, sender=PostLike)
-@receiver(post_delete, sender=PostLike)
-def update_reaction_counts(sender, instance, **kwargs):
-    post_id = instance.post_id
-
-    # 1. Sab reaction ka count ek sath nikalo
-    reactions = PostLike.objects.filter(post_id=post_id).values('reaction_type').annotate(c=Count('id'))
-    counts = {r['reaction_type']: r['c'] for r in reactions}
-
-    # 2. Pehle sirf counts update karo - ye hamesha chalega
-    Post.objects.filter(id=post_id).update(
-        likes_count=sum(counts.values()),
-        like_count=counts.get('like', 0),
-        confuse_count=counts.get('confuse', 0),
-        wrong_count=counts.get('wrong', 0),
-        imp_count=counts.get('imp', 0),
-        explain_count=counts.get('explain', 0),
-    )
-
-    # 3. Alag se flag check karo - isse upar wala fail nahi hoga
-    wrong = counts.get('wrong', 0)
-    if wrong >= 5:
-        Post.objects.filter(id=post_id).update(moderation_status='flagged')
-
+# NOTE (fix, see B-5): `update_reaction_counts` REMOVED FROM HERE.
+#
+# It was a second `post_save`/`post_delete` receiver on `PostLike`,
+# running alongside `post.signals.sync_post_reaction_counts` — both
+# converged on the same numbers (not a correctness bug), but every
+# like/unlike paid for two full aggregate-recompute + UPDATE round
+# trips on the app's hottest write path. `sync_post_reaction_counts`
+# is the superset (same per-type + total counts) and is the one kept;
+# its 5+-wrong auto-flag logic now lives there too, folded into the
+# same aggregate query and the same UPDATE instead of a second one —
+# see post/signals.py.
 
 
 import uuid

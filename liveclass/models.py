@@ -2550,38 +2550,32 @@ class CoinPurchase(models.Model):
     def __str__(self):
         return f"{self.user} - {self.coins} coins ({self.get_status_display()})"
 
+    # TASK 6 — READ-ONLY as of this pass. Coin top-ups now go through
+    # user_profile.CoinPurchaseRequest (start_purchase/confirm_success),
+    # which writes through the shared CoinLedger.objects.record_transaction()
+    # instead of touching User.coin directly here. These two methods are
+    # the only places this model ever used to move a balance
+    # (CoinPurchaseViewSet.initiate/verify/retry in liveclass/views.py were
+    # already turned into 410-Gone stubs in the same pass) — kept as raising
+    # stubs, not deleted, so any call site this review didn't find (an admin
+    # action, a Celery task, a shell script) fails loudly instead of quietly
+    # re-crediting a wallet through a now-deprecated path. Existing rows and
+    # `mark_liveclass_coin_purchase_readonly = migrate_liveclass_coin_models`
+    # management command may still read every field here freely — only the
+    # writes are blocked.
     def mark_success(self, gateway_payment_id: str, gateway_signature: str) -> None:
-        """Credits the wallet exactly once. Idempotent by construction: a
-        gateway webhook can legitimately fire more than once for the same
-        payment (retries on their side, or the client's own verify call
-        racing a webhook) — only ever act if this row is still PENDING,
-        inside a row lock, so a duplicate call is a safe no-op rather than
-        a double-credit."""
-        if self.status != self.Status.PENDING:
-            return
-        user = type(self.user).objects.select_for_update().get(pk=self.user_id)
-        user.coin += self.coins
-        user.save(update_fields=["coin"])
-        CoinTransaction.objects.create(
-            user=user,
-            txn_type=CoinTransaction.TxnType.CREDIT,
-            reason=CoinTransaction.Reason.TOPUP,
-            amount=self.coins,
-            balance_after=user.coin,
-            reference_id=f"coinpurchase:{self.id}",
+        raise RuntimeError(
+            "CoinPurchase.mark_success() is disabled (Task 6) — coin "
+            "purchases are now confirmed via "
+            "user_profile.CoinPurchaseRequest.objects.confirm_success()."
         )
-        self.status = self.Status.SUCCESS
-        self.gateway_payment_id = gateway_payment_id
-        self.gateway_signature = gateway_signature
-        self.verified_at = timezone.now()
-        self.save(update_fields=["status", "gateway_payment_id", "gateway_signature", "verified_at"])
 
     def mark_failed(self, reason: str = "") -> None:
-        if self.status != self.Status.PENDING:
-            return
-        self.status = self.Status.FAILED
-        self.failure_reason = reason[:255]
-        self.save(update_fields=["status", "failure_reason"])
+        raise RuntimeError(
+            "CoinPurchase.mark_failed() is disabled (Task 6) — coin "
+            "purchases are now failed via "
+            "user_profile.CoinPurchaseRequest.objects.mark_failed()."
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -2715,104 +2709,55 @@ class CoinWithdrawal(models.Model):
     def __str__(self):
         return f"{self.user} withdraw {self.coins} coins ({self.status})"
 
+    # TASK 6 — READ-ONLY as of this pass. Withdrawals now go through
+    # user_profile.CoinWithdrawalRequest (request_withdrawal/mark_processing/
+    # confirm_success/reject), which writes through the shared
+    # CoinLedger.objects.record_transaction() instead of touching User.coin
+    # directly here. These five methods were the only places this model
+    # ever moved a balance (CoinWithdrawalViewSet's create/cancel/approve/
+    # reject/mark-paid in liveclass/views.py were already turned into
+    # 410-Gone stubs in the same pass) — kept as raising stubs, not
+    # deleted, so any call site this review didn't find fails loudly
+    # instead of quietly re-moving coins through a now-deprecated path.
+    # Existing rows may still be read freely (list/retrieve in
+    # CoinWithdrawalViewSet, the migrate_liveclass_coin_models command,
+    # admin) — only the writes are blocked.
     @classmethod
     def create_request(cls, user, coins: int, payout_method: str, payout_details: dict) -> "CoinWithdrawal":
-        """The only supported way to create a withdrawal request — debits
-        the coins from the wallet in the SAME transaction as creating the
-        row, so the balance check and the debit can never race each other
-        (two concurrent requests both reading a stale `user.coin` and both
-        passing validation). Caller (the view) does the permission check;
-        this does the money-moving + row-locking.
-        """
-        if coins < cls.MIN_WITHDRAWAL_COINS:
-            raise ValidationError(
-                f"Minimum withdrawal is {cls.MIN_WITHDRAWAL_COINS} coins."
-            )
-        with transaction.atomic():
-            locked_user = type(user).objects.select_for_update().get(pk=user.pk)
-            if locked_user.coin < coins:
-                raise ValidationError(
-                    f"Insufficient balance — you have {locked_user.coin} coins, requested {coins}."
-                )
-            locked_user.coin -= coins
-            locked_user.save(update_fields=["coin"])
-            CoinTransaction.objects.create(
-                user=locked_user,
-                txn_type=CoinTransaction.TxnType.DEBIT,
-                reason=CoinTransaction.Reason.WITHDRAWAL,
-                amount=coins,
-                balance_after=locked_user.coin,
-                reference_id="withdrawal:pending",  # backfilled to the real id right after creation, below
-            )
-            withdrawal = cls.objects.create(
-                user=locked_user,
-                coins=coins,
-                amount_inr=coins * cls.COIN_TO_INR_RATE,
-                payout_method=payout_method,
-                payout_details=payout_details,
-            )
-            CoinTransaction.objects.filter(
-                user=locked_user, reference_id="withdrawal:pending"
-            ).order_by("-created_at").update(reference_id=f"withdrawal:{withdrawal.id}")
-        return withdrawal
+        raise RuntimeError(
+            "CoinWithdrawal.create_request() is disabled (Task 6) — coin "
+            "withdrawals are now requested via "
+            "user_profile.CoinWithdrawalRequest.objects.request_withdrawal()."
+        )
 
     def _refund_coins(self, reason_note: str) -> None:
-        """Shared by reject() and cancel() — gives the debited coins back.
-        Caller must already hold a row lock on self (select_for_update) and
-        run inside transaction.atomic(), same contract as PassPurchase.reverse().
-        """
-        user = type(self.user).objects.select_for_update().get(pk=self.user_id)
-        user.coin += self.coins
-        user.save(update_fields=["coin"])
-        CoinTransaction.objects.create(
-            user=user,
-            txn_type=CoinTransaction.TxnType.CREDIT,
-            reason=CoinTransaction.Reason.WITHDRAWAL_REVERSED,
-            amount=self.coins,
-            balance_after=user.coin,
-            reference_id=f"withdrawal:{self.id}",
-        )
-        if reason_note:
-            self.admin_note = reason_note
+        raise RuntimeError("CoinWithdrawal._refund_coins() is disabled (Task 6).")
 
     def approve(self, admin_user) -> None:
-        """Marks intent to pay — no coin movement (already debited at
-        request time). The actual transfer happens outside this app; call
-        mark_paid() once it's done."""
-        if self.status != self.Status.PENDING:
-            raise ValidationError(f"This request is already {self.get_status_display().lower()}.")
-        self.status = self.Status.APPROVED
-        self.reviewed_by = admin_user
-        self.reviewed_at = timezone.now()
-        self.save(update_fields=["status", "reviewed_by", "reviewed_at"])
+        raise RuntimeError(
+            "CoinWithdrawal.approve() is disabled (Task 6) — use "
+            "user_profile.CoinWithdrawalRequest.objects.mark_processing()."
+        )
 
     def reject(self, admin_user, reason: str) -> None:
-        if self.status not in (self.Status.PENDING, self.Status.APPROVED):
-            raise ValidationError(f"This request is already {self.get_status_display().lower()}.")
-        self._refund_coins(reason)
-        self.status = self.Status.REJECTED
-        self.reviewed_by = admin_user
-        self.reviewed_at = timezone.now()
-        self.save(update_fields=["status", "admin_note", "reviewed_by", "reviewed_at"])
+        raise RuntimeError(
+            "CoinWithdrawal.reject() is disabled (Task 6) — use "
+            "user_profile.CoinWithdrawalRequest.objects.reject()."
+        )
 
     def cancel(self) -> None:
-        """User-initiated: only while still PENDING (once an admin has
-        APPROVED it, a payout may already be in flight — cancel through
-        support instead)."""
-        if self.status != self.Status.PENDING:
-            raise ValidationError(f"This request is already {self.get_status_display().lower()}.")
-        self._refund_coins("Cancelled by user.")
-        self.status = self.Status.CANCELLED
-        self.save(update_fields=["status", "admin_note"])
+        raise RuntimeError(
+            "CoinWithdrawal.cancel() is disabled (Task 6) — cancellation "
+            "isn't a separate case in the new model; use "
+            "user_profile.CoinWithdrawalRequest.objects.reject() while "
+            "still PENDING."
+        )
 
     def mark_paid(self, admin_user, external_reference: str) -> None:
-        if self.status != self.Status.APPROVED:
-            raise ValidationError("Only an approved request can be marked paid.")
-        self.status = self.Status.PAID
-        self.external_reference = external_reference
-        self.reviewed_by = admin_user
-        self.paid_at = timezone.now()
-        self.save(update_fields=["status", "external_reference", "reviewed_by", "paid_at"])
+        raise RuntimeError(
+            "CoinWithdrawal.mark_paid() is disabled (Task 6) — use "
+            "user_profile.CoinWithdrawalRequest.objects.confirm_success()."
+        )
 
 
 # ---------------------------------------------------------------------------

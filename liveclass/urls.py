@@ -241,16 +241,28 @@ router — list/retrieve/create/update/delete on each, plus the custom
     classroom-reports/{id}/              GET
     classroom-reports/{id}/review/       POST              (platform staff only — mark
                                                           reviewed/action_taken/dismissed)
-    notifications/                       GET               (own notifications, newest first;
-                                                          ?is_read=true/false to filter)
-    notifications/{id}/                  GET, DELETE       (DELETE clears one, own only)
-    notifications/unread-count/          GET               (badge count for the bell icon)
-    notifications/{id}/mark-read/        POST              (mark one notification as read)
-    notifications/mark-all-read/         POST              (mark every unread notification as read)
-    notification-preferences/me/         GET, PATCH        (always the caller's own row — push/email/
-                                                          sms/whatsapp_enabled, muted_types, and
-                                                          digest_frequency off/daily/weekly; see
-                                                          NotificationPreferenceView in views.py)
+    (NOTE — task 42 cleanup: notifications/... and notification-preferences/
+     me/ used to be documented here, but are NOT registered on this app's
+     router — see the "core-app migration" note above the router definition
+     below. They now live at /core/notifications/... and
+     /core/notification-preferences/me/ only; this stale doc block was left
+     in place before and has now been corrected so it stops implying they're
+     still reachable under /liveclass/.)
+    classrooms/{id}/participants/{user_id}/parent-code/  POST  (teacher/co-teacher/moderator — Phase 2,
+                                                          generates a parent-access code for that
+                                                          participant; see ClassroomParentCodeGenerateView
+                                                          in parent_link_views.py)
+    classrooms/{id}/parent-queries/      GET               (teacher/co-teacher/moderator — Phase 5, this
+                                                          classroom's parent-mode query threads;
+                                                          ?status= optional)
+    parent-queries/{id}/reply/           POST              (teacher/co-teacher/moderator — Phase 5, body
+                                                          {"text": "...", "close": false})
+    report-cards/                        GET, POST         (Phase 4 — GET: ?classroom= to scope; POST:
+                                                          teacher/co-teacher/moderator only, body
+                                                          {"classroom", "student", "period_label",
+                                                          "teacher_remark"} — attendance/homework/marks
+                                                          are always server-computed, never accepted
+                                                          from the request; see ReportCardViewSet)
     referrals/                           GET               (people the caller has successfully referred —
                                                           own ledger only)
     referrals/my-code/                   GET               (own referral code + redemption tally)
@@ -344,6 +356,21 @@ from .views import (
 )
 
 from . import chunked_upload_views
+
+# ---------------------------------------------------------------------------
+# Task 10 fix — these four views (Phase 2 teacher parent-codes, Phase 4
+# report cards, Phase 5 teacher-side parent-mode query threads) existed in
+# parent_link_views.py but were never imported/routed anywhere, so none of
+# them were reachable at any URL. Wired in below, next to the other
+# explicit-path() APIViews (dashboard/, my-earnings/, ...) and the router
+# registrations, per each view's own docstring in parent_link_views.py.
+# ---------------------------------------------------------------------------
+from .parent_link_views import (
+    ClassroomParentCodeGenerateView,
+    ClassroomParentQueryListView,
+    ParentQueryReplyView,
+    ReportCardViewSet,
+)
 # 🔥 NAYA (tasks 29/30) — Classroom <-> chat-group bridge endpoints. Plain
 # APIViews, so — same as dashboard/, my-earnings/, my-progress/,
 # notification-preferences/me/ below — they need their own explicit
@@ -389,6 +416,13 @@ router.register(r"queries", ClassQueryViewSet, basename="classquery")
 # messaging. See the module note above ParentMessageTemplate in models.py.
 router.register(r"parent-message-templates", ParentMessageTemplateViewSet, basename="parentmessagetemplate")
 router.register(r"parent-messages", ParentTeacherMessageViewSet, basename="parentteachermessage")
+# NEW (Task 10 fix) — Phase 4 report cards. Registered flat (not nested
+# under classrooms/<id>/) because ReportCardViewSet.create()/get_queryset()
+# already scope by classroom via the request body ("classroom") and the
+# ?classroom= query param respectively, not via a URL kwarg — nesting the
+# route would just leave classroom_id unused by the view. See
+# ReportCardViewSet's own docstring in parent_link_views.py.
+router.register(r"report-cards", ReportCardViewSet, basename="studentreportcard")
 # NOTE (task 42 cleanup — core-app migration): "notifications" used to be
 # registered here. NotificationViewSet now lives in core/views.py and is
 # wired via core/urls.py under the `core/` prefix — see
@@ -423,6 +457,32 @@ urlpatterns = [
         "classrooms/<uuid:classroom_id>/group/",
         ClassroomGroupStatusView.as_view(),
         name="classroom-group-status",
+    ),
+    # NEW (Task 10 fix) — Phase 2: teacher generates a parent-access code
+    # for one participant. classroom_id matches the uuid convention every
+    # other classrooms/<...>/ path in this file already uses; user_id is
+    # the target student's login.User pk.
+    path(
+        "classrooms/<uuid:classroom_id>/participants/<int:user_id>/parent-code/",
+        ClassroomParentCodeGenerateView.as_view(),
+        name="classroom-parent-code-generate",
+    ),
+    # NEW (Task 10 fix) — Phase 5: teacher's list of parent-mode query
+    # threads for one classroom (?status= optional — see the view).
+    path(
+        "classrooms/<uuid:classroom_id>/parent-queries/",
+        ClassroomParentQueryListView.as_view(),
+        name="classroom-parent-query-list",
+    ),
+    # NEW (Task 10 fix) — Phase 5: teacher reply on a single parent-mode
+    # query thread. query_id uses the plain `str` converter (not `uuid`
+    # or `int`) since ParentModeQuery's pk type lives in the message app
+    # and wasn't confirmed here — `str` matches either without guessing
+    # wrong and 404ing every request.
+    path(
+        "parent-queries/<str:query_id>/reply/",
+        ParentQueryReplyView.as_view(),
+        name="parent-query-reply",
     ),
     # NOTE (production): unauthenticated DB+cache liveness/readiness probe
     # for Render's health check / an uptime monitor / a k8s readiness

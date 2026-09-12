@@ -159,6 +159,8 @@ INSTALLED_APPS = [
     'post',
     "message",
     'liveclass',
+    'campus',
+
     # NEW (task 42) — neutral notification + classroom<->chat bridge
     # layer. Must be able to resolve `liveclass.Classroom`/`ClassSession`
     # string FK references (core/models.py), so no strict load-order
@@ -392,6 +394,66 @@ else:
 # `"storages"` added to `INSTALLED_APPS`. Required env vars in that mode:
 # AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, AWS_STORAGE_BUCKET_NAME.
 
+# ---------------------------------------------------------------------------
+# TASK 25 — production media serving toggle.
+#
+# `post/views.py:serve_media_with_range` (and any similar chat-media serve
+# view in `message/`) is a fine *local dev* convenience but must never be
+# the primary way media is served in production:
+#   - it streams the whole read through a Python/WSGI-ASGI worker instead
+#     of the webserver's zero-copy sendfile path — one worker tied up for
+#     the entire duration of a video scrub/seek
+#   - it sits behind zero shared HTTP/CDN caching
+#   - it has no auth of its own (see the view's own docstring) — fine only
+#     because it's dev-only right now
+#
+# The real production path is one of:
+#   (a) USE_S3_STORAGE=true  → `S3Storage.url()` (used by every FileField
+#       via `default_storage`, see STORAGES above) already returns an S3 /
+#       CloudFront URL directly. Django's `/media/` route is never hit at
+#       all for anything uploaded with this on — nginx/CDN config is the
+#       whole fix here, see deploy/S3_CLOUDFRONT_SETUP.md.
+#   (b) USE_S3_STORAGE=false → nginx serves `/media/` straight off disk in
+#       front of Django (see deploy/nginx.conf's `location /media/` block).
+#       Plain static-file serving in nginx supports byte-range requests
+#       (video seeking, resumable downloads) with no extra module.
+#
+# SERVE_MEDIA_VIA_DJANGO is the explicit escape hatch for case (b): media
+# served by Django itself instead of nginx/S3. It's meant to be temporary.
+#
+# 🔧 CURRENT STATE (low traffic / no budget yet for nginx media config or
+# S3+CloudFront): defaulting this to **True even in production** — i.e.
+# `serve_media_with_range` (post/views.py) stays live and serves real
+# media traffic for now, worker-blocking and all. That's an accepted,
+# deliberate trade-off at low user counts, NOT the long-term setup.
+#
+# ⚠️ TO CHANGE LATER, WHEN TRAFFIC/USERS GROW — do ONE of:
+#   (a) Point nginx at MEDIA_ROOT using `deploy/nginx.conf`'s
+#       `location /media/` block, then flip this line's default back to
+#       `"False"` (or just set env var SERVE_MEDIA_VIA_DJANGO=false) —
+#       zero other code changes needed.
+#   (b) Move to S3/CloudFront per `deploy/S3_CLOUDFRONT_SETUP.md` and set
+#       USE_S3_STORAGE=true — media URLs switch to S3/CloudFront
+#       automatically (`STORAGES` above), and this flag becomes
+#       irrelevant for new uploads.
+# Either way, this is the ONLY line to touch — nothing in views.py/
+# urls.py needs to change again.
+SERVE_MEDIA_VIA_DJANGO = os.getenv("SERVE_MEDIA_VIA_DJANGO", "True") == "True"
+
+if not DEBUG and SERVE_MEDIA_VIA_DJANGO and USE_S3_STORAGE:
+    # Contradictory combination: with S3 on, model FileFields already
+    # resolve to S3/CloudFront URLs and MEDIA_ROOT has nothing in it for
+    # this view to read — turning the Django fallback on here would just
+    # mean every request 404s from an empty local media dir, disguising
+    # the real (missing CloudFront setup) problem as a Django bug.
+    raise ImproperlyConfigured(
+        "SERVE_MEDIA_VIA_DJANGO=true is meaningless with USE_S3_STORAGE=true — "
+        "media already resolves straight to S3/CloudFront URLs and MEDIA_ROOT "
+        "has nothing to serve locally. Unset SERVE_MEDIA_VIA_DJANGO, or set up "
+        "nginx (see deploy/nginx.conf) if you meant to serve from local disk "
+        "instead of S3."
+    )
+
 # --- PRODUCTION AI FIX ---
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 
@@ -602,6 +664,53 @@ REST_FRAMEWORK = {
         # wired in, but keeping the rate here avoids yet another "scope
         # exists in code, rate missing in settings" gap later.
         "focus_session": "20/min",
+        # NOTE (fix — CRITICAL, same bug class as every scope above):
+        # `ParentCodeRevealThrottle` (message/throttles.py, scope
+        # `parent_code_reveal`) is wired onto `ParentAccessCodeRevealView`
+        # but had no matching rate here — ImproperlyConfigured (guaranteed
+        # 500) on the very first "reveal full parent code" request. Rate
+        # matches the throttle class's own documented intended rate.
+        "parent_code_reveal": "10/hour",
+        # ---------------------------------------------------------------
+        # B-4 fix (campus app, this pass): `campus` had ZERO
+        # throttle_scope/ScopedRateThrottle usage anywhere — every other
+        # app (liveclass, message) throttles its money-movement, token-
+        # verification, and fan-out-notification endpoints; campus's
+        # equivalents (fee payment, live-session start, notice post,
+        # parent-link-token verify) were completely unprotected. Wired
+        # onto the views via campus/throttles.py's four scoped classes
+        # (each with a fixed `scope`, not `view.throttle_scope`, since
+        # several sit as separate @action methods on the same
+        # ViewSet — see that file's module docstring). Same bug class as
+        # every other NOTE above: a ScopedRateThrottle subclass with no
+        # matching rate here is a guaranteed ImproperlyConfigured (500)
+        # on the very first request to that action, so these had to
+        # land in the same commit as the throttle_classes= wiring in
+        # views.py, not after it.
+        # ---------------------------------------------------------------
+        # FeePaymentViewSet.pay/.record/.refund — money movement, so
+        # rated the same as the existing coin_withdrawal/coin_purchase
+        # scopes above rather than a general read/write action.
+        "campus_fee_payment": "10/min",
+        # CampusLiveSessionViewSet.start — fires a notification fan-out
+        # to every active enrollment in the section (see that action in
+        # views.py); rated the same as liveclass's session_join, which
+        # this scope is modeled on (campus has no separate student-join
+        # endpoint of its own — start is the closest analogue).
+        "campus_live_session_join": "20/min",
+        # NoticeViewSet.create — any active staff member can post to an
+        # entire campus/section roster (see NoticeViewSet's own
+        # docstring in views.py); rated tight since one spammy/
+        # compromised staff account can otherwise blast every student
+        # and parent in a campus.
+        "campus_notice_post": "10/min",
+        # ParentLinkVerifyView.post — resolves a raw `token` from the
+        # request body via bridge.resolve_parent_from_token; rated tight
+        # for the same reason message's parent_code_reveal/
+        # parent_code_verify_ip scopes are tight — this is a
+        # token-guessing surface, not a retry-heavy legitimate flow (a
+        # parent verifies their link once, not repeatedly).
+        "campus_parent_link_verify": "10/min",
     },
     # NOTE (fix — production breaking gap): NOT having this meant every
     # list endpoint (classrooms, sessions, chat-messages, notices, etc.)
@@ -704,6 +813,25 @@ REFERRAL_REDEEM_WINDOW_DAYS = int(os.environ.get("REFERRAL_REDEEM_WINDOW_DAYS", 
 CLASSROOM_REFERRAL_JOIN_BONUS_COINS = int(os.environ.get("CLASSROOM_REFERRAL_JOIN_BONUS_COINS", 20))
 
 # ---------------------------------------------------------------------------
+# F-3: campus engagement-reward bonuses (see campus/tasks.py's
+# check_attendance_streak_rewards / check_assignment_ontime_streak_rewards,
+# campus/services.py's compute_attendance_streak / compute_assignment_ontime_streak).
+# Paid via user_profile.CoinLedger.record_transaction(transaction_type=
+# CAMPUS_REWARD, ...) -- distinct wallet/ledger from liveclass's
+# CoinTransaction above, but the same "flat, env-overridable settings
+# constant" shape as REFERRAL_BONUS_COINS, deliberately, so ops can retune
+# either program the same way.
+# CAMPUS_ATTENDANCE_STREAK_DAYS -- how many consecutive PRESENT/LATE daily
+# attendance marks earn one bonus (paid again every further multiple).
+# CAMPUS_ASSIGNMENT_STREAK_COUNT -- same idea for consecutive on-time
+# (non-LATE, non-MISSING) assignment submissions within one section.
+# ---------------------------------------------------------------------------
+CAMPUS_ATTENDANCE_STREAK_DAYS = int(os.environ.get("CAMPUS_ATTENDANCE_STREAK_DAYS", 7))
+CAMPUS_ATTENDANCE_STREAK_BONUS_COINS = int(os.environ.get("CAMPUS_ATTENDANCE_STREAK_BONUS_COINS", 10))
+CAMPUS_ASSIGNMENT_STREAK_COUNT = int(os.environ.get("CAMPUS_ASSIGNMENT_STREAK_COUNT", 5))
+CAMPUS_ASSIGNMENT_STREAK_BONUS_COINS = int(os.environ.get("CAMPUS_ASSIGNMENT_STREAK_BONUS_COINS", 15))
+
+# ---------------------------------------------------------------------------
 # Coin purchase gateway (see CoinPurchase in liveclass/models.py,
 # CoinPurchaseViewSet + _verify_gateway_signature in views.py). Written
 # against Razorpay's order-create + HMAC-signature-verify shape. Both
@@ -726,6 +854,18 @@ MSG91_AUTH_KEY = os.environ.get("MSG91_AUTH_KEY", "")
 MSG91_SMS_SENDER_ID = os.environ.get("MSG91_SMS_SENDER_ID", "")
 MSG91_WHATSAPP_INTEGRATED_NUMBER = os.environ.get("MSG91_WHATSAPP_INTEGRATED_NUMBER", "")
 MSG91_WHATSAPP_TEMPLATE_NAME = os.environ.get("MSG91_WHATSAPP_TEMPLATE_NAME", "")
+
+# NEW (task 14 — phone OTP delivery, see login/sms_service.py): DLT-
+# registered MSG91 OTP template id, used by SendOTPView for phone
+# targets. Separate from the liveclass notification templates above —
+# this one is fed through MSG91's dedicated `/api/v5/otp` endpoint (not
+# the generic SMS/flow API `_send_sms` uses) so our own `secrets`-
+# generated OTP code is what actually gets delivered, not one MSG91
+# generates itself. Reuses MSG91_AUTH_KEY above; unlike the liveclass
+# notification channels, sms_service.send_otp_sms() fails LOUD (raises)
+# rather than silently no-op'ing when this isn't set — see that module's
+# docstring for why a missed OTP can't be treated like a missed reminder.
+MSG91_OTP_TEMPLATE_ID = os.environ.get("MSG91_OTP_TEMPLATE_ID", "")
 
 EMAIL_BACKEND = "django.core.mail.backends.smtp.EmailBackend"
 EMAIL_HOST = os.environ.get("EMAIL_HOST")
@@ -901,6 +1041,97 @@ CELERY_BEAT_SCHEDULE = {
         "task": "message.purge_soft_deleted_conversations",
         "schedule": crontab(hour=3, minute=30),
     },
+    # 🔧 TASK 28 — followers_count/following_count drift reconciliation.
+    #
+    # Both counters are updated atomically per-operation today
+    # (FollowAPIView.post / AcceptFollowRequestView.post / BlockedUsersView.post
+    # in user_profile/views.py all do their own F()-based +1/-1 right
+    # alongside the Follow-row write) — correct for every write that goes
+    # through those views. The gap is writes that DON'T: an admin deleting
+    # a Follow row directly in /admin/ (FollowAdmin has no read-only
+    # guard, unlike CoinLedgerAdmin), a user.delete() CASCADE-deleting
+    # every Follow row the deleted user was party to (as follower AND as
+    # following) with nothing re-running the counter update on the
+    # *other* side of each of those rows, or a data migration / shell
+    # bulk-delete. None of those fire the F()-update logic the views use,
+    # so the stored counters can silently drift from what Follow rows
+    # actually say.
+    #
+    # Detect-and-correct safety net, not the root-cause fix (a Follow
+    # post_delete signal would make drift structurally impossible instead
+    # of periodically corrected — see user_profile/tasks.py's own
+    # docstring). 6-hourly matches the cadence already used for the other
+    # counter-recompute jobs in this schedule.
+    "user-profile-reconcile-follow-counts": {
+        "task": "user_profile.tasks.reconcile_follow_counts",
+        "schedule": crontab(hour="*/6", minute=15),
+    },
+    # FEE-6 — campus/tasks.py::send_fee_due_reminders. Task string is
+    # "campus.tasks.<name>" (Celery's default module-path-derived name,
+    # since campus/tasks.py never passes an explicit name= to
+    # @shared_task) — same convention as the user_profile entry right
+    # above, not the "app.func" shorthand liveclass/message entries use
+    # (those explicitly rename their tasks; campus/user_profile don't).
+    # Once-a-day is enough — same reasoning as
+    # liveclass-send-notification-digests and campus's own
+    # send_assignment_due_reminders (design doc §6): this task carries
+    # no state of its own, so an occasional extra run is harmless.
+    #
+    "campus-send-fee-due-reminders": {
+        "task": "campus.tasks.send_fee_due_reminders",
+        "schedule": crontab(hour=8, minute=0),
+    },
+    # 🔧 FIX (this pass) — same "written but never registered" bug class
+    # this file has already had to fix repeatedly for liveclass/message/
+    # user_profile above.
+    "campus-check-low-attendance": {
+        "task": "campus.tasks.check_low_attendance",
+        # check_low_attendance() takes no args — it loops over every
+        # active Campus itself (campus/tasks.py), so a single global
+        # crontab entry is correct as-is. Once-daily, end-of-school-day
+        # check.
+        "schedule": crontab(hour=18, minute=0),
+    },
+    "campus-send-assignment-due-reminders": {
+        "task": "campus.tasks.send_assignment_due_reminders",
+        # Also loops internally (every Assignment due today, across all
+        # campuses) — no args needed. Staggered 30min after the
+        # fee-reminder job above so both don't hit the DB in the same
+        # minute.
+        "schedule": crontab(hour=8, minute=30),
+    },
+    # 🔴 REMOVED (this pass) — "campus-rollover-session" and
+    # "campus-refresh-analytics-snapshot" were both registered here with
+    # NO `args`/`kwargs`, but campus/tasks.py confirms both tasks take
+    # REQUIRED positional args:
+    #   - rollover_session(campus_id, new_session_id)
+    #   - refresh_analytics_snapshot(campus_id, session_id)
+    # Unlike check_low_attendance/send_assignment_due_reminders/
+    # send_fee_due_reminders above (which loop over every active Campus
+    # themselves), neither of these two tasks has a "for every
+    # campus/session" wrapper — they operate on ONE specific
+    # campus+session pair, supplied by the caller. Scheduled as a bare
+    # crontab entry with no args, Celery would call e.g.
+    # `rollover_session()` with zero arguments every 5 minutes and it
+    # would raise `TypeError: rollover_session() missing 2 required
+    # positional arguments` on every single tick, forever — this is a
+    # worse bug than "never runs" (it's "always crashes, floods error
+    # logs/Sentry, still never actually does anything").
+    #
+    # rollover_session is already correctly invoked on-demand, with the
+    # real campus_id/new_session_id, from
+    # `AcademicSessionViewSet.rollover` (see campus/tasks.py's own
+    # module docstring) — it was never meant to be periodic, so it's
+    # intentionally left OUT of this schedule rather than "fixed" with
+    # guessed args.
+    #
+    # refresh_analytics_snapshot genuinely does look like it wants to be
+    # periodic (design doc §8 — pre-computed dashboard snapshot), but
+    # that requires a new wrapper task in campus/tasks.py that iterates
+    # every (active campus, its current session) pair and calls
+    # refresh_analytics_snapshot(campus_id, session_id) for each —
+    # that wrapper doesn't exist yet. Add it, then register the
+    # wrapper's task path here, rather than the raw per-session task.
 }
 
 # 🔧 GAP FIX — grace window ke liye, dekho message/tasks.py:

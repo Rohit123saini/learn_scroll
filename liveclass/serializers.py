@@ -1580,23 +1580,36 @@ class ParentTeacherMessageReplySerializer(serializers.ModelSerializer):
 
 
 # ---------------------------------------------------------------------------
-# 20b. PARENT-JOIN (task 9). Input for ClassSessionViewSet.parent_join —
-# the endpoint a parent hits with nothing but a signed `parent_token`
-# link (they have no platform account, so there's no request.user to
-# validate against). See views.py's parent_join() for what the token
-# actually decodes to and how it's checked against the classroom.
+# 20b. PARENT-JOIN (task 9) — DEPRECATED, no longer used by
+# ClassSessionViewSet.parent_join.
 #
-# ASSUMPTION (flagged for a follow-up confirm-pass, same convention this
-# codebase already uses — see classroom_chat_bridge.py's original
-# ASSUMPTION markers before its Task 2 gap-fix): `parent_token` here is a
-# stateless, signed token (django.core.signing) encoding a student id —
-# NOT a DB-stored code — because this task's file list deliberately does
-# not include models.py. If a parent-token DB model already exists
-# elsewhere in the real codebase, this serializer's validate() needs to
-# be swapped to look it up there instead; the endpoint's external
-# contract (POST {"parent_token": "..."}) stays the same either way.
+# This serializer validated a stateless, signed `parent_token`
+# (django.core.signing encoding a student id) because, at the time it was
+# written, this task's file list didn't include models.py and it wasn't
+# known that a DB-backed parent-token model (`ParentAccessCode`/
+# `ParentToken`, in the `message` app) already existed. It does — and the
+# rest of the parent-portal feature set (teacher-generated codes, report
+# cards, parent-mode query threads) was already built against it. That
+# left two unreconciled parent-auth mechanisms issuing two different
+# kinds of "parent token" for what is, from a parent's point of view, one
+# feature — a `ParentAccessCode` code couldn't join a live session, and a
+# signed join-link couldn't do anything else, and the signed link had no
+# way to be revoked.
+#
+# `parent_join()` in views.py now resolves `parent_token` via
+# `core.classroom_chat_bridge.resolve_parent_from_token()` directly (the
+# same ParentAccessCode/ParentToken lookup `HasValidParentSessionToken`
+# uses) instead of through this class. Left defined here, unused, rather
+# than deleted — this task's visibility couldn't confirm nothing else in
+# the codebase imports it; recommended follow-up is to grep for
+# `ParentJoinSerializer` project-wide and delete both this class and
+# `PARENT_JOIN_TOKEN_SALT`/`generate_parent_join_token` in views.py once
+# that's confirmed clean, so a future reader doesn't mistake this for a
+# second, still-live parent-auth path.
 # ---------------------------------------------------------------------------
 class ParentJoinSerializer(serializers.Serializer):
+    """DEPRECATED — see module note above. Not used by parent_join() any more."""
+
     parent_token = serializers.CharField(write_only=True, trim_whitespace=True)
 
     def validate_parent_token(self, value):
