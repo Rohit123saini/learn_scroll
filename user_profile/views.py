@@ -20,6 +20,7 @@ from .models import (
     CoinWithdrawalRequest,
     Follow,
     RestrictUser,
+    UserPreference,
 )
 from .serializers import (
     BlockUserSerializer,
@@ -33,6 +34,7 @@ from .serializers import (
     RestrictedTargetUserProfileSerializer,
     RestrictUserSerializer,
     TargetUserProfileSerializer,
+    UserPreferenceSerializer,
     UserProfileDetailResponseSerializer,
     UserProfileSerializer,
     UserSearchSerializer,
@@ -474,6 +476,38 @@ class FollowAPIView(GenericAPIView):
                 followers_count=F("followers_count") + 1
             )
 
+        # TASK 2: notify the other side of a follow action. Lazy imports
+        # (core.models for the NotifType enum, .services for the
+        # _notify wrapper) — user_profile must not hard-depend on core
+        # at module-import time, since core.services.create_notification
+        # already lazy-imports back into user_profile.views the other
+        # way (is_restricted_between, for the restrict check).
+        from core.models import Notification
+        from .services import _notify
+
+        if new_follow.status == Follow.Status.PENDING:
+            _notify(
+                following_user,
+                Notification.NotifType.FOLLOW_REQUEST_RECEIVED,
+                "New follow request",
+                f"{request.user.username} wants to follow you.",
+                actor=request.user,
+            )
+        else:
+            # Public account, auto-accept — no NEW_FOLLOWER type exists
+            # in the enum (see core/models.py module docstring, point
+            # 5: "product-decision"), so this reuses
+            # FOLLOW_REQUEST_ACCEPTED for "someone just started
+            # following you" too, same as a request that was actually
+            # accepted.
+            _notify(
+                following_user,
+                Notification.NotifType.FOLLOW_REQUEST_ACCEPTED,
+                "New follower",
+                f"{request.user.username} started following you.",
+                actor=request.user,
+            )
+
         return Response({
             "message": "Follow request sent" if new_follow.status == Follow.Status.PENDING else "Followed successfully",
             "status": new_follow.status,
@@ -518,6 +552,19 @@ class AcceptFollowRequestView(GenericAPIView):
         )
         User.objects.filter(id=request.user.id).update(
             followers_count=F("followers_count") + 1
+        )
+
+        # TASK 2: notify the original requester. Same lazy-import
+        # pattern as FollowAPIView.post above — see that comment for why.
+        from core.models import Notification
+        from .services import _notify
+
+        _notify(
+            follow_request.follower_id,
+            Notification.NotifType.FOLLOW_REQUEST_ACCEPTED,
+            "Follow request accepted",
+            f"{request.user.username} accepted your follow request.",
+            actor=request.user,
         )
 
         return Response({
@@ -1092,3 +1139,53 @@ class CoinWithdrawalRequestView(GenericAPIView):
             "message": "Withdrawal requested successfully.",
             "data": self.get_serializer(withdrawal).data,
         }, status=status.HTTP_201_CREATED)
+
+
+class UserPreferenceView(GenericAPIView):
+    """
+    TASK 1 — GET/PATCH /user-profile/preferences/me/, same shape as
+    core's `notification-preferences/me/`.
+
+    GET always returns 200, never 404: `UserPreference.for_user()`
+    get-or-creates the row, so a user who's never touched their
+    theme/language still gets defaults back on first read instead of
+    an empty state the frontend has to special-case.
+    """
+    permission_classes = [IsAuthenticated]
+    serializer_class = UserPreferenceSerializer
+
+    @extend_schema(
+        responses={200: UserPreferenceSerializer},
+        description="Get current user's theme/language preferences.",
+    )
+    def get(self, request):
+        preference = UserPreference.for_user(request.user)
+        serializer = self.get_serializer(preference)
+        return Response({
+            "status": True,
+            "message": "Preferences fetched successfully.",
+            "data": serializer.data,
+        }, status=status.HTTP_200_OK)
+
+    @extend_schema(
+        request=UserPreferenceSerializer,
+        responses={200: UserPreferenceSerializer},
+        description="Update current user's theme/language preferences. Send only fields you want to update.",
+    )
+    def patch(self, request):
+        preference = UserPreference.for_user(request.user)
+        serializer = self.get_serializer(preference, data=request.data, partial=True)
+
+        if serializer.is_valid():
+            serializer.save()
+            return Response({
+                "status": True,
+                "message": "Preferences updated successfully.",
+                "data": serializer.data,
+            }, status=status.HTTP_200_OK)
+
+        return Response({
+            "status": False,
+            "message": "Validation failed.",
+            "errors": serializer.errors,
+        }, status=status.HTTP_400_BAD_REQUEST)

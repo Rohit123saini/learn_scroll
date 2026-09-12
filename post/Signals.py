@@ -103,6 +103,49 @@ def decrement_posts_count_on_soft_delete(post):
 
 
 # ----------------------------------------------------------------------
+# TASK 3 — "new post from someone you follow" fan-out, enqueue-only.
+#
+# Same reasoning as queue_video_thumbnail_on_create further down:
+# `post_save` runs synchronously inside whatever request/transaction
+# created this `Post` row (`PostCreateAPIView.post()`), and a popular
+# account's follower list can run into the thousands — looping through
+# even a cheap per-follower write inline here would make every single
+# post-create request slow in direct proportion to that account's
+# follower count. `.delay()` just enqueues
+# `post.tasks.notify_followers_new_post` and returns immediately; the
+# actual `Follow` table query and the notification fan-out itself happen
+# there, off the request path.
+#
+# transaction.on_commit(...) (deliberately NOT a bare `.delay()` the way
+# queue_video_thumbnail_on_create below still is): if
+# PostCreateAPIView.post() ever wraps the Post creation in
+# `@transaction.atomic` (as several views in this codebase already do —
+# e.g. FollowAPIView.post()), a bare `.delay()` fired from inside that
+# transaction could have the Celery worker pick up the task and query
+# for this Post row before the transaction actually commits, raising
+# Post.DoesNotExist in the task for a post that does, in fact, exist.
+# on_commit() defers the enqueue until the surrounding transaction (if
+# any) has successfully committed — and runs immediately, synchronously,
+# if there's no open transaction at all (autocommit), so this is strictly
+# safer with no downside either way.
+#
+# MVP scope (per the design doc): every ACCEPTED follower gets notified
+# on every new post — no per-follower "bell" opt-in yet (Instagram-style,
+# per-account). That's a deliberate, documented trade-off for a later
+# pass, not something this receiver is trying to solve.
+# ----------------------------------------------------------------------
+@receiver(post_save, sender=Post)
+def queue_new_post_notification_fanout(sender, instance, created, **kwargs):
+    if not created:
+        return
+    from django.db import transaction
+
+    from .tasks import notify_followers_new_post
+
+    transaction.on_commit(lambda: notify_followers_new_post.delay(instance.id))
+
+
+# ----------------------------------------------------------------------
 # TASK 23 — PostLike reaction counts (see module docstring for why this
 # replaces the old `update_likes_count` / `update_reaction_counts` pair).
 # ----------------------------------------------------------------------

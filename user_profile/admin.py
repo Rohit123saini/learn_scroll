@@ -31,7 +31,7 @@ others.
 """
 from django.contrib import admin
 
-from .models import CoinLedger
+from .models import CoinLedger, UserPreference
 
 
 class WithdrawalEligibleFilter(admin.SimpleListFilter):
@@ -96,3 +96,16 @@ class CoinLedgerAdmin(admin.ModelAdmin):
         # explains every balance change" guarantee. Blocked for the
         # same reason.
         return False
+
+@admin.register(UserPreference)
+class UserPreferenceAdmin(admin.ModelAdmin):
+    """
+    TASK 1 -- unlike CoinLedger above, this table has no audit-trail
+    invariant to protect (a theme/language row has nothing else in the
+    system it needs to stay consistent with), so normal add/change/
+    delete is left enabled -- useful for support to fix a stuck value
+    for a user without going through the API.
+    """
+    list_display = ("id", "user", "theme", "language", "updated_at")
+    list_filter = ("theme", "language")
+    search_fields = ("user__username",)

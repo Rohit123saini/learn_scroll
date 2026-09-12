@@ -441,7 +441,18 @@ class ClassroomViewSet(viewsets.ModelViewSet):
         return qs.select_related("teacher")
 
     def perform_create(self, serializer):
-        serializer.save(teacher=self.request.user)
+        classroom = serializer.save(teacher=self.request.user)
+
+        # TASK 4: notify the teacher's followers that a new classroom
+        # went up. Queued via _safe_delay (see its docstring above) —
+        # a popular teacher's follower list can run into the thousands,
+        # so the actual user_profile.Follow read + notification fan-out
+        # happens entirely inside notify_followers_new_classroom, off
+        # this request's path, same reasoning as every other
+        # notify_*.delay() call site in this file.
+        from .tasks import notify_followers_new_classroom
+
+        _safe_delay(notify_followers_new_classroom, classroom.id)
 
     def perform_update(self, serializer):
         # Only the classroom's own teacher can edit its info — co-teachers/

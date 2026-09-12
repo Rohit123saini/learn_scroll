@@ -44,12 +44,12 @@ via **Celery beat + worker**.
 |---|---|---|
 | `models.py` | ~3460 | All DB models (~45 models) + model-level business logic + cache-version signals |
 | `serializers.py` | ~1640 | DRF serializers — 55 classes, one (or a few) per model/action |
-| `views.py` | ~6320 | DRF ViewSets/APIViews — all HTTP endpoints, permission logic, orchestration |
+| `views.py` | ~6510 | DRF ViewSets/APIViews — all HTTP endpoints, permission logic, orchestration. **+TASK 4** (new): `ClassroomViewSet.perform_create` now enqueues `notify_followers_new_classroom` via `_safe_delay` — see §4/§9. |
 | `urls.py` | ~429 | DRF router registrations + a few plain `path()`s for non-ViewSet views, incl. the two new `create_group/`/`group/` paths (tasks 29/30, §5/§6b). **Its module docstring is itself the canonical endpoint reference** — reproduced in full in §5 below. |
 | `admin.py` | 607 | Django admin registrations (inlines, list filters, bulk actions) — 33 `ModelAdmin`s (not 40+ — `NotificationAdmin`/`NotificationPreferenceAdmin` moved to `core/admin.py` per task 42, since `Notification` itself now lives in `core/models.py`; see §14). **Gap**: imports `ParentMessageTemplate`/`ParentTeacherMessage` from `.models` but never registers a `ModelAdmin` for either — see §14. |
 | `signals.py` | ~620 | `@receiver`s for session-end cleanup, waitlist FCFS promotion, attendance credit, **+ 6 NEW classroom↔chat-group sync receivers (tasks 29–40, §6b)** (registered via `apps.py`) |
 | `apps.py` | 33 | `AppConfig.ready()` — the thing that actually makes `signals.py` load |
-| `tasks.py` | ~1700 | All Celery tasks — periodic sweeps + async `notify_*` senders (~40 `@shared_task`s) |
+| `tasks.py` | ~1845 | All Celery tasks — periodic sweeps + async `notify_*` senders (✅ recounted this pass — exactly **38** `@shared_task`s: 13 periodic/sweep + 25 `notify_*`, incl. **TASK 4**'s `notify_followers_new_classroom` — see §9) |
 | `LearnScroll/celery.py` | 57 | **Project-level** Celery app bootstrap (sits next to `settings.py`, not part of the `liveclass` app itself). Creates the `Celery("LearnScroll")` instance, loads every `CELERY_*` setting from Django settings via `config_from_object(..., namespace="CELERY")`, and `autodiscover_tasks()`s a `tasks.py` in every `INSTALLED_APPS` app (`liveclass/tasks.py` included) — no manual per-task registration needed. Docstring spells out the one-time wiring: `LearnScroll/__init__.py` must do `from .celery import app as celery_app`; worker (`celery -A LearnScroll worker`) and beat (`celery -A LearnScroll beat`) are two separate long-running processes, both required. |
 | `consumers.py` | ~577 | Django Channels WebSocket consumers (`SessionConsumer`, `UserConsumer`, `ClassroomConsumer` — new, see §6) |
 | `routing.py` | 30 | WebSocket URL patterns (separate from `urls.py`, wired into ASGI, not WSGI) — 3 routes: session/user/classroom |
@@ -79,7 +79,7 @@ via **Celery beat + worker**.
 - `LearnScroll/__init__.py` must do `from .celery import app as celery_app`.
 - ASGI app (project-level `asgi.py`) wires `liveclass.routing.websocket_urlpatterns` through `liveclass.ws_auth.JWTAuthMiddleware`.
 - `settings.py` → `REST_FRAMEWORK["EXCEPTION_HANDLER"] = "liveclass.exceptions.liveclass_exception_handler"`.
-- `TeacherEarningsView`, `StudentProgressView`, `NotificationPreferenceView`, `HealthCheckView` are plain `APIView`s, **not** ViewSets — `router.register()` never auto-wires them; each needs its own explicit `path()` in `urls.py` (this was missing at least 3 times historically).
+- `TeacherEarningsView`, `StudentProgressView`, `HealthCheckView` are plain `APIView`s, **not** ViewSets — `router.register()` never auto-wires them; each needs its own explicit `path()` in `urls.py` (this was missing at least 3 times historically). (`NotificationPreferenceView` used to be in this list too, but per task 42 it — and `NotificationViewSet` — moved to `core/views.py`; see the corrected rows in §4/§5.)
 - **✅ RESOLVED (classroom↔chat bridge, tasks 29–40)**: `Classroom.chat_group_enabled` (`BooleanField`, default `False`) and `Classroom.linked_conversation_id` (`UUIDField`, null/blank) are now both defined on `Classroom` in `models.py` — `models_PATCH_apply_to_Classroom.md` has landed. Every code path that assumes these two attributes (`classroom_chat_views.py`, the 6 chat-sync signal receivers in `signals.py`) is safe to run now. See §6b.
 - **✅ RESOLVED (parent access — Phases 2/4/5, `parent_link_views.py`, Task 10 fix)**: `ClassroomParentCodeGenerateView`, `ReportCardViewSet`, `ClassroomParentQueryListView`, `ParentQueryReplyView` all now have `path()`/router registration in `urls.py`. `StudentReportCard` is now a real model in `models.py` (§3), computed server-side via `compute_attendance_percent_bulk()` — `ReportCardViewSet.create()` no longer raises `ImportError` at module load. **Additionally**, `ClassSessionViewSet.parent_join` — the other, previously-independent parent-facing mechanism — has been consolidated onto this same `ParentAccessCode`/`resolve_parent_from_token()` base, so there's now exactly one parent-auth mechanism in this app, not two. See §6c for the full picture, including the now-dead-code left behind by that consolidation (`PARENT_JOIN_TOKEN_SALT`, `generate_parent_join_token`, `ParentJoinSerializer`).
 
@@ -273,6 +273,7 @@ body.
 - `Notification.mark_read()`.
 - `NotificationPreference.allowed_channels_for(notif_type)`, `.for_user(cls, user)` (classmethod, get-or-create-like accessor). Fields include `push_enabled`/`email_enabled`/`sms_enabled`/`whatsapp_enabled`, `muted_types`, `digest_frequency` (off/daily/weekly), `last_digest_sent_at`.
 - **"Production notification coverage audit" NOTE** (line ~2779): six specific notification types were previously missing coverage — now all wired (see the full `notify_*` task list in §9).
+- **(TASK 4, new)** `tasks.notify_followers_new_classroom` (§9) references `Notification.NotifType.CLASSROOM_CREATED_BY_FOLLOWED` and passes a `classroom=classroom` kwarg into `create_bulk_notifications(...)`, per that task's own docstring claiming a `classroom` FK already exists on `Notification`. **Neither is independently verified against `models.py` this pass** (`models.py` wasn't part of this upload) — `models.py`'s own `Notification` definition should be checked for both the enum member and the FK before relying on this in production. Flagged the same way `NEW_POST_FROM_FOLLOWED` was flagged unconfirmed in `post_app.md` §22 / `TESTSERIES_CREATED_BY_FOLLOWED` in `testseries_app_reference.md` §3.9 — this is the third app in the codebase to add an identically-shaped "notify my followers when I create X" feature, and all three now share this same unconfirmed-enum caveat.
 
 ### `ChunkedUpload`
 Tracks large multi-chunk uploads in progress (see §8). Indexed on `(user, status)` and `(status, created_at)` — the latter is what makes `tasks.cleanup_stale_chunked_uploads` cheap.
@@ -301,9 +302,17 @@ Tracks large multi-chunk uploads in progress (see §8). Indexed on `(user, statu
 
 ### ViewSets and every `@action` (module line numbers as of this audit)
 
+⚠️ Line numbers below were re-confirmed for `ClassroomViewSet` only (the
+one TASK 4 touches, this pass). `views.py` grew from ~6320 to ~6508
+total lines since the rest of this table was last fully re-walked, so
+every other row's line number below may have drifted further and
+should be treated as approximate — same "trust the code over a stale
+line reference" caveat §17 item 25 already gives for `urls.py`'s
+docstring.
+
 | ViewSet | `get_queryset`/`perform_*` | `@action`s |
 |---|---|---|
-| `ClassroomViewSet` (259) | yes, all 4 | `close`, `has_access`, `my_pass` (url `my-pass`), `start-or-join`, `stats` (GET), `share` (POST), `share-stats` (GET), `my-shares` (GET, detail=False), `refer-link` (GET), `referral-dashboard` (GET) *(NEW — task 65, §3)*, `recommended` (GET, detail=False, ?limit=), `ban` (POST), `bans` (GET), `unban/(?P<student_id>...)` (POST), `recordings` (GET). Custom `list()` uses the version-based cache. |
+| `ClassroomViewSet` (276) | yes, all 4 — **`perform_create` (TASK 4, NEW)**: after `serializer.save(teacher=...)`, enqueues `tasks.notify_followers_new_classroom(classroom.id)` via `_safe_delay` (see §4 cross-cutting bits) so the teacher's followers get notified off the request path — same fan-out shape as `post.tasks.notify_followers_new_post`/`testseries.tasks.notify_followers_new_testseries`, this app's siblings for the identical feature. See §9, §3. | `close`, `has_access`, `my_pass` (url `my-pass`), `start-or-join`, `stats` (GET), `share` (POST), `share-stats` (GET), `my-shares` (GET, detail=False), `refer-link` (GET), `referral-dashboard` (GET) *(NEW — task 65, §3)*, `recommended` (GET, detail=False, ?limit=), `ban` (POST), `bans` (GET), `unban/(?P<student_id>...)` (POST), `recordings` (GET). Custom `list()` uses the version-based cache. |
 | `ClassroomReportViewSet` (1059) | yes | `review` (POST, staff-only decision on a report) |
 | `ClassScheduleViewSet` (1162) | yes, all 4 | standard CRUD, scoped to own classrooms |
 | `ClassSessionViewSet` (1392) | yes, create/update/destroy | `join` (POST, throttled `session_join` scope), `parent-join` (POST, `AllowAny` + `ParentJoinIPThrottle` — unauthenticated observer join for a parent holding a `ParentAccessCode`-issued token, resolved via `resolve_parent_from_token()`, see §6c), `end` (POST), `engagement-report` (GET), `token` (POST, throttled `session_token` scope — fresh LiveKit token, no participant row, for reconnect/testing), `kick/(?P<user_id>...)` (POST), `mute/(?P<user_id>...)` (POST, body `{"muted": true|false}`), `hand` (POST, raise/lower **own** hand), `hand/(?P<user_id>...)/lower` (POST, lower **someone else's** hand), `whiteboard` (POST, `{"snapshot": {...}|null}`, `_has_room_access` gate, not manage-only — see whiteboard persistence note under `ClassSession` in §3), `spotlight` (POST, `{"identity": "<livekit id>"|null}`, `_can_moderate_session` gate, re-broadcasts `spotlight` over the session's realtime channel), `reactions` (GET+POST, `{"reaction": "heart"}`, throttled `session_reaction` scope, `_has_room_access` gate — durable log behind `SessionReaction`, see §3), `captions` (GET+POST, `{"text": "..."}`, throttled `session_caption` scope, `_has_room_access` gate — durable transcript behind `SessionCaption`, see §3), `unread` (GET, Pass 13), `mark-read` (POST, Pass 13), `start-recording` (POST), `stop-recording` (POST), `breakout` (GET+POST), `breakout/assign` (POST), `breakout/close` (POST). |
@@ -337,10 +346,11 @@ Tracks large multi-chunk uploads in progress (see §8). Indexed on `(user, statu
 | `ClassHolidayViewSet` (5786) | yes, all 4 (`perform_update` ownership-gated — Pass 19/21 fix, see §17 item 19) | — |
 | `NoticeViewSet` (5854) | yes, all 4 | `pin` (POST). Custom cached `list()` (per-classroom notice cache version). |
 | `ClassQueryViewSet` (6000) | yes, create/update (`perform_update` ownership-gated, frozen once `ANSWERED` — Pass 19/21 fix, see §17 item 19) | `answer` (POST, teacher/co-teacher/moderator) |
-| `NotificationViewSet` (6117) | yes | `unread-count` (GET, detail=False), `mark-read` (POST), `mark-all-read` (POST, detail=False) |
-| `NotificationPreferenceView` (`APIView`, 6184) | — | GET/PATCH own preferences row (Pass 14 — per-type channel prefs + digest) |
-| `MyDashboardView` (`APIView`, 6203) | — | single-call home-screen summary |
-| `HealthCheckView` (`APIView`, 6261) | — | unauthenticated DB+cache liveness probe |
+| ✅ **CORRECTED** — `NotificationViewSet`/`NotificationPreferenceView` are **no longer in this file** | — | Per task 42 (core-app migration), both moved to `core/views.py`, wired via `core/urls.py` under the `core/` prefix — `liveclass/urls.py` no longer registers `notifications/` or `notification-preferences/me/` at all (confirmed by `views.py`'s own module note just above `MyDashboardView`). Don't look for these two here. |
+| `ParentMessageTemplateViewSet` (6247, list/retrieve-only `GenericViewSet`) | yes (`get_queryset` only) | **NOT PREVIOUSLY DOCUMENTED — task 69.** Read-only, platform-curated catalog of message templates (like `PollTemplate` but platform-authored, not per-teacher); not classroom-scoped, same list for every authenticated user. Optional `?category=<ParentMessageTemplate.Category>` filter. No pagination (small fixed catalog). |
+| `ParentTeacherMessageViewSet` (6268, list/retrieve/create `GenericViewSet`) | yes, create | **NOT PREVIOUSLY DOCUMENTED — task 69.** `reply` (POST, manage-tier via `_can_manage_classroom`, 400 if already `RESPONDED`). A parent/student with valid classroom access (`_can_view_classroom_internals`) sends one of the fixed templates to the teacher; `perform_create` resolves the template text and writes a bell `Notification` (`PARENT_MESSAGE_RECEIVED`) — but **no `_safe_delay(notify_*, ...)` push/digest queue yet**, unlike every sibling action in this file (confirmed: `tasks.py` has no `notify_parent_message_received` task at all — this is a real, still-open gap, not just an omission from this doc). `reply()` similarly writes a `PARENT_MESSAGE_REPLIED` bell row only. No update/destroy at all — a sent message is a fixed audit record. `get_throttles` scopes `create` only to `parent_message_create` (needs a matching `DEFAULT_THROTTLE_RATES` entry in `settings.py` or it raises `ImproperlyConfigured` on the first real message — same pattern as `session_join`/`coupon_validate`). Visibility mirrors `ClassQueryViewSet`: `?classroom=<id>` shows everything to a manager, else only the caller's own sent messages; no filter = "my sent messages" across every classroom. |
+| `MyDashboardView` (`APIView`, 6395) | — | single-call home-screen summary |
+| `HealthCheckView` (`APIView`, 6453) | — | unauthenticated DB+cache liveness probe |
 
 ---
 
@@ -356,7 +366,7 @@ One `DefaultRouter` with ~28 `router.register(...)` entries, mounted at project 
 | `dashboard/` | GET | `MyDashboardView` — single-call home-screen summary |
 | `my-earnings/` | GET | `TeacherEarningsView` — teacher-only earnings summary; optional `?classroom=<id>` |
 | `my-progress/` | GET | `StudentProgressView` — caller's own attendance/assignment/certificate stats + streak |
-| `notification-preferences/me/` | GET, PATCH | `NotificationPreferenceView` — always the caller's own row |
+| ~~`notification-preferences/me/`~~ | — | ✅ CORRECTED — **no longer registered here**. `NotificationPreferenceView` moved to `core` (task 42); this path is now served under the `core/` prefix in the root urlconf, not `liveclass/urls.py`. |
 | `classrooms/<uuid:classroom_id>/create_group/` | POST | `classroom_chat_views.ClassroomCreateGroupView` — NEW, tasks 29/30, see §6b |
 | `classrooms/<uuid:classroom_id>/group/` | GET | `classroom_chat_views.ClassroomGroupStatusView` — NEW, tasks 29/30, see §6b |
 | `livekit-webhook/` | POST | `LiveKitWebhookView` — server-to-server only, not for client/app use |
@@ -421,13 +431,23 @@ sessions/{id}/                       GET, PUT, PATCH, DELETE
 sessions/{id}/join/                  POST
 sessions/{id}/token/                 POST              (fresh token, no participant row — reconnect/testing)
 sessions/{id}/parent-join/           POST              (UNAUTHENTICATED, AllowAny — body {"parent_token":
-                                                          "..."}; a signed django.core.signing token
-                                                          decodes to a student id, observer-role LiveKit
-                                                          token issued if that student has valid access to
-                                                          this classroom. No participant row created.
-                                                          IP-throttled via ParentJoinIPThrottle, not
-                                                          user-throttled. See §6c — NOT the same mechanism
-                                                          as ParentAccessCode/parent_link_views.py below.)
+                                                          "..."}; ✅ CORRECTED — resolved via the SAME
+                                                          ParentAccessCode/ParentToken mechanism as every
+                                                          other parent-facing endpoint
+                                                          (core.classroom_chat_bridge.resolve_parent_from_
+                                                          token()), NOT a signed django.core.signing token
+                                                          (that old scheme is dead code — see §6c). Observer-
+                                                          role LiveKit token issued if the resolved student
+                                                          has valid access to this classroom. No participant
+                                                          row created. IP-throttled via ParentJoinIPThrottle,
+                                                          not user-throttled — resolved in the view body
+                                                          rather than via a permission class so a bad-token
+                                                          guess still counts against the throttle. See §6c.
+                                                          🐛 Confirmed currently broken: both call sites pass
+                                                          `role=ParticipantRole.OBSERVER`, which doesn't
+                                                          exist (`livekit_utils.py` only defines
+                                                          `PARENT_OBSERVER`) — AttributeError on every real
+                                                          call. See §6c/§17 item 24.)
 sessions/{id}/end/                   POST              (teacher/co-teacher/moderator)
 sessions/{id}/kick/{user_id}/        POST              (teacher/co-teacher/moderator)
 sessions/{id}/mute/{user_id}/        POST              (force-mutes mic without removing; body
@@ -642,11 +662,21 @@ classroom-reports/                   GET, POST         (POST: file a report on a
 classroom-reports/{id}/              GET
 classroom-reports/{id}/review/       POST              (platform staff only)
 
-notifications/                       GET               (own, newest first; ?is_read=true/false)
-notifications/{id}/                  GET, DELETE       (DELETE clears one, own only)
-notifications/unread-count/          GET               (badge count for the bell icon)
-notifications/{id}/mark-read/        POST
-notifications/mark-all-read/         POST
+~~notifications/ (+ sub-paths)~~             ✅ CORRECTED — **not registered in `liveclass/urls.py` at all
+                                              any more**. Moved to `core` (task 42) — served under the
+                                              `core/` prefix in the root urlconf now, via `core/urls.py`.
+
+parent-message-templates/            GET               (NEW, NOT PREVIOUSLY DOCUMENTED — task 69.
+                                                        `ParentMessageTemplateViewSet`, read-only,
+                                                        platform-curated catalog, ?category= filter)
+parent-message-templates/{id}/       GET
+parent-messages/                     GET, POST         (NEW, NOT PREVIOUSLY DOCUMENTED — task 69.
+                                                        `ParentTeacherMessageViewSet`; POST sends a
+                                                        template to the classroom's teacher, throttled
+                                                        `parent_message_create` scope; GET ?classroom=<id>
+                                                        for a manager, else own sent messages only)
+parent-messages/{id}/                GET               (no PUT/PATCH/DELETE — fixed audit record)
+parent-messages/{id}/reply/          POST              (manage-tier only; 400 if already responded)
 
 referrals/                           GET               (people the caller has successfully referred)
 referrals/my-code/                   GET               (own referral code + redemption tally)
@@ -1088,7 +1118,7 @@ Flow: `init` → many `chunk` calls → `complete` (assembles + validates + fina
 
 ---
 
-## 9. Celery tasks (`tasks.py`, ~1700 lines) — what runs on its own, and how often
+## 9. Celery tasks (`tasks.py`, ~1845 lines) — what runs on its own, and how often
 
 App bootstrap is `LearnScroll/celery.py` (project-level — see §1 file map): builds the `Celery("LearnScroll")` instance, loads `CELERY_*` settings, `autodiscover_tasks()`s `liveclass/tasks.py` automatically. Two separate long-running processes required in production, neither optional: `celery -A LearnScroll worker` (executes tasks) and `celery -A LearnScroll beat` (fires periodic ones on schedule) — a worker with no beat means nothing self-triggers, beat with no worker means tasks queue up but never run.
 
@@ -1112,7 +1142,33 @@ App bootstrap is `LearnScroll/celery.py` (project-level — see §1 file map): b
 **Not currently in `CELERY_BEAT_SCHEDULE`** (triggered another way, or worth double-checking if a captions/transcript bug is ever reported): `transcribe_recording` (queued via `.delay()` from `LiveKitWebhookView`'s `egress_ended` handler when `Classroom.captions_enabled`), `poll_transcription_jobs` (polls transcription job status — check whether this is chained/queued elsewhere or genuinely needs a beat entry).
 
 ### Every `notify_*` fire-and-forget task (queued via `.delay()`, never called synchronously in the request path)
-`notify_waitlist_promotion(student_id, session_id)`, `notify_classroom_shared(share_id)`, `notify_purchase_refunded(purchase_id)`, `notify_pass_auto_renewed(purchase_id)`, `notify_auto_renew_failed(purchase_id)`, `notify_gift_expired(gift_id)`, `notify_pass_gift_received(gift_id)`, `notify_pass_gift_claimed(gift_id)`, `notify_classroom_flagged(classroom_id)`, `notify_session_auto_completed(session_id)`, `notify_join_request_received(join_request_id)`, `notify_join_request_accepted(join_request_id)`, `notify_join_request_rejected(join_request_id)`, `notify_assignment_graded(submission_id)`, `notify_certificate_issued(certificate_id)`, `notify_notice_posted(notice_id, student_ids)`, `notify_session_live(session_id, exclude_user_id=None)`, `notify_session_cancelled(classroom_id, classroom_title, session_id, scheduled_start_iso, exclude_user_id=None)`, `notify_assignment_posted(assignment_id, student_ids)`, `notify_submission_received(submission_id)`, `notify_staff_added(staff_id)`, `notify_review_posted(review_id)`, `notify_report_reviewed(report_id)`, `notify_query_answered(query_id)`.
+`notify_waitlist_promotion(student_id, session_id)`, `notify_classroom_shared(share_id)`, `notify_purchase_refunded(purchase_id)`, `notify_pass_auto_renewed(purchase_id)`, `notify_auto_renew_failed(purchase_id)`, `notify_gift_expired(gift_id)`, `notify_pass_gift_received(gift_id)`, `notify_pass_gift_claimed(gift_id)`, `notify_classroom_flagged(classroom_id)`, `notify_session_auto_completed(session_id)`, `notify_join_request_received(join_request_id)`, `notify_join_request_accepted(join_request_id)`, `notify_join_request_rejected(join_request_id)`, `notify_assignment_graded(submission_id)`, `notify_certificate_issued(certificate_id)`, `notify_notice_posted(notice_id, student_ids)`, `notify_session_live(session_id, exclude_user_id=None)`, `notify_session_cancelled(classroom_id, classroom_title, session_id, scheduled_start_iso, exclude_user_id=None)`, `notify_assignment_posted(assignment_id, student_ids)`, `notify_submission_received(submission_id)`, `notify_staff_added(staff_id)`, `notify_review_posted(review_id)`, `notify_report_reviewed(report_id)`, `notify_query_answered(query_id)`, **`notify_followers_new_classroom(classroom_id)` (TASK 4, NEW)**.
+
+#### `notify_followers_new_classroom(classroom_id)` (TASK 4, NEW — line ~1791)
+
+Enqueued via `_safe_delay(notify_followers_new_classroom, classroom.id)`
+from `ClassroomViewSet.perform_create()` (§4) — the same `_safe_delay`
+wrapper every other `notify_*` call site in `views.py` already uses,
+not a special case. Notifies every `ACCEPTED` follower
+(`user_profile.models.Follow`) of the classroom's teacher that a new
+classroom was just created, excluding any follower who has restricted
+the teacher (`user_profile.models.RestrictUser` — one bulk exclusion
+query, same shape `post.tasks.notify_followers_new_post` and
+`testseries.tasks.notify_followers_new_testseries` already use for
+their own identical feature in their own apps). Re-fetches the
+`Classroom` itself (handles it having been deleted/closed between
+enqueue and run — logs and returns `False`, no error). Uses
+`core.services.create_bulk_notifications()` — one bulk INSERT, not a
+per-follower loop — with `Notification.NotifType.
+CLASSROOM_CREATED_BY_FOLLOWED` and a `classroom=classroom` kwarg so a
+client can deep-link straight into the new classroom from the
+notification row. **Both the enum member and the `classroom` FK on
+`Notification` are unconfirmed this pass** — see §3's Notification
+section for the full caveat.
+
+No `CELERY_BEAT_SCHEDULE` entry needed — like `transcribe_recording`
+and every other enqueue-only task in this file, it only ever runs
+triggered, never on a schedule.
 
 ### Everything else
 `build_engagement_report(session_id)` — heavier analytics computation offloaded from the request/response cycle (backs `sessions/{id}/engagement-report/`). `_dates_for_schedule(schedule, window_start, window_end)` (96) — recurrence-rule expansion helper for `generate_upcoming_sessions`. `_chunked_upload_dir_size(path)` (1563). `transcribe_recording(session_id)` (1574), `poll_transcription_jobs()` (1646) — recording → transcript pipeline (uses `GEMINI_API_KEY`).
@@ -1295,7 +1351,7 @@ All extend `LiveClassTestBase(TestCase)` (line 120 — shared fixtures: a teache
 1. `apps.py` must exist and be wired, or `signals.py` is dead code.
 2. `CELERY_BEAT_SCHEDULE` must actually register a task, or it silently never runs even if fully implemented — `refresh_stale_enrolled_counts`, `reconcile_stuck_coin_purchases`, `run_auto_renewals`, `expire_unclaimed_gifts`, `send_notification_digests` **all had this exact bug once** (written, tested-looking, never scheduled).
 2b. `DEFAULT_THROTTLE_RATES` (settings.py) must have a matching entry for every `ScopedRateThrottle`/custom-throttle `scope` used anywhere in `views.py` — a missing one isn't a soft degrade, it's `ImproperlyConfigured` (an unhandled 500) on the very first request that hits that endpoint. `session_join`, `session_token`, `coupon_validate`, `chat_message_create`, `chat_reaction`, `classroom_share`, `chunked_upload_init/chunk/complete`, and `coin_withdrawal`/`coin_purchase` **all had this exact bug at least once** — same "written correctly but not wired everywhere it needs to be" shape as item 2 above, just at the settings layer instead of Celery's.
-3. `TeacherEarningsView`/`StudentProgressView`/`NotificationPreferenceView` are plain `APIView`s — `router.register()` never auto-wires a non-ViewSet; each needs its own explicit `path()` in `urls.py` (all three were missing this at least once historically).
+3. `TeacherEarningsView`/`StudentProgressView` are plain `APIView`s — `router.register()` never auto-wires a non-ViewSet; each needs its own explicit `path()` in `urls.py` (this was missing at least once historically). (`NotificationPreferenceView` no longer lives in this app at all — see §1/§4/§5 corrections.)
 4. `LiveKitError` must subclass DRF's `APIException` (not bare `Exception`) or it bypasses `exceptions.py` entirely and every call site has to hand-build its own error response.
 5. All File/ImageFields need `MaxFileSizeValidator`; the four plain FileFields (material, assignment attachment, assignment submission, certificate) also need a **safelist** `FileExtensionValidator` — `cover_image` is safe for free via Pillow decoding.
 6. `_first_message()` in `exceptions.py` must recurse (dict/list nesting) — flat `data[field][0]` indexing breaks on nested/list-of-dict serializer errors, and breaks *inside the exception handler itself*, producing a raw 500 instead of a clean error.
@@ -1321,6 +1377,7 @@ All extend `LiveClassTestBase(TestCase)` (line 120 — shared fixtures: a teache
     - `urls.py` wires 4 `classrooms/<...>/` paths (`create_group/`, `group/`, `participants/<id>/parent-code/`, `parent-queries/`) with the `<uuid:classroom_id>` converter, but `Classroom`'s pk is a plain integer `AutoField`, not a UUID — these 4 paths 404 for every real classroom id before the view even runs. See §6b.
     - `ReportCardViewSet._homework_stats()` (`parent_link_views.py`) filters on `Assignment.Category.HOMEWORK`, a field/enum `Assignment` doesn't have — `AttributeError` on every `POST report-cards/`. Separately, once that's fixed, it should read through `bridge.get_assignment_submissions()` (§6d) rather than the local, Task-12-frozen `Assignment`/`AssignmentSubmission` models directly, or it'll silently miss every assignment posted after the Task 12 cutover. See §6c.
 25. **A module's own docstring (or a whole file's module-level docstring, like `urls.py`'s endpoint reference) can go stale the moment the code beneath it changes, and nothing forces it to be re-synced.** `urls.py`'s docstring still describes `coin-purchases/initiate/`, full `withdrawals/` CRUD, and full `assignments/`/`submissions/` CRUD as live — Task 6 and Task 12 changed the actual view behavior underneath without anyone updating that comment block. Trust the ViewSet's own method bodies over a docstring describing them, especially in a codebase with this much "as of Task N" churn — see §5/§6d/§6e for what's actually true as of this audit.
+26. **(NEW, TASK 4) A "notify my followers when I create X" fan-out is now a repeated, cross-app pattern — and each copy carries its own unconfirmed enum until checked.** `liveclass.tasks.notify_followers_new_classroom` is the third instance of this exact shape in the codebase (`post.tasks.notify_followers_new_post`, `testseries.tasks.notify_followers_new_testseries` are the other two) — same `Follow`/`RestrictUser` bulk-query pattern, same `core.services.create_bulk_notifications()` call, each referencing its own new `Notification.NotifType` member (`CLASSROOM_CREATED_BY_FOLLOWED` here) with no independent confirmation that `core` actually defines it. Don't assume this one is safe just because the pattern is now proven elsewhere — each app's enum member is a separate, individually-unverified claim. See §3, §9.
 
 ---
 
@@ -1340,3 +1397,4 @@ When continuing work in a new chat, paste this file and say what you want change
 - **Parent-facing work** → check §6c first — parent auth now runs through exactly one mechanism (`ParentAccessCode`/`ParentToken`, resolved via `core.classroom_chat_bridge.resolve_parent_from_token()`), used by `ClassroomParentCodeGenerateView`, `ReportCardViewSet`, `ClassroomParentQueryListView`, `ParentQueryReplyView`, and `ClassSessionViewSet.parent_join` alike. Don't resurrect the old signed-token path (`PARENT_JOIN_TOKEN_SALT`/`generate_parent_join_token`/`ParentJoinSerializer`) — it's dead code kept only pending a project-wide grep-and-delete, see §6c.
 - **Assignments** → check §6d first. New assignments never touch `liveclass.Assignment`/`AssignmentSubmission` directly — go through `bridge.create_assignment()`/`get_assignment_submissions()`, which delegate to `assignment.bridge.*`. The local models are read-only history now; the only sanctioned exception to "liveclass never imports `assignment.models` outside `bridge.py`" is the one-off `migrate_liveclass_assignments_to_unified` command. If `assignment/bridge.py`'s real `create_context_assignment()` signature requires `roll_number`/`enrollment_no` keys unconditionally, `bridge.py`'s roster dict needs a one-line fix — this is a flagged, unconfirmed assumption, not settled fact (see §6d).
 - **Coin purchases/withdrawals** → check §6e first. `CoinPurchase.mark_success`/`mark_failed` and all six `CoinWithdrawal` write methods now raise `RuntimeError` by design — this is not a bug to "fix" by removing the stub, it's Task 6's intended read-only freeze. Any new money-moving code for top-ups/payouts belongs in `user_profile` (`CoinPurchaseRequest`/`CoinWithdrawalRequest`), writing through `user_profile.CoinLedger`, never back through these two `liveclass` models. `User.coin` and `liveclass.CoinTransaction` are still live/authoritative for the wallet balance itself.
+- **Follower fan-out on create (TASK 4)** → before relying on `notify_followers_new_classroom` (or copying its shape for a fourth app), confirm `Notification.NotifType.CLASSROOM_CREATED_BY_FOLLOWED` and a `classroom` FK on `Notification` actually exist in `models.py` (§3, §17 item 26) — both are referenced directly with no fallback, so a missing one fails the task silently (async, after the classroom-create request has already returned 201).

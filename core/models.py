@@ -33,20 +33,58 @@ changes beyond two additive indexes):
    all — that's a from-scratch index for a different query shape, not a
    duplicate of anything above.
 
-4. (this pass) Added 10 new NotifType choices for the testseries,
-   assignment, and campus-gamification apps: TESTSERIES_POSTED,
-   TESTSERIES_CHECKED, TESTSERIES_PAYOUT_RELEASED, ASSIGNMENT_POSTED,
-   ASSIGNMENT_GRADED, ASSIGNMENT_DUE_SOON, CAMPUS_REWARD_EARNED,
-   TESTSERIES_REVIEW_RECEIVED, TESTSERIES_QUERY_RECEIVED,
-   TESTSERIES_QUERY_ANSWERED. Pure addition — no existing choice was
-   renamed or removed, and choices-only changes need no migration.
-   NOTE: ASSIGNMENT_POSTED and ASSIGNMENT_GRADED already existed above
-   under the task-44/46 block (ASSIGNMENT_POSTED, ASSIGNMENT_GRADED) —
-   reused rather than duplicated with a new string, since NotifType.values
-   must stay a set of unique choice values. Only ASSIGNMENT_DUE_SOON was
-   actually new for that pair (ASSIGNMENT_DUE_REMINDER already exists
-   under the campus block and is a distinct value/label — kept both since
-   they're two different apps' reminder events, not aliases).
+4. Added 10 new NotifType choices for the testseries, assignment, and
+   campus-gamification apps: TESTSERIES_POSTED, TESTSERIES_CHECKED,
+   TESTSERIES_PAYOUT_RELEASED, ASSIGNMENT_POSTED, ASSIGNMENT_GRADED,
+   ASSIGNMENT_DUE_SOON, CAMPUS_REWARD_EARNED, TESTSERIES_REVIEW_RECEIVED,
+   TESTSERIES_QUERY_RECEIVED, TESTSERIES_QUERY_ANSWERED. Pure addition —
+   no existing choice was renamed or removed, and choices-only changes
+   need no migration. NOTE: ASSIGNMENT_POSTED and ASSIGNMENT_GRADED
+   already existed above under the task-44/46 block (ASSIGNMENT_POSTED,
+   ASSIGNMENT_GRADED) — reused rather than duplicated with a new string,
+   since NotifType.values must stay a set of unique choice values. Only
+   ASSIGNMENT_DUE_SOON was actually new for that pair
+   (ASSIGNMENT_DUE_REMINDER already exists under the campus block and is
+   a distinct value/label — kept both since they're two different apps'
+   reminder events, not aliases).
+
+5. TASK 1 (this pass) — `user_profile`'s Follow feature + a "someone you
+   follow just posted/created something" cross-app family. Two things
+   confirmed already present and unchanged (no action needed):
+   POST_LIKED / POST_COMMENTED (task 11, post app — see the block below
+   this docstring). Five new choices added:
+     - FOLLOW_REQUEST_RECEIVED / FOLLOW_REQUEST_ACCEPTED — fired by
+       `user_profile`'s private-account follow-request flow
+       (`Follow.Status.PENDING` → `ACCEPTED`, see
+       `user_profile/models.py`'s `Follow` model and
+       `AcceptFollowRequestView` in that app's `views.py`). Two separate
+       values (not one "follow_status_changed" type) because a received
+       request and an accepted request need different copy/deep-links on
+       the recipient's side, matching how this enum already keeps
+       JOIN_REQUEST_RECEIVED / JOIN_REQUEST_ACCEPTED distinct rather than
+       folding them into one type with a status field.
+     - NEW_POST_FROM_FOLLOWED / CLASSROOM_CREATED_BY_FOLLOWED /
+       TESTSERIES_CREATED_BY_FOLLOWED — "someone I follow just created
+       X" fan-out, one value per content type (post / liveclass
+       classroom / testseries), same one-type-per-source-app pattern
+       already used for TESTSERIES_POSTED vs ASSIGNMENT_POSTED vs
+       CAMPUS_SESSION_SCHEDULED above rather than a single generic
+       "new_content_from_followed" type — each source app's caller
+       fires only its own value, and a client can route/deep-link on
+       notif_type alone without inspecting `data`.
+   Added the same "which NotifType values came from feature X" frozenset
+   this file already keeps for MESSAGE_APP_TYPES/CAMPUS_APP_TYPES/
+   TESTSERIES_APP_TYPES: see `FOLLOW_APP_TYPES` below `MESSAGE_APP_TYPES`.
+   Pure choices-only addition — no migration needed for the enum values
+   themselves, but see the module's own migration note below: this
+   codebase does still generate a state-only `AlterField` migration for
+   `notif_type` whenever `choices=` changes, purely so
+   `makemigrations --check` doesn't flag drift in CI — that migration
+   carries no database operation (CharField already has no CHECK
+   constraint tied to `choices`). ⚠️ `TESTSERIES_CREATED_BY_FOLLOWED` is
+   30 characters — exactly at the `max_length=30` ceiling below, with
+   zero headroom left. The next NotifType value longer than 30 chars
+   will need `max_length` bumped in the same migration that adds it.
 
 Everything else (fields, db_table, choices, on_delete choices, the
 task-44/46 comments) is unchanged from the original — it was already
@@ -121,6 +159,8 @@ class Notification(models.Model):
         # below, which stays unchanged — post-app types are a third,
         # separate source, not folded into that set). Adding choices is
         # not a schema change (no migration needed for the enum itself).
+        # TASK 1 (this pass): CONFIRMED still present, unchanged — post
+        # app already references both of these; nothing to add here.
         POST_LIKED = "post_liked", "Post Liked"
         POST_COMMENTED = "post_commented", "Post Commented"
 
@@ -162,6 +202,23 @@ class Notification(models.Model):
         TESTSERIES_REVIEW_RECEIVED = "testseries_review_received", "New Test Series Review"
         TESTSERIES_QUERY_RECEIVED = "testseries_query_received", "New Test Series Query"
         TESTSERIES_QUERY_ANSWERED = "testseries_query_answered", "Test Series Query Answered"
+
+        # --- TASK 1 (this pass) — user_profile's Follow feature (private-
+        # account follow requests) plus the "someone you follow just
+        # created something" cross-app fan-out. See FOLLOW_APP_TYPES
+        # below (next to MESSAGE_APP_TYPES/CAMPUS_APP_TYPES/
+        # TESTSERIES_APP_TYPES) for the matching "which values belong to
+        # this feature" set. ---
+        FOLLOW_REQUEST_RECEIVED = "follow_request_received", "Follow Request Received"
+        FOLLOW_REQUEST_ACCEPTED = "follow_request_accepted", "Follow Request Accepted"
+        NEW_POST_FROM_FOLLOWED = "new_post_from_followed", "New Post From Someone You Follow"
+        CLASSROOM_CREATED_BY_FOLLOWED = (
+            "classroom_created_by_followed", "New Classroom From Someone You Follow"
+        )
+        # ⚠️ 30 chars — exactly at max_length below, zero headroom left.
+        TESTSERIES_CREATED_BY_FOLLOWED = (
+            "testseries_created_by_followed", "New Test Series From Someone You Follow"
+        )
 
     recipient = models.ForeignKey(User, on_delete=models.CASCADE, related_name="notifications")
     # max_length=30 kept as-is — the longest current NotifType value
@@ -248,6 +305,19 @@ class Notification(models.Model):
         NotifType.TESTSERIES_POSTED, NotifType.TESTSERIES_CHECKED,
         NotifType.TESTSERIES_PAYOUT_RELEASED, NotifType.TESTSERIES_REVIEW_RECEIVED,
         NotifType.TESTSERIES_QUERY_RECEIVED, NotifType.TESTSERIES_QUERY_ANSWERED,
+    })
+
+    #: TASK 1 (this pass) — user_profile's Follow feature, same "which
+    #: NotifType values came from app/feature X" pattern as the three
+    #: sets above. POST_LIKED/POST_COMMENTED are deliberately NOT in here
+    #: — they're post-app types (task 11), not follow-app types, even
+    #: though a "someone you follow" feed could plausibly surface both;
+    #: this set stays scoped to Follow-relationship-driven notifications
+    #: only, matching how CAMPUS_APP_TYPES doesn't reach into NOTICE_POSTED.
+    FOLLOW_APP_TYPES = frozenset({
+        NotifType.FOLLOW_REQUEST_RECEIVED, NotifType.FOLLOW_REQUEST_ACCEPTED,
+        NotifType.NEW_POST_FROM_FOLLOWED, NotifType.CLASSROOM_CREATED_BY_FOLLOWED,
+        NotifType.TESTSERIES_CREATED_BY_FOLLOWED,
     })
 
     def mark_read(self):

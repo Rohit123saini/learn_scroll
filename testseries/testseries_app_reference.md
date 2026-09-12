@@ -1,4 +1,4 @@
-# `testseries` App — Implementation Reference (v2 — Tasks 15/16/17 synced)
+# `testseries` App — Implementation Reference (v3 — Task 5 follower fan-out synced)
 
 > Ye woh single doc hai jisse **sara kaam ho sakta hai** — settings wiring,
 > prerequisite migrations/gaps, API integration (campus/liveclass/message
@@ -12,6 +12,12 @@
 > wo sab yahan update ho chuka hai. Code files khud source-of-truth rehte
 > hain, lekin unhe padhne ki zaroorat tabhi hai jab actual line-by-line
 > implementation dekhni ho — is doc me har cheez already extract ki hui hai.
+>
+> **v3 update:** `views.py` (`TestSeriesViewSet.publish()`) aur `tasks.py`
+> (naya `notify_followers_new_testseries` task) dobara resync kiye gaye
+> hain — Task 5, "creator ke followers ko naye published individual
+> series ka notify", is pass me add hua hai (§7.1, §11, §13, §16, §17,
+> §18).
 
 ---
 
@@ -32,7 +38,8 @@ testseries/
 ├── admin.py               # Django admin registration
 ├── bridge.py              # create_context_testseries(), get_attempts_for_context(),
 │                         # ask_query_on_series() / answer_query_on_series() (Task 16)
-├── tasks.py               # 2 Celery tasks (§11 safety nets)
+├── tasks.py               # 3 Celery tasks (§11 — 2 scheduled safety nets +
+│                         # 1 enqueued-on-publish follower fan-out, Task 5)
 ├── tests.py               # RegressionLockTests (Task 17 — 3 sequencing-lock tests)
 └── migrations/            # (khud generate karna: `manage.py makemigrations testseries`)
 ```
@@ -150,6 +157,8 @@ nahi. Jo already resolved ho chuke hain unko bhi list me rakha hai
 | 3.6 | `liveclass.bridge.create_testseries(...)` | `liveclass` | ❌ **STILL OPEN** — calls `create_context_testseries(source="liveclass", is_paid=<teacher's choice>, ...)` |
 | 3.7 | `message.models.DoubtQuestion.context_type` / `.context_id` (generic opaque pointer fields) | `message` | ⚠️ **ASSUMED ADDED this pass** — `bridge.py`'s Task 16 comment says these were added to `DoubtQuestion` this pass so `testseries` can attach queries without a new Q&A model. `message/models.py`'s own source wasn't shared to `testseries` for direct verification — confirm the migration actually landed in `message` before relying on `ask_query_on_series()` in production. |
 | 3.8 | `message.services.answer_doubt_question(doubt, actor, answer_text, answered_by=...)` — `answered_by` param | `message` | ⚠️ **ASSUMED ADDED this pass** — same Task 16 pass per `bridge.py`'s comment; `actor=None` skips `message`'s own group-admin/mod check (a testseries doubt has no group). Confirm signature in `message/services.py` before deploy. |
+| 3.9 | `Notification.NotifType.TESTSERIES_CREATED_BY_FOLLOWED` (NEW, Task 5) | `core` | ⚠️ **UNCONFIRMED** — `tasks.py::notify_followers_new_testseries()` references this enum member directly (no `_TransactionTypeGap`-style shim, unlike how §3.1/§3.2 were guarded before they landed). Not flagged as an assumption in the task's own code comments, but `core`'s enum source wasn't available this pass to verify it actually exists — confirm before relying on the follower-notify fan-out in production; if missing, `TestSeriesViewSet.publish()` itself still succeeds (the notify task runs async, after `publish()` has already returned 200), but the task run will fail with `AttributeError`. |
+| 3.10 | `core.services.create_bulk_notifications(recipient_ids, notif_type, title, message, data=...)` (Task 5) | `core` | ✅ **assumed already resolved** — `tasks.py`'s own comment says this is the same bulk-insert helper `post`/`liveclass`'s equivalent follower-fan-out tasks already call, so unlike §3.9 this isn't a new/unverified surface — just noted here for completeness since it's a new cross-app call site for `testseries` specifically. |
 
 **Once §3.3 lands:** `TestSeriesReview.create_review()` needs no code
 change — the enum reference already points at the real name, it just
@@ -439,7 +448,14 @@ query; `PermissionError` if `teacher` isn't that series' creator.
   here (that's roster-driven, only meaningful for campus/liveclass —
   see `bridge.create_context_testseries`).
 - `@action publish` — creator-only, 400 if not `draft` or zero
-  questions; recomputes `total_marks`, sets `published`.
+  questions; recomputes `total_marks`, sets `published`. **(Task 5,
+  NEW)** for `source="individual"` series only, also enqueues
+  `tasks.notify_followers_new_testseries.delay(series.id)` — notifies
+  the creator's accepted followers that a new series just went live.
+  Never runs inline (a popular creator's follower list can be
+  thousands-large) and never fires for `campus`/`liveclass`-context
+  series, which already notify their own roster through a separate,
+  membership-based path (see `perform_create` above and §11/§13).
 
 ### 7.2 `QuestionViewSet` (nested, `/testseries/{series_pk}/questions/`)
 Creator-only, **draft-only** writes (`_check_draft_and_owner`). Every
@@ -617,10 +633,13 @@ questions):
 |---|---|---|
 | `send_pending_check_reminders` | daily | Notifies creators with `submitted`/`partially_checked` attempts older than `TESTSERIES_REMINDER_DAYS`. Uses `NotifType.GENERIC` (string literal `"generic"`) — no dedicated reminder type exists in the confirmed enum list (§3), not guessed. |
 | `refund_unchecked_paid_attempts` | daily | Auto-refunds any `escrowed` purchase older than `TESTSERIES_AUTO_REFUND_DAYS` whose attempt never reached `checked`. This is the exploit-guard: without it, a creator could hold a paid attempt forever without reviewing it. |
+| `notify_followers_new_testseries(series_id)` **(Task 5, NEW)** | enqueued via `.delay()`, not scheduled | Fired from `TestSeriesViewSet.publish()` (§7.1), only for `source="individual"` series. Notifies every `ACCEPTED` follower (`user_profile.models.Follow`) of the series' creator, minus anyone who has restricted the creator (`user_profile.models.RestrictUser` — one bulk exclusion query, not a per-follower check). Uses `core.services.create_bulk_notifications()` directly (a single bulk INSERT) rather than this module's own `_notify()` helper, since looping `_notify()` once per follower wouldn't scale to a fan-out that can be thousands of rows — same pattern as the `post`/`liveclass` follower-fan-out tasks. Re-checks `series.source`/`series.status` itself (doesn't just trust the caller) in case the task is invoked directly outside `publish()`. See §3.9 for the unconfirmed `NotifType.TESTSERIES_CREATED_BY_FOLLOWED` enum member this task depends on. |
 
-Neither task touches reviews or doubt-queries — no Celery follow-up
-was added for Task 15/16 (e.g. no "nudge student to review after
-checked" reminder exists yet — see §17 open items).
+The first two tasks don't touch reviews or doubt-queries — no Celery
+follow-up was added for Task 15/16 (e.g. no "nudge student to review
+after checked" reminder exists yet — see §17 open items). The new
+Task 5 task above is unrelated to that gap — it's a one-shot,
+publish-triggered fan-out, not a scheduled reminder.
 
 ---
 
@@ -739,8 +758,8 @@ Har jagah jahan `testseries` doosre apps ko chhoo raha hai:
 | `login.User` | `testseries` imports directly | `creator`/`student`/`buyer`/`reviewed_by`/`checked_by` FKs | Not a bridge case — `User` is the shared identity model every app uses directly, same as everywhere else in the codebase. |
 | `campus` | `campus -> testseries` only (never reverse) | `campus`'s own proxy endpoint calls `bridge.create_context_testseries(source="campus", ...)`; `testseries.permissions.user_can_review_attempt()` calls `campus.bridge.can_review_testseries_attempt()` (§3.4, still a gap) | Golden rule: `testseries` never imports `campus.Section` etc. Context is opaque (`context_type`/`context_id`). |
 | `liveclass` | `liveclass -> testseries` only | Same shape as campus — `liveclass.bridge.create_testseries()` (§3.6, still a gap) calls `create_context_testseries(source="liveclass", ...)` with teacher-chosen `is_paid`/`price_coins` | No server-side force on `is_paid` for liveclass (unlike campus). |
-| `user_profile` | `testseries -> user_profile` (lazy import) | `CoinLedger.record_transaction()` via `_record_coin_transaction()` — used for purchase debit, payout release, refund | Enum members `TESTSERIES_PURCHASE`/`TESTSERIES_PAYOUT` confirmed to exist (§3.1, resolved). `REFUND` type reused as-is for refunds. |
-| `core` | `testseries -> core` (lazy import) | `core.services.create_notification()` via `_notify()` — `TESTSERIES_POSTED`, `TESTSERIES_CHECKED`, `TESTSERIES_PAYOUT_RELEASED` (all resolved, §3.2), `TESTSERIES_REVIEW_RECEIVED` (**still a gap, §3.3**), and a plain `"generic"` string for the reminder task | |
+| `user_profile` | `testseries -> user_profile` (lazy import) | `CoinLedger.record_transaction()` via `_record_coin_transaction()` — used for purchase debit, payout release, refund. **(Task 5, NEW)** `tasks.py::notify_followers_new_testseries()` also reads `user_profile.models.Follow` (accepted-follower ids) and `user_profile.models.RestrictUser` (bulk exclusion) directly — read-only, no coin/ledger involvement. | Enum members `TESTSERIES_PURCHASE`/`TESTSERIES_PAYOUT` confirmed to exist (§3.1, resolved). `REFUND` type reused as-is for refunds. `Follow`/`RestrictUser` are read directly (not via a bridge function) — same lazy-import-inside-the-task pattern as everywhere else in this app. |
+| `core` | `testseries -> core` (lazy import) | `core.services.create_notification()` via `_notify()` — `TESTSERIES_POSTED`, `TESTSERIES_CHECKED`, `TESTSERIES_PAYOUT_RELEASED` (all resolved, §3.2), `TESTSERIES_REVIEW_RECEIVED` (**still a gap, §3.3**), and a plain `"generic"` string for the reminder task. **(Task 5, NEW)** `tasks.py::notify_followers_new_testseries()` calls `core.services.create_bulk_notifications()` directly (bypassing `_notify()`) with `Notification.NotifType.TESTSERIES_CREATED_BY_FOLLOWED` | `TESTSERIES_CREATED_BY_FOLLOWED` is **unconfirmed** (§3.9); `create_bulk_notifications` itself is assumed to already exist, reused from `post`/`liveclass`'s equivalent tasks (§3.10). |
 | `message` | `testseries -> message` (lazy import) **(Task 16, NEW)** | `message.models.DoubtQuestion` (created via `bridge.ask_query_on_series()`), `message.services.answer_doubt_question()` (via `bridge.answer_query_on_series()`) | Assumes `DoubtQuestion.context_type`/`context_id` generic pointer fields exist (§3.7) and `answer_doubt_question()` accepts an `answered_by` kwarg (§3.8) — **both assumed added this pass, not independently verified against `message`'s real source**. Confirm before relying on this in production. `message` never imports `testseries` back. |
 | `assignment` | no direct link | `Question.auto_grade()` uses the **shared** `common.question_grading.auto_grade()` module — same grading logic as `assignment`, avoiding duplication. Attachment validators (`common.attachment_validators`) are also shared with `assignment` (Task 7). | Not a runtime cross-app call, just shared utility code both apps import from `common`. |
 
@@ -870,6 +889,21 @@ sections above and in the code itself.
    answer. Fixed: `answered_by=teacher` now passed explicitly (§5.4,
    §3.8).
 
+**This pass's own addition (Task 5), added to the changelog:**
+
+8. **New "creator's followers get notified on publish" feature.**
+   `TestSeriesViewSet.publish()` now enqueues
+   `tasks.notify_followers_new_testseries.delay(series.id)` for
+   `source="individual"` series (§7.1). New Celery task
+   `notify_followers_new_testseries` added to `tasks.py` (§11),
+   bulk-notifying accepted followers via
+   `core.services.create_bulk_notifications()` while excluding
+   followers who have restricted the creator
+   (`user_profile.models.RestrictUser`). Introduces one new,
+   unconfirmed `core` dependency — `Notification.NotifType.
+   TESTSERIES_CREATED_BY_FOLLOWED` (§3.9) — flagged as an open
+   cross-app item, not yet verified to exist.
+
 ---
 
 ## 17. Open items (carried over, still valid — updated)
@@ -913,6 +947,19 @@ sections above and in the code itself.
     landed this pass per `bridge.py`'s own comments, but `message`'s
     source wasn't available to cross-check directly against
     `testseries`. Confirm before relying on Task 16 in production.
+12. **`NotifType.TESTSERIES_CREATED_BY_FOLLOWED` unconfirmed (NEW,
+    Task 5, §3.9)** — `tasks.py::notify_followers_new_testseries()`
+    references it directly, with no fallback/shim. If `core` hasn't
+    added it, the follower-fan-out task fails with `AttributeError`
+    on every run (asynchronously — `publish()` itself still returns
+    200 either way, since the task is enqueued via `.delay()` after
+    the series is already saved as published).
+13. **No unfollow/opt-out check on the new-series notification (Task
+    5)** — every `ACCEPTED` follower gets notified, same "no
+    per-follower bell opt-in yet" MVP trade-off already called out for
+    `post`/`liveclass`'s equivalent fan-outs (§11). Worth revisiting
+    together with those if/when a notification-preferences feature
+    ships.
 
 ---
 
@@ -926,6 +973,8 @@ sections above and in the code itself.
 - [ ] §3.6 — `liveclass.bridge.create_testseries()` implemented — **still open**
 - [ ] §3.7 — confirm `message.DoubtQuestion.context_type`/`context_id` fields actually exist/migrated — **verify, assumed only**
 - [ ] §3.8 — confirm `message.services.answer_doubt_question()` accepts `answered_by=` — **verify, assumed only**
+- [ ] §3.9 — confirm `Notification.NotifType.TESTSERIES_CREATED_BY_FOLLOWED` exists on `core` — **still open, unconfirmed (Task 5)**
+- [ ] §3.10 — confirm `core.services.create_bulk_notifications()` signature matches what `tasks.py::notify_followers_new_testseries()` calls (`recipient_ids, notif_type, title, message, data=...`) — assumed reused from `post`/`liveclass`, not independently re-verified this pass
 - [ ] `testseries/migrations/` generated and applied (incl. `TestSeriesReview` table, Task 15)
 - [ ] `testseries.urls` mounted in project `urls.py` (incl. new review routes)
 - [ ] Celery beat schedule entries added (§2)

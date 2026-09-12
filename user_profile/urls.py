@@ -18,6 +18,7 @@ from .views import (
     UnblockUserView,
     UnrestrictUserView,
     UpdateProfileView,
+    UserPreferenceView,
     UserProfileDetailView,
     UserSearchView,
 )
@@ -55,4 +56,7 @@ urlpatterns = [
     # /profile/... URL-shape consistency RestrictUser's docstring
     # (models.py) calls out for restricted-users/ vs blocked-users/.
     path("coin-withdrawals/", CoinWithdrawalRequestView.as_view(), name="coin-withdrawal-requests"),
+    # TASK 1 — theme/language preferences, same URL shape as core's
+    # notification-preferences/me/.
+    path("preferences/me/", UserPreferenceView.as_view(), name="user-preferences"),
 ]

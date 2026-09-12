@@ -160,6 +160,8 @@ INSTALLED_APPS = [
     "message",
     'liveclass',
     'campus',
+    'testseries',
+    'assigments',
 
     # NEW (task 42) — neutral notification + classroom<->chat bridge
     # layer. Must be able to resolve `liveclass.Classroom`/`ClassSession`

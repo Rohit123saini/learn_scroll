@@ -1764,3 +1764,84 @@ def poll_transcription_jobs():
     if resolved:
         logger.info("poll_transcription_jobs: resolved %s caption job(s).", resolved)
     return resolved
+
+
+# ---------------------------------------------------------------------------
+# TASK 4 — "new classroom from someone you follow" fan-out.
+#
+# Enqueued via `_safe_delay(notify_followers_new_classroom, classroom.id)`
+# from `ClassroomViewSet.perform_create()` in views.py, never called
+# inline — same reasoning as `post.tasks.notify_followers_new_post`
+# (this app's own sibling feature): a popular teacher's follower list can
+# run into the thousands, and a synchronous loop inside the classroom-
+# create request/response cycle would make that request slow in direct
+# proportion to follower count. The actual `user_profile.Follow` read and
+# the notification fan-out both happen here, off the request path.
+#
+# Uses `core.services.create_bulk_notifications` (one bulk INSERT) rather
+# than looping `create_notification` once per follower — looping would
+# also mean one `is_restricted_between` query per follower for the
+# actor-restrict check, which doesn't scale to a fan-out that can be
+# thousands of rows. The restrict exclusion below does the same thing
+# `create_notification` would have per-recipient, but as a single bulk
+# query up front instead (same pattern used in post/tasks.py's sibling
+# task — see that module for the fuller explanation).
+# ---------------------------------------------------------------------------
+@shared_task(name="liveclass.notify_followers_new_classroom")
+def notify_followers_new_classroom(classroom_id):
+    """Notify every ACCEPTED follower of a classroom's teacher that the
+    teacher just created a new classroom. MVP version per the design
+    doc: no per-follower "bell" opt-in yet — every accepted follower
+    gets notified. `classroom` FK is set on each Notification row (the
+    field already exists on the model) so a client can deep-link
+    straight into the new classroom from the notification.
+    """
+    from core.models import Notification
+    from core.services import create_bulk_notifications
+    from user_profile.models import Follow, RestrictUser
+
+    from .models import Classroom
+
+    classroom = Classroom.objects.select_related("teacher").filter(pk=classroom_id).first()
+    if not classroom:
+        # Classroom was deleted (or closed+purged) between enqueue and
+        # run — nothing left to notify about.
+        logger.warning("notify_followers_new_classroom: Classroom %s no longer exists", classroom_id)
+        return False
+
+    follower_ids = set(
+        Follow.objects.filter(
+            following_id=classroom.teacher_id, status=Follow.Status.ACCEPTED
+        ).values_list("follower_id", flat=True)
+    )
+    if not follower_ids:
+        return 0
+
+    # Restrict is defined to be invisible to the restricted user (see
+    # create_notification's own docstring in core/services.py) — that
+    # must hold here too, not just on the single-recipient path. One
+    # bulk query for every follower who has restricted this classroom's
+    # teacher, instead of one is_restricted_between() call per follower.
+    restricting_follower_ids = set(
+        RestrictUser.objects.filter(
+            user_id__in=follower_ids, restricted_id=classroom.teacher_id
+        ).values_list("user_id", flat=True)
+    )
+    recipient_ids = follower_ids - restricting_follower_ids
+    if not recipient_ids:
+        return 0
+
+    teacher_name = classroom.teacher.get_full_name() or classroom.teacher.username
+    create_bulk_notifications(
+        recipient_ids,
+        Notification.NotifType.CLASSROOM_CREATED_BY_FOLLOWED,
+        f"{teacher_name} created a new classroom",
+        f"'{classroom.title}' is now live.",
+        classroom=classroom,
+        data={"classroom_id": str(classroom.id), "actor_id": str(classroom.teacher_id)},
+    )
+    logger.info(
+        "notify_followers_new_classroom: notified %d follower(s) for classroom %s",
+        len(recipient_ids), classroom_id,
+    )
+    return len(recipient_ids)

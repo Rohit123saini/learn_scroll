@@ -1,34 +1,108 @@
 # `user_profile` App — Complete Self-Contained Reference
 
-> **v4 — v3.1 ke upar TASK 1 / TASK 3 / TASK 4 / TASK 5 (poora coin-economy
-> build-out: purchase → withdrawal → fraud/anti-abuse layer) fully merged.**
+> **v5 — v4 ke upar TASK 1 (naya `UserPreference` model — theme/language) aur
+> TASK 2 (`services.py` — Follow notification helper) merged.**
 > Ye ek hi file hai jisme poore **user_profile** Django app ka sara logic,
 > code, connections, flows, fraud rules, aur known issues cover hain. Iske
 > alawa kisi aur file ki zaroorat nahi — sab kuch (models → serializers →
-> views → urls → admin → fraud → tasks → tests) yahin milega, current code
-> ke saath.
+> views → urls → admin → fraud → services → tasks → tests) yahin milega,
+> current code ke saath.
 >
-> **v3.1 se kya badla, sabse pehle:** section 0.3 (Changelog v3.1 → v4)
-> padho. Short version: `CoinLedger` ab sirf ek chhota audit-table nahi
-> raha — ab uske upar poora coin-economy stack khada hai:
-> - **TASK 1** — 5 naye `TransactionType` choices (testseries + withdrawal
->   ke liye prerequisite).
-> - **TASK 3** — Buy-Coin flow (`CoinPurchaseRequest`, `BuyCoinView`,
->   `BuyCoinConfirmView`) — pending → success/failed, real money → coins.
-> - **TASK 4** — Withdraw-Coin flow (`CoinWithdrawalRequest`,
->   `CoinWithdrawalRequestView`) — escrow-style debit-on-request, coins →
->   real money.
-> - **TASK 5** — naya `fraud.py` module: withdrawal-eligibility rule
->   (sirf purchased/gifted coins hi withdrawable) + earn-rate limiting
->   (burst-farming se bachao), dono `CoinLedger.objects.
->   record_transaction()` ke andar hi enforce hote hain — koi bhi call
->   site inhe bypass nahi kar sakta.
+> **v4 se kya badla, sabse pehle:** section 0.4 (Changelog v4 → v5) padho.
+> Short version — is baar coin-economy me kuch nahi bada, ye do chhote,
+> independent additions hain:
+> - **TASK 1** — naya `UserPreference` model (`theme` + `language`,
+>   `OneToOne` + get-or-create — `core.NotificationPreference` jaisa hi
+>   pattern) + `GET/PATCH /user-profile/preferences/me/` endpoint.
+> - **TASK 2** — naya `services.py` module: `_notify(...)`, ek thin
+>   lazy-import wrapper `core.services.create_notification` ke upar,
+>   Follow events ke liye banaya gaya hai — **⚠️ is pass me sirf module
+>   add hua hai, `FollowAPIView`/`AcceptFollowRequestView` (views.py) me
+>   abhi kahin se call nahi hota** (see §11 item 16).
 >
-> Har naya piece **existing `CoinLedger.objects.record_transaction()`**
-> ke upar hi bana hai — koi doosra balance-writing path nahi khula.
-> Poora document is round ke baad, fully updated code ke saath, dubara
-> organize kiya gaya hai; purane version-history (v1→v2→v3→v3.1) sections
-> §0 me neeche traceable hain, delete nahi kiye gaye.
+> Naya migration bhi is round me aaya: `migrations/
+> 0002_add_userpreference.py` (TASK 1's `UserPreference` table). Poora
+> document is round ke baad, fully updated code ke saath, dubara organize
+> kiya gaya hai; purane version-history (v1→v2→v3→v3.1→v4) sections §0 me
+> neeche traceable hain, delete nahi kiye gaye.
+
+---
+
+## 0.4 Changelog — v4 → v5 (TASK 1 — `UserPreference`; TASK 2 — `services.py`)
+
+Do independent, chhote additions is round me — koi ek doosre ko touch nahi
+karta, aur na hi coin-economy (v4) ka koi hissa. Files touched:
+`models.py`, `serializers.py`, `views.py`, `urls.py`, `admin.py` (sab TASK 1
+ke liye, ek-ek chhota edit), plus ek naya file `services.py` (TASK 2) aur
+ek naya migration `0002_add_userpreference.py`.
+
+### 🎨 TASK 1 — naya `UserPreference` model (per-user theme + language)
+
+- Naya model `UserPreference` — `user` (`OneToOne` → `settings.
+  AUTH_USER_MODEL`, `related_name="preferences"`), `theme` (`TextChoices`:
+  `light`/`dark`/`system`, default `system`), `language` (`CharField`,
+  ISO 639-1 jaisa code, `max_length=10` taaki `en-US`/`zh-Hans` jaisa
+  locale-qualified tag bhi fit ho jaaye, default `en`), `updated_at`
+  (`auto_now`).
+- `for_user(cls, user)` classmethod — `get_or_create(user=user)` wrapper,
+  taaki koi bhi caller (ye app ka apna view, ya koi doosri app jo baad me
+  kisi user ka theme/language jaanna chahe) bina `DoesNotExist` handle
+  kiye ek row wapas paaye — chahe us user ne kabhi apni preference save
+  na ki ho.
+- ⚠️ **ASSUMPTION** — `core.NotificationPreference` (jiska pattern copy
+  karne ko kaha gaya tha) is pass me kisi upload ka hissa nahi thi, isliye
+  `for_user()` ka shape *describe* kiye gaye pattern (OneToOne +
+  get-or-create classmethod) se banaya gaya hai, `core/models.py` se
+  copy nahi kiya gaya. Agar asli `core.NotificationPreference` alag naam/
+  shape use karti hai (jaise classmethod ka naam `for_user` na ho), to
+  us file ko match karna is model se zyada priority rakhega — see §11
+  item 17.
+- Row lazily banti hai — signup pe nahi. Zyada users kabhi theme/language
+  touch hi nahi karenge, isliye `for_user()` jab pehli baar call hota hai
+  (yaani `/preferences/me/` GET/PATCH pe) tabhi row bhi banti hai.
+- Naya endpoint: **`GET/PATCH /user-profile/preferences/me/`**
+  (`UserPreferenceView`) — bilkul `core`'s `notification-preferences/
+  me/` jaisa shape/response envelope (`{"status", "message", "data"}`).
+  GET kabhi 404 nahi deta — `for_user()` hamesha ek row (defaults sahit)
+  return karta hai.
+- Naya migration: `user_profile/migrations/0002_add_userpreference.py`
+  (dependency: `0001_initial` + `AUTH_USER_MODEL`'s swappable dependency).
+- `admin.py` me `UserPreferenceAdmin` register hui — `CoinLedgerAdmin`
+  ke ulat, ye **normal edit-allowed** hai (add/change/delete koi
+  restriction nahi), kyunki is table ka koi audit-trail invariant
+  protect nahi karna — support ko kisi user ki stuck preference seedhe
+  admin se fix karne dena useful hai.
+
+### 🔔 TASK 2 — naya `services.py` (Follow notification helper)
+
+- Naya module `user_profile/services.py` — sirf ek function, `_notify
+  (recipient, notif_type, title, message="", *, actor=None, data=None)`,
+  jo `core.services.create_notification` ko **lazy-import karke** call
+  karta hai (module-level import nahi — kyun, neeche dekho).
+- **Kyun lazy import zaroori hai:** dependency already dono taraf chalti
+  hai — `create_notification` khud bhi `user_profile.views.
+  is_restricted_between` ko lazy-import karta hai (restrict-check ke
+  liye — `core/services.py`'s apne docstring ke mutabik). Agar ye file
+  top-level `from core.services import ...` karti, to Django ke
+  app-loading order ke hisaab se ek real circular import ban sakta tha.
+  Isi lazy-import ko is ek helper me centralize karne ka fayda: `views.py`
+  ke Follow-related views ko har jagah ye boilerplate repeat nahi karna
+  padega.
+- Same contract jo `create_notification` khud follow karta hai: kabhi
+  raise nahi karta, kabhi push/email/sms/whatsapp nahi bhejta — sirf
+  in-app bell row.
+- ⚠️ **Is pass me sirf module add hua hai — kahin se call nahi hota.**
+  Docstring `FollowAPIView`/`AcceptFollowRequestView` ko target karta
+  hai, lekin `views.py` is round me touch nahi hui — na koi naya
+  `notif_type` decide kiya gaya, na koi actual `_notify(...)` call kisi
+  view me add hua. Jab wire kiya jaaye, `core.models.Notification.
+  NotifType` me follow-specific values (jaise `FOLLOW_REQUEST`/
+  `FOLLOW_ACCEPTED`) confirm karna padega — `core/models.py` is pass me
+  bhi upload nahi hua tha. See §11 item 16 for the open wiring work.
+- `liveclass`/`testseries` jaisi kisi "reference `services.py`" (jise
+  copy kiya ja sake) is codebase me maujood nahi thi — isliye ye sirf
+  us *pattern* ko follow karta hai jo doosri apps ke docstrings point
+  karte hain (lazy-import core.services), field-for-field copy nahi.
 
 ---
 
@@ -443,8 +517,10 @@ flow), followers/following lists, user search, "chat contacts" search
 (mutual/connected users only), block/unblock users (enforced across
 search/follow/profile-view), restrict/unrestrict users (one-way, silent
 relationship — record only, effects not yet consumed by other apps),
-read-only coin transaction history, profile update (with image upload +
-privacy toggle).
+coin economy (ledger, buy-coin, withdraw-coin, fraud/anti-abuse layer),
+per-user theme/language preferences (TASK 1, v5), profile update (with
+image upload + privacy toggle), and a not-yet-wired Follow-notification
+helper (TASK 2, v5 — see §8c).
 
 **Tech stack:** Django + Django REST Framework + `drf-spectacular` (for
 OpenAPI docs via `@extend_schema`).
@@ -452,14 +528,18 @@ OpenAPI docs via `@extend_schema`).
 **Files in this app:**
 | File | Responsibility |
 |---|---|
-| `models.py` | `Follow`, `BlockUser`, `RestrictUser`, `CoinLedger` (+ `CoinLedgerManager.record_transaction()`) models |
-| `serializers.py` | All request/response serializers + `accepted_connection_ids()` / `bulk_accepted_connection_ids()` helpers |
+| `models.py` | `Follow`, `BlockUser`, `RestrictUser`, `CoinLedger` (+ `CoinLedgerManager.record_transaction()`), `CoinPurchaseRequest`, `CoinWithdrawalRequest`, `UserPreference` (**TASK 1, v5** — theme/language, `for_user()`) models |
+| `serializers.py` | All request/response serializers (incl. `UserPreferenceSerializer`, **v5**) + `accepted_connection_ids()` / `bulk_accepted_connection_ids()` helpers |
 | `views.py` | All API endpoint logic (class-based views) + `is_blocked_between()` / `is_restricted_between()` helpers |
 | `urls.py` | URL routing |
 | `admin.py` | Django admin registration (proper `ModelAdmin` configs) |
 | `apps.py` | App config (`name = 'user_profile'`) |
+| `fraud.py` | Withdrawal-eligibility + earn-rate-limiting checks, enforced inside `CoinLedgerManager.record_transaction()` |
+| `services.py` | **New, v5, TASK 2** — `_notify()`, a lazy-import wrapper around `core.services.create_notification` for Follow events. **Not yet called from any view** — see §8c / §11 item 16 |
 | `tasks.py` | Celery task `reconcile_follow_counts` — periodic followers/following counter drift correction |
-| `tests.py` | `FollowModelTests`, `FollowAPITests`, `PrivateAccountFollowRequestFlowTests`, `BlockUnblockEdgeCaseTests`, `RestrictUserModelTests`, `UserSearchExclusionTests`, `FollowRaceConditionTests` |
+| `migrations/` | `0001_initial.py` (`Follow`/`BlockUser`/`CoinLedger`/`RestrictUser`), `0002_add_userpreference.py` (**new, v5** — `UserPreference`) |
+| `tests.py` | `FollowModelTests`, `FollowAPITests`, `PrivateAccountFollowRequestFlowTests`, `BlockUnblockEdgeCaseTests`, `RestrictUserModelTests`, `UserSearchExclusionTests`, `FollowRaceConditionTests`, `CoinWithdrawalRequestManagerTests`, `CoinWithdrawalRequestAPITests` |
+| `tests_fraud.py` | `WithdrawalEligibilityTests`, `EarnRateLimitTests` |
 
 ---
 
@@ -512,6 +592,22 @@ INSTALLED_APPS = [
 ]
 ```
 
+**v5 note — `UserPreference` needs NO new field on `User`.** Unlike the
+list above, `UserPreference` (TASK 1, §4) is its own table with a
+`OneToOne` pointing *at* `settings.AUTH_USER_MODEL` (`related_name=
+"preferences"`) — nothing needs to be added to your custom `User` model
+for it to work, only the migration (`0002_add_userpreference.py`) needs
+to run.
+
+**v5 note — `services.py` needs a `core` app with `core.services.
+create_notification` importable.** This is the same dependency
+`views.py`'s `AcceptFollowRequestView`/`FollowAPIView` already lazy-
+import (`from core.models import Notification`) elsewhere in this file
+— `core` itself was never part of any upload for this app, so its
+actual signature is inferred from those existing call sites, not
+verified. Harmless today since nothing calls `services._notify()` yet
+(see §8c) — this only matters once that wiring happens.
+
 ---
 
 ## 3. `apps.py`
@@ -528,6 +624,50 @@ Nothing special — standard app config, unchanged from v1.
 
 ---
 
+## 3a. `migrations/` (new subsection, v5)
+
+Two migration files exist for this app as of v5:
+
+| File | What it creates |
+|---|---|
+| `0001_initial.py` | `BlockUser`, `CoinLedger`, `Follow`, `RestrictUser` (the four models that existed at the time this app's first migration was generated — `CoinPurchaseRequest`/`CoinWithdrawalRequest` from TASK 3/4 would need their own follow-up migration, not shown in any upload for this app; this doc doesn't assume one exists — see §11 item 5 for the related `CoinLedger` shape-change migration caution). |
+| `0002_add_userpreference.py` | **New, v5, TASK 1** — `UserPreference` (`theme`, `language`, `updated_at`, `user` OneToOne to `settings.AUTH_USER_MODEL`). Depends on `0001_initial` + `migrations.swappable_dependency(settings.AUTH_USER_MODEL)`. Written by hand (no Django install available in this pass to run `makemigrations` against) — field defs match `UserPreference` in §4 exactly; regenerate with `manage.py makemigrations user_profile` and diff against this file if you want Django's own migration writer to confirm it.
+
+```python
+# user_profile/migrations/0002_add_userpreference.py
+import django.db.models.deletion
+from django.conf import settings
+from django.db import migrations, models
+
+
+class Migration(migrations.Migration):
+
+    dependencies = [
+        migrations.swappable_dependency(settings.AUTH_USER_MODEL),
+        ('user_profile', '0001_initial'),
+    ]
+
+    operations = [
+        migrations.CreateModel(
+            name='UserPreference',
+            fields=[
+                ('id', models.BigAutoField(auto_created=True, primary_key=True, serialize=False, verbose_name='ID')),
+                ('theme', models.CharField(choices=[('light', 'Light'), ('dark', 'Dark'), ('system', 'System')], default='system', max_length=10)),
+                ('language', models.CharField(default='en', max_length=10)),
+                ('updated_at', models.DateTimeField(auto_now=True)),
+                ('user', models.OneToOneField(on_delete=django.db.models.deletion.CASCADE, related_name='preferences', to=settings.AUTH_USER_MODEL)),
+            ],
+            options={
+                'ordering': ['-updated_at'],
+            },
+        ),
+    ]
+```
+
+Run `python manage.py migrate user_profile` after pulling this in — no
+data migration needed (a brand-new table, zero existing rows).
+
+---
 
 ## 4. `models.py` (full current code)
 
@@ -1641,7 +1781,74 @@ class CoinWithdrawalRequest(models.Model):
         ]
 
     def __str__(self):
-        return f"{self.user.username}: {self.coins} coins withdrawal ({self.status})"```
+        return f"{self.user.username}: {self.coins} coins withdrawal ({self.status})"
+
+
+class UserPreference(models.Model):
+    """
+    TASK 1 (this pass) — per-user UI/locale preferences: `theme` and
+    `language`. Deliberately the same OneToOne + get-or-create shape as
+    `core.NotificationPreference`.
+
+    ⚠️ ASSUMPTION — `core/models.py` wasn't part of this upload, so
+    `NotificationPreference`'s actual field names/`for_user()` body
+    aren't visible here. This reproduces the pattern as described
+    (OneToOne to the user, a classmethod that get-or-creates, an
+    `updated_at`) rather than copying real code. If
+    `core.NotificationPreference` turns out to differ (e.g. it names its
+    classmethod something other than `for_user`, or keys the get-or-
+    create differently), prefer matching that file exactly over this
+    one, and adjust `for_user()`/the `/preferences/me/` view below to
+    match.
+
+    Row is NOT created at signup — it's get-or-created lazily the first
+    time anything calls `for_user()` (same lazy-row idea `CoinLedger`
+    etc. don't need, but a preferences table specifically benefits from:
+    most users never touch theme/language, so this avoids a write on
+    every signup for a row most rows will just sit at defaults for).
+    """
+
+    class Theme(models.TextChoices):
+        LIGHT = "light", "Light"
+        DARK = "dark", "Dark"
+        SYSTEM = "system", "System"
+
+    user = models.OneToOneField(
+        settings.AUTH_USER_MODEL,
+        related_name="preferences",
+        on_delete=models.CASCADE,
+    )
+
+    theme = models.CharField(
+        max_length=10,
+        choices=Theme.choices,
+        default=Theme.SYSTEM,
+    )
+
+    # ISO 639-1 code ("en", "hi", "es", ...). max_length=10 rather than
+    # 2 so a locale-qualified tag ("en-US", "zh-Hans") fits too, without
+    # forcing a migration the day someone needs that.
+    language = models.CharField(max_length=10, default="en")
+
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-updated_at"]
+
+    def __str__(self):
+        return f"{self.user.username} preferences ({self.theme}/{self.language})"
+
+    @classmethod
+    def for_user(cls, user):
+        """
+        Get-or-create wrapper — mirrors `core.NotificationPreference`'s
+        pattern so every caller (this app's own view, or another app
+        that wants to know a user's theme/language later) gets a row
+        back unconditionally instead of having to branch on
+        DoesNotExist for a user who's never saved a preference before.
+        """
+        obj, _created = cls.objects.get_or_create(user=user)
+        return obj```
 
 ### Model notes
 
@@ -1691,6 +1898,15 @@ class CoinWithdrawalRequest(models.Model):
   `settings.AUTH_USER_MODEL`, and `record_transaction()` gets the
   concrete user model via `type(user)` rather than importing it, keeping
   `user_profile` decoupled from `login` the same way it always has been.
+- **`UserPreference`** (TASK 1, new, v5) — unrelated to the coin economy;
+  a standalone `OneToOne` table for `theme`/`language`. `for_user()` is
+  the one sanctioned way to fetch/create a user's row (same "one
+  sanctioned path" shape `record_transaction()` and the `Coin*Request`
+  managers already establish for their own tables, just without a write
+  that needs atomicity here — get-or-create is enough). ⚠️ Its
+  `for_user()` shape mirrors a *described* `core.NotificationPreference`
+  pattern, not copied code — `core/models.py` wasn't part of this
+  upload (see §0.4 / §11 item 17).
 
 ---
 
@@ -1712,6 +1928,7 @@ from .models import (
     CoinWithdrawalRequest,
     Follow,
     RestrictUser,
+    UserPreference,
 )
 
 User = get_user_model()
@@ -2135,7 +2352,21 @@ class CoinWithdrawalRequestSerializer(serializers.ModelSerializer):
                     )
                 }
             )
-        return attrs```
+        return attrs
+
+# TASK 1 -- theme/language preferences.
+# Row is get-or-created via UserPreference.for_user() in the view
+# (models.py) -- this serializer only ever sees a row that already
+# exists, so "user" itself isn't a field here (it's set by
+# for_user(), never by client input). updated_at is read-only for the
+# same reason CoinPurchaseRequestSerializer's timestamps are: it's
+# maintained by auto_now, not something a PATCH body should be able
+# to set.
+class UserPreferenceSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = UserPreference
+        fields = ["theme", "language", "updated_at"]
+        read_only_fields = ["updated_at"]```
 
 ### Serializer notes
 
@@ -2168,6 +2399,15 @@ class CoinWithdrawalRequestSerializer(serializers.ModelSerializer):
   (`check_earn_rate_limit`) — there's no request/response shape that
   needs its own serializer; the rejection messages they produce are
   passed straight into the view's `Response(...)` body.
+- **`UserPreferenceSerializer`** (TASK 1, new, v5) — `theme`/`language`/
+  `updated_at`, with `updated_at` read-only (same reasoning
+  `CoinPurchaseRequestSerializer`'s timestamps are read-only: it's
+  maintained by `auto_now`, not something a PATCH body should set).
+  Deliberately has no `user` field — the view sets that via
+  `UserPreference.for_user(request.user)`, never from client input.
+- **No serializer exists for `services.py`** — same reasoning as
+  `fraud.py` above: `_notify()` isn't a request/response boundary, it's
+  an internal helper a view would call and discard the return value of.
 
 ---
 
@@ -2196,6 +2436,7 @@ from .models import (
     CoinWithdrawalRequest,
     Follow,
     RestrictUser,
+    UserPreference,
 )
 from .serializers import (
     BlockUserSerializer,
@@ -2209,6 +2450,7 @@ from .serializers import (
     RestrictedTargetUserProfileSerializer,
     RestrictUserSerializer,
     TargetUserProfileSerializer,
+    UserPreferenceSerializer,
     UserProfileDetailResponseSerializer,
     UserProfileSerializer,
     UserSearchSerializer,
@@ -2650,6 +2892,38 @@ class FollowAPIView(GenericAPIView):
                 followers_count=F("followers_count") + 1
             )
 
+        # TASK 2: notify the other side of a follow action. Lazy imports
+        # (core.models for the NotifType enum, .services for the
+        # _notify wrapper) — user_profile must not hard-depend on core
+        # at module-import time, since core.services.create_notification
+        # already lazy-imports back into user_profile.views the other
+        # way (is_restricted_between, for the restrict check).
+        from core.models import Notification
+        from .services import _notify
+
+        if new_follow.status == Follow.Status.PENDING:
+            _notify(
+                following_user,
+                Notification.NotifType.FOLLOW_REQUEST_RECEIVED,
+                "New follow request",
+                f"{request.user.username} wants to follow you.",
+                actor=request.user,
+            )
+        else:
+            # Public account, auto-accept — no NEW_FOLLOWER type exists
+            # in the enum (see core/models.py module docstring, point
+            # 5: "product-decision"), so this reuses
+            # FOLLOW_REQUEST_ACCEPTED for "someone just started
+            # following you" too, same as a request that was actually
+            # accepted.
+            _notify(
+                following_user,
+                Notification.NotifType.FOLLOW_REQUEST_ACCEPTED,
+                "New follower",
+                f"{request.user.username} started following you.",
+                actor=request.user,
+            )
+
         return Response({
             "message": "Follow request sent" if new_follow.status == Follow.Status.PENDING else "Followed successfully",
             "status": new_follow.status,
@@ -2694,6 +2968,19 @@ class AcceptFollowRequestView(GenericAPIView):
         )
         User.objects.filter(id=request.user.id).update(
             followers_count=F("followers_count") + 1
+        )
+
+        # TASK 2: notify the original requester. Same lazy-import
+        # pattern as FollowAPIView.post above — see that comment for why.
+        from core.models import Notification
+        from .services import _notify
+
+        _notify(
+            follow_request.follower_id,
+            Notification.NotifType.FOLLOW_REQUEST_ACCEPTED,
+            "Follow request accepted",
+            f"{request.user.username} accepted your follow request.",
+            actor=request.user,
         )
 
         return Response({
@@ -3267,7 +3554,57 @@ class CoinWithdrawalRequestView(GenericAPIView):
             "status": True,
             "message": "Withdrawal requested successfully.",
             "data": self.get_serializer(withdrawal).data,
-        }, status=status.HTTP_201_CREATED)```
+        }, status=status.HTTP_201_CREATED)
+
+
+class UserPreferenceView(GenericAPIView):
+    """
+    TASK 1 — GET/PATCH /user-profile/preferences/me/, same shape as
+    core's `notification-preferences/me/`.
+
+    GET always returns 200, never 404: `UserPreference.for_user()`
+    get-or-creates the row, so a user who's never touched their
+    theme/language still gets defaults back on first read instead of
+    an empty state the frontend has to special-case.
+    """
+    permission_classes = [IsAuthenticated]
+    serializer_class = UserPreferenceSerializer
+
+    @extend_schema(
+        responses={200: UserPreferenceSerializer},
+        description="Get current user's theme/language preferences.",
+    )
+    def get(self, request):
+        preference = UserPreference.for_user(request.user)
+        serializer = self.get_serializer(preference)
+        return Response({
+            "status": True,
+            "message": "Preferences fetched successfully.",
+            "data": serializer.data,
+        }, status=status.HTTP_200_OK)
+
+    @extend_schema(
+        request=UserPreferenceSerializer,
+        responses={200: UserPreferenceSerializer},
+        description="Update current user's theme/language preferences. Send only fields you want to update.",
+    )
+    def patch(self, request):
+        preference = UserPreference.for_user(request.user)
+        serializer = self.get_serializer(preference, data=request.data, partial=True)
+
+        if serializer.is_valid():
+            serializer.save()
+            return Response({
+                "status": True,
+                "message": "Preferences updated successfully.",
+                "data": serializer.data,
+            }, status=status.HTTP_200_OK)
+
+        return Response({
+            "status": False,
+            "message": "Validation failed.",
+            "errors": serializer.errors,
+        }, status=status.HTTP_400_BAD_REQUEST)```
 
 ### View notes / what changed vs v3.1
 
@@ -3299,6 +3636,19 @@ class CoinWithdrawalRequestView(GenericAPIView):
   individual functions) so the single call site
   (`fraud.is_withdrawal_eligible`) stays self-documenting about which
   module owns the rule it's enforcing.
+- **`UserPreferenceView`** (TASK 1, new, v5) — `GET`/`PATCH` on the same
+  `GenericAPIView`, same envelope shape (`{"status", "message", "data"}`)
+  every other view in this file uses. `GET` never 404s: `UserPreference.
+  for_user(request.user)` get-or-creates the row before serializing it,
+  so a user who's never touched their theme/language still gets a
+  200 with defaults. `PATCH` is `partial=True` the same way
+  `UpdateProfileView.patch()` is — "send only what you want to change".
+- **`services.py` is NOT imported here.** `_notify()` (TASK 2, v5)
+  exists as a module but `views.py` has no `from . import services` /
+  `from .services import _notify` anywhere in this pass — `FollowAPIView`
+  and `AcceptFollowRequestView` still don't send any notification on
+  follow/accept. See §8c and §11 item 16 for what wiring this in would
+  look like.
 
 ---
 
@@ -3325,6 +3675,7 @@ from .views import (
     UnblockUserView,
     UnrestrictUserView,
     UpdateProfileView,
+    UserPreferenceView,
     UserProfileDetailView,
     UserSearchView,
 )
@@ -3362,9 +3713,12 @@ urlpatterns = [
     # /profile/... URL-shape consistency RestrictUser's docstring
     # (models.py) calls out for restricted-users/ vs blocked-users/.
     path("coin-withdrawals/", CoinWithdrawalRequestView.as_view(), name="coin-withdrawal-requests"),
+    # TASK 1 — theme/language preferences, same URL shape as core's
+    # notification-preferences/me/.
+    path("preferences/me/", UserPreferenceView.as_view(), name="user-preferences"),
 ]```
 
-### Full endpoint table (as of v4)
+### Full endpoint table (as of v5)
 
 | Method | Path | View | Auth | Notes |
 |---|---|---|---|---|
@@ -3383,20 +3737,35 @@ urlpatterns = [
 | GET/POST | `/profile/restricted-users/` | `RestrictedUsersView` | ✅ | TASK 18 |
 | DELETE | `/profile/restricted-users/<int:id>/` | `UnrestrictUserView` | ✅ | TASK 18 |
 | GET | `/profile/coin-ledger/` | `CoinLedgerListView` | ✅ | TASK 19, read-only |
-| POST | `/profile/buy-coin/` | `BuyCoinView` | ✅ | **TASK 3, new** — start a pending purchase |
-| POST | `/profile/buy-coin/confirm/` | `BuyCoinConfirmView` | ✅ | **TASK 3, new** — confirm success/failed; not gateway-verified yet |
-| GET/POST | `/profile/coin-withdrawals/` | `CoinWithdrawalRequestView` | ✅ | **TASK 4, new** — POST runs the TASK 5 eligibility check (403) before debiting (402 on shortfall) |
+| POST | `/profile/buy-coin/` | `BuyCoinView` | ✅ | TASK 3 — start a pending purchase |
+| POST | `/profile/buy-coin/confirm/` | `BuyCoinConfirmView` | ✅ | TASK 3 — confirm success/failed; not gateway-verified yet |
+| GET/POST | `/profile/coin-withdrawals/` | `CoinWithdrawalRequestView` | ✅ | TASK 4 — POST runs the TASK 5 eligibility check (403) before debiting (402 on shortfall) |
+| GET/PATCH | `/profile/preferences/me/` | `UserPreferenceView` | ✅ | **TASK 1, new (v5)** — theme/language; GET always 200 (get-or-creates) |
+
+⚠️ **Path note:** the task that requested this endpoint asked for
+`/user-profile/preferences/me/`, but this app's routes are mounted at
+`path('profile/', include('user_profile.urls'))` (see §2) — same prefix
+every other route in this table sits under, e.g. `coin-ledger/` resolves
+to `/profile/coin-ledger/`, not `/user-profile/coin-ledger/`. So as
+written, `path("preferences/me/", ...)` resolves to
+**`/profile/preferences/me/`**, matching this app's existing convention
+rather than the literal `/user-profile/...` string from the task. If a
+literal `/user-profile/` prefix is actually required (e.g. a different
+app is mounted there, or the root `urls.py` include path differs from
+what §2 documents), update either the root `urls.py` include or treat
+this as a separate mount point — don't assume the two prefixes are
+interchangeable.
 
 Nothing new in `urls.py` itself beyond the one new path — `admin.py`,
-`fraud.py`, and `tasks.py` have no URL surface of their own (admin is
-reached via Django's own `/admin/` site; `fraud.py` is called from
-inside views/models, not routed directly; `tasks.py`'s
-`reconcile_follow_counts` runs on Celery Beat's schedule, not an HTTP
-endpoint).
+`fraud.py`, `services.py`, and `tasks.py` have no URL surface of their
+own (admin is reached via Django's own `/admin/` site; `fraud.py`/
+`services.py` are called from inside views/models, not routed directly;
+`tasks.py`'s `reconcile_follow_counts` runs on Celery Beat's schedule,
+not an HTTP endpoint).
 
 ---
 
-## 8. `admin.py` (full current code — this pass, B-8)
+## 8. `admin.py` (full current code — B-8, + TASK 1 `UserPreferenceAdmin`, v5)
 
 ```python
 # user_profile/admin.py
@@ -3432,7 +3801,7 @@ others.
 """
 from django.contrib import admin
 
-from .models import CoinLedger
+from .models import CoinLedger, UserPreference
 
 
 class WithdrawalEligibleFilter(admin.SimpleListFilter):
@@ -3496,7 +3865,20 @@ class CoinLedgerAdmin(admin.ModelAdmin):
         # keeps the effect, which is just as bad for the "ledger
         # explains every balance change" guarantee. Blocked for the
         # same reason.
-        return False```
+        return False
+
+@admin.register(UserPreference)
+class UserPreferenceAdmin(admin.ModelAdmin):
+    """
+    TASK 1 -- unlike CoinLedger above, this table has no audit-trail
+    invariant to protect (a theme/language row has nothing else in the
+    system it needs to stay consistent with), so normal add/change/
+    delete is left enabled -- useful for support to fix a stuck value
+    for a user without going through the API.
+    """
+    list_display = ("id", "user", "theme", "language", "updated_at")
+    list_filter = ("theme", "language")
+    search_fields = ("user__username",)```
 
 ### admin.py notes
 
@@ -3519,17 +3901,24 @@ class CoinLedgerAdmin(admin.ModelAdmin):
   `record_transaction()` now stamps on every row) rather than
   re-deriving eligibility from `transaction_type` here — so this filter
   and `fraud.py` can never quietly disagree about what "eligible" means.
-- ⚠️ **This file only defines `CoinLedger`'s registration.** If `Follow`,
-  `BlockUser`, `RestrictUser`, `CoinPurchaseRequest`, or
-  `CoinWithdrawalRequest` are already registered in a version of
-  `admin.py` elsewhere in the actual codebase, **merge** those
-  registrations into this file rather than letting this overwrite them
-  — no earlier upload of this app ever included an existing `admin.py`,
-  so this pass has no visibility into one. `autocomplete_fields` (if you
-  add any for these other models, following the same pattern v2's
-  `admin.py` used) still needs your `User` model's own `ModelAdmin` to
-  declare `search_fields`, or Django raises `E040` at startup (see §11
-  item 6).
+- **`UserPreferenceAdmin`** (TASK 1, new, v5) — the opposite lockdown
+  from `CoinLedgerAdmin` right above, deliberately: `UserPreference` has
+  no audit-trail invariant to protect (a theme/language row has nothing
+  else in the system it needs to stay consistent with the way
+  `CoinLedger`/`User.coin` do), so ordinary add/change/delete is left
+  enabled. Useful for support to fix a stuck value for a user directly,
+  without going through the API.
+- ⚠️ **This file defines `CoinLedger`'s and (as of v5) `UserPreference`'s
+  registrations only.** If `Follow`, `BlockUser`, `RestrictUser`,
+  `CoinPurchaseRequest`, or `CoinWithdrawalRequest` are already
+  registered in a version of `admin.py` elsewhere in the actual
+  codebase, **merge** those registrations into this file rather than
+  letting this overwrite them — no earlier upload of this app ever
+  included an existing `admin.py`, so this pass has no visibility into
+  one. `autocomplete_fields` (if you add any for these other models,
+  following the same pattern v2's `admin.py` used) still needs your
+  `User` model's own `ModelAdmin` to declare `search_fields`, or Django
+  raises `E040` at startup (see §11 item 6).
 
 ## 8a. `tasks.py` (full current code — unchanged since v3)
 
@@ -4009,6 +4398,102 @@ def check_earn_rate_limit(user, transaction_type):
   another user's coins aren't "farmable" the way a repeatable in-app
   action is), so this never adds query overhead to the majority of
   `record_transaction()` calls.
+
+---
+
+## 8c. `services.py` (new this pass — TASK 2, v5 — full current code)
+
+```python
+"""
+user_profile/services.py
+
+TASK 2 — thin `_notify(...)` wrapper around
+`core.services.create_notification` for the Follow feature
+(FollowAPIView / AcceptFollowRequestView in this app's views.py).
+
+No `assignment`/`testseries` services.py actually exists to copy
+verbatim, so this follows the *pattern* those apps' docstrings point at
+instead: `core.services.create_notification` is lazy-imported, never at
+module top. That matters here specifically because the dependency
+already runs the other way too — `create_notification` itself
+lazy-imports `user_profile.views.is_restricted_between` for the
+restrict check (see core/services.py's own docstring) — so a top-level
+`from core.services import ...` here would risk a real circular import
+depending on Django's app-loading order. Centralizing the lazy import
+in this one helper means FollowAPIView/AcceptFollowRequestView don't
+each need to repeat that boilerplate.
+
+Same contract as create_notification itself: never raises, never sends
+a push/email/sms/whatsapp — in-app bell row only.
+"""
+import logging
+
+logger = logging.getLogger(__name__)
+
+
+def _notify(recipient, notif_type, title, message="", *, actor=None, data=None):
+    """Fire-and-forget in-app notification for a Follow event.
+
+    `recipient` / `actor` may be User instances or raw ids — both pass
+    straight through to create_notification, which accepts either.
+    """
+    from core.services import create_notification
+
+    return create_notification(
+        recipient,
+        notif_type,
+        title,
+        message,
+        data=data or {},
+        actor=actor,
+    )
+```
+
+### services.py notes
+
+- **This file did not exist in any earlier upload of this app** — new
+  this pass, TASK 2. `models.py`/`views.py`/`serializers.py`/`urls.py`/
+  `admin.py` were **not** modified for this file's own sake (only for
+  TASK 1's `UserPreference`, a completely unrelated change landing in
+  the same round — see §0.4).
+- **⚠️ Not called from anywhere in this codebase yet.** The module
+  docstring names `FollowAPIView`/`AcceptFollowRequestView` as its
+  intended callers, but `views.py` (§6) has no `from . import services`
+  / `from .services import _notify` and neither view calls `_notify(...)`
+  anywhere. As shipped, this is dead code — safe to leave in (it can't
+  be triggered accidentally, since nothing imports it), but it provides
+  zero actual notification behavior until it's wired in. See §11 item
+  16 for what that wiring would need to decide.
+- **Why lazy-import, specifically:** the dependency between this app and
+  `core` already runs both directions — `views.py` elsewhere in this
+  file already does `from core.models import Notification` (a lazy,
+  in-function import, same pattern) when creating follow-request/
+  accept notifications inline, and per this module's own docstring,
+  `core.services.create_notification` itself lazy-imports `user_profile.
+  views.is_restricted_between` to run the restrict check before sending
+  a notification. Two apps lazy-importing from each other, both at
+  function-call time rather than module-import time, is what keeps
+  Django's app-loading order from ever hitting a real circular import
+  between them — a module-level `from core.services import
+  create_notification` at the top of this file would remove that safety
+  margin for no benefit (the function is only ever called from inside a
+  view method, never at import time, so there's no performance reason to
+  hoist the import).
+- **No `notif_type` constants are defined here.** `_notify()` takes
+  `notif_type` as a plain parameter — the actual `core.models.
+  Notification.NotifType` values a Follow event should use (e.g. a
+  `FOLLOW_REQUEST`/`FOLLOW_ACCEPTED`-shaped pair, mirroring how
+  `CoinLedger.TransactionType` already anticipates `core.Notification.
+  NotifType.WITHDRAWAL_APPROVED`/`WITHDRAWAL_REJECTED`/`WITHDRAWAL_PAID`
+  per §4's TASK 1 comment) aren't confirmed here, because `core/
+  models.py` wasn't part of this upload either. Whoever wires this into
+  `FollowAPIView`/`AcceptFollowRequestView` needs to confirm those
+  values exist on the real `core.models.Notification.NotifType` enum
+  first — don't guess a value name and ship it.
+- **No serializer, no test file, no URL** — same reasoning `fraud.py`
+  has none: `_notify()` is an internal fire-and-forget helper, not a
+  request/response boundary, so there's nothing to route to or from and
+  nothing with its own shape to validate.
 
 ---
 
@@ -5104,6 +5589,52 @@ path is the one crediting EARN/CAMPUS_REWARD coins — including code
 this upload never saw (campus's engagement-bonus task, a future
 referral-bonus flow, etc.).
 
+### 10.13 Theme/language preferences (`GET/PATCH /profile/preferences/me/`) — v5, TASK 1, new
+
+```
+GET /profile/preferences/me/
+        │
+        ▼
+UserPreference.for_user(request.user)
+  get_or_create(user=request.user) — first-ever call for this user
+  creates a row with defaults (theme=system, language=en)
+        │
+        ▼
+serialize (theme, language, updated_at) → 200
+  (never 404 — a brand-new user still gets defaults back)
+
+PATCH /profile/preferences/me/ {"theme": "dark"} (partial — send only
+what you want to change)
+        │
+        ▼
+UserPreference.for_user(request.user)   ◀── same get-or-create as GET
+        │
+        ▼
+serializer.is_valid(partial=True)? ──no──▶ 400
+        │ yes
+        ▼
+serializer.save() — updates only the fields sent; updated_at bumps via
+auto_now
+        │
+        ▼
+200 with the full (theme, language, updated_at) row
+```
+No ledger, no fraud check, no notification — this is the simplest flow
+in the app. The only thing worth calling out: `for_user()` runs on
+*every* GET and PATCH, not just the first one, so a returning user's
+second-and-later calls are a plain `get_or_create` SELECT-that-hits
+(cheap), not a second INSERT.
+
+**Separately, and NOT part of this flow:** `services._notify()` (§8c)
+exists in this codebase as of v5 but has no call site — following,
+accepting, or rejecting a follow request (§10.1–10.2) still sends **no**
+notification of any kind. If/when that's wired in, it would sit inside
+`FollowAPIView.post()` (after a successful follow/follow-request) and
+`AcceptFollowRequestView.post()` (after accepting), calling
+`services._notify(recipient=..., notif_type=..., ...)` the same way
+those two views already lazy-import `core.models.Notification` for
+other notification logic — see §11 item 16.
+
 ---
 
 ## 11. Known Issues / Things To Double-Check
@@ -5235,6 +5766,40 @@ Items 5–7 are still open.
     and no test exercises `record_transaction()` specifically with
     `transaction_type=CAMPUS_REWARD` (only the EARN/CAMPUS_REWARD
     grouping inside the rate limiter is exercised, via EARN).
+
+---
+
+> **v5 additions below (items 16–17)** — everything above this line is
+> unchanged from v4. TASK 1/2 add the following, still-open items.
+
+16. **`services.py`'s `_notify()` is not called from anywhere.** The
+    module exists (§8c) and its own docstring names `FollowAPIView`/
+    `AcceptFollowRequestView` as its intended callers, but `views.py`
+    (§6) has no import of it and neither view calls it — following,
+    accepting, or rejecting a follow request still sends zero
+    notifications. Wiring this in needs three decisions this pass
+    couldn't make: (a) which `core.models.Notification.NotifType`
+    value(s) a follow-request/follow-accepted event should use — `core/
+    models.py` wasn't part of this upload, so nothing here confirms
+    those values exist; (b) whether both the request AND the accept
+    should notify, or just one; (c) whether a *private*-account follow
+    request (§10.1) and a *public*-account immediate-follow should use
+    the same `notif_type` or two different ones (arguably they should
+    differ — one is "someone wants to follow you", the other is "you
+    have a new follower" — but that's a product decision, not something
+    inferable from this app's own files).
+17. **`UserPreference.for_user()`'s shape is inferred, not confirmed
+    against `core.NotificationPreference`.** The task that requested
+    `UserPreference` asked for the "exact same pattern" as `core.
+    NotificationPreference`, but `core/models.py` wasn't part of any
+    upload for this app (same gap item 16 above and §11 item 11's
+    `liveclass.CoinPurchase` reconciliation note both hit) — so
+    `for_user()`'s `get_or_create(user=user)` body is a reasonable
+    guess at that pattern, not copied code. If the real
+    `core.NotificationPreference` uses a different classmethod name,
+    different get-or-create keying, or does something extra (e.g.
+    pre-populating defaults from a settings dict), reconcile the two —
+    ideally by rerunning TASK 1 with `core/models.py` included.
 
 ---
 

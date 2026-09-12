@@ -76,6 +76,21 @@ class TestSeriesViewSet(viewsets.ModelViewSet):
         series.recompute_total_marks(save=False)
         series.status = TestSeries.Status.PUBLISHED
         series.save(update_fields=["status", "total_marks"])
+
+        # TASK 5: notify the creator's followers that a new (individual/
+        # marketplace) series is live. Only for source="individual" —
+        # campus/liveclass-context series already notify their own
+        # classroom/section roster through a different, membership-based
+        # path (see perform_create's own note above for why THAT
+        # notification is scoped the same way; individual discovery is
+        # follow/browse-based per §4, campus/liveclass is not). Queued,
+        # never inline — see tasks.py::notify_followers_new_testseries
+        # for why a synchronous per-follower loop here would be wrong.
+        if series.source == TestSeries.Source.INDIVIDUAL:
+            from .tasks import notify_followers_new_testseries
+
+            notify_followers_new_testseries.delay(series.id)
+
         return Response(TestSeriesSerializer(series, context={"request": request}).data)
 
 

@@ -1108,3 +1108,70 @@ class CoinWithdrawalRequest(models.Model):
 
     def __str__(self):
         return f"{self.user.username}: {self.coins} coins withdrawal ({self.status})"
+
+
+class UserPreference(models.Model):
+    """
+    TASK 1 (this pass) — per-user UI/locale preferences: `theme` and
+    `language`. Deliberately the same OneToOne + get-or-create shape as
+    `core.NotificationPreference`.
+
+    ⚠️ ASSUMPTION — `core/models.py` wasn't part of this upload, so
+    `NotificationPreference`'s actual field names/`for_user()` body
+    aren't visible here. This reproduces the pattern as described
+    (OneToOne to the user, a classmethod that get-or-creates, an
+    `updated_at`) rather than copying real code. If
+    `core.NotificationPreference` turns out to differ (e.g. it names its
+    classmethod something other than `for_user`, or keys the get-or-
+    create differently), prefer matching that file exactly over this
+    one, and adjust `for_user()`/the `/preferences/me/` view below to
+    match.
+
+    Row is NOT created at signup — it's get-or-created lazily the first
+    time anything calls `for_user()` (same lazy-row idea `CoinLedger`
+    etc. don't need, but a preferences table specifically benefits from:
+    most users never touch theme/language, so this avoids a write on
+    every signup for a row most rows will just sit at defaults for).
+    """
+
+    class Theme(models.TextChoices):
+        LIGHT = "light", "Light"
+        DARK = "dark", "Dark"
+        SYSTEM = "system", "System"
+
+    user = models.OneToOneField(
+        settings.AUTH_USER_MODEL,
+        related_name="preferences",
+        on_delete=models.CASCADE,
+    )
+
+    theme = models.CharField(
+        max_length=10,
+        choices=Theme.choices,
+        default=Theme.SYSTEM,
+    )
+
+    # ISO 639-1 code ("en", "hi", "es", ...). max_length=10 rather than
+    # 2 so a locale-qualified tag ("en-US", "zh-Hans") fits too, without
+    # forcing a migration the day someone needs that.
+    language = models.CharField(max_length=10, default="en")
+
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-updated_at"]
+
+    def __str__(self):
+        return f"{self.user.username} preferences ({self.theme}/{self.language})"
+
+    @classmethod
+    def for_user(cls, user):
+        """
+        Get-or-create wrapper — mirrors `core.NotificationPreference`'s
+        pattern so every caller (this app's own view, or another app
+        that wants to know a user's theme/language later) gets a row
+        back unconditionally instead of having to branch on
+        DoesNotExist for a user who's never saved a preference before.
+        """
+        obj, _created = cls.objects.get_or_create(user=user)
+        return obj

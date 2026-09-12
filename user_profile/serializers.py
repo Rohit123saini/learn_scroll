@@ -13,6 +13,7 @@ from .models import (
     CoinWithdrawalRequest,
     Follow,
     RestrictUser,
+    UserPreference,
 )
 
 User = get_user_model()
@@ -437,3 +438,17 @@ class CoinWithdrawalRequestSerializer(serializers.ModelSerializer):
                 }
             )
         return attrs
+
+# TASK 1 -- theme/language preferences.
+# Row is get-or-created via UserPreference.for_user() in the view
+# (models.py) -- this serializer only ever sees a row that already
+# exists, so "user" itself isn't a field here (it's set by
+# for_user(), never by client input). updated_at is read-only for the
+# same reason CoinPurchaseRequestSerializer's timestamps are: it's
+# maintained by auto_now, not something a PATCH body should be able
+# to set.
+class UserPreferenceSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = UserPreference
+        fields = ["theme", "language", "updated_at"]
+        read_only_fields = ["updated_at"]

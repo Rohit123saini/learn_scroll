@@ -158,3 +158,87 @@ def generate_video_thumbnail(self, media_id):
         for path in (local_video_path, thumb_path):
             if path and os.path.exists(path):
                 os.unlink(path)
+
+
+# ---------------------------------------------------------------------------
+# TASK 3 — "new post from someone you follow" fan-out.
+#
+# Enqueued (never called inline) from
+# signals.py::queue_new_post_notification_fanout — same "don't block the
+# request" reasoning as generate_video_thumbnail above, but for a much
+# more common trigger (every post, not just video posts): a popular
+# account's follower list can run into the thousands, and a synchronous
+# loop inside PostCreateAPIView's request/response cycle would make
+# every single post-create slow in direct proportion to follower count.
+# This task does the actual Follow-table read and the notification
+# fan-out off the request path.
+#
+# `post` app already imports `user_profile.Follow` directly elsewhere
+# (the feed query — same precedent this reuses), so that import is at
+# normal top-of-function level here too, not behind a try/except the way
+# `core` is guarded in services.py — `user_profile` is a required app,
+# not an optional one.
+# ---------------------------------------------------------------------------
+@shared_task
+def notify_followers_new_post(post_id):
+    """Notify every ACCEPTED follower of `post.user` that a new post went
+    up. MVP version per the design doc: no per-follower "bell" opt-in
+    yet — every accepted follower gets notified on every post. That's a
+    deliberate, documented noise trade-off for a later pass.
+
+    Uses `core.services.create_bulk_notifications` (one bulk INSERT)
+    rather than looping `create_notification` once per follower — the
+    latter would also mean one `is_restricted_between` query per
+    follower for the actor-restrict check, which doesn't scale to a
+    fan-out that can be thousands of rows. The restrict exclusion below
+    does the same thing `create_notification` would have per-recipient,
+    but as a single bulk query up front instead.
+    """
+    from core.models import Notification
+    from core.services import create_bulk_notifications
+    from user_profile.models import Follow, RestrictUser
+
+    from .models import Post
+
+    try:
+        post = Post.objects.select_related("user").get(id=post_id)
+    except Post.DoesNotExist:
+        # Post (or its author) was deleted/removed between enqueue and
+        # run — nothing left to notify about.
+        logger.warning("notify_followers_new_post: Post %s no longer exists", post_id)
+        return
+
+    follower_ids = set(
+        Follow.objects.filter(
+            following_id=post.user_id, status=Follow.Status.ACCEPTED
+        ).values_list("follower_id", flat=True)
+    )
+    if not follower_ids:
+        return
+
+    # Restrict is defined to be invisible to the restricted user (see
+    # create_notification's own docstring in core/services.py) — that
+    # must hold here too, not just on the single-recipient path. One
+    # bulk query for every follower who has restricted this post's
+    # author, instead of one is_restricted_between() call per follower.
+    restricting_follower_ids = set(
+        RestrictUser.objects.filter(
+            user_id__in=follower_ids, restricted_id=post.user_id
+        ).values_list("user_id", flat=True)
+    )
+    recipient_ids = follower_ids - restricting_follower_ids
+    if not recipient_ids:
+        return
+
+    actor_name = post.user.get_full_name() or post.user.username
+    create_bulk_notifications(
+        recipient_ids,
+        Notification.NotifType.NEW_POST_FROM_FOLLOWED,
+        f"{actor_name} shared a new post",
+        (post.content or "")[:200],
+        data={"post_id": str(post.id), "actor_id": str(post.user_id)},
+    )
+    logger.info(
+        "notify_followers_new_post: notified %d follower(s) for post %s",
+        len(recipient_ids), post_id,
+    )

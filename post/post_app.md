@@ -126,6 +126,14 @@ does a lazy `from user_profile.models import RestrictUser` inside the
 method — this app **cannot run** unless the `user_profile` app (see its
 own reference doc) is installed and migrated first.
 
+⚠️ **(TASK 3, new)** `tasks.py`'s `notify_followers_new_post` also does
+top-of-function (not try/except-guarded) lazy imports of
+`user_profile.models.Follow`/`RestrictUser` and
+`core.models.Notification`/`core.services.create_bulk_notifications` —
+same "`user_profile` is required, not optional" reasoning `services.py`
+already applies to `core` for the like/comment notification path. See
+§10.3 and §22.
+
 ---
 
 ## 3. `models.py` (full code)
@@ -3296,12 +3304,21 @@ Interconnections this file owns:
 > Case-sensitivity rename, same as `services.py` above. Registered from
 > `apps.py`'s `ready()` (§10). Owns two independent pieces of counter
 > bookkeeping — `User.posts_count` and `Post`'s reaction counts — plus
-> the fire-and-forget enqueue of video-thumbnail generation. TASK 23 /
-> fix B-5 (deduping the old two-receiver reaction-count split — see this
-> file's own docstring, and models.py's matching removal note) is now
-> fully resolved: `models.py` no longer has a competing
-> `update_reaction_counts` receiver; `sync_post_reaction_counts` here is
-> the single source of truth.
+> the fire-and-forget enqueue of video-thumbnail generation **and (TASK
+> 3, new)** the fire-and-forget enqueue of the new-post follower-notify
+> fan-out. TASK 23 / fix B-5 (deduping the old two-receiver
+> reaction-count split — see this file's own docstring, and models.py's
+> matching removal note) is now fully resolved: `models.py` no longer
+> has a competing `update_reaction_counts` receiver;
+> `sync_post_reaction_counts` here is the single source of truth.
+>
+> **TASK 3 (new):** a third `post_save` receiver on `Post`,
+> `queue_new_post_notification_fanout`, enqueues
+> `tasks.notify_followers_new_post` for every newly-created `Post` —
+> via `transaction.on_commit(...)` rather than a bare `.delay()` (unlike
+> `queue_video_thumbnail_on_create` below, which still uses a bare
+> `.delay()`), so the task can't run before the `Post` row's own
+> transaction has actually committed. See §22 for the full writeup.
 
 ```python
 """
@@ -3406,6 +3423,49 @@ def decrement_posts_count_on_soft_delete(post):
     if not hasattr(User, "posts_count"):
         return
     User.objects.filter(pk=post.user_id).update(posts_count=F("posts_count") - 1)
+
+
+# ----------------------------------------------------------------------
+# TASK 3 — "new post from someone you follow" fan-out, enqueue-only.
+#
+# Same reasoning as queue_video_thumbnail_on_create further down:
+# `post_save` runs synchronously inside whatever request/transaction
+# created this `Post` row (`PostCreateAPIView.post()`), and a popular
+# account's follower list can run into the thousands — looping through
+# even a cheap per-follower write inline here would make every single
+# post-create request slow in direct proportion to that account's
+# follower count. `.delay()` just enqueues
+# `post.tasks.notify_followers_new_post` and returns immediately; the
+# actual `Follow` table query and the notification fan-out itself happen
+# there, off the request path.
+#
+# transaction.on_commit(...) (deliberately NOT a bare `.delay()` the way
+# queue_video_thumbnail_on_create below still is): if
+# PostCreateAPIView.post() ever wraps the Post creation in
+# `@transaction.atomic` (as several views in this codebase already do —
+# e.g. FollowAPIView.post()), a bare `.delay()` fired from inside that
+# transaction could have the Celery worker pick up the task and query
+# for this Post row before the transaction actually commits, raising
+# Post.DoesNotExist in the task for a post that does, in fact, exist.
+# on_commit() defers the enqueue until the surrounding transaction (if
+# any) has successfully committed — and runs immediately, synchronously,
+# if there's no open transaction at all (autocommit), so this is strictly
+# safer with no downside either way.
+#
+# MVP scope (per the design doc): every ACCEPTED follower gets notified
+# on every new post — no per-follower "bell" opt-in yet (Instagram-style,
+# per-account). That's a deliberate, documented trade-off for a later
+# pass, not something this receiver is trying to solve.
+# ----------------------------------------------------------------------
+@receiver(post_save, sender=Post)
+def queue_new_post_notification_fanout(sender, instance, created, **kwargs):
+    if not created:
+        return
+    from django.db import transaction
+
+    from .tasks import notify_followers_new_post
+
+    transaction.on_commit(lambda: notify_followers_new_post.delay(instance.id))
 
 
 # ----------------------------------------------------------------------
@@ -3523,6 +3583,10 @@ Interconnections this file owns:
 - **`post.tasks.generate_video_thumbnail`** — `queue_video_thumbnail_on_create`
   is the *only* place this Celery task gets enqueued (`.delay()`, on
   every new `PostMedia` row where `media_type == "video"`).
+- **`post.tasks.notify_followers_new_post`** (TASK 3, new) —
+  `queue_new_post_notification_fanout` is the *only* place this Celery
+  task gets enqueued, via `transaction.on_commit(lambda: ...delay(...))`
+  on every new `Post` row. See §10.3/§22.
 - Must stay in sync with `ReactionRequestSerializer.reaction`'s
   `choices` in `serializers.py` (§4) — `REACTION_TYPES` here is the only
   other place that same 5-value set (`like`/`confuse`/`wrong`/`imp`/
@@ -3534,10 +3598,14 @@ Interconnections this file owns:
 
 > Case-sensitivity rename, same as above. Two Celery Beat housekeeping
 > tasks for `Story` expiry (checklist items 54/55/57/60) plus the async
-> video-thumbnail task enqueued by `signals.py` above (task 27). Not
-> wired into `settings.py` automatically — see the `CELERY_BEAT_SCHEDULE`
-> snippet in this file's own docstring below; confirm it's actually
-> present in the real `settings.py` (§2 doesn't currently list it).
+> video-thumbnail task enqueued by `signals.py` above (task 27), **plus
+> (TASK 3, new)** `notify_followers_new_post` — enqueued, not scheduled,
+> triggered by `signals.py::queue_new_post_notification_fanout` on every
+> new `Post`. Not wired into `settings.py` automatically — see the
+> `CELERY_BEAT_SCHEDULE` snippet in this file's own docstring below;
+> confirm it's actually present in the real `settings.py` (§2 doesn't
+> currently list it). `notify_followers_new_post` needs no beat entry —
+> it only ever runs enqueued, same as `generate_video_thumbnail`.
 
 ```python
 """
@@ -3700,6 +3768,90 @@ def generate_video_thumbnail(self, media_id):
         for path in (local_video_path, thumb_path):
             if path and os.path.exists(path):
                 os.unlink(path)
+
+
+# ---------------------------------------------------------------------------
+# TASK 3 — "new post from someone you follow" fan-out.
+#
+# Enqueued (never called inline) from
+# signals.py::queue_new_post_notification_fanout — same "don't block the
+# request" reasoning as generate_video_thumbnail above, but for a much
+# more common trigger (every post, not just video posts): a popular
+# account's follower list can run into the thousands, and a synchronous
+# loop inside PostCreateAPIView's request/response cycle would make
+# every single post-create slow in direct proportion to follower count.
+# This task does the actual Follow-table read and the notification
+# fan-out off the request path.
+#
+# `post` app already imports `user_profile.Follow` directly elsewhere
+# (the feed query — same precedent this reuses), so that import is at
+# normal top-of-function level here too, not behind a try/except the way
+# `core` is guarded in services.py — `user_profile` is a required app,
+# not an optional one.
+# ---------------------------------------------------------------------------
+@shared_task
+def notify_followers_new_post(post_id):
+    """Notify every ACCEPTED follower of `post.user` that a new post went
+    up. MVP version per the design doc: no per-follower "bell" opt-in
+    yet — every accepted follower gets notified on every post. That's a
+    deliberate, documented noise trade-off for a later pass.
+
+    Uses `core.services.create_bulk_notifications` (one bulk INSERT)
+    rather than looping `create_notification` once per follower — the
+    latter would also mean one `is_restricted_between` query per
+    follower for the actor-restrict check, which doesn't scale to a
+    fan-out that can be thousands of rows. The restrict exclusion below
+    does the same thing `create_notification` would have per-recipient,
+    but as a single bulk query up front instead.
+    """
+    from core.models import Notification
+    from core.services import create_bulk_notifications
+    from user_profile.models import Follow, RestrictUser
+
+    from .models import Post
+
+    try:
+        post = Post.objects.select_related("user").get(id=post_id)
+    except Post.DoesNotExist:
+        # Post (or its author) was deleted/removed between enqueue and
+        # run — nothing left to notify about.
+        logger.warning("notify_followers_new_post: Post %s no longer exists", post_id)
+        return
+
+    follower_ids = set(
+        Follow.objects.filter(
+            following_id=post.user_id, status=Follow.Status.ACCEPTED
+        ).values_list("follower_id", flat=True)
+    )
+    if not follower_ids:
+        return
+
+    # Restrict is defined to be invisible to the restricted user (see
+    # create_notification's own docstring in core/services.py) — that
+    # must hold here too, not just on the single-recipient path. One
+    # bulk query for every follower who has restricted this post's
+    # author, instead of one is_restricted_between() call per follower.
+    restricting_follower_ids = set(
+        RestrictUser.objects.filter(
+            user_id__in=follower_ids, restricted_id=post.user_id
+        ).values_list("user_id", flat=True)
+    )
+    recipient_ids = follower_ids - restricting_follower_ids
+    if not recipient_ids:
+        return
+
+    actor_name = post.user.get_full_name() or post.user.username
+    create_bulk_notifications(
+        recipient_ids,
+        Notification.NotifType.NEW_POST_FROM_FOLLOWED,
+        f"{actor_name} shared a new post",
+        (post.content or "")[:200],
+        data={"post_id": str(post.id), "actor_id": str(post.user_id)},
+    )
+    logger.info(
+        "notify_followers_new_post: notified %d follower(s) for post %s",
+        len(recipient_ids), post_id,
+    )
 ```
 
 Interconnections this file owns:
@@ -3715,6 +3867,16 @@ Interconnections this file owns:
   `thumbnail` ImageField/FileField already exists on `PostMedia`
   (models.py, §3) — confirm the field name matches if this ever gets
   renamed there.
+- **`notify_followers_new_post`** (TASK 3, new) — reads
+  `user_profile.models.Follow`/`RestrictUser` directly (top-level lazy
+  import inside the function, not try/except-guarded — `user_profile`
+  is a required app, same reasoning `views.py`'s own top-level `Follow`
+  import already uses, §2), then calls
+  `core.services.create_bulk_notifications()` with
+  `Notification.NotifType.NEW_POST_FROM_FOLLOWED` — a **new,
+  unconfirmed** enum member; nothing else in this doc references it
+  (contrast `POST_LIKED`/`POST_COMMENTED`, §10.1, both confirmed real).
+  See §22.
 
 ---
 
@@ -3754,9 +3916,17 @@ User.posts_count += 1 (F() update)
         ▼
 201 response with full post + media (via to_representation)
 ```
-If any uploaded media is a video, `auto_generate_video_thumbnail` (§3
-signal) fires automatically in the background of the same request (via
-`post_save` on `PostMedia`) — extracts a frame at 1 second via ffmpeg.
+If any uploaded media is a video, `queue_video_thumbnail_on_create`
+(§10.2 signal) fires automatically in the background of the same
+request (via `post_save` on `PostMedia`) — enqueues
+`generate_video_thumbnail` (Celery), which extracts a frame via ffmpeg.
+
+**(TASK 3, new)** Independently, `queue_new_post_notification_fanout`
+(§10.2 signal, `post_save` on `Post` itself) enqueues
+`notify_followers_new_post` (§10.3) via `transaction.on_commit(...)` —
+notifies every `ACCEPTED` follower of the post's author once the
+create transaction commits. Off the request path, same as the
+thumbnail fan-out above; see §22 for the full writeup.
 
 ### 13.2 Home Feed algorithm (`GET /post/feed/`)
 ```
@@ -3944,6 +4114,20 @@ browser) vs. `attachment` for office docs/archives (forced download).
     `"Comments disabled"` up front — see the `FIX (post_app.md §14 issue
     #10)` comment at that call site — so a blocked upload fails at
     `init` time instead of after the client has already pushed chunks.
+11. **`NotifType.NEW_POST_FROM_FOLLOWED` unconfirmed (NEW, TASK 3)** —
+    `tasks.py::notify_followers_new_post()` references this enum member
+    directly, with no fallback/shim (unlike, say, the old
+    `_NotifTypeGap` pattern this codebase has used elsewhere while
+    waiting on a `core` enum to land). If `core` hasn't added it, the
+    task fails with `AttributeError` on every run — asynchronously,
+    after `PostCreateAPIView.post()` has already returned 201, so a
+    missing enum member is silent from the API caller's point of view.
+    See §22.
+12. **No unfollow/opt-out check on the new-post notification (NEW,
+    TASK 3)** — every `ACCEPTED` follower gets notified on every post,
+    same documented MVP trade-off as the home feed (§13.2) and the
+    reaction/comment notifications — no per-follower "bell" opt-in
+    exists yet anywhere in this app.
 
 ---
 
@@ -3966,6 +4150,15 @@ browser) vs. `attachment` for office docs/archives (forced download).
 - [ ] For production media serving (Range/video streaming outside
       `DEBUG`): configure nginx/S3/CDN separately — this app's own
       `serve_media_with_range` only activates when `DEBUG=True`.
+- [ ] `core` app installed & migrated with `Notification.NotifType.
+      NEW_POST_FROM_FOLLOWED` defined (TASK 3, new — see §14 issue #11,
+      §22) and `core.services.create_bulk_notifications()` available —
+      otherwise `notify_followers_new_post` fails with `AttributeError`
+      on every post-create (silently, since it runs async).
+- [ ] Celery worker running — `notify_followers_new_post` (TASK 3, like
+      `generate_video_thumbnail`) only ever executes if something is
+      consuming the queue; without a worker it just enqueues and never
+      runs, same caveat §2 already gives for video thumbnails.
 
 With the above satisfied, everything in this single document — models,
 serializers, comment_serializers, views, comment_view, urls, admin — is
@@ -4579,3 +4772,58 @@ code change to `models.py`, `serializers.py`, `comment_serializers.py`,
 `views.py`, `comment_view.py`, `services.py`, `signals.py`, `tasks.py`,
 `urls.py`, or `admin.py` should be reflected in this doc's matching
 section in the same turn, so the two never drift apart again.
+
+---
+
+## 22. Addendum 7 — TASK 3: "new post from someone you follow" fan-out (new feature)
+
+Two files actually changed logic in this pass: `signals.py` and
+`tasks.py`. Both were diffed byte-for-byte against §10.2/§10.3 above —
+this is the only change; every other line in both files is unchanged
+from §21's already-verified content.
+
+1. **`signals.py` — one new receiver, `queue_new_post_notification_fanout`**
+   (`post_save` on `Post`). Enqueue-only, same shape as
+   `queue_video_thumbnail_on_create` further down the same file, but
+   uses `transaction.on_commit(lambda: notify_followers_new_post.delay(
+   instance.id))` instead of a bare `.delay()` — deliberately, because
+   `Post` creation may run inside `@transaction.atomic` (several other
+   views in this codebase already wrap writes that way), and a bare
+   `.delay()` risks the Celery worker querying for the `Post` row
+   before its transaction has actually committed. `on_commit()` also
+   degrades safely to "runs immediately" when there's no open
+   transaction at all. Updated: §10.2 code block + intro blurb +
+   interconnections notes.
+2. **`tasks.py` — one new task, `notify_followers_new_post(post_id)`.**
+   Re-fetches the `Post` (handles it having been deleted between
+   enqueue and run — logs and returns, no error), resolves `ACCEPTED`
+   followers via `user_profile.models.Follow`, excludes anyone who has
+   restricted the post's author via `user_profile.models.RestrictUser`
+   (one bulk query, same shape §4's `PostDetailSerializer.get_comments()`
+   restrict-exclusion already uses, and the same shape
+   `testseries.tasks.notify_followers_new_testseries` uses for the
+   equivalent feature in that app), then calls
+   `core.services.create_bulk_notifications()` — one bulk INSERT,
+   deliberately not a per-follower loop through `create_notification()`
+   (`services.py`'s `_notify()` helper), which wouldn't scale to a
+   follower list that can run into the thousands. Updated: §10.3 code
+   block + intro blurb + interconnections notes.
+3. **New, unconfirmed cross-app dependency:**
+   `Notification.NotifType.NEW_POST_FROM_FOLLOWED` — referenced
+   directly by `notify_followers_new_post`, with no fallback the way
+   this codebase's older `_NotifTypeGap`-style shims used to provide
+   while waiting on a `core` enum to land. Not independently verified
+   against `core`'s actual enum list this pass (`core`'s source wasn't
+   part of this upload). Added as **§14 issue #11** and a new checklist
+   line in **§15**. Unlike `POST_LIKED`/`POST_COMMENTED` (§10.1, both
+   confirmed real), this one should be treated as **open** until
+   checked.
+4. **No test coverage added for this feature** — `tests.py`'s class
+   list (§11) is unchanged from §17.5/§18.3/§21; same "no coverage yet"
+   treatment G-3 (restrict-aware comment previews, §20) got when it
+   landed.
+5. **No migration-shape change** — `signals.py`/`tasks.py` are pure
+   Python (signal wiring + a Celery task); no model field was added or
+   changed in this pass.
+
+---

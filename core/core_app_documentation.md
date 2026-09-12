@@ -2,7 +2,12 @@
 
 > Ye document `core` Django app ke andar jo bhi kaam hua hai (tasks 28, 42-48, Task 18, F-1, F-4) uska single source of truth hai. Koi bhi is app pe kaam continue kare, sabse pehle ye file padhe — har file ka purpose, har function ka contract, aur sab `ASSUMPTION` markers ek jagah pe hain.
 
-> **Reconciliation pass (latest — is update):** source files firse check kiye gaye (campus app ke liye jaisi pass abhi-abhi hui thi, wahi tarika yahan bhi). Do real gaps mile:
+> **Reconciliation pass (latest — this update):** `models.py` aur nayi migration file (`0004_alter_notification_notif_type.py`) ke against check kiya — **`NotifType` enum ka documentation bahut peeche reh gaya tha**, fix kar diya:
+> - **§3's `NotifType` list sirf 31 values document karti thi ("28 original liveclass + 3 message-app types") — real enum me ab 55 values hain.** Missing the: task 11 ka `post` app block (`POST_LIKED`/`POST_COMMENTED`, 2), pura campus block (9), testseries/assignment/campus-gamification block (8), aur is pass (TASK 1) ke 5 naye `FOLLOW_*`/`*_FROM_FOLLOWED` values (`user_profile`'s Follow feature). §3 ab poori 55-value list, grouped by source app, ke saath update hai.
+> - **`CAMPUS_APP_TYPES`, `TESTSERIES_APP_TYPES`, aur naya `FOLLOW_APP_TYPES` — teeno frozensets is doc me pehle kabhi mention nahi hue the**, sirf `MESSAGE_APP_TYPES` document tha. `views.py`/`serializers.py` ke apne-apne app ka notification-routing in par depend karta hai (same "ek jagah se dono import karein" pattern jo `MESSAGE_APP_TYPES` ke liye already tha) — §3 me sab add kiye.
+> - **Naya migration `core/migrations/0004_alter_notification_notif_type.py` — is doc me pehle mention nahi tha.** State-only `AlterField` (`choices=` par, koi DB column/constraint change nahi, isliye Postgres/SQLite par zero SQL issue hoti) — sirf Django ke migration-state ko model se sync rakhne ke liye, taaki `makemigrations --check` CI me drift na pakde. `TESTSERIES_CREATED_BY_FOLLOWED` (30 chars) ab `max_length=30` ke bilkul limit par hai, zero headroom bacha — agla naya value isse lamba hua to `max_length` bhi isi migration-shape me bump karna padega.
+
+> **Reconciliation pass (latest):** source files firse check kiye gaye (campus app ke liye jaisi pass abhi-abhi hui thi, wahi tarika yahan bhi). Do real gaps mile:
 > - **`search.py` (F-4) — poora naya file, is doc me ab tak bilkul mention hi nahi tha.** `core`'s unified cross-app "search everything" layer (Postgres FTS + trigram, `message/search_utils.py` ke strategy ka extension) — naya **§6.2** isko poora document karta hai; §2 aur §8 (dependency graph) bhi update kiye.
 > - **`test_parent_bridge.py` test-count galat tha** — §2 aur §6.1 "10 tests" bolte the, real file me **11** hain (`test_second_students_parent_token_never_resolves_to_first_student` count me chhoot gaya tha). Fix kar diya.
 >
@@ -31,7 +36,8 @@ Pehle notifications aur classroom↔chat coupling `liveclass` app ke andar bikhr
 
 | File | Kya karta hai |
 |---|---|
-| `models.py` | `Notification`, `NotificationPreference` — dono models `liveclass` se yahan move hue (task 42) |
+| `models.py` | `Notification`, `NotificationPreference` — dono models `liveclass` se yahan move hue (task 42). `NotifType` enum ab **55 values** hai (§3) — pehle is doc me sirf 31 documented the. |
+| `migrations/0004_alter_notification_notif_type.py` | **NEW row, is doc me pehle mention nahi thi.** State-only `AlterField` — `notif_type`'s `choices=` ko current 55-value list se sync karta hai, koi DB-level operation nahi (Postgres/SQLite pe zero SQL). Purpose sirf `makemigrations --check` (CI) ko drift-free rakhna hai. |
 | `services.py` | `create_notification()` + `create_bulk_notifications()` — sirf bell-row(s) banate hain, push kabhi nahi bhejte |
 | `notification_batching.py` | `create_batched_notification()` — burst events (5 likes ek saath) ko ek notification me collapse karta hai. ✅ **Real implementation ab uploaded hai — see §5** (pehle yahan broken-content warning thi). |
 | `classroom_chat_bridge.py` | `liveclass` ↔ `message` app ke beech ka pura coupling — 8 sync functions + `get_groups_for_classrooms()` (bulk helper) + `resolve_parent_from_token()` (Task 5, parent-portal auth) — **poora file ab uploaded hai, body-not-available warning resolved — see §6/§6.1** |
@@ -86,8 +92,10 @@ Do additive indexes + ek convenience manager ke alawa kuch aur nahi badla — fi
 
 Ye task 42 ke migration (`core/migrations/0001_move_notification_models.py`) ko pure `SeparateDatabaseAndState` banata hai — sirf Django ORM state `liveclass`→`core` move hota hai, physical Postgres table na move hoti hai, na rename, na row-copy. **In values ko real ALTER/RENAME TABLE migration ke bina mat badlo.** (Real DB confirm karna abhi bhi bacha hai — §9.)
 
-**`NotifType` enum — ✅ AB POORI CONFIRMED LIST HAI (pehle sirf partial thi):**
+**`NotifType` enum — ✅ AB POORI CONFIRMED LIST HAI, 55 VALUES (pichli pass ne sirf 31 document kiye the):**
+
 ```
+# --- Original liveclass block (28) ---
 JOIN_REQUEST_RECEIVED, JOIN_REQUEST_ACCEPTED, JOIN_REQUEST_REJECTED,
 PASS_REFUNDED, SESSION_REMINDER, ASSIGNMENT_GRADED, QUERY_ANSWERED,
 CERTIFICATE_ISSUED, WAITLIST_PROMOTED, CLASSROOM_FLAGGED, NOTICE_POSTED,
@@ -95,12 +103,48 @@ SESSION_LIVE, SESSION_CANCELLED, ASSIGNMENT_POSTED, SUBMISSION_RECEIVED,
 STAFF_ADDED, REVIEW_POSTED, REPORT_REVIEWED, WITHDRAWAL_APPROVED,
 WITHDRAWAL_REJECTED, WITHDRAWAL_PAID, CLASSROOM_SHARED,
 PASS_GIFT_RECEIVED, PASS_GIFT_CLAIMED, PASS_AUTO_RENEWED,
-AUTO_RENEW_FAILED, PASS_GIFT_EXPIRED, GENERIC,
-CHAT_MESSAGE, MENTION, INCOMING_CALL   # task 44 — message app ke naye types
-```
-31 values total (28 original liveclass types + 3 message-app types). Purani list me `PASS_AUTO_RENEWED`/`AUTO_RENEW_FAILED`/`JOIN_REQUEST_RECEIVED`/`JOIN_REQUEST_REJECTED`/`QUERY_ANSWERED`/`SESSION_REMINDER`/`SESSION_CANCELLED`/`ASSIGNMENT_POSTED`/`SUBMISSION_RECEIVED`/`STAFF_ADDED`/`REVIEW_POSTED`/`REPORT_REVIEWED`/`WITHDRAWAL_*`/`GENERIC` missing the — ab sab yahan hai, ASSUMPTION marker hata diya gaya.
+AUTO_RENEW_FAILED, PASS_GIFT_EXPIRED, GENERIC
 
-**`MESSAGE_APP_TYPES`** — `frozenset({CHAT_MESSAGE, MENTION, INCOMING_CALL})`, ek **class attribute directly `Notification` model pe** (⚠️ pehle iss doc ke §7 me `_MESSAGE_APP_TYPES` naam se `views.py` me hone ka zikr tha — real jagah ye hai, taaki `views.py` **aur** `serializers.py` dono same set import kar sakein, do copies maintain na karni pade — task 46). **Naya message-app type add karte waqt yahi ek jagah update karni hai.**
+# --- Task 44 — message app (3) ---
+CHAT_MESSAGE, MENTION, INCOMING_CALL
+
+# --- Task 11 — post app (2) — ⚠️ is doc me pehle bilkul mention nahi tha ---
+POST_LIKED, POST_COMMENTED
+
+# --- campus app, campus_app_design.md §10 (9) — ⚠️ pehle mention nahi tha ---
+CAMPUS_SESSION_SCHEDULED, CAMPUS_SESSION_LIVE, LOW_ATTENDANCE_ALERT,
+ASSIGNMENT_POSTED_CAMPUS, ASSIGNMENT_DUE_REMINDER, RESULT_PUBLISHED,
+FEE_DUE_REMINDER, STAFF_ASSIGNMENT_APPROVED, STAFF_ASSIGNMENT_REJECTED
+
+# --- testseries / assignment / campus-gamification (8) — ⚠️ pehle mention nahi tha ---
+TESTSERIES_POSTED, TESTSERIES_CHECKED, TESTSERIES_PAYOUT_RELEASED,
+ASSIGNMENT_DUE_SOON, CAMPUS_REWARD_EARNED, TESTSERIES_REVIEW_RECEIVED,
+TESTSERIES_QUERY_RECEIVED, TESTSERIES_QUERY_ANSWERED
+
+# --- TASK 1 (is pass) — user_profile's Follow feature (5) — NAYA ---
+FOLLOW_REQUEST_RECEIVED, FOLLOW_REQUEST_ACCEPTED, NEW_POST_FROM_FOLLOWED,
+CLASSROOM_CREATED_BY_FOLLOWED, TESTSERIES_CREATED_BY_FOLLOWED
+```
+**Total 55 values** (28 + 3 + 2 + 9 + 8 + 5). Pichli pass sirf pehle do block (31) document karti thi — baaki 24 values (post/campus/testseries-assignment/follow, sab already-existing PLUS is pass ke 5 naye follow-wale) is doc me kabhi nahi likhe gaye the.
+
+**Notes:**
+- `NOTICE_POSTED` campus ke liye reuse hota hai (`campus.bridge.NotifTypes.NOTICE_POSTED` isi value ko point karta hai) — campus ke liye alag duplicate choice nahi banaya gaya.
+- `ASSIGNMENT_POSTED`/`ASSIGNMENT_GRADED` testseries/assignment block me bhi reuse hote hain (naya string nahi) — sirf `ASSIGNMENT_DUE_SOON` (assignment-app) naya hai, aur `ASSIGNMENT_DUE_REMINDER` (campus-app) se deliberately alag/separate value hai — do alag apps ke reminder events, aliases nahi.
+- `FOLLOW_REQUEST_RECEIVED`/`FOLLOW_REQUEST_ACCEPTED` do alag values hain (ek "follow_status_changed" + status field ki jagah) — same pattern jo `JOIN_REQUEST_RECEIVED`/`JOIN_REQUEST_ACCEPTED` already follow karte hain.
+- `NEW_POST_FROM_FOLLOWED`/`CLASSROOM_CREATED_BY_FOLLOWED`/`TESTSERIES_CREATED_BY_FOLLOWED` — "jisko follow karte ho usne X banaya" fan-out, ek value per content-type (generic `new_content_from_followed` nahi) — client `notif_type` se hi deep-link route kar sake, `data` inspect kiye bina.
+- ⚠️ **`TESTSERIES_CREATED_BY_FOLLOWED` (`"testseries_created_by_followed"`) exactly 30 characters hai — `max_length=30` ki hard limit par, zero headroom.** Agla koi naya value 30 se lamba hua to usi migration me `max_length` bump bhi karna hoga.
+- Har naya block choices-only addition hai (koi schema/DB-level migration nahi chahiye) — lekin ab is codebase ka convention hai ki phir bhi ek state-only `AlterField` migration record ki jaati hai taaki `makemigrations --check` CI me drift na pakde: yehi is pass ka `0004_alter_notification_notif_type.py` hai (see §2).
+
+**`*_APP_TYPES` frozensets — "ye NotifType values kaunse app/feature se aaye" pattern, chaaro ab documented (pehle sirf `MESSAGE_APP_TYPES`):**
+
+| Frozenset | Values | Notes |
+|---|---|---|
+| `MESSAGE_APP_TYPES` (task 46) | `CHAT_MESSAGE`, `MENTION`, `INCOMING_CALL` | `views.py`/`serializers.py` dono yahi ek jagah se import karte hain — naya message-app type add karte waqt sirf yahi ek jagah update karni hai. |
+| `CAMPUS_APP_TYPES` | `CAMPUS_SESSION_SCHEDULED`, `CAMPUS_SESSION_LIVE`, `LOW_ATTENDANCE_ALERT`, `ASSIGNMENT_POSTED_CAMPUS`, `ASSIGNMENT_DUE_REMINDER`, `RESULT_PUBLISHED`, `FEE_DUE_REMINDER`, `STAFF_ASSIGNMENT_APPROVED`, `STAFF_ASSIGNMENT_REJECTED` | `NOTICE_POSTED` deliberately isme NAHI hai — wo campus se pehle ka hai, shared/generic value hai, campus-exclusive nahi (`MESSAGE_APP_TYPES` jo values claim nahi karta unke saath consistent reasoning). |
+| `TESTSERIES_APP_TYPES` | `TESTSERIES_POSTED`, `TESTSERIES_CHECKED`, `TESTSERIES_PAYOUT_RELEASED`, `TESTSERIES_REVIEW_RECEIVED`, `TESTSERIES_QUERY_RECEIVED`, `TESTSERIES_QUERY_ANSWERED` | testseries ke apne notification-list routing ke liye. |
+| `FOLLOW_APP_TYPES` (TASK 1, NAYA) | `FOLLOW_REQUEST_RECEIVED`, `FOLLOW_REQUEST_ACCEPTED`, `NEW_POST_FROM_FOLLOWED`, `CLASSROOM_CREATED_BY_FOLLOWED`, `TESTSERIES_CREATED_BY_FOLLOWED` | `POST_LIKED`/`POST_COMMENTED` deliberately isme NAHI hain — wo post-app types (task 11) hain, Follow-relationship-driven nahi, chahe ek "jisko follow karte ho unka feed" us dono ko dikha sakta ho. Isi tarah `CAMPUS_APP_TYPES` bhi `NOTICE_POSTED` tak nahi phailta. |
+
+Sab chaar sets same jagah (`Notification` model par class attribute) define hain, `MESSAGE_APP_TYPES` (§ upar) jaisi jagah — do copies maintain karne ki zaroorat nahi.
 
 **Methods:**
 - `mark_read()` — idempotent, `is_read=True` + `read_at=now()` set karta hai, sirf tab save karta hai jab already read na ho.

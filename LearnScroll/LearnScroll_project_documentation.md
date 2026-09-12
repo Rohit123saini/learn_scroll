@@ -2,10 +2,10 @@
 
 > Ye document `LearnScroll/` folder (Django project root — `settings.py`, `asgi.py`, `wsgi.py`, `celery.py`, `urls.py`, `ws_auth.py`) ka single source of truth hai — wahi tarika jo `campus_app_design.md` aur `core_app_documentation.md` already follow karte hain. Ye teeno docs ab ek doosre ko complete karte hain: `campus`/`core` apps *kya* karte hain wo un docs me hai; ye project *kaise wire hota hai* (INSTALLED_APPS, throttle rates, celery beat, auth, deployment) yahan hai. Koi bhi is project pe kaam continue kare, teeno docs ek saath padhe.
 >
-> **Is pass me EK CRITICAL aur DO real gaps mile** (neeche §7 "Cross-app config audit" me poora detail):
-> - 🔴 **`assignment` aur `testseries` apps `INSTALLED_APPS` me hain hi nahi** — jabki `campus/bridge.py` aur `core/views.py::SearchView` dono inhe hard-import karte hain (`campus_app_design.md` §10, `core_app_documentation.md` §7/§8 already isko "confirmed sibling apps" bolte hain). Django app-registry ke bina ye migrations/admin/`get_app_config()` sab me fail hoga. §7.1 dekho.
-> - 🟡 **`campus`'s do F-3 streak-reward Celery tasks (`check_attendance_streak_rewards`, `check_assignment_ontime_streak_rewards`) `CELERY_BEAT_SCHEDULE` me registered nahi hain** — `campus_app_design.md` §7a/§12/§16 already bolta hai ye dono ab crash nahi karte (ImportError/AttributeError dono resolve ho chuke), lekin scheduled na hone ki wajah se abhi bhi kabhi apne aap chalte hi nahi. §7.2 dekho.
-> - 🟡 **`LearnScroll/ws_auth.py` — khud apna docstring "ye project ki EK hi copy hai" bolta hai, lekin `asgi.py` isko import hi nahi karta** — `asgi.py` abhi bhi `message.Middleware.JWTAuthMiddleware` use karta hai, exact wahi per-app-duplicate pattern jo `ws_auth.py` khatam karne ke liye likha gaya tha. §7.3 dekho.
+> **Is pass me settings.py update hua hai — pichla EK CRITICAL gap ab HAALF-fixed hai, aur DO real gaps abhi bhi baaki hain** (neeche §7 "Cross-app config audit" me poora detail):
+> - 🟡 **`INSTALLED_APPS` me `testseries`/`assignment` add kar diye gaye — lekin `'assigments'` (typo, missing 'n') likha gaya hai, `'assignment'` nahi.** `testseries` sahi spell hui hai aur ab register hai. Lekin `campus/bridge.py` aur `core/views.py::SearchView` dono jo hard-import karte hain wo module `assignment` hai (`campus_app_design.md`/`core_app_documentation.md` dono consistently isi label ko "confirmed sibling app" bolte hain) — agar us app ka actual `AppConfig.name`/folder `assignment` hai (jaisa har jagah reference hota hai), to `'assigments'` ek naya, alag-bug-shape wala CRITICAL issue hai: Django `assignment.bridge`/`assignment.models` ko resolve to kar lega (Python import path se, app-registry se independent), lekin `assignment` app registry me registered hi nahi hoga — migrations/admin us par ab bhi kaam nahi karenge, aur `'assigments'` khud ek bhoot-app ke roop me registered rahega jiska koi matching folder/label nahi. §7.1 dekho — updated.
+> - 🟡 **`campus`'s do F-3 streak-reward Celery tasks (`check_attendance_streak_rewards`, `check_assignment_ontime_streak_rewards`) abhi bhi `CELERY_BEAT_SCHEDULE` me registered NAHI hain** — is pass me bhi koi change nahi, still open. §7.2 dekho.
+> - 🟡 **`LearnScroll/ws_auth.py` ka `asgi.py`-wiring status is pass me verify nahi ho saka** — is baar `asgi.py` upload me nahi aaya, sirf `settings.py` aaya hai. §7.3 ka pichla finding (dead code, `asgi.py` abhi bhi `message.Middleware.JWTAuthMiddleware` use karta tha) last-confirmed status hai, is pass me re-verify nahi hua.
 >
 > Baaki poora `settings.py` (1141 lines), `asgi.py`, `celery.py`, `urls.py`, `wsgi.py` neeche as-built document kiya gaya hai.
 
@@ -40,10 +40,10 @@
 ```
 daphne, django.contrib.{admin,auth,contenttypes,sessions,messages,staticfiles},
 django.contrib.postgres, django_filters, rest_framework, drf_spectacular, corsheaders,
-login, user_profile, post, message, liveclass, campus, core
+login, user_profile, post, message, liveclass, campus, testseries, assigments, core
 [+ 'storages' if USE_S3_STORAGE]
 ```
-**🔴 `assignment` aur `testseries` is list me NAHI hain** — dono `campus`/`core` ke sibling apps hain jo `campus/bridge.py` aur `core/views.py::SearchView` hard-import karte hain. Poora detail + impact **§7.1** me.
+**🟡 UPDATED THIS PASS, PARTIALLY FIXED** — `testseries` ab correctly registered hai. Lekin chautha naya entry `'assigments'` hai (typo — missing 'n'), `'assignment'` nahi, jabki `campus/bridge.py` aur `core/views.py::SearchView` dono `assignment.bridge`/`assignment.models` hi hard-import karte hain. Poora detail + impact **§7.1** me.
 
 ### Database
 `DATABASE_URL` env-var se driven — set ho to Postgres (`CONN_MAX_AGE=60`), na ho to SQLite fallback (`db.sqlite3`, WAL mode + `busy_timeout=30000` `connection_created` signal se activate hota hai). Postgres ka `psycopg2-binary`/`psycopg[binary]` install hona chahiye jab `DATABASE_URL` set karo.
@@ -174,16 +174,18 @@ urlpatterns = [
 
 Is section ka maksad: dono app-level docs ke "kya settings.py me hona chahiye" wale open items ko is asli `settings.py` ke against check karna — same reconciliation jo `campus`/`core` docs khud apne code ke liye karte hain.
 
-### 7.1 🔴 `assignment` / `testseries` — `INSTALLED_APPS` me MISSING (critical)
+### 7.1 🟡 `assignment` — `INSTALLED_APPS` me galat spelling se add hua (`testseries` sahi hai)
 
-**Evidence:**
-- `campus/bridge.py` (`campus_app_design.md` §10): `create_assignment()`/`get_assignment_submissions()` `assignment.bridge`/`assignment.models` import karte hain; `create_testseries()`/`can_review_testseries_attempt()`/`get_testseries_attempts()` `testseries.bridge`/`testseries.models` import karte hain — dono jagah doc khud explicitly bolta hai "confirmed sibling apps hain, isliye HARD import, koi lazy-degrade nahi".
-- `core/views.py::SearchView` (`core_app_documentation.md` §6.2/§7): `from assignment.models import Assignment, AssignmentSource` aur `from testseries.models import TestSeries` — dono seedhe module-level function-body imports.
-- `settings.py`'s `INSTALLED_APPS` (§2 upar) me `'assignment'`/`'testseries'` kahin nahi hain.
+**✅ Is pass me updated:** `INSTALLED_APPS` me ab `'testseries'` aur `'assigments'` dono add ho chuke hain (§2 upar). `testseries` bilkul sahi hai — koi issue nahi.
 
-**Impact:** Django app-registry (`django.apps.apps`) in dono apps ko bilkul nahi jaanti — `manage.py migrate`/`makemigrations` unke models ke liye kuch nahi karega (tables ban hi nahi sakti), `admin.site.register()` (agar unka apna `admin.py` hai) fail hoga, `django_apps.get_app_config("assignment")` `LookupError` dega (jo `check_config_drift.py` khud bhi use karta hai — is se ye command bhi in do apps par kabhi nahi chal sakta jab tak `CONFIG_DRIFT_APPS` me add na ho), aur AI Studio dependent hai in models ke DB tables exist karne par — jo `INSTALLED_APPS` ke bina kabhi bante hi nahi. Iska matlab `campus`/`core` ke through jitna bhi assignment/testseries-related functionality already "wired" document hui hai (Task 11, Task 13, Task 18), wo saari **runtime pe crash karegi** (`ImportError` nahi — modules import to ho jayenge agar Python path pe hain — balki DB-level: koi table hi nahi hogi unke models ke liye, ya agar dusre kisi project me already migrated hain to Django unhe apna nahi maanega).
+**🟡 Lekin `'assigments'` likha gaya hai, `'assignment'` nahi (typo — missing 'n'):**
+- `campus/bridge.py` (`campus_app_design.md` §10): `create_assignment()`/`get_assignment_submissions()` `assignment.bridge`/`assignment.models` import karte hain — module path `assignment`, `assigments` nahi.
+- `core/views.py::SearchView` (`core_app_documentation.md` §6.2/§7): `from assignment.models import Assignment, AssignmentSource` — yahan bhi `assignment`.
+- Dono docs consistently `assignment` (poora word, sahi spelling) ko hi "confirmed sibling app" label bolte hain — kahin bhi `assigments` nahi likha.
 
-**Fix:** `INSTALLED_APPS` me `'assignment'` aur `'testseries'` add karo (jahan bhi unka natural position ho — `campus`/`core` jaisa hi ek line). Is upload me `assignment`/`testseries` ke apne `apps.py`/models kabhi nahi aaye, isliye exact app-label confirm nahi ho saka (`'assignment'` aur `'testseries'` yahan wahi labels hain jo `campus_app_design.md`/`core_app_documentation.md` consistently use karte hain) — verify karo unke apne `AppConfig.name` se match karte hain.
+**Impact agar actual app ka folder/`AppConfig.name` `assignment` hai (jaisa har jagah use hota hai):** `'assigments'` string se Django ek **naya, non-existent app** register karne ki koshish karega — agar `assigments/` naam ka koi folder/module hi nahi hai to Django startup pe hi `ModuleNotFoundError`/`ImproperlyConfigured` degi ("Cannot import 'assigments'"), poora project boot hi nahi hoga. Agar koi purana/dummy `assigments` folder kahin accidentally maujood hai to project boot to ho jayega, lekin asli `assignment` app (jise `campus/bridge.py`/`core/views.py` import karte hain) **ab bhi app-registry me registered NAHI hai** — wahi purana §7.1 impact (migrations/admin/`get_app_config("assignment")` sab fail) jyon ka tyon rehta hai, sirf ab ek extra bhoot-entry (`assigments`) ke saath. Dono cases me ye **still-critical** hai, sirf failure ka shape badla hai.
+
+**Fix:** `INSTALLED_APPS` me `'assigments'` ko `'assignment'` se replace karo (spelling fix, ek character). Confirm karo `assignment` app ka apna `AppConfig.name` isi label se match karta hai (jaisa is doc me pehle bhi flag kiya gaya tha — is app ka apna `apps.py`/models is upload me kabhi nahi aaya).
 
 ### 7.2 🟡 Campus F-3 streak-reward tasks — beat schedule me missing, deliberate-exclusion list me bhi nahi
 
@@ -216,7 +218,7 @@ Is section ka maksad: dono app-level docs ke "kya settings.py me hona chahiye" w
 
 ## 8. Open items (agla kaam yahi se shuru hoga)
 
-1. **🔴 `INSTALLED_APPS` me `assignment`/`testseries` add karna** — §7.1, sabse pehle ye, kyunki iske bina campus/core ke bahut saare already-"wired"-documented features runtime pe kaam hi nahi karenge.
+1. **🟡 `INSTALLED_APPS` me `'assigments'` ko `'assignment'` se fix karna (spelling)** — §7.1. `testseries` already sahi hai. Ye ab ek one-character typo fix hai, lekin jab tak fix nahi hota tab tak impact utna hi critical hai jitna pehle "missing entirely" wala tha.
 2. **🟡 Campus streak-reward tasks ko `CELERY_BEAT_SCHEDULE` me add karna** — §7.2 (pehle `campus/tasks.py` ka signature confirm karo — is upload me nahi aaya).
 3. **🟡 `ws_auth.py` ko `asgi.py` me actually wire karna**, aur `message`/`liveclass` ki apni duplicate copies delete karna — §7.3.
 4. `LearnScroll/__init__.py` verify karo — `from .celery import app as celery_app` + `__all__ = ("celery_app",)` hona chahiye (celery.py's apna wiring-requirement) — is upload me `__init__.py` nahi aaya.
