@@ -1,13 +1,30 @@
 # `login` App — Complete Self-Contained Reference
 
-> **v4 — updated after the latest patch round (fix B-7, forgot/reset
-> password).** Ye ek hi file hai jisme poore **login** (auth) Django app
+> **v5 — verified byte-for-byte against the uploaded source (Sep 2026
+> sync pass).** Ye ek hi file hai jisme poore **login** (auth) Django app
 > ka sara logic, code, connections, flows aur known issues cover hain.
 > Iske alawa kisi aur file ki zaroorat nahi — sab kuch (models →
 > serializers → views → urls → admin → apps.py → sms_service.py) yahin
 > milega, saath me har piece kya kaam karta hai uski explanation bhi.
 >
-> **v3 se kya badla, sabse pehle:** section 0.2 (Changelog v3 → v4)
+> **v4 se v5 me kya badla:** koi functional/behavioural change nahi —
+> pure sync/accuracy pass hai. Har ek `.py` file (`models.py`,
+> `serializers.py`, `views.py`, `sms_service.py`, `admin.py`, `apps.py`,
+> `tests.py`, `urls.py`) is doc ke embedded code-blocks ke against
+> programmatically diff kiya gaya. Ek hi real mismatch mila — §5
+> (`views.py`) ke andar do jagah comments doc me trim ho gaye the
+> (`VerifyOTPView`'s "(B-7) this is also NOT the forgot-password flow"
+> note, aur `ForgotPasswordView` se pehle wala poora FIX rationale
+> block) — dono ab restore kar diye gaye hain, so **§5 ab actual
+> `views.py` se character-for-character match karta hai.** Baaki saari
+> files (`models.py`, `serializers.py`, `sms_service.py`, `admin.py`,
+> `apps.py`, `tests.py`, `urls.py`) already exact match the, koi change
+> nahi. **Is file ko ab source of truth maan kar aage ka saara kaam
+> (naye features, bug-fixes, reviews) isi ke against karo** — jab bhi
+> code change ho, is doc ko wahi turant update karna, taaki dono kabhi
+> drift na karein.
+>
+> **v3 se v4 me kya badla:** section 0.2 (Changelog v3 → v4)
 > padho. Ek dedicated **forgot/reset password** flow (`ForgotPasswordView`/
 > `ResetPasswordView`) add hui hai — pehle password-reset ka koi seedha
 > rasta nahi tha, sirf OTP-login ka side-effect (§11 item 6, ab
@@ -1338,6 +1355,13 @@ class VerifyOTPView(APIView):
                 # see GoogleAuthView's set_unusable_password()), email
                 # them a heads-up after the fact. Best-effort: a failed
                 # notification must never block a legitimate login.
+                #
+                # (B-7) This is also, deliberately, still NOT the
+                # forgot-password flow — it never asks for or sets a new
+                # password. That's now ForgotPasswordView/ResetPasswordView
+                # further down this file, kept fully separate so a correct
+                # OTP here keeps meaning exactly one thing: "log this
+                # session in."
                 user = user_queryset.first()
                 refresh = RefreshToken.for_user(user)
                 # ✅ SECURITY: OTP consume ho gaya, dobara replay use nahi ho sakta
@@ -1432,7 +1456,25 @@ class ChangePasswordAPIView(APIView):
         )
 
 
-#-------------  forgot / reset password (B-7)  ---------------------------
+#------------------------------------  forgot / reset password (B-7)  ------------------------------------
+#
+# FIX — there was no dedicated "forgot password" flow. The only path that
+# looked like one was VerifyOTPView's "user_exists" branch above, which is
+# by-design passwordless OTP-login (see Task 16's note right there) — it
+# logs the user in on a correct OTP, it never asks for or sets a new
+# password. Using it as a password-reset substitute would mean an OTP
+# alone both proves identity AND silently hands out a session, with no
+# step where the account owner actually sets a new password — not what
+# "I forgot my password" should do, and not something to bolt onto an
+# endpoint that already has a different, intentional job.
+#
+# Added instead: a proper two-step flow that never returns a session —
+#   1. ForgotPasswordView — request a reset code for a *known* account.
+#   2. ResetPasswordView  — spend that code, in the same request as the
+#      new password, to actually change it.
+# Both reuse the existing OTPVerification model and its hash/expiry/
+# lockout machinery (same as SendOTPView/VerifyOTPView above) rather than
+# inventing a second OTP mechanism.
 
 class ForgotPasswordView(APIView):
     """

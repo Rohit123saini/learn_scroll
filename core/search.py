@@ -1,18 +1,18 @@
 # core/search.py
 """
 F-4 — Unified cross-app search ("search everything": messages, posts,
-classroom materials, campus notices), built as an extension of the
-same Postgres FTS + trigram strategy `message/search_utils.py` already
-established for `Message`.
+classroom materials, campus notices, assignments, test series), built as
+an extension of the same Postgres FTS + trigram strategy
+`message/search_utils.py` already established for `Message`.
 
 Lives in `core`, not `message` — `core` is already this project's
 shared cross-app integration point (see `core.models.Notification`'s
 direct FKs into `liveclass`, and `campus/bridge.py`'s own "campus's
 ONLY door into core/message" golden rule, which says nothing about
 `core` itself being restricted from reaching into any app). Putting
-this here also means `message`/`liveclass`/`campus`/`post` never need
-to import each other directly just to power one search box — they
-each only ever talk to `core`.
+this here also means `message`/`liveclass`/`campus`/`post`/`assignment`/
+`testseries` never need to import each other directly just to power one
+search box — they each only ever talk to `core`.
 
 GOLDEN RULE THIS FILE FOLLOWS (same one `message/search_utils.py`
 already follows, look at how `search_messages(qs, query)` takes an
@@ -22,16 +22,19 @@ module never decides who can see what — that decision (which
 conversations a user is a participant of, which notices a student's
 enrollment/parent-link/staff-profile entitles them to, which posts
 aren't from a blocked/blocking user, which classroom materials belong
-to a classroom the user has access to) stays inside each app's own
-view/queryset-building code, exactly where it already lives for
-`message`. Reimplementing that scoping logic here — even partially, even
-just for `Notice`, where I can see the model — would create a SECOND,
-independently-maintained copy of "who can see this row" next to
-whatever `NoticeViewSet`/`ConversationViewSet`/etc. already enforce.
-Two independently-maintained copies of an access rule drift, and a
-search endpoint that leaks one row an app's own view would have denied
-is a worse failure than this feature simply not existing yet — so this
-file deliberately stays a pure ranking/merging layer, never a
+to a classroom the user has access to, which assignments/test series a
+user posted/holds a submission or attempt for) stays inside each app's
+own view/queryset-building code (for `assignment`/`testseries`: in
+`core/views.py::SearchView`, which mirrors each source's own existing
+viewset scoping — see that view's own docstring). Reimplementing that
+scoping logic here — even partially, even just for `Notice`, where I
+can see the model — would create a SECOND, independently-maintained
+copy of "who can see this row" next to whatever
+`NoticeViewSet`/`ConversationViewSet`/`AssignmentViewSet`/etc. already
+enforce. Two independently-maintained copies of an access rule drift,
+and a search endpoint that leaks one row an app's own view would have
+denied is a worse failure than this feature simply not existing yet —
+so this file deliberately stays a pure ranking/merging layer, never a
 permission layer.
 
 STATUS (this pass):
@@ -39,10 +42,23 @@ STATUS (this pass):
     (Message already has a real `search_vector` column + trigger, no
     need to re-derive it with the generic on-the-fly path below).
   - ✅ campus notices (`campus.Notice`, `title`/`body`) — fully wired
-    via `_search_generic_model` below, since `campus/models.py` was
-    available this pass. Still needs a caller to pass in a properly
-    scoped `Notice` queryset (see golden rule above) — this file does
-    NOT know or guess campus/department/section visibility rules.
+    via `_search_generic_model` below. Still needs a caller to pass in
+    a properly scoped `Notice` queryset (see golden rule above) — this
+    file does NOT know or guess campus/department/section visibility
+    rules.
+  - ✅ assignment (`assignment.Assignment`, `title`/`description`,
+      Task 18) — fully wired via `_search_generic_model`. Caller
+      (`core/views.py::SearchView`) mirrors `AssignmentViewSet.
+      get_queryset()`'s own scoping exactly.
+  - ✅ testseries (`testseries.TestSeries`, `title`/`description`,
+      Task 18) — fully wired via `_search_generic_model`. Caller scopes
+      to individual/published + own-created + attempted + campus-
+      enrolled (via `campus.StudentEnrollment`, the same roster source
+      `campus.bridge.create_testseries()` itself uses). Liveclass-
+      context test series are not yet included there — no roster/
+      entitlement resolver exists for testseries on the liveclass side
+      yet, so those rows are simply absent from search results, never
+      leaked.
   - ❌ posts (`post` app) — STUB ONLY. `post/models.py` was never part
     of any upload, so `Post`'s searchable field name(s) are unknown.
     Wire up by adding a `SearchSource` to `SOURCES` below (see
@@ -96,10 +112,11 @@ def _search_generic_model(qs: QuerySet, query: str, *, fields: Iterable[str], or
     row's text at query time, not at write time) and can't use a GIN
     index the way `Message.search_vector` can. Acceptable for a
     low-volume, already-narrowly-scoped table (e.g. one campus's
-    notices) — NOT something to point at a large or ungated table
-    as-is. A source that needs to scale should get its own stored
-    `search_vector` column + trigger migration, the same way `Message`
-    already has one, instead of leaning on this generic path forever.
+    notices, or one user's own assignments/test series) — NOT
+    something to point at a large or ungated table as-is. A source
+    that needs to scale should get its own stored `search_vector`
+    column + trigger migration, the same way `Message` already has
+    one, instead of leaning on this generic path forever.
 
     `fields` — searchable text column name(s), e.g. `("title",
     "body")`. Trigram similarity only ever runs against the FIRST
@@ -110,8 +127,9 @@ def _search_generic_model(qs: QuerySet, query: str, *, fields: Iterable[str], or
     `order_field` — the model's own recency field, used both for the
     non-Postgres fallback's ordering and as the final tiebreaker after
     rank/similarity. Every model passed into this function must have
-    it (defaults to `created_at`, which `Message`/`Notice` both have —
-    override for a model that names it differently, e.g. `posted_at`).
+    it (defaults to `created_at`, which `Message`/`Notice`/
+    `Assignment`/`TestSeries` all have — override for a model that
+    names it differently, e.g. `posted_at`).
     """
     fields = tuple(fields)
     if not fields:
@@ -182,6 +200,41 @@ def _serialize_notice(notice) -> dict:
     }
 
 
+def _serialize_assignment(assignment) -> dict:
+    return {
+        "source": "assignment",
+        "id": assignment.id,
+        "title": assignment.title,
+        "snippet": assignment.description[:280],
+        "created_at": assignment.created_at,
+        "rank": getattr(assignment, "rank", None),
+        "similarity": getattr(assignment, "similarity", None),
+        "extra": {
+            # personal / campus / liveclass
+            "source_type": assignment.source,
+            "context_type": assignment.context_type,
+            "context_id": str(assignment.context_id) if assignment.context_id else None,
+        },
+    }
+
+
+def _serialize_testseries(series) -> dict:
+    return {
+        "source": "testseries",
+        "id": series.id,
+        "title": series.title,
+        "snippet": series.description[:280],
+        "created_at": series.created_at,
+        "rank": getattr(series, "rank", None),
+        "similarity": getattr(series, "similarity", None),
+        "extra": {
+            # individual / campus / liveclass
+            "source_type": series.source,
+            "is_paid": series.is_paid,
+        },
+    }
+
+
 MESSAGE_SOURCE = SearchSource(
     name="message",
     run=lambda qs, query: message_search_utils.search_messages(qs, query),
@@ -192,6 +245,18 @@ NOTICE_SOURCE = SearchSource(
     name="campus_notice",
     run=lambda qs, query: _search_generic_model(qs, query, fields=("title", "body")),
     serialize=_serialize_notice,
+)
+
+ASSIGNMENT_SOURCE = SearchSource(
+    name="assignment",
+    run=lambda qs, query: _search_generic_model(qs, query, fields=("title", "description")),
+    serialize=_serialize_assignment,
+)
+
+TESTSERIES_SOURCE = SearchSource(
+    name="testseries",
+    run=lambda qs, query: _search_generic_model(qs, query, fields=("title", "description")),
+    serialize=_serialize_testseries,
 )
 
 # ❌ post / classroom-material sources intentionally NOT registered
@@ -212,6 +277,8 @@ NOTICE_SOURCE = SearchSource(
 SOURCES = {
     MESSAGE_SOURCE.name: MESSAGE_SOURCE,
     NOTICE_SOURCE.name: NOTICE_SOURCE,
+    ASSIGNMENT_SOURCE.name: ASSIGNMENT_SOURCE,
+    TESTSERIES_SOURCE.name: TESTSERIES_SOURCE,
 }
 
 
@@ -232,6 +299,8 @@ def search_everything(
             {
                 "message": Message.objects.filter(conversation__participants=request.user),
                 "campus_notice": Notice.objects.filter(campus__in=my_campus_ids, ...),
+                "assignment": Assignment.objects.filter(...),
+                "testseries": TestSeries.objects.filter(...),
             },
             query="exam schedule",
         )
@@ -243,11 +312,12 @@ def search_everything(
     above is wired up.
 
     Returns a single flat list of normalized dicts (see
-    `_serialize_message`/`_serialize_notice` for the shape), merged
-    across sources and sorted by `rank` (falling back to `similarity`,
-    then `created_at`) — capped to `total_limit` overall, after first
-    capping each individual source to `limit_per_source` so one noisy
-    source can't crowd out every other one.
+    `_serialize_message`/`_serialize_notice`/`_serialize_assignment`/
+    `_serialize_testseries` for the shape), merged across sources and
+    sorted by `rank` (falling back to `similarity`, then `created_at`)
+    — capped to `total_limit` overall, after first capping each
+    individual source to `limit_per_source` so one noisy source can't
+    crowd out every other one.
 
     CAVEAT this doesn't try to solve: `rank`/`similarity` are Postgres
     tsvector/trigram scores computed independently per model/content —

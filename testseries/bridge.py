@@ -144,3 +144,99 @@ def get_attempts_for_context(*, context_type: str, context_id):
     return TestAttempt.objects.filter(
         series__context_type=context_type, series__context_id=context_id
     ).select_related("series", "student")
+
+
+# ---------------------------------------------------------------------------
+# Task 16 — "post-result query-to-teacher". Reuses `message.DoubtQuestion`
+# (no new model) via the generic `context_type`/`context_id` opaque
+# pointer added to it this pass (see `message/models.py`'s docstring on
+# `DoubtQuestion`) rather than `testseries` growing its own Q&A model.
+#
+# Golden rule direction, confirmed for this feature: `testseries` ->
+# `message` only (lazy imports below, same reasoning `_notify()`/
+# `_record_coin_transaction()` in models.py already give for `core`/
+# `user_profile`) — `message` itself never imports `testseries` back;
+# `DoubtQuestion.context_type`/`context_id` are bare opaque values to it.
+# ---------------------------------------------------------------------------
+
+def ask_query_on_series(*, attempt: "TestAttempt", student, text: str, is_anonymous: bool = False):
+    """Student asks the series creator a doubt about their OWN attempt,
+    only once it's actually `checked` — exact Task 16 requirement.
+    Creates a `message.DoubtQuestion` with `group=None`/`conversation=
+    None` (a testseries query has neither) and `context_type=
+    "testseries_attempt"`, `context_id=<attempt.id>`.
+
+    Raises plain `ValueError` (not a DRF exception — same "services stay
+    HTTP-decoupled" convention `message/services.py`'s own module
+    docstring states) for both "not your attempt" and "not checked yet";
+    `views.py::TestAttemptViewSet.ask_query` maps this to a clean 400.
+    The coarser "do you even have an attempt on this series at all" gate
+    is `permissions.CanAskQueryOnCheckedAttempt`, checked before this
+    function is ever called.
+    """
+    from message.models import DoubtQuestion
+
+    if attempt.student_id != student.id:
+        raise ValueError("You can only ask a query about your own attempt.")
+    if attempt.status != TestAttempt.Status.CHECKED:
+        raise ValueError("You can only ask a query after your attempt has been fully checked.")
+
+    return DoubtQuestion.objects.create(
+        group=None,
+        conversation=None,
+        author=student,
+        text=text,
+        is_anonymous=is_anonymous,
+        context_type="testseries_attempt",
+        context_id=attempt.id,
+    )
+
+
+def answer_query_on_series(*, doubt_id, teacher, answer_text: str):
+    """Answer-side counterpart to `ask_query_on_series()` above.
+
+    ⚠️ Not in Task 16's own "files banegi/badlengi" list, but added
+    anyway — without SOME entrypoint that can verify "is this teacher
+    actually this series' creator" before calling `message.services.
+    answer_doubt_question()`, the acceptance checklist's "teacher
+    answers -> student gets TESTSERIES_QUERY_ANSWERED" item has no route
+    to actually happen through: `message` itself can never resolve that
+    check (golden rule — no `message` -> `testseries` import), so
+    `testseries` has to be the one holding this entrypoint. Flagging
+    this explicitly rather than quietly leaving the feature half-wired;
+    wire `views.py::TestAttemptViewSet.answer_query` (or whatever
+    teacher-facing endpoint you prefer) to call this.
+
+    Resolves `doubt.context_id` back to its `TestAttempt` -> `TestSeries`
+    here, testseries-side, confirms `teacher == series.creator`, THEN
+    calls `message.services.answer_doubt_question(actor=None, ...)` —
+    the "already authorized by a trusted caller" convention
+    `add_members_to_group`/`update_group_member_role` in that module
+    already use, since `message` has no way to independently re-verify
+    a testseries creator relationship itself.
+
+    Raises `ValueError` if the doubt doesn't exist / isn't a testseries
+    query; `PermissionError` if `teacher` isn't that series' creator —
+    `views.py` maps these to a 400 / 403 respectively.
+    """
+    from message.models import DoubtQuestion
+    from message.services import answer_doubt_question
+
+    try:
+        doubt = DoubtQuestion.objects.get(pk=doubt_id, context_type="testseries_attempt")
+    except DoubtQuestion.DoesNotExist:
+        raise ValueError("Query not found.")
+
+    attempt = TestAttempt.objects.select_related("series").filter(pk=doubt.context_id).first()
+    if attempt is None or attempt.series.creator_id != teacher.id:
+        raise PermissionError("Only the series creator can answer this query.")
+
+    # `actor=None` skips message/services.py's group-admin/mod check (this
+    # doubt has no group to check against anyway — see models.py's Task 16
+    # comment). `answered_by=teacher` is passed SEPARATELY so the already-
+    # verified creator above still ends up recorded as the answerer instead
+    # of being silently dropped (previous version of this function passed
+    # neither, which meant `DoubtQuestion.answered_by` never got set here —
+    # fixed as part of the same Task 16 pass that added `answered_by` as
+    # its own parameter to `answer_doubt_question()`).
+    return answer_doubt_question(doubt=doubt, actor=None, answer_text=answer_text, answered_by=teacher)

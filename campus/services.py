@@ -165,35 +165,48 @@ def compute_assignment_ontime_streak(student, section):
     streak()` did not exist in this file at all, so this is a new
     function, not a fix to a pre-existing wrong-model read.
 
-    ⚠️ FLAGGED, NOT GUESSED AT — two things below are assumed rather
-    than confirmed, because `assignment/models.py` / `assignment/
-    bridge.py` were not part of this pass's upload (only `campus/
-    services.py`, `tasks.py`, `bridge.py`, `settings.py` were):
+    ✅ CONFIRMED against the real `assignment/models.py` (this pass) —
+    this REPLACES a wrong first draft that checked
+    `submission.status == "submitted"`. That check is wrong for two
+    confirmed reasons, not just an unconfirmed guess:
+      1. `status` does not stay `"submitted"` — once a free-form
+         submission is graded, `grade_freeform()` moves it to `CHECKED`
+         regardless of whether it was on-time or late, so an on-time
+         but already-graded submission would wrongly break the streak.
+      2. The structured path (`submit_structured()`) NEVER sets status
+         to `SUBMITTED`/`LATE` at all — it goes straight to
+         `PARTIALLY_CHECKED` or `CHECKED` (see `_recompute_structured_
+         status()`). Every structured submission would ALWAYS wrongly
+         break the streak under the old check.
+    The model's own `is_late()` method is the actual source of truth —
+    it recomputes from `submitted_at` vs. `assignment.due_date` fresh
+    every time, independent of workflow status, so it works identically
+    for both the free-form and structured paths. "On-time" here is
+    therefore `submitted_at is not None and not is_late()` — the
+    `submitted_at` check is needed because `is_late()` also returns
+    `False` for a never-submitted (`MISSING`) row, which is not on-time.
 
-    1. "On-time" is read as `submission.status == "submitted"` — a bare
-       string, not `AssignmentSubmission.SubmissionStatus.SUBMITTED` —
-       specifically so this file does NOT import `assignment.models`
-       directly, which `campus/bridge.py`'s own docstring states is
-       the golden rule for `AssignmentSubmission` ("never a direct
-       import ... outside this bridge module"). The value `"submitted"`
-       itself is not independently confirmed against the real enum —
-       it matches every other `TextChoices` in this codebase's own
-       convention (member name lower-cased == value, e.g. `Attendance.
-       Status.PRESENT = "present"`) and matches the deprecated
-       `campus.AssignmentSubmission.Status.SUBMITTED = "submitted"`
-       this model replaces, but has not been checked character-for-
-       character against `assignment.models.AssignmentSubmission.
-       SubmissionStatus` the way `bridge.py`'s own `NotifTypes` class
-       states it checked its values. Please confirm against the real
-       `assignment/models.py` — if the value differs, only the string
-       literal below needs to change.
-    2. `get_assignment_submissions()`'s return type isn't confirmed
-       (queryset vs. plain list) — handled defensively below by
-       filtering/sorting in plain Python instead of chaining
-       `.filter()`/`.order_by()` onto it, so this works either way
-       rather than risking a fresh `AttributeError` from guessing wrong
-       about chainability (exactly the class of bug this task exists to
-       eliminate).
+    ✅ CONFIRMED (this pass, `assignment/bridge.py` now provided):
+    `get_submissions_for_context()` — and therefore `campus.bridge.
+    get_assignment_submissions()`, which calls straight through to it —
+    returns a real Django queryset (`AssignmentSubmission.objects.
+    filter(...).select_related("assignment", "student")`), not a plain
+    list. This REPLACES a more defensive first draft that filtered/
+    sorted in plain Python specifically to avoid depending on that being
+    true. Switching to DB-level `.filter()`/`.order_by()` isn't just
+    tidier now that it's confirmed — it also sidesteps a real crash the
+    Python-side version had: `Assignment.due_date` is nullable
+    (`null=True, blank=True`, confirmed in `assignment/models.py`), and
+    `sorted(..., key=lambda s: s.assignment.due_date)` raises `TypeError`
+    the moment it has to compare a real `date` against `None`. Ordering
+    at the DB level instead never hits that — SQL handles NULL in
+    `ORDER BY` without raising (Postgres sorts them as the "largest"
+    value in a `DESC` order, i.e. first), so a null-due-date submission
+    can appear in the streak walk without crashing this function, even
+    though whether it *should* count is arguably itself a design
+    question the callers of `create_context_assignment()` — not this
+    function — would need to actually resolve (should a campus
+    assignment ever have no due_date at all?).
 
     Returns `(streak_length, last_due_date)` — `last_due_date` is the
     `Assignment.due_date` of the most recent submission in the streak,
@@ -202,16 +215,32 @@ def compute_assignment_ontime_streak(student, section):
     `last_date` is used. Returns `(0, None)` if there's no current
     streak (the most recent submission, if any, isn't on-time) or there
     are no submissions for this student in this section at all.
+
+    ⚠️ EDGE CASE, FLAGGED NOT GUESSED AT: if the most-recent submission
+    counted into the streak belongs to an assignment with `due_date=
+    None` (allowed by the model), this returns `(streak, None)` with
+    `streak > 0` — `tasks.check_assignment_ontime_streak_rewards()`
+    then calls `last_due_date.isoformat()` unconditionally once
+    `streak != 0`, which would raise `AttributeError` on that `None`.
+    Not fixed here because it's a genuine product-rule gap, not a coding
+    guess: should a due-date-less campus assignment count towards an
+    "on-time" streak at all, and if so what should stand in for
+    `last_due_date` in the idempotency reference? Neither question is
+    this function's to answer alone. In practice this likely never
+    fires — every other campus task that touches `due_date` (e.g.
+    `send_assignment_due_reminders`) assumes it's always set for a
+    campus-sourced assignment — but the model itself does not enforce
+    that, so it's flagged rather than silently assumed away.
     """
     from .bridge import get_assignment_submissions
 
-    submissions = [s for s in get_assignment_submissions(section) if s.student_id == student.id]
-    submissions.sort(key=lambda s: s.assignment.due_date, reverse=True)
+    submissions = get_assignment_submissions(section).filter(student_id=student.id).order_by("-assignment__due_date")
 
     streak = 0
     last_due_date = None
     for submission in submissions:
-        if submission.status != "submitted":
+        on_time = submission.submitted_at is not None and not submission.is_late()
+        if not on_time:
             break
         streak += 1
         if last_due_date is None:

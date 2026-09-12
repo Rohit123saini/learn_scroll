@@ -186,6 +186,24 @@ class Campus(CampusBaseModel):
     # the service/view layer that creates FeeStructure/FeeInvoice rows.
     fee_module_enabled = models.BooleanField(default=False)
 
+    # [Task 19 — ORG_VS_INDIVIDUAL_MATRIX] Future-proofing toggle only —
+    # does NOT change any current behavior. `TestSeries.save()`
+    # (testseries/models.py) still unconditionally forces `is_paid=False`
+    # / `price_coins=0` for every `source="campus"` series regardless of
+    # this flag's value — that force-free enforcement is the real
+    # invariant today, same as `campus.bridge.create_testseries()` never
+    # accepting an `is_paid`/`price_coins` kwarg at all. This field is
+    # deliberately just an admin-visible, defaulted-off record of intent
+    # ("could this campus ever be allowed to run paid test series") for
+    # a future task to actually wire up — that future task would need to
+    # (a) relax `TestSeries.save()`'s force-False for campus-sourced
+    # series when the campus it belongs to has this set, and (b) add an
+    # `is_paid`/`price_coins` kwarg to `campus.bridge.create_testseries()`
+    # gated on it. Neither of those changes is made here. See
+    # `docs/ORG_VS_INDIVIDUAL_MATRIX.md` for the full current
+    # org-vs-individual paid/unpaid matrix across every source.
+    testseries_paid_allowed = models.BooleanField(default=False)
+
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:

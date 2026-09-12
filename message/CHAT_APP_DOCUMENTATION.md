@@ -12,7 +12,58 @@ Auth model: `AUTH_USER_MODEL` is a **custom `User`** (app `login`), primary key 
 **integer** (not UUID). Fields used across this app: `id`, `username`, `first_name`,
 `last_name`, `profile_photo` (ImageField), `is_active`.
 
-> **Reconciliation pass (latest — TASK 21, call recording)**: `models.py`, `consumers.py`,
+> **Reconciliation pass (latest — parent-mode G-6 + Task-16 cross-app batch)**: the
+> remaining large/core files were reviewed for the first time this pass —
+> `views.py`, `views_ai.py`, `views_parent.py`, `push_utils.py`, `serializers.py`,
+> `tasks.py`, `offline_queue.py`, `permissions.py`, `routing.py`, `scheduled_messages.py`,
+> `search_utils.py`, `services.py`, `tests.py`, `throttles.py`, `translation_service.py`,
+> `upload_view.py`, `urls.py`, `user_display.py`. The large majority confirmed this doc's
+> existing content exactly as written (`push_utils.py`, `tasks.py`, `throttles.py`,
+> `translation_service.py`, `upload_view.py`, `offline_queue.py`, `search_utils.py`,
+> `scheduled_messages.py`, `user_display.py`, `routing.py`, `tests.py` needed **no**
+> corrections). Two genuinely new findings, both cross-referenced from §2/§6/§9/§10:
+> (1) **G-6 mutual-consent (`ParentToken.status`) — model-field half now resolved, a
+> NEW routing gap found in its place.** `views_parent.py` confirms `ParentToken.status`/
+> `Status`/`approved_at`/`generate_token()` are real and wired through two new views
+> (`ParentCodeTokenApproveView`, `ParentPendingRequestsView`) — but `urls.py`, reviewed in
+> this exact same batch, still doesn't import or route either one, so a student still has
+> **zero reachable way** to approve a pending parent device end-to-end; see §9.4 item 22
+> (fully rewritten), §2 `ParentToken`, §6 Parent Dashboard. (2) **`DoubtQuestion.
+> context_type`/`context_id` (Task 16) has a confirmed real caller — and it's an entirely
+> new app, `testseries`.** `services.answer_doubt_question()` (new function, documented in
+> §10) is built to answer both group and context-pointer doubts; its own docstring names
+> `testseries/bridge.py::answer_query_on_series()` as the actual caller. `message`'s own
+> `DoubtQuestionViewSet.answer()` does **not** call this shared function — it duplicates
+> the same logic inline, the same anti-pattern `services.py` (task 27) already fixed once
+> for group actions. A second, smaller gap is flagged inline in `services.py` itself: an
+> unconfirmed `core.models.Notification.NotifType.TESTSERIES_QUERY_ANSWERED` enum member.
+> See §2 `DoubtQuestion`, §9.4 item 23 (rewritten), §10 `services.py`.
+>
+> **Previous reconciliation pass — management-commands batch**: four
+> `management/commands/*.py` files were reviewed for the first time that pass —
+> `send_scheduled_messages.py`, `cleanup_expired_messages.py`,
+> `expire_stale_parent_access.py`, `apply_doubtquestion_context_fields.py` — none of
+> which had previously been part of any file batch, even though `tasks.py`/`models.py`
+> comments already referenced two of them by name. All four are documented in a
+> **§10 "Management Commands" subsection**, with File Map rows (§1) and cross-references
+> from the models/features they touch. Headline findings: (1) `send_scheduled_messages`
+> and `cleanup_expired_messages` are **manual/backup triggers that duplicate logic
+> `tasks.py`'s Celery tasks already run on a schedule** (§9.4 items 4/24 — not bugs, but
+> worth confirming neither is *also* cron-scheduled in production, which would be
+> redundant and, for the scheduled-messages one specifically, was a real double-send risk
+> before this file's own locking fix); (2) `expire_stale_parent_access` is a genuinely new
+> periodic-hygiene job (`ParentToken`/`ParentAccessCode`) that is **not yet registered
+> anywhere** (no `CELERY_BEAT_SCHEDULE` entry, no external cron confirmed) — see §9.4 item
+> 25; (3) `apply_doubtquestion_context_fields` reveals a **`DoubtQuestion` schema change
+> not yet reflected in this doc's §2/§6** — `group`/`conversation` become nullable and a
+> new generic `context_type`/`context_id` pointer + `CheckConstraint` are added, but
+> `DoubtQuestionViewSet` (§6) still only exposes the group-scoped
+> `/message/groups/<group_id>/doubts/` route, so it's unconfirmed whether any view code
+> actually writes/reads the new context columns yet — see §2 `DoubtQuestion` and §9.4 item
+> 23. §2's `DoubtQuestion` entry and §9.4 have been updated accordingly; no other section
+> needed a factual correction this pass.
+>
+> **Previous reconciliation pass — TASK 21, call recording**: `models.py`, `consumers.py`,
 > `admin.py`, `ai_service.py`, `apps.py`, `attendance_utils.py`, `cache_utils.py`,
 > `constants.py`, `group_rules.py`, `link_preview.py`, `livekit_utils.py`,
 > `media_utils.py`, `mentions.py`, `Middleware.py`, and `models_focus.py` were
@@ -47,7 +98,7 @@ Auth model: `AUTH_USER_MODEL` is a **custom `User`** (app `login`), primary key 
 | `Middleware.py` | JWT auth for WebSocket connections. No longer carries its own copy of the logic — re-exports `JWTAuthMiddleware`/`get_user_from_token` from project-level `LearnScroll/ws_auth.py`, which `liveclass` also now imports from *(fix — see §9.0)* |
 | `permissions.py` | DRF permission classes. `IsGroupAdminOrModerator` now confirmed on `group_rules.is_group_admin_or_mod` (cached single source of truth) instead of its own raw query. `HasValidParentToken` *(Feature 8 — Parent Mode, see §7.16)* — header-token auth (`X-Parent-Token`) for parent-facing read-only views, deliberately not touching `request.user`. **🔧 GAP FIX (G-6, mutual consent) — NEW this session**: a verified-but-not-yet-`status=APPROVED` token is now rejected here just like an expired/revoked one — closes old §9.4 item 10, see there and §2/§6 |
 | `group_rules.py` | Group access-control (message/call/study-room permission, daily limit) |
-| `services.py` *(NEW — task 27)* | `GroupViewSet.create`/`add_members`/`update_member`'s core logic extracted into plain functions (`create_group`, `add_members_to_group`, `remove_group_member`, `update_group_member_role`) — decoupled from DRF so `core/classroom_chat_bridge.py` can reuse the exact same "create group / add member / change role" logic without going through an HTTP request/response cycle. Raises plain `ValueError`/`PermissionError` (not DRF exceptions) so it stays importable from non-DRF code; the caller converts them. Also re-homes `add_or_reactivate_participant` (moved here from `views.py`, which now imports it from here — single source, also reused by `offline_queue.py`) — **and both this and the `GroupViewSet` delegation are now confirmed actually wired in `views.py`**, see §5/§9.4 item 21. `create_bell_rows_for_push` (task 44) **used to live here but has been removed** — see §7.22/§10 `push_utils.py` for where bell-row creation actually happens |
+| `services.py` *(NEW — task 27)* | `GroupViewSet.create`/`add_members`/`update_member`'s core logic extracted into plain functions (`create_group`, `add_members_to_group`, `remove_group_member`, `update_group_member_role`) — decoupled from DRF so `core/classroom_chat_bridge.py` can reuse the exact same "create group / add member / change role" logic without going through an HTTP request/response cycle. Raises plain `ValueError`/`PermissionError` (not DRF exceptions) so it stays importable from non-DRF code; the caller converts them. Also re-homes `add_or_reactivate_participant` (moved here from `views.py`, which now imports it from here — single source, also reused by `offline_queue.py`) — **and both this and the `GroupViewSet` delegation are now confirmed actually wired in `views.py`**, see §5/§9.4 item 21. `create_bell_rows_for_push` (task 44) **used to live here but has been removed** — see §7.22/§10 `push_utils.py` for where bell-row creation actually happens. **`answer_doubt_question` *(NEW this batch — Task 16)*** — shared answer-path for both group and context-pointer `DoubtQuestion`s, confirmed called by an **external `testseries` app** (`testseries/bridge.py::answer_query_on_series()`), **not** by `message`'s own `DoubtQuestionViewSet` — see §2 `DoubtQuestion`, §9.4 item 23, §10 |
 | `mentions.py` | Shared `@mention` text-parsing helper (REST + WS) |
 | `translation_service.py` *(NEW this batch — Feature 9: real-time message translate)* | `translate_text(text, target_lang, source_lang=None)` — pluggable provider wrapper, default implementation calls Google Cloud Translate v2 REST API (plain API key via `settings.GOOGLE_TRANSLATE_API_KEY`, no SDK/service-account needed). Raises `TranslationServiceUnavailable` (not-configured / unreachable, → clean 503) or `TranslationError` (bad lang code / bad response, → 4xx) rather than ever surfacing as a raw 500. Also exposes `SUPPORTED_LANGUAGES` (the 10 languages in the app's language picker — en/hi/mr/ta/te/kn/bn/gu/pa/ur — kept in sync with `language_picker_sheet.dart` per its own comment, not an enforced server-side allow-list). Consumed by `MessageViewSet.translate` (referenced in this file's own docstring) — see §7.21 |
 | `push_utils.py` | Firebase Cloud Messaging (FCM) push helpers. Firebase init is **lazy** (only runs the first time a push is actually sent, not at import time) and reads either `FIREBASE_CREDENTIALS_PATH` or `settings.FCM_SERVICE_ACCOUNT_JSON_PATH` *(fix — see §9.0)*. Chat-push batching was **rewritten this batch to be WhatsApp-style immediate** — no more delayed Celery flush, see §7.13. Also filters recipients through active Focus Mode sessions (Feature 12, §7.18) and tags announcement pushes (Feature 11, §7.17) differently from normal chat pushes |
@@ -69,6 +120,10 @@ Auth model: `AUTH_USER_MODEL` is a **custom `User`** (app `login`), primary key 
 | `attendance_utils.py` *(NEW)* | `compute_attendance_stats(conversation, user)` — single source of truth for Study Room attendance-streak math (current streak, longest streak, total classes attended, last attended date), backed by `StudyRoomAttendance` (see §2). Used by `StudyRoomStreakView` (student's own view, single classroom). Also `compute_attendance_stats_bulk(conversation_ids, user)` *(NEW — N+1 fix)* — same math, one query for however many classrooms instead of one query per classroom; `ParentDashboardView` (Parent Mode) now uses this batched variant instead of calling the single-conversation function in a loop, see §7.16 |
 | `apps.py` | App config (`name = 'message'`) |
 | `tests.py` | Empty Django default stub — no tests written yet *(confirmed this batch)* |
+| `management/commands/send_scheduled_messages.py` *(NEW this batch)* | Manual/backup CLI trigger for "Send Later" delivery — **not** the production path; `tasks.send_scheduled_messages` (Celery beat, every minute) is canonical, see §10 `tasks.py`. Now uses the identical `select_for_update(skip_locked=True)` + 200/batch pattern as the Celery task specifically so the two are safe to run concurrently without double-sending. See §9.4 item 4, §10 |
+| `management/commands/cleanup_expired_messages.py` *(NEW this batch)* | Manual/backup CLI trigger for the disappearing-messages hard-delete sweep, with `--batch-size`/`--dry-run` flags. Duplicates (does not replace) `tasks.cleanup_expired_messages`'s already-scheduled Celery-beat sweep (every 15 min) — its own docstring assumed hard-delete was unimplemented, which this doc's §10/§9.1 item 3 shows is not the case. See §9.4 item 24, §10 |
+| `management/commands/expire_stale_parent_access.py` *(NEW this batch)* | Periodic DB-hygiene only (**not** security-load-bearing — `HasValidParentToken` already rejects expired tokens/codes live on every request regardless of this ever running). Hard-deletes `ParentToken`s stale past their rolling TTL + a grace period, and deactivates long-expired never-renewed `ParentAccessCode`s. **Not yet registered in `CELERY_BEAT_SCHEDULE` or any confirmed cron** — see §9.4 item 25, §2 `ParentAccessCode`/`ParentToken`, §10 |
+| `management/commands/apply_doubtquestion_context_fields.py` *(NEW this batch — Task 16)* | One-off, idempotent raw-SQL schema command (Postgres-only) making `DoubtQuestion.group`/`.conversation` nullable and adding `context_type`/`context_id` + a supporting index + `CheckConstraint` (must have a `group` OR a full context pointer). Applied outside Django's migration history by design — `makemigrations` will still want to generate a matching no-op migration afterward to sync state. See §2 `DoubtQuestion`, §9.4 item 23, §10 |
 
 **Note on `urls.py`:** an earlier upload of this file was accidentally a duplicate of
 `Middleware.py`, so this doc used to assume the router/paths rather than confirm them.
@@ -77,7 +132,10 @@ names — router-registered ViewSets (`ConversationViewSet`, `MessageViewSet`,
 `GroupViewSet`, `BlockedUserViewSet`, `CallHistoryViewSet`) plus plain `path()` entries
 for `UserPresenceView`, `CallInitiateView`, `CallActionView`, `StudyRoomJoinView`,
 `StudyRoomStateView`, `DeviceTokenView`, `AiStudyRoomView`, `VoiceTranscribeView`, and
-`MessageUploadAPIView`. All endpoint paths below are confirmed against it.
+`MessageUploadAPIView`. All endpoint paths below are confirmed against it. **Confirmed
+gap (this batch)**: `views_parent.py`'s `ParentCodeTokenApproveView` and
+`ParentPendingRequestsView` are fully coded but **not** in this file's `views_parent`
+import block or `urlpatterns` — see §6 Parent Dashboard, §9.4 item 22.
 
 ---
 
@@ -368,6 +426,31 @@ per-classroom question board; now directly confirmed in `models.py`)*
   `is_revealed` true. This is the actual point of `Group.allow_anonymous_doubts` (§2) —
   the toggle controls whether "Ask Anonymously" is offered at all, not whether it's
   visible once asked.
+- **🔧 SCHEMA CHANGE — Task 16, `management/commands/apply_doubtquestion_context_fields.py`
+  (NEW this batch, not part of any prior file batch).** `group` and `conversation` are now
+  **nullable**, and two new columns exist: `context_type` (`varchar(30)`, nullable) and
+  `context_id` (`uuid`, nullable), backed by a lookup index on `(context_type,
+  context_id)` and a `CheckConstraint` (`doubtquestion_has_group_or_context`) requiring
+  every row to have **either** `group` **or** a full `(context_type, context_id)` pair —
+  never neither. **The intended non-group context is now confirmed**: `services.
+  answer_doubt_question()` (`services.py`, reviewed this batch) exists specifically to
+  answer both shapes, and its own docstring names the real caller —
+  **`testseries/bridge.py::answer_query_on_series()`**, a different app entirely,
+  reusing `DoubtQuestion` as shared infrastructure for test-series Q&A rather than
+  chat-group doubts. See §9.4 item 23 for the full detail, including a confirmed
+  duplication gap (`message`'s own `DoubtQuestionViewSet.answer()` doesn't call this
+  shared function) and an inline-flagged notification-enum gap
+  (`core.models.Notification.NotifType.TESTSERIES_QUERY_ANSWERED`, unconfirmed to
+  exist). Applied via
+  raw SQL directly against Postgres (`ALTER TABLE ... ADD COLUMN IF NOT EXISTS`, guarded
+  `DO $$ ... $$` for the constraint), **not** a numbered Django migration — idempotent
+  and safe to re-run, but it does not update `django_migrations`, so `makemigrations`
+  will likely still generate a no-op migration afterward to sync state (expected, per the
+  command's own docstring). `message`'s own REST surface
+  (`DoubtQuestionViewSet`/`DoubtQuestionSerializer`/`DoubtCreateSerializer`, §6) still
+  only exposes the group-scoped `/message/groups/<group_id>/doubts/` route — no
+  context-based create/list path exists there; the context-pointer shape is populated
+  entirely from the `testseries` side. See §9.4 item 23.
 
 ### `ParentAccessCode` / `ParentToken` *(NEW — Feature 8: Parent Mode auth; now directly
 confirmed in `models.py`)*
@@ -380,48 +463,66 @@ confirmed in `models.py`)*
   `generate_for(student, label, ttl_days)` retries up to 5 times on a code collision.
   `renew(ttl_days)` gives the same code a fresh `expires_at` and re-activates it.
 - `ParentToken`: `parent_access_code` (FK, `related_name='tokens'`), `token` (64-char,
-  unique, `secrets.token_urlsafe(32)`), `last_seen_at`. `INACTIVITY_TTL_DAYS = 30` — a
+  unique, `secrets.token_urlsafe(32)`, generated via a `generate_token()` classmethod —
+  confirmed this batch via `views_parent.ParentVerifyCodeView`'s
+  `token=ParentToken.generate_token()` call), `last_seen_at`. `INACTIVITY_TTL_DAYS = 30` — a
   **rolling** expiry independent of the code's own `expires_at`; `is_expired` compares
   `now - (last_seen_at or created_at)` against that TTL, so one idle device auto-expires
   without touching the code or any other device. `touch()` bumps `last_seen_at` — called
   by `HasValidParentToken` on every authenticated parent request so the rolling TTL stays
-  accurate.
+  accurate. **`status`/`Status` (`PENDING`/`APPROVED`/`REJECTED`) and `approved_at` are
+  now CONFIRMED to exist on the model — resolves the model-field gap old §9.4 item 22
+  flagged.** Confirmed this batch purely from usage in `views_parent.py` (not from
+  `models.py` itself, still not part of any file batch) — `ParentVerifyCodeView` creates
+  every new token `status=ParentToken.Status.PENDING`; `ParentCodeTokenApproveView`
+  flips exactly one to `status=ParentToken.Status.APPROVED` + stamps `approved_at`;
+  `ParentCodeTokensView`'s per-device list now also returns `status`/`approved_at` per
+  token. See the new §9.4 item 22 update for what's still open (routing).
 - Deliberately decoupled: a lost/replaced parent phone just re-verifies the same code for
   a new `ParentToken`, no new code needed from the student; revoking
   `ParentAccessCode.is_active` invalidates every token issued against that code at once.
+- **DB hygiene (NEW this batch, not security-critical)** —
+  `management/commands/expire_stale_parent_access.py` periodically hard-deletes
+  `ParentToken`s that have been past their own `INACTIVITY_TTL_DAYS` for a further
+  14-day grace period (so a just-expired device doesn't vanish from a "devices" list the
+  instant it crosses the line), and deactivates `ParentAccessCode`s that expired more
+  than 30 days ago and were never renewed. Purely cosmetic/storage cleanup —
+  `HasValidParentToken` already rejects expired codes/tokens live on every request
+  regardless of whether this command has ever run. **Not yet wired into
+  `CELERY_BEAT_SCHEDULE` or any confirmed cron** — see §9.4 item 25, §1 File Map.
 - **Deliberately does not use `request.user`** — `HasValidParentToken` attaches
   `request.parent_access_code` and `request.parent_student` instead, specifically so no
   other permission/view could accidentally treat an authenticated parent as if they were
   the student themselves (a parent has no `User` row at all in this model).
 - Parent↔student linking is a direct `ParentAccessCode.student` FK, set by the student
   themselves when they generate the code.
-- **🔧 GAP FIX (G-6, mutual consent) — NEW this session, supersedes "no separate
+- **🔧 GAP FIX (G-6, mutual consent) — supersedes "no separate
   invite/approval flow" from earlier revisions of this doc.** `permissions.py`'s
-  `HasValidParentToken` now filters on `status=ParentToken.Status.APPROVED` in addition to
+  `HasValidParentToken` filters on `status=ParentToken.Status.APPROVED` in addition to
   the existing `is_active`/expiry checks — a token that has merely completed
   `ParentVerifyCodeView` (verified the code) but has not yet been approved by the student
   is rejected exactly like an expired/revoked one (same generic denial message,
   deliberately not distinguishing "pending" from "invalid", so a guessed/leaked code can't
   be used to probe whether it's real-but-unapproved vs. simply wrong). Every new
-  `ParentToken` is expected to start `status=PENDING`, flipped to `APPROVED` only by the
-  student, via a `views_parent.ParentCodeTokenApproveView` referenced in
-  `permissions.py`'s own comments. This closes the trust-model gap flagged in old §9.4
-  item 10 (a leaked/screenshotted code previously granted immediately-live access with the
-  student never in the loop) — see §6/§9.4 item 10 for the product-level framing and
-  **§9.4's new open item** for a confirmed inconsistency this introduces: `models.py` (as
-  reviewed this session) does **not** yet define a `status`/`Status` field on `ParentToken`
-  at all, so `ParentToken.Status.APPROVED` and the `status=...` filter `permissions.py` now
-  references would raise `AttributeError`/`FieldError` until the model catches up.
-  **Confirmed missing** (upgraded from "unconfirmed" now that `urls.py` has been fully
-  reviewed): `views_parent.ParentCodeTokenApproveView` isn't among the `views_parent`
-  imports/routes there at all (only `ParentAccessCodeView`, `...RenewView`,
-  `...RevealView`, `ParentCodeTokensView`, `ParentCodeTokenDetailView`,
-  `ParentDashboardView`, `ParentVerifyCodeView` are) — so even once `ParentToken.status`
-  exists on the model, there is currently **no way for a student to ever approve a
-  pending token** at all; every parent token would be permanently stuck at `PENDING` and
-  `HasValidParentToken` would reject it forever. `views_parent.py` itself still isn't in
-  this file set, so whether `ParentVerifyCodeView` sets `status=PENDING` on create can't
-  be directly confirmed either — only inferred from `permissions.py`'s comments.
+  `ParentToken` starts `status=PENDING`, flipped to `APPROVED` only by the student, via
+  `views_parent.ParentCodeTokenApproveView`. This closes the trust-model gap flagged in
+  old §9.4 item 10 (a leaked/screenshotted code previously granted immediately-live access
+  with the student never in the loop) — see §6/§9.4 item 10 for the product-level framing.
+  **UPDATE this batch — the model-field half of old §9.4 item 22 is now resolved**:
+  `views_parent.py` (reviewed for the first time this batch) confirms `ParentToken.status`/
+  `Status`/`approved_at` are real and in active use (see this entry's own `ParentToken`
+  paragraph above), and two new views exist to drive them — `ParentCodeTokenApproveView`
+  (student approves one PENDING device) and `ParentPendingRequestsView` (student sees
+  every PENDING device across all their codes in one list). **The routing half of that
+  same gap is still open, though**: `urls.py`, reviewed in this exact same batch, still
+  only imports `ParentAccessCodeView`, `ParentAccessCodeRenewView`,
+  `ParentAccessCodeRevealView`, `ParentCodeTokensView`, `ParentCodeTokenDetailView`,
+  `ParentDashboardView`, `ParentVerifyCodeView` from `views_parent` — neither
+  `ParentCodeTokenApproveView` nor `ParentPendingRequestsView` is imported or routed
+  anywhere. So end-to-end, a student today still has **no reachable way** to ever approve
+  a pending parent-device request: the code exists, it's just not wired to a URL. See
+  §9.4 item 22 (updated) for the full current status, and §6 Parent Dashboard for the
+  request/response shapes of the two new views.
 
 ### `Assignment` / `AssignmentSubmission` (`message`'s own — distinct from
 `liveclass.Assignment`)
@@ -751,24 +852,40 @@ Gap 2/Gap 3, supersedes the Group-primary shape described in earlier revisions o
   `ParentCodeVerifyThrottle` — see §14 for its own confirmed-missing settings scope) —
   body `{"code": "7F3K9QRT"}` (case-insensitive, normalized to uppercase server-side).
   Looks up an active `ParentAccessCode`, bumps its `last_used_at`, mints a fresh
-  `ParentToken`, returns `{"parent_token", "student_name", "label"}`. Distinguishes two
+  `ParentToken` (`status=PENDING`, `token=ParentToken.generate_token()`), returns
+  `{"parent_token", "student_name", "label", "approval_status"}` — **`approval_status`
+  confirmed this batch**, so the parent-side app can show a "waiting for approval"
+  screen immediately instead of assuming the dashboard is ready. Distinguishes two
   failure cases: `404` if no active code matches at all (doesn't leak whether the code
   ever existed), vs. a separate `410 Gone` if the code matches but
   `access_code.is_expired` — deliberately split so the parent-side app can show "wrong
   code" vs. "expired, ask the student for a new/renewed one" as different messages,
-  rather than one generic "invalid" for both.
-  **🔧 GAP FIX (G-6, mutual consent) — NEW this session**: the minted `ParentToken` is now
-  expected to start out un-approved (`status=PENDING`) rather than immediately usable —
-  see §2/§10/§12 `HasValidParentToken` for the enforcement side and the confirmed
-  model-field gap this depends on. `permissions.py`'s comments reference a
-  `ParentCodeTokenApproveView` (student-authenticated) as the only way a token moves to
-  `APPROVED`, but with `urls.py` now fully reviewed, **this view is confirmed not routed
-  anywhere** — the `views_parent` import block there only pulls in `ParentAccessCodeView`,
-  `ParentAccessCodeRenewView`, `ParentAccessCodeRevealView`, `ParentCodeTokensView`,
-  `ParentCodeTokenDetailView`, `ParentDashboardView`, `ParentVerifyCodeView`. So even
-  setting aside the missing model field (§2/§9.4), a student currently has **no endpoint
-  at all** to approve a pending parent token — see §9.4's new item for the full
-  end-to-end consequence.
+  rather than one generic "invalid" for both. **Confirmed gap flagged in the view's own
+  code, not this doc's inference**: no notification (push/in-app) tells the student a
+  new pending request exists — a `TODO(notifications)` comment right there says exactly
+  that, and no notification service was available in this file batch to wire it into.
+  **🔧 GAP FIX (G-6, mutual consent)**: the minted `ParentToken` starts un-approved
+  (`status=PENDING`) rather than immediately usable — see §2/§10/§12 `HasValidParentToken`
+  for the enforcement side. Two student-side endpoints now drive the approval, both
+  **confirmed coded this batch (`views_parent.py`) but confirmed NOT routed
+  (`urls.py`, same batch)** — see §9.4 item 22 for the full status:
+  - `GET /message/parent/pending-requests/` (`ParentPendingRequestsView`) — every
+    `PENDING` `ParentToken` across **all** of the student's active codes, newest first,
+    so the app can show a single "N new parent device(s) want access" badge without
+    opening each code's own token list.
+  - `POST /message/parent/codes/<code_id>/tokens/<token_id>/approve/`
+    (`ParentCodeTokenApproveView`) — flips exactly one `PENDING` token to `APPROVED`
+    + stamps `approved_at`; `400` if the token isn't currently `PENDING` (e.g. already
+    approved/rejected); `404` if the token doesn't belong to one of the requesting
+    student's own codes. Only after this does that device's `parent_token` pass
+    `HasValidParentToken`.
+  - `ParentCodeTokensView`'s per-device list (below) now also returns each token's
+    `status` (`"pending"`/`"approved"`/`"rejected"`) and `approved_at`, so the student's
+    app can visually flag a waiting device ("Dad's phone — needs your approval")
+    differently from an already-live one — and `DELETE
+    /message/parent/codes/<code_id>/tokens/<token_id>/` (`ParentCodeTokenDetailView`,
+    already routed) now doubles as "reject" for a `PENDING` token as well as "revoke"
+    for an already-`APPROVED` one.
 - **Student-side management** (`ParentAccessCodeView`, `IsAuthenticated`,
   `/message/parent/codes/`):
   - `GET` lists the student's own active codes: `id`, `label`, `masked_code` (e.g.
@@ -805,13 +922,15 @@ Gap 2/Gap 3, supersedes the Group-primary shape described in earlier revisions o
     the student's own/inactive.
   - `GET /message/parent/codes/<id>/tokens/` (`ParentCodeTokensView`) — lists every
     individual device/`ParentToken` currently verified against **that one code**
-    (`[{"id", "created_at", "last_seen_at"}, ...]`), so the student can tell devices on a
-    shared code apart (e.g. "3 devices on the 'Mom' code") instead of only being able to
-    see/manage the code as a whole. 404 if the code isn't the student's own or isn't
+    (`[{"id", "status", "created_at", "approved_at", "last_seen_at"}, ...]` — `status`/
+    `approved_at` confirmed added this batch, see §2/§6/§9.4 item 22), so the student can
+    tell devices on a shared code apart (e.g. "3 devices on the 'Mom' code") instead of
+    only being able to see/manage the code as a whole, and tell a still-`PENDING` device
+    apart from an already-`APPROVED` one. 404 if the code isn't the student's own or isn't
     active.
   - `DELETE /message/parent/codes/<id>/tokens/<token_id>/` (`ParentCodeTokenDetailView`)
     — revokes exactly **one** device; the code itself and every other device tied to it
-    stay untouched. Ownership is checked through `parent_access_code__student`, not a
+    stay untouched. Now doubles as "reject" for a `PENDING` device, same endpoint. Ownership is checked through `parent_access_code__student`, not a
     bare token-id lookup, so a student can never revoke a token hanging off a code that
     isn't theirs even by guessing a UUID. **This is the actual gap fix these two token
     endpoints exist for**: previously the only way to cut off one lost/stolen device was
@@ -2182,6 +2301,15 @@ computes `duration_seconds` and marks the whole `CallSession` `ENDED`.
 4. ~~No management-command file for `send_scheduled_messages` was seen...~~ **Resolved,
    see §9.1 item 3** — `tasks.py` (Celery, not a management command) plus its
    `CELERY_BEAT_SCHEDULE` registration in `settings.py` are both now confirmed present.
+   **Update this batch**: a `management/commands/send_scheduled_messages.py` **does**
+   now exist too, but it's explicitly a manual/backup trigger (its own docstring is
+   emphatic about this), not meant to also be cron-scheduled alongside Celery beat in
+   normal operation — the two together would be redundant. It now shares the identical
+   `select_for_update(skip_locked=True)` + 200/batch locking pattern as the Celery task
+   specifically so running both at once (e.g. someone cron'd it "just in case") is safe
+   rather than a double-send risk like it would have been before this fix. No action
+   needed unless ops actually has this cron'd somewhere — worth a quick check that it
+   isn't, since redundant-but-safe is still redundant.
 5. **`STORAGES["default"]` is still local `FileSystemStorage`** *(NEW note)* —
    `upload_view.py` uses `default_storage`, so switching the backend (e.g. to S3 via
    `django-storages`) needs zero code changes, only a `settings.py` change. Not urgent
@@ -2324,35 +2452,92 @@ computes `duration_seconds` and marks the whole `CallSession` `ENDED`.
     boundary). The module-level duplicate of `add_or_reactivate_participant` that used to
     live in `views.py` has been removed — `services.py` is now the single source, exactly
     as its own docstring always claimed. See §5/§7.22.
-22. **🔴 NEW this session — `ParentToken.status`/`ParentToken.Status.APPROVED` referenced
-    by `permissions.py` (`HasValidParentToken`, the G-6 mutual-consent gap fix — see §2/§6)
-    does not exist in `models.py` as reviewed this session.** `ParentToken` currently only
-    has `parent_access_code`, `token`, `last_seen_at`, `INACTIVITY_TTL_DAYS`/`is_expired`,
-    `touch()` — no `status` field, no `Status` `TextChoices` inner class, no `PENDING`/
-    `APPROVED`/`REJECTED` values. As written, `HasValidParentToken.has_permission()`'s
-    `.filter(..., status=ParentToken.Status.APPROVED)` would raise an `AttributeError`
-    (`ParentToken` has no `Status`) at request time — every Parent Mode dashboard/read
-    request would 500, not just silently deny, until the model is updated to match. This
-    is the same class of gap this doc has flagged before (`ai_service.py`'s
-    `generate_classroom_answer` being imported before it was defined, §9.0) — a
-    permission/view-layer change shipped ahead of its model. **Worse, now that `urls.py`
-    has been fully reviewed this session (its `views_parent` import block is confirmed
-    complete: `ParentAccessCodeView`, `ParentAccessCodeRenewView`,
-    `ParentAccessCodeRevealView`, `ParentCodeTokensView`, `ParentCodeTokenDetailView`,
-    `ParentDashboardView`, `ParentVerifyCodeView` — no more, no less), item (c) below is
-    no longer just unconfirmed, it's a confirmed second gap on top of the first**: there
-    is no `ParentCodeTokenApproveView` route anywhere, so even after the model field is
-    added, a student would have zero way to ever flip a token to `APPROVED` — every
-    parent token would be stuck at `PENDING` forever and Parent Mode would be completely
-    unusable end-to-end, not just broken by a 500. Needed to close this out: (a) add
-    `status` (`CharField`, `choices=Status.choices, default=Status.PENDING`) to
-    `ParentToken` in `models.py` + a migration, (b) confirm `views_parent.
-    ParentVerifyCodeView` actually sets `status=PENDING` on the `ParentToken` it creates
-    (still not confirmed — `views_parent.py` itself has never been part of any file batch
-    so far), and (c) **build and route** `ParentCodeTokenApproveView` (student-side
-    approval action, referenced only in `permissions.py`'s comments — e.g. something like
-    `POST /message/parent/codes/<id>/tokens/<token_id>/approve/`) since it does not exist
-    today.
+22. **`ParentToken.status`/`Status`/`approved_at` (G-6 mutual-consent gap) — model-field
+    half now RESOLVED, routing half still open.** Previously flagged as a confirmed
+    missing model field (an `AttributeError`/500 waiting to happen). This batch's
+    `views_parent.py` review resolves that: `status`, `Status.PENDING`/`APPROVED`/
+    `REJECTED`, `approved_at`, and a `generate_token()` classmethod are all confirmed in
+    active use — `ParentVerifyCodeView` creates tokens `status=PENDING`,
+    `ParentCodeTokenApproveView` flips one to `APPROVED` + stamps `approved_at`,
+    `ParentCodeTokensView`'s per-device list returns both fields. `models.py` itself
+    still isn't part of any file batch, so the model source can't be read directly, but
+    three independent call-sites agreeing on the same field/method names is about as
+    confirmed as this doc can get without it. **What's still open**: `urls.py`, reviewed
+    in this exact same batch as `views_parent.py`, still only imports
+    `ParentAccessCodeView`, `ParentAccessCodeRenewView`, `ParentAccessCodeRevealView`,
+    `ParentCodeTokensView`, `ParentCodeTokenDetailView`, `ParentDashboardView`,
+    `ParentVerifyCodeView` — **not** `ParentCodeTokenApproveView` or
+    `ParentPendingRequestsView`, both of which are fully coded and ready. So today, a
+    student still has zero *reachable* way to approve a pending parent-device request —
+    the exact same end-user-facing outcome as before (every token effectively stuck
+    unusable), just for a different underlying reason now (missing route, not missing
+    model field). Two `path()` entries need adding to `urls.py`: something like
+    `POST /message/parent/codes/<id>/tokens/<token_id>/approve/` and
+    `GET /message/parent/pending-requests/` — see §6/§10 for the two views' confirmed
+    request/response shapes. **Also flagged in `ParentVerifyCodeView`'s own code (not
+    this doc's inference)**: no push/in-app notification tells the student a new pending
+    parent-device request exists at all — `ParentPendingRequestsView` (once routed)
+    would be the only way to discover one, and only if the student thinks to poll it.
+23. **`DoubtQuestion.context_type`/`context_id` (Task 16, see §2) — reader/writer now
+    partially confirmed, and it's an EXTERNAL app, not `message` itself.**
+    `management/commands/apply_doubtquestion_context_fields.py` makes `group`/
+    `conversation` nullable and adds the new generic context columns + index +
+    constraint. This batch's `services.py` review resolves who actually uses them:
+    `services.answer_doubt_question(*, doubt, actor, answer_text, answered_by=None)`
+    *(new function, not previously documented)* is a generalized answer-path built to
+    handle **both** shapes of `DoubtQuestion` — group doubts (existing
+    `doubt.group` set, permission-checked via `is_group_admin_or_mod`) and
+    context-pointer doubts (`doubt.context_type`/`context_id` set, `actor=None`,
+    permission already checked by the caller). Its own docstring names the actual
+    caller: **`testseries/bridge.py::answer_query_on_series()`** — a completely
+    different, previously-unmentioned-in-this-doc app (`testseries`) that creates/answers
+    `DoubtQuestion` rows scoped to a test-series query rather than a chat group, reusing
+    this app's `DoubtQuestion` model as shared infrastructure. This is a new confirmed
+    cross-app dependency in the same family as the existing `liveclass`/`core` ones (§6
+    Parent Dashboard, §7.16) — worth remembering that `message.DoubtQuestion` now has
+    **two** independent consumers with different data shapes sharing one table.
+    **However — `message`'s own `DoubtQuestionViewSet.answer()` (views.py, §6/§7.20)
+    does NOT call `services.answer_doubt_question()` at all**: it hand-rolls the
+    identical set/save steps inline instead (`doubt.answer_text = ...`, `doubt.
+    is_answered = True`, etc., duplicated verbatim). That's the same
+    duplicate-logic-drifts-out-of-sync anti-pattern this codebase has already paid for
+    once (`group_rules.is_group_admin_or_mod`'s docstring: 4 independent copies of one
+    permission rule) and fixed for group actions via `services.py` (task 27, §9.4 item
+    21) — `answer_doubt_question` looks like it exists specifically to be that same fix
+    for doubt-answering, but the REST view was never switched over to call it. `message`'s
+    own REST route (`/message/groups/<group_id>/doubts/<id>/answer/`) still only ever
+    creates/reads group-scoped doubts — no context-based create/list path exists in
+    `views.py`/`serializers.py` for the `message` app's own API surface; the
+    context-pointer shape is created/answered entirely from the `testseries` side via the
+    shared model + `services.answer_doubt_question`, not through any `message`-app
+    endpoint. **A second, smaller gap flagged inline in `services.py` itself (not this
+    doc's own inference)**: when `doubt.context_type == 'testseries_attempt'`,
+    `answer_doubt_question` tries to fire a
+    `core.models.Notification.NotifType.TESTSERIES_QUERY_ANSWERED` notification — that
+    enum member is **not confirmed to exist** on `core.models.Notification` yet (`core`
+    app not in this file batch), so answering a testseries doubt today would raise
+    `AttributeError` at the notify step specifically (the answer itself — `is_answered`,
+    `answer_text`, `answered_by`, `answered_at` — still saves successfully first, since
+    the notify call comes after `doubt.save()`).
+24. **`management/commands/cleanup_expired_messages.py` (NEW this batch) duplicates
+    logic `tasks.cleanup_expired_messages` (Celery beat, every 15 min, §10) already
+    covers in production** — not a gap it fills. The command's own docstring assumes
+    hard-delete was never implemented ("disappearing messages ka sirf half implement
+    tha"); this doc's §9.1 item 3 / §10 `tasks.py` entry confirms otherwise — the Celery
+    task already hard-deletes via `Message.all_objects` on a schedule. Not a bug — a
+    `--dry-run`-capable manual CLI trigger for the same sweep is a reasonable ops tool —
+    but worth (a) confirming this command isn't *also* cron-scheduled alongside the
+    Celery beat entry (redundant, though harmless either way since both just delete rows
+    matching the same filter), and (b) reconciling the batch-size default mismatch (this
+    command: 1000/batch; the Celery task: 500/batch) if both are meant to be
+    interchangeable.
+25. **`management/commands/expire_stale_parent_access.py` (NEW this batch) is not
+    registered anywhere** — no `CELERY_BEAT_SCHEDULE` entry in `settings.py`, no
+    confirmed external cron. Low urgency (explicitly DB hygiene only, per its own
+    docstring — `HasValidParentToken` enforces expiry live regardless), but until it's
+    scheduled somewhere, stale `ParentToken`/`ParentAccessCode` rows simply accumulate
+    indefinitely instead of being cleaned up. See §2 `ParentAccessCode`/`ParentToken`,
+    §1 File Map.
 
 ---
 
@@ -2394,6 +2579,26 @@ see §10 `push_utils.py`)*
 - **Now confirmed actually used by `GroupViewSet`** (§5) — `create_group`,
   `add_members_to_group`, `remove_group_member`, `update_group_member_role`, and
   `add_or_reactivate_participant` are all called from `views.py`, not parallel/dead code.
+- `answer_doubt_question(*, doubt, actor, answer_text, answered_by=None) -> DoubtQuestion`
+  *(NEW this batch — Task 16)* — shared answer-path for **both** shapes of
+  `DoubtQuestion` (§2): group doubts (`doubt.group` set, checks `actor` is admin/mod via
+  `require_group_admin_or_mod` — skipped if `doubt.group_id is None` or `actor=None`) and
+  context-pointer doubts (`doubt.context_type`/`context_id` set, no group to
+  permission-check against, so callers that already authorized the action themselves
+  pass `actor=None`). `answered_by` is tracked separately from `actor` specifically so an
+  `actor=None` caller can still correctly record who answered. Raises `ValueError` if
+  already answered, or if neither `actor` nor `answered_by` is given. **Confirmed caller:
+  `testseries/bridge.py::answer_query_on_series()`** — a different app, not `message`
+  itself — which passes `actor=None` (having already verified `teacher ==
+  series.creator` on its own side) and its own verified `teacher` as `answered_by`. **Not
+  called by `message`'s own `DoubtQuestionViewSet.answer()`** (views.py) — that action
+  still duplicates the same set/save steps inline rather than calling this function; see
+  §9.4 item 23 for why that's worth fixing. Also contains an inline-flagged, not-yet-
+  confirmed dependency: fires a `core.models.Notification.NotifType.
+  TESTSERIES_QUERY_ANSWERED` notification when `doubt.context_type ==
+  'testseries_attempt'`, an enum member not confirmed to exist on `core.models.
+  Notification` (that app isn't in any file batch so far) — the answer itself still
+  saves fine either way, only that one notify call is at risk of `AttributeError`.
 
 ### `offline_queue.py` *(NEW — task 49, see §7.23)*
 - `flush_offline_queue(conversation, sender, queued_messages) -> list[dict]` — processes a
@@ -2842,14 +3047,80 @@ vars below — TASK 21)
   updates conversation denorm fields/unread counts/`MessageStatus` rows/@mentions/
   `GroupMedia`, then broadcasts `chat_message` + `inbox_update` and sends the same
   mute/mention-aware pushes a normal send does.
-- Called by the `message.send_scheduled_messages` **Celery task** (`tasks.py`, not a
-  management command — see §10's `tasks.py` entry), registered in `CELERY_BEAT_SCHEDULE`
+- Called by the `message.send_scheduled_messages` **Celery task** (`tasks.py` — the
+  canonical, beat-scheduled production path), registered in `CELERY_BEAT_SCHEDULE`
   (`settings.py`) to run every minute. **Confirmed present and scheduled — see §9.1
   item 3** (this was flagged as unconfirmed in an earlier review, before `settings.py`
-  had been reviewed).
+  had been reviewed). **A `management/commands/send_scheduled_messages.py` also now
+  exists as a manual/backup trigger for this same function — see the new "Management
+  Commands" subsection right below, and §9.4 item 4.**
 - Now also enqueues `generate_link_preview_task`/`transcribe_voice_message_task` after
   finalizing a scheduled message, same as the two live-send paths *(NEW this session,
   see §7.5/§7.6)*.
+
+### Management Commands (`management/commands/`) *(NEW subsection this batch — four
+files reviewed for the first time, none previously part of any file batch)*
+
+- **`send_scheduled_messages.py`** — manual/backup CLI trigger:
+  `python manage.py send_scheduled_messages [--batch-size N]` (default 200, same bound
+  as the Celery task). Calls the exact same `scheduled_messages.finalize_scheduled_message`
+  as the Celery task above, one message at a time, logging + skipping (not aborting) on a
+  per-message exception. Its own docstring is explicit that `tasks.send_scheduled_messages`
+  (Celery beat, every minute) is the **confirmed production path** and this command is
+  **not meant to also be cron-scheduled alongside it** in normal operation — it exists for
+  a one-off "flush the queue right now" ops need, or as a fallback if Celery/Beat is ever
+  down. **Fix baked into this version**: uses the identical `select_for_update
+  (skip_locked=True)` row-locking as the Celery task (previously — per this file's own
+  changelog comment — it had none), so if it *were* ever run concurrently with the Celery
+  beat tick, the two can no longer pick up and double-process the same due message
+  (double-send, double unread-count increment, double push). Whichever process gets the
+  row lock first wins; the other skips it via `skip_locked=True`. See §9.4 item 4.
+- **`cleanup_expired_messages.py`** — manual/backup CLI trigger:
+  `python manage.py cleanup_expired_messages [--batch-size N] [--dry-run]` (default
+  batch size 1000). Deletes `Message` rows where `expires_at` is set and in the past, in
+  bounded batches (fetch a page of ids, delete that page, repeat) to avoid holding a
+  long-running lock on a potentially huge table in one shot. `--dry-run` reports the
+  count without deleting anything. **Duplicates, does not introduce**, the hard-delete
+  behavior `tasks.cleanup_expired_messages` (Celery beat, every 15 min, batch size 500)
+  already provides in production — the command's own docstring assumed this sweep had
+  never been implemented, which §9.1 item 3 / this file's own `tasks.py` entry above
+  shows is incorrect. Safe to have as an extra manual/dry-run-capable ops tool; not safe
+  to assume it's the *only* thing doing this cleanup. See §9.4 item 24.
+- **`expire_stale_parent_access.py`** — periodic DB-hygiene command (intended to be run
+  via cron/celery-beat, e.g. daily — `python manage.py expire_stale_parent_access`, no
+  arguments). Explicitly **not load-bearing for security**: `HasValidParentToken`
+  already rejects expired parent codes/tokens live, on every request, independent of
+  whether this command has ever run. Two things it does: (1) hard-deletes `ParentToken`
+  rows inactive past `ParentToken.INACTIVITY_TTL_DAYS` (30) **plus** a further 14-day
+  grace period (`TOKEN_DELETE_GRACE_DAYS`) — the grace window means a device that just
+  crossed its TTL doesn't instantly vanish from a "devices" list; the student can still
+  see it existed for a couple more weeks. Falls back to `created_at` when `last_seen_at`
+  is null (never used after verify), matching `ParentToken.is_expired`'s own fallback
+  logic. (2) deactivates (`is_active=False`, not deleted) `ParentAccessCode`s that
+  expired more than 30 days ago (`CODE_DEACTIVATE_GRACE_DAYS`) and were never renewed —
+  keeps the student's "Manage parent access" list from accumulating ancient dead codes
+  forever. **Not yet registered in `CELERY_BEAT_SCHEDULE` or confirmed via external
+  cron** — see §9.4 item 25, §2 `ParentAccessCode`/`ParentToken`.
+- **`apply_doubtquestion_context_fields.py`** *(Task 16)* — one-off, idempotent,
+  Postgres-only raw-SQL schema command: `python manage.py
+  apply_doubtquestion_context_fields`, no arguments. Makes `DoubtQuestion.group_id`/
+  `.conversation_id` nullable, adds `context_type` (`varchar(30)`, nullable) and
+  `context_id` (`uuid`, nullable) columns, a lookup index on
+  `(context_type, context_id)`, and a `doubtquestion_has_group_or_context`
+  `CheckConstraint` requiring every row to have `group_id` **or** a full
+  `(context_type, context_id)` pair. Every step uses `IF NOT EXISTS`/a guarded
+  `DO $$ ... EXCEPTION ... END $$` block, so re-running the command is a no-op past the
+  first run. Deliberately applied outside Django's own migration history (no
+  `django_migrations` row) — the command's own docstring flags that `makemigrations`
+  will likely still want to generate a matching migration afterward, and that this is
+  expected: it'll be a no-op migration (columns already exist) that just brings
+  migration *state* in sync with what the DB already has, not something that tries to
+  re-create anything. Assumes Postgres (this project already uses
+  `django.contrib.postgres` elsewhere, e.g. `GinIndex`/`SearchVectorField` on `Message`)
+  and the default Django table/column naming for `app_label='message'`,
+  `model='DoubtQuestion'` — will not work as-is on MySQL/SQLite, or if `Meta.db_table`
+  has been overridden. See §2 `DoubtQuestion`, §9.4 item 23 for the open question of
+  whether any view code actually uses the new columns yet.
 
 ---
 

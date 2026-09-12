@@ -3,11 +3,28 @@
 Ye ek hi file hai jisme poore **post** (feed, likes, comments, saves, media)
 Django app ka sara logic, code, connections, flows aur known issues cover
 hain. Iske alawa kisi aur file ki zaroorat nahi — sab kuch (models →
-serializers → comment_serializers → views → comment_view → urls → admin →
-apps.py) yahin milega, saath me har piece kya kaam karta hai uski
-explanation bhi.
+serializers → comment_serializers → views → comment_view → services →
+signals → tasks → urls → admin → apps.py) yahin milega, saath me har piece
+kya kaam karta hai uski explanation bhi.
 
-> **Latest pass:** §20 (Addendum 5) — the `PostLike` duplicate-signal
+> **Latest pass — Addendum 6 (§21):** full **byte-for-byte verification**
+> of every code section in this doc against the actual uploaded source
+> (Sep 2026 sync pass, same treatment as `login_app_reference.md`). One
+> real bug found and fixed: §5 (`comment_serializers.py`) had an old,
+> dead, commented-out draft accidentally pasted *ahead of* the real code
+> inside the same code fence — the note above it claimed "only the
+> active code is included" but the block itself contradicted that. Fixed
+> — §5 now contains exactly and only the current active file. Also
+> **added full "full code" sections for `services.py`, `signals.py`, and
+> `tasks.py`** (§10.1–§10.3) — these three existed only as scattered
+> excerpts across earlier addenda before now; they have one canonical,
+> current, verified home like every other file in this app. Everything
+> else (`models.py`, `serializers.py`, `views.py`, `comment_view.py`,
+> `urls.py`, `admin.py`, `apps.py`) was diffed line-by-line and already
+> matched exactly — no changes needed there. See §21 for the full
+> changelog of this pass.
+>
+> **Previous pass:** §20 (Addendum 5) — the `PostLike` duplicate-signal
 > issue tracked since §19.2 (B-5) is now resolved, a new restrict-aware
 > comment-preview feature (G-3) was added, and two stale doc sections
 > (`urls.py` §8, `admin.py` §9's trailing note) were synced back up with
@@ -1213,136 +1230,18 @@ longer be confused by name.
 
 ## 5. `comment_serializers.py` (full code — active version)
 
-> Same situation as §4: an earlier draft is commented out at the top of
-> the uploaded file; only the active code below is included. The real
-> difference versus the draft: the active `PostCommentSerializer` adds
-> **comment-level reactions** (`my_reaction`/`reaction_counts` via
-> `CommentLike`), which the draft didn't have.
+> Same situation as §4: the uploaded file has an entire earlier draft
+> commented out at the top (dead code — Python never executes it). Only
+> the **active code below** is included here — it's what actually runs.
+> The real difference versus that draft: the active `PostCommentSerializer`
+> adds **comment-level reactions** (`my_reaction`/`myReaction`,
+> `reaction_counts`/`reactionCounts`, via `CommentLike`), which the draft
+> didn't have. *(v-sync fix: an earlier revision of this doc accidentally
+> pasted the dead draft into this code block too, ahead of the real code —
+> fixed here; the block below is exactly and only the active file.)*
 
 ```python
-# from rest_framework import serializers
-# from .models import PostComment, CommentMedia
-# from django.contrib.auth import get_user_model
-#
-# User = get_user_model()
-#
-#
-# class CommentMediaSerializer(serializers.ModelSerializer):
-#     # Flutter ke liye camelCase me bhi bhej rahe hain + absolute url
-#     file = serializers.SerializerMethodField()
-#     file_name = serializers.CharField(read_only=True)
-#     file_size = serializers.IntegerField(read_only=True)
-#
-#     # Flutter me fileName fileSize use hota hai
-#     fileName = serializers.CharField(source='file_name', read_only=True)
-#     fileSize = serializers.IntegerField(source='file_size', read_only=True)
-#     mimeType = serializers.CharField(source='mime_type', read_only=True)
-#     mediaType = serializers.CharField(source='media_type', read_only=True)
-#
-#     class Meta:
-#         model = CommentMedia
-#         fields = ['id', 'media_type', 'mediaType', 'file', 'file_name', 'fileName', 'file_size', 'fileSize',
-#                   'mime_type', 'mimeType', 'created_at']
-#         read_only_fields = ['id', 'file_name', 'file_size']
-#
-#     def get_file(self, obj):
-#         if not obj.file:
-#             return None
-#         request = self.context.get('request')
-#         try:
-#             url = obj.file.url
-#             if request:
-#                 return request.build_absolute_uri(url)
-#             return url
-#         except:
-#             return str(obj.file)
-#
-#
-# class UserShortSerializer(serializers.ModelSerializer):
-#     # Tere User model me profile_photo hai
-#     profile_picture = serializers.SerializerMethodField()
-#     profilePicture = serializers.SerializerMethodField()  # Flutter ke liye camelCase bhi
-#
-#     class Meta:
-#         model = User
-#         fields = ['id', 'username', 'profile_picture', 'profilePicture']
-#
-#     def get_profile_picture(self, obj):
-#         request = self.context.get('request')
-#         field = None
-#         if hasattr(obj, 'profile_photo') and obj.profile_photo:
-#             field = obj.profile_photo
-#         elif hasattr(obj, 'profile_picture') and getattr(obj, 'profile_picture', None):
-#             field = obj.profile_picture
-#
-#         if field:
-#             try:
-#                 url = field.url
-#                 if request:
-#                     return request.build_absolute_uri(url)
-#                 return url
-#             except:
-#                 return str(field)
-#         return None
-#
-#     def get_profilePicture(self, obj):
-#         return self.get_profile_picture(obj)
-#
-#
-# class PostCommentSerializer(serializers.ModelSerializer):
-#     user = UserShortSerializer(read_only=True)
-#     media = CommentMediaSerializer(many=True, read_only=True)
-#
-#     # Flutter compatibility - snake + camel dono
-#     likes_count = serializers.IntegerField(read_only=True)
-#     replies_count = serializers.IntegerField(read_only=True)
-#     likesCount = serializers.IntegerField(source='likes_count', read_only=True)
-#     repliesCount = serializers.IntegerField(source='replies_count', read_only=True)
-#
-#     class Meta:
-#         model = PostComment
-#         fields = [
-#             'id', 'post', 'user', 'parent', 'content', 'media',
-#             'likes_count', 'likesCount', 'replies_count', 'repliesCount',
-#             'is_edited', 'is_pinned', 'is_hidden', 'created_at', 'updated_at'
-#         ]
-#         read_only_fields = ['id', 'likes_count', 'replies_count', 'is_edited', 'created_at', 'updated_at']
-#
-#
-# class CreateCommentSerializer(serializers.Serializer):
-#     post_id = serializers.UUIDField(required=False, allow_null=True)
-#     parent_id = serializers.UUIDField(required=False, allow_null=True)
-#     content = serializers.CharField(required=False, allow_blank=True, default='')
-#
-#     def to_internal_value(self, data):
-#         mutable = data.copy() if hasattr(data, 'copy') else dict(data)
-#         if mutable.get('parent_id') in ['', 'string', 'null']:
-#             mutable['parent_id'] = None
-#         if mutable.get('post_id') in ['', 'string', 'null']:
-#             mutable['post_id'] = None
-#         return super().to_internal_value(mutable)
-#
-#     def validate(self, attrs):
-#         if not attrs.get('post_id') and not attrs.get('parent_id'):
-#             raise serializers.ValidationError({"post_id": "post_id is required for top-level comment"})
-#         return attrs
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
+# post/comment_serializers.py
 
 
 from rest_framework import serializers
@@ -3042,6 +2941,781 @@ way it auto-discovers `models.py`. Filename must be lowercase
 `signals.py` — `import post.signals` will not resolve a `Signals.py` on
 a case-sensitive filesystem (Linux/prod).
 
+## 10.1 `services.py` (full code — renamed from uploaded `Services.py`)
+
+> Case-sensitivity rename (same reasoning as §10's `apps.py` note —
+> `import post.signals`/`.tasks`/`.services` are lowercase, so a
+> capitalized `Services.py` silently only worked on case-insensitive dev
+> filesystems). Also carries the TASK 11 notification-wiring fix (real
+> `core.services.create_notification` module + matching call signature)
+> and the storage-agnostic ffmpeg helpers (task 27). Full rationale for
+> every change already lives in this file's own module docstring below
+> and in Addendum 2 (§17.1) / Addendum 4 (§19) — this section exists so
+> the literal, current code has one canonical home instead of only being
+> quoted in fragments across those addenda.
+
+```python
+"""
+post/services.py
+
+⚠️ RENAMED from the uploaded `Services.py` — apps.py does
+`import post.signals` (lowercase), and this module gets imported the same
+way. On a case-sensitive filesystem (Linux/prod) a capitalized
+`Services.py` / `Signals.py` / `Tasks.py` is a DIFFERENT file to Python
+than `services.py` / `signals.py` / `tasks.py` — the import would raise
+`ModuleNotFoundError` at runtime. It only "worked" by accident on
+case-insensitive dev filesystems (Windows/macOS default). Same rename
+applied to signals.py and tasks.py.
+
+⚠️ CRITICAL FIX — the uploaded file imported `Hashtag`, `PostHashtag`,
+`Like`, `SavedPost`, `Comment` from `.models`. None of these exist.
+Real models.py has: Post, PostMedia, PostLike, PostComment, CommentMedia,
+PostShare, PostView, PostSave, ChunkedUpload, CommentLike.
+
+- `attach_hashtags()` / the whole Hashtag/PostHashtag idea — REMOVED.
+  Hashtags aren't a separate model here: `Post.hashtags` is a plain
+  `JSONField(default=list)`, populated directly inside
+  `PostCreateSerializer.create()` via `re.findall(r"#(\w+)", content)`
+  (see serializers.py, and post_app.md §13.1). There's nothing left for a
+  service function to do.
+  ⚠️ serializers.py currently STILL has a dead/broken call —
+      hashtags = validated_data.get("hashtags")
+      if hashtags:
+          from .services import attach_hashtags
+          attach_hashtags(post, hashtags)
+  left over from this same wrong assumption. That will raise
+  ImportError/AttributeError the moment anyone creates a post with
+  hashtags, since this function no longer exists (and shouldn't).
+  Delete those lines from `PostCreateSerializer.create()` —
+  `validated_data["hashtags"]` is already what gets saved on the row.
+- `toggle_like()` / `toggle_save()` / `add_comment()` / `delete_comment()`
+  — REMOVED. These duplicated logic already implemented, correctly,
+  directly in views.py / comment_view.py against the real models
+  (`PostLike` / `PostSave` / `PostComment`), with counters kept in sync by
+  the `@receiver` signals already living in models.py
+  (`update_reaction_counts`, `update_saves_count`, etc — see models.py's
+  own "NOTE (fix...)" comment on why a second counter-update path is a
+  correctness bug, not just redundant work). Nothing in this app calls
+  `services.toggle_like` etc. today — keeping them as dead code against
+  nonexistent models was the actual problem, not a missing feature.
+
+What's kept below is genuinely additive — logic the views/signals don't
+already provide:
+
+- The `core.create_notification` hookup (checklist item 63 / Phase 3's
+  hub) — fixed to use `post.user` (the real FK) instead of the
+  nonexistent `post.author`, and to take a `PostComment` instance instead
+  of the nonexistent `Comment`.
+  ⚠️ TASK 11 FIX — this used to probe `core.notifications.create_notification`,
+  a module that doesn't exist (the real function is
+  `core.services.create_notification`), so the probe's `except ImportError`
+  always fired and every call silently fell through to the debug-log
+  no-op stub below — no bell row was ever created, even after this
+  function started being called. On top of that, the stub's own
+  signature (`recipient, actor, verb, target_type, target_id, payload`)
+  never matched the real `core.services.create_notification`'s signature
+  (`recipient, notif_type, title, message=None, data=None` — see
+  `core/tests.py` for confirmed call shapes), so fixing only the import
+  path would have raised a `TypeError` on the very first real call.
+  Both fixed below: the import now points at `core.services`, and
+  `notify_post_liked`/`notify_post_commented` build the
+  (notif_type, title, message, data) shape that function actually
+  expects, using the new `Notification.NotifType.POST_LIKED`/
+  `POST_COMMENTED` choices added in `core/models.py`.
+  Now wired: `notify_post_liked` is called from
+  `PostReactionAPIView.post()` (only the `status_msg == "liked"` branch)
+  and `notify_post_commented` from `CommentCreateAPIView.post()` (only
+  for new top-level comments, i.e. `parent is None`) — see those files.
+- `share_post_to_conversation()` (checklist item 61) — fixed to use
+  `post.user` / `post.content` instead of `post.author` / `post.caption`,
+  and `PostShare.objects.get_or_create` instead of `.create()` (the real
+  model has `unique_together = ['post', 'user']`, so a second share by
+  the same user would raise `IntegrityError`). Also stopped hand-rolling
+  a `Post.share_count` F()-update against a field that doesn't exist —
+  the real counter is `shares_count`, already kept in sync by
+  `update_shares_count` in models.py whenever a `PostShare` row is
+  created. Still unwired — no view/url calls this yet (see urls.py: no
+  `/share/` route exists). Add one once the `message` app's real
+  send-function path is confirmed.
+"""
+import logging
+import os
+import shutil
+import subprocess
+import tempfile
+
+logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# TASK 27 — cloud-storage-safe file access for external binaries (ffmpeg,
+# and anything else that needs a real local path: virus scanners, image
+# processors, etc).
+#
+# The old `auto_generate_video_thumbnail` read `instance.file.path`
+# directly. `.path` only exists for `FileSystemStorage` — it raises
+# `NotImplementedError` on `storages.backends.s3.S3Storage` (there is no
+# local filesystem path for a remote object), and the old code caught
+# that failure with a bare `print()` instead of `logger`, so the moment
+# `USE_S3_STORAGE=true` (task 26) was flipped on, thumbnail generation
+# started silently no-op-ing for every video with nothing showing up in
+# Sentry/logs to say why.
+#
+# `.open("rb")` + chunked read, below, works identically for every
+# storage backend Django/django-storages supports — local disk today,
+# S3 after task 26, GCS/Azure if this ever moves again — because it goes
+# through the storage API instead of assuming a local filesystem.
+# ---------------------------------------------------------------------------
+def download_storage_file_to_temp(file_field, suffix=""):
+    """Copy a Django FileField's content to a local NamedTemporaryFile,
+    regardless of which storage backend is behind it, and return the
+    local path. ffmpeg (and most other external binaries) need an actual
+    path on disk to read from — they have no concept of S3/GCS.
+
+    Caller owns the returned path and MUST delete it (e.g. in a
+    `finally:` block) once done — this function only creates it.
+    """
+    tmp = tempfile.NamedTemporaryFile(suffix=suffix, delete=False)
+    try:
+        with file_field.open("rb") as src:
+            for chunk in src.chunks():
+                tmp.write(chunk)
+    finally:
+        tmp.close()
+    return tmp.name
+
+
+def generate_video_thumbnail_file(video_path, time_offset="00:00:01", timeout=30):
+    """Run ffmpeg against a LOCAL video file path (already downloaded via
+    `download_storage_file_to_temp` above — ffmpeg has no concept of S3)
+    and return the local path to a generated JPEG thumbnail, or `None` if
+    generation failed for any reason. Every failure path is logged via
+    `logger` (not `print()`, task 27's other reported gap) so a bad
+    upload or a missing ffmpeg binary actually shows up in production
+    logs/Sentry instead of silently vanishing.
+
+    Caller owns the returned path and MUST delete it once done, same as
+    `download_storage_file_to_temp`.
+    """
+    if shutil.which("ffmpeg") is None:
+        # Infra problem (ffmpeg not installed in the app image/container),
+        # not a per-file problem — log once per call so it's loud in
+        # aggregated logs, but don't raise: one video with no thumbnail
+        # yet is a much better failure mode than crashing the upload.
+        logger.error(
+            "ffmpeg binary not found on PATH — cannot generate video "
+            "thumbnails. Install ffmpeg in the app image/container."
+        )
+        return None
+
+    thumb_fd, thumb_path = tempfile.mkstemp(suffix=".jpg")
+    os.close(thumb_fd)  # ffmpeg writes the actual bytes; we only needed the path
+
+    cmd = [
+        "ffmpeg", "-y",
+        "-ss", time_offset,
+        "-i", video_path,
+        "-frames:v", "1",
+        "-vf", "scale=480:-1",
+        thumb_path,
+    ]
+    try:
+        result = subprocess.run(cmd, capture_output=True, timeout=timeout, check=False)
+    except subprocess.TimeoutExpired:
+        logger.error("ffmpeg timed out (%ss) generating thumbnail for %s", timeout, video_path)
+        if os.path.exists(thumb_path):
+            os.unlink(thumb_path)
+        return None
+    except OSError as exc:
+        # e.g. ffmpeg binary present in `which` but not actually executable,
+        # or disappeared between the check above and this call.
+        logger.exception("ffmpeg failed to start for %s: %s", video_path, exc)
+        if os.path.exists(thumb_path):
+            os.unlink(thumb_path)
+        return None
+
+    if result.returncode != 0 or not os.path.exists(thumb_path) or os.path.getsize(thumb_path) == 0:
+        logger.error(
+            "ffmpeg failed generating thumbnail for %s (rc=%s): %s",
+            video_path,
+            result.returncode,
+            result.stderr.decode(errors="replace")[:500] if result.stderr else "",
+        )
+        if os.path.exists(thumb_path):
+            os.unlink(thumb_path)
+        return None
+
+    return thumb_path
+
+# ---------------------------------------------------------------------------
+# Notification hookup (checklist item 63 / Phase 3's hub).
+#
+# TASK 11 FIX: `core.notifications` never existed — the real module is
+# `core.services`, and its `create_notification()` takes
+# `(recipient, notif_type, title, message=None, data=None)`, not the
+# `(recipient, actor, verb, target_type, target_id, payload)` shape this
+# file's fallback stub used to have. Both are fixed below. The
+# `except ImportError` guard is kept (not because `core.services` is
+# expected to be missing — it isn't, `core` is a required app — but so
+# this app degrades to a logged no-op instead of a hard crash on every
+# like/comment in the unlikely event the `core` app isn't installed in a
+# given environment, e.g. a stripped-down test settings module).
+# ---------------------------------------------------------------------------
+try:
+    from core.services import create_notification as _create_notification_row
+except ImportError:  # pragma: no cover - only if the `core` app isn't installed
+    def _create_notification_row(recipient, notif_type, title, message=None, data=None):
+        logger.debug(
+            "core.services.create_notification not available — skipping notification "
+            "(%s: %s -> %s)", notif_type, title, recipient,
+        )
+        return None
+
+
+# PRODUCTION FIX — `notify_post_liked`/`notify_post_commented` used to do
+# `from core.models import Notification` as an *unguarded* local import.
+# If `core` genuinely isn't installed in some environment (the exact case
+# the try/except above claims to handle gracefully), that unguarded
+# import raised ImportError straight out of every single like and every
+# top-level comment — i.e. it crashed the two hottest write paths in this
+# app, which is a much worse outcome than the "log + no-op" the module
+# docstring promises. Guarded the same way as `_create_notification_row`
+# above, so `core` being absent degrades this to a no-op everywhere, not
+# just in the create_notification call itself.
+try:
+    from core.models import Notification as _Notification
+except ImportError:  # pragma: no cover - only if the `core` app isn't installed
+    _Notification = None
+
+
+def notify_post_liked(post, actor):
+    """Call from PostReactionAPIView.post(), only on the branch where a new
+    PostLike was just created (status_msg == 'liked') — not on unlike or
+    reaction-change."""
+    if post.user_id == actor.id:
+        return  # don't notify yourself
+    if _Notification is None:
+        return  # `core` app not installed — nothing to notify with
+
+    actor_name = actor.get_full_name() or actor.username
+    _create_notification_row(
+        post.user,
+        _Notification.NotifType.POST_LIKED,
+        f"{actor_name} liked your post",
+        data={"post_id": str(post.id), "actor_id": str(actor.id)},
+    )
+
+
+def notify_post_commented(post, comment):
+    """Call from CommentCreateAPIView.post() after a new top-level
+    PostComment is created. `comment` is a PostComment instance."""
+    if post.user_id == comment.user_id:
+        return
+    if _Notification is None:
+        return  # `core` app not installed — nothing to notify with
+
+    actor_name = comment.user.get_full_name() or comment.user.username
+    _create_notification_row(
+        post.user,
+        _Notification.NotifType.POST_COMMENTED,
+        f"{actor_name} commented on your post",
+        (comment.content or "")[:200],
+        data={"post_id": str(post.id), "comment_id": str(comment.id)},
+    )
+
+
+# ---------------------------------------------------------------------------
+# Share a post into a chat conversation (checklist item 61).
+#
+# Reuses the `message` app's existing attachment-message flow rather than
+# reimplementing message-sending. The exact function name/signature in
+# `message` wasn't visible when this was written — the call below is a
+# best-guess based on the message-app's documented flow
+# (`MessageViewSet`, attachment upload via `upload_view.py`). ADJUST the
+# import + call to match your actual `message/services.py` (or wherever
+# send-message logic lives) once you wire this up — everything else here
+# stays the same.
+# ---------------------------------------------------------------------------
+def share_post_to_conversation(post, sender, conversation_id):
+    """Raises NotImplementedError with a clear message if the message app's
+    send function isn't available yet, so this fails loudly instead of
+    silently doing nothing."""
+    from .models import PostShare
+
+    try:
+        from message.services import send_message  # ADJUST to your real path
+    except ImportError as exc:
+        raise NotImplementedError(
+            "message.services.send_message not found — wire this to your "
+            "actual message-sending function (see comment in post/services.py)."
+        ) from exc
+
+    first_media = post.media.first()
+    attachment_url = first_media.file.url if first_media else None
+
+    message = send_message(
+        conversation_id=conversation_id,
+        sender=sender,
+        text=post.content or "",
+        shared_post_id=str(post.id),
+        attachment_url=attachment_url,
+    )
+
+    # unique_together=['post', 'user'] on PostShare, mirroring how
+    # PostLike/PostSave behave — get_or_create so re-sharing the same post
+    # doesn't raise IntegrityError. `shares_count` updates itself via the
+    # `update_shares_count` signal in models.py; no manual F() needed here.
+    PostShare.objects.get_or_create(post=post, user=sender)
+
+    return message
+```
+
+Interconnections this file owns:
+- **`core.services.create_notification`** — `notify_post_liked()` /
+  `notify_post_commented()` call straight into the `core` app's real
+  notification pipeline (guarded by a lazy `try/except ImportError` so
+  `post` degrades to a logged no-op rather than crashing if `core` is
+  ever absent from an environment). Called from `PostReactionAPIView`
+  (on the `liked` branch only) and `CommentCreateAPIView` (top-level
+  comments only) — see §6/§7.
+- **`core.models.Notification.NotifType.POST_LIKED`/`POST_COMMENTED`** —
+  the two choices this app depends on existing on `core`'s side.
+- **`message.services.send_message`** (`share_post_to_conversation`) —
+  **best-guess path, not yet confirmed against the real `message` app**,
+  and **not wired to any view/url yet** (no `/share/` route exists in
+  §8). Adjust the import once the real function is confirmed, then add
+  a route + view calling it.
+- **ffmpeg** (external binary, not a Python package) — both thumbnail
+  helpers shell out to it via `subprocess`; `tasks.py` (§10.3) is the
+  only caller.
+
+---
+
+## 10.2 `signals.py` (full code — renamed from uploaded `Signals.py`)
+
+> Case-sensitivity rename, same as `services.py` above. Registered from
+> `apps.py`'s `ready()` (§10). Owns two independent pieces of counter
+> bookkeeping — `User.posts_count` and `Post`'s reaction counts — plus
+> the fire-and-forget enqueue of video-thumbnail generation. TASK 23 /
+> fix B-5 (deduping the old two-receiver reaction-count split — see this
+> file's own docstring, and models.py's matching removal note) is now
+> fully resolved: `models.py` no longer has a competing
+> `update_reaction_counts` receiver; `sync_post_reaction_counts` here is
+> the single source of truth.
+
+```python
+"""
+post/signals.py
+
+⚠️ RENAMED from the uploaded `Signals.py` — apps.py does
+`import post.signals` in lowercase, which fails to resolve on a
+case-sensitive filesystem (Linux/prod) against a file literally named
+`Signals.py`. Same rename applied to services.py / tasks.py.
+
+⚠️ FIX — every function here used `instance.author_id`. `Post` has no
+`author` field/FK — the real one is `Post.user` (see models.py). This
+raised `AttributeError` the first time any of these receivers fired.
+
+DECISION — `posts_count` is now kept in sync HERE, via
+`post_save`/`post_delete`, instead of the manual
+`User.objects.filter(...).update(posts_count=F('posts_count') + 1)` line
+that used to live inline in `PostCreateAPIView.post()`. That manual line
+has been removed from views.py to match (see views.py's own note at that
+call site) — keeping both would double-count.
+
+Signal-based wins for production: it's the single place this logic lives
+no matter which code path creates/deletes a Post (the API view, the admin,
+a management command, a data-migration script, a test calling
+`Post.objects.create()` directly) — a future second entry point into post
+creation can't silently forget to bump the counter, because it was never
+its job to remember in the first place. This also matches what checklist
+item 58 originally asked for ("Post.save() signal se posts_count update
+karo").
+
+KEPT — `decrement_posts_count_on_soft_delete`, called explicitly from the
+new `PostDeleteAPIView.delete()` in views.py (soft-delete never fires
+`post_delete`, so it can't be a signal). `decrement_posts_count_on_hard_delete`
+is registered for whenever/if a genuine hard-delete path is ever added
+(e.g. an admin purge command) — inert today, harmless to leave wired up.
+
+🔥 TASK 23 — `PostLike` used to have two separate signal handlers
+(`update_likes_count`, `update_reaction_counts`) both firing on every
+PostLike save/delete and both writing `Post.likes_count` independently.
+Beyond the redundant writes, that split was a correctness risk: a
+*reaction change* (`PostReactionAPIView.post()` does `existing.
+reaction_type = new_type; existing.save()` — same row, not a create or
+delete) doesn't move the total (`likes_count`), only the per-type
+breakdown (`like_count`/`confuse_count`/`wrong_count`/`imp_count`/
+`explain_count`) — nothing guaranteed both handlers agreed on how to
+treat that case, and an incremental `F(...) + 1`/`- 1` style counter
+only even makes sense on create/delete in the first place.
+
+Replaced both with `sync_post_reaction_counts` below: a single receiver
+on PostLike's `post_save`/`post_delete` that recomputes every reaction
+count directly from the actual `PostLike` rows via one aggregate query,
+then writes all of them in one `UPDATE`. An aggregate recompute can't
+drift out of sync the way two independent incremental counters can, and
+it's naturally correct for create, delete, *and* the in-place reaction
+change case, with no special-casing needed for any of the three.
+"""
+import logging
+
+from django.db.models import Count, F, Q
+from django.db.models.signals import post_delete, post_save
+from django.dispatch import receiver
+
+from .models import Post, PostLike, PostMedia
+
+logger = logging.getLogger(__name__)
+
+
+def _user_model():
+    from django.contrib.auth import get_user_model
+
+    return get_user_model()
+
+
+@receiver(post_save, sender=Post)
+def increment_posts_count_on_create(sender, instance, created, **kwargs):
+    if not created:
+        return
+    User = _user_model()
+    if not hasattr(User, "posts_count"):
+        logger.warning("User model has no `posts_count` field — skipping sync.")
+        return
+    User.objects.filter(pk=instance.user_id).update(posts_count=F("posts_count") + 1)
+
+
+@receiver(post_delete, sender=Post)
+def decrement_posts_count_on_hard_delete(sender, instance, **kwargs):
+    """Only fires on a genuine hard delete (a queryset/instance `.delete()`
+    that actually removes the row) — the normal delete path in this app is
+    the soft-delete below, which never triggers post_delete."""
+    User = _user_model()
+    if not hasattr(User, "posts_count"):
+        return
+    User.objects.filter(pk=instance.user_id).update(posts_count=F("posts_count") - 1)
+
+
+def decrement_posts_count_on_soft_delete(post):
+    """Not a Django signal — soft-delete is just a `.save()`/`.update()`
+    under the hood and won't fire `post_delete`. Called explicitly from
+    `PostDeleteAPIView.delete()` in views.py, mirroring the exact pattern
+    `CommentDeleteAPIView` already uses for `PostComment` counters."""
+    User = _user_model()
+    if not hasattr(User, "posts_count"):
+        return
+    User.objects.filter(pk=post.user_id).update(posts_count=F("posts_count") - 1)
+
+
+# ----------------------------------------------------------------------
+# TASK 23 — PostLike reaction counts (see module docstring for why this
+# replaces the old `update_likes_count` / `update_reaction_counts` pair).
+# ----------------------------------------------------------------------
+# Must stay in sync with `ReactionRequestSerializer.reaction`'s
+# `choices` (serializers.py) — that's the only other place this set of
+# reaction types is spelled out, and each entry here maps directly to a
+# `Post.<type>_count` field.
+REACTION_TYPES = ("like", "confuse", "wrong", "imp", "explain")
+
+
+def sync_post_reaction_counts(post_id):
+    """
+    Single source of truth for a `Post`'s reaction counters. Recomputes
+    every per-type count (`like_count`, `confuse_count`, `wrong_count`,
+    `imp_count`, `explain_count`) plus the `likes_count` total straight
+    from `PostLike` rows, in one aggregate query, then writes all of
+    them (plus the auto-flag below, when it applies) in one `UPDATE` —
+    so the two never disagree the way two separately-maintained
+    incremental counters could.
+
+    Not `@receiver`-decorated itself (that's `_on_save`/`_on_delete`
+    below) so it can also be called directly wherever `PostLike` rows
+    might be touched outside a normal save/delete — e.g. a future
+    moderation bulk-remove or a data-migration backfill — the same way
+    `decrement_posts_count_on_soft_delete` above is called explicitly
+    for its own out-of-band case.
+
+    Trade-off, noted deliberately: this is a full recompute (one
+    `COUNT`-style aggregate) rather than an incremental +1/-1, which
+    costs one extra query per like/unlike compared to the old approach.
+    That's the right trade for a reaction feature — a post's total like
+    count staying wrong is a worse bug than one more cheap indexed
+    COUNT — but if a single post's `PostLike` volume ever gets large
+    enough for this to matter, the field to revisit is scale on this
+    query, not going back to incremental counters.
+
+    FIX (B-5) — this used to be duplicated by a second receiver,
+    `update_reaction_counts` in models.py, which independently
+    recomputed the same counts AND carried its own 5+-`wrong`
+    auto-flag-to-`flagged` check as a *second* `UPDATE` right after the
+    first. Both receivers were registered on the same PostLike
+    post_save/post_delete signals, so every like/unlike paid for two
+    full aggregate-recompute + UPDATE round trips converging on
+    identical numbers — pure waste on the app's hottest write path.
+    `update_reaction_counts` has been deleted from models.py; its
+    auto-flag check is folded in here instead, using the `wrong_count`
+    already sitting in `counts` (no extra query needed), and merged
+    into the same `UPDATE` as the counts themselves rather than firing
+    a second one. Matches the old behavior exactly: it only ever sets
+    `flagged`, never clears it back once `wrong_count` drops below 5.
+    """
+    counts = PostLike.objects.filter(post_id=post_id).aggregate(
+        **{f"{rt}_count": Count("id", filter=Q(reaction_type=rt)) for rt in REACTION_TYPES},
+        likes_count=Count("id"),
+    )
+    if counts["wrong_count"] >= 5:
+        counts["moderation_status"] = "flagged"
+    Post.objects.filter(pk=post_id).update(**counts)
+
+
+@receiver(post_save, sender=PostLike)
+def sync_post_reaction_counts_on_save(sender, instance, **kwargs):
+    """
+    Deliberately does NOT branch on `created` the way
+    `increment_posts_count_on_create` above does — a reaction *change*
+    (`PostReactionAPIView.post()`: `existing.reaction_type = new_type;
+    existing.save()`) is a save with `created=False` that still needs
+    the per-type breakdown recomputed (old type's count -1, new type's
+    +1 — even though the `likes_count` total doesn't move). Since
+    `sync_post_reaction_counts` recomputes from scratch rather than
+    incrementing, running it unconditionally on every save handles
+    create AND change identically and correctly, with no special case.
+    """
+    sync_post_reaction_counts(instance.post_id)
+
+
+@receiver(post_delete, sender=PostLike)
+def sync_post_reaction_counts_on_delete(sender, instance, **kwargs):
+    sync_post_reaction_counts(instance.post_id)
+
+
+# ----------------------------------------------------------------------
+# TASK 27 — video thumbnail generation, enqueue-only.
+#
+# This receiver's ONLY job is to hand off to Celery
+# (`post.tasks.generate_video_thumbnail`) — it deliberately does not call
+# ffmpeg or touch storage itself. `post_save` runs synchronously inside
+# whatever request/transaction created this `PostMedia` row
+# (`PostCreateAPIView.post()`); running ffmpeg (a slow subprocess against
+# a real video file) inline here would block that request's response for
+# however long ffmpeg takes, on every single video upload. `.delay()`
+# just enqueues and returns immediately.
+# ----------------------------------------------------------------------
+@receiver(post_save, sender=PostMedia)
+def queue_video_thumbnail_on_create(sender, instance, created, **kwargs):
+    if not created or instance.media_type != "video":
+        return
+    from .tasks import generate_video_thumbnail
+
+    generate_video_thumbnail.delay(instance.id)
+```
+
+Interconnections this file owns:
+- **`django.contrib.auth.get_user_model()`** — writes `posts_count`
+  directly onto whatever the project's `AUTH_USER_MODEL` is (the `login`
+  app's `User` — see `login_app_reference.md` §3) via `F()` updates, the
+  same atomic-update contract that `login`'s own model docstring asks
+  every caller of `followers_count`/`following_count`/`posts_count`/
+  `coin` to follow. Guarded with `hasattr(User, "posts_count")` so this
+  app doesn't hard-crash if it's ever pointed at a `User` model without
+  that field.
+- **`post.tasks.generate_video_thumbnail`** — `queue_video_thumbnail_on_create`
+  is the *only* place this Celery task gets enqueued (`.delay()`, on
+  every new `PostMedia` row where `media_type == "video"`).
+- Must stay in sync with `ReactionRequestSerializer.reaction`'s
+  `choices` in `serializers.py` (§4) — `REACTION_TYPES` here is the only
+  other place that same 5-value set (`like`/`confuse`/`wrong`/`imp`/
+  `explain`) is spelled out; if one changes, the other silently drifts.
+
+---
+
+## 10.3 `tasks.py` (full code — renamed from uploaded `Tasks.py`)
+
+> Case-sensitivity rename, same as above. Two Celery Beat housekeeping
+> tasks for `Story` expiry (checklist items 54/55/57/60) plus the async
+> video-thumbnail task enqueued by `signals.py` above (task 27). Not
+> wired into `settings.py` automatically — see the `CELERY_BEAT_SCHEDULE`
+> snippet in this file's own docstring below; confirm it's actually
+> present in the real `settings.py` (§2 doesn't currently list it).
+
+```python
+"""
+post/tasks.py
+
+⚠️ RENAMED from the uploaded `Tasks.py` (case-sensitivity — see
+services.py's docstring).
+
+⚠️ PREVIOUSLY BLOCKED ON — a `Story` model that didn't exist anywhere in
+this app. That's now added in models.py (checklist items 54/55/57/60),
+so this task's original premise is valid again. Rewritten against the
+real field names on the new `Story` model (`user`, not `author`;
+`soft_delete()` is a real method now, not assumed).
+
+Wire into settings.py CELERY_BEAT_SCHEDULE:
+
+    CELERY_BEAT_SCHEDULE = {
+        ...
+        "expire-old-stories": {
+            "task": "post.tasks.expire_old_stories",
+            "schedule": crontab(minute="*/15"),  # every 15 min is plenty
+        },
+        "purge-ancient-stories": {
+            "task": "post.tasks.hard_delete_ancient_stories",
+            "schedule": crontab(hour=3, minute=0, day_of_week=0),  # weekly
+        },
+    }
+
+Note this task is pure housekeeping, not a visibility gate: `Story`
+listing endpoints already filter `expires_at__gt=timezone.now()` in
+real time (see `StoryListAPIView.get_queryset()` in views.py), so an
+expired-but-not-yet-soft-deleted story is already invisible to users
+even before this task runs. This task's only job is to stop expired rows
+piling up forever and to soft-delete them so their `StoryView` rows are
+eventually eligible for cleanup too.
+"""
+import logging
+import os
+from datetime import timedelta
+
+from celery import shared_task
+from django.core.files import File
+from django.utils import timezone
+
+logger = logging.getLogger(__name__)
+
+
+@shared_task
+def expire_old_stories():
+    from .models import Story
+
+    now = timezone.now()
+    expired = Story.objects.filter(expires_at__lte=now, is_deleted=False)
+    count = expired.count()
+    for story in expired.iterator():
+        story.soft_delete()
+    logger.info("expire_old_stories: soft-deleted %s expired stories", count)
+    return count
+
+
+@shared_task
+def hard_delete_ancient_stories(days=30):
+    """Permanently remove stories soft-deleted more than `days` ago, so the
+    DB doesn't grow forever with dead rows. Run weekly — not required for
+    correctness (listing/visibility never depends on this task running)."""
+    from .models import Story
+
+    cutoff = timezone.now() - timedelta(days=days)
+    old = Story.objects.filter(is_deleted=True, deleted_at__lte=cutoff)
+    count = old.count()
+    old.delete()
+    logger.info("hard_delete_ancient_stories: purged %s stories older than %sd", count, days)
+    return count
+
+
+# ---------------------------------------------------------------------------
+# TASK 27 — video thumbnail generation, cloud-storage-safe + async.
+#
+# Moved here (as a Celery task, enqueued from signals.py's
+# `queue_video_thumbnail_on_create`) instead of running inline in the
+# `post_save` signal or the upload view, for two independent reasons:
+#   1. ffmpeg is a slow subprocess call (real videos, real disk I/O) —
+#      running it synchronously inside the request/signal cycle that
+#      creates a `PostMedia` row would block `PostCreateAPIView`'s
+#      response for however long ffmpeg takes.
+#   2. It needs to be retryable on its own schedule (transient S3 read
+#      hiccup, ffmpeg momentarily OOM-killed under load) without retrying
+#      the whole post-creation request.
+#
+# Every failure path here is `logger.exception`/`logger.error`, not
+# `print()` — `print()` output only ever reaches whatever happens to be
+# tailing stdout at that exact moment; `logger.error`/`.exception` is
+# what Sentry's `LoggingIntegration` (settings.py) actually captures as
+# an event, which is the whole point of task 27's "silently fails in
+# production" complaint.
+#
+# ⚠️ ADJUST if your `PostMedia` model (models.py) doesn't already have a
+# nullable `thumbnail` ImageField/FileField — this task assumes one
+# exists to write into. Field name used below: `thumbnail`.
+# ---------------------------------------------------------------------------
+@shared_task(bind=True, max_retries=3, default_retry_delay=30)
+def generate_video_thumbnail(self, media_id):
+    """Generate and save a JPEG thumbnail for a video `PostMedia` row.
+
+    Storage-backend agnostic: downloads the source video to a local temp
+    file via `services.download_storage_file_to_temp` (works the same
+    whether `default_storage` is local disk or S3 — see task 26/
+    settings.py's `USE_S3_STORAGE`), runs ffmpeg against that local copy,
+    then saves the resulting thumbnail back through the model field so it
+    lands in whichever storage backend is currently active — no
+    S3-specific code needed here at all, exactly because it never touches
+    `.path` directly.
+    """
+    from .models import PostMedia
+    from .services import download_storage_file_to_temp, generate_video_thumbnail_file
+
+    try:
+        media = PostMedia.objects.get(id=media_id)
+    except PostMedia.DoesNotExist:
+        # Media row (or its parent Post) was deleted between enqueue and
+        # run — nothing to do, and not an error worth retrying.
+        logger.warning("generate_video_thumbnail: PostMedia %s no longer exists", media_id)
+        return
+
+    if media.media_type != "video":
+        return
+    if getattr(media, "thumbnail", None):
+        # Already has one — avoids redoing work if this task is ever
+        # retried or the signal somehow fires twice for the same row.
+        return
+    if not media.file:
+        logger.warning("generate_video_thumbnail: PostMedia %s has no file", media_id)
+        return
+
+    _, ext = os.path.splitext(media.file.name)
+    local_video_path = None
+    thumb_path = None
+    try:
+        local_video_path = download_storage_file_to_temp(media.file, suffix=ext or ".mp4")
+        thumb_path = generate_video_thumbnail_file(local_video_path)
+        if thumb_path is None:
+            # Already logged inside generate_video_thumbnail_file (missing
+            # ffmpeg binary, ffmpeg failure, or timeout) — nothing more to
+            # do here. Not retried: a video that ffmpeg can't decode won't
+            # decode any better on retry #2.
+            return
+
+        with open(thumb_path, "rb") as f:
+            media.thumbnail.save(f"{media.id}_thumb.jpg", File(f), save=True)
+        logger.info("generate_video_thumbnail: thumbnail generated for PostMedia %s", media_id)
+    except Exception as exc:
+        # Genuinely unexpected failure (e.g. a transient storage-read
+        # error downloading the source video) — worth a bounded retry
+        # via Celery's own backoff, unlike the ffmpeg-level failures
+        # above which are handled (and intentionally not retried) inside
+        # generate_video_thumbnail_file.
+        logger.exception("generate_video_thumbnail: failed for PostMedia %s", media_id)
+        raise self.retry(exc=exc)
+    finally:
+        for path in (local_video_path, thumb_path):
+            if path and os.path.exists(path):
+                os.unlink(path)
+```
+
+Interconnections this file owns:
+- **Celery** (`shared_task`, `CELERY_BEAT_SCHEDULE`) — `expire_old_stories`
+  and `hard_delete_ancient_stories` are scheduled tasks; confirm the beat
+  schedule snippet in this file's docstring is actually present in
+  `settings.py`, or they simply never run.
+- **`post.services.download_storage_file_to_temp` /
+  `generate_video_thumbnail_file`** — `generate_video_thumbnail` (the
+  task) is pure orchestration; both actual pieces of work (storage
+  download, ffmpeg invocation) live in `services.py` (§10.1).
+- **`PostMedia.thumbnail`** — ⚠️ this task assumes a nullable
+  `thumbnail` ImageField/FileField already exists on `PostMedia`
+  (models.py, §3) — confirm the field name matches if this ever gets
+  renamed there.
+
 ---
 
 ## 11. `tests.py`
@@ -3837,3 +4511,71 @@ trailing note), not new code.
 No migration-shape changes in this pass — B-5 and the doc-sync items
 touch signal wiring and documentation only; G-3 adds no new field or
 model, just a cross-app read in a serializer method.
+---
+
+## 21. Addendum 6 — full doc-vs-code verification pass (Sep 2026 sync)
+
+This pass did a **programmatic, byte-for-byte diff** of every "full
+code" section in this doc against the actual current source files
+(same method used on `login_app_reference.md`) — not a re-read, an
+actual line-by-line comparison — so nothing was eyeballed and missed.
+
+**Files diffed and confirmed exact-match, no changes needed:**
+`models.py` (§3), `serializers.py` (§4), `views.py` (§6),
+`comment_view.py` (§7), `urls.py` (§8), `admin.py` (§9), `apps.py`
+(§10).
+
+**One real bug found and fixed:**
+
+- **§5 `comment_serializers.py`** — the code fence contained the
+  **entire dead, commented-out draft** (the old `PostCommentSerializer`
+  without comment-reactions) pasted directly ahead of the real active
+  code, inside the *same* fence. The prose note directly above it
+  claimed "only the active code below is included" (correctly true for
+  §4's `serializers.py`, right next to it) but was never actually true
+  for this section — an editing slip when this section was first
+  written. Net effect: anyone copy-pasting "the full file" from §5 got
+  ~120 lines of dead code prepended to the real thing. Fixed: the dead
+  draft is removed from the code fence entirely, the missing
+  `# post/comment_serializers.py` header line was restored, and the
+  note above it now accurately describes both the original draft/active
+  split *and* this doc-level fix, so a future reader isn't confused by
+  a note that doesn't match what's below it.
+
+**Three files promoted from "scattered addenda excerpts" to full,
+canonical, verified sections:**
+
+- **§10.1 `services.py`**, **§10.2 `signals.py`**, **§10.3 `tasks.py`**
+  — previously these three lived only as partial quotes and rationale
+  spread across §16, §17.1, §19, and this file's own module docstrings;
+  there was no one place with the complete, current, copy-pasteable
+  code the way every other file in this app already had. All three are
+  now included in full, verified byte-for-byte against the actual
+  uploaded (post-rename, lowercase-filename) source, with their
+  cross-app interconnections (`core.services.create_notification`,
+  `core.models.Notification`, `message.services.send_message` —
+  unwired/best-guess, `login`'s `User.posts_count`, Celery/
+  `CELERY_BEAT_SCHEDULE`) called out directly under each section instead
+  of only inside prose elsewhere. The existing addenda (§16, §17.1, §19)
+  are left in place as-is — they're the historical record of *why* each
+  fix happened — §10.1–§10.3 are the current, standalone reference for
+  *what the code actually is right now*.
+
+**Not changed, deliberately:**
+
+- `tests.py` (§11) stays as a descriptive list, not a full-code section
+  — same treatment as `login_app_reference.md` gives its own
+  (admittedly much shorter) `tests.py`. Its current content
+  (`PostCreateTests`, `PostDeleteTests`, `ReactionIdempotencyTests`,
+  `CommentThreadingTests`, `SavePostTests`, `HashtagDiscoveryTests`,
+  `ExploreFeedTests`, `StoryExpiryTests`) was spot-checked against the
+  actual `tests.py` on disk and is still accurate — no new test classes
+  need adding to this list.
+- `__init__.py` (§12) — still genuinely empty, nothing to sync.
+
+**Going forward:** this file is the single source of truth for the
+`post` app, same as `login_app_reference.md` is for `login`. Any future
+code change to `models.py`, `serializers.py`, `comment_serializers.py`,
+`views.py`, `comment_view.py`, `services.py`, `signals.py`, `tasks.py`,
+`urls.py`, or `admin.py` should be reflected in this doc's matching
+section in the same turn, so the two never drift apart again.

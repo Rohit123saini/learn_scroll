@@ -228,6 +228,77 @@ def update_group_member_role(*, group: Group, actor, user_id, data: dict) -> Gro
     return membership
 
 # ---------------------------------------------------------------------------
+# answer_doubt_question() — Task 16. Shared answer-path for BOTH classroom
+# doubts (`doubt.group` set) and context-pointer doubts (`doubt.
+# context_type`/`context_id` set, e.g. testseries — see `testseries/
+# bridge.py::answer_query_on_series()`), since `DoubtQuestion` itself now
+# supports both shapes (see models.py's Task 16 comment on the field).
+# ---------------------------------------------------------------------------
+def answer_doubt_question(*, doubt, actor, answer_text: str, answered_by=None):
+    """
+    `actor`: used ONLY for the classroom-doubt permission check
+    (admin/mod on `doubt.group`) — same `actor=None` convention as
+    `add_members_to_group`/`update_group_member_role` above: pass `None`
+    when the caller has already authorized this itself (e.g. `testseries/
+    bridge.py::answer_query_on_series()`, which confirms
+    `teacher == series.creator` before ever calling here) or when
+    `doubt.group` is None (a context-pointer doubt has no group to check
+    admin/mod against in the first place).
+
+    `answered_by`: the user to record as having answered. Defaults to
+    `actor` (the normal classroom-teacher-answers-directly case). Kept as
+    a SEPARATE param from `actor` so a trusted caller passing `actor=None`
+    (to skip the group-permission check) can still correctly record who
+    answered — `testseries/bridge.py::answer_query_on_series()` passes its
+    already-verified `teacher` here even though it passes `actor=None`.
+
+    Raises `ValueError` if `doubt` is already answered, or if neither
+    `actor` nor `answered_by` is given (nothing to record as the answerer).
+    """
+    if doubt.is_answered:
+        raise ValueError('Ye doubt pehle se hi answer ho chuka hai.')
+
+    if doubt.group_id is not None and actor is not None:
+        require_group_admin_or_mod(doubt.group, actor)
+
+    resolved_answered_by = answered_by if answered_by is not None else actor
+    if resolved_answered_by is None:
+        raise ValueError("'answered_by' (ya 'actor') required hai.")
+
+    doubt.is_answered = True
+    doubt.answer_text = answer_text
+    doubt.answered_by = resolved_answered_by
+    doubt.answered_at = timezone.now()
+    doubt.save(update_fields=['is_answered', 'answer_text', 'answered_by', 'answered_at', 'updated_at'])
+
+    # Task 16 acceptance checklist: student gets TESTSERIES_QUERY_ANSWERED
+    # when their testseries query is answered. Classroom (group) doubts
+    # don't get a notify here — deliberately: no acceptance requirement
+    # for that path in this task, and it'd need its own NotifType member
+    # (same "flag the gap, don't guess" convention `testseries/models.py`
+    # already uses for its own unconfirmed NotifType members).
+    if doubt.context_type == 'testseries_attempt':
+        # ⚠️ GAP, same shape as testseries/models.py's own flagged gaps:
+        # `core.models.Notification.NotifType.TESTSERIES_QUERY_ANSWERED`
+        # is NOT confirmed to exist yet. Until `core` adds it, this raises
+        # `AttributeError` at this point — i.e. the answer itself (fields
+        # above) is saved and real either way, only this notify step needs
+        # that enum member added first.
+        from core.models import Notification
+        from core.services import create_notification
+
+        create_notification(
+            recipient=doubt.author,
+            notif_type=Notification.NotifType.TESTSERIES_QUERY_ANSWERED,
+            title='Your query has been answered',
+            message=answer_text[:200],
+            data={'doubt_id': str(doubt.id), 'context_id': str(doubt.context_id)},
+        )
+
+    return doubt
+
+
+# ---------------------------------------------------------------------------
 # 🔧 REMOVED (was dead code) — `create_bell_rows_for_push` used to live
 # here, written back when `push_utils.py`'s source wasn't available to
 # check against. Now that it is: `push_utils.py` already creates its own

@@ -1,24 +1,41 @@
 # `assignment` App — Master Reference (Design + Complete Production Code)
 
-> **Ye ek hi self-contained document hai.** Isme functional design,
-> production-hardening design, aur har file ka **poora, copy-paste-ready
-> source code** ek hi jagah hai — kisi alag `.py` file ko dobara dekhne
-> ki zaroorat nahi. Naya developer/AI is doc ko top-se-bottom padh ke
-> poora `assignment` Django app, bina kisi aur reference ke, apne project
-> me reproduce kar sakta hai.
+> **Yeh ek hi self-contained document hai.** Isme functional design,
+> production-hardening design, har file ka **poora, copy-paste-ready
+> source code**, aur **dusri apps (campus/liveclass/testseries/core/
+> message/common) ke saath integration/plugin points** — sab ek hi jagah
+> hain. Kisi alag `.py` file, kisi purani chat, ya kisi doosre doc ko
+> dobara dekhne ki zaroorat nahi — is doc ko top-se-bottom padh ke koi
+> bhi (developer ya AI) is poore `assignment` app ko samajh sakta hai,
+> extend kar sakta hai, ya kisi bhi future task (naya endpoint, naya
+> bridge function, ek naya bug fix) ko sirf isi file ke bharose pe kar
+> sakta hai.
+>
+> **Last synced against real source:** 2026-09-12 — Part 3 ka har code block
+> is pass me actually upload ki gayi, real `.py` files se seedha liya
+> gaya hai (copy-paste, verbatim), copy-drift se bachne ke liye. Jahan
+> is doc ka Part 3 aur asli file mismatch pa jaye future me, **asli file
+> jeetegi** — is doc ko turant usi se dobara sync karo.
 >
 > Structure:
 > - **Part 1** — Functional design (source: `assignment_app_design.md`,
->   verbatim, is doc ka apna traceability-source hai — har baad ka code
->   comment `§N` isi part ko cite karta hai).
+>   verbatim — har baad ka code comment `§N` isi part ko cite karta hai).
 > - **Part 2** — App folder structure (kya file kahan jaati hai).
-> - **Part 3** — Har file ka poora source code, order se, taaki ek fresh
->   Django project me seedha copy kiya ja sake.
+> - **Part 3** — Har file ka poora, latest source code, verbatim, order
+>   se — seedha copy karke ek fresh Django project me daala ja sake.
+> - **Part 3.5 — Known Issues Found & Fixed This Pass** — is pass me
+>   real code execute karke confirm kiya gaya ek genuine production bug
+>   (`submit_structured()` ka `auto_grade()` call), aur uska fix.
 > - **Part 4** — Production-readiness design (security, performance,
 >   observability, testing, deployment, rate-limiting, open risks).
 > - **Part 5** — Integration checklist (settings, `INSTALLED_APPS`, URLs,
->   migrations) — ye 4 chhoti cheezein hi hain jo **project-level** hain
->   aur is app ke andar nahi ho sakti, baaki sab kuch upar hi hai.
+>   migrations) — project-level 4 cheezein jo is app ke andar nahi ho
+>   saktin.
+> - **Part 6 — Cross-App Integration / Plugin Registry** — har dusri app
+>   (`campus`, `liveclass`, `testseries`, `core`, `message`, `common`)
+>   ke saath `assignment` kaise bridge/plug hota hai, ek hi jagah —
+>   golden rules, notification types, bridge function signatures, aur
+>   is-baar-verify-hui vs abhi-tak-unverified cheezon ka clear split.
 
 ---
 
@@ -27,21 +44,10 @@
 1. [Part 1 — Functional Design](#part-1--functional-design)
 2. [Part 2 — App Folder Structure](#part-2--app-folder-structure)
 3. [Part 3 — Complete Source Code](#part-3--complete-source-code)
-   - [`common/question_grading.py`](#commonquestion_gradingpy)
-   - [`assignment/models.py`](#assignmentmodelspy)
-   - [`assignment/serializers.py`](#assignmentserializerspy)
-   - [`assignment/permissions.py`](#assignmentpermissionspy)
-   - [`assignment/throttling.py`](#assignmentthrottlingpy)
-   - [`assignment/views.py`](#assignmentviewspy)
-   - [`assignment/urls.py`](#assignmenturlspy)
-   - [`assignment/admin.py`](#assignmentadminpy)
-   - [`assignment/apps.py`](#assignmentappspy)
-   - [`assignment/bridge.py`](#assignmentbridgepy)
-   - [`assignment/tasks.py`](#assignmenttaskspy)
-   - [`assignment/management/commands/send_assignment_due_reminders.py`](#assignmentmanagementcommandssend_assignment_due_reminderspy)
-   - [`assignment/tests.py`](#assignmenttestspy)
-4. [Part 4 — Production-Readiness Design](#part-4--production-readiness-design)
-5. [Part 5 — Integration Checklist](#part-5--integration-checklist)
+4. [Part 3.5 — Known Issues Found & Fixed This Pass](#part-35--known-issues-found--fixed-this-pass)
+5. [Part 4 — Production-Readiness Design](#part-4--production-readiness-design)
+6. [Part 5 — Integration Checklist](#part-5--integration-checklist)
+7. [Part 6 — Cross-App Integration / Plugin Registry](#part-6--cross-app-integration--plugin-registry)
 
 ---
 
@@ -431,7 +437,16 @@ common/
 
 ---
 
+
+
 ## Part 3 — Complete Source Code
+
+> Har file neeche **verbatim** hai — is pass me upload hui asli `.py`
+> files se seedha liya gaya, koi paraphrase ya "reconstruction" nahi.
+> Ek hi jagah jahan asli file se **jaan-boojh kar** alag kiya gaya hai:
+> `assignment/models.py` — wahan ek confirmed, real bug fix hai (dekho
+> Part 3.5), aur diff clearly `[FIX ...]` comment se marked hai us file
+> ke andar hi.
 
 ### `common/question_grading.py`
 
@@ -536,7 +551,10 @@ def auto_grade(*, question_type: str, marks: int, correct_answer: Any, answer_da
         return GradingResult(is_auto_graded=True, is_correct=is_correct, marks_awarded=marks if is_correct else 0)
 
     raise ValueError(f"Unknown question_type for auto_grade(): {question_type!r}")
+
 ```
+
+---
 
 ### `assignment/models.py`
 
@@ -578,14 +596,28 @@ WHAT'S IN THIS FILE:
      `clean()`/`save()` shape-validation per question_type, same
      `answer_attachment` field, same `mark_answer()` bounds-checking and
      `is_correct` semantics. Grading is delegated to `common.
-     question_grading.auto_grade()` (verified against the real module —
-     a plain `(question_type, options, correct_answer, answer_data,
-     marks) -> (is_correct, marks_awarded)` function, not the
-     `GradingResult`-returning, `options`-less draft this file was
-     originally written against; that earlier mismatch would have raised
-     an `ImportError` on `GradingResult`/`QuestionType` at import time and
-     is now fixed, along with `submit_structured()`'s call site — see
-     that method's own docstring for the full list of what changed).
+     question_grading.auto_grade()`.
+     [FIX — bug found and fixed this pass, confirmed by actually
+     executing the real function]: the real `common/question_grading.py`
+     signature is `auto_grade(*, question_type, marks, correct_answer,
+     answer_data) -> GradingResult` — it takes **no** `options` keyword
+     at all, and returns a `GradingResult` dataclass
+     (`.is_auto_graded`/`.is_correct`/`.marks_awarded`), never a plain
+     `(is_correct, marks_awarded)` tuple. An earlier version of this
+     file's own docstring claimed the exact opposite (that the real
+     module WAS the tuple-returning, `options`-taking shape, and that a
+     "GradingResult-returning, options-less draft" was the outdated one)
+     — that claim was backwards relative to the actual uploaded
+     `common/question_grading.py`, and `submit_structured()`'s call site
+     was written to match the wrong shape. Both resulting failures were
+     reproduced for real (not assumed): passing `options=` raised
+     `TypeError: auto_grade() got an unexpected keyword argument
+     'options'`, and even with that removed, `is_correct, marks_awarded
+     = auto_grade(...)` raised `TypeError: cannot unpack non-iterable
+     GradingResult object`. Every structured-assignment submission would
+     have hit this in production. Fixed at the one call site
+     (`submit_structured()`, below) to call the real signature and read
+     `.is_correct`/`.marks_awarded` off the returned `GradingResult`.
   4. `AssignmentSubmission` — one student's attempt. Snapshots
      `roll_number`/`enrollment_no` at submit time (never re-derived) so a
      submission stays independently verifiable even if enrollment changes
@@ -1132,13 +1164,33 @@ class AssignmentSubmission(AssignmentBaseModel):
             question = questions[str(entry["question_id"])]
             answer_data = entry["answer_data"]
             is_auto_graded = question.question_type != AssignmentQuestion.QuestionTypeChoices.TEXT
-            is_correct, marks_awarded = auto_grade(
+            # [FIX — confirmed by actually executing the real
+            # common/question_grading.auto_grade() against this call
+            # site] The real function's signature is
+            # `auto_grade(*, question_type, marks, correct_answer,
+            # answer_data) -> GradingResult` — it takes NO `options`
+            # keyword at all, and returns a `GradingResult` dataclass
+            # (`.is_auto_graded` / `.is_correct` / `.marks_awarded`),
+            # never a plain tuple. The previous version of this call
+            # site passed `options=question.options` (an unexpected
+            # kwarg -> immediate `TypeError`) and then tried to unpack
+            # the result as `is_correct, marks_awarded = auto_grade(...)`
+            # (a `GradingResult` is not iterable -> a second, independent
+            # `TypeError` even if the first were fixed). Both failure
+            # modes were reproduced against the real module before this
+            # fix, not assumed — see the master doc's "Known Issues
+            # Found & Fixed This Pass" section. Every structured-
+            # assignment submission would have raised a 500 with the
+            # old code; this is what actually calling the real function
+            # requires.
+            grading_result = auto_grade(
                 question_type=question.question_type,
-                options=question.options,
                 correct_answer=question.correct_answer,
                 answer_data=answer_data,
                 marks=question.marks,
             )
+            is_correct = grading_result.is_correct
+            marks_awarded = grading_result.marks_awarded
             answer_rows.append(
                 AssignmentAnswer(
                     submission=self,
@@ -1302,6 +1354,8 @@ class AssignmentAnswer(AssignmentBaseModel):
         self.reviewed_at = timezone.now()
         self.save(update_fields=["marks_awarded", "reviewer_feedback", "reviewed_by", "reviewed_at"])
 ```
+
+---
 
 ### `assignment/serializers.py`
 
@@ -1824,6 +1878,8 @@ class AnswerReviewSerializer(serializers.Serializer):
     feedback = serializers.CharField(required=False, allow_blank=True, default="")
 ```
 
+---
+
 ### `assignment/permissions.py`
 
 ```python
@@ -1873,6 +1929,8 @@ class IsAssignmentStaffOrOwner(permissions.BasePermission):
         )
 ```
 
+---
+
 ### `assignment/throttling.py`
 
 ```python
@@ -1899,6 +1957,8 @@ from rest_framework.throttling import AnonRateThrottle
 class AssignmentPublicPageThrottle(AnonRateThrottle):
     scope = "assignment_public_page"
 ```
+
+---
 
 ### `assignment/views.py`
 
@@ -2131,8 +2191,9 @@ class PublicSubmissionView(generics.RetrieveAPIView):
         # never-published submission 404s outright, rather than being
         # "reachable" via an empty-string URL segment.
         return AssignmentSubmission.objects.exclude(public_slug="").select_related("assignment", "student")
-
 ```
+
+---
 
 ### `assignment/urls.py`
 
@@ -2169,6 +2230,8 @@ urlpatterns = router.urls + [
     path("public/<str:slug>/", PublicSubmissionView.as_view(), name="assignment-public-submission"),
 ]
 ```
+
+---
 
 ### `assignment/admin.py`
 
@@ -2250,6 +2313,8 @@ class AssignmentQuestionAdmin(admin.ModelAdmin):
     search_fields = ["text", "assignment__title"]
 ```
 
+---
+
 ### `assignment/apps.py`
 
 ```python
@@ -2270,7 +2335,10 @@ class AssignmentConfig(AppConfig):
         # duplicate `import .models`, so a future reader isn't left
         # wondering whether signals are actually live.
         pass
+
 ```
+
+---
 
 ### `assignment/bridge.py`
 
@@ -2442,8 +2510,9 @@ def notify_submission_received(submission: AssignmentSubmission) -> None:
         message=f"{submission.student} submitted \"{assignment.title}\".",
         data={"context_type": assignment.context_type, "context_id": str(assignment.context_id or "")},
     )
-
 ```
+
+---
 
 ### `assignment/tasks.py`
 
@@ -2587,6 +2656,8 @@ def send_due_reminders(*, lookahead_hours: int = 24) -> int:
     return count
 ```
 
+---
+
 ### `assignment/management/commands/send_assignment_due_reminders.py`
 
 ```python
@@ -2619,6 +2690,8 @@ class Command(BaseCommand):
         count = send_due_reminders(lookahead_hours=options["lookahead_hours"])
         self.stdout.write(self.style.SUCCESS(f"Sent {count} assignment due-date reminder(s)."))
 ```
+
+---
 
 ### `assignment/tests.py`
 
@@ -2876,8 +2949,101 @@ class DueReminderIdempotencyTests(TestCase):
         mock_create_notification.side_effect = None
         second_count = send_due_reminders(lookahead_hours=24)
         self.assertEqual(second_count, 1)
-
 ```
+
+---
+
+## Part 3.5 — Known Issues Found & Fixed This Pass
+
+> Ye section is pass me naya hai. Pichhli baar jab yeh master doc likha
+> gaya tha, `assignment/models.py`'s docstring ne khud claim kiya tha ki
+> real `common/question_grading.auto_grade()` ek `(question_type,
+> options, correct_answer, answer_data, marks) -> (is_correct,
+> marks_awarded)` shape ka plain function hai. Is pass me asli
+> `common/question_grading.py` upload hui, aur us claim ko **actually
+> Python execute karke** verify kiya gaya — claim **galat/backwards**
+> nikli.
+
+### Bug: `AssignmentSubmission.submit_structured()` → `auto_grade()` call crash
+
+**Confirmed by real execution, guess nahi:**
+
+```python
+>>> auto_grade(question_type='mcq', options=[...], correct_answer={...}, answer_data={...}, marks=5)
+TypeError: auto_grade() got an unexpected keyword argument 'options'
+```
+
+Aur agar `options=` hata bhi diya jaaye (jaisa purana code karta tha
+result unpack karte waqt):
+
+```python
+>>> is_correct, marks_awarded = auto_grade(question_type='mcq', ...)  # no options kwarg
+TypeError: cannot unpack non-iterable GradingResult object
+```
+
+**Asli `common/question_grading.py` ka real signature:**
+
+```python
+def auto_grade(*, question_type: str, marks: int, correct_answer: Any, answer_data: Any) -> GradingResult:
+    ...
+# returns: GradingResult(is_auto_graded: bool, is_correct: bool | None, marks_awarded: int | None)
+```
+
+Koi `options` parameter hai hi nahi — MCQ/MSQ ka grading sirf
+`correct_answer` aur `answer_data` compare karke hoti hai
+(`common/question_grading.py` khud kabhi `options` list dekhta hi nahi,
+sirf caller-supplied `answer_data`/`correct_answer` ko compare karta
+hai).
+
+**Impact (agar fix na hota):** Har ek structured-assignment submission
+(`POST .../submit_structured/`) turant `TypeError` se crash hota — ek
+raw 500, koi bhi mcq/msq/list question wale assignment ke liye. `text`-
+only assignments is bug se bachte (kyunki `text` questions kabhi
+`auto_grade()` ko call hi nahi karte is code-path me — dekho model ka
+`is_auto_graded` check, jo `question_type != TEXT` par hi call karta
+hai `auto_grade()` ko).
+
+**Fix (already applied in Part 3's `assignment/models.py` upar):**
+
+```python
+grading_result = auto_grade(
+    question_type=question.question_type,
+    correct_answer=question.correct_answer,
+    answer_data=answer_data,
+    marks=question.marks,
+)
+is_correct = grading_result.is_correct
+marks_awarded = grading_result.marks_awarded
+```
+
+`options=question.options` hata diya gaya (real function ko iski
+zaroorat nahi), aur result ko `GradingResult` attributes se padha ja
+raha hai, tuple-unpack se nahi.
+
+**Fix verify kiya gaya real code chala ke** (teen cases — correct mcq,
+wrong mcq, text) — teeno expected behavior dete hain:
+
+| Case | `is_correct` | `marks_awarded` |
+|---|---|---|
+| mcq, sahi answer | `True` | full marks |
+| mcq, galat answer | `False` | `0` |
+| text | `None` | `None` |
+
+**Is bug ka koi aur jagah pe asar nahi hai** — sirf ye ek call site
+(`submit_structured()`) `auto_grade()` ko seedha call karta hai is app
+ke andar. `AssignmentQuestion.clean()`/`.save()` apna khud ka shape-
+validation karte hain (`auto_grade()` ko call nahi karte), toh unpe koi
+asar nahi.
+
+**Follow-up recommendation (is pass me nahi kiya, sirf flagged):** ab
+jab `submit_structured()` fix ho chuka hai, `assignment/tests.py`'s
+`StructuredSubmissionTests` (`test_mcq_auto_graded_correctly`,
+`test_wrong_mcq_answer_scores_zero`, etc.) ko real `common/
+question_grading.py` ke against actually run karke confirm karna chahiye
+ki wo ab pass hoti hain — is pass me sirf `submit_structured()`'s
+internal logic hi standalone verify hui hai (upar wali table), poora
+Django test suite (models + views + auth) run karna abhi bhi ek open
+item hai agar poori confidence chahiye.
 
 ---
 
@@ -3236,4 +3402,169 @@ python manage.py send_assignment_due_reminders --lookahead-hours 24
 ---
 
 *End of document — everything needed to reproduce, run, and operate the
-`assignment` app in production is contained above.*
+
+
+## Part 6 — Cross-App Integration / Plugin Registry
+
+> Ye is pass ka sabse bada addition hai: har jagah jahan `assignment`
+> kisi doosri app se milta hai — ek hi consolidated jagah, taaki koi
+> future task campus/liveclass/testseries/core/message ki files khole
+> bina bhi yahan se poori tasveer samajh sake.
+
+### 6.1 Golden Rule (repeat, but load-bearing enough to restate here)
+
+`assignment` **kabhi bhi** `campus.*` ya `liveclass.*` models import nahi
+karta — kisi bhi function ke andar, kisi bhi `TYPE_CHECKING` block me
+bhi nahi. Dono directions is tarah kaam karte hain:
+
+```
+campus/liveclass  --(calls)-->  assignment.bridge.create_context_assignment()
+campus/liveclass  --(calls)-->  assignment.bridge.get_submissions_for_context()
+assignment         --(calls)-->  core.services.create_notification()
+```
+
+`context_type` (`"section"` | `"classroom"` | `""`) + `context_id`
+(UUID) `Assignment` model par ek **opaque soft-reference** hain —
+`assignment` in dono ko kabhi resolve nahi karta, sirf store/filter
+karta hai. Sirf caller (campus/liveclass ka apna bridge) hi janta hai
+`context_id` ka matlab real `Section`/`Classroom` row me kya hai.
+
+### 6.2 `assignment.bridge` — public contract (dusri apps ke liye)
+
+Ye teen functions hi hain jo kisi doosri app ko `assignment` se milne ke
+liye chahiye — poora contract, ek hi jagah:
+
+| Function | Caller | Purpose | Signature |
+|---|---|---|---|
+| `create_context_assignment()` | `campus.bridge.create_assignment()`, (expected) `liveclass.bridge.create_assignment()` | Assignment row banata hai + poore roster ke liye `AssignmentSubmission(status=MISSING)` bulk pre-create karta hai | `(*, source, context_type, context_id, posted_by, title, description="", attachment=None, due_date=None, total_marks=None, roster: list[dict], extra_data: dict | None = None) -> Assignment` |
+| `get_submissions_for_context()` | `campus.bridge.get_assignment_submissions()`, (expected) `liveclass.bridge.get_assignment_submissions()` | Ek context (section/classroom) ke saare submissions, **unfiltered by permission** — caller apna khud ka staff/student narrowing karta hai | `(context_type: str, context_id) -> QuerySet[AssignmentSubmission]` |
+| `notify_submission_received()` | `assignment/views.py` khud (submit_freeform/submit_structured ke andar) | Assignment poster ko notify karta hai jab koi student submit karta hai | `(submission: AssignmentSubmission) -> None` |
+
+**`roster` ka exact shape** (`create_context_assignment()` ka
+parameter): `[{"user_id": <UUID/PK>, "roll_number": "...", "enrollment_no": "..."}, ...]`
+— dono `roll_number`/`enrollment_no` optional keys hain
+(`entry.get(..., "")` se defensive), kyunki `liveclass` ke paas ye
+concept hi nahi hai (koi roll number nahi, sirf `PassPurchase` holders).
+
+**`source` restriction**: `create_context_assignment()` sirf
+`AssignmentSource.CAMPUS` ya `AssignmentSource.LIVECLASS` accept karta
+hai — `PERSONAL` is function se **kabhi** nahi banta, wo seedha public
+API (`AssignmentViewSet.perform_create`) se, hard-wired, banta hai.
+
+### 6.3 Confirmed caller: `campus.bridge.create_assignment()`
+
+(Pichhle passes me verify hua, is master doc me carry-forward reference
+ke liye rakha gaya hai)
+
+- Roster source: `campus.StudentEnrollment.objects.filter(section=section, status=StudentEnrollment.Status.ACTIVE)`
+  — har entry se `{"user_id": enrollment.student_id, "roll_number": enrollment.roll_number, "enrollment_no": enrollment.enrollment_no}`
+- `context_type="section"`, `context_id=section.id`
+- `subject_id` — `Assignment` model par koi field nahi hai iske liye
+  (ek `Section` multiple subjects span karta hai) — isliye
+  `extra_data={"subject_id": str(subject.id)}` se `Assignment.data`
+  JSONField ke andar store hota hai, seedha field ke through nahi.
+
+### 6.4 Expected (not yet independently re-verified this pass) caller: `liveclass.bridge.create_assignment()`
+
+- Roster source: `liveclass.PassPurchase.objects.filter(class_pass__classroom=classroom, status=SUCCESS, is_active=True, expires_at__gt=now)`
+  — sirf `{"user_id": student_id}` (roll_number/enrollment_no nahi hain
+  is app me, blank rehte hain)
+- `context_type="classroom"`, `context_id=classroom.id`
+- Koi `subject_id`/`extra_data` nahi (liveclass classrooms subject-scoped
+  nahi hain)
+
+### 6.5 `core` integration — notifications
+
+`assignment` **seedha** `core.services.create_notification()` ko call
+karta hai (`message` app jaisa hi precedent — `core` neutral layer hai
+jise sab depend kar sakte hain):
+
+| Call site | `notif_type` | Kab fire hota hai |
+|---|---|---|
+| `assignment/bridge.py::notify_submission_received()` | `"submission_received"` | Jab bhi koi student `submit_freeform`/`submit_structured` call karta hai — assignment ke `posted_by` ko notify karta hai |
+| `assignment/tasks.py::send_due_reminders()` | `"assignment_due_reminder"` | Due-date reminder sweep — student ko notify karta hai jinka submission abhi bhi `MISSING` hai aur due date `lookahead_hours` ke andar hai |
+
+⚠️ **[ASSUMPTION — abhi bhi unverified]**: `core.services.
+create_notification()`'s exact signature kabhi bhi asli `core/
+services.py` se verify nahi hui hai (sirf `core/models.py` mila tha,
+`core/services.py` kabhi nahi). Dono call sites upar keyword args
+(`recipient`, `notif_type`, `title`, `message`, `data`) `core.
+Notification` model ke apne fields ke naam se guess kiye gaye hain.
+**Is master doc ka agla reader**: agar kabhi `core/services.py` mile,
+sabse pehla kaam ye hai ki dono call sites ko us real signature ke
+against verify/fix karo — same tareeqe se jaise Part 3.5 me
+`auto_grade()` ka mismatch pakड़ा gaya, waisa hi ek aur potential
+mismatch yahan chhupa ho sakta hai jab tak actually verify na ho.
+
+### 6.6 `common` integration — shared, non-Django utility modules
+
+`assignment` do jagah `common/` (ek plain Python package, Django app
+nahi — koi models/migrations/settings entry nahi) se import karta hai:
+
+| Module | Used by | Exports used |
+|---|---|---|
+| `common/question_grading.py` | `assignment/models.py` (`AssignmentSubmission.submit_structured()`) | `auto_grade(*, question_type, marks, correct_answer, answer_data) -> GradingResult` |
+| `common/attachment_validators.py` | `assignment/models.py` (har FileField) | `attachment_extension_validator`, `validate_attachment_size` |
+
+`common/question_grading.py` **explicitly** `testseries` app se bhi
+share hone ke liye design hua hai (uske apne docstring ke mutabiq) —
+agar kabhi `testseries` isko import karta hua paya jaaye, dono apps ka
+grading behavior automatically same rahega, kyunki dono ek hi function
+call kar rahe honge. `assignment` khud kabhi is baat ko assume nahi
+karta ki `testseries` isko use kar hi raha hai — ye sirf module ka apna
+stated design-intent hai.
+
+### 6.7 `testseries` app — koi seedha coupling nahi, sirf ek shared model-shape
+
+`assignment.AssignmentQuestion`/`AssignmentAnswer` **field-for-field**
+`testseries.Question`/`QuestionResponse` ka clone hain (Part 1 design
+doc §2a) — same `clean()`/`save()` per-type validation, same
+`mark_answer()` bounds-checking. Ye ek **intentional parallel
+implementation** hai, koi import/dependency nahi — `assignment` kabhi
+`testseries.models` ko import nahi karta, aur na hi vice versa (jahan
+tak is pass me pata hai). Agar future me `testseries` ka `Question`
+model apna shape badalta hai, `assignment/models.py`'s
+`AssignmentQuestion` ko manually usi ke saath sync karna hoga — koi
+automatic mechanism dono ko in-sync nahi rakhta.
+
+### 6.8 Notification-type naming — cross-app consistency note
+
+`assignment` khud `notif_type` values **plain strings** ke roop me
+bhejta hai (`"submission_received"`, `"assignment_due_reminder"`) —
+`core.models.Notification`'s apne enum (`NotifType`) se import nahi
+karta, taaki `assignment` ko `core.models` import karne ki zaroorat na
+pade (halanki ye already `core.services` import kar raha hai, toh ye
+consistency choice hai, hard technical zaroorat nahi). Agar `core.
+models.NotifType` par in dono values ke exact-match members nahi hain,
+ye silently ek mismatched/unrecognized notif_type ban jayega — **is
+master doc ka agla reader**: `core.models.NotifType` ko check karke
+confirm karo ki `"submission_received"` aur `"assignment_due_reminder"`
+dono wahan character-for-character match karte hain (jaisa `campus.
+bridge.NotifTypes` apni class docstring me khud ke liye ye discipline
+maintain karti hai — `assignment` ke paas aisi koi mirror-class nahi
+hai, isliye ye check manual hai).
+
+### 6.9 Quick "who imports what" map (is app ki poori dependency surface)
+
+```
+assignment/models.py       -> common.attachment_validators, common.question_grading, login.models.User
+assignment/serializers.py  -> assignment.models (only)
+assignment/views.py        -> assignment.{bridge,models,permissions,throttling,serializers}
+assignment/bridge.py       -> core.services.create_notification, login.models.User, assignment.models
+assignment/tasks.py        -> core.services.create_notification, assignment.models
+assignment/admin.py        -> assignment.models
+assignment/permissions.py  -> assignment.models (AssignmentSource only)
+assignment/urls.py         -> assignment.views
+
+<koi bhi file jo assignment se BAAHAR hai, jo assignment ko import karti hai:>
+campus/bridge.py           -> assignment.bridge, assignment.models  (create_assignment/get_assignment_submissions)
+liveclass/bridge.py        -> assignment.bridge, assignment.models  (expected — same pattern as campus)
+core/views.py (SearchView, agar wired hai)
+                           -> assignment.models  (search-scoping ke liye, alag task — is app ke andar nahi)
+```
+
+`assignment` khud **kabhi** `campus`, `liveclass`, ya `testseries` ko
+import nahi karta — sirf `core.services` aur `login.models` (dono
+neutral/shared layers hain, golden-rule violation nahi).
+
+---

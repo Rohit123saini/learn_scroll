@@ -1,28 +1,191 @@
 # `user_profile` App — Complete Self-Contained Reference
 
-> **v3.1 — v3 (TASK 18 / 19 / 28 / 30) plus a small follow-up patch
-> (B-8 / F-3, under the FEE-2 initiative).**
-> Ye ek hi file hai jisme poore **user_profile** Django app ka sara
-> logic, code, connections, flows aur known issues cover hain. Iske
-> alawa kisi aur file ki zaroorat nahi — sab kuch (models → serializers
-> → views → urls → admin → tasks → tests) yahin milega.
+> **v4 — v3.1 ke upar TASK 1 / TASK 3 / TASK 4 / TASK 5 (poora coin-economy
+> build-out: purchase → withdrawal → fraud/anti-abuse layer) fully merged.**
+> Ye ek hi file hai jisme poore **user_profile** Django app ka sara logic,
+> code, connections, flows, fraud rules, aur known issues cover hain. Iske
+> alawa kisi aur file ki zaroorat nahi — sab kuch (models → serializers →
+> views → urls → admin → fraud → tasks → tests) yahin milega, current code
+> ke saath.
 >
-> **v2 se kya badla, sabse pehle:** section 0.1 (Changelog v2 → v3)
-> padho — usme is round ke sab naye fixes/features ek jagah list hain
-> (`RestrictUser` ab wired hai, `CoinLedger` ab actually likhi/padhi
-> jaati hai, follow-count drift ke liye ek Celery reconciliation task
-> add hui, aur test coverage kaafi expand hui). Baaki poora document un
-> changes ko reflect karta hua, fully updated code ke saath, dubara
-> likha gaya hai.
+> **v3.1 se kya badla, sabse pehle:** section 0.3 (Changelog v3.1 → v4)
+> padho. Short version: `CoinLedger` ab sirf ek chhota audit-table nahi
+> raha — ab uske upar poora coin-economy stack khada hai:
+> - **TASK 1** — 5 naye `TransactionType` choices (testseries + withdrawal
+>   ke liye prerequisite).
+> - **TASK 3** — Buy-Coin flow (`CoinPurchaseRequest`, `BuyCoinView`,
+>   `BuyCoinConfirmView`) — pending → success/failed, real money → coins.
+> - **TASK 4** — Withdraw-Coin flow (`CoinWithdrawalRequest`,
+>   `CoinWithdrawalRequestView`) — escrow-style debit-on-request, coins →
+>   real money.
+> - **TASK 5** — naya `fraud.py` module: withdrawal-eligibility rule
+>   (sirf purchased/gifted coins hi withdrawable) + earn-rate limiting
+>   (burst-farming se bachao), dono `CoinLedger.objects.
+>   record_transaction()` ke andar hi enforce hote hain — koi bhi call
+>   site inhe bypass nahi kar sakta.
 >
-> **v3 → v3.1 (is chhoti patch me kya badla):** section 0.2 (Changelog
-> v3 → v3.1) padho — `admin.py` ab upload ho gaya, isliye `CoinLedger`
-> ka pending admin-lockdown caveat (B-8) finally band ho gaya, aur
-> `models.py` me ek naya `CAMPUS_REWARD` transaction type (F-3) add hua
-> hai — dono `FEE-2` (real tuition-fee money ab isi ledger se guzarta
-> hai) ke context me.
+> Har naya piece **existing `CoinLedger.objects.record_transaction()`**
+> ke upar hi bana hai — koi doosra balance-writing path nahi khula.
+> Poora document is round ke baad, fully updated code ke saath, dubara
+> organize kiya gaya hai; purane version-history (v1→v2→v3→v3.1) sections
+> §0 me neeche traceable hain, delete nahi kiye gaye.
 
 ---
+
+## 0.3 Changelog — v3.1 → v4 (TASK 1 / 3 / 4 / 5 — the coin-economy build-out)
+
+This is the biggest single jump since v3. Four tasks, all building on the
+same `CoinLedger.objects.record_transaction()` foundation v3 (TASK 19)
+put in place — nothing here opens a second way to move a balance.
+
+### 🧾 TASK 1 — new `TransactionType` choices (pure addition, no migration
+for the enum itself)
+- `TESTSERIES_PURCHASE`, `TESTSERIES_PAYOUT` — `testseries/models.py`
+  (`TestSeriesPurchase.purchase_and_start_attempt()` / `.release()`)
+  already referenced these directly; they were **missing from the enum**,
+  which was a live `AttributeError` waiting to happen. Fixed by adding
+  them, not by changing `testseries`.
+- `WITHDRAWAL_REQUESTED`, `WITHDRAWAL_COMPLETED`, `WITHDRAWAL_REJECTED` —
+  added ahead of the withdrawal flow itself (same pattern
+  `core.Notification.NotifType` already uses: carry the enum value before
+  every consumer of it exists). TASK 4 below wires
+  `WITHDRAWAL_REQUESTED`/`WITHDRAWAL_REJECTED` in; `WITHDRAWAL_COMPLETED`
+  is intentionally still unused (see §4 model notes).
+- Field-width checked: longest new value (`withdrawal_requested` /
+  `withdrawal_completed`, 20 chars) still fits
+  `transaction_type = CharField(max_length=20)` — no column-length
+  migration needed.
+
+### 💰 TASK 3 — Buy-Coin flow (real money → coins)
+- New model `CoinPurchaseRequest` (+ `CoinPurchaseRequestManager`):
+  `PENDING` → `SUCCESS` (credits `coins` via `record_transaction`,
+  `transaction_type=PURCHASE`) or `FAILED` (wallet untouched). Both
+  terminal. Idempotent on `gateway_reference` (DB `UniqueConstraint` +
+  `get_or_create`, with the `IntegrityError` race caught and turned into
+  a re-fetch — same pattern as everywhere else in this app that needs
+  double-submit safety).
+- New views `BuyCoinView` (`POST /profile/buy-coin/` — start a pending
+  purchase) and `BuyCoinConfirmView` (`POST /profile/buy-coin/confirm/` —
+  mark success/failed). **Not a real payment-gateway webhook as shipped**
+  — `IsAuthenticated` + "must be your own purchase" stand in for gateway-
+  signature verification, which wasn't part of this upload. Replace/gate
+  that before this goes live behind an actual gateway callback (see §11).
+- `liveclass/models.py` (which already has its own `CoinPurchase` flow)
+  was **not** part of this upload, so `CoinPurchaseRequest`'s shape is
+  inferred from this app's own established patterns, not copied
+  field-for-field — reconcile the two if they ever need to be the same
+  shape (see §4 model notes / §11).
+
+### 💸 TASK 4 — Withdraw-Coin flow (coins → real money)
+- New model `CoinWithdrawalRequest` (+ `CoinWithdrawalRequestManager`):
+  the mirror image of TASK 3, escrow-style — debits `coins` **immediately
+  on request** (`WITHDRAWAL_REQUESTED`), not on payout confirmation, so a
+  user can't double-request the same coins while one withdrawal is
+  pending. Lifecycle: `PENDING` → `PROCESSING` (no coin movement) →
+  `SUCCESS` (no coin movement — debit already happened) **or** →
+  `REJECTED` from `PENDING`/`PROCESSING` (credits coins back via
+  `WITHDRAWAL_REJECTED`). Reference read: `liveclass.CoinWithdrawal` /
+  `liveclass.CoinTransaction`, which already implement this exact escrow
+  pattern — reproduced here on top of `CoinLedger` instead, since
+  `CoinLedger` (not `liveclass.CoinTransaction`) is this codebase's one
+  shared ledger.
+- New view `CoinWithdrawalRequestView` (`GET`/`POST
+  /profile/coin-withdrawals/`) — `GET` lists your own requests; `POST`
+  requests a withdrawal, `402` on insufficient balance (no partial debit,
+  no orphan request row — same `transaction.atomic()` block covers both).
+- Deliberately **not** included this pass: `reviewed_by`/admin-user
+  tracking, a `MIN_WITHDRAWAL_COINS` floor, an INR conversion snapshot,
+  and endpoints for `mark_processing`/`confirm_success`/`reject` (those
+  three manager methods exist and are tested, but nothing in `urls.py`
+  calls them yet — that's an ops/admin surface for later).
+
+### 🛡️ TASK 5 — fraud / anti-abuse layer (`fraud.py`, new file)
+Two independent rules, both enforced **inside
+`CoinLedgerManager.record_transaction()` itself** — not only in a view —
+so no call site (this app's own views, `campus` tasks, a referral-bonus
+flow, anything written later) can bypass them by going around a
+particular endpoint:
+
+1. **Withdrawal eligibility** — `fraud.is_withdrawal_eligible(user,
+   coins)`. Only coins traceable to `PURCHASE` or `GIFT_RECEIVED` may
+   ever be cashed out; `EARN`/`CAMPUS_REWARD` coins can be spent in-app
+   but never withdrawn. On a mixed balance, only the purchased/gifted
+   **portion** is eligible — `fraud.get_withdrawal_eligible_balance()`
+   derives that with a single grouped aggregate query (non-eligible
+   coins are treated as spent first; only once they're exhausted does
+   further spend eat into the eligible pool). Called by
+   `CoinWithdrawalRequestView.post()` **before**
+   `request_withdrawal()`, so an ineligible request never touches the
+   balance and never creates a request row — a `403`, distinct from the
+   `402` "insufficient balance" case.
+2. **Earn-rate limiting** — `fraud.check_earn_rate_limit(user,
+   transaction_type)`, called from *inside* `record_transaction()` for
+   `EARN`/`CAMPUS_REWARD` credits only. Two independent rolling-window
+   caps (either tripping blocks the credit): a transaction-count cap
+   (`EARN_RATE_LIMIT_MAX_TRANSACTIONS`, default 20 per hour) and a
+   total-coins cap (`EARN_RATE_LIMIT_MAX_COINS`, default 500 per hour).
+   Trips raise `fraud.EarnRateLimitExceeded` — deliberately **not** a
+   `ValueError`, so a caller that wants to tell "you're farming too fast"
+   apart from "you're broke" can catch it specifically, while a caller
+   that only wants "something went wrong, don't credit" can still catch
+   `(ValueError, EarnRateLimitExceeded)` or a bare `Exception` the same
+   way it always could.
+3. `record_transaction()` now **always** stamps
+   `metadata["withdrawal_eligible"]` (derived purely from
+   `transaction_type`, any caller-supplied value overwritten) on every
+   row it writes — not the real source of eligibility truth
+   (`get_withdrawal_eligible_balance()` still derives that from
+   `transaction_type` directly), just a denormalized flag so `admin.py`'s
+   ops filter can filter on it without recomputing per row.
+
+### 🔒 B-8 (folded into this same pass) — `admin.py` now uploaded, `CoinLedger` locked down read-only
+- `CoinLedgerAdmin`: `has_add_permission` / `has_change_permission` /
+  `has_delete_permission` all return `False`; every field is also listed
+  in `readonly_fields` (defense in depth — a future field addition can't
+  accidentally become admin-editable by omission). Admin is a **viewer**
+  of this table, never a second unguarded write path around
+  `record_transaction()` — see §8 for why this matters even more now
+  that real tuition-fee money (`FEE-2`) flows through the same ledger.
+- New `WithdrawalEligibleFilter` — an ops-facing `list_filter` that reads
+  `metadata["withdrawal_eligible"]` (the flag TASK 5 stamps) rather than
+  re-deriving eligibility from `transaction_type` in `admin.py` itself,
+  so the admin filter and `fraud.py` can never silently disagree about
+  what "eligible" means for a given row.
+
+### 🎓 F-3 (folded into this same pass) — `CAMPUS_REWARD` transaction type
+- New `TransactionType.CAMPUS_REWARD`, for `campus`'s small engagement
+  bonuses (attendance-streak, on-time-assignment-streak). Kept
+  **distinct from `EARN`** on purpose: `FEE-3`/`FEE-6`
+  (`campus/tasks.py`) already reads a student's `User.coin` balance to
+  decide whether it covers an upcoming fee, and `FEE-2` now routes real
+  tuition-fee payments through this same ledger — an ops/support person
+  scanning a ledger needs to tell "this coin came from a reward, not a
+  real top-up" at a glance, without cross-referencing amounts.
+- TASK 5's earn-rate limiter treats `CAMPUS_REWARD` the same as `EARN`
+  (both rate-limited, both withdrawal-ineligible) — see fraud.py notes
+  above.
+
+### 🧪 Test coverage added this pass
+- `tests.py` gained `CoinWithdrawalRequestManagerTests` (exact-amount
+  debit, rejected-withdrawal-credits-back) and
+  `CoinWithdrawalRequestAPITests` (402 on insufficient balance, pending
+  row created via API, payout-details validation).
+- New file `tests_fraud.py` (§9a): `WithdrawalEligibilityTests` (earn-
+  only balance is non-withdrawable, mixed-balance eligible-portion math,
+  gift-received eligibility, spend-overflow eating into the eligible
+  pool) and `EarnRateLimitTests` (burst blocked by count, blocked by
+  total-coins, and confirmed **not** applied to `PURCHASE`).
+- Still not covered (carried into §11): `CoinLedgerAdmin`'s
+  add/change/delete refusal has no test, and no test exercises
+  `record_transaction()` with `transaction_type=CAMPUS_REWARD`
+  specifically (only the rate limiter's generic EARN/CAMPUS_REWARD
+  grouping is tested).
+
+### Status as of v3.1 (superseded — see above for what changed in v4)
+- ~~`CoinLedger` has no fraud/anti-abuse controls~~ — **resolved in v4**:
+  see TASK 5 above.
+- ~~No buy-coin / withdraw-coin flow exists~~ — **resolved in v4**: see
+  TASK 3 / TASK 4 above.
 
 ## 0. Changelog — v1 → v2 (is round me kya fix hua)
 
@@ -271,6 +434,7 @@ ko bilkul touch nahi karta.
 
 ---
 
+
 ## 1. App Overview
 
 **App name:** `user_profile`
@@ -364,6 +528,7 @@ Nothing special — standard app config, unchanged from v1.
 
 ---
 
+
 ## 4. `models.py` (full current code)
 
 ```python
@@ -445,9 +610,45 @@ WHAT CHANGED in this pass, and why:
    full purpose/scope writeup, including why no generic write endpoint
    is exposed and an admin.py caveat this pass couldn't fix (no
    admin.py in this upload).
+
+6. TASK 1 (this pass) — added 5 new `TransactionType` choices:
+   `TESTSERIES_PURCHASE`, `TESTSERIES_PAYOUT`, `WITHDRAWAL_REQUESTED`,
+   `WITHDRAWAL_COMPLETED`, `WITHDRAWAL_REJECTED`. Pure addition — no
+   existing choice renamed or removed, so no migration is needed for
+   the enum itself (`choices=` is not a schema-affecting kwarg).
+   `TESTSERIES_PURCHASE`/`TESTSERIES_PAYOUT` were already being
+   referenced directly by `testseries/models.py`
+   (`TestSeriesPurchase.purchase_and_start_attempt()` / `.release()`)
+   before this enum had them defined — that was a live `AttributeError`
+   waiting to happen, now fixed. `WITHDRAWAL_*` aren't consumed by any
+   code yet in this pass; added ahead of time as a prerequisite for the
+   upcoming withdrawal flow, same as `core.Notification.NotifType`
+   already carries `WITHDRAWAL_APPROVED`/`WITHDRAWAL_REJECTED`/
+   `WITHDRAWAL_PAID` without every one of those being wired up yet.
+   Checked field width: longest new value is `withdrawal_requested`/
+   `withdrawal_completed` at 20 chars, which still fits the existing
+   `transaction_type = CharField(max_length=20, ...)` — no field-length
+   change needed either.
+
+7. TASK 4 (this pass) — added `CoinWithdrawalRequest` +
+   `CoinWithdrawalRequestManager`: the canonical "cash out coins"
+   request for this app, using the `WITHDRAWAL_REQUESTED`/
+   `WITHDRAWAL_REJECTED` transaction types TASK 1 added ahead of time.
+   Reference read for this task was `liveclass.CoinWithdrawal` /
+   `liveclass.CoinTransaction`, which already implement this exact
+   escrow pattern (debit the coins the moment the request is made, not
+   when the payout completes; refund only on reject; no second ledger
+   write on completion since the debit already happened). This
+   reproduces that lifecycle on top of `CoinLedger.record_transaction()`
+   instead of `liveclass.CoinTransaction`, since `CoinLedger` — not
+   `liveclass.CoinTransaction` — is this codebase's one shared,
+   canonical coin ledger (see CoinLedger's own docstring). See
+   `CoinWithdrawalRequest`'s class docstring below for the full
+   lifecycle and what's deliberately left out of this pass (no
+   `reviewed_by`, no `MIN_WITHDRAWAL_COINS` floor, no INR snapshot).
 """
 from django.conf import settings
-from django.db import models, transaction
+from django.db import IntegrityError, models, transaction
 from django.db.models import CheckConstraint, F, Q, UniqueConstraint
 
 
@@ -657,6 +858,36 @@ class CoinLedgerManager(models.Manager):
         `user.coin` negative (PositiveIntegerField can't hold a negative
         balance anyway — this turns that into a clean, catchable error
         for the caller instead of an IntegrityError bubbling up).
+
+        TASK 5 (this pass) — two fraud/anti-abuse hooks were added here,
+        not in the view layer, specifically so they can't be bypassed by
+        a call site that doesn't go through a particular view (campus
+        tasks, referral bonus, any future caller) — same reasoning this
+        being "the one sanctioned write path" already rests on:
+          - Earn-rate limiting: for EARN/CAMPUS_REWARD credits only,
+            `fraud.check_earn_rate_limit()` is checked (after the row
+            lock below, so concurrent earn calls for the same user are
+            serialized before the check runs, the same way the
+            `reference` idempotency check already relies on that lock).
+            A burst-farming caller gets `fraud.EarnRateLimitExceeded`
+            instead of a silent credit — nothing here catches it, so it
+            propagates straight to the caller (campus tasks, referral
+            bonus, ...), which is expected to catch it the same way it's
+            expected to catch the `ValueError`s below.
+          - `metadata["withdrawal_eligible"]` is now always set (any
+            caller-supplied value for that key is overwritten) purely
+            from `transaction_type` — True only for
+            PURCHASE/GIFT_RECEIVED, per `CoinWithdrawalRequest`'s
+            eligibility rule. This is stored in `metadata` rather than a
+            new column so this pass doesn't force a schema migration on
+            a table that's already live (same "avoid the migration when
+            the data doesn't demand a schema change" call this file
+            already makes elsewhere) — it's also NOT what withdrawal
+            eligibility is actually computed from (`fraud.
+            get_withdrawal_eligible_balance()` derives that straight
+            from `transaction_type`, the real source of truth); this
+            flag exists purely so `admin.py`'s read-only ops filter can
+            filter on it without re-deriving it per row.
         """
         if amount == 0:
             raise ValueError("CoinLedger amount must not be zero.")
@@ -666,8 +897,27 @@ class CoinLedgerManager(models.Manager):
         # settings.AUTH_USER_MODEL (see the FK fields above), never a
         # direct import, to keep user_profile decoupled from login.
 
+        # Local import — avoids a module-level circular reference
+        # between this module and `fraud.py`, which itself imports
+        # `CoinLedger` from here to compute the rate-limit window. Same
+        # pattern `CoinPurchaseRequestManager.confirm_success` already
+        # uses a local import for, just against a different module.
+        from .fraud import EarnRateLimitExceeded, check_earn_rate_limit
+
+        merged_metadata = dict(metadata or {})
+        merged_metadata["withdrawal_eligible"] = transaction_type in (
+            self.model.TransactionType.PURCHASE,
+            self.model.TransactionType.GIFT_RECEIVED,
+        )
+
         with transaction.atomic():
             locked_user = UserModel.objects.select_for_update().get(pk=user.pk)
+
+            if not check_earn_rate_limit(locked_user, transaction_type):
+                raise EarnRateLimitExceeded(
+                    f"Earn rate limit exceeded for user {locked_user.pk!r} "
+                    f"({transaction_type})."
+                )
 
             if reference:
                 existing = self.filter(user=locked_user, reference=reference).first()
@@ -690,7 +940,7 @@ class CoinLedgerManager(models.Manager):
                 balance_after=new_balance,
                 reference=reference,
                 description=description,
-                metadata=metadata or {},
+                metadata=merged_metadata,
             )
 
 
@@ -723,30 +973,37 @@ class CoinLedger(models.Model):
     `record_transaction` also moves the real balance, mint themselves
     coins.
 
-    RESOLVED (was: "can't fix from this pass — admin.py wasn't
-    uploaded"): Django admin used to allow raw add/edit/delete on this
-    model directly, which bypassed `record_transaction()` entirely — it
-    could create a ledger row with no matching change to `User.coin`, or
-    edit an existing row's `amount` without ever touching the balance it
-    supposedly explains, silently breaking the exact "these must always
-    agree" invariant this table exists to guarantee. B-8 (this pass, now
-    that admin.py is uploaded): `CoinLedgerAdmin` is locked read-only —
-    `has_add_permission`/`has_change_permission`/`has_delete_permission`
-    all return `False`, plus `readonly_fields = [f.name for f in
-    CoinLedger._meta.fields]` as a belt-and-braces measure so even a
-    future permission slip can't re-open a write path. Admin is now a
-    viewer only. This matters more after FEE-2, which put real
-    tuition-fee money through this same ledger (not just in-app coins) —
-    see §8.
-
     F-3 (this pass): added `TransactionType.CAMPUS_REWARD` for
-    `campus`'s small engagement bonuses (attendance streak, on-time
-    assignment streak) — kept deliberately distinct from `EARN` because
-    FEE-3/FEE-6 (`campus`'s own tasks.py, not part of this upload)
-    already reads a student's `User.coin` balance to decide whether it
-    covers an upcoming fee; an admin/support person scanning a student's
-    ledger needs to tell "this coin came from a reward" apart from "this
-    coin came from a real top-up" at a glance.
+    `campus`'s small engagement bonuses (attendance-streak,
+    assignment-on-time-streak) -- see that choice's own comment below for
+    why it's kept distinct from `EARN` rather than reusing it.
+
+    TASK 1 (this pass): added `TESTSERIES_PURCHASE`/`TESTSERIES_PAYOUT`/
+    `WITHDRAWAL_REQUESTED`/`WITHDRAWAL_COMPLETED`/`WITHDRAWAL_REJECTED` —
+    see `TransactionType` below for details. Pure choices-only addition,
+    same as F-3 was.
+
+    TASK 4 (this pass): `WITHDRAWAL_REQUESTED`/`WITHDRAWAL_REJECTED` are
+    now actually consumed, by `CoinWithdrawalRequest` below.
+    `WITHDRAWAL_COMPLETED` is still unused on purpose — see
+    `CoinWithdrawalRequestManager.confirm_success`'s docstring for why a
+    completed withdrawal doesn't get a new ledger row at all (the debit
+    already happened at request time, and a zero-amount row would
+    violate `coinledger_amount_not_zero`).
+
+    CAUTION (can't fix from this pass — admin.py wasn't uploaded):
+    Django admin currently allows raw add/edit/delete on this model
+    directly (that's the "sirf admin me registered hai" from the task).
+    Any edit made through the admin bypasses `record_transaction()`
+    entirely — it can create a ledger row with no matching change to
+    `User.coin`, or edit an existing row's `amount` without ever
+    touching the balance it supposedly explains — silently breaking the
+    exact "these must always agree" invariant this table exists to
+    guarantee. If/when admin.py is available, that registration should
+    be made read-only (`has_add_permission`/`has_change_permission`
+    returning False, or `readonly_fields = [f.name for f in
+    CoinLedger._meta.fields]`) so admin is a viewer, not a second
+    unguarded write path.
 
     Renamed from the original lowercase `coins` — kept here as `CoinLedger`
     (not `CoinTransaction`) to avoid breaking any existing imports/
@@ -780,6 +1037,28 @@ class CoinLedger(models.Model):
         # ledger needs to tell at a glance "this coin came from a
         # reward, not a real top-up" without cross-referencing amounts.
         CAMPUS_REWARD = "campus_reward", "Campus Reward"
+
+        # TASK 1: testseries app's escrow purchase/payout flow
+        # (testseries/models.py — TestSeriesPurchase.
+        # purchase_and_start_attempt() / .release()) already references
+        # these two values directly; they were missing from this enum
+        # until now (a live AttributeError waiting to happen). Kept
+        # distinct from PURCHASE/EARN for the same "tell it apart at a
+        # glance in the ledger" reasoning CAMPUS_REWARD's comment above
+        # already gives — a support person scanning a creator's ledger
+        # should be able to tell "this coin came from a test series
+        # payout" without cross-referencing the reference field.
+        TESTSERIES_PURCHASE = "testseries_purchase", "Test Series Purchase"
+        TESTSERIES_PAYOUT = "testseries_payout", "Test Series Payout"
+
+        # TASK 1: prerequisite for the upcoming coin-withdrawal flow
+        # (a user cashes out coins to real money). TASK 4 wires
+        # WITHDRAWAL_REQUESTED/WITHDRAWAL_REJECTED into
+        # CoinWithdrawalRequest below; WITHDRAWAL_COMPLETED stays
+        # unused — see that model's docstring for why.
+        WITHDRAWAL_REQUESTED = "withdrawal_requested", "Withdrawal Requested"
+        WITHDRAWAL_COMPLETED = "withdrawal_completed", "Withdrawal Completed"
+        WITHDRAWAL_REJECTED = "withdrawal_rejected", "Withdrawal Rejected"
 
     user = models.ForeignKey(
         settings.AUTH_USER_MODEL,
@@ -835,46 +1114,583 @@ class CoinLedger(models.Model):
     def __str__(self):
         sign = "+" if self.amount >= 0 else ""
         return f"{self.user.username}: {sign}{self.amount} ({self.transaction_type})"
-```
+
+
+class CoinPurchaseRequestManager(models.Manager):
+    """
+    TASK 3 — the sanctioned write path for `CoinPurchaseRequest`, same
+    role `CoinLedgerManager` plays for `CoinLedger` just above: callers
+    (views, webhooks, the sweep task) go through these three methods
+    instead of `.create()`/`.save()` directly, so "pending never touches
+    the balance" and "confirming twice never double-credits" are
+    guaranteed in one place rather than re-implemented at every call
+    site.
+    """
+
+    def start_purchase(self, *, user, gateway_reference, amount, coins, gateway=""):
+        """
+        Create (or return the existing) PENDING request for this
+        `gateway_reference`. Does NOT touch `User.coin` — a purchase
+        only ever credits coins via `confirm_success()` below.
+
+        Idempotent the same way `CoinLedger.objects.record_transaction()`
+        is idempotent on `reference`: a second call with the same
+        `gateway_reference` returns the row that's already there
+        (`get_or_create`) instead of raising or creating a duplicate —
+        safe for a client retrying a dropped response. `gateway_reference`
+        also carries a DB `UniqueConstraint` (see Meta below), so if two
+        concurrent requests both miss the `get_or_create` SELECT and race
+        to INSERT, the loser's `IntegrityError` is caught here and turned
+        into a re-fetch of the winner's row instead of a 500.
+        """
+        try:
+            obj, created = self.get_or_create(
+                gateway_reference=gateway_reference,
+                defaults={
+                    "user": user,
+                    "amount": amount,
+                    "coins": coins,
+                    "gateway": gateway,
+                },
+            )
+        except IntegrityError:
+            obj = self.get(gateway_reference=gateway_reference)
+            created = False
+        return obj, created
+
+    def confirm_success(self, *, gateway_reference):
+        """
+        Mark a request SUCCESS and credit `coins` via
+        `CoinLedger.objects.record_transaction()` — never a direct
+        `User.coin` write — atomically, exactly once.
+
+        Idempotent at two layers: if this request is already SUCCESS,
+        it's returned as-is with no second credit (checked under
+        `select_for_update()` so a retried webhook racing itself can't
+        both pass the check); and even if that check were somehow
+        bypassed, `record_transaction`'s own `reference=` idempotency
+        (keyed on this request's id, not the gateway's reference, so it
+        can never collide with an unrelated ledger entry) would still
+        refuse to double-credit.
+
+        Raises `ValueError` if the request is already FAILED — a failed
+        purchase must be retried as a new request, not resurrected.
+        """
+        with transaction.atomic():
+            purchase = self.select_for_update().get(gateway_reference=gateway_reference)
+
+            if purchase.status == self.model.Status.SUCCESS:
+                return purchase
+
+            if purchase.status == self.model.Status.FAILED:
+                raise ValueError(
+                    f"Coin purchase {gateway_reference!r} already failed — cannot confirm."
+                )
+
+            # Local import avoids a module-level circular reference
+            # between CoinLedger (defined above) and this manager; kept
+            # as a local import anyway for symmetry with how this file
+            # otherwise avoids importing the user model directly.
+            ledger_entry = CoinLedger.objects.record_transaction(
+                user=purchase.user,
+                transaction_type=CoinLedger.TransactionType.PURCHASE,
+                amount=purchase.coins,
+                reference=f"coin_purchase_request:{purchase.pk}",
+                description=f"Coin purchase via {purchase.gateway or 'payment gateway'}",
+                metadata={
+                    "coin_purchase_request_id": purchase.pk,
+                    "gateway_reference": purchase.gateway_reference,
+                    "amount_paid": str(purchase.amount),
+                },
+            )
+
+            purchase.status = self.model.Status.SUCCESS
+            purchase.ledger_entry = ledger_entry
+            purchase.save(update_fields=["status", "ledger_entry", "updated_at"])
+            return purchase
+
+    def mark_failed(self, *, gateway_reference, reason=""):
+        """
+        Mark a request FAILED. Never touches `User.coin` — that's the
+        whole point of a two-step (pending -> success/failed) flow: a
+        failed payment leaves the wallet exactly where it was.
+
+        Idempotent: already-FAILED is returned as-is. Raises `ValueError`
+        for an already-SUCCESS request — a completed purchase can't be
+        un-credited by calling this; that would need an explicit refund
+        (`CoinLedger.TransactionType.REFUND`), which is out of scope
+        here.
+        """
+        with transaction.atomic():
+            purchase = self.select_for_update().get(gateway_reference=gateway_reference)
+
+            if purchase.status == self.model.Status.FAILED:
+                return purchase
+
+            if purchase.status == self.model.Status.SUCCESS:
+                raise ValueError(
+                    f"Coin purchase {gateway_reference!r} already succeeded — cannot fail."
+                )
+
+            purchase.status = self.model.Status.FAILED
+            purchase.failure_reason = reason
+            purchase.save(update_fields=["status", "failure_reason", "updated_at"])
+            return purchase
+
+
+class CoinPurchaseRequest(models.Model):
+    """
+    TASK 3 — canonical "buy coins" request/receipt row for `user_profile`.
+    `liveclass.CoinPurchase` already has a purchase flow, but it's scoped
+    to that app; this is the one every coin top-up should go through
+    regardless of where in the product it's triggered from, the same way
+    `CoinLedger` is the one shared ledger every coin-changing action
+    writes to.
+
+    NOTE: `liveclass/models.py` wasn't included in this pass's upload
+    (only `user_profile`'s own four files were), so the field shape below
+    is inferred from this app's own established patterns — `CoinLedger`'s
+    `reference`/idempotency shape and the pending/success/failed
+    lifecycle the task description asks for — rather than copied
+    field-for-field from `CoinPurchase`. If `CoinPurchase`'s actual shape
+    differs in a way that matters (e.g. its gateway list, its money
+    field's precision), reconcile the two before relying on this as
+    final — ideally by rerunning this task with `liveclass/models.py`
+    included so the two don't silently diverge.
+
+    Lifecycle: PENDING (created by `start_purchase`, wallet untouched) ->
+    SUCCESS (via `confirm_success`, credits `coins` through
+    `CoinLedger.objects.record_transaction()`) or FAILED (via
+    `mark_failed`, wallet still untouched). SUCCESS and FAILED are both
+    terminal — see the manager docstrings above for what happens if
+    either is called again.
+
+    Nothing here writes to `User.coin` directly, by design — same
+    boundary `CoinLedger` draws: the only sanctioned path to a balance
+    change is `CoinLedger.objects.record_transaction()`, so this model's
+    manager calls through to it rather than duplicating the balance
+    update.
+    """
+
+    class Status(models.TextChoices):
+        PENDING = "pending", "Pending"
+        SUCCESS = "success", "Success"
+        FAILED = "failed", "Failed"
+
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name="coin_purchase_requests",
+    )
+
+    # Free-text on purpose (not a choices field) — this app doesn't own
+    # the set of payment gateways the product integrates with, and
+    # locking that down here would mean a migration every time a new
+    # gateway is added elsewhere. Blank allowed for the same reason
+    # CoinLedger.reference is blank-ok: not every caller may have a
+    # gateway name handy (e.g. a manual admin-initiated top-up).
+    gateway = models.CharField(max_length=30, blank=True)
+
+    # The gateway's own transaction/order id. This is the idempotency
+    # key for the whole request lifecycle: unique at the DB level so two
+    # `start_purchase()` calls (or a retried client request) for the
+    # same gateway transaction can never create two rows, and it's what
+    # `confirm_success`/`mark_failed` key off of instead of an internal
+    # id the gateway doesn't know about.
+    gateway_reference = models.CharField(max_length=150, unique=True, db_index=True)
+
+    # Real money paid, in the product's billing currency. Decimal (not
+    # Integer) because money — same reasoning that keeps `CoinLedger`
+    # off floats for `amount`, just applied to currency instead of coins.
+    amount = models.DecimalField(max_digits=10, decimal_places=2)
+
+    # Coins to be credited on success. Always positive — this model only
+    # represents purchases (money -> coins), never a debit; refunds are
+    # a separate `CoinLedger.TransactionType.REFUND` entry, not a
+    # negative row here.
+    coins = models.PositiveIntegerField()
+
+    status = models.CharField(max_length=10, choices=Status.choices, default=Status.PENDING)
+
+    # Populated by mark_failed() — why the gateway/webhook says this
+    # didn't go through, or why the auto-fail sweep gave up on it.
+    failure_reason = models.CharField(max_length=255, blank=True)
+
+    # Set only on SUCCESS, by confirm_success(). SET_NULL (not CASCADE
+    # or PROTECT): if a CoinLedger row were ever administratively
+    # deleted, that shouldn't cascade into deleting the purchase receipt
+    # that explains it — the receipt should just lose its back-link.
+    ledger_entry = models.ForeignKey(
+        CoinLedger,
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="+",
+    )
+
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    objects = CoinPurchaseRequestManager()
+
+    class Meta:
+        ordering = ["-created_at"]
+        indexes = [
+            # "my purchase history" — same query shape CoinLedger's
+            # (user, -created_at) index serves.
+            models.Index(fields=["user", "-created_at"]),
+            # Supports the auto-fail sweep task's "PENDING older than
+            # cutoff" query without a full-table scan.
+            models.Index(fields=["status", "created_at"]),
+        ]
+        constraints = [
+            CheckConstraint(condition=Q(amount__gt=0), name="coinpurchaserequest_amount_positive"),
+            CheckConstraint(condition=Q(coins__gt=0), name="coinpurchaserequest_coins_positive"),
+        ]
+
+    def __str__(self):
+        return f"{self.user.username}: {self.coins} coins ({self.status}, {self.gateway_reference})"
+
+
+class CoinWithdrawalRequestManager(models.Manager):
+    """
+    TASK 4 — the sanctioned write path for `CoinWithdrawalRequest`, same
+    role `CoinPurchaseRequestManager` plays for `CoinPurchaseRequest`
+    above: callers (views, admin actions) go through these methods
+    instead of `.create()`/`.save()` directly.
+
+    Money direction is the mirror image of `CoinPurchaseRequest`: a
+    purchase credits coins only on success; a withdrawal debits coins
+    immediately on request. This is the escrow pattern
+    `liveclass.CoinWithdrawal.create_request` already uses (reference
+    read for this task) — coins leave the wallet the moment the request
+    is made, not when the payout is actually confirmed, specifically so
+    a user can't request the same coins twice while a withdrawal is
+    still pending. They only come back if the request is rejected.
+    """
+
+    def request_withdrawal(self, *, user, coins, payout_method="", payout_details=None):
+        """
+        Debit `coins` from `user` via `CoinLedger.objects.
+        record_transaction(transaction_type=WITHDRAWAL_REQUESTED,
+        amount=-coins, ...)` and create a PENDING CoinWithdrawalRequest,
+        in the same DB transaction.
+
+        `record_transaction` raises `ValueError` for insufficient
+        balance (see `CoinLedgerManager.record_transaction` above) —
+        that propagates straight out of here uncaught. Because the row
+        creation and the debit share one `transaction.atomic()` block,
+        that ValueError rolls back BOTH: no request row is left behind
+        and no partial debit happens. The view is expected to catch
+        `ValueError` and turn it into a 402 (same shape as campus's
+        `FeePaymentViewSet.pay`).
+        """
+        if coins <= 0:
+            raise ValueError("Withdrawal coins must be positive.")
+
+        with transaction.atomic():
+            withdrawal = self.create(
+                user=user,
+                coins=coins,
+                payout_method=payout_method,
+                payout_details=payout_details or {},
+                status=self.model.Status.PENDING,
+            )
+            ledger_entry = CoinLedger.objects.record_transaction(
+                user=user,
+                transaction_type=CoinLedger.TransactionType.WITHDRAWAL_REQUESTED,
+                amount=-coins,
+                reference=f"coin_withdrawal_request:{withdrawal.pk}",
+                description="Coin withdrawal requested",
+                metadata={"coin_withdrawal_request_id": withdrawal.pk},
+            )
+            withdrawal.debit_ledger_entry = ledger_entry
+            withdrawal.save(update_fields=["debit_ledger_entry"])
+            return withdrawal
+
+    def mark_processing(self, *, withdrawal_id):
+        """
+        Admin/ops moves a PENDING request into PROCESSING (payout
+        initiated externally, e.g. a bank transfer submitted). No coin
+        movement — the coins already left the wallet at request time.
+
+        Raises `ValueError` if the request is already SUCCESS or
+        REJECTED (both terminal).
+        """
+        with transaction.atomic():
+            wr = self.select_for_update().get(pk=withdrawal_id)
+            if wr.status in (self.model.Status.SUCCESS, self.model.Status.REJECTED):
+                raise ValueError(
+                    f"Withdrawal {withdrawal_id} is already {wr.status} — cannot move to processing."
+                )
+            wr.status = self.model.Status.PROCESSING
+            wr.save(update_fields=["status", "updated_at"])
+            return wr
+
+    def confirm_success(self, *, withdrawal_id):
+        """
+        Mark a withdrawal SUCCESS once the payout has actually gone out
+        externally (bank transfer / UPI confirmed).
+
+        No new CoinLedger row is written here — the coins were already
+        debited via WITHDRAWAL_REQUESTED at request time, and a
+        WITHDRAWAL_COMPLETED entry with amount=0 would violate
+        `coinledger_amount_not_zero`. This only flips the request's own
+        status, same as `liveclass.CoinWithdrawal.approve()`/
+        `mark_paid()` not moving any coins either.
+
+        Idempotent: already-SUCCESS is returned as-is. Raises
+        `ValueError` if REJECTED — a rejected (already refunded)
+        withdrawal can't retroactively be completed.
+        """
+        with transaction.atomic():
+            wr = self.select_for_update().get(pk=withdrawal_id)
+            if wr.status == self.model.Status.SUCCESS:
+                return wr
+            if wr.status == self.model.Status.REJECTED:
+                raise ValueError(
+                    f"Withdrawal {withdrawal_id} was already rejected — cannot mark success."
+                )
+            wr.status = self.model.Status.SUCCESS
+            wr.save(update_fields=["status", "updated_at"])
+            return wr
+
+    def reject(self, *, withdrawal_id, reason=""):
+        """
+        Reject a PENDING/PROCESSING withdrawal and credit the coins
+        back via `CoinLedger.objects.record_transaction(
+        transaction_type=WITHDRAWAL_REJECTED, amount=+coins, ...)`.
+
+        Idempotent the same way `CoinPurchaseRequestManager.
+        confirm_success` is: the refund is keyed on this request's own
+        id via `record_transaction`'s `reference=` argument, so a
+        retried reject call (double form submit, admin double-click)
+        can never credit the refund twice. Belt-and-braces: the
+        `select_for_update()` row lock below also means a second call
+        already sees `status == REJECTED` and returns early before it
+        even reaches `record_transaction`.
+
+        Raises `ValueError` if the request is already SUCCESS — a
+        completed payout can't be un-done by calling this; that would
+        need a separate manual adjustment, out of scope here (same
+        carve-out `CoinPurchaseRequestManager.mark_failed` makes for an
+        already-succeeded purchase).
+        """
+        with transaction.atomic():
+            wr = self.select_for_update().get(pk=withdrawal_id)
+            if wr.status == self.model.Status.REJECTED:
+                return wr
+            if wr.status == self.model.Status.SUCCESS:
+                raise ValueError(
+                    f"Withdrawal {withdrawal_id} already completed — cannot reject."
+                )
+
+            refund_entry = CoinLedger.objects.record_transaction(
+                user=wr.user,
+                transaction_type=CoinLedger.TransactionType.WITHDRAWAL_REJECTED,
+                amount=wr.coins,
+                reference=f"coin_withdrawal_request_refund:{wr.pk}",
+                description="Coin withdrawal rejected — coins refunded",
+                metadata={"coin_withdrawal_request_id": wr.pk},
+            )
+            wr.status = self.model.Status.REJECTED
+            wr.failure_reason = reason
+            wr.refund_ledger_entry = refund_entry
+            wr.save(update_fields=["status", "failure_reason", "refund_ledger_entry", "updated_at"])
+            return wr
+
+
+class CoinWithdrawalRequest(models.Model):
+    """
+    TASK 4 — canonical "cash out coins" request for `user_profile`, the
+    mirror image of `CoinPurchaseRequest` above (coins -> money instead
+    of money -> coins), built on the same `CoinLedger` primitives.
+
+    Reference read for this task was `liveclass.CoinWithdrawal`, which
+    already implements this exact escrow pattern (debit at request
+    time, refund on reject, no second debit/credit on completion) via
+    its own `CoinTransaction` ledger. This model reproduces that same
+    lifecycle but writes through `CoinLedger.objects.record_transaction()`
+    instead, since `user_profile.CoinLedger` — not `liveclass.
+    CoinTransaction` — is this codebase's shared, canonical coin ledger
+    (see `CoinLedger`'s own docstring above). Differences from
+    `liveclass.CoinWithdrawal` that are deliberate, not oversights:
+      - No separate APPROVED status — this app's lifecycle is PENDING ->
+        PROCESSING -> SUCCESS, or -> REJECTED from PENDING/PROCESSING.
+        PROCESSING plays the same "payout initiated, not yet confirmed"
+        role `liveclass.CoinWithdrawal`'s APPROVED does.
+      - No `reviewed_by`/admin-user tracking, no `MIN_WITHDRAWAL_COINS`
+        floor, no INR conversion snapshot — out of scope for this pass;
+        add them if/when an admin-facing withdrawal review UI is built,
+        the same way `RestrictUser`'s docstring above scopes out
+        consumer-app integration work it doesn't own.
+      - `payout_method`/`payout_details` are still modeled as a
+        choices field + JSONField, same shape as `liveclass.
+        CoinWithdrawal` uses, since there's no separate saved-bank-
+        detail model in this app to reference by id instead.
+
+8. TASK 5 (this pass) — fraud/anti-abuse layer. New `user_profile/
+   fraud.py` module with two checks, both wired into
+   `CoinLedgerManager.record_transaction()` (not the view layer) so
+   they apply no matter which app/call site triggers a coin change:
+     - `fraud.is_withdrawal_eligible(user, coins)` — only coins from
+       `PURCHASE`/`GIFT_RECEIVED` (real money or a gift) may be
+       withdrawn; `EARN`/`CAMPUS_REWARD` coins can be spent but never
+       cashed out. Called by `CoinWithdrawalRequestView` (views.py)
+       before `request_withdrawal()`, so an ineligible request never
+       touches the balance. See `fraud.get_withdrawal_eligible_balance`
+       for how a mixed balance's eligible portion is derived.
+     - `fraud.check_earn_rate_limit(user, transaction_type)` — caps
+       EARN/CAMPUS_REWARD credits per user within a rolling window to
+       block burst-farming. Enforced inside `record_transaction()`
+       itself (raises `fraud.EarnRateLimitExceeded`), not in a view, so
+       campus tasks / referral bonuses / anything else that credits
+       EARN or CAMPUS_REWARD coins is covered automatically.
+   `record_transaction()` also now always sets
+   `metadata["withdrawal_eligible"]` (derived purely from
+   `transaction_type`) on every row it writes, for `admin.py`'s
+   read-only ops filter — see that method's own docstring below for
+   why this lives in `metadata` instead of a new column.
+
+    Lifecycle: PENDING (created by `request_withdrawal`, debits `coins`
+    immediately via a WITHDRAWAL_REQUESTED CoinLedger entry) ->
+    PROCESSING (via `mark_processing`, no coin movement) -> SUCCESS (via
+    `confirm_success`, no coin movement — the debit already happened) OR
+    REJECTED (via `reject`, from PENDING or PROCESSING, credits `coins`
+    back via a WITHDRAWAL_REJECTED entry). SUCCESS and REJECTED are both
+    terminal.
+
+    Nothing here writes to `User.coin` directly — same boundary
+    `CoinPurchaseRequest` draws: the only sanctioned path to a balance
+    change is `CoinLedger.objects.record_transaction()`.
+    """
+
+    class Status(models.TextChoices):
+        PENDING = "pending", "Pending"
+        PROCESSING = "processing", "Processing"
+        SUCCESS = "success", "Success"
+        REJECTED = "rejected", "Rejected"
+
+    class PayoutMethod(models.TextChoices):
+        BANK_TRANSFER = "bank_transfer", "Bank Transfer"
+        UPI = "upi", "UPI"
+
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name="coin_withdrawal_requests",
+    )
+
+    coins = models.PositiveIntegerField()
+
+    payout_method = models.CharField(max_length=20, choices=PayoutMethod.choices, blank=True)
+
+    # Bank: {"account_holder", "account_number", "ifsc"}. UPI: {"upi_id"}.
+    # Kept as JSON (not separate columns), same reasoning as
+    # liveclass.CoinWithdrawal.payout_details — validated against
+    # payout_method in the serializer, not here, so a new payout method
+    # never needs a migration.
+    payout_details = models.JSONField(default=dict, blank=True)
+
+    status = models.CharField(max_length=10, choices=Status.choices, default=Status.PENDING)
+
+    # Populated by reject() — why the withdrawal was turned down.
+    failure_reason = models.CharField(max_length=255, blank=True)
+
+    # The debit written by request_withdrawal(). SET_NULL for the same
+    # reason CoinPurchaseRequest.ledger_entry is SET_NULL: an
+    # administratively-deleted ledger row shouldn't cascade into
+    # deleting the request that explains it.
+    debit_ledger_entry = models.ForeignKey(
+        CoinLedger,
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="+",
+    )
+
+    # The refund written by reject(), if any. Stays null for PENDING/
+    # PROCESSING/SUCCESS requests — only ever set once reject() runs.
+    refund_ledger_entry = models.ForeignKey(
+        CoinLedger,
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="+",
+    )
+
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    objects = CoinWithdrawalRequestManager()
+
+    class Meta:
+        ordering = ["-created_at"]
+        indexes = [
+            # "my withdrawal history" — same query shape CoinLedger's
+            # and CoinPurchaseRequest's (user, -created_at) index serve.
+            models.Index(fields=["user", "-created_at"]),
+            # Supports an admin queue view's "PENDING/PROCESSING oldest
+            # first" query without a full-table scan — same shape
+            # CoinPurchaseRequest's (status, created_at) index serves
+            # for its own sweep task.
+            models.Index(fields=["status", "created_at"]),
+        ]
+        constraints = [
+            CheckConstraint(condition=Q(coins__gt=0), name="coinwithdrawalrequest_coins_positive"),
+        ]
+
+    def __str__(self):
+        return f"{self.user.username}: {self.coins} coins withdrawal ({self.status})"```
 
 ### Model notes
-- **`Follow`** is the core relation. `status` handles the private-account
-  "request → accept/reject" flow. Unique constraint prevents duplicate
-  follow rows for the same (follower, following) pair. **Now also**
-  ordered newest-first and DB-level self-follow-proof. No standalone
-  index on `follower`/`following` — Django already auto-indexes every
-  ForeignKey column; only the composite `(follower, status)` /
-  `(following, status)` indexes are declared, since those aren't
-  automatic.
-- **`BlockUser`** — one-directional block record. Unique constraint on
-  (blocker, blocked) prevents duplicate blocks. **Now also** DB-level
-  self-block-proof.
-- **`RestrictUser`** — Instagram-style soft block: one-way, silent,
-  doesn't touch `Follow` or hide anything by itself. **v3: now wired** —
-  `RestrictedUsersView` / `UnrestrictUserView` (views.py) +
-  `RestrictUserSerializer` (serializers.py), reachable at
-  `/profile/restricted-users/`. DB-level self-restrict-proof. The
-  model/app only owns the *relationship record* — the actual effects
-  (hiding comments, muting notifications/read-receipts) are still
-  unimplemented consumer-side work for posts/message/notifications apps,
-  via `is_restricted_between()`.
-- **`CoinLedger`** (renamed from `coins`) — a self-auditing ledger model
-  (signed `amount` + `transaction_type` + `reference` idempotency key +
-  `balance_after` snapshot). **v3: now the actual source of truth for
-  `User.coin`** — its custom manager's `record_transaction()` is the one
-  sanctioned way to change a balance (atomic: updates `User.coin` and
-  writes the matching ledger row in the same locked DB transaction,
-  idempotent on `reference`). Read via `GET /profile/coin-ledger/`
-  (`CoinLedgerListView`). The `coin` field referenced in
-  `UserProfileSerializer` (`fields = [..., "coin"]`) is a field expected
-  on the **custom `User` model** (see §2), not this `CoinLedger` model —
-  the naming is just coincidentally similar, don't confuse the two.
-  Now also has a `CAMPUS_REWARD` transaction type (F-3) for campus
-  engagement bonuses, kept distinct from `EARN` so it's visually
-  separable from real tuition-fee-linked coin. ✅ `CoinLedgerAdmin` is
-  now locked read-only (B-8) — admin can no longer add/edit/delete rows
-  directly, closing the bypass-around-`record_transaction()` gap
-  flagged in the previous pass — see §11 item 2 and §8.
+
+- **`Follow` / `BlockUser` / `RestrictUser`** — unchanged in behavior
+  since v3 (see §0 / §0.1 for their full history: self-relation
+  `CheckConstraint`s, composite indexes on `(follower/following, status)`,
+  `RestrictUser`'s one-way/silent semantics). `CheckConstraint` now
+  uses `condition=` everywhere (Django ≥ 5.1 required — see §11 item 7).
+- **`CoinLedger`** — still the one append-only, auditable source of
+  truth for every change to `User.coin` (a cache column on `login.User`).
+  `CoinLedgerManager.record_transaction()` is still the *only* sanctioned
+  write path — as of v4 it now also runs the two TASK 5 fraud hooks
+  (earn-rate limiting, always-stamped `metadata["withdrawal_eligible"]`)
+  and is the thing `CoinPurchaseRequest.confirm_success()` and
+  `CoinWithdrawalRequest.request_withdrawal()`/`.reject()` all call
+  through — no model in this app writes `User.coin` directly.
+  `TransactionType` now has 12 values total (7 from v3 + 5 from TASK 1 +
+  `CAMPUS_REWARD` from F-3 = see §0.3 for the exact list and why each new
+  one is kept distinct from the others it might look similar to).
+- **`CoinPurchaseRequest`** (TASK 3, new) — pending/success/failed
+  receipt row for a coin top-up. Never writes `User.coin` itself;
+  `confirm_success()` calls `CoinLedger.objects.record_transaction()`.
+  Idempotent on `gateway_reference` (DB-unique + `get_or_create`, with
+  the concurrent-insert race caught as `IntegrityError` and re-fetched —
+  same shape as `Follow`'s double-follow race fix in v2). ⚠️
+  `liveclass/models.py` wasn't part of this upload, so this shape is
+  inferred from this app's own conventions, not copied from
+  `liveclass.CoinPurchase` — reconcile if the two need to match exactly
+  (see §11).
+- **`CoinWithdrawalRequest`** (TASK 4, new) — escrow-style: debits at
+  request time via `WITHDRAWAL_REQUESTED`, refunds via
+  `WITHDRAWAL_REJECTED` on reject, no second ledger write on
+  `confirm_success()` (the debit already happened; a zero-amount
+  `WITHDRAWAL_COMPLETED` row would violate `coinledger_amount_not_zero`
+  anyway — that's why `WITHDRAWAL_COMPLETED` stays unused). Reference
+  read: `liveclass.CoinWithdrawal`. No `reviewed_by`, no minimum-coins
+  floor, no INR snapshot — deliberately out of scope this pass (see
+  §0.3 / §11).
+- **`CoinLedgerManager.record_transaction()`** — the row-lock
+  (`select_for_update()` on the user row) that already made the
+  `reference` idempotency check race-safe is the *same* lock that now
+  makes the earn-rate-limit check race-safe: two concurrent EARN calls
+  for the same user always serialize on that lock before either one's
+  rate-limit check runs. No new locking was added for TASK 5 — it rides
+  the lock that was already there.
+- **Nothing in this app imports `login.User` directly** — every FK uses
+  `settings.AUTH_USER_MODEL`, and `record_transaction()` gets the
+  concrete user model via `type(user)` rather than importing it, keeping
+  `user_profile` decoupled from `login` the same way it always has been.
 
 ---
 
@@ -883,12 +1699,20 @@ class CoinLedger(models.Model):
 ```python
 # user_profile/serializers.py
 from collections import defaultdict
+from decimal import Decimal
 
 from django.contrib.auth import get_user_model
 from django.db.models import Q
 from rest_framework import serializers
 
-from .models import BlockUser, CoinLedger, Follow, RestrictUser
+from .models import (
+    BlockUser,
+    CoinLedger,
+    CoinPurchaseRequest,
+    CoinWithdrawalRequest,
+    Follow,
+    RestrictUser,
+)
 
 User = get_user_model()
 
@@ -1194,47 +2018,156 @@ class CoinLedgerSerializer(serializers.ModelSerializer):
             "created_at",
         ]
         read_only_fields = fields
-```
+
+
+# 🔥 TASK 3 — Buy-Coin flow
+# `CoinPurchaseRequest` is the request/receipt row; this serializer is
+# used for BOTH directions of `BuyCoinView`: as input to start a
+# purchase (gateway_reference/amount/coins/gateway) and as output for
+# the created/existing row (adds status/failure_reason/timestamps,
+# read-only). `status`/`failure_reason` are read-only here on purpose —
+# same reasoning as `CoinLedgerSerializer` being entirely read-only: the
+# only sanctioned way to move a request out of PENDING is
+# `CoinPurchaseRequest.objects.confirm_success()` /
+# `.mark_failed()` (models.py), never a client-supplied status field.
+class CoinPurchaseRequestSerializer(serializers.ModelSerializer):
+    # Explicit (not just relying on the model field) so a bad amount/
+    # coins value is rejected at validation time with a clear message,
+    # instead of surfacing later as a DB CheckConstraint violation.
+    amount = serializers.DecimalField(
+        max_digits=10, decimal_places=2, min_value=Decimal("0.01")
+    )
+    coins = serializers.IntegerField(min_value=1)
+
+    class Meta:
+        model = CoinPurchaseRequest
+        fields = [
+            "id",
+            "gateway",
+            "gateway_reference",
+            "amount",
+            "coins",
+            "status",
+            "failure_reason",
+            "created_at",
+            "updated_at",
+        ]
+        read_only_fields = ["id", "status", "failure_reason", "created_at", "updated_at"]
+
+    def validate_gateway_reference(self, value):
+        value = value.strip()
+        if not value:
+            raise serializers.ValidationError("gateway_reference is required.")
+        return value
+
+
+# 🔥 TASK 3 — confirm/webhook payload for `BuyCoinConfirmView`.
+# Deliberately a plain Serializer, not a ModelSerializer: this doesn't
+# create/update a `CoinPurchaseRequest` row itself — the manager methods
+# it hands off to (`confirm_success`/`mark_failed`) own that, with their
+# own locking/idempotency — this is only validating the shape of the
+# confirm payload.
+class CoinPurchaseConfirmSerializer(serializers.Serializer):
+    gateway_reference = serializers.CharField(max_length=150)
+    status = serializers.ChoiceField(choices=["success", "failed"])
+    # Only meaningful when status="failed"; harmless if sent (and
+    # ignored) alongside status="success".
+    failure_reason = serializers.CharField(
+        required=False, allow_blank=True, max_length=255
+    )
+
+# 🔥 TASK 4 — Withdraw-Coin flow
+# `CoinWithdrawalRequest` is the request/receipt row for cashing coins
+# out to real money — the mirror image of `CoinPurchaseRequest` above
+# (coins -> money instead of money -> coins). `status`/`failure_reason`/
+# both ledger-entry back-links are read-only here for the same reason
+# `CoinPurchaseRequestSerializer`'s are: the only sanctioned way to move
+# a request out of PENDING is `CoinWithdrawalRequest.objects.
+# request_withdrawal()` / `.mark_processing()` / `.confirm_success()` /
+# `.reject()` (models.py), never a client-supplied status field.
+class CoinWithdrawalRequestSerializer(serializers.ModelSerializer):
+    # Explicit (not just relying on the model field) so a bad coins
+    # value is rejected at validation time with a clear message,
+    # instead of surfacing later as a DB CheckConstraint violation —
+    # same reasoning CoinPurchaseRequestSerializer's explicit
+    # amount/coins fields give.
+    coins = serializers.IntegerField(min_value=1)
+
+    class Meta:
+        model = CoinWithdrawalRequest
+        fields = [
+            "id",
+            "coins",
+            "payout_method",
+            "payout_details",
+            "status",
+            "failure_reason",
+            "created_at",
+            "updated_at",
+        ]
+        read_only_fields = ["id", "status", "failure_reason", "created_at", "updated_at"]
+
+    def validate(self, attrs):
+        """
+        payout_details' required keys depend on payout_method — kept as
+        cross-field validation here rather than a DB constraint, same
+        reasoning CoinWithdrawalRequest.payout_details' own field
+        comment gives for staying JSON: a new payout method should
+        never need a migration, just a new branch here.
+        """
+        method = attrs.get("payout_method")
+        details = attrs.get("payout_details") or {}
+
+        if method == CoinWithdrawalRequest.PayoutMethod.BANK_TRANSFER:
+            required = {"account_holder", "account_number", "ifsc"}
+        elif method == CoinWithdrawalRequest.PayoutMethod.UPI:
+            required = {"upi_id"}
+        else:
+            required = set()
+
+        missing = required - set(details.keys())
+        if missing:
+            raise serializers.ValidationError(
+                {
+                    "payout_details": (
+                        f"Missing required field(s) for {method}: "
+                        f"{', '.join(sorted(missing))}."
+                    )
+                }
+            )
+        return attrs```
 
 ### Serializer notes
-- `accepted_connection_ids(user)` — still the module-level, per-user
-  helper (2 queries). Kept for single-object use-cases and as the
-  fallback path inside `get_mutual_friends`.
-- `bulk_accepted_connection_ids(user_ids)` — **new**, batch version (2
-  queries for N users). Every list view that shows `mutual_friends` now
-  calls this once and passes the result in as `connections_map` via
-  `get_serializer_context()`.
-- `MessageContactSearchSerializer.get_mutual_friends` — caches
-  `_my_connections` in `self.context` (computed once per request), and
-  now **prefers** `connections_map` (from `bulk_accepted_connection_ids`)
-  over the old per-object fallback query.
-- `RestrictedTargetUserProfileSerializer` — **new**, minimal 5-field
-  payload used when the profile-detail view decides the viewer shouldn't
-  see full data (see §6).
-- `UserProfileDetailResponseSerializer.data` — changed from a nested
-  `TargetUserProfileSerializer()` field to a generic `DictField()`,
-  because the view can now return **either**
-  `TargetUserProfileSerializer` or `RestrictedTargetUserProfileSerializer`
-  data depending on the privacy check — a fixed nested serializer
-  couldn't represent both shapes.
-- `UserProfileDetailResponseSerializer.am_i_restricting` — **v3, new**.
-  Only field on this response related to restrict; deliberately no
-  `their_restrict_status` counterpart (restrict is one-way/silent by
-  design, see models.py's `RestrictUser` docstring).
-- `RestrictUserSerializer` — **v3, new**. Same shape as
-  `BlockUserSerializer` (mirrors it for frontend consistency:
-  `{"restricted": "<user_id>"}` in, `restricted_detail` nested read-only
-  out). `validate_restricted` additionally rejects restricting someone
-  you already have a `BlockUser` relationship with either direction
-  (block is already the stronger relationship).
-- `CoinLedgerSerializer` — **v3, new**, fully `read_only_fields = fields`
-  on purpose: the only sanctioned way to create a `CoinLedger` row is
-  `CoinLedger.objects.record_transaction()` (models.py) — a writable
-  serializer here would let a client mint their own ledger rows (and
-  therefore coins) without a matching balance change.
-- `FollowSerializer` — **removed in v3** (was dead code — nothing ever
-  imported or referenced it; views return raw dicts via
-  `FollowActionResponseSerializer` instead).
+
+- **`CoinLedgerSerializer`** — unchanged, still fully `read_only_fields`
+  (see its own comment: the only sanctioned way to create a row is
+  `record_transaction()`, never a client-writable serializer).
+- **`CoinPurchaseRequestSerializer`** (TASK 3, new) — used for both the
+  input to `BuyCoinView` (`gateway_reference`/`amount`/`coins`/`gateway`)
+  and the output shape (adds `status`/`failure_reason`/timestamps, all
+  read-only). `amount`/`coins` are declared explicitly with
+  `min_value` so a bad value is a clean 400 at validation time instead
+  of surfacing later as a DB `CheckConstraint` violation.
+- **`CoinPurchaseConfirmSerializer`** (TASK 3, new) — deliberately a
+  plain `Serializer`, not a `ModelSerializer`: it only validates the
+  shape of the confirm/webhook payload
+  (`gateway_reference`/`status`/`failure_reason`); the actual state
+  transition is owned by `CoinPurchaseRequest.objects.confirm_success()`
+  / `.mark_failed()`.
+- **`CoinWithdrawalRequestSerializer`** (TASK 4, new) — same
+  read-only-status shape as the purchase serializer above, plus a
+  `validate()` that checks `payout_details`' required keys against
+  `payout_method` (`bank_transfer` → `account_holder`/`account_number`/
+  `ifsc`; `upi` → `upi_id`) as cross-field validation rather than a DB
+  constraint, so a new payout method only ever needs a new branch here,
+  never a migration.
+- **No serializer exists for `fraud.py`** — deliberately. Both fraud
+  checks are pure functions called directly from `views.py`
+  (`is_withdrawal_eligible`) or from inside
+  `CoinLedgerManager.record_transaction()`
+  (`check_earn_rate_limit`) — there's no request/response shape that
+  needs its own serializer; the rejection messages they produce are
+  passed straight into the view's `Response(...)` body.
 
 ---
 
@@ -1255,10 +2188,21 @@ from rest_framework.parsers import FormParser, MultiPartParser
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 
-from .models import BlockUser, CoinLedger, Follow, RestrictUser
+from . import fraud
+from .models import (
+    BlockUser,
+    CoinLedger,
+    CoinPurchaseRequest,
+    CoinWithdrawalRequest,
+    Follow,
+    RestrictUser,
+)
 from .serializers import (
     BlockUserSerializer,
     CoinLedgerSerializer,
+    CoinPurchaseConfirmSerializer,
+    CoinPurchaseRequestSerializer,
+    CoinWithdrawalRequestSerializer,
     FollowActionResponseSerializer,
     MessageContactSearchSerializer,
     ProfileUpdateSerializer,
@@ -2068,54 +3012,293 @@ class CoinLedgerListView(ListAPIView):
             "message": "Coin transaction history fetched successfully.",
             "data": data,
         }, status=status.HTTP_200_OK)
-```
 
-### View notes / what changed vs v1
-- **Explicit imports now** — no more `from .serializers import *` /
-  `from .models import *`. If you add a new serializer/model and forget
-  to import it in `views.py`, you'll get a clean `NameError` at import
-  time instead of it silently working via wildcard.
-- **`is_blocked_between()`** is the one new shared helper — reused by
-  both `UserProfileDetailView` and `FollowAPIView`. If you add more
-  block-sensitive endpoints later, reuse this instead of re-writing the
-  `Q(blocker=...) | Q(blocked=...)` query.
-- **Pagination-aware `mutual_friends` batching** — note the repeated
-  pattern in `MessageContactSearchView.list`, `FollowersListView.list`,
-  `FollowingListView.list`: `filter_queryset` → `paginate_queryset` →
-  build `_connections_map` from **only the current page's rows** → serialize.
-  If you add a fourth view using `MessageContactSearchSerializer` with
-  `many=True`, copy this exact pattern (don't just call
-  `accepted_connection_ids` per row again).
-- **`is_restricted_between(user, other)`** — **v3, new** shared helper,
-  same shape as `is_blocked_between()` but deliberately **one-way**
-  (`user` restricted `other`, never the reverse) since restrict is
-  silent/asymmetric by design. Used by `UserProfileDetailView` (for
-  `am_i_restricting`) and internally by `RestrictedUsersView`. Other
-  apps (posts/message/notifications) should filter through this the
-  same way they'd use `is_blocked_between` for block, once they're
-  ready to implement restrict's actual effects — not done in this app.
-- **`UserProfileDetailView.get`** — now also computes `am_i_restricting`
-  (`not is_self and is_restricted_between(request.user, target_user)`)
-  and includes it in the response, alongside the existing
-  `is_restricted_view` privacy check.
-- **`RestrictedUsersView`** — **v3, new**. `GET` lists who I've
-  restricted; `POST {"restricted": <user_id>}` restricts someone via
-  `get_or_create` (idempotent, same double-tap reasoning as
-  `BlockedUsersView.post`). Deliberately does **not** touch `Follow` rows
-  or counts (unlike blocking) — restrict must not change what either
-  party can see or do.
-- **`UnrestrictUserView`** — **v3, new**. `DELETE
-  /profile/restricted-users/<id>/`, same `<id>`-flexibility as
-  `UnblockUserView` (accepts either the `RestrictUser` row's own id or
-  the target user's id).
-- **`CoinLedgerListView`** — **v3, new**, read-only `ListAPIView` at
-  `GET /profile/coin-ledger/`. Returns the authenticated user's own
-  transaction history, newest-first (free from `CoinLedger.Meta.ordering`).
-  No write endpoint is exposed on purpose — writes only happen through
-  `CoinLedger.objects.record_transaction()`, called from wherever a
-  coin-changing action actually happens (a purchase, a gift, an admin
-  adjustment) in whichever app owns that action — none of those views
-  were part of this app's upload.
+
+# 🔥 TASK 3 — Buy-Coin flow
+# Two-step, same shape as any pending -> confirmed payment flow: this
+# view only ever creates/returns a PENDING `CoinPurchaseRequest` — it
+# never touches `User.coin`. The actual credit happens in
+# `BuyCoinConfirmView` below, via `CoinPurchaseRequest.objects.
+# confirm_success()`, which is the only path that calls
+# `CoinLedger.objects.record_transaction()` for a purchase.
+class BuyCoinView(GenericAPIView):
+    """
+    POST /profile/buy-coin/
+    {"gateway_reference": "<gateway's txn id>", "amount": "99.00", "coins": 100, "gateway": "razorpay"}
+
+    Starts a coin purchase. Idempotent on `gateway_reference`: calling
+    this again with the same reference returns the existing request
+    (whatever its current status) instead of creating a duplicate — safe
+    for a client retrying after a dropped response.
+    """
+    permission_classes = [IsAuthenticated]
+    serializer_class = CoinPurchaseRequestSerializer
+
+    @extend_schema(
+        request=CoinPurchaseRequestSerializer,
+        responses={201: CoinPurchaseRequestSerializer, 200: CoinPurchaseRequestSerializer},
+        description="Start a coin purchase (creates a pending request; idempotent on "
+        "gateway_reference). Does not credit coins — see /buy-coin/confirm/.",
+    )
+    def post(self, request):
+        serializer = self.get_serializer(data=request.data)
+        if not serializer.is_valid():
+            return Response({
+                "status": False,
+                "message": "Validation failed.",
+                "errors": serializer.errors,
+            }, status=status.HTTP_400_BAD_REQUEST)
+
+        data = serializer.validated_data
+        purchase, created = CoinPurchaseRequest.objects.start_purchase(
+            user=request.user,
+            gateway_reference=data["gateway_reference"],
+            amount=data["amount"],
+            coins=data["coins"],
+            gateway=data.get("gateway", ""),
+        )
+
+        # `gateway_reference` is globally unique (it's the gateway's own
+        # id), so if it already exists under a DIFFERENT user, this is
+        # either a client bug or a replayed/guessed reference — never
+        # silently let the caller read or "adopt" someone else's pending
+        # purchase.
+        if purchase.user_id != request.user.id:
+            return Response({
+                "status": False,
+                "message": "This gateway_reference is already associated with another purchase.",
+            }, status=status.HTTP_409_CONFLICT)
+
+        return Response({
+            "status": True,
+            "message": "Coin purchase started." if created
+            else "Coin purchase already exists for this reference.",
+            "data": self.get_serializer(purchase).data,
+        }, status=status.HTTP_201_CREATED if created else status.HTTP_200_OK)
+
+
+class BuyCoinConfirmView(GenericAPIView):
+    """
+    POST /profile/buy-coin/confirm/
+    {"gateway_reference": "<gateway's txn id>", "status": "success", "failure_reason": ""}
+
+    Confirms a pending purchase as successful (credits `coins` through
+    `CoinLedger.objects.record_transaction()`) or failed (wallet
+    untouched). Idempotent and safe to call more than once for the same
+    `gateway_reference` — see `CoinPurchaseRequest.objects.
+    confirm_success()`/`mark_failed()` (models.py) for exactly what
+    happens on a repeat call.
+
+    🚧 NOT a real webhook endpoint as-is: no payment-gateway integration
+    was part of this upload, so there's no gateway signature to verify
+    here — `IsAuthenticated` + "must be your own purchase" stand in so
+    the flow is testable end-to-end. Before this goes live behind an
+    actual gateway callback, that verification should replace (or gate)
+    the checks below; a genuine webhook call isn't "acting as" any
+    particular authenticated user.
+    """
+    permission_classes = [IsAuthenticated]
+    serializer_class = CoinPurchaseConfirmSerializer
+
+    @extend_schema(
+        request=CoinPurchaseConfirmSerializer,
+        responses={200: CoinPurchaseRequestSerializer, 404: OpenApiTypes.OBJECT},
+        description="Confirm a coin purchase as success or failed. Idempotent — safe to retry "
+        "(e.g. a duplicated webhook delivery).",
+    )
+    def post(self, request):
+        serializer = self.get_serializer(data=request.data)
+        if not serializer.is_valid():
+            return Response({
+                "status": False,
+                "message": "Validation failed.",
+                "errors": serializer.errors,
+            }, status=status.HTTP_400_BAD_REQUEST)
+
+        gateway_reference = serializer.validated_data["gateway_reference"]
+        outcome = serializer.validated_data["status"]
+
+        purchase = CoinPurchaseRequest.objects.filter(
+            gateway_reference=gateway_reference
+        ).first()
+        if purchase is None:
+            return Response({
+                "status": False,
+                "message": "Coin purchase request not found.",
+            }, status=status.HTTP_404_NOT_FOUND)
+
+        # See the class docstring above re: this check standing in for
+        # real webhook-signature verification.
+        if purchase.user_id != request.user.id:
+            raise Http404
+
+        try:
+            if outcome == "success":
+                purchase = CoinPurchaseRequest.objects.confirm_success(
+                    gateway_reference=gateway_reference
+                )
+                message = "Coin purchase confirmed and wallet credited."
+            else:
+                purchase = CoinPurchaseRequest.objects.mark_failed(
+                    gateway_reference=gateway_reference,
+                    reason=serializer.validated_data.get("failure_reason", ""),
+                )
+                message = "Coin purchase marked as failed."
+        except ValueError as exc:
+            # confirm_success()/mark_failed() raise this for an invalid
+            # state transition (e.g. trying to fail an already-succeeded
+            # purchase) — a 409, not a 400: the request body was valid,
+            # the request's current state just doesn't allow this move.
+            return Response({
+                "status": False,
+                "message": str(exc),
+            }, status=status.HTTP_409_CONFLICT)
+
+        return Response({
+            "status": True,
+            "message": message,
+            "data": CoinPurchaseRequestSerializer(purchase).data,
+        }, status=status.HTTP_200_OK)
+
+# 🔥 TASK 4 — Withdraw-Coin flow
+# Mirror image of BuyCoinView/BuyCoinConfirmView above (money direction
+# reversed), but ONE view instead of two: CoinWithdrawalRequestManager.
+# request_withdrawal() debits the coins the moment the request is made
+# (escrow-style — see its own docstring in models.py for why), so
+# there's no separate "confirm" step the way a coin purchase needs one.
+# mark_processing()/confirm_success()/reject() (models.py) aren't wired
+# to an endpoint in this pass — same "views weren't part of this
+# upload" scope-out CoinLedger's docstring already applies to the
+# actions that would eventually create a ledger entry from outside this
+# app; here it applies to whatever admin/ops surface will eventually
+# call those three.
+class CoinWithdrawalRequestView(GenericAPIView):
+    """
+    GET  /profile/coin-withdrawals/            -> current user's own withdrawal requests
+    POST /profile/coin-withdrawals/ {"coins": 200, "payout_method": "upi", "payout_details": {"upi_id": "a@bank"}}
+
+    Debits `coins` immediately via CoinWithdrawalRequestManager.
+    request_withdrawal(). Insufficient balance is a clean 402 with no
+    partial debit and no request row left behind — the debit and the
+    row creation share one transaction.atomic() block inside the
+    manager, so a ValueError there (bubbled up from CoinLedger.objects.
+    record_transaction) rolls both back together.
+
+    TASK 5 (this pass): before any of that, `fraud.
+    is_withdrawal_eligible(request.user, coins)` is checked. This is a
+    read-only check — it runs BEFORE `request_withdrawal()`, so a
+    rejection here never touches the balance and never creates a
+    request row (satisfies the "balance must not shrink" acceptance
+    criterion directly, rather than relying on a rollback). Distinct
+    from the 402 below on purpose: 402 means "you don't have enough
+    coins, period"; this is "you have enough coins, but not enough
+    *withdrawal-eligible* ones" — a different, policy-level rejection,
+    so it gets its own 403 rather than reusing 402's "add more funds"
+    implication.
+    """
+    permission_classes = [IsAuthenticated]
+    serializer_class = CoinWithdrawalRequestSerializer
+
+    @extend_schema(
+        responses={200: CoinWithdrawalRequestSerializer(many=True)},
+        description="List of the current user's coin withdrawal requests (newest first).",
+    )
+    def get(self, request):
+        qs = CoinWithdrawalRequest.objects.filter(user=request.user)
+        serializer = self.get_serializer(qs, many=True)
+        return Response({
+            "status": True,
+            "message": "Withdrawal requests fetched successfully.",
+            "data": serializer.data,
+        }, status=status.HTTP_200_OK)
+
+    @extend_schema(
+        request=CoinWithdrawalRequestSerializer,
+        responses={
+            201: CoinWithdrawalRequestSerializer,
+            402: OpenApiTypes.OBJECT,
+            403: OpenApiTypes.OBJECT,
+        },
+        description="Request a coin withdrawal. Only coins purchased or received as a gift are "
+        "withdrawal-eligible (403 if the requested amount isn't covered by eligible coins); "
+        "debits the wallet immediately once eligible, with insufficient balance returning 402 "
+        "and no partial debit or request row left behind either way.",
+    )
+    def post(self, request):
+        serializer = self.get_serializer(data=request.data)
+        if not serializer.is_valid():
+            return Response({
+                "status": False,
+                "message": "Validation failed.",
+                "errors": serializer.errors,
+            }, status=status.HTTP_400_BAD_REQUEST)
+
+        data = serializer.validated_data
+
+        # TASK 5: fraud/eligibility check runs before any coins move —
+        # see the class docstring above for why this is a 403, distinct
+        # from the 402 below.
+        is_eligible, reason = fraud.is_withdrawal_eligible(request.user, data["coins"])
+        if not is_eligible:
+            return Response({
+                "status": False,
+                "message": reason,
+            }, status=status.HTTP_403_FORBIDDEN)
+
+        try:
+            withdrawal = CoinWithdrawalRequest.objects.request_withdrawal(
+                user=request.user,
+                coins=data["coins"],
+                payout_method=data.get("payout_method", ""),
+                payout_details=data.get("payout_details", {}),
+            )
+        except ValueError as exc:
+            # Insufficient balance — 402, same "request was well-formed,
+            # the wallet just can't cover it" shape campus's
+            # FeePaymentViewSet.pay uses. Distinct from the 409s above
+            # (BuyCoinConfirmView) which are for an invalid *state
+            # transition*, not a money shortfall.
+            return Response({
+                "status": False,
+                "message": str(exc),
+            }, status=status.HTTP_402_PAYMENT_REQUIRED)
+
+        return Response({
+            "status": True,
+            "message": "Withdrawal requested successfully.",
+            "data": self.get_serializer(withdrawal).data,
+        }, status=status.HTTP_201_CREATED)```
+
+### View notes / what changed vs v3.1
+
+- **`BuyCoinView` / `BuyCoinConfirmView`** (TASK 3, new) — two-step:
+  `BuyCoinView` only ever creates/returns a `PENDING` request (never
+  touches `User.coin`); `BuyCoinConfirmView` is the only place that calls
+  `confirm_success()`/`mark_failed()`. ⚠️ **Not gateway-verified as
+  shipped** — `IsAuthenticated` + "must be your own purchase" stand in
+  for a real payment-gateway signature check, since no gateway
+  integration was part of this upload. Don't expose this confirm route
+  to the public internet unauthenticated until that's added (see §11).
+- **`CoinWithdrawalRequestView`** (TASK 4, new) — one view, not two
+  (unlike buy-coin): `request_withdrawal()` debits at request time, so
+  there's no separate confirm step from the user's side.
+  `mark_processing`/`confirm_success`/`reject` (models.py) are **not**
+  wired to any endpoint yet — that's an ops/admin surface for a later
+  pass.
+- **TASK 5 fraud check placement** — `fraud.is_withdrawal_eligible()` is
+  called in `CoinWithdrawalRequestView.post()` **before**
+  `request_withdrawal()` is ever invoked, and returns its own `403`,
+  deliberately distinct from the `402` "insufficient balance" case
+  further down (different failure semantics: "you don't have enough
+  coins" vs. "you have enough coins but they're not the withdrawable
+  kind"). `check_earn_rate_limit()` is **not** called from any view at
+  all — it lives inside `record_transaction()` itself (models.py), so
+  every view/task/app that credits `EARN`/`CAMPUS_REWARD` coins is
+  covered without each of them needing to remember to check it.
+- **`from . import fraud`** — `views.py` imports the whole module (not
+  individual functions) so the single call site
+  (`fraud.is_withdrawal_eligible`) stays self-documenting about which
+  module owns the rule it's enforcing.
 
 ---
 
@@ -2128,7 +3311,10 @@ from django.urls import path
 from .views import (
     AcceptFollowRequestView,
     BlockedUsersView,
+    BuyCoinConfirmView,
+    BuyCoinView,
     CoinLedgerListView,
+    CoinWithdrawalRequestView,
     FollowAPIView,
     FollowersListView,
     FollowingListView,
@@ -2165,77 +3351,119 @@ urlpatterns = [
     path("restricted-users/<int:id>/", UnrestrictUserView.as_view(), name="unrestrict-user"),
     # TASK 19 — read-only coin transaction history.
     path("coin-ledger/", CoinLedgerListView.as_view(), name="coin-ledger"),
-]
-```
+    # TASK 3 — buy-coin flow: start a purchase, then confirm it
+    # (success/failed). See BuyCoinConfirmView's docstring for the
+    # caveat that this confirm route stands in for a real payment-
+    # gateway webhook and isn't signature-verified yet.
+    path("buy-coin/", BuyCoinView.as_view(), name="buy-coin"),
+    path("buy-coin/confirm/", BuyCoinConfirmView.as_view(), name="buy-coin-confirm"),
+    # TASK 4 — withdraw-coin flow: request a withdrawal (debits
+    # immediately) / list your own withdrawal requests. Same
+    # /profile/... URL-shape consistency RestrictUser's docstring
+    # (models.py) calls out for restricted-users/ vs blocked-users/.
+    path("coin-withdrawals/", CoinWithdrawalRequestView.as_view(), name="coin-withdrawal-requests"),
+]```
 
-### Full endpoint table
-(assuming this is included in root urls as `path('profile/', include('user_profile.urls'))`)
+### Full endpoint table (as of v4)
 
-| Method | URL | View | Auth | Purpose |
+| Method | Path | View | Auth | Notes |
 |---|---|---|---|---|
-| GET | `/profile/` | `ProfileView` | ✅ | My own profile |
-| GET | `/profile/search/?search=` | `UserSearchView` | ✅ | Search users (self + blocked relationships excluded, `is_active=True` only) |
-| GET | `/profile/chat-search/?search=` | `MessageContactSearchView` | ✅ | Search only connected users, blocked excluded (for chat/group add-member) |
-| GET | `/profile/profile/<username>/` | `UserProfileDetailView` | ✅ | Target user's profile + two-way follow status; 404 if blocked either way; restricted card if private & not accepted-follower |
-| GET | `/profile/profile/<username>/followers/` | `FollowersListView` | ✅ | Target user's accepted followers, with batched mutual_friends |
-| GET | `/profile/profile/<username>/following/` | `FollowingListView` | ✅ | Who target user follows (accepted), with batched mutual_friends |
-| POST | `/profile/follow/<user_id>/` | `FollowAPIView` | ✅ | Follow/unfollow toggle; blocked pairs rejected; race-safe |
-| POST | `/profile/accept-request/<follow_id>/` | `AcceptFollowRequestView` | ✅ | Accept pending follow request |
-| POST | `/profile/reject-request/<follow_id>/` | `RejectFollowRequestView` | ✅ | Reject pending follow request |
-| PATCH | `/profile/update/` | `UpdateProfileView` | ✅ | Update my profile (partial, multipart) — now includes `is_private` |
-| GET | `/profile/blocked-users/` | `BlockedUsersView` | ✅ | List users I've blocked |
-| POST | `/profile/blocked-users/` | `BlockedUsersView` | ✅ | Block a user |
-| DELETE | `/profile/blocked-users/<int:id>/` | `UnblockUserView` | ✅ | Unblock (id = block record id OR target user id) |
+| GET | `/profile/` | `ProfileView` | ✅ | own profile |
+| GET | `/profile/search/` | `UserSearchView` | ✅ | excludes self + blocked |
+| GET | `/profile/chat-search/` | `MessageContactSearchView` | ✅ | connections only, excludes blocked |
+| GET | `/profile/profile/<username>/` | `UserProfileDetailView` | ✅ | block → 404; private → restricted card |
+| GET | `/profile/profile/<username>/followers/` | `FollowersListView` | ✅ | |
+| GET | `/profile/profile/<username>/following/` | `FollowingListView` | ✅ | |
+| POST | `/profile/follow/<user_id>/` | `FollowAPIView` | ✅ | toggles follow/unfollow |
+| POST | `/profile/accept-request/<follow_id>/` | `AcceptFollowRequestView` | ✅ | |
+| POST | `/profile/reject-request/<follow_id>/` | `RejectFollowRequestView` | ✅ | |
+| POST | `/profile/update/` | `UpdateProfileView` | ✅ | |
+| GET/POST | `/profile/blocked-users/` | `BlockedUsersView` | ✅ | |
+| DELETE | `/profile/blocked-users/<int:id>/` | `UnblockUserView` | ✅ | int-only path param |
+| GET/POST | `/profile/restricted-users/` | `RestrictedUsersView` | ✅ | TASK 18 |
+| DELETE | `/profile/restricted-users/<int:id>/` | `UnrestrictUserView` | ✅ | TASK 18 |
+| GET | `/profile/coin-ledger/` | `CoinLedgerListView` | ✅ | TASK 19, read-only |
+| POST | `/profile/buy-coin/` | `BuyCoinView` | ✅ | **TASK 3, new** — start a pending purchase |
+| POST | `/profile/buy-coin/confirm/` | `BuyCoinConfirmView` | ✅ | **TASK 3, new** — confirm success/failed; not gateway-verified yet |
+| GET/POST | `/profile/coin-withdrawals/` | `CoinWithdrawalRequestView` | ✅ | **TASK 4, new** — POST runs the TASK 5 eligibility check (403) before debiting (402 on shortfall) |
 
-Note: the URL pattern `/profile/profile/<username>/` looks doubled
-because the app itself is mounted at `profile/` in the root urls, and
-this app's own path also starts with `profile/<str:username>/`. That's
-intentional given the current routing — just be aware of it when wiring
-the frontend.
+Nothing new in `urls.py` itself beyond the one new path — `admin.py`,
+`fraud.py`, and `tasks.py` have no URL surface of their own (admin is
+reached via Django's own `/admin/` site; `fraud.py` is called from
+inside views/models, not routed directly; `tasks.py`'s
+`reconcile_follow_counts` runs on Celery Beat's schedule, not an HTTP
+endpoint).
 
 ---
 
-## 8. `admin.py` (full current code)
+## 8. `admin.py` (full current code — this pass, B-8)
 
 ```python
+# user_profile/admin.py
+"""
+TASK 5 — this file wasn't part of any earlier upload for this app (see
+the CAUTION note in `CoinLedger`'s docstring in models.py — admin.py's
+absence was already flagged there as the reason `CoinLedger` was
+"sirf admin me registered hai" with NO read-only guard). This pass
+adds it from scratch with just the two things TASK 5 actually needs:
+
+  - `CoinLedger` registered READ-ONLY. Per that CAUTION note: letting
+    admin add/edit/delete `CoinLedger` rows directly bypasses
+    `CoinLedgerManager.record_transaction()` entirely, which can create
+    a ledger row with no matching `User.coin` change (or edit an
+    existing row's `amount` without touching the balance it supposedly
+    explains) — silently breaking the "ledger and balance must always
+    agree" invariant this table exists to guarantee. Admin should be
+    a VIEWER of this table, never a second unguarded write path.
+  - A "Withdrawal eligible" list filter, driven by the
+    `metadata["withdrawal_eligible"]` flag `record_transaction()` now
+    stamps on every row (see that method's docstring), so ops can
+    quickly see/filter which credits are/aren't withdrawal-eligible
+    without cross-referencing `transaction_type` by hand.
+
+IMPORTANT: if `Follow`, `BlockUser`, `RestrictUser`,
+`CoinPurchaseRequest`, or `CoinWithdrawalRequest` are already
+registered in a version of this file elsewhere in the codebase (this
+upload never included an existing admin.py, so this pass has no
+visibility into one), merge those registrations into this file rather
+than letting this overwrite them — this file only defines
+`CoinLedger`'s registration; it doesn't know about or touch the
+others.
+"""
 from django.contrib import admin
 
-from .models import BlockUser, CoinLedger, Follow, RestrictUser
+from .models import CoinLedger
 
 
-@admin.register(Follow)
-class FollowAdmin(admin.ModelAdmin):
-    list_display = ("id", "follower", "following", "status", "created_at")
-    list_filter = ("status", "created_at")
-    search_fields = ("follower__username", "following__username")
-    autocomplete_fields = ("follower", "following")
-    ordering = ("-created_at",)
+class WithdrawalEligibleFilter(admin.SimpleListFilter):
+    """
+    Ops-facing filter on the `metadata["withdrawal_eligible"]` flag
+    `CoinLedgerManager.record_transaction()` stamps on every row. Reads
+    the flag rather than re-deriving eligibility from
+    `transaction_type` here, so this filter and `fraud.py` can never
+    silently disagree about what "eligible" means for a given row —
+    there is exactly one place (`record_transaction`) that decides it.
+    """
 
+    title = "withdrawal eligible"
+    parameter_name = "withdrawal_eligible"
 
-@admin.register(BlockUser)
-class BlockUserAdmin(admin.ModelAdmin):
-    list_display = ("id", "blocker", "blocked", "created_at")
-    search_fields = ("blocker__username", "blocked__username")
-    autocomplete_fields = ("blocker", "blocked")
-    ordering = ("-created_at",)
+    def lookups(self, request, model_admin):
+        return (
+            ("1", "Eligible (purchase / gift)"),
+            ("0", "Not eligible (earn / reward / other)"),
+        )
 
-
-@admin.register(RestrictUser)
-class RestrictUserAdmin(admin.ModelAdmin):
-    list_display = ("id", "user", "restricted", "created_at")
-    search_fields = ("user__username", "restricted__username")
-    autocomplete_fields = ("user", "restricted")
-    ordering = ("-created_at",)
+    def queryset(self, request, queryset):
+        if self.value() == "1":
+            return queryset.filter(metadata__withdrawal_eligible=True)
+        if self.value() == "0":
+            return queryset.filter(metadata__withdrawal_eligible=False)
+        return queryset
 
 
 @admin.register(CoinLedger)
 class CoinLedgerAdmin(admin.ModelAdmin):
-    # `credit`/`debit` no longer exist on CoinLedger — the model
-    # was redesigned to a single signed `amount` column plus
-    # `transaction_type`, `reference`, and a self-auditing
-    # `balance_after` snapshot (see §0 item 13, §4). Listing the old
-    # field names here would raise `FieldDoesNotExist` the moment this
-    # admin page is opened.
     list_display = (
         "id",
         "user",
@@ -2245,31 +3473,14 @@ class CoinLedgerAdmin(admin.ModelAdmin):
         "reference",
         "created_at",
     )
-    # `transaction_type` is a bounded TextChoices field — filtering by it
-    # (like `status`/`created_at` on the other admins) is cheap and useful
-    # for "show me all admin_adjustment rows" style audits.
-    list_filter = ("transaction_type", "created_at")
-    # `reference` is the idempotency key callers pass in (gift id,
-    # withdrawal id, payment receipt id) — searchable so support/finance
-    # can look up "what happened for reference X".
-    search_fields = ("user__username", "reference")
-    autocomplete_fields = ("user",)
-    ordering = ("-created_at",)
+    list_filter = ("transaction_type", WithdrawalEligibleFilter)
+    search_fields = ("user__username", "reference", "description")
+    date_hierarchy = "created_at"
 
-    # B-8 FIX: CoinLedger rows must ONLY ever be created via
-    # `record_transaction()`, which is what keeps `User.coin` and the
-    # ledger's running `balance_after` in sync. Raw admin add/change/delete
-    # bypasses that helper entirely and can desync the invariant — and
-    # after FEE-2, CoinLedger also carries real tuition-fee money, not just
-    # in-app coins, so a stray admin edit is a real-money bug, not a
-    # cosmetic one. Make the whole model admin read-only:
-    #   - no "Add" button (has_add_permission = False)
-    #   - no editing existing rows (has_change_permission = False)
-    #   - no deleting rows, so history can't be silently erased
-    #     (has_delete_permission = False)
-    #   - every field is listed in readonly_fields as a belt-and-braces
-    #     measure, so even if change permission were ever re-enabled by
-    #     mistake, the change form still can't save edits.
+    # Read-only, deliberately: see the module docstring above. Every
+    # field is listed (not just a subset) so a future field addition
+    # to CoinLedger doesn't accidentally become admin-editable by
+    # being left off this list.
     readonly_fields = [f.name for f in CoinLedger._meta.fields]
 
     def has_add_permission(self, request):
@@ -2279,45 +3490,48 @@ class CoinLedgerAdmin(admin.ModelAdmin):
         return False
 
     def has_delete_permission(self, request, obj=None):
-        return False
-```
+        # Deletion (unlike add/change) doesn't corrupt a row's own
+        # amount/balance_after — but it DOES let an already-applied
+        # balance change vanish from the audit trail while `User.coin`
+        # keeps the effect, which is just as bad for the "ledger
+        # explains every balance change" guarantee. Blocked for the
+        # same reason.
+        return False```
 
-Upgraded from v1's bare `admin.site.register(Model)` wildcard-import
-style to explicit `@admin.register` + custom `ModelAdmin` per model —
-all four models are now searchable/filterable/orderable in `/admin/`.
-`autocomplete_fields` on FK fields needs each referenced model's own
-`ModelAdmin` (the custom `User` model's admin) to itself declare
-`search_fields`, otherwise Django raises an error at startup — verify
-that's true for your `User` admin.
+### admin.py notes
 
-**B-8 / FEE-2 (new this pass):** `CoinLedgerAdmin` is now fully
-read-only — `has_add_permission`, `has_change_permission`, and
-`has_delete_permission` all return `False`, and every field is also
-listed in `readonly_fields` as a second layer of protection. This closes
-the gap called out in the model's docstring and in §11 item 2 of the
-previous pass: admin used to be a second, unguarded write path around
-`record_transaction()`, and after FEE-2 wired real tuition-fee payments
-through the same ledger, an admin-side slip is a real-money bug, not
-just a cosmetic drift. `Follow`, `BlockUser`, and `RestrictUser` are
-unaffected — only `CoinLedgerAdmin` gets this lockdown.
+- This file did not exist in any earlier upload of this app — it's new
+  this pass, added specifically to close the "CoinLedger is admin-
+  editable with no guard" caveat v3.1 flagged (B-8) and left open in
+  `CoinLedger`'s own docstring (see §4).
+- `CoinLedgerAdmin` registers `CoinLedger` **read-only**:
+  `has_add_permission`/`has_change_permission`/`has_delete_permission`
+  all return `False`, and `readonly_fields` lists every model field
+  explicitly (not a subset) so a future field addition to `CoinLedger`
+  doesn't silently become admin-editable by being left off the list.
+  Deletion is blocked too — deleting a row doesn't corrupt its own
+  amount/balance_after, but it would let an already-applied balance
+  change vanish from the audit trail while `User.coin` keeps the
+  effect, which breaks the same "ledger explains every balance change"
+  invariant.
+- `WithdrawalEligibleFilter` is a `SimpleListFilter` reading
+  `metadata["withdrawal_eligible"]` (the flag TASK 5's
+  `record_transaction()` now stamps on every row) rather than
+  re-deriving eligibility from `transaction_type` here — so this filter
+  and `fraud.py` can never quietly disagree about what "eligible" means.
+- ⚠️ **This file only defines `CoinLedger`'s registration.** If `Follow`,
+  `BlockUser`, `RestrictUser`, `CoinPurchaseRequest`, or
+  `CoinWithdrawalRequest` are already registered in a version of
+  `admin.py` elsewhere in the actual codebase, **merge** those
+  registrations into this file rather than letting this overwrite them
+  — no earlier upload of this app ever included an existing `admin.py`,
+  so this pass has no visibility into one. `autocomplete_fields` (if you
+  add any for these other models, following the same pattern v2's
+  `admin.py` used) still needs your `User` model's own `ModelAdmin` to
+  declare `search_fields`, or Django raises `E040` at startup (see §11
+  item 6).
 
----
-
-## 8a. `tasks.py` (new in v3 — full current code)
-
-TASK 28 — a Celery task that detects and corrects
-`followers_count`/`following_count` drift on the custom `User` model.
-Per-operation increments/decrements in `FollowAPIView` /
-`AcceptFollowRequestView` are correct for writes that go through those
-views, but anything that deletes a `Follow` row outside them (an admin
-deleting it directly, `user.delete()` CASCADE-ing every `Follow` row the
-deleted user was party to, a shell/migration bulk `.delete()`/`.update()`)
-never re-runs that increment/decrement logic — so the stored counters can
-silently drift from what `Follow` rows actually say. This task is a
-detect-and-correct safety net for that gap, not the root-cause fix (the
-real fix would be a `Follow` `post_save`/`post_delete` signal that
-recomputes from real rows on every change — the same pattern
-`post/models.py` already uses for its own denormalized counters).
+## 8a. `tasks.py` (full current code — unchanged since v3)
 
 ```python
 """
@@ -2487,46 +3701,314 @@ def reconcile_follow_counts():
         "checked": checked,
         "corrected_followers_count": corrected_followers,
         "corrected_following_count": corrected_following,
-    }
-```
+    }```
 
-### Task notes
-- **Cheap regardless of user count.** Two `GROUP BY` aggregate queries
-  compute every user's *correct* counts in one shot each; the task then
-  walks `User.objects.only(...).iterator(chunk_size=1000)` and only
-  issues `bulk_update()` calls (batched at 500 rows) for users whose
-  stored counters actually disagree — a run with zero drift costs
-  exactly 2 queries beyond the read, not one query per user.
-- **Walks every user, not just users in the two aggregate maps** — a
-  user whose real accepted-follow count just dropped to zero (every
-  `Follow` row touching them got deleted) won't appear in either map at
-  all, but their stored counter could still be sitting on a stale
-  nonzero value; checking map keys only would miss exactly that
-  direction of drift.
-- **⚠️ Field-name assumption**, called out in the module docstring: this
-  was written without `user_profile/models.py` available at the time,
-  so `followers_count`/`following_count` field names were inferred from
-  how `post/views.py` already uses `Follow` elsewhere in the codebase.
-  Now that `models.py` is available (§4), those names are confirmed
-  correct — no adjustment needed, but if your actual `User` model uses
-  different field names, adjust the two `hasattr` checks and the
-  `bulk_update` field list.
-- **Wire into `settings.py`:**
-  ```python
-  CELERY_BEAT_SCHEDULE = {
-      ...
-      "user-profile-reconcile-follow-counts": {
-          "task": "user_profile.tasks.reconcile_follow_counts",
-          "schedule": crontab(hour="*/6", minute=15),
-      },
-  }
-  ```
-- Returns a summary dict (`checked`, `corrected_followers_count`,
-  `corrected_following_count`) so a manual `.delay()` call, a Flower
-  dashboard, or an admin action can see whether drift is actually
-  happening in practice. If a run keeps finding real correction work
-  every time, that's a signal the root-cause signal-based fix is
-  overdue — not that this task is misbehaving.
+### tasks.py notes
+
+- No change this pass — `reconcile_follow_counts` is unrelated to the
+  coin-economy work in TASK 1/3/4/5. Kept here in full for the "one file
+  has everything" promise this document makes.
+- Still requires Celery + Celery Beat configured and the
+  `user-profile-reconcile-follow-counts` entry in
+  `CELERY_BEAT_SCHEDULE` (see §12) — nothing about that changed either.
+
+## 8b. `fraud.py` (new this pass — TASK 5 — full current code)
+
+```python
+# user_profile/fraud.py
+"""
+TASK 5 — fraud / anti-abuse layer for the coin economy.
+
+Two independent rules live here, both enforced at the `CoinLedger`
+write path (`CoinLedgerManager.record_transaction()` in models.py)
+rather than only in a view, so no call site — this app's own views,
+campus's tasks, referral bonuses, or anything written later — can
+bypass them by going around a particular view:
+
+1. Withdrawal eligibility — only coins that came from real money
+   (`TransactionType.PURCHASE`) or from another user
+   (`TransactionType.GIFT_RECEIVED`) may ever be cashed out.
+   `TransactionType.EARN` / `CAMPUS_REWARD` coins can be spent inside
+   the product but never withdrawn. `is_withdrawal_eligible()` is the
+   single function `CoinWithdrawalRequestView` (views.py) calls before
+   accepting a withdrawal request.
+
+2. Earn-rate limiting — `EARN`/`CAMPUS_REWARD` credits for a single
+   user are capped within a rolling time window, so a script (or a
+   user replaying the same "task complete" call) can't burst-farm
+   coins. `check_earn_rate_limit()` is called from inside
+   `record_transaction()` itself for exactly those two transaction
+   types; every other transaction_type is untouched by this rule.
+
+Both functions take a plain `user` object (not a user id) and never
+mutate anything — this module reads the ledger, it never writes to
+it. The only writer stays `CoinLedgerManager.record_transaction()`.
+"""
+from datetime import timedelta
+
+from django.db.models import Sum
+from django.utils import timezone
+
+
+class EarnRateLimitExceeded(Exception):
+    """
+    Raised by `CoinLedgerManager.record_transaction()` (models.py) when
+    an EARN/CAMPUS_REWARD credit would push a user past the burst-farm
+    limit. Deliberately NOT a `ValueError` — `record_transaction()`
+    already uses plain `ValueError` for "this request is malformed /
+    can't be satisfied" (zero amount, insufficient balance), which
+    campus tasks and the referral-bonus flow may already be catching
+    generically. A distinct exception class lets a caller that *does*
+    want to tell "you're farming too fast" apart from "you're broke"
+    catch this specifically (e.g. to log it, or to back off and retry
+    later) without also swallowing unrelated ValueErrors — while a
+    caller that only wants "something went wrong, don't credit" can
+    still catch `Exception` (or `(ValueError, EarnRateLimitExceeded)`)
+    the same way it always could.
+    """
+
+
+# --- Withdrawal eligibility ------------------------------------------------
+
+# Credits that count toward the withdrawal-eligible pool. Deliberately
+# just these two "money actually entered the platform" types, per the
+# rule as specified — NOT `TESTSERIES_PAYOUT` (a creator payout is
+# revenue-shaped but isn't literally a purchase or a gift), NOT
+# `REFUND` (a generic refund's original source isn't known here), and
+# NOT `ADMIN_ADJUSTMENT` (an ops-issued adjustment isn't "real paisa"
+# either — if a specific adjustment SHOULD be withdrawable, it should
+# be issued as an explicit `GIFT_RECEIVED`/`PURCHASE` entry instead of
+# widening this set).
+#
+# `WITHDRAWAL_REJECTED` is included too, but not because a rejected
+# withdrawal is itself a new source of money — it's the refund of a
+# withdrawal that could only have been *requested* by draining this
+# same eligible pool in the first place (see `is_withdrawal_eligible`
+# / `CoinWithdrawalRequestManager.request_withdrawal` in models.py).
+# Refunding a rejected withdrawal and NOT crediting it back to the
+# eligible pool would silently strand a user's own purchased/gifted
+# coins as un-withdrawable forever, which is a bug, not a fraud
+# control — no acceptance test covers this edge case, but leaving it
+# out would be wrong on inspection.
+def _eligible_source_types():
+    from .models import CoinLedger
+
+    return {
+        CoinLedger.TransactionType.PURCHASE,
+        CoinLedger.TransactionType.GIFT_RECEIVED,
+        CoinLedger.TransactionType.WITHDRAWAL_REJECTED,
+    }
+
+
+def get_withdrawal_eligible_balance(user):
+    """
+    How many of `user`'s current coins are withdrawal-eligible (i.e.
+    traceable back to a purchase or a received gift), as of right now.
+
+    This is NOT `sum(amount for PURCHASE/GIFT_RECEIVED rows)` — a user
+    can spend coins on something, and that spend has to come out of
+    *some* bucket. The rule applied here: non-eligible coins (EARN,
+    CAMPUS_REWARD, ...) are treated as spent first, and only once
+    they're exhausted does further spend start eating into the
+    eligible (purchased/gifted) pool. This is the generous-to-the-user
+    reading (their real-money coins survive as long as possible) and
+    is also the one that keeps `User.coin` and this figure mutually
+    consistent without needing a second running-balance column: see
+    the derivation below.
+
+    Implementation: a single grouped aggregate over this user's
+    `CoinLedger` rows (one query, not a row-by-row replay) is enough,
+    because the two buckets only interact in one place (debits that
+    exceed the non-eligible bucket "overflow" into the eligible one),
+    and that overflow amount only depends on the FINAL totals of each
+    bucket, not the order the rows happened in — as long as no
+    withdrawal was ever approved for more than the eligible balance at
+    the time (which `is_withdrawal_eligible` below exists to
+    guarantee). Concretely:
+
+      eligible_balance
+        = (eligible credits: PURCHASE + GIFT_RECEIVED + WITHDRAWAL_REJECTED)
+        - (eligible debits: WITHDRAWAL_REQUESTED, which only ever draws
+           from this pool by construction)
+        + min(0, non_eligible_net)
+
+      where `non_eligible_net` is the net of every OTHER
+      transaction_type (EARN, CAMPUS_REWARD, SPEND, GIFT_SENT, REFUND,
+      ADMIN_ADJUSTMENT, TESTSERIES_*, ...) — if that net is negative,
+      i.e. more was spent than was ever earned/rewarded, the shortfall
+      must have come out of the eligible pool, so it's subtracted from
+      it too.
+
+    Clamped to >= 0 defensively; it should never go negative given the
+    invariants above, but a negative "eligible balance" is meaningless
+    either way.
+    """
+    from .models import CoinLedger
+
+    eligible_types = _eligible_source_types()
+    withdrawal_debit_type = CoinLedger.TransactionType.WITHDRAWAL_REQUESTED
+
+    totals_by_type = dict(
+        CoinLedger.objects.filter(user=user)
+        .values_list("transaction_type")
+        .annotate(total=Sum("amount"))
+    )
+
+    eligible_credits = sum(
+        totals_by_type.get(t, 0) for t in eligible_types
+    )
+    eligible_debits = totals_by_type.get(withdrawal_debit_type, 0)  # already negative
+    non_eligible_net = sum(
+        total
+        for ttype, total in totals_by_type.items()
+        if ttype not in eligible_types and ttype != withdrawal_debit_type
+    )
+
+    eligible_balance = eligible_credits + eligible_debits
+    if non_eligible_net < 0:
+        eligible_balance += non_eligible_net
+
+    return max(eligible_balance, 0)
+
+
+def is_withdrawal_eligible(user, coins=None):
+    """
+    (bool, reason) — whether `user` may withdraw `coins`.
+
+    `coins=None` checks only "does this user have ANY withdrawal-
+    eligible balance at all" (useful for e.g. showing/hiding a
+    "withdraw" button); `coins=<int>` checks that specific amount, which
+    is what `CoinWithdrawalRequestView.post()` (views.py) actually
+    calls before accepting a request. On a mixed balance, only the
+    purchased/gifted portion is eligible — see
+    `get_withdrawal_eligible_balance()` above — not the user's total
+    `User.coin` balance.
+
+    Never touches the balance or writes anything; this is a pure
+    read-only check, safe to call as many times as a view wants.
+    """
+    eligible_balance = get_withdrawal_eligible_balance(user)
+
+    if coins is None:
+        if eligible_balance <= 0:
+            return False, (
+                "No withdrawal-eligible balance. Only coins you purchased "
+                "or received as a gift can be withdrawn."
+            )
+        return True, ""
+
+    if coins <= 0:
+        return False, "Withdrawal amount must be positive."
+
+    if coins > eligible_balance:
+        return False, (
+            f"Only {eligible_balance} of your coins are withdrawal-eligible "
+            "(purchased or gifted). Earned/reward coins can't be withdrawn."
+        )
+
+    return True, ""
+
+
+# --- Earn-rate limiting -----------------------------------------------------
+
+# Deliberately conservative constants, not config-driven — same
+# "cheap moment, no live traffic depends on the exact number yet" call
+# this file's sibling models already make for other first-pass
+# choices. Tighten/loosen these (or move them to Django settings) once
+# there's real farming-attempt data to calibrate against.
+EARN_RATE_LIMIT_WINDOW = timedelta(hours=1)
+EARN_RATE_LIMIT_MAX_TRANSACTIONS = 20
+EARN_RATE_LIMIT_MAX_COINS = 500
+
+
+def check_earn_rate_limit(user, transaction_type):
+    """
+    True if `user` may receive another `transaction_type` credit right
+    now; False if they've hit the burst-farm limit and the caller
+    (`record_transaction()`) should refuse the credit.
+
+    Only ever restricts `EARN`/`CAMPUS_REWARD` — every other
+    transaction_type returns True immediately without a query, since
+    rate-limiting a purchase or a gift makes no sense (real money and
+    another user's coins aren't "farmable" the way a repeatable
+    in-app action is).
+
+    Two independent caps within a rolling window (both must pass):
+    a count cap (no more than N earn-type credits, regardless of size
+    — catches a script hammering a small reward repeatedly) and a
+    total-coins cap (no more than M coins total, regardless of how
+    many transactions — catches a few large credits instead of many
+    small ones). Either one tripping blocks the credit.
+    """
+    from .models import CoinLedger
+
+    rate_limited_types = (
+        CoinLedger.TransactionType.EARN,
+        CoinLedger.TransactionType.CAMPUS_REWARD,
+    )
+    if transaction_type not in rate_limited_types:
+        return True
+
+    window_start = timezone.now() - EARN_RATE_LIMIT_WINDOW
+    recent = CoinLedger.objects.filter(
+        user=user,
+        transaction_type__in=rate_limited_types,
+        created_at__gte=window_start,
+    )
+
+    if recent.count() >= EARN_RATE_LIMIT_MAX_TRANSACTIONS:
+        return False
+
+    total_recent_coins = recent.aggregate(total=Sum("amount"))["total"] or 0
+    if total_recent_coins >= EARN_RATE_LIMIT_MAX_COINS:
+        return False
+
+    return True```
+
+### fraud.py notes
+
+- **Two independent rules, one shared enforcement point.** Both
+  `is_withdrawal_eligible()` and `check_earn_rate_limit()` are read-only,
+  side-effect-free functions — neither writes to `CoinLedger` or
+  `User.coin`. The only writer stays
+  `CoinLedgerManager.record_transaction()` (models.py), which calls
+  `check_earn_rate_limit()` internally and which `CoinWithdrawalRequestView`
+  (views.py) calls `is_withdrawal_eligible()` in front of.
+- **Withdrawal-eligible balance derivation**
+  (`get_withdrawal_eligible_balance`) is a single grouped `Sum` aggregate,
+  not a row-by-row replay: non-eligible credits (EARN, CAMPUS_REWARD,
+  ...) are treated as spent first; only once that bucket nets negative
+  does the shortfall eat into the eligible (PURCHASE/GIFT_RECEIVED/
+  WITHDRAWAL_REJECTED) bucket. `WITHDRAWAL_REJECTED` is counted as an
+  eligible *credit* not because a rejection is a new source of money,
+  but because it's refunding coins that could only have been withdrawn
+  from the eligible pool in the first place — leaving it out would
+  silently strand a user's own purchased/gifted coins as permanently
+  un-withdrawable, which is a bug this module deliberately avoids even
+  though no acceptance test covers that specific edge case.
+- **Explicitly excluded from the eligible-source set**, on purpose, not
+  by omission: `TESTSERIES_PAYOUT` (creator payout, not literally a
+  purchase or a gift), `REFUND` (source unknown from this function's
+  vantage point), `ADMIN_ADJUSTMENT` (an ops adjustment isn't "real
+  paisa" either — if a specific one should be withdrawable, issue it as
+  an explicit `GIFT_RECEIVED`/`PURCHASE` instead of widening this set).
+- **Earn-rate limiting constants** (`EARN_RATE_LIMIT_WINDOW`,
+  `EARN_RATE_LIMIT_MAX_TRANSACTIONS`, `EARN_RATE_LIMIT_MAX_COINS`) are
+  plain module constants, not settings-driven — same "cheap moment, no
+  live traffic to calibrate against yet" call other first-pass choices
+  in this app already make. Move them to Django settings once there's
+  real farming-attempt data.
+- **`EarnRateLimitExceeded` is deliberately not a `ValueError`** — see
+  §0.3 for why: it lets a caller distinguish "you're farming too fast"
+  from "you're broke" without also swallowing unrelated `ValueError`s,
+  while a caller that doesn't care about the distinction can still catch
+  both together.
+- **Every non-EARN/CAMPUS_REWARD `transaction_type` short-circuits
+  `check_earn_rate_limit()` to `True` with no query at all** — rate-
+  limiting a purchase or a gift doesn't make sense (real money and
+  another user's coins aren't "farmable" the way a repeatable in-app
+  action is), so this never adds query overhead to the majority of
+  `record_transaction()` calls.
 
 ---
 
@@ -2542,7 +4024,7 @@ from django.urls import reverse
 from rest_framework import status
 from rest_framework.test import APITestCase
 
-from .models import BlockUser, Follow, RestrictUser
+from .models import BlockUser, CoinLedger, CoinWithdrawalRequest, Follow, RestrictUser
 
 User = get_user_model()
 
@@ -2897,59 +4379,414 @@ class FollowRaceConditionTests(APITestCase):
         # this reads as a clean 200, never an unhandled 500.
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertIsNone(response.data["status"])
-```
 
-### Coverage this gives you
-- Self-follow rejected at DB level (`IntegrityError`) — covers the new
-  `CheckConstraint`.
-- Self-follow rejected at API level (400, before it ever reaches the DB).
-- Follow → unfollow correctly increments/decrements both users' counters.
-- A user blocked by the target cannot send a follow request (400).
-- A private profile viewed by a non-follower returns
-  `is_restricted_view: true` and omits `bio` from `data`.
-- A profile lookup between blocked users returns 404 (not 403 — see
-  §6's `is_blocked_between` note on why).
+# ==========================================================================
+# TASK 4 — Withdraw-Coin flow.
+#
+# Written against the real `user_profile/views.py`/`urls.py`/
+# `serializers.py` (all uploaded for this pass). Confirmed endpoint:
+#   CoinWithdrawalRequestView   GET/POST /coin-withdrawals/   "coin-withdrawal-requests"
+# ==========================================================================
 
-### v3 (TASK 30) — the "still missing" list above is now covered
-All five gaps from v2's "still missing" list were closed in this round,
-plus `RestrictUser` coverage that didn't exist as a concept yet back
-then:
-- **`PrivateAccountFollowRequestFlowTests`** — private-account request
-  flow end-to-end: following a private account creates a `PENDING`
-  request (not an immediate follow); counts stay untouched while
-  pending; the target's profile stays `is_restricted_view: true` for the
-  requester the whole time it's pending; accepting flips status, counts,
-  and the profile view together; only the target can accept; rejecting
-  deletes the row outright with no counts touched.
-- **`BlockUnblockEdgeCaseTests`** — self-block rejected at API and DB
-  level; blocking twice is idempotent (`get_or_create`, second call
-  returns 200 "already blocked" not a 400); blocking wipes an existing
-  `Follow` relationship **both ways** and decrements both users'
-  counters; unblock resolves by both the `BlockUser` record's own id and
-  the target user's id; unblocking a user who was never blocked is a
-  clean 404; you cannot unblock someone else's block record by guessing
-  its id; **plus** restricting an already-blocked user is rejected (400)
-  — covers `RestrictUserSerializer.validate_restricted`'s block check.
-- **`RestrictUserModelTests`** — self-restrict rejected at DB level
-  (`CheckConstraint`); duplicate restrict rejected at DB level
-  (`UniqueConstraint`); restricting someone does **not** touch `Follow`
-  rows or followers/following counts (the "silent, non-blocking by
-  design" guarantee from `RestrictUser`'s docstring).
-- **`UserSearchExclusionTests`** — search excludes the requesting user
-  themself, users they've blocked, and users who've blocked them.
-- **`FollowRaceConditionTests`** — thread-based: two near-simultaneous
-  follow requests for the same (follower, following) pair never produce
-  a 500; the loser reads back as a clean 200 with the follow already in
-  the accepted/pending state the winner created, exercising the
-  `try/except IntegrityError` path in `FollowAPIView.post` under actual
-  concurrency instead of just asserting the code exists.
-- Not yet covered: `mutual_friends` correctness under the batched
-  `bulk_accepted_connection_ids` path, and any test that actually
-  exercises `CoinLedger.objects.record_transaction()` (idempotent
-  `reference` reuse, negative-balance rejection, the `select_for_update`
-  concurrency guarantee) or the new restrict/coin-ledger endpoints'
-  happy paths (`RestrictedUsersView`, `UnrestrictUserView`,
-  `CoinLedgerListView`) — none of these have direct test coverage yet.
+class CoinWithdrawalRequestManagerTests(APITestCase):
+    """
+    Direct manager-level tests — CoinWithdrawalRequestManager is the
+    sanctioned write path (models.py), same as
+    CoinPurchaseRequestManager is for CoinPurchaseRequest.
+    """
+
+    def setUp(self):
+        self.alice = User.objects.create_user(username="alice", password="pass12345")
+        self.alice.coin = 500
+        self.alice.save(update_fields=["coin"])
+
+    def test_withdrawal_debits_exact_amount(self):
+        withdrawal = CoinWithdrawalRequest.objects.request_withdrawal(
+            user=self.alice,
+            coins=200,
+            payout_method=CoinWithdrawalRequest.PayoutMethod.UPI,
+            payout_details={"upi_id": "alice@bank"},
+        )
+
+        self.alice.refresh_from_db()
+        self.assertEqual(self.alice.coin, 300)
+
+        self.assertEqual(withdrawal.status, CoinWithdrawalRequest.Status.PENDING)
+        self.assertIsNotNone(withdrawal.debit_ledger_entry)
+        self.assertEqual(withdrawal.debit_ledger_entry.amount, -200)
+        self.assertEqual(
+            withdrawal.debit_ledger_entry.transaction_type,
+            CoinLedger.TransactionType.WITHDRAWAL_REQUESTED,
+        )
+
+    def test_rejected_withdrawal_credits_coins_back(self):
+        withdrawal = CoinWithdrawalRequest.objects.request_withdrawal(
+            user=self.alice,
+            coins=200,
+            payout_method=CoinWithdrawalRequest.PayoutMethod.UPI,
+            payout_details={"upi_id": "alice@bank"},
+        )
+        self.alice.refresh_from_db()
+        self.assertEqual(self.alice.coin, 300)  # sanity check on the debit
+
+        rejected = CoinWithdrawalRequest.objects.reject(
+            withdrawal_id=withdrawal.pk, reason="Bad IFSC code"
+        )
+        self.alice.refresh_from_db()
+        self.assertEqual(self.alice.coin, 500)  # fully refunded
+        self.assertEqual(rejected.status, CoinWithdrawalRequest.Status.REJECTED)
+        self.assertIsNotNone(rejected.refund_ledger_entry)
+        self.assertEqual(rejected.refund_ledger_entry.amount, 200)
+        self.assertEqual(
+            rejected.refund_ledger_entry.transaction_type,
+            CoinLedger.TransactionType.WITHDRAWAL_REJECTED,
+        )
+
+        # Idempotency: a retried reject() call (double form submit, admin
+        # double-click) must not credit the refund a second time.
+        CoinWithdrawalRequest.objects.reject(withdrawal_id=withdrawal.pk, reason="retry")
+        self.alice.refresh_from_db()
+        self.assertEqual(self.alice.coin, 500)
+
+
+class CoinWithdrawalRequestAPITests(APITestCase):
+    def setUp(self):
+        self.alice = User.objects.create_user(username="alice", password="pass12345")
+        self.alice.coin = 500
+        self.alice.save(update_fields=["coin"])
+        self.client.force_authenticate(user=self.alice)
+
+    def test_insufficient_balance_returns_402(self):
+        response = self.client.post(
+            reverse("coin-withdrawal-requests"),
+            {
+                "coins": 10_000,
+                "payout_method": CoinWithdrawalRequest.PayoutMethod.UPI,
+                "payout_details": {"upi_id": "alice@bank"},
+            },
+            format="json",
+        )
+        self.assertEqual(response.status_code, status.HTTP_402_PAYMENT_REQUIRED)
+        self.assertFalse(response.data["status"])
+
+        # No partial debit, and no request row left behind — the debit
+        # and the row creation share one transaction.atomic() block in
+        # CoinWithdrawalRequestManager.request_withdrawal.
+        self.alice.refresh_from_db()
+        self.assertEqual(self.alice.coin, 500)
+        self.assertFalse(CoinWithdrawalRequest.objects.filter(user=self.alice).exists())
+
+    def test_withdrawal_request_via_api_creates_pending_row(self):
+        response = self.client.post(
+            reverse("coin-withdrawal-requests"),
+            {
+                "coins": 150,
+                "payout_method": CoinWithdrawalRequest.PayoutMethod.UPI,
+                "payout_details": {"upi_id": "alice@bank"},
+            },
+            format="json",
+        )
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertTrue(response.data["status"])
+        self.assertEqual(response.data["data"]["status"], CoinWithdrawalRequest.Status.PENDING)
+
+        self.alice.refresh_from_db()
+        self.assertEqual(self.alice.coin, 350)
+
+    def test_missing_payout_details_is_rejected(self):
+        response = self.client.post(
+            reverse("coin-withdrawal-requests"),
+            {"coins": 150, "payout_method": CoinWithdrawalRequest.PayoutMethod.UPI, "payout_details": {}},
+            format="json",
+        )
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.alice.refresh_from_db()
+        self.assertEqual(self.alice.coin, 500)  # validation failed before any debit```
+
+### tests.py coverage summary (as of v4)
+
+Test classes present, in file order:
+- `FollowModelTests`, `FollowAPITests` — self-follow, follow/unfollow
+  counts, blocked-user-cannot-follow, private-profile-hides-bio,
+  blocked-user-404-on-lookup (v2).
+- `PrivateAccountFollowRequestFlowTests` — pending-request flow for
+  private accounts, accept/reject (v3, TASK 30).
+- `BlockUnblockEdgeCaseTests` — self-block, idempotent double-block,
+  block removes existing Follow both ways, unblock by record id or by
+  target user id, cross-user unblock rejected (v3, TASK 30).
+- `RestrictUserModelTests` — self-restrict / duplicate-restrict blocked
+  at DB level, restrict does NOT touch Follow/counts, restricting an
+  already-blocked user is rejected (v3, TASK 30).
+- `UserSearchExclusionTests` — search excludes self/blocked both
+  directions (v3, TASK 30).
+- `FollowRaceConditionTests` — concurrent double-follow doesn't 500
+  (v3, TASK 30).
+- `CoinWithdrawalRequestManagerTests`, `CoinWithdrawalRequestAPITests`
+  — **new this pass (TASK 4)**: exact-amount debit, rejected withdrawal
+  credits back, 402 on insufficient balance via the API, pending row
+  created via the API, missing payout_details rejected.
+
+Fraud-specific coverage (withdrawal eligibility, earn-rate limiting)
+lives in the separate `tests_fraud.py` file — see §9a — not in this one.
+
+## 9a. `tests_fraud.py` (new this pass — TASK 5 — full current code)
+
+```python
+# user_profile/tests_fraud.py
+"""
+TASK 5 — tests for the fraud/anti-abuse layer (fraud.py +
+CoinLedgerManager.record_transaction()'s hooks into it).
+
+NOTE: this file wasn't placed in an existing `user_profile/tests/`
+package because none was part of this upload — if this app already
+has one, move this module in as `tests/test_fraud.py` instead of
+leaving it as a top-level sibling of models.py/views.py, and drop this
+note.
+
+NOTE on user creation: the exact required fields for
+`settings.AUTH_USER_MODEL` (`login.User`, per models.py's comments)
+weren't part of this upload either, so `_make_user()` below only sets
+`username` + `password` via `create_user`. If that model requires more
+than that (e.g. a mandatory phone/email field with no default), adjust
+`_make_user()` accordingly — the assertions themselves don't depend on
+anything about the user beyond its `coin` field and its pk.
+"""
+from unittest.mock import patch
+
+from django.contrib.auth import get_user_model
+from django.test import TestCase
+
+from . import fraud
+from .models import CoinLedger
+
+User = get_user_model()
+
+
+def _make_user(username):
+    return User.objects.create_user(username=username, password="testpass123")
+
+
+class WithdrawalEligibilityTests(TestCase):
+    def test_earn_only_balance_not_withdrawable(self):
+        """
+        A user whose entire balance came from EARN/CAMPUS_REWARD has
+        zero withdrawal-eligible balance, and a withdrawal attempt gets
+        a clean rejection with no balance change.
+        """
+        user = _make_user("earn_only_user")
+
+        CoinLedger.objects.record_transaction(
+            user=user,
+            transaction_type=CoinLedger.TransactionType.EARN,
+            amount=150,
+            reference="earn-1",
+        )
+        CoinLedger.objects.record_transaction(
+            user=user,
+            transaction_type=CoinLedger.TransactionType.CAMPUS_REWARD,
+            amount=50,
+            reference="campus-1",
+        )
+        user.refresh_from_db()
+        self.assertEqual(user.coin, 200)
+
+        self.assertEqual(fraud.get_withdrawal_eligible_balance(user), 0)
+
+        is_eligible, reason = fraud.is_withdrawal_eligible(user, coins=50)
+        self.assertFalse(is_eligible)
+        self.assertTrue(reason)  # a human-readable rejection message
+
+        # Balance must be untouched — the check ran before any debit.
+        user.refresh_from_db()
+        self.assertEqual(user.coin, 200)
+
+        # Note: `CoinWithdrawalRequestManager.request_withdrawal()` on
+        # its own does NOT enforce eligibility (it only checks total
+        # balance, which 200 covers) — it's `CoinWithdrawalRequestView`
+        # calling `fraud.is_withdrawal_eligible()` first that provides
+        # the guarantee this test is actually checking. That's a view-
+        # layer responsibility, so it isn't re-asserted here.
+
+    def test_mixed_balance_only_purchased_portion_withdrawable(self):
+        """
+        A balance made up of both earned and purchased coins is only
+        withdrawal-eligible up to the purchased/gifted portion — not
+        the full balance.
+        """
+        user = _make_user("mixed_balance_user")
+
+        CoinLedger.objects.record_transaction(
+            user=user,
+            transaction_type=CoinLedger.TransactionType.EARN,
+            amount=100,
+            reference="earn-1",
+        )
+        CoinLedger.objects.record_transaction(
+            user=user,
+            transaction_type=CoinLedger.TransactionType.PURCHASE,
+            amount=200,
+            reference="purchase-1",
+        )
+        user.refresh_from_db()
+        self.assertEqual(user.coin, 300)
+
+        # Only the 200 purchased coins are eligible, not the full 300.
+        self.assertEqual(fraud.get_withdrawal_eligible_balance(user), 200)
+
+        ok_small, _ = fraud.is_withdrawal_eligible(user, coins=150)
+        self.assertTrue(ok_small)
+
+        ok_full_balance, reason = fraud.is_withdrawal_eligible(user, coins=300)
+        self.assertFalse(ok_full_balance)
+        self.assertIn("200", reason)
+
+        ok_exact, _ = fraud.is_withdrawal_eligible(user, coins=200)
+        self.assertTrue(ok_exact)
+
+    def test_gift_received_is_withdrawal_eligible(self):
+        """Gifted coins are eligible the same way purchased coins are."""
+        user = _make_user("gift_user")
+        CoinLedger.objects.record_transaction(
+            user=user,
+            transaction_type=CoinLedger.TransactionType.GIFT_RECEIVED,
+            amount=75,
+            reference="gift-1",
+        )
+        self.assertEqual(fraud.get_withdrawal_eligible_balance(user), 75)
+
+    def test_spend_overflow_eats_into_eligible_balance(self):
+        """
+        Spending more than the non-eligible (earned) balance should
+        reduce the eligible (purchased) balance by the overflow amount
+        — not leave it untouched.
+        """
+        user = _make_user("overflow_user")
+        CoinLedger.objects.record_transaction(
+            user=user,
+            transaction_type=CoinLedger.TransactionType.PURCHASE,
+            amount=100,
+            reference="purchase-1",
+        )
+        CoinLedger.objects.record_transaction(
+            user=user,
+            transaction_type=CoinLedger.TransactionType.EARN,
+            amount=50,
+            reference="earn-1",
+        )
+        # Spend 80: consumes the 50 earned coins, then 30 more must come
+        # out of the 100 purchased coins.
+        CoinLedger.objects.record_transaction(
+            user=user,
+            transaction_type=CoinLedger.TransactionType.SPEND,
+            amount=-80,
+            reference="spend-1",
+        )
+        user.refresh_from_db()
+        self.assertEqual(user.coin, 70)
+        self.assertEqual(fraud.get_withdrawal_eligible_balance(user), 70)
+
+
+class EarnRateLimitTests(TestCase):
+    def test_earn_rate_limit_blocks_burst(self):
+        """
+        Once a user crosses the earn-rate limit, a further EARN credit
+        is rejected with EarnRateLimitExceeded — and the caller (e.g.
+        campus tasks, referral bonus) can catch that specifically.
+        """
+        user = _make_user("burst_farmer")
+
+        # Patch the limit low so this test is fast and deterministic
+        # rather than depending on fraud.py's production defaults.
+        with patch.object(fraud, "EARN_RATE_LIMIT_MAX_TRANSACTIONS", 3), \
+             patch.object(fraud, "EARN_RATE_LIMIT_MAX_COINS", 10_000):
+            for i in range(3):
+                CoinLedger.objects.record_transaction(
+                    user=user,
+                    transaction_type=CoinLedger.TransactionType.EARN,
+                    amount=10,
+                    reference=f"earn-{i}",
+                )
+
+            with self.assertRaises(fraud.EarnRateLimitExceeded):
+                CoinLedger.objects.record_transaction(
+                    user=user,
+                    transaction_type=CoinLedger.TransactionType.EARN,
+                    amount=10,
+                    reference="earn-over-limit",
+                )
+
+        # The rejected transaction must not have moved the balance.
+        user.refresh_from_db()
+        self.assertEqual(user.coin, 30)
+
+    def test_earn_rate_limit_by_total_coins(self):
+        """The coin-total cap trips independently of the count cap."""
+        user = _make_user("big_earn_farmer")
+
+        with patch.object(fraud, "EARN_RATE_LIMIT_MAX_TRANSACTIONS", 100), \
+             patch.object(fraud, "EARN_RATE_LIMIT_MAX_COINS", 50):
+            CoinLedger.objects.record_transaction(
+                user=user,
+                transaction_type=CoinLedger.TransactionType.EARN,
+                amount=50,
+                reference="earn-1",
+            )
+            with self.assertRaises(fraud.EarnRateLimitExceeded):
+                CoinLedger.objects.record_transaction(
+                    user=user,
+                    transaction_type=CoinLedger.TransactionType.EARN,
+                    amount=1,
+                    reference="earn-2",
+                )
+
+    def test_earn_rate_limit_does_not_apply_to_purchase(self):
+        """
+        PURCHASE (and every non-EARN/CAMPUS_REWARD type) is never
+        rate-limited, even well past the earn caps.
+        """
+        user = _make_user("frequent_buyer")
+
+        with patch.object(fraud, "EARN_RATE_LIMIT_MAX_TRANSACTIONS", 1), \
+             patch.object(fraud, "EARN_RATE_LIMIT_MAX_COINS", 1):
+            for i in range(5):
+                CoinLedger.objects.record_transaction(
+                    user=user,
+                    transaction_type=CoinLedger.TransactionType.PURCHASE,
+                    amount=100,
+                    reference=f"purchase-{i}",
+                )
+
+        user.refresh_from_db()
+        self.assertEqual(user.coin, 500)```
+
+### tests_fraud.py notes
+
+- ⚠️ **Location caveat, in the file's own header:** this wasn't placed
+  under an existing `user_profile/tests/` package because no such
+  package was part of any upload — if this app already has one, move
+  this module in as `tests/test_fraud.py` instead of leaving it as a
+  top-level sibling of `models.py`/`views.py`.
+- ⚠️ **`_make_user()` assumption:** only sets `username` + `password` via
+  `create_user`. If `settings.AUTH_USER_MODEL` (`login.User`, per
+  `models.py`'s own comments) requires more mandatory fields, adjust
+  `_make_user()` — none of the assertions depend on anything about the
+  user beyond `coin` and its pk.
+- `WithdrawalEligibilityTests` covers: an earn-only balance is fully
+  non-withdrawable (with a clean rejection message, no balance change);
+  a mixed earn+purchase balance is only eligible up to the purchased
+  portion; gift-received coins are eligible the same as purchased ones;
+  spend that exceeds the non-eligible bucket correctly eats into the
+  eligible bucket.
+- `EarnRateLimitTests` covers: the count cap trips
+  (`EarnRateLimitExceeded`, no balance change on the rejected attempt);
+  the total-coins cap trips independently of the count cap; `PURCHASE`
+  (and by extension every non-EARN/CAMPUS_REWARD type) is never
+  rate-limited even with the caps patched down to 1.
+- Uses `unittest.mock.patch.object(fraud, "EARN_RATE_LIMIT_MAX_..." , N)`
+  to make the rate-limit tests fast and deterministic rather than
+  depending on `fraud.py`'s production defaults (20 tx / 500 coins per
+  hour) — don't remove those patches when editing these tests, or they
+  become slow/flaky against the real window.
 
 ---
 
@@ -3143,6 +4980,132 @@ gift, live in other apps not covered by this upload).
 
 ---
 
+> **Update to §10.9 (v4):** `record_transaction()`'s atomic block above
+> now also runs `fraud.check_earn_rate_limit()` (for
+> `EARN`/`CAMPUS_REWARD` only) right after the row lock is acquired and
+> before the reference/idempotency check — a trip raises
+> `fraud.EarnRateLimitExceeded` and rolls the whole transaction back, so
+> no partial ledger row or balance change survives a rejected earn
+> credit. The method also now always sets
+> `metadata["withdrawal_eligible"]` before creating the row. See §8b for
+> the full rule.
+
+### 10.10 Buy coins (`POST /profile/buy-coin/` → `POST /profile/buy-coin/confirm/`) — v4, TASK 3, new
+
+```
+POST /profile/buy-coin/ {gateway_reference, amount, coins, gateway}
+        │
+        ▼
+CoinPurchaseRequest.objects.start_purchase(...)
+  get_or_create(gateway_reference=...) — wallet untouched, status=PENDING
+        │
+        ▼
+201 (new) or 200 (already existed) — never touches User.coin
+
+... later, once the payment gateway confirms ...
+
+POST /profile/buy-coin/confirm/ {gateway_reference, status: success|failed}
+        │
+        ▼
+status == "success"?
+  ├─ yes → CoinPurchaseRequest.objects.confirm_success(gateway_reference)
+  │         select_for_update() the request row
+  │         already SUCCESS? → return as-is (idempotent)
+  │         already FAILED?  → raise ValueError → 409
+  │         else → CoinLedger.objects.record_transaction(
+  │                  transaction_type=PURCHASE, amount=+coins,
+  │                  reference=f"coin_purchase_request:{pk}")
+  │                request.status = SUCCESS; save
+  └─ no  → CoinPurchaseRequest.objects.mark_failed(gateway_reference, reason)
+            already FAILED? → return as-is
+            already SUCCESS? → raise ValueError → 409 (can't un-credit this way)
+            else → request.status = FAILED; save — wallet untouched
+```
+⚠️ As shipped, `BuyCoinConfirmView` is **not** verified against a real
+payment-gateway signature — see §11. Don't expose `/buy-coin/confirm/`
+to an untrusted caller in production without adding that check first.
+
+### 10.11 Withdraw coins (`POST /profile/coin-withdrawals/`) — v4, TASK 4 + TASK 5, new
+
+```
+POST /profile/coin-withdrawals/ {coins, payout_method, payout_details}
+        │
+        ▼
+serializer valid? (payout_details' required keys checked against
+payout_method — e.g. UPI needs upi_id) ──no──▶ 400
+        │ yes
+        ▼
+fraud.is_withdrawal_eligible(request.user, coins)   ◀── TASK 5
+  get_withdrawal_eligible_balance(user): eligible credits
+  (PURCHASE + GIFT_RECEIVED + WITHDRAWAL_REJECTED) minus eligible debits
+  (WITHDRAWAL_REQUESTED) minus any non-eligible-bucket overflow
+        │
+   not eligible? ──▶ 403 (balance untouched, no request row created)
+        │ eligible
+        ▼
+CoinWithdrawalRequest.objects.request_withdrawal(user, coins, ...)
+  transaction.atomic():
+    create CoinWithdrawalRequest(status=PENDING)
+    CoinLedger.objects.record_transaction(
+      transaction_type=WITHDRAWAL_REQUESTED, amount=-coins,
+      reference=f"coin_withdrawal_request:{pk}")
+      ├─ insufficient User.coin? → ValueError → rolls back BOTH
+      │   the request row and the debit → view returns 402
+      └─ ok → debit applied, request.debit_ledger_entry = entry
+        │
+        ▼
+201 — coins already left the wallet (escrow pattern)
+
+... later, ops/admin side (no endpoint yet, see §11) ...
+mark_processing() → PROCESSING (no coin movement)
+confirm_success() → SUCCESS (no coin movement — debit already happened)
+reject(reason)     → REJECTED, credits coins back via
+                     CoinLedger.objects.record_transaction(
+                       transaction_type=WITHDRAWAL_REJECTED, amount=+coins,
+                       reference=f"coin_withdrawal_request_refund:{pk}")
+```
+Note the two distinct rejection codes: **403** means "you have enough
+coins overall, but not enough *withdrawal-eligible* ones" (policy);
+**402** means "you don't have enough coins, period" (balance). A client
+should show different messaging for each.
+
+### 10.12 Earn-rate limiting (`fraud.check_earn_rate_limit`) — v4, TASK 5, new
+
+```
+Any caller (this app, campus tasks, referral bonus, ...) calls
+CoinLedger.objects.record_transaction(transaction_type=EARN or
+CAMPUS_REWARD, amount=+n, ...)
+        │
+        ▼
+transaction.atomic(): select_for_update() locks the user row
+        │
+        ▼
+fraud.check_earn_rate_limit(locked_user, transaction_type)
+  transaction_type not in (EARN, CAMPUS_REWARD)? → True immediately, no query
+  else:
+    count of EARN/CAMPUS_REWARD rows in the last EARN_RATE_LIMIT_WINDOW
+    (default 1h) >= EARN_RATE_LIMIT_MAX_TRANSACTIONS (default 20)?
+      → False
+    OR sum(amount) over that same window >=
+       EARN_RATE_LIMIT_MAX_COINS (default 500)?
+      → False
+    else → True
+        │
+   False? ──▶ raise fraud.EarnRateLimitExceeded — whole atomic block
+              rolls back, no ledger row, no balance change
+        │ True
+        ▼
+... reference-idempotency check, balance update, CoinLedger row creation
+    (unchanged from v3 — see §10.9)
+```
+Because this check lives inside `record_transaction()` itself rather
+than in any one view, it applies uniformly no matter which app or code
+path is the one crediting EARN/CAMPUS_REWARD coins — including code
+this upload never saw (campus's engagement-bonus task, a future
+referral-bonus flow, etc.).
+
+---
+
 ## 11. Known Issues / Things To Double-Check
 
 Items 1–4 below are **resolved as of v3** (kept here, struck through, so
@@ -3227,6 +5190,54 @@ Items 5–7 are still open.
 
 ---
 
+
+> **v4 additions below (items 10–15)** — everything above this line is
+> unchanged from v3.1; item 9 there already listed the two test gaps
+> B-8/F-3 introduced. TASK 1/3/4/5 add the following, still-open items.
+
+10. **`BuyCoinConfirmView` is not gateway-signature-verified.** As shipped,
+    `IsAuthenticated` + "must be your own purchase" stand in for real
+    payment-gateway webhook verification (no gateway integration was
+    part of this upload). Before this endpoint is exposed to a real
+    payment provider's callback, that verification needs to replace or
+    gate the current ownership check — a genuine webhook call isn't
+    "acting as" any particular authenticated user, so the current shape
+    can't be the final one.
+11. **`CoinPurchaseRequest`'s shape is inferred, not confirmed against
+    `liveclass.CoinPurchase`.** `liveclass/models.py` wasn't part of any
+    upload for this app. If `liveclass.CoinPurchase`'s actual field
+    shape (gateway list, money precision, etc.) differs in a way that
+    matters, reconcile the two — ideally by rerunning TASK 3 with
+    `liveclass/models.py` included so they don't silently diverge.
+12. **No admin/ops endpoint for `CoinWithdrawalRequest.objects.
+    mark_processing()` / `.confirm_success()` / `.reject()`.** All three
+    manager methods exist and are unit-tested, but nothing in `urls.py`
+    calls them — a withdrawal can currently only ever reach `PENDING`
+    through the public API; moving it to `PROCESSING`/`SUCCESS`/
+    `REJECTED` requires a Django shell, a management command, or a
+    future admin action, none of which exist yet.
+13. **`CoinWithdrawalRequest` has no `MIN_WITHDRAWAL_COINS` floor, no
+    `reviewed_by` tracking, and no INR conversion snapshot** — all three
+    exist on the `liveclass.CoinWithdrawal` this was modeled after but
+    were deliberately left out of this pass as out of scope; add them
+    if/when an admin-facing withdrawal review UI is built.
+14. **Earn-rate-limit constants are hardcoded, not settings-driven**
+    (`fraud.EARN_RATE_LIMIT_WINDOW` / `_MAX_TRANSACTIONS` /
+    `_MAX_COINS`). Fine for a first pass with no real farming-attempt
+    data to calibrate against, but tightening/loosening them today means
+    editing `fraud.py` directly rather than a settings/ops change — move
+    them to Django settings once there's production signal to tune
+    against.
+15. **`fraud.py`'s two rules have partial test coverage, not full.**
+    `tests_fraud.py` covers the withdrawal-eligibility math and both
+    rate-limit caps, but (carried over from item 9) there's still no
+    test asserting `CoinLedgerAdmin` actually refuses add/change/delete,
+    and no test exercises `record_transaction()` specifically with
+    `transaction_type=CAMPUS_REWARD` (only the EARN/CAMPUS_REWARD
+    grouping inside the rate limiter is exercised, via EARN).
+
+---
+
 ## 12. Quick Setup Checklist (to run this app standalone)
 
 - [ ] Custom `User` model has: `profile_photo`, `bio`, `is_private`,
@@ -3263,4 +5274,66 @@ Items 5–7 are still open.
 
 With the above satisfied, everything in this single document — models,
 serializers, views, urls, admin, tasks, tests — is enough to run the
-full `user_profile` app end to end.
+
+- [ ] **v4:** If/when `BuyCoinConfirmView` is wired to a real payment
+      gateway, replace/gate its current "must be your own purchase"
+      check with actual gateway-signature verification (see §11 item
+      10) — do not expose it to the public internet unauthenticated
+      before that.
+- [ ] **v4:** If `liveclass/models.py` exists in your actual codebase,
+      diff `CoinPurchaseRequest`'s shape against `liveclass.CoinPurchase`
+      before relying on this as final (§11 item 11).
+- [ ] **v4:** Decide who/what will eventually call
+      `CoinWithdrawalRequest.objects.mark_processing()` /
+      `.confirm_success()` / `.reject()` — no endpoint calls them yet
+      (§11 item 12).
+- [x] **v4:** `fraud.py`'s two rules (withdrawal eligibility, earn-rate
+      limiting) are already wired into
+      `CoinLedgerManager.record_transaction()` in code — nothing to
+      configure to turn them on. Only the rate-limit *constants*
+      (`EARN_RATE_LIMIT_WINDOW`/`_MAX_TRANSACTIONS`/`_MAX_COINS`) are
+      worth revisiting once you have real usage data (§11 item 14).
+- [x] **v4:** `CoinLedgerAdmin` (in the now-uploaded `admin.py`) is
+      already read-only in code, same as noted for B-8 in v3.1 — if you
+      already had your own `admin.py` with other model registrations in
+      it, make sure they were merged in rather than overwritten (§8).
+
+---
+
+## 13. Cross-App Interconnections (summary)
+
+`user_profile` doesn't run in isolation — this section pulls together,
+in one place, every other app this codebase's comments reference so the
+boundary between "owned here" and "consumed elsewhere" stays clear as
+more apps get added. None of these other apps' own files were part of
+any upload for this app — everything below is inferred from how
+`user_profile` already refers to them.
+
+| Other app | What it needs from `user_profile` | What `user_profile` needs from it |
+|---|---|---|
+| **`login`** | `settings.AUTH_USER_MODEL` (`login.User`) is the target of every FK in this app (`Follow`, `BlockUser`, `RestrictUser`, `CoinLedger`, `CoinPurchaseRequest`, `CoinWithdrawalRequest`). `user_profile` never imports `login.User` directly — always via `settings.AUTH_USER_MODEL` or `type(user)` — to stay decoupled. | The custom fields §2 lists (`profile_photo`, `bio`, `is_private`, `is_verified`, `is_active`, `followers_count`, `following_count`, `posts_count`, `coin`) must exist on `login.User`. Its own `ModelAdmin` must declare `search_fields` for `autocomplete_fields` elsewhere in this app's `admin.py` to work (§11 item 6). |
+| **`testseries`** | `TestSeriesPurchase.purchase_and_start_attempt()` / `.release()` reference `CoinLedger.TransactionType.TESTSERIES_PURCHASE` / `TESTSERIES_PAYOUT` directly (TASK 1) — those values existing in this app's enum is a hard dependency; they were missing before TASK 1 and it was a live `AttributeError`. | Nothing — `testseries` is purely a consumer of this app's `TransactionType` enum and (presumably) calls `CoinLedger.objects.record_transaction()` itself for its own purchase/payout flow. |
+| **`campus`** | `campus/tasks.py` (FEE-3/FEE-6) reads a student's `User.coin` balance to decide whether it covers an upcoming fee. `FEE-2` routes real tuition-fee payments through this same `CoinLedger`. Small engagement bonuses (attendance-streak, on-time-assignment-streak) credit coins via `TransactionType.CAMPUS_REWARD` (F-3) — and are therefore automatically subject to TASK 5's earn-rate limiter, the same as any other `EARN`/`CAMPUS_REWARD` credit. | Nothing structural — `campus` just needs `CAMPUS_REWARD` to exist (it does, as of F-3) and to call `record_transaction()` rather than writing `User.coin` directly, or its credits would silently escape both the audit trail and the rate limiter. |
+| **`liveclass`** | Nothing currently — not a consumer of this app. | `liveclass.CoinPurchase` and `liveclass.CoinWithdrawal`/`CoinTransaction` were used as **reference reads** (not code dependencies) when designing `CoinPurchaseRequest` (TASK 3) and `CoinWithdrawalRequest` (TASK 4) respectively — both reproduce `liveclass`'s escrow/lifecycle patterns on top of `CoinLedger` instead of `liveclass.CoinTransaction`, since `CoinLedger` is this codebase's one shared ledger. `liveclass/models.py` itself was never uploaded, so these two models' exact field shapes are inferred, not verified against it (§11 items 10–11) — worth reconciling if the two ever need to match exactly.
+| **`post`** | Nothing currently — not a consumer. | `post/models.py`'s `update_shares_count`/`update_saves_count`/`update_story_views_count` signal pattern is the reference design `tasks.py`'s module docstring points to as the *real* fix for follow-count drift (a `Follow` `post_save`/`post_delete` signal, instead of `reconcile_follow_counts`'s periodic detect-and-correct). Not implemented here — out of scope for this pass, noted for a future one. `post.views.TrendingHashtagsAPIView`'s "bounded recompute now, revisit at scale" trade-off is the same one `reconcile_follow_counts` makes. |
+| **`message`** | Consumes `is_blocked_between()` for chat/contact-search filtering (block) and is expected to eventually consume `is_restricted_between()` to suppress read-receipts/online-status/notifications from a restricted user (not implemented yet — §11 item 8). Gifting flows in `message` are expected to call `CoinLedger.objects.record_transaction(transaction_type=GIFT_SENT / GIFT_RECEIVED)` — not verified against actual `message` code since it wasn't uploaded. | `MessageContactSearchView`/`MessageContactSearchSerializer` exist specifically to serve `message`'s "add members" flow. |
+
+### Ground rules that apply across all of the above
+- **`CoinLedger.objects.record_transaction()` is the only sanctioned way
+  any app changes `User.coin`.** Every other app in this table is
+  expected to call it rather than writing `user.coin = ...; user.save()`
+  itself — that's what keeps the ledger, the fraud checks (TASK 5), and
+  the balance mutually consistent no matter which app triggers the
+  change.
+- **`user_profile` owns the relationship, not the effect**, for both
+  `BlockUser` and `RestrictUser` — `is_blocked_between()`/
+  `is_restricted_between()` are the two functions other apps are meant
+  to filter through; this app never reaches into `post`/`message`/
+  notifications itself to enforce what blocking or restricting should
+  do there.
+- **Every cross-app reference above is a one-way dependency on this
+  app's public surface** (a `TransactionType` value, a helper function,
+  `record_transaction()` itself) — none of them require `user_profile`
+  to import the other app back, keeping this app's own import graph
+  free of circular references to `testseries`/`campus`/`liveclass`/
+  `post`/`message`.

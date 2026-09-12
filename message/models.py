@@ -1023,8 +1023,31 @@ class DoubtQuestion(BaseModel):
     (moderation/abuse ke liye zaroori hai, aur teacher `reveal` action se
     dobara dekh sakta hai).
     """
-    group = models.ForeignKey(Group, on_delete=models.CASCADE, related_name='doubts')
-    conversation = models.ForeignKey(Conversation, on_delete=models.CASCADE, related_name='doubts')
+    # Task 16 — both made nullable so a testseries query (neither a
+    # classroom nor a chat conversation) can use this same model via
+    # `context_type`/`context_id` below instead. A classroom doubt
+    # still always sets both (`group` for permission/query, `conversation`
+    # for the WS broadcast room — see docstring above); the two pointer
+    # styles are mutually exclusive per doubt, enforced by the
+    # CheckConstraint in Meta below.
+    group = models.ForeignKey(
+        Group, null=True, blank=True, on_delete=models.CASCADE, related_name='doubts',
+    )
+    conversation = models.ForeignKey(
+        Conversation, null=True, blank=True, on_delete=models.CASCADE, related_name='doubts',
+    )
+
+    # Task 16 — generic opaque context pointer, same shape/convention as
+    # `testseries.TestSeries.context_type`/`context_id`: this app never
+    # resolves it to a real `testseries.TestAttempt` row itself (golden
+    # rule — no `testseries` import here); only `testseries/bridge.py`
+    # reads/writes these. `context_type="testseries_attempt"` +
+    # `context_id=<TestAttempt.id>` is the only value in use today, but
+    # left generic (unprefixed) in case another app needs the same
+    # "doubt with no group/conversation" shape later. Both blank/null
+    # for ordinary classroom doubts.
+    context_type = models.CharField(max_length=30, blank=True, null=True)
+    context_id = models.UUIDField(blank=True, null=True)
     author = models.ForeignKey(
         User, on_delete=models.CASCADE, related_name='doubts_asked',
     )
@@ -1060,6 +1083,24 @@ class DoubtQuestion(BaseModel):
         ordering = ['-upvotes_count', '-created_at']
         indexes = [
             models.Index(fields=['group', 'is_answered', '-upvotes_count']),
+            # Task 16 — testseries-side lookup: "does this attempt already
+            # have a query on it" / reverse-resolve a doubt back to its
+            # attempt, without a group.
+            models.Index(fields=['context_type', 'context_id']),
+        ]
+        # Task 16 — every doubt is EITHER a classroom doubt (`group` set)
+        # OR a context-pointer doubt (`context_type`+`context_id` set),
+        # never neither and never (today) both — a doubt with no group
+        # and no context pointer would be orphaned (nowhere to list it,
+        # nothing to permission-check it against).
+        constraints = [
+            models.CheckConstraint(
+                check=(
+                    models.Q(group__isnull=False)
+                    | (models.Q(context_type__isnull=False) & models.Q(context_id__isnull=False))
+                ),
+                name='doubtquestion_has_group_or_context',
+            ),
         ]
 
 

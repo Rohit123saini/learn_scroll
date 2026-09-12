@@ -1,12 +1,18 @@
 # `core` App — Documentation
 
-> Ye document `core` Django app ke andar jo bhi kaam hua hai (tasks 28, 42-48, F-4) uska single source of truth hai. Koi bhi is app pe kaam continue kare, sabse pehle ye file padhe — har file ka purpose, har function ka contract, aur sab `ASSUMPTION` markers ek jagah pe hain.
+> Ye document `core` Django app ke andar jo bhi kaam hua hai (tasks 28, 42-48, Task 18, F-1, F-4) uska single source of truth hai. Koi bhi is app pe kaam continue kare, sabse pehle ye file padhe — har file ka purpose, har function ka contract, aur sab `ASSUMPTION` markers ek jagah pe hain.
 
 > **Reconciliation pass (latest — is update):** source files firse check kiye gaye (campus app ke liye jaisi pass abhi-abhi hui thi, wahi tarika yahan bhi). Do real gaps mile:
 > - **`search.py` (F-4) — poora naya file, is doc me ab tak bilkul mention hi nahi tha.** `core`'s unified cross-app "search everything" layer (Postgres FTS + trigram, `message/search_utils.py` ke strategy ka extension) — naya **§6.2** isko poora document karta hai; §2 aur §8 (dependency graph) bhi update kiye.
 > - **`test_parent_bridge.py` test-count galat tha** — §2 aur §6.1 "10 tests" bolte the, real file me **11** hain (`test_second_students_parent_token_never_resolves_to_first_student` count me chhoot gaya tha). Fix kar diya.
 >
-> Baaki sab (`models.py`, `services.py`, `notification_batching.py`, `classroom_chat_bridge.py`'s 8+1 sync/parent functions, `views.py`/`serializers.py`/`urls.py`, `admin.py`, `tests.py`) already is doc se match kar rahe the — in files me koi naya drift nahi mila.
+> Baaki sab (`models.py`, `services.py`, `notification_batching.py`, `classroom_chat_bridge.py`'s 8+1 sync/parent functions, `admin.py`, `tests.py`) already is doc se match kar rahe the — in files me koi naya drift nahi mila.
+>
+> **Reconciliation pass (latest — this update):** phir se saare files check kiye gaye (campus app ke liye jaisi pass hui thi, wahi tarika) — **3 real gaps mile**, doc ab neeche diye changes ke saath update kar diya gaya hai:
+> - **`SearchView`/`search/` endpoint ab BAN CHUKA HAI — pichli pass ka §6.2/§9-item-13 ka "koi view/url wired nahi" claim ab STALE tha.** `core/views.py` me ab `SearchView` (Task 18, plain `APIView`) hai jo `assignment`+`testseries` ke liye khud apne scoped querysets banata hai (`assignment` — `AssignmentViewSet.get_queryset()` ko mirror karta hai; `testseries` — individual/published + own-created + attempted + campus-enrolled, `campus.StudentEnrollment` se resolve karke) aur unhe `core.search.search_everything()` ko deta hai. `core/urls.py` me `path("search/", SearchView.as_view())` bhi wired hai. §6.2, §7, §8, §9 update kiye — koi test coverage abhi bhi nahi hai iske liye (naya open item).
+> - **`search.py`'s `SOURCES` registry me `assignment`/`testseries` bhi ab WIRED hain (Task 18)** — pichli pass ke status-table me sirf `message`✅/`campus_notice`✅ the, `post`❌/`class_material`❌ stub — lekin `ASSIGNMENT_SOURCE`/`TESTSERIES_SOURCE` (dono `_search_generic_model` ke through, fields=`("title","description")`) us table me the hi nahi, jabki module docstring khud unhe ✅ bolta hai. §6.2 status table fix kiya.
+> - **`check_config_drift.py` (F-1) — bilkul NAYI file, is doc me ab tak kahin mention nahi thi.** `core/management/commands/check_config_drift.py` — 4 automated drift checks (throttle-scope→`DEFAULT_THROTTLE_RATES`, `@shared_task`→`CELERY_BEAT_SCHEDULE`, model→admin registration, `APIView`→`urls.py` wiring), abhi `user_profile`+`core` par scoped (`settings.CONFIG_DRIFT_APPS`). Naya **§11** poora document karta hai; §2 aur §9 (settings.py wiring requirement) bhi update kiye.
+>
 
 ---
 
@@ -29,15 +35,16 @@ Pehle notifications aur classroom↔chat coupling `liveclass` app ke andar bikhr
 | `services.py` | `create_notification()` + `create_bulk_notifications()` — sirf bell-row(s) banate hain, push kabhi nahi bhejte |
 | `notification_batching.py` | `create_batched_notification()` — burst events (5 likes ek saath) ko ek notification me collapse karta hai. ✅ **Real implementation ab uploaded hai — see §5** (pehle yahan broken-content warning thi). |
 | `classroom_chat_bridge.py` | `liveclass` ↔ `message` app ke beech ka pura coupling — 8 sync functions + `get_groups_for_classrooms()` (bulk helper) + `resolve_parent_from_token()` (Task 5, parent-portal auth) — **poora file ab uploaded hai, body-not-available warning resolved — see §6/§6.1** |
-| `search.py` | **NEW row, F-4 — is doc me pehle bilkul mention nahi tha** — unified cross-app "search everything" (Postgres FTS + trigram, `message/search_utils.py` ka extension). `message` (wired) + `campus.Notice` (wired) sources abhi live hain; `post`/`liveclass.ClassMaterial` STUB hain (model uploads na hone ki wajah se). Pure ranking/merging layer hai — koi bhi permission-scoping khud nahi karta, caller ka pehle se scoped queryset leta hai. Naya **§6.2** dekho. |
-| `serializers.py` | **NEW row (wasn't in this table before)** — real DRF `ModelSerializer`s (`NotificationSerializer`, `NotificationPreferenceSerializer`), replacing this doc's own original `to_dict` suggestion — see §7 |
-| `views.py` | `NotificationViewSet` (list/retrieve/destroy + custom actions) + `NotificationPreferenceView` |
-| `urls.py` | Router wiring — root urlconf me `include("core.urls")` karna hai |
-| `admin.py` | **✅ NOT empty anymore** — `NotificationAdmin` + `NotificationPreferenceAdmin` dono registered hain, see §3b |
+| `search.py` | Unified cross-app "search everything" (Postgres FTS + trigram, `message/search_utils.py` ka extension). **4 sources ab WIRED hain**: `message`, `campus.Notice` (Task F-4), aur `assignment`/`testseries` (Task 18, is pass me confirm hue) — `post`/`liveclass.ClassMaterial` abhi bhi STUB hain (model uploads na hone ki wajah se). Pure ranking/merging layer hai — koi bhi permission-scoping khud nahi karta, caller (`core/views.py::SearchView`) ka pehle se scoped queryset leta hai. §6.2 dekho. |
+| `serializers.py` | Real DRF `ModelSerializer`s (`NotificationSerializer`, `NotificationPreferenceSerializer`), replacing this doc's own original `to_dict` suggestion — see §7 |
+| `views.py` | `NotificationViewSet` (list/retrieve/destroy + custom actions) + `NotificationPreferenceView` + **`SearchView`** (Task 18, unified search endpoint — is pass me "wired" confirm hua, see §6.2/§7) |
+| `urls.py` | Router wiring (`notifications/`) + `notification-preferences/me/` + **`search/`** (Task 18, `SearchView.as_view()`) — root urlconf me `include("core.urls")` karna hai |
+| `admin.py` | `NotificationAdmin` + `NotificationPreferenceAdmin` dono registered hain, see §3b |
 | `apps.py` | Standard `CoreConfig` |
-| `tests.py` | `Notification`/`NotificationPreference`/`create_notification`/viewset ke tests |
+| `management/commands/check_config_drift.py` | **NEW row, F-1 — is doc me pehle bilkul mention nahi tha.** 4 automated config-drift checks (throttle-scope, celery-beat, admin-registration, urls-wiring), `settings.CONFIG_DRIFT_APPS` (default `["user_profile", "core"]`) par scoped. Naya **§11** poora document karta hai |
+| `tests.py` | `Notification`/`NotificationPreference`/`create_notification`/viewset ke **25** tests — `SearchView` ke liye abhi koi test nahi hai (open item, §9) |
 | `test_notification_batching.py` | `create_batched_notification` ke **5** tests (contract confirm karte hain — see §5) |
-| `test_parent_bridge.py` | **NEW row** — `resolve_parent_from_token()` (Task 5) ke **11** tests (count fix — pehle "10" likha tha), `message.models.ParentAccessCode`/`ParentToken` ke against — see §6 |
+| `test_parent_bridge.py` | `resolve_parent_from_token()` (Task 5) ke **11** tests, `message.models.ParentAccessCode`/`ParentToken` ke against — see §6 |
 
 ---
 
@@ -319,7 +326,9 @@ resolve_parent_from_token(token: str) -> resolution | None
 | Source | Status |
 |---|---|
 | `message` (chat messages) | ✅ WIRED — `message.search_utils.search_messages` ko seedha reuse karta hai (`Message` ke paas already stored `search_vector` + trigger hai) |
-| `campus_notice` (`campus.Notice`, `title`/`body`) | ✅ WIRED — `_search_generic_model()` ke through, kyunki `campus/models.py` iss pass me available tha. Caller ko phir bhi khud ek properly-scoped `Notice` queryset pass karna hai (golden rule upar) — ye file campus/department/section visibility rules khud nahi jaanti/guess karti. |
+| `campus_notice` (`campus.Notice`, `title`/`body`) | ✅ WIRED — `_search_generic_model()` ke through. Caller (`SearchView`) ko phir bhi khud ek properly-scoped `Notice` queryset pass karna hai (golden rule upar) — ye file campus/department/section visibility rules khud nahi jaanti/guess karti. |
+| `assignment` (`assignment.Assignment`, `title`/`description`) | ✅ **WIRED (Task 18, naya is pass me confirm hua)** — `_search_generic_model()` ke through. `SearchView` (§7) scoped queryset `AssignmentViewSet.get_queryset()` ko VERBATIM mirror karta hai: staff sab kuch dekhte hain, baaki sirf jo unhone khud post kiya ya jispe unki personal submission hai. Campus/liveclass-sourced assignments non-staff ke liye deliberately excluded hain yahan bhi (wo viewset khud unhe bahar rakhta hai). |
+| `testseries` (`testseries.TestSeries`, `title`/`description`) | ✅ **WIRED (Task 18, naya is pass me confirm hua)** — `_search_generic_model()` ke through. `SearchView` scoped queryset: individual/published (marketplace) + user ki khud-banayi + jo attempt ki + campus-context series un sections ke liye jinme user ACTIVE enrolled hai (`campus.StudentEnrollment` se — wahi roster-source jo `campus.bridge.create_testseries()` khud use karta hai). Liveclass-context series abhi included NAHI hain — liveclass side pe koi roster/entitlement resolver abhi nahi hai (`liveclass/bridge.py` me sirf assignment functions hain), isliye wo rows silently absent hain search results se, kabhi leak nahi hoti. |
 | `post` (post app) | ❌ **STUB ONLY** — `post/models.py` kabhi kisi upload ka hissa nahi raha, isliye `Post`'s searchable field(s) ka naam pata nahi. Wire karne ke liye `SOURCES` me ek naya `SearchSource` add karna hai (`NOTICE_SOURCE` jaisi shape) jab wo model milega. |
 | `class_material` (`liveclass.ClassMaterial`) | ❌ **STUB ONLY**, same reason — class exist karti hai (ek pehli `liveclass/models.py` upload me confirm hui thi) par uski field-list kabhi nahi dekhi gayi. |
 
@@ -351,7 +360,7 @@ search_everything(
 - `query` `MIN_QUERY_LENGTH` (message/search_utils.py se reused constant) se chhota ho to `ValueError` raise karta hai — same check jo `message/search_utils.py`'s callers `search_messages` tak pahunchne se pehle already karte hain, yahan ek hi jagah har source ke liye.
 - Ek source ka query error hona (e.g. caller ne ek expected field-missing queryset pass kar diya) baaki sources ko down nahi le jaata — `logger.exception` + continue, wahi "degrade, crash mat karo" posture jo `campus/bridge.py` ek missing bridge function ke liye already leta hai.
 
-**Koi naya `views.py`/`urls.py` endpoint abhi is pass me nahi bana** — `search.py` sirf ye library function expose karta hai; ek `SearchView`/URL wire karna caller-side follow-up hai (naya open item, §9 me add kiya).
+**✅ RESOLVED — `SearchView`/`search/` URL ab wired hai (pehle yahan "abhi library-only hai" warning thi).** `core/views.py::SearchView` (plain `APIView`, Task 18) is file ke `search_everything()` ko `core/urls.py`'s `path("search/", SearchView.as_view())` ke through expose karta hai — poori detail §7 me. Scoped-queryset-building responsibility (golden rule ke mutabik) `SearchView` khud nibhata hai, `search.py` nahi — is file me is wajah se koi change nahi karna pada. **Abhi bhi open:** koi test coverage `SearchView`/`search_everything()` ke liye nahi hai (naya open item, §9), aur `post`/`class_material` sources upar wali table ke mutabik abhi bhi stub hain.
 
 ---
 
@@ -368,6 +377,7 @@ search_everything(
 | POST | `notifications/{id}/mark-read/` | Mark ek read |
 | POST | `notifications/mark-all-read/` | Sab read, `{"marked_read": N}` |
 | GET/PATCH | `notification-preferences/me/` | Apni preference (get-or-create) |
+| GET | `search/` | **Task 18** — unified cross-app search, `?q=<query>` (required) + optional `?sources=assignment,testseries,...`. §6.2 me poori source-list; niche isi section me full behaviour. |
 
 **Root urlconf me wire karna hai** (abhi tak nahi kiya gaya):
 ```python
@@ -394,6 +404,20 @@ Ye doc pehle bolta tha ki `NotificationSerializer` deliberately plain `to_dict` 
 - `Meta.fields = ["push_enabled", "email_enabled", "sms_enabled", "whatsapp_enabled", "muted_types", "digest_frequency", "last_digest_sent_at", "updated_at"]`.
 - `read_only_fields = ["last_digest_sent_at", "updated_at"]` — baaki sab (`push_enabled` se lekar `digest_frequency` tak) client `PATCH` kar sakta hai.
 - `validate_muted_types(value)` — pehle check karta hai `value` ek list hai (warna `ValidationError`), phir har entry ko `Notification.NotifType.values` ke against validate karta hai — koi bhi unknown type string ho to `ValidationError(f"Unknown notification type(s): ...")`. Isi validation ko `tests.py::test_patch_rejects_unknown_muted_type` guard karta hai.
+
+### `SearchView` (Task 18) — `GET /core/search/?q=...&sources=...`
+
+Plain `APIView` (`IsAuthenticated`), `NotificationViewSet`/`NotificationPreferenceView` jaisa hi "own-scope only" spirit follow karta hai — bas yahan "own scope" ka matlab hai "jo bhi is user ko har source ki apni existing permission-rule allow karti hai", na ki sirf apne records.
+
+- `q` required — nahi diya to `search_everything()` `ValueError` raise karta hai, jise ye view `400 {"detail": ...}` me convert karta hai.
+- `sources` optional, comma-separated (`SOURCES` ke keys ka subset) — `?sources=assignment` jaisa; na diya jaye to har source jiska ye view khud queryset banata hai, search hoti hai.
+- **Is view ki asli responsibility** — golden rule (§6.2) ke mutabik — HAR source ke liye ek already-permission-scoped queryset khud banana hai, `core.search` ko kabhi seedha model query nahi karne dena:
+  - `assignment` — `assignment.models.Assignment` ko `AssignmentViewSet.get_queryset()` (`assignment/views.py`) jaisa hi scope karta hai: `user.is_staff` ho to sab, warna sirf `posted_by=user` YA (`source=PERSONAL` aur `submissions__student=user`).
+  - `testseries` — `testseries.models.TestSeries` ko scope karta hai: `source=INDIVIDUAL, status=PUBLISHED` (marketplace) YA `creator=user` YA `attempts__student=user` YA (`source=CAMPUS`, `context_type="section"`, `context_id` un section-ids me jinme `campus.StudentEnrollment` ke through user `ACTIVE` enrolled hai).
+- In dono ke local imports (`from assignment.models import ...`, `from testseries.models import ...`, `from campus.models import StudentEnrollment`) function-body ke andar hain, module-level nahi — same lazy-import posture jo poore project me circular-import se bachne ke liye use hoti hai.
+- `message`/`campus_notice` (`Notice`) sources ke liye **is view me abhi koi scoped-queryset builder nahi hai** — `search.py`'s `SOURCES` registry me dono entries maujood hain, lekin `SearchView.get()` unke liye koi queryset nahi banata, isliye `?sources=message`/`?sources=campus_notice` aaj **khaali results dete hain, error nahi** (`search_everything()`'s "sirf jo dono jagah present ho, wahi search hoti hai" contract ke mutabik). Ye apna alag open item hai (§9) — `search.py`'s docstring khud is gap ko wired-vs-scoped do alag cheezein maankar treat karta hai.
+- Response shape: `{"results": [...]}`, jahan har result `search_everything()`'s common dict shape follow karta hai (`source`, `id`, `title`, `snippet`, `created_at`, `rank`, `similarity`, `extra`).
+- **⚠️ NO TEST COVERAGE** — `tests.py` me is view/endpoint ke liye ek bhi test nahi hai (naya open item, §9).
 
 ### Pagination
 Simple limit/offset — DRF ka `PageNumberPagination` istemal nahi kiya (project ka `REST_FRAMEWORK.DEFAULT_PAGINATION_CLASS` pata nahi tha). Agar project me standard pagination class hai, isse replace kar sakte ho.
@@ -426,11 +450,15 @@ message.views_parent.StudentReportCardList  ──uses──▶  core.classroom_
 
 core.models.Notification  ──FK (SET_NULL)──▶  liveclass.Classroom, liveclass.ClassSession
 
-core.search.search_everything  ──uses──▶  message.search_utils.search_messages   [NEW, F-4]
-                            └── caller (a future view) ──must pass──▶ already permission-scoped
-                                 querysets for each source (message/campus.Notice/...) — core.search
-                                 itself never queries `campus`/`message`/`post`/`liveclass` models
-                                 directly, only ranks/merges what the caller hands it.
+core.search.search_everything  ──uses──▶  message.search_utils.search_messages
+                            └── caller ──must pass──▶ already permission-scoped querysets for each
+                                 source (message/campus.Notice/assignment/testseries/...) — core.search
+                                 itself never queries `campus`/`message`/`post`/`liveclass`/`assignment`/
+                                 `testseries` models directly, only ranks/merges what the caller hands it.
+
+core.views.SearchView  ──uses──▶  core.search.search_everything   [Task 18, NOW WIRED]
+                            ├──local-import──▶ assignment.models (Assignment, AssignmentSource)
+                            └──local-import──▶ campus.models (StudentEnrollment), testseries.models (TestSeries)
 ```
 
 `liveclass` aur `message` **kabhi ek dusre ko seedha nahi jaante** — sab kuch `core.classroom_chat_bridge` se guzarta hai. Ye invariant future me bhi maintain karna hai.
@@ -451,7 +479,10 @@ core.search.search_everything  ──uses──▶  message.search_utils.search_
 10. ✅ ~~`notification_batching.py` uploaded content broken (self-import)~~ — resolved, real implementation ab hai (§5).
 11. ✅ ~~`classroom_chat_bridge.py`'s apna module docstring khud ko "9 functions" bolta hai lekin `get_groups_for_classrooms()` (10wa entry point) us count me nahi hai~~ — **resolved.** Module docstring ab explicitly clarify karta hai ki "9 functions" sirf `liveclass`-facing count hai (functions 1-9); `get_groups_for_classrooms()` module ka 10wa entry point hai, `message/views_parent.py` se seedha call hota hai, isliye us 9 ki ginti me nahi tha. Koi functional bug nahi tha, sirf docstring stale/ambiguous tha — ab dono counts (9 liveclass-facing + 1 message-facing = 10 total) explicit hain.
 12. **NEW open item:** `models.py`'s naye `NotificationQuerySet.for_user()`/`.unread()` manager methods abhi kahin bhi call-site pe use nahi ho rahe (`views.py`/`tests.py` purane `.filter(...)` style se hi likhe hain) — functional issue nahi (dono equivalent hain), bas ek available convenience hai jo abhi adopt nahi hui.
-13. **NEW open item (F-4, `search.py`):** koi `views.py`/`urls.py` endpoint abhi `search_everything()` ko expose nahi karta — ye sirf ek library function hai abhi tak, koi caller wire nahi hua. `post`/`liveclass.ClassMaterial` sources bhi stub hain (§6.2) un models ke upload hone tak.
+13. ✅ ~~`search.py` expose karne ke liye koi `views.py`/`urls.py` endpoint nahi tha~~ — **resolved, is pass me confirm hua.** `core/views.py::SearchView` + `core/urls.py`'s `path("search/", ...)` dono ab wired hain (§6.2, §7). `post`/`liveclass.ClassMaterial` sources abhi bhi stub hain (§6.2) un models ke upload hone tak — ye hissa khula hai.
+14. **NEW open item:** `SearchView`/`search_everything()` ke liye `tests.py` me **koi test nahi hai** — na success path (`?q=`, `?sources=`), na 400-on-short-query, na "assignment/testseries scoping sahi hai" wali regression. Sabse pehle iske liye tests likhna agla natural kaam hai.
+15. **NEW open item:** `SearchView` sirf `assignment`/`testseries` ke liye scoped queryset banata hai — `message`/`campus_notice` (`Notice`) `search.py`'s `SOURCES` me registered hain (§6.2) lekin `SearchView.get()` unke liye koi queryset nahi banata, isliye `?sources=message`/`?sources=campus_notice` aaj silently khaali result dete hain. Inke liye bhi scoped-queryset builder add karna hai (§7 me flag kiya) jab ye tasked ho.
+16. **NEW open item (F-1, `check_config_drift.py`):** command khud apne docstring me `settings.py` me `CONFIG_DRIFT_APPS = ["user_profile", "core"]` set karne ko kehta hai — ye setting is upload me confirm nahi ho saki (settings.py iss pass me nahi aaya). Verify karo ye setting maujood hai, aur command ko CI me (`--strict` flag ke saath) wire karna hai taaki drift automatically catch ho — abhi sirf manually `python manage.py check_config_drift` chalane se hi kaam karta hai.
 
 ---
 
@@ -468,3 +499,59 @@ core.search.search_everything  ──uses──▶  message.search_utils.search_
 | Live session start (`notify_session_live` task) | `post_session_live_announcement(session)` |
 | Burst-y event (likes/follows/comments) | `create_batched_notification(...)` bell + push dono ke liye, agar batching chahiye |
 | Non-burst notification (single event) | `create_notification(...)` bell ke liye + apna separate push call |
+
+---
+
+## 11. `management/commands/check_config_drift.py` — F-1, automated config-drift check (NEW, is doc me pehle bilkul nahi tha)
+
+**Kyu bana:** is codebase ke audit-comments me baar-baar EK JAISE 4 bug-shapes milte rahe hain, alag-alag apps me — sab "compile to ho jaata hai, bug sirf pehli real request/tick pe pata chalta hai" type ke:
+
+1. Koi `ScopedRateThrottle`/custom throttle `throttle_scope` (ya `scope`) set karta hai, lekin `REST_FRAMEWORK["DEFAULT_THROTTLE_RATES"]` me uski matching key nahi hoti — us endpoint ki pehli hi request `ImproperlyConfigured` deti hai. (Is codebase me 10+ baar ho chuka: `session_join`, `coupon_validate`, `coin_withdrawal`, `chat_reaction`, `classroom_share`, `chunked_upload_*`, ...)
+2. Koi `@shared_task` likha jaata hai jo clearly ek schedule pe chalne ke liye bana hai (sweep/reconcile/cleanup/expire job), lekin kabhi `CELERY_BEAT_SCHEDULE` entry nahi milti — wo bas kabhi chalta hi nahi. (`refresh_stale_enrolled_counts`, `reconcile_stuck_coin_purchases`, `run_auto_renewals`, `expire_unclaimed_gifts`, `send_notification_digests` — sab kisi na kisi point pe ye bug rakh chuke hain, settings.py ke comments ke mutabik.)
+3. Koi model banta hai lekin `admin.py` me kabhi register nahi hota — koi `/admin/` se inspect/support nahi kar sakta.
+4. Koi `APIView` subclass likhi jaati hai lekin kabhi `urls.py` me wire nahi hoti — dead code jo koi reach hi nahi kar sakta.
+
+Ye command in charo checks ko generic bana kar automate karta hai — Django ke app-registry + AST/regex source-scans par based, koi hardcoded per-app logic nahi.
+
+### Scope (deliberate, limitation nahi)
+
+Abhi sirf `user_profile` aur `core` check hote hain (`CONFIG_DRIFT_APPS` default) — sirf ye do apps is command likhte waqt available the. Command khud fully generic hai; baaki apps add karna sirf `CONFIG_DRIFT_APPS` list me ek line badalna hai — kuch aur nahi chhedna padta.
+
+### Wiring (one-time, `settings.py` me — **is pass me verify nahi ho paaya, settings.py upload nahi hua**)
+
+```python
+CONFIG_DRIFT_APPS = ["user_profile", "core"]  # yahan aur apps add karo baad me
+
+# Escape hatches — sirf tab add karo jab flag ki gayi cheez
+# genuinely jaanboojh kar aisi hai, check galat nahi hai:
+CONFIG_DRIFT_ADMIN_SKIP = set()        # {"app_label.ModelName", ...}
+CONFIG_DRIFT_ONDEMAND_TASKS = set()    # {"task_function_name", ...}
+CONFIG_DRIFT_URL_SKIP = set()          # {"app_label.ViewClassName", ...}
+```
+
+### Usage
+
+```bash
+python manage.py check_config_drift
+python manage.py check_config_drift --apps user_profile core liveclass
+python manage.py check_config_drift --strict   # CI ke liye — issue mile to nonzero exit
+```
+
+### 4 checks (as-built)
+
+1. **`_check_throttle_scopes`** — har app ke saare `.py` files me `throttle_scope = "xxx"` (regex) aur `class XThrottle(...Throttle...):` ke andar bare `scope = "xxx"` (regex, sirf Throttle-base classes ke andar hi, taaki koi unrelated `scope` variable false-positive na de) dhoondta hai, phir har mile hue scope ko `REST_FRAMEWORK["DEFAULT_THROTTLE_RATES"]` ke against check karta hai.
+2. **`_check_celery_beat`** — `tasks.py` ko AST-parse karke har `@shared_task` (bare ya `@shared_task(bind=True)` jaisa called-with-args, aur `@app.task` style bhi) decorated function ka naam nikalta hai, phir `CELERY_BEAT_SCHEDULE` ke against check karta hai — **sirf task ka function-name match hota hai** (poora dotted path nahi), kyunki khud ye codebase inconsistent hai `"app.tasks.func"` vs `"app.func"` convention me. `CONFIG_DRIFT_ONDEMAND_TASKS` whitelist un tasks ke liye jo genuinely sirf `.delay()`/`.apply_async()` se request-time pe chalte hain.
+3. **`_check_admin_registration`** — `django_apps.get_app_config(app_label).get_models()` se har model ko `admin.site._registry` ke against check karta hai.
+4. **`_check_urls_wiring`** — `views.py` ko AST-parse karke har aisi class dhoondta hai jo `APIView`/`GenericAPIView` (ya usi file me pehle se flag ki gayi ek aisi hi base) se inherit karti ho — **`ViewSet`s is check se bahar hain** (wo normally `router.register()` se wire hote hain, literal `.as_view()` reference se nahi) — phir check karta hai ki class-name `urls.py` ke text me kahin mention hai ya nahi.
+
+Har check ek `(kind, app_label, message)` tuple deta hai; `_report()` inhe 4 headings ke neeche group-print karta hai. `--strict` diya ho aur koi bhi issue mila ho to `CommandError` raise hoti hai (CI-fail ke liye).
+
+### Limitations (clean run ko blindly trust karne se pehle padho)
+
+- Throttle-scope aur `APIView`-vs-`urls.py` checks **source-text ke regex/AST scans hain, running interpreter nahi** — dynamically-built scope strings (ek f-string, ek literal ke bajaye variable) nahi pakde jaate. Is codebase me ab tak har real usage plain string literal raha hai, isliye abhi non-issue hai.
+- Ye ek drift **detector** hai, fixer nahi — kabhi `settings.py`/`admin.py`/`urls.py` khud edit nahi karta, sirf batata hai kahan dekhna hai.
+
+### Is doc ke against status
+
+- Command khud generic hai aur is upload me poora mil gaya — **implementation-level koi gap nahi**.
+- **Open (§9, item 16):** `settings.py` me `CONFIG_DRIFT_APPS` set hai ya nahi, aur CI me `--strict` ke saath wired hai ya nahi — dono is pass me verify nahi ho paaye (settings.py upload nahi hua).

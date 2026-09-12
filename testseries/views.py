@@ -13,11 +13,17 @@ from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 
 from .models import (
-    Question, TestAttempt, TestSeries, TestSeriesPurchase,
+    Question, TestAttempt, TestSeries, TestSeriesPurchase, TestSeriesReview,
     attachment_extension_validator, validate_attachment_size,
 )
-from .permissions import IsSeriesCreatorOrReadOnly, user_can_review_attempt
-from .serializers import QuestionSerializer, TestAttemptSerializer, TestSeriesSerializer
+from .bridge import ask_query_on_series, answer_query_on_series
+from .permissions import (
+    CanAskQueryOnCheckedAttempt, CanReviewCheckedAttempt, IsSeriesCreatorOrReadOnly,
+    user_can_review_attempt,
+)
+from .serializers import (
+    QuestionSerializer, TestAttemptSerializer, TestSeriesReviewSerializer, TestSeriesSerializer,
+)
 
 
 
@@ -125,6 +131,11 @@ class TestAttemptViewSet(mixins.RetrieveModelMixin, mixins.ListModelMixin, views
 
     serializer_class = TestAttemptSerializer
     permission_classes = [IsAuthenticated]
+
+    def get_permissions(self):
+        if self.action == "ask_query":
+            return [IsAuthenticated(), CanAskQueryOnCheckedAttempt()]
+        return [IsAuthenticated()]
 
     def get_queryset(self):
         # Scoped for LIST only (browse-your-own-attempts): a student's
@@ -281,3 +292,171 @@ class TestAttemptViewSet(mixins.RetrieveModelMixin, mixins.ListModelMixin, views
         )
         attempt.refresh_from_db()
         return Response(TestAttemptSerializer(attempt, context={"request": request}).data)
+
+    @action(detail=True, methods=["post"], url_path="ask-query")
+    def ask_query(self, request, pk=None):
+        """Task 16 — `POST /attempts/{id}/ask-query/`. `get_object()`
+        already resolves "own attempt OR permitted reviewer" access;
+        `CanAskQueryOnCheckedAttempt` narrows that to "own attempt only"
+        for this action. The `status != checked` business rule lives in
+        `bridge.ask_query_on_series()` (plain `ValueError`), caught here
+        and surfaced as a clean 400 per the acceptance checklist."""
+        attempt = self.get_object()
+
+        text = request.data.get("text", "")
+        if not str(text).strip():
+            raise ValidationError({"text": "This field is required."})
+
+        try:
+            doubt = ask_query_on_series(
+                attempt=attempt,
+                student=request.user,
+                text=text,
+                is_anonymous=bool(request.data.get("is_anonymous", False)),
+            )
+        except ValueError as exc:
+            raise ValidationError(str(exc))
+
+        # Kept deliberately minimal — only fields `bridge.
+        # ask_query_on_series()` is known to set at creation time.
+        # Once message/models.py's real `DoubtQuestion` shape is
+        # confirmed, swap this for a proper DoubtQuestionSerializer.
+        return Response(
+            {
+                "id": str(doubt.id),
+                "text": doubt.text,
+                "is_anonymous": doubt.is_anonymous,
+                "context_type": doubt.context_type,
+                "context_id": str(doubt.context_id),
+            },
+            status=status.HTTP_201_CREATED,
+        )
+
+    @action(detail=True, methods=["post"], url_path="answer-query")
+    def answer_query(self, request, pk=None):
+        """Task 16 — teacher-facing counterpart to `ask_query`. Not in the
+        task's own file list, but `bridge.py::answer_query_on_series()`
+        flags it as needed to actually wire the feature end-to-end (see
+        that function's docstring) — added here as the natural
+        `TestAttemptViewSet` counterpart.
+
+        `pk` is the ATTEMPT id (same URL shape as `ask_query`/
+        `review_answer`); `doubt_id` in the body identifies which query on
+        that attempt is being answered. `get_object()` already resolves
+        "own attempt OR permitted reviewer" (a series creator always
+        qualifies); `answer_query_on_series()` itself does the finer "are
+        YOU actually this series' creator" check — a series can have more
+        than one permitted reviewer (e.g. a campus subject-teacher via
+        `user_can_review_attempt`), but only the creator can answer
+        queries, per that function's own docstring."""
+        attempt = self.get_object()
+
+        doubt_id = request.data.get("doubt_id")
+        if not doubt_id:
+            raise ValidationError({"doubt_id": "This field is required."})
+        answer_text = request.data.get("answer_text", "")
+        if not str(answer_text).strip():
+            raise ValidationError({"answer_text": "This field is required."})
+
+        try:
+            doubt = answer_query_on_series(doubt_id=doubt_id, teacher=request.user, answer_text=answer_text)
+        except ValueError as exc:
+            raise ValidationError(str(exc))
+        except PermissionError as exc:
+            raise PermissionDenied(str(exc))
+
+        # Belt-and-suspenders only: `answer_query_on_series()` already
+        # independently confirms `teacher == series.creator` off the
+        # doubt itself, so this attempt-id mismatch is never a security
+        # gap — just catches a client sending the wrong attempt id in the
+        # URL for this `doubt_id` and surfaces it as a 400 instead of a
+        # silently-succeeded-on-the-wrong-attempt response.
+        if str(doubt.context_id) != str(attempt.id):
+            raise ValidationError({"doubt_id": "This query does not belong to this attempt."})
+
+        return Response(
+            {
+                "id": str(doubt.id),
+                "is_answered": doubt.is_answered,
+                "answer_text": doubt.answer_text,
+                "answered_at": doubt.answered_at,
+            }
+        )
+
+
+class TestSeriesReviewViewSet(mixins.CreateModelMixin, mixins.ListModelMixin, viewsets.GenericViewSet):
+    """Task 15. Two access shapes, both wired manually in urls.py (same
+    "no DefaultRouter, series_pk explicit in the URL" reasoning
+    `question_list`/`question_detail` already use):
+
+      - `/testseries/<series_pk>/reviews/` (list, create) — `list` is a
+        public read of one series' reviews (like `TestSeriesViewSet`'s
+        published-series browse path); `create` is gated by
+        `CanReviewCheckedAttempt` (coarse: "did you ever attempt this
+        series") plus the checked-status/already-reviewed business
+        rules inside `TestSeriesReviewSerializer.validate()`.
+      - `/testseries/reviews/my-view/` (`my_view`, GET only, no
+        series_pk) — the creator-aggregate review dashboard: every
+        review across every series THIS user created, never anyone
+        else's (acceptance checklist: "Creator ka my-view sirf apni
+        series ka review-dashboard dikhata hai, doosron ka nahi").
+    """
+
+    serializer_class = TestSeriesReviewSerializer
+    permission_classes = [IsAuthenticated]
+
+    def get_series(self):
+        return get_object_or_404(TestSeries, pk=self.kwargs["series_pk"])
+
+    def get_queryset(self):
+        # Only reachable from list()/create() on the nested route, where
+        # series_pk is always present (see urls.py) — my_view() below
+        # builds its own creator-scoped queryset directly and never
+        # calls this.
+        return TestSeriesReview.objects.filter(
+            series_id=self.kwargs["series_pk"]
+        ).select_related("student", "series")
+
+    def get_serializer_context(self):
+        ctx = super().get_serializer_context()
+        if "series_pk" in self.kwargs:
+            ctx["series"] = self.get_series()
+        return ctx
+
+    def get_permissions(self):
+        if self.action == "create":
+            return [IsAuthenticated(), CanReviewCheckedAttempt()]
+        return [IsAuthenticated()]
+
+    def perform_create(self, serializer):
+        try:
+            serializer.save()
+        except IntegrityError:
+            # Lost a race with a concurrent review-create for the same
+            # (series, student) — unique_review_per_student_per_series
+            # caught it. Same race-handling shape as
+            # TestAttemptViewSet.start()'s IntegrityError handling above,
+            # surfaced as a clean 400 instead of a raw 500.
+            raise ValidationError("You have already reviewed this series.")
+
+    @action(detail=False, methods=["get"], url_path="my-view")
+    def my_view(self, request):
+        """Creator-aggregate dashboard: every review across every series
+        `request.user` created, plus a per-series {avg, count} rollup —
+        scoped to `series__creator=request.user` only, never another
+        creator's reviews (the acceptance-checklist requirement)."""
+        reviews = (
+            TestSeriesReview.objects.filter(series__creator=request.user)
+            .select_related("student", "series")
+            .order_by("-created_at")
+        )
+        summary = (
+            TestSeries.objects.filter(creator=request.user)
+            .annotate(avg=db_models.Avg("reviews__rating"), count=db_models.Count("reviews"))
+            .filter(count__gt=0)
+            .values("id", "title", "avg", "count")
+        )
+        return Response({
+            "summary": list(summary),
+            "reviews": TestSeriesReviewSerializer(reviews, many=True, context={"request": request}).data,
+        })

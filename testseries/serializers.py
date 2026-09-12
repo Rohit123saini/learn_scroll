@@ -4,7 +4,7 @@ from rest_framework import serializers
 
 from .models import (
     Question, QuestionResponse, TestAttempt, TestSeries, TestSeriesPurchase,
-    attachment_extension_validator, validate_attachment_size,
+    TestSeriesReview, attachment_extension_validator, validate_attachment_size,
 )
 
 
@@ -87,6 +87,12 @@ class QuestionResponseSerializer(serializers.ModelSerializer):
 class TestSeriesSerializer(serializers.ModelSerializer):
     questions = QuestionSerializer(many=True, read_only=True)
     creator = serializers.PrimaryKeyRelatedField(read_only=True)
+    # Model properties, not DB fields — must be declared explicitly so
+    # ModelSerializer picks them up at all; declaring them read_only
+    # here is sufficient (no need to also list in Meta.read_only_fields,
+    # which is only for auto-generated fields).
+    avg_rating = serializers.FloatField(read_only=True)
+    review_count = serializers.IntegerField(read_only=True)
 
     class Meta:
         model = TestSeries
@@ -94,7 +100,7 @@ class TestSeriesSerializer(serializers.ModelSerializer):
             "id", "source", "context_type", "context_id", "creator", "title",
             "description", "is_paid", "price_coins", "duration_minutes",
             "total_marks", "status", "attempts_allowed", "questions",
-            "created_at", "updated_at",
+            "avg_rating", "review_count", "created_at", "updated_at",
         ]
         # `source`/`context_type`/`context_id` are provenance — set once at
         # creation (INDIVIDUAL here, or CAMPUS/LIVECLASS via bridge.py) and
@@ -159,3 +165,74 @@ class TestAttemptSerializer(serializers.ModelSerializer):
             "id", "series", "student", "attempt_number", "auto_score", "final_score",
             "status", "checked_by", "roll_number", "enrollment_no", "submitted_at", "checked_at",
         ]
+
+
+class TestSeriesReviewSerializer(serializers.ModelSerializer):
+    """Task 15. `series`/`student`/`attempt` are all resolved server-side
+    in `validate()` below (never client-writable — a student sends only
+    `rating`/`comment`), same "provenance fields are read-only, set by
+    the server" reasoning `TestSeriesSerializer` already uses for
+    `source`/`context_type`/`context_id`.
+
+    `rating` is declared explicitly (rather than left to the default
+    ModelSerializer mapping from `PositiveSmallIntegerField`) so an
+    out-of-range value comes back as a clean DRF 400 from field-level
+    validation, instead of surfacing later as a `DjangoValidationError`
+    out of `TestSeriesReview.full_clean()` inside `create()`.
+    """
+
+    student = serializers.PrimaryKeyRelatedField(read_only=True)
+    series = serializers.PrimaryKeyRelatedField(read_only=True)
+    rating = serializers.IntegerField(min_value=1, max_value=5)
+
+    class Meta:
+        model = TestSeriesReview
+        fields = ["id", "series", "student", "attempt", "rating", "comment", "created_at", "updated_at"]
+        read_only_fields = ["id", "series", "student", "attempt", "created_at", "updated_at"]
+
+    def validate(self, attrs):
+        # `series` is put in context by TestSeriesReviewViewSet.
+        # get_serializer_context() — only present on the nested
+        # `/testseries/{series_pk}/reviews/` route, which is the only
+        # route `create()` is ever reachable from (see urls.py).
+        series = self.context.get("series")
+        request = self.context.get("request")
+        user = getattr(request, "user", None)
+        if series is None or not (user and user.is_authenticated):
+            raise serializers.ValidationError("Reviews must be created via a specific series' reviews endpoint.")
+
+        # This is the acceptance-checklist's core rule: an unchecked (or
+        # nonexistent) attempt is a clean 400, not a 403 — see
+        # permissions.CanReviewCheckedAttempt's docstring for why that
+        # split exists.
+        attempt = TestAttempt.objects.filter(series=series, student=user).order_by("-attempt_number").first()
+        if attempt is None:
+            raise serializers.ValidationError("You must attempt this series before reviewing it.")
+        if attempt.status != TestAttempt.Status.CHECKED:
+            raise serializers.ValidationError(
+                "You can only review this series after your attempt has been fully checked."
+            )
+        if TestSeriesReview.objects.filter(series=series, student=user).exists():
+            raise serializers.ValidationError("You have already reviewed this series.")
+
+        attrs["series"] = series
+        attrs["student"] = user
+        attrs["attempt"] = attempt
+        return attrs
+
+    def create(self, validated_data):
+        try:
+            return TestSeriesReview.create_review(
+                attempt=validated_data["attempt"],
+                rating=validated_data["rating"],
+                comment=validated_data.get("comment", ""),
+            )
+        except DjangoValidationError as exc:
+            # Defence-in-depth: TestSeriesReview.clean() re-checks the
+            # same status/uniqueness rules validate() above already
+            # checked — this only fires if that state changed in the
+            # gap between validate() and create() (a genuine race, not
+            # the common case), same shape QuestionSerializer.validate()
+            # already uses to convert a model-layer ValidationError into
+            # a clean DRF one instead of a raw 500.
+            raise serializers.ValidationError(exc.message_dict if hasattr(exc, "message_dict") else exc.messages)

@@ -24,6 +24,18 @@ lazily (function/method-local) at each use site for the same
 import-cycle reason `_record_coin_transaction`/`_notify` already import
 `CoinLedger`/`create_notification` lazily rather than at module level.
 
+⚠️ NEW GAP (Task 15, this pass) — `TestSeriesReview.create_review()`
+below references `core.models.Notification.NotifType.
+TESTSERIES_REVIEW_RECEIVED`, same lazy-import pattern as every other
+`_notify()` call site in this file. That enum member does not exist on
+`core.models.Notification.NotifType` as of this pass (only the three
+listed above are confirmed) — flagged explicitly rather than guessed
+at, same as the now-resolved `TESTSERIES_POSTED` gap was. Until `core`
+adds it, `create_review()` will raise `AttributeError` at the point of
+the notify call — i.e. review creation itself (the row + uniqueness +
+checked-status guard) is real and testable independently, but the
+notify-the-creator step needs that enum member added first.
+
 Everything else below matches the design doc's confirmed decisions:
   - `TestSeries.is_paid` is server-side FORCED False for `source="campus"`
     (campus's golden "always free for students" constraint) inside
@@ -52,6 +64,7 @@ Everything else below matches the design doc's confirmed decisions:
 import uuid
 
 from django.core.exceptions import ValidationError
+from django.core.validators import MaxValueValidator, MinValueValidator
 from django.db import models, transaction
 from django.utils import timezone
 
@@ -196,6 +209,23 @@ class TestSeries(TestSeriesBaseModel):
         if save:
             self.save(update_fields=["total_marks"])
         return total
+
+    @property
+    def review_count(self) -> int:
+        """Task 15. Plain `.count()`, not a denormalized field — unlike
+        `total_marks` (which is read on every attempt-submit/question-
+        edit path and worth caching), review counts aren't on a hot
+        read path anywhere yet; add caching later if that changes."""
+        return self.reviews.count()
+
+    @property
+    def avg_rating(self) -> float | None:
+        """`None` (not `0`) when there are no reviews yet — a series
+        with zero reviews and a series rated straight `0`s are not the
+        same thing, and callers (e.g. a "sort by rating" browse view)
+        need to be able to tell them apart."""
+        result = self.reviews.aggregate(avg=models.Avg("rating"))["avg"]
+        return round(result, 2) if result is not None else None
 
     def __str__(self):
         return f"{self.title} ({self.get_source_display()})"
@@ -668,3 +698,93 @@ class TestAttempt(TestSeriesBaseModel):
 
     def __str__(self):
         return f"Attempt: {self.student} on {self.series} [{self.status}]"
+
+
+class TestSeriesReview(TestSeriesBaseModel):
+    """Task 15. A student's rating/review of a `TestSeries`, gated on
+    their OWN `TestAttempt` having actually reached `status="checked"`
+    — reviewing is about having seen a real result, not merely having
+    attempted the series (design doc's exact requirement for this
+    task). One review per (series, student) ever — not one per
+    attempt — via the `UniqueConstraint` below; even once `attempts_
+    allowed` > 1 becomes real (§8 open item 3 elsewhere in this file),
+    a student still only gets one say on a series overall, not one per
+    retry. `attempt` is still stored (as a `OneToOneField`, not a plain
+    FK) so a review is traceable back to exactly which checked attempt
+    earned it, and so `clean()` below can verify status/ownership
+    directly off that FK without a second query.
+
+    Primary validation (attempt-not-checked -> clean 400, already-
+    reviewed -> clean 400) lives in `TestSeriesReviewSerializer.
+    validate()` (serializers.py), same "serializer owns the client-
+    facing 400, model owns defence-in-depth" split `TestSeriesSerializer
+    .validate()` already uses for is_paid/price_coins. `clean()`/
+    `save()` here are that second layer, not the primary one — they
+    exist so `TestSeriesReview.objects.create(...)` can never silently
+    create a row that violates either rule even if some future call
+    site bypasses the serializer.
+    """
+
+    series = models.ForeignKey(TestSeries, on_delete=models.CASCADE, related_name="reviews")
+    student = models.ForeignKey(User, on_delete=models.CASCADE, related_name="testseries_reviews")
+    # OneToOne, not a plain FK: a given checked attempt can back at most
+    # one review — same "one row per real-world event" reasoning as
+    # TestSeriesPurchase.attempt above.
+    attempt = models.OneToOneField(TestAttempt, on_delete=models.CASCADE, related_name="review")
+
+    rating = models.PositiveSmallIntegerField(validators=[MinValueValidator(1), MaxValueValidator(5)])
+    comment = models.TextField(blank=True)
+
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(fields=["series", "student"], name="unique_review_per_student_per_series"),
+        ]
+        ordering = ["-created_at"]
+
+    def clean(self):
+        super().clean()
+        if not self.attempt_id:
+            return
+        if self.student_id and self.attempt.student_id != self.student_id:
+            raise ValidationError("attempt must belong to the reviewing student.")
+        if self.series_id and self.attempt.series_id != self.series_id:
+            raise ValidationError("attempt must belong to the series being reviewed.")
+        if self.attempt.status != TestAttempt.Status.CHECKED:
+            raise ValidationError("Can only review a series after your attempt has been fully checked.")
+
+    def save(self, *args, **kwargs):
+        self.full_clean()
+        super().save(*args, **kwargs)
+
+    @classmethod
+    @transaction.atomic
+    def create_review(cls, *, attempt: "TestAttempt", rating: int, comment: str = "") -> "TestSeriesReview":
+        """Single creation entrypoint — `TestSeriesReviewSerializer.
+        create()` calls this instead of `TestSeriesReview.objects.
+        create()` directly, so the `TESTSERIES_REVIEW_RECEIVED`
+        notify-the-creator step can never be forgotten at a call site.
+        Same "validation + side effect together, one function" shape as
+        `TestSeriesPurchase.purchase_and_start_attempt()` above."""
+        from core.models import Notification
+
+        review = cls.objects.create(
+            series=attempt.series,
+            student=attempt.student,
+            attempt=attempt,
+            rating=rating,
+            comment=comment,
+        )
+        _notify(
+            recipient=review.series.creator,
+            notif_type=Notification.NotifType.TESTSERIES_REVIEW_RECEIVED,
+            title="New review received",
+            message=f"{review.student} rated '{review.series.title}' {review.rating}\u2605.",
+            data={"review_id": str(review.id), "series_id": str(review.series_id)},
+        )
+        return review
+
+    def __str__(self):
+        return f"Review: {self.student} -> {self.series} ({self.rating}\u2605)"
