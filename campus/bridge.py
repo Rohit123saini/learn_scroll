@@ -109,6 +109,18 @@ class NotifTypes:
     # design doc — reused as-is, not redefined here.
     NOTICE_POSTED = "notice_posted"
 
+    # F-3 (Task 14) — ADDED. `tasks.check_attendance_streak_rewards()`
+    # and `check_assignment_ontime_streak_rewards()` already referenced
+    # `NotifTypes.CAMPUS_REWARD_EARNED`, but it did not exist on this
+    # class — every call to `bridge.notify(notif_type=NotifTypes.
+    # CAMPUS_REWARD_EARNED, ...)` in either task raised `AttributeError`
+    # before this fix, on top of the separate `ImportError` those same
+    # tasks hit from `campus/services.py` missing the two streak
+    # functions (see that file's own F-3 note). Same "must match
+    # core.models.NotifType verbatim once added there" contract every
+    # other value on this class already documents above.
+    CAMPUS_REWARD_EARNED = "campus_reward_earned"
+
 
 def create_section_group(section, actor):
     """
@@ -326,3 +338,172 @@ def get_assignment_submissions(section):
     from assignment.bridge import get_submissions_for_context
 
     return get_submissions_for_context(context_type="section", context_id=section.id)
+
+
+def create_testseries(*, section, creator, title, description="", duration_minutes=None,
+                       attempts_allowed=1, questions):
+    """[Task 13] Creates a campus test series via the unified
+    `testseries` app — the same "one function is the app boundary"
+    pattern `create_assignment()` above already uses for `assignment`,
+    and the same pattern `testseries/bridge.py`'s own module docstring
+    says it exists for (`campus`/`liveclass` bridge modules call
+    `create_context_testseries()`, never `testseries` models directly).
+    `testseries` is a confirmed, fully-built sibling app for this task —
+    its own bridge module docstring spells out exactly this calling
+    contract for `source="campus"` — not an unverified dependency, so
+    same as `create_assignment()`'s own Task 11 addition reasoning, this
+    imports `testseries.bridge`/`testseries.models` as hard imports
+    below, no lazy-import/`ImportError` degrade.
+
+    `is_paid=False` (and `price_coins=0`) are forced here
+    UNCONDITIONALLY — this function has no `is_paid`/`price_coins`
+    keyword arg at all, unlike whatever `liveclass`'s own
+    `create_testseries()` is expected to expose for its teacher-priced
+    series. This is deliberately redundant with `TestSeries.save()`'s
+    own golden-constraint enforcement (Task 13 checklist: "force-enforced
+    dono jagah") — defence in depth, not a substitute for it.
+
+    No `subject` parameter, unlike `create_assignment()` above.
+    `create_context_testseries()`'s full kwarg list (confirmed against
+    this pass's `testseries/bridge.py` upload) is `source, context_type,
+    context_id, creator, title, description, is_paid, price_coins,
+    duration_minutes, attempts_allowed, questions, roster` — there's no
+    `extra_data`-shaped slot the way `create_context_assignment()` has,
+    so there's nowhere to persist a `subject_id` even if this function
+    accepted one. A campus test series is therefore scoped to a
+    `Section` only, not a `Section`+`Subject` pair, until `testseries`
+    grows somewhere to put that. Any subject-level restriction on WHO
+    may call this (e.g. "only that section/subject's staff") is
+    entirely `views.py`'s job, checked BEFORE this function is ever
+    called (Task 13 checklist: "Staff permission check bridge call se
+    pehle hota hai, testseries khud trust karta hai caller ko" — the
+    same golden rule `create_assignment()` operates under) — this
+    function itself does not accept or check a `subject` at all, so
+    there's no way for it to enforce that even if it wanted to.
+
+    `questions` is passed straight through uninspected; shape/validation
+    (each dict `full_clean()`-ed as a `Question`) is entirely
+    `create_context_testseries()`'s own contract — same "caller resolves
+    context, testseries resolves everything about a Question" boundary
+    `assignment` draws for its own roster dicts.
+
+    Roster is every ACTIVE `StudentEnrollment` for `section`, passed as
+    plain `login.User` instances (via `.student`) — `create_context_
+    testseries()`'s own `roster` docstring asks for exactly that shape
+    ("iterable of `login.User`, or `None`"), unlike `assignment`'s
+    roster dicts (which additionally seed per-student roll_number/
+    enrollment_no onto pre-created submission rows; `testseries` has no
+    pre-created-attempt-row concept per its own bridge module docstring,
+    so there's nothing here that needs those extra fields). This is also
+    how the Task 13 checklist's "Roster fanout notification
+    (TESTSERIES_POSTED) sab active enrolled students ko jaata hai" is
+    satisfied — `create_context_testseries()` does that fan-out itself
+    once handed this roster; `campus.bridge` doesn't (and can't, from
+    outside `testseries`) fire that notification a second time.
+
+    Returns the created `testseries.models.TestSeries` instance.
+    """
+    from testseries.bridge import create_context_testseries
+    from testseries.models import TestSeries
+
+    from .models import StudentEnrollment
+
+    roster = [
+        enrollment.student
+        for enrollment in StudentEnrollment.objects.filter(
+            section=section, status=StudentEnrollment.Status.ACTIVE
+        ).select_related("student")
+    ]
+    return create_context_testseries(
+        source=TestSeries.Source.CAMPUS,
+        context_type="section",
+        context_id=section.id,
+        creator=creator,
+        title=title,
+        description=description,
+        is_paid=False,
+        price_coins=0,
+        duration_minutes=duration_minutes,
+        attempts_allowed=attempts_allowed,
+        questions=questions,
+        roster=roster,
+    )
+
+
+def can_review_testseries_attempt(*, user, context_type, context_id):
+    """[Task 13] Permission check for a campus-sourced `TestSeries`
+    attempt review — the exact function `testseries.permissions.
+    user_can_review_attempt()` calls (this pass's `testseries/
+    permissions.py` upload confirms the call site verbatim:
+    `can_review_testseries_attempt(user=user, context_type=series.
+    context_type, context_id=series.context_id)`).
+
+    ⚠️ SIGNATURE FIX (this pass) — this function previously took
+    `(user, attempt)` positionally, a shape guessed at before
+    `testseries/permissions.py` was available. That guess was WRONG:
+    the real caller passes `user`/`context_type`/`context_id` as
+    keyword arguments, no `attempt` object at all. Left as `(user,
+    attempt)`, this would have raised `TypeError` on every real call
+    from `testseries` — a hard crash, not merely a wrong answer — the
+    same "never exercised against the real caller" failure mode
+    already found and fixed once this pass in `testseries/bridge.py`'s
+    `_NotifTypeGap` import. Fixed below; both call sites in
+    `campus/views.py`'s `TestAttemptViewSet` updated to match.
+
+    `testseries.permissions.user_can_review_attempt()` already
+    short-circuits `series.creator_id == user.id` before ever calling
+    this, and only calls this at all for `source="campus"` — so this
+    function doesn't need to re-check either of those itself; it only
+    ever needs to answer "is `user` allowed to review a campus series
+    at this `(context_type, context_id)`".
+
+    Only `context_type="section"` is supported — the only shape
+    `campus.bridge.create_testseries()` ever produces. Unlike
+    `create_assignment()`'s subject-scoped `can_manage_section_
+    subject()` check, a campus test series has no subject concept at
+    all (see `create_testseries()`'s own docstring above — there's
+    nowhere on `TestSeries` to even store one) — so this checks only
+    "is `user` any active staff at this section's campus", the
+    broadest permission `is_any_active_staff()` already expresses, not
+    a narrower subject-specific one `testseries` has nowhere to record
+    anyway.
+
+    Returns `False` for any `context_type` other than `"section"`, for
+    a `context_id` that no longer resolves to a real `Section` (e.g. a
+    deleted one), and for a user with no active staff role at that
+    campus. Returns `True` otherwise.
+    """
+    from .models import Section
+    from .permissions import is_any_active_staff
+
+    if context_type != "section":
+        return False
+
+    section = Section.objects.filter(pk=context_id).select_related("school_class").first()
+    if section is None:
+        logger.warning(
+            "can_review_testseries_attempt(): context_id %s (context_type=%r) "
+            "no longer resolves to a Section — denying review access rather "
+            "than guessing at a campus.",
+            context_id, context_type,
+        )
+        return False
+
+    return is_any_active_staff(user, section.school_class.campus_id)
+
+
+def get_testseries_attempts(section):
+    """[Task 13] Returns every `testseries.TestAttempt` row for every
+    campus test series attached to `section`, via `testseries.bridge.
+    get_attempts_for_context()` — never a direct `testseries.models.
+    TestAttempt` import from campus code outside this bridge module.
+    Same "unfiltered by permission, caller narrows further" contract
+    `get_assignment_submissions()` above documents for its own
+    `assignment` analogue — `views.py`'s review endpoint still needs to
+    check `can_review_testseries_attempt()` per-attempt (or gate the
+    whole call on `is_any_active_staff()` for this section's campus)
+    before showing anything back to a non-owning caller.
+    """
+    from testseries.bridge import get_attempts_for_context
+
+    return get_attempts_for_context(context_type="section", context_id=section.id)

@@ -197,6 +197,18 @@ def check_attendance_streak_rewards():
             reference = f"campus_attendance_streak:{enrollment.id}:{streak}:{last_date.isoformat()}"
             if CoinLedger.objects.filter(user=enrollment.student, reference=reference).exists():
                 continue
+
+            # ⚠️ NOT FIXED THIS PASS — Task 14 checklist asks for a
+            # Task 5 fraud-guard call here before crediting the reward.
+            # Task 5's fraud-guard function (name, module, signature —
+            # whether it's a check-and-raise, a check-and-return-bool,
+            # or something CoinLedger.record_transaction already applies
+            # internally for transaction_type=CAMPUS_REWARD) was not
+            # part of this pass's upload, and guessing a call here risks
+            # inventing a function that doesn't exist — exactly the
+            # ImportError/AttributeError class of bug this task exists
+            # to remove. Please share the Task 5 fraud-guard file (or
+            # just its function signature) to close this.
             CoinLedger.objects.record_transaction(
                 user=enrollment.student,
                 transaction_type=CoinLedger.TransactionType.CAMPUS_REWARD,
@@ -311,19 +323,16 @@ def check_assignment_ontime_streak_rewards():
     length, the due_date the streak reached that length)` instead of an
     attendance date, for the same "can only happen once, ever" reason.
 
-    ⚠️ NOT FIXED THIS PASS — flagged, not silently left inconsistent:
-    `services.compute_assignment_ontime_streak()` (not part of this
-    pass's upload — only `campus/models.py`, `views.py`, `tasks.py`,
-    `bridge.py` were provided for Task 11) almost certainly still reads
-    `campus.AssignmentSubmission` directly, the same now-deprecated model
-    `send_assignment_due_reminders()` above was redirected off of. If so,
-    this task is now computing on-time streaks from a data source that
-    stops receiving new rows going forward (see that model's own
-    `save()` guard in models.py) — streaks would silently freeze rather
-    than error. Needs the same query redirect this pass gave
-    `send_assignment_due_reminders()`, applied inside
-    `services.compute_assignment_ontime_streak()` itself — please
-    provide `campus/services.py` to close this.
+    ✅ RESOLVED (Task 14) — `services.compute_assignment_ontime_streak()`
+    now exists (it did not before this pass — that was the `ImportError`
+    both streak tasks hit on every run) and reads through `campus.
+    bridge.get_assignment_submissions()`, the same unified-`assignment`-
+    app redirect `send_assignment_due_reminders()` above already applies
+    — never the deprecated `campus.AssignmentSubmission` model. See that
+    function's own docstring in services.py for the two points it flags
+    as assumed-not-confirmed (the on-time status string, and
+    `get_assignment_submissions()`'s return-type), which weren't
+    resolvable without `assignment/models.py`.
     """
     from user_profile.models import CoinLedger
 
@@ -345,6 +354,10 @@ def check_assignment_ontime_streak_rewards():
         reference = f"campus_assignment_streak:{enrollment.id}:{streak}:{last_due_date.isoformat()}"
         if CoinLedger.objects.filter(user=enrollment.student, reference=reference).exists():
             continue
+
+        # ⚠️ NOT FIXED THIS PASS — same Task 5 fraud-guard gap flagged
+        # in check_attendance_streak_rewards() above; see that call's
+        # comment for why it isn't guessed at here either.
         CoinLedger.objects.record_transaction(
             user=enrollment.student,
             transaction_type=CoinLedger.TransactionType.CAMPUS_REWARD,

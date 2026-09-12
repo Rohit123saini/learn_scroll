@@ -30,6 +30,8 @@ from .views import (
     SubjectViewSet,
     SyllabusProgressViewSet,
     SyllabusUnitViewSet,
+    TestAttemptViewSet,
+    TestSeriesViewSet,
     TimeSlotViewSet,
     TimetableEntryViewSet,
 )
@@ -72,6 +74,12 @@ router.register("syllabus-progress", SyllabusProgressViewSet, basename="syllabus
 # Phase 7 — results
 router.register("exam-terms", ExamTermViewSet, basename="exam-term")
 router.register("results", ResultEntryViewSet, basename="result-entry")
+
+# Task 13 — test series (thin proxy over the unified `testseries` app,
+# same "campus" source posture `assignments`/`assignment-submissions`
+# above already take toward the unified `assignment` app)
+router.register("test-series", TestSeriesViewSet, basename="campus-test-series")
+router.register("test-attempts", TestAttemptViewSet, basename="campus-test-attempt")
 
 # Phase 8 — optional / future-ready modules
 router.register("digital-id-cards", DigitalIDCardViewSet, basename="digital-id-card")

@@ -38,7 +38,6 @@ from rest_framework.throttling import ScopedRateThrottle
 from rest_framework.views import APIView
 
 from .models import (
-    Assignment,
     AssignmentSubmission,
     BreakoutRoom,
     Certificate,
@@ -91,6 +90,17 @@ from .models import (
 from core.classroom_chat_bridge import resolve_parent_from_token
 from core.models import Notification, NotificationPreference
 from core.services import create_notification, create_bulk_notifications
+# Task 12 — Assignment/AssignmentSubmission (create + list) now go through
+# the unified `assignment` app via `liveclass.bridge`, never through a
+# local liveclass.Assignment model. See the "10. ASSIGNMENT + SUBMISSION"
+# section below for why only these two viewsets need this.
+from django.utils.dateparse import parse_date, parse_datetime
+
+from . import bridge
+from assignment.serializers import (
+    AssignmentSerializer as UnifiedAssignmentSerializer,
+    AssignmentSubmissionSerializer as UnifiedAssignmentSubmissionSerializer,
+)
 from .livekit_utils import (
     LIVEKIT_URL,
     LiveKitError,
@@ -110,9 +120,6 @@ from .moderation import screen_message
 # pattern; see throttles.py's module docstring for why.
 from .throttles import ParentJoinIPThrottle
 from .serializers import (
-    AssignmentGradeSerializer,
-    AssignmentSerializer,
-    AssignmentSubmissionSerializer,
     BreakoutRoomSerializer,
     CertificateIssueSerializer,
     CertificateSerializer,
@@ -4657,54 +4664,131 @@ class PollTemplateViewSet(viewsets.ModelViewSet):
 
 # ---------------------------------------------------------------------------
 # 10. ASSIGNMENT + SUBMISSION
+#
+# Task 12 — thin proxy onto the unified `assignment` app via
+# `liveclass.bridge`. Only two things stay on liveclass's own URL
+# surface: posting a new assignment to a classroom, and listing a
+# classroom's assignments/submissions — because only those two need
+# liveclass's own classroom-membership/manage-permission rules
+# (_can_manage_classroom / _can_view_classroom_internals), which
+# `assignment` has no way to check (it has no concept of a "classroom").
+#
+# Submitting an assignment, grading it, structured-question review,
+# publish/unpublish — NOT proxied here. `assignment.views.
+# AssignmentSubmissionViewSet`'s own queryset already grants access
+# correctly for a liveclass-sourced submission (`Q(student=user) |
+# Q(assignment__posted_by=user)` — `posted_by` is set to the classroom's
+# teacher at creation time by `bridge.create_assignment`, `student` is
+# the roster member), and its `grade`/`review_answer` actions are gated
+# by `IsAssignmentStaffOrOwner`, `submit_*`/`publish`/`unpublish` by
+# `IsSubmissionStudent` — both already correct for a liveclass-sourced
+# row with no liveclass-side wrapping needed. Flutter hits
+# `/assignment/submissions/{id}/...` directly for those; the two
+# viewsets below only ever hand back that `id` (as part of the nested
+# `assignment`/each submission row) for the client to call next.
+#
+# `liveclass.models.Assignment`/`AssignmentSubmission` (still defined in
+# models.py, untouched — no schema/`makemigrations` change here) are no
+# longer written to by these two viewsets. `AssignmentSubmission` is
+# still imported at the top of this file because `StudentProgressView`
+# below still reads it for `assignments_submitted` — NOTE (flagged, not
+# fixed, out of this task's scope): that count will only reflect
+# submissions made before this cutover, plus whatever
+# `migrate_liveclass_assignments_to_unified` backfilled, since new
+# submissions from here on land in `assignment.AssignmentSubmission`
+# instead. Repointing that dashboard at `liveclass.bridge.
+# get_assignment_submissions()` (summed across the student's classrooms)
+# is a real follow-up, not done here since it wasn't part of Task 12's
+# file list.
 # ---------------------------------------------------------------------------
-class AssignmentViewSet(viewsets.ModelViewSet):
-    """NOTE (fix): this previously had no perform_create/update/destroy
-    checks at all — any authenticated user (not just the classroom's
-    teacher/co-teacher/moderator) could create, edit, or delete an
-    assignment on ANY classroom. Locked down to _can_manage_classroom,
-    matching the pattern used by ClassHoliday/Notice/ClassQuery.
+class AssignmentViewSet(viewsets.ViewSet):
+    """Thin proxy — `list` + `create` only.
 
-    NOTE (fix): get_queryset() also had no access-control gate at all —
-    unlike every sibling "classroom internals" endpoint (materials,
-    schedules, sessions, notices, holidays), a bare GET /assignments/ with
-    no ?classroom= returned EVERY assignment on the whole platform, and
-    ?classroom=<id> returned that classroom's assignments (titles, due
-    dates, attachment files) to any signed-in user, pass or no pass. Now
-    gated behind _can_view_classroom_internals, same pattern as
-    ClassScheduleViewSet/ClassSessionViewSet: an explicit ?classroom=
-    filter is checked against that one classroom, and a bare list (or a
-    detail lookup by id, which never carries a ?classroom= param) is scoped
-    to every classroom the caller can already see internals for."""
+    `retrieve`/`update`/`destroy` are NOT implemented: the unified
+    `assignment.views.AssignmentViewSet` is personal-source-only by its
+    own docstring ("Campus/liveclass assignments never reach this
+    viewset"), so there is currently no path anywhere for editing or
+    deleting an already-posted classroom assignment — not a liveclass
+    gap specifically, a gap in the unified app for the context-sourced
+    flow generally. Flagged rather than worked around by guessing at an
+    `assignment/bridge.py` function (`update_context_assignment()` /
+    `delete_context_assignment()`) that doesn't exist yet.
+    """
 
-    serializer_class = AssignmentSerializer
     permission_classes = [IsAuthenticated]
-    pagination_class = LiveClassPagination
-    queryset = Assignment.objects.all()
 
-    def get_queryset(self):
-        qs = super().get_queryset()
-        classroom_id = self.request.query_params.get("classroom")
-        user = self.request.user
-        if classroom_id:
-            classroom = Classroom.objects.filter(pk=classroom_id).first()
-            if not classroom or not _can_view_classroom_internals(classroom, user):
-                return qs.none()
-            return qs.filter(classroom_id=classroom_id)
-        return qs.filter(classroom_id__in=_accessible_classroom_ids(user))
+    def list(self, request):
+        classroom_id = request.query_params.get("classroom")
+        if not classroom_id:
+            raise ValidationError({"classroom": "This query parameter is required."})
+        classroom = get_object_or_404(Classroom, pk=classroom_id)
+        if not _can_view_classroom_internals(classroom, request.user):
+            raise PermissionDenied("A pass (active or expired) is required to view this classroom's assignments.")
 
-    def perform_create(self, serializer):
-        classroom = serializer.validated_data["classroom"]
-        if not _can_manage_classroom(classroom, self.request.user):
+        submissions = bridge.get_assignment_submissions(classroom)
+        if not _can_manage_classroom(classroom, request.user):
+            submissions = submissions.filter(student=request.user)
+
+        # bridge.create_assignment() bulk-pre-creates one
+        # AssignmentSubmission(status=MISSING) per roster member at
+        # posting time (see assignment.bridge.create_context_assignment)
+        # — so every assignment this user is entitled to see already has
+        # exactly one submission row per user in the queryset above.
+        # De-duplicating by assignment_id here is therefore a correct
+        # "every assignment this classroom has, this user can see" list,
+        # with no separate "list assignments" bridge call needed.
+        seen_ids = set()
+        assignments = []
+        for submission in submissions.select_related("assignment").order_by("assignment__due_date"):
+            if submission.assignment_id in seen_ids:
+                continue
+            seen_ids.add(submission.assignment_id)
+            assignments.append(submission.assignment)
+
+        serializer = UnifiedAssignmentSerializer(assignments, many=True, context={"request": request})
+        return Response(serializer.data)
+
+    def create(self, request):
+        classroom_id = request.data.get("classroom")
+        if not classroom_id:
+            raise ValidationError({"classroom": "This field is required."})
+        classroom = get_object_or_404(Classroom, pk=classroom_id)
+        if not _can_manage_classroom(classroom, request.user):
             raise PermissionDenied(
                 "Only the classroom's teacher, co-teacher, or moderator can create an assignment."
             )
-        assignment = serializer.save()
-        # NOTE (fix): posting an assignment previously produced no
-        # notification at all — students found out only by happening to
-        # open the Assignments tab, same class of silent-fan-out gap
-        # NoticeViewSet already fixed for urgent notices. bulk_create keeps
-        # the in-app fan-out to one INSERT regardless of classroom size.
+
+        due_date = request.data.get("due_date")
+        if due_date:
+            # Unified Assignment.due_date is a DateField (the old local
+            # liveclass.Assignment.due_date was a DateTimeField) — accept
+            # either an ISO date or datetime string from the client and
+            # take just the date part here, at the one call site that
+            # actually knows what the client sent, rather than inside
+            # bridge.create_assignment() (see that function's own
+            # docstring for why it deliberately does NOT do this
+            # coercion itself).
+            parsed = parse_date(due_date) or parse_datetime(due_date)
+            if parsed is None:
+                raise ValidationError({"due_date": "Enter a valid ISO date or datetime."})
+            due_date = parsed.date() if hasattr(parsed, "date") and callable(parsed.date) else parsed
+
+        assignment = bridge.create_assignment(
+            classroom=classroom,
+            posted_by=request.user,
+            title=request.data.get("title", ""),
+            description=request.data.get("description", ""),
+            attachment=request.FILES.get("attachment"),
+            due_date=due_date,
+        )
+
+        # NOTE (carried over from the old AssignmentViewSet.perform_create,
+        # verified against real PassPurchase fields): posting an
+        # assignment fans out an in-app notification to every active pass
+        # holder. Kept here rather than folded into bridge.create_assignment()
+        # — that function's only job is "create the assignment in the
+        # unified app"; it has no reason to know liveclass's notification
+        # system exists.
         student_ids = list(
             PassPurchase.objects.filter(
                 class_pass__classroom=classroom,
@@ -4724,175 +4808,43 @@ class AssignmentViewSet(viewsets.ModelViewSet):
 
         _safe_delay(notify_assignment_posted, assignment.id, student_ids)
 
-    # NOTE (fix — Phase 3 follow-up, classroom-reassignment gap): this
-    # checked permission against `serializer.instance.classroom` (the
-    # OLD value) but `AssignmentSerializer.classroom` is writable and not
-    # read_only — a caller who manages classroom A could edit an
-    # assignment that belongs to A while also changing `classroom` to B
-    # in the same PATCH, moving it into a classroom they may have no
-    # manage rights on at all (only A's permission was ever checked).
-    # This was reachable the moment AssignmentApi.update() (Dart) started
-    # sending full `Assignment.toJson()` on PATCH, which includes
-    # `classroom`. Assignments aren't meant to move between classrooms
-    # after creation anyway (nothing about "editing" an assignment implies
-    # relocating it) — same "frozen field" shape as
-    # AssignmentSubmissionViewSet's `graded_at` guard above — so this is
-    # blocked outright rather than re-validated against a second
-    # classroom.
-    def perform_update(self, serializer):
-        if not _can_manage_classroom(serializer.instance.classroom, self.request.user):
-            raise PermissionDenied(
-                "Only the classroom's teacher, co-teacher, or moderator can edit this assignment."
-            )
-        new_classroom = serializer.validated_data.get("classroom")
-        if new_classroom is not None and new_classroom.id != serializer.instance.classroom_id:
-            raise ValidationError({"classroom": "An assignment can't be moved to a different classroom."})
-        serializer.save()
-
-    def perform_destroy(self, instance):
-        if not _can_manage_classroom(instance.classroom, self.request.user):
-            raise PermissionDenied(
-                "Only the classroom's teacher, co-teacher, or moderator can delete this assignment."
-            )
-        instance.delete()
+        serializer = UnifiedAssignmentSerializer(assignment, context={"request": request})
+        return Response(serializer.data, status=status.HTTP_201_CREATED)
 
 
-class AssignmentSubmissionViewSet(viewsets.ModelViewSet):
-    serializer_class = AssignmentSubmissionSerializer
+class AssignmentSubmissionViewSet(viewsets.ViewSet):
+    """Thin proxy — read-only `list` (a teacher's grading queue for a
+    classroom, or a student's own submissions in it). See the module
+    note above `AssignmentViewSet` for why submit/grade/publish are
+    deliberately NOT here — those go straight to
+    `/assignment/submissions/{id}/...`.
+    """
+
     permission_classes = [IsAuthenticated]
-    # NOTE (fix): a teacher's ?assignment= view returns every student's
-    # submission for that assignment — for a large batch this is unbounded
-    # in the same way the lists above are.
-    pagination_class = LiveClassPagination
 
-    def get_queryset(self):
-        # NOTE (perf): student is nested (UserMiniSerializer) on every row.
-        qs = AssignmentSubmission.objects.select_related("student", "assignment__classroom")
-        assignment_id = self.request.query_params.get("assignment")
+    def list(self, request):
+        classroom_id = request.query_params.get("classroom")
+        if not classroom_id:
+            raise ValidationError({"classroom": "This query parameter is required."})
+        classroom = get_object_or_404(Classroom, pk=classroom_id)
+        if not _can_view_classroom_internals(classroom, request.user):
+            raise PermissionDenied("A pass (active or expired) is required to view this classroom's submissions.")
+
+        submissions = bridge.get_assignment_submissions(classroom)
+        # Same manager/self split as the old AssignmentSubmissionViewSet.
+        # get_queryset: full roster view for a classroom manager, own
+        # rows only for everyone else.
+        if not _can_manage_classroom(classroom, request.user):
+            submissions = submissions.filter(student=request.user)
+
+        assignment_id = request.query_params.get("assignment")
         if assignment_id:
-            qs = qs.filter(assignment_id=assignment_id)
+            submissions = submissions.filter(assignment_id=assignment_id)
 
-        # A ?assignment= filter used to return EVERY submission for that
-        # assignment to whoever asked — any signed-in student could read
-        # classmates' submissions/grades just by passing the id. Now: only
-        # the classroom's teacher/co-teacher/moderator (org staff included,
-        # via _can_manage_classroom) gets the full list; everyone else,
-        # filtered or not, only ever sees their own.
-        user = self.request.user
-        is_manager = False
-        if assignment_id:
-            assignment = Assignment.objects.filter(pk=assignment_id).select_related("classroom").first()
-            is_manager = bool(assignment) and _can_manage_classroom(assignment.classroom, user)
-        if not is_manager:
-            qs = qs.filter(student=user)
-        return qs
-
-    def perform_create(self, serializer):
-        # NOTE (fix): no check that the submitter actually holds access to
-        # the assignment's classroom — anyone signed in could submit
-        # (and, since (assignment, student) is unique_together, squat on)
-        # any assignment across the platform, pass or no pass.
-        assignment = serializer.validated_data["assignment"]
-        user = self.request.user
-        if not _can_view_classroom_internals(assignment.classroom, user):
-            raise PermissionDenied("A pass (active or expired) is required to submit this assignment.")
-        # NOTE (fix): same class of bug as ClassroomReview above —
-        # AssignmentSubmission has unique_together = ("assignment",
-        # "student") but `student` is read-only here, so the automatic
-        # UniqueTogetherValidator never applies and a resubmission attempt
-        # raised an unhandled IntegrityError -> 500 instead of a clear
-        # error telling the student to update their existing submission.
-        if AssignmentSubmission.objects.filter(assignment=assignment, student=user).exists():
-            raise ValidationError(
-                "You've already submitted this assignment — update your existing submission instead."
-            )
-        submission = serializer.save(student=user)
-        # NOTE (fix): the teacher-facing counterpart to ASSIGNMENT_GRADED
-        # below didn't exist — a submission coming in produced no signal at
-        # all for the teacher, who'd only find out by manually reopening
-        # the grading queue for every assignment they'd ever posted.
-        create_notification(
-            recipient=assignment.classroom.teacher,
-            notif_type=Notification.NotifType.SUBMISSION_RECEIVED,
-            title="New submission to grade",
-            message=(
-                f"{user.get_full_name() or user.username} submitted "
-                f"'{assignment.title}' in '{assignment.classroom.title}'."
-            ),
-            classroom=assignment.classroom,
+        serializer = UnifiedAssignmentSubmissionSerializer(
+            submissions.prefetch_related("answers__question"), many=True, context={"request": request}
         )
-        from .tasks import notify_submission_received
-
-        _safe_delay(notify_submission_received, submission.id)
-
-    # NOTE (fix — grading integrity): AssignmentSubmissionViewSet is a plain
-    # ModelViewSet with no perform_update/perform_destroy override, so once
-    # a submission existed ANY of these were silently possible:
-    #   - the submitting student could swap out their file (or the "score"/
-    #     "feedback" fields, which are only meant to be teacher-writable via
-    #     grade()) AFTER being graded — grade the easy version, quietly
-    #     replace it with someone else's work, keep the mark;
-    #   - the submitting student could DELETE a low-scoring submission
-    #     outright to force a "resubmission" and game the due-date/is_late
-    #     check on a second attempt;
-    #   - a classroom manager (teacher/co-teacher/moderator), who get the
-    #     full queryset for grading purposes, could edit/delete a student's
-    #     submission with no ownership check at all.
-    # Locked down: only the submitting student may edit/delete their own
-    # row, and never once graded_at is set — a graded submission is frozen,
-    # exactly like a paid PassPurchase or an accepted join request.
-    def perform_update(self, serializer):
-        instance = serializer.instance
-        if instance.student_id != self.request.user.id:
-            raise PermissionDenied("You can only edit your own submission.")
-        if instance.graded_at:
-            raise ValidationError("This submission has already been graded and can no longer be edited.")
-        # NOTE (fix — same class of gap as Assignment/Notice/ClassHoliday/
-        # LivePoll perform_update above): `assignment` is writable on
-        # `AssignmentSubmissionSerializer` (only student/submitted_at/score/
-        # feedback/graded_at are read_only). Without this, a student could
-        # PATCH their OWN ungraded submission's `assignment` to point at a
-        # different assignment entirely — bypassing perform_create's
-        # `_can_view_classroom_internals` check on that assignment's
-        # classroom (which only runs on create, not update) and the
-        # unique-submission check, effectively faking a submission to an
-        # assignment they never actually turned work in for.
-        # SubmissionApi.update() (Dart) never sends `assignment` — it only
-        # ever sends `file` — but the endpoint itself is reachable
-        # regardless, so this is closed here rather than relying on the
-        # client to keep behaving.
-        new_assignment = serializer.validated_data.get("assignment")
-        if new_assignment is not None and new_assignment.id != instance.assignment_id:
-            raise ValidationError({"assignment": "A submission can't be moved to a different assignment."})
-        serializer.save()
-
-    def perform_destroy(self, instance):
-        if instance.student_id != self.request.user.id:
-            raise PermissionDenied("You can only delete your own submission.")
-        if instance.graded_at:
-            raise ValidationError("This submission has already been graded and can no longer be deleted.")
-        instance.delete()
-
-    @action(detail=True, methods=["post"])
-    def grade(self, request, pk=None):
-        submission = self.get_object()
-        if submission.assignment.classroom.teacher_id != request.user.id:
-            raise PermissionDenied("Only the classroom's teacher can grade submissions.")
-        serializer = AssignmentGradeSerializer(submission, data=request.data, partial=True)
-        serializer.is_valid(raise_exception=True)
-        serializer.save(graded_at=timezone.now())
-        create_notification(
-            recipient=submission.student,
-            notif_type=Notification.NotifType.ASSIGNMENT_GRADED,
-            title="Assignment graded",
-            message=f"'{submission.assignment.title}' was graded — score: {submission.score}.",
-            classroom=submission.assignment.classroom,
-        )
-        # NOTE (fix): grading previously only produced a silent bell-icon row.
-        from .tasks import notify_assignment_graded
-
-        _safe_delay(notify_assignment_graded, submission.id)
-        return Response(AssignmentSubmissionSerializer(submission).data)
+        return Response(serializer.data)
 
 
 # ---------------------------------------------------------------------------

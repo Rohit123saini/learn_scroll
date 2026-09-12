@@ -127,10 +127,43 @@ class TestAttemptViewSet(mixins.RetrieveModelMixin, mixins.ListModelMixin, views
     permission_classes = [IsAuthenticated]
 
     def get_queryset(self):
+        # Scoped for LIST only (browse-your-own-attempts): a student's
+        # own attempts, plus attempts on series they themselves created.
+        # This intentionally does NOT also try to include "attempts a
+        # campus subject-teacher may review" — resolving that set here
+        # would mean this app resolving campus context-membership
+        # itself, which is exactly what the golden rule (no campus/
+        # liveclass imports/queries from this app) forbids. Retrieving
+        # a SINGLE attempt for review is handled separately by
+        # get_object() below, which is where the subject-teacher case
+        # actually needs to work.
         user = self.request.user
         return TestAttempt.objects.filter(
             db_models.Q(student=user) | db_models.Q(series__creator=user)
         ).distinct()
+
+    def get_object(self):
+        # FIX for the gap previously flagged here: `retrieve()` and
+        # `review_answer()` both need a non-creator campus subject-
+        # teacher (approved via `permissions.user_can_review_attempt()`)
+        # to actually reach the permission check, instead of being
+        # filtered out by get_queryset()'s narrower "list" scope first.
+        # Detail access is therefore resolved independently of
+        # get_queryset(): fetch the row unfiltered by owner/creator,
+        # then allow it only if the requesting user is the attempt's
+        # own student OR is permitted to review it (series creator, or
+        # campus subject-teacher via `user_can_review_attempt`). This
+        # does not widen who can review anything — `user_can_review_
+        # attempt()` is the exact same check the endpoint already
+        # relied on; it's just no longer unreachable behind a 404.
+        obj = get_object_or_404(
+            TestAttempt.objects.select_related("series", "student"),
+            pk=self.kwargs.get("pk"),
+        )
+        is_owner = obj.student_id == self.request.user.id
+        if not is_owner and not user_can_review_attempt(self.request.user, obj):
+            raise PermissionDenied("You do not have permission to access this attempt.")
+        return obj
 
     @action(detail=False, methods=["post"], url_path=r"start/(?P<series_id>[^/.]+)")
     def start(self, request, series_id=None):

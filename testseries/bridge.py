@@ -18,10 +18,35 @@ Per design doc §6:
 Both callers own roster/context resolution — this function never queries
 `campus`/`liveclass` itself, it only accepts what the caller already
 resolved (golden rule, restated in the design doc's §1 and §6).
+
+BUG FIX (this pass) — `create_context_testseries()`'s roster-notify
+block below was importing `_NotifTypeGap` from `.models`, but
+`testseries/models.py`'s own module docstring (confirmed against this
+pass's upload) says that placeholder class is GONE — `core.models.
+Notification.NotifType` now has `TESTSERIES_POSTED` for real, every
+call site inside `models.py` itself already reads it directly off
+`Notification.NotifType`. This module was never updated to match, so
+`from .models import Question, TestSeries, _NotifTypeGap, _notify`
+would raise `ImportError` at import time — i.e. this file could not
+have been imported successfully once `_NotifTypeGap` was removed from
+`models.py`, meaning `create_context_testseries()` was never actually
+exercised against the real model. Fixed below: `_NotifTypeGap` import
+dropped, `Notification.NotifType.TESTSERIES_POSTED` imported lazily
+(function-local) instead, same lazy-import-for-`core`/`user_profile`
+reasoning `models.py`'s own `_notify()`/`_record_coin_transaction()`
+already use.
+
+ADDITION (this pass) — `get_attempts_for_context()` at the bottom of
+this file. `campus/bridge.py::can_review_testseries_attempt()` and a
+review endpoint on `campus`'s `TestSeriesViewSet` both need a way to
+list `TestAttempt` rows for a `(context_type, context_id)` pair without
+importing `TestAttempt` directly — the `testseries` analogue of
+`assignment.bridge.get_submissions_for_context()`, which `campus.
+bridge.get_assignment_submissions()` already calls the same way.
 """
 from django.db import transaction
 
-from .models import Question, TestSeries, _NotifTypeGap, _notify
+from .models import Question, TestAttempt, TestSeries, _notify
 
 
 def create_context_testseries(
@@ -84,13 +109,38 @@ def create_context_testseries(
         series.recompute_total_marks()
 
     if roster:
+        # Lazy import — same reasoning `models.py`'s own `_notify()`/
+        # `_record_coin_transaction()` already give for `core`/
+        # `user_profile`: avoids a hard import-time cycle between
+        # `testseries` and `core`.
+        from core.models import Notification
+
         for user in roster:
             _notify(
                 recipient=user,
-                notif_type=_NotifTypeGap.TESTSERIES_POSTED,
+                notif_type=Notification.NotifType.TESTSERIES_POSTED,
                 title=f"New test series: {series.title}",
                 message=series.description[:200],
                 data={"series_id": str(series.id)},
             )
 
     return series
+
+
+def get_attempts_for_context(*, context_type: str, context_id):
+    """Returns every `TestAttempt` for every campus/liveclass `TestSeries`
+    in this `(context_type, context_id)` — the `testseries` analogue of
+    `assignment.bridge.get_submissions_for_context()`, added so
+    `campus`/`liveclass` bridge modules have a context-scoped way to
+    list attempts for review without ever touching `TestAttempt`/
+    `TestSeries` directly (golden rule).
+
+    Unfiltered by permission, same contract `get_submissions_for_
+    context()` documents on its own side: the caller (e.g. `campus.
+    bridge.can_review_testseries_attempt()`, or a review endpoint in
+    `campus/views.py`) is responsible for any further staff/student-
+    scoped narrowing.
+    """
+    return TestAttempt.objects.filter(
+        series__context_type=context_type, series__context_id=context_id
+    ).select_related("series", "student")
