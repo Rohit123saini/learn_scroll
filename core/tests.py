@@ -262,3 +262,180 @@ class NotificationPreferenceViewTests(CoreTestBase):
             "/core/notification-preferences/me/", {"muted_types": ["not_a_real_type"]}, format="json",
         )
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+# ===========================================================================
+# SearchView / search_everything() — Task 18, §9 items 14/15
+# ===========================================================================
+class SearchViewTests(CoreTestBase):
+    """[GAP CLOSED — §9 item 14] `SearchView` had zero test coverage
+    before this pass.
+
+    `core.views.search_everything` is mocked for most of these —
+    deliberately, not out of laziness: real `assigments`/`testseries`
+    rows would need this test to guess at those apps' exact model
+    schemas (required fields, `full_clean()` constraints on `testseries.
+    Question`, etc.), which weren't part of any upload this doc has
+    seen (same "stub it, don't guess" reasoning `search.py`'s own
+    module docstring already gives for why `post`/`ClassMaterial`
+    aren't wired yet). Mocking `search_everything` isolates exactly
+    what `SearchView` itself owns: parsing `q`/`sources`, the
+    `ValueError` -> `400` translation, and — the actual regression
+    target for item 14's \"assigments/testseries scoping\" ask — the
+    WHERE-clause shape of the two scoped querysets it builds, verified
+    via `str(queryset.query)` rather than by executing them against
+    real data. This needs no fixture data and no schema beyond the
+    field names `core/views.py::SearchView.get()` itself already
+    references (`posted_by`, `source`, `context_type`, `context_id`,
+    `creator`, `status`) — nothing here is guessed past what's already
+    in the uploaded source.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.client = APIClient()
+        self.client.force_authenticate(user=self.student)
+
+    def _capture_scoped_querysets(self):
+        """Returns (captured_dict, side_effect_fn) — patch
+        `core.views.search_everything` with the side_effect_fn to grab
+        the `scoped_querysets` dict `SearchView.get()` builds, without
+        actually running any FTS/trigram query against real data."""
+        captured = {}
+
+        def _capture(scoped_querysets, query, **kwargs):
+            captured.update(scoped_querysets)
+            return []
+
+        return captured, _capture
+
+    # --- q / 400 handling ---------------------------------------------
+
+    def test_missing_query_returns_400(self):
+        # Real search_everything() — not mocked — since MIN_QUERY_LENGTH
+        # is enforced as the very first line of that function, before it
+        # ever touches a scoped queryset, so this doesn't need
+        # assigments/testseries data to exercise the real 400 path.
+        response = self.client.get("/core/search/")
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("detail", response.data)
+
+    def test_empty_query_string_returns_400(self):
+        response = self.client.get("/core/search/?q=")
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_whitespace_only_query_returns_400(self):
+        # search_everything() strips before length-checking — a
+        # query of only spaces must be rejected the same as an empty one.
+        response = self.client.get("/core/search/?q=   ")
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_below_min_length_query_returns_400_not_500(self):
+        # Exact MIN_QUERY_LENGTH threshold wasn't part of this upload
+        # (it's imported from message.search_utils, not defined in
+        # core.search itself) — mocked here with the exact contract
+        # search_everything() documents (raises ValueError) rather than
+        # guessing the real number of characters that trips it.
+        with patch(
+            "core.views.search_everything",
+            side_effect=ValueError("Query must be at least 2 characters."),
+        ) as mock_search:
+            response = self.client.get("/core/search/?q=a")
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("detail", response.data)
+        mock_search.assert_called_once()
+
+    # --- success path ----------------------------------------------------
+
+    def test_success_path_returns_search_everything_results_unmodified(self):
+        fake_results = [
+            {"source": "assigments", "id": 1, "title": "Algebra basics", "snippet": "..."},
+            {"source": "testseries", "id": 7, "title": "Algebra mock test", "snippet": "..."},
+        ]
+        with patch("core.views.search_everything", return_value=fake_results) as mock_search:
+            response = self.client.get("/core/search/?q=algebra")
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["results"], fake_results)
+        mock_search.assert_called_once()
+        _, call_kwargs = mock_search.call_args
+        # No ?sources= given -> None, meaning "every registered source",
+        # per search_everything()'s own contract.
+        self.assertIsNone(call_kwargs.get("sources"))
+
+    def test_success_path_scoped_querysets_include_assigments_and_testseries(self):
+        captured, side_effect = self._capture_scoped_querysets()
+        with patch("core.views.search_everything", side_effect=side_effect):
+            response = self.client.get("/core/search/?q=algebra")
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(set(captured.keys()), {"assigments", "testseries"})
+
+    def test_sources_param_is_parsed_into_a_list(self):
+        with patch("core.views.search_everything", return_value=[]) as mock_search:
+            response = self.client.get("/core/search/?q=algebra&sources=assigments,testseries")
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        _, call_kwargs = mock_search.call_args
+        self.assertEqual(call_kwargs["sources"], ["assigments", "testseries"])
+
+    def test_sources_param_ignores_blank_entries(self):
+        with patch("core.views.search_everything", return_value=[]) as mock_search:
+            self.client.get("/core/search/?q=algebra&sources=assigments,,testseries,")
+        _, call_kwargs = mock_search.call_args
+        self.assertEqual(call_kwargs["sources"], ["assigments", "testseries"])
+
+    def test_unregistered_sources_return_empty_not_error(self):
+        # [§9 item 15 regression] `message`/`campus_notice` ARE
+        # registered in search.py's SOURCES, but SearchView.get() builds
+        # no scoped queryset for either yet — search_everything()'s own
+        # "silently skipped, not an error" contract means this must stay
+        # a clean 200/[] today, not a 400/500, until item 15 is tasked.
+        # Real (unmocked) search_everything() — this needs no
+        # assigments/testseries data since neither key is present in
+        # scoped_querysets for this request.
+        response = self.client.get("/core/search/?q=algebra&sources=message,campus_notice")
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["results"], [])
+
+    # --- assigments/testseries scoping regression -------------------------
+
+    def test_assigments_scoping_denies_staff_shortcut_to_non_staff(self):
+        """Non-staff caller's `assigments` queryset must carry the
+        posted-by-me-or-my-personal-submission narrowing — regression
+        for `assigmentsViewSet.get_queryset()` parity (class docstring)."""
+        captured, side_effect = self._capture_scoped_querysets()
+        with patch("core.views.search_everything", side_effect=side_effect):
+            self.client.get("/core/search/?q=algebra")
+        sql = str(captured["assigments"].query).lower()
+        self.assertIn("posted_by_id", sql)
+        self.assertIn("source", sql)  # the PERSONAL-source half of the OR
+
+    def test_assigments_scoping_staff_sees_everything_unfiltered(self):
+        """A staff caller must get `assigments.objects.all()` — no
+        posted-by-me narrowing — same as `assigmentsViewSet.get_queryset()`
+        for staff."""
+        self.student.is_staff = True
+        self.student.save()
+        captured, side_effect = self._capture_scoped_querysets()
+        with patch("core.views.search_everything", side_effect=side_effect):
+            self.client.get("/core/search/?q=algebra")
+        sql = str(captured["assigments"].query).lower()
+        self.assertNotIn("posted_by_id", sql)
+
+    def test_testseries_scoping_includes_own_created_and_campus_enrolled(self):
+        """Regression for the four-way OR: individual/published,
+        own-created, attempted, and campus-enrolled-section — losing any
+        one of these silently shrinks what a user can find via search."""
+        captured, side_effect = self._capture_scoped_querysets()
+        with patch("core.views.search_everything", side_effect=side_effect):
+            self.client.get("/core/search/?q=algebra")
+        sql = str(captured["testseries"].query).lower()
+        self.assertIn("creator_id", sql)  # own-created
+        self.assertIn("context_type", sql)  # campus-context branch
+        self.assertIn("context_id", sql)  # campus-enrolled-sections branch
+        self.assertIn("status", sql)  # individual/published branch
+        # The campus-enrolled branch must be a nested SELECT against
+        # `campus.StudentEnrollment` (`context_id__in=active_section_ids`)
+        # rather than a hardcoded value — checked structurally (a
+        # subquery appears right after `context_id`) rather than by
+        # guessing `StudentEnrollment.Status.ACTIVE`'s exact stored
+        # string representation, which wasn't confirmed for this
+        # project's Django/enum setup (see class docstring).
+        self.assertIn("select", sql.split("context_id", 1)[-1][:200])

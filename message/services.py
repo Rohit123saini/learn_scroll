@@ -299,13 +299,45 @@ def answer_doubt_question(*, doubt, actor, answer_text: str, answered_by=None):
 
 
 # ---------------------------------------------------------------------------
-# 🔧 REMOVED (was dead code) — `create_bell_rows_for_push` used to live
-# here, written back when `push_utils.py`'s source wasn't available to
-# check against. Now that it is: `push_utils.py` already creates its own
-# bell rows, inline, per event (`send_chat_message_push` /
-# `send_mention_push` / `send_incoming_call_push` each call `core.
-# services.create_notification()` directly — see that file). This helper
-# had zero callers anywhere in the codebase and duplicated a job that was
-# already done a different way, so it's gone rather than left to drift
-# from the real implementation.
+# create_bell_rows_for_push() — RESTORED (Phase 2 Task 11).
+#
+# This was previously removed as dead code (see the note this replaces —
+# kept below for history) on the grounds that `push_utils.py` already
+# creates bell rows inline per-event via `core.services.create_notification()`,
+# and nothing else called this. That's no longer true:
+# `liveclass/parent_link_views.py::ClassroomParentCodeGenerateView.post()`
+# now calls this directly (Task 11's "notify the student a parent code was
+# created" gap-fix) with a `recipient_ids` LIST, which bare
+# `create_notification()` doesn't support — it only takes one `recipient`.
+# So this is a thin fan-out wrapper around the same real implementation,
+# not a second/competing notification path.
+#
+# Best-effort per recipient: one bad id (or `core` app not installed —
+# `create_notification` itself degrades to a no-op in that case, same as
+# `answer_doubt_question` above) never stops the rest of the batch.
+# ---------------------------------------------------------------------------
+def create_bell_rows_for_push(*, recipient_ids: Iterable, notif_type: str, title: str,
+                               message: str = None, data: dict = None) -> list:
+    from core.services import create_notification
+
+    recipients = User.objects.filter(id__in=list(recipient_ids))
+    created = []
+    for recipient in recipients:
+        try:
+            created.append(
+                create_notification(recipient, notif_type, title, message, data)
+            )
+        except Exception:
+            continue
+    return created
+
+
+# ---------------------------------------------------------------------------
+# (superseded) — `create_bell_rows_for_push` used to live here, written
+# back when `push_utils.py`'s source wasn't available to check against.
+# `push_utils.py` still creates its own bell rows inline for its own
+# events (`send_chat_message_push` / `send_mention_push` /
+# `send_incoming_call_push`) — this function is a separate, genuinely-used
+# fan-out helper for callers (like `parent_link_views.py`) that need to
+# notify several recipients from one call, not a duplicate of those.
 # ---------------------------------------------------------------------------

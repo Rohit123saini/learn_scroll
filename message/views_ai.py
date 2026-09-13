@@ -376,7 +376,7 @@ class ClassTranscriptSearchView(APIView):
 #      kaafi hai; agar chaho to embeddings-based retrieval pe upgrade
 #      karo, but us layer ke bina bhi ye already "generic AI" se kaafi
 #      behtar hai kyunki asli class content use ho raha hai)
-# Koi Assignment/StudyMaterial model abhi backend me exist nahi karta
+# Koi assigments/StudyMaterial model abhi backend me exist nahi karta
 # (confirmed against CHAT_APP_DOCUMENTATION.md) — isliye wo context source
 # is version me shaamil NAHI hai. Jab wo model bane, yahan ek aur context
 # section add kar dena.

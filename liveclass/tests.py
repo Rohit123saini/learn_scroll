@@ -8,7 +8,7 @@ zero coverage on money-moving code.
 
 Scope (deliberately NOT a full-app test suite — see README/audit for what's
 still uncovered elsewhere, e.g. scheduling/recurrence, chat, polls,
-assignments):
+assigmentss):
     1. Coupon.is_valid() + classroom-scoping rules
     2. _charge_and_create_purchase() — the only place coins actually leave a
        student's wallet (discount math/rounding, insufficient balance,

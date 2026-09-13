@@ -3,7 +3,7 @@
 Shared attachment validation — used by any app's FileField that accepts a
 user-uploaded document/image (originally lived in `testseries/models.py`,
 where it validated `Question.attachment` / `QuestionResponse.
-answer_attachment`; `assignment` reuses the exact same rules instead of
+answer_attachment`; `assigments` reuses the exact same rules instead of
 redefining them).
 
 Behavior is UNCHANGED from the original `testseries` version — same

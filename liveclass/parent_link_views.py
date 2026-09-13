@@ -28,8 +28,8 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from .models import (
-    Assignment,
-    AssignmentSubmission,
+    assigments,
+    assigmentsSubmission,
     Classroom,
     StudentReportCard,
     compute_attendance_percent_bulk,
@@ -152,7 +152,7 @@ class ReportCardViewSet(viewsets.ModelViewSet):
     attendance_percent is NEVER accepted from the request body — always
     computed server-side by compute_attendance_percent_bulk() (Gap 3 fix).
     homework_completion_percent and average_marks are computed the same way
-    from this classroom's own liveclass Assignment/AssignmentSubmission data
+    from this classroom's own liveclass assigments/assigmentsSubmission data
     (category='homework'), so a teacher only ever supplies period_label and
     teacher_remark — the numbers are never hand-typed and therefore can
     never drift from what the classroom's own records say.
@@ -208,9 +208,9 @@ class ReportCardViewSet(viewsets.ModelViewSet):
 
     @staticmethod
     def _homework_stats(classroom, student):
-        homework_qs = Assignment.objects.filter(classroom=classroom, category=Assignment.Category.HOMEWORK)
+        homework_qs = assigments.objects.filter(classroom=classroom, category=assigments.Category.HOMEWORK)
         total = homework_qs.count()
-        submissions = AssignmentSubmission.objects.filter(assignment__in=homework_qs, student=student)
+        submissions = assigmentsSubmission.objects.filter(assigments__in=homework_qs, student=student)
         submitted = submissions.count()
         completion_percent = round((submitted / total) * 100, 2) if total else 0
         average_marks = submissions.filter(score__isnull=False).aggregate(avg=Avg("score"))["avg"]

@@ -7,7 +7,7 @@ serializer's `validate()` as well as a view's `get_permissions()`.
 """
 from rest_framework.permissions import SAFE_METHODS, BasePermission
 
-from .models import Campus, CampusParentLink, ClassTeacherAssignment, StaffProfile, SubjectTeacherAssignment
+from .models import Campus, CampusParentLink, ClassTeacherassigments, StaffProfile, SubjectTeacherassigments
 
 
 def get_staff_profile(user, campus_id):
@@ -55,7 +55,7 @@ def is_any_active_staff(user, campus_id):
 
 
 def is_class_teacher_of_section(user, section_id):
-    return ClassTeacherAssignment.objects.filter(
+    return ClassTeacherassigments.objects.filter(
         section_id=section_id, staff__user=user, staff__is_active=True
     ).exists()
 
@@ -82,13 +82,13 @@ def is_linked_parent_of_student(user, student_id, campus_id=None):
 
 def can_manage_section_subject(user, campus_id, section_id, subject_id=None):
     """
-    Can `user` manage content (attendance, assignments, syllabus,
+    Can `user` manage content (attendance, assigmentss, syllabus,
     results, live sessions) for this section, optionally scoped to one
     subject? True if any of:
       - `user` is the section's class-teacher, or a campus admin/
         principal-HOD — always allowed, subject or no subject.
       - `subject_id` is given AND `user` holds an APPROVED
-        `SubjectTeacherAssignment` for that exact section+subject
+        `SubjectTeacherassigments` for that exact section+subject
         (design doc §2/§5/§11 — approved subject-teachers manage only
         their own approved section+subject, not the whole section).
     When `subject_id` is None (a daily, not period-wise, mark — see
@@ -101,12 +101,12 @@ def can_manage_section_subject(user, campus_id, section_id, subject_id=None):
     if is_campus_admin_or_principal(user, campus_id):
         return True
     if subject_id:
-        return SubjectTeacherAssignment.objects.filter(
+        return SubjectTeacherassigments.objects.filter(
             section_id=section_id,
             subject_id=subject_id,
             staff__user=user,
             staff__is_active=True,
-            status=SubjectTeacherAssignment.Status.APPROVED,
+            status=SubjectTeacherassigments.Status.APPROVED,
         ).exists()
     return False
 
@@ -213,7 +213,7 @@ class IsCampusAdminOrPrincipal(BasePermission):
 class IsSectionSubjectStaffOrReadOnly(BasePermission):
     """
     For section+subject-scoped content endpoints (live sessions,
-    attendance, assignments, syllabus, results — design doc §5/§6/§7):
+    attendance, assigmentss, syllabus, results — design doc §5/§6/§7):
     safe methods (list/retrieve) are left to the viewset's own
     campus-membership queryset scoping; unsafe methods require
     `can_manage_section_subject` to be true for the (campus, section,

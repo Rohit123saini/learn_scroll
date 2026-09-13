@@ -14,12 +14,12 @@ kept here, not duplicated in `tasks.py`, so the task and the on-demand
 `AttendanceViewSet.summary` action can never drift out of sync on what
 "percent" means.
 
-F-3 (this pass) — `compute_attendance_streak()` / `compute_assignment_
+F-3 (this pass) — `compute_attendance_streak()` / `compute_assigments_
 ontime_streak()` added below. Neither existed in this file before this
 pass; `tasks.check_attendance_streak_rewards()` /
-`check_assignment_ontime_streak_rewards()` were already calling
+`check_assigments_ontime_streak_rewards()` were already calling
 `from .services import compute_attendance_streak` /
-`compute_assignment_ontime_streak` — i.e. this module could not have
+`compute_assigments_ontime_streak` — i.e. this module could not have
 been imported successfully by either task before this fix, meaning
 BOTH streak Celery tasks raised `ImportError` on every single run.
 That's the "abhi crash karte the" the Task 14 checklist refers to.
@@ -149,23 +149,23 @@ def compute_attendance_streak(enrollment):
     return streak, last_date
 
 
-def compute_assignment_ontime_streak(student, section):
+def compute_assigments_ontime_streak(student, section):
     """
-    F-3 — current unbroken streak of on-time assignment submissions by
+    F-3 — current unbroken streak of on-time assigments submissions by
     `student` within `section`, walking backward from the most recently
-    due campus assignment in that section.
+    due campus assigments in that section.
 
     [Task 11 QUERY REDIRECT] Reads through `campus.bridge.
-    get_assignment_submissions(section)` — the unified `assignment`
-    app's data — never the deprecated `campus.AssignmentSubmission`
+    get_assigments_submissions(section)` — the unified `assigments`
+    app's data — never the deprecated `campus.assigmentsSubmission`
     model (which stopped receiving new rows once Task 11 landed; see
     that model's own `save()` guard in models.py). This is the same
-    redirect `tasks.send_assignment_due_reminders()` already applied
-    for its own query; before this pass, `compute_assignment_ontime_
+    redirect `tasks.send_assigments_due_reminders()` already applied
+    for its own query; before this pass, `compute_assigments_ontime_
     streak()` did not exist in this file at all, so this is a new
     function, not a fix to a pre-existing wrong-model read.
 
-    ✅ CONFIRMED against the real `assignment/models.py` (this pass) —
+    ✅ CONFIRMED against the real `assigments/models.py` (this pass) —
     this REPLACES a wrong first draft that checked
     `submission.status == "submitted"`. That check is wrong for two
     confirmed reasons, not just an unconfirmed guess:
@@ -179,39 +179,39 @@ def compute_assignment_ontime_streak(student, section):
          status()`). Every structured submission would ALWAYS wrongly
          break the streak under the old check.
     The model's own `is_late()` method is the actual source of truth —
-    it recomputes from `submitted_at` vs. `assignment.due_date` fresh
+    it recomputes from `submitted_at` vs. `assigments.due_date` fresh
     every time, independent of workflow status, so it works identically
     for both the free-form and structured paths. "On-time" here is
     therefore `submitted_at is not None and not is_late()` — the
     `submitted_at` check is needed because `is_late()` also returns
     `False` for a never-submitted (`MISSING`) row, which is not on-time.
 
-    ✅ CONFIRMED (this pass, `assignment/bridge.py` now provided):
+    ✅ CONFIRMED (this pass, `assigments/bridge.py` now provided):
     `get_submissions_for_context()` — and therefore `campus.bridge.
-    get_assignment_submissions()`, which calls straight through to it —
-    returns a real Django queryset (`AssignmentSubmission.objects.
-    filter(...).select_related("assignment", "student")`), not a plain
+    get_assigments_submissions()`, which calls straight through to it —
+    returns a real Django queryset (`assigmentsSubmission.objects.
+    filter(...).select_related("assigments", "student")`), not a plain
     list. This REPLACES a more defensive first draft that filtered/
     sorted in plain Python specifically to avoid depending on that being
     true. Switching to DB-level `.filter()`/`.order_by()` isn't just
     tidier now that it's confirmed — it also sidesteps a real crash the
-    Python-side version had: `Assignment.due_date` is nullable
-    (`null=True, blank=True`, confirmed in `assignment/models.py`), and
-    `sorted(..., key=lambda s: s.assignment.due_date)` raises `TypeError`
+    Python-side version had: `assigments.due_date` is nullable
+    (`null=True, blank=True`, confirmed in `assigments/models.py`), and
+    `sorted(..., key=lambda s: s.assigments.due_date)` raises `TypeError`
     the moment it has to compare a real `date` against `None`. Ordering
     at the DB level instead never hits that — SQL handles NULL in
     `ORDER BY` without raising (Postgres sorts them as the "largest"
     value in a `DESC` order, i.e. first), so a null-due-date submission
     can appear in the streak walk without crashing this function, even
     though whether it *should* count is arguably itself a design
-    question the callers of `create_context_assignment()` — not this
+    question the callers of `create_context_assigments()` — not this
     function — would need to actually resolve (should a campus
-    assignment ever have no due_date at all?).
+    assigments ever have no due_date at all?).
 
     Returns `(streak_length, last_due_date, last_submission_id)` —
-    `last_due_date` is the `Assignment.due_date` of the most recent
+    `last_due_date` is the `assigments.due_date` of the most recent
     submission in the streak, used by `tasks.
-    check_assignment_ontime_streak_rewards()` the same idempotency-
+    check_assigments_ontime_streak_rewards()` the same idempotency-
     reference way `compute_attendance_streak()`'s `last_date` is used.
     `last_submission_id` is that same submission's own `id` — see the
     `due_date=None` note below for why the caller needs it too. Returns
@@ -221,13 +221,13 @@ def compute_assignment_ontime_streak(student, section):
 
     ✅ RESOLVED (this pass) — `due_date=None` no longer crashes the
     caller. If the most-recent submission counted into the streak
-    belongs to an assignment with `due_date=None` (allowed by the
+    belongs to an assigments with `due_date=None` (allowed by the
     model), `last_due_date` comes back `None` alongside a real
     `streak > 0`, exactly as before — but now `last_submission_id` is
     always populated whenever `streak > 0`, `due_date` or not, because
     it's read straight off the submission row itself rather than the
-    (possibly-null) assignment field. `tasks.
-    check_assignment_ontime_streak_rewards()` builds its idempotency
+    (possibly-null) assigments field. `tasks.
+    check_assigments_ontime_streak_rewards()` builds its idempotency
     reference from `last_due_date` when present and falls back to
     `last_submission_id` when it isn't, instead of calling
     `.isoformat()` on `None`. A submission row's `id` is permanently
@@ -240,7 +240,7 @@ def compute_assignment_ontime_streak(student, section):
     for two genuinely different milestones.
 
     This does NOT resolve the separate product-rule question flagged
-    before — should a due-date-less campus assignment count towards an
+    before — should a due-date-less campus assigments count towards an
     "on-time" streak at all — that's still a real call for whoever owns
     that rule, not something fixed here. This pass only makes the
     *crash* on that case go away regardless of which way that question
@@ -248,9 +248,9 @@ def compute_assignment_ontime_streak(student, section):
     them", that's a filter added to the `submissions` query below, not
     a change to this return shape.
     """
-    from .bridge import get_assignment_submissions
+    from .bridge import get_assigments_submissions
 
-    submissions = get_assignment_submissions(section).filter(student_id=student.id).order_by("-assignment__due_date")
+    submissions = get_assigments_submissions(section).filter(student_id=student.id).order_by("-assigments__due_date")
 
     streak = 0
     last_due_date = None
@@ -261,6 +261,6 @@ def compute_assignment_ontime_streak(student, section):
             break
         streak += 1
         if last_submission_id is None:
-            last_due_date = submission.assignment.due_date
+            last_due_date = submission.assigments.due_date
             last_submission_id = submission.id
     return streak, last_due_date, last_submission_id

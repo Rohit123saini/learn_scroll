@@ -36,6 +36,9 @@ from .views import (
     CallActionView,
     CallHistoryViewSet,
     CallInitiateView,
+    # 🔥 GAP FIX — TASK 21: fully implemented in views.py but was never
+    # imported/routed here (CHAT_APP_DOCUMENTATION.md §9.4 item 26).
+    CallRecordingView,
     ConversationViewSet,
     DeviceTokenView,
     # 🔥 NAYA — Doubt Queue ("persistent, upvotable question board per
@@ -127,6 +130,7 @@ urlpatterns = [
     # --- Calls ---
     path('calls/initiate/', CallInitiateView.as_view(), name='call-initiate'),
     path('calls/<uuid:call_id>/action/', CallActionView.as_view(), name='call-action'),
+    path('calls/<uuid:call_id>/recording/', CallRecordingView.as_view(), name='call-recording'),
 
     # --- Study Room ---
     path('study-room/<uuid:conversation_id>/join/', StudyRoomJoinView.as_view(), name='study-room-join'),

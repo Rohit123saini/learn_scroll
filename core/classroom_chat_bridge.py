@@ -50,8 +50,8 @@ needed, the ASSUMPTION markers below have been resolved and removed.
 ✅ VERIFIED (this pass) against the real `campus/models.py`:
 `Section.chat_group_enabled`/`linked_conversation_id` (newly added this
 same pass, mirroring `Classroom`'s pair exactly — see that model's own
-comment), `ClassTeacherAssignment(section, staff)`,
-`SubjectTeacherAssignment(section, subject, staff, status)` with
+comment), `ClassTeacherassigments(section, staff)`,
+`SubjectTeacherassigments(section, subject, staff, status)` with
 `Status.APPROVED`, `StudentEnrollment(student, section, status)` with
 `Status.ACTIVE`, and `CampusLiveSession.room_id` (plain `CharField`) all
 match what functions 10/11 below assume.
@@ -445,7 +445,7 @@ def post_session_live_announcement(session):
 # exact same "campus never imports message/liveclass models directly,
 # core.classroom_chat_bridge is the only door" pattern as functions 1-8
 # above — the only difference is the section/campus vocabulary
-# (StudentEnrollment/ClassTeacherAssignment/SubjectTeacherAssignment
+# (StudentEnrollment/ClassTeacherassigments/SubjectTeacherassigments
 # instead of ClassJoinRequest/ClassroomStaff) and, for the video room,
 # no persistent-model integration at all (see that function's own
 # docstring for why).
@@ -483,11 +483,11 @@ def create_section_group(section, actor):
     already has one linked (`_get_group_for_section()` above).
 
     Initial members: every ACTIVE `StudentEnrollment` for this section,
-    plus every APPROVED `SubjectTeacherAssignment` for it (promoted to
+    plus every APPROVED `SubjectTeacherassigments` for it (promoted to
     MODERATOR after creation, same as classroom co-teachers/moderators
     above) — campus has no `ClassJoinRequest`/`ClassroomStaff` concept,
     these are its equivalents. The section's own class-teacher
-    (`ClassTeacherAssignment`) is the group creator/ADMIN.
+    (`ClassTeacherassigments`) is the group creator/ADMIN.
 
     Raises `ValueError` if `actor` isn't this section's assigned
     class-teacher (same "extra safety net, view should also check its
@@ -495,16 +495,16 @@ def create_section_group(section, actor):
     """
     # Local imports — cross-app (campus), same "no hard import-time
     # coupling" reasoning every other local import in this module gives.
-    from campus.models import ClassTeacherAssignment, StudentEnrollment, SubjectTeacherAssignment
+    from campus.models import ClassTeacherassigments, StudentEnrollment, SubjectTeacherassigments
     from message.models import GroupMember
     from message.services import create_group
 
-    class_teacher_assignment = (
-        ClassTeacherAssignment.objects.filter(section=section)
+    class_teacher_assigments = (
+        ClassTeacherassigments.objects.filter(section=section)
         .select_related("staff__user")
         .first()
     )
-    if class_teacher_assignment is None or actor.id != class_teacher_assignment.staff.user_id:
+    if class_teacher_assigments is None or actor.id != class_teacher_assigments.staff.user_id:
         raise ValueError("Sirf section ka class-teacher hi chat group bana sakta hai.")
 
     existing = _get_group_for_section(section)
@@ -517,15 +517,15 @@ def create_section_group(section, actor):
         ).values_list("student_id", flat=True)
     )
     subject_teacher_user_ids = list(
-        SubjectTeacherAssignment.objects.filter(
-            section=section, status=SubjectTeacherAssignment.Status.APPROVED,
+        SubjectTeacherassigments.objects.filter(
+            section=section, status=SubjectTeacherassigments.Status.APPROVED,
         ).values_list("staff__user_id", flat=True)
     )
     member_ids = set(student_ids) | set(subject_teacher_user_ids)
 
     with transaction.atomic():
         group = create_group(
-            created_by=class_teacher_assignment.staff.user,
+            created_by=class_teacher_assigments.staff.user,
             name=str(section),
             description="",
             # Section has no cover-image-equivalent field (confirmed

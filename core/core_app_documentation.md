@@ -3,14 +3,14 @@
 > Ye document `core` Django app ke andar jo bhi kaam hua hai (tasks 28, 42-48, Task 18, F-1, F-4) uska single source of truth hai. Koi bhi is app pe kaam continue kare, sabse pehle ye file padhe — har file ka purpose, har function ka contract, aur sab `ASSUMPTION` markers ek jagah pe hain.
 
 > **Reconciliation pass (newest — this update):** `classroom_chat_bridge.py` firse check kiya gaya — **§6 ka "10 public/semi-public entry points" claim ab STALE hai.** File me ab campus (`campus` app) ↔ chat-Group/video-room bridge ke **2 naye functions** hain, jo is doc me pehle kahin mention nahi the:
-> - `create_section_group(section, actor)` — `create_classroom_group()`'s `campus.Section` counterpart (`campus/bridge.py::create_section_group` isko ab top-level import ke through seedha call karta hai). Members = ACTIVE `StudentEnrollment` + APPROVED `SubjectTeacherAssignment` (promoted to MODERATOR), creator/ADMIN = section ka `ClassTeacherAssignment`. Idempotent, `ValueError` agar `actor` class-teacher na ho — same contract-shape jo `create_classroom_group()` already follow karta hai.
+> - `create_section_group(section, actor)` — `create_classroom_group()`'s `campus.Section` counterpart (`campus/bridge.py::create_section_group` isko ab top-level import ke through seedha call karta hai). Members = ACTIVE `StudentEnrollment` + APPROVED `SubjectTeacherassigments` (promoted to MODERATOR), creator/ADMIN = section ka `ClassTeacherassigments`. Idempotent, `ValueError` agar `actor` class-teacher na ho — same contract-shape jo `create_classroom_group()` already follow karta hai.
 > - `provision_video_room(live_session, actor)` — `campus.CampusLiveSession.room_id` ke liye ek deterministic room-name string (`f"campus_live_session_{live_session.id}"`) banata hai. **LiveKit JWT yahan mint NAHI hoti** — har participant apna token join-time pe, apni identity ke saath, alag se banata hai (`message.livekit_utils.generate_livekit_token`, jo abhi tak `campus/views.py` na aane ki wajah se wire nahi hai — flagged, guess nahi kiya gaya).
 > - Module ka apna docstring ab khud ko **12 public entry points** bolta hai (pehle 10): 8 liveclass-facing sync functions (1-8) + `get_groups_for_classrooms()` (message-facing) + naye `create_section_group()`/`provision_video_room()` (campus-facing, functions 10/11) + `resolve_parent_from_token()` — jo iss pass me **#9 se #12 pe renumber ho gaya** hai, taaki campus-facing pair (10/11) module ke andar contiguous rahe, beech me insert na ho.
-> - Iske saath `campus.models` (`ClassTeacherAssignment`, `StudentEnrollment`, `SubjectTeacherAssignment`) is file ki dependency list me bhi add ho gaya hai — pehle sirf `message.models`/`message.services` documented tha.
+> - Iske saath `campus.models` (`ClassTeacherassigments`, `StudentEnrollment`, `SubjectTeacherassigments`) is file ki dependency list me bhi add ho gaya hai — pehle sirf `message.models`/`message.services` documented tha.
 > §1, §2, §6, aur §8 (dependency graph) neeche update kar diye gaye hain.
 
 > **Reconciliation pass (latest — this update):** `models.py` aur nayi migration file (`0004_alter_notification_notif_type.py`) ke against check kiya — **`NotifType` enum ka documentation bahut peeche reh gaya tha**, fix kar diya:
-> - **§3's `NotifType` list sirf 31 values document karti thi ("28 original liveclass + 3 message-app types") — real enum me ab 55 values hain.** Missing the: task 11 ka `post` app block (`POST_LIKED`/`POST_COMMENTED`, 2), pura campus block (9), testseries/assignment/campus-gamification block (8), aur is pass (TASK 1) ke 5 naye `FOLLOW_*`/`*_FROM_FOLLOWED` values (`user_profile`'s Follow feature). §3 ab poori 55-value list, grouped by source app, ke saath update hai.
+> - **§3's `NotifType` list sirf 31 values document karti thi ("28 original liveclass + 3 message-app types") — real enum me ab 55 values hain.** Missing the: task 11 ka `post` app block (`POST_LIKED`/`POST_COMMENTED`, 2), pura campus block (9), testseries/assigments/campus-gamification block (8), aur is pass (TASK 1) ke 5 naye `FOLLOW_*`/`*_FROM_FOLLOWED` values (`user_profile`'s Follow feature). §3 ab poori 55-value list, grouped by source app, ke saath update hai.
 > - **`CAMPUS_APP_TYPES`, `TESTSERIES_APP_TYPES`, aur naya `FOLLOW_APP_TYPES` — teeno frozensets is doc me pehle kabhi mention nahi hue the**, sirf `MESSAGE_APP_TYPES` document tha. `views.py`/`serializers.py` ke apne-apne app ka notification-routing in par depend karta hai (same "ek jagah se dono import karein" pattern jo `MESSAGE_APP_TYPES` ke liye already tha) — §3 me sab add kiye.
 > - **Naya migration `core/migrations/0004_alter_notification_notif_type.py` — is doc me pehle mention nahi tha.** State-only `AlterField` (`choices=` par, koi DB column/constraint change nahi, isliye Postgres/SQLite par zero SQL issue hoti) — sirf Django ke migration-state ko model se sync rakhne ke liye, taaki `makemigrations --check` CI me drift na pakde. `TESTSERIES_CREATED_BY_FOLLOWED` (30 chars) ab `max_length=30` ke bilkul limit par hai, zero headroom bacha — agla naya value isse lamba hua to `max_length` bhi isi migration-shape me bump karna padega.
 
@@ -21,8 +21,8 @@
 > Baaki sab (`models.py`, `services.py`, `notification_batching.py`, `classroom_chat_bridge.py`'s 8+1 sync/parent functions, `admin.py`, `tests.py`) already is doc se match kar rahe the — in files me koi naya drift nahi mila.
 >
 > **Reconciliation pass (latest — this update):** phir se saare files check kiye gaye (campus app ke liye jaisi pass hui thi, wahi tarika) — **3 real gaps mile**, doc ab neeche diye changes ke saath update kar diya gaya hai:
-> - **`SearchView`/`search/` endpoint ab BAN CHUKA HAI — pichli pass ka §6.2/§9-item-13 ka "koi view/url wired nahi" claim ab STALE tha.** `core/views.py` me ab `SearchView` (Task 18, plain `APIView`) hai jo `assignment`+`testseries` ke liye khud apne scoped querysets banata hai (`assignment` — `AssignmentViewSet.get_queryset()` ko mirror karta hai; `testseries` — individual/published + own-created + attempted + campus-enrolled, `campus.StudentEnrollment` se resolve karke) aur unhe `core.search.search_everything()` ko deta hai. `core/urls.py` me `path("search/", SearchView.as_view())` bhi wired hai. §6.2, §7, §8, §9 update kiye — koi test coverage abhi bhi nahi hai iske liye (naya open item).
-> - **`search.py`'s `SOURCES` registry me `assignment`/`testseries` bhi ab WIRED hain (Task 18)** — pichli pass ke status-table me sirf `message`✅/`campus_notice`✅ the, `post`❌/`class_material`❌ stub — lekin `ASSIGNMENT_SOURCE`/`TESTSERIES_SOURCE` (dono `_search_generic_model` ke through, fields=`("title","description")`) us table me the hi nahi, jabki module docstring khud unhe ✅ bolta hai. §6.2 status table fix kiya.
+> - **`SearchView`/`search/` endpoint ab BAN CHUKA HAI — pichli pass ka §6.2/§9-item-13 ka "koi view/url wired nahi" claim ab STALE tha.** `core/views.py` me ab `SearchView` (Task 18, plain `APIView`) hai jo `assigments`+`testseries` ke liye khud apne scoped querysets banata hai (`assigments` — `assigmentsViewSet.get_queryset()` ko mirror karta hai; `testseries` — individual/published + own-created + attempted + campus-enrolled, `campus.StudentEnrollment` se resolve karke) aur unhe `core.search.search_everything()` ko deta hai. `core/urls.py` me `path("search/", SearchView.as_view())` bhi wired hai. §6.2, §7, §8, §9 update kiye — koi test coverage abhi bhi nahi hai iske liye (naya open item).
+> - **`search.py`'s `SOURCES` registry me `assigments`/`testseries` bhi ab WIRED hain (Task 18)** — pichli pass ke status-table me sirf `message`✅/`campus_notice`✅ the, `post`❌/`class_material`❌ stub — lekin `assigments_SOURCE`/`TESTSERIES_SOURCE` (dono `_search_generic_model` ke through, fields=`("title","description")`) us table me the hi nahi, jabki module docstring khud unhe ✅ bolta hai. §6.2 status table fix kiya.
 > - **`check_config_drift.py` (F-1) — bilkul NAYI file, is doc me ab tak kahin mention nahi thi.** `core/management/commands/check_config_drift.py` — 4 automated drift checks (throttle-scope→`DEFAULT_THROTTLE_RATES`, `@shared_task`→`CELERY_BEAT_SCHEDULE`, model→admin registration, `APIView`→`urls.py` wiring), abhi `user_profile`+`core` par scoped (`settings.CONFIG_DRIFT_APPS`). Naya **§11** poora document karta hai; §2 aur §9 (settings.py wiring requirement) bhi update kiye.
 >
 
@@ -48,7 +48,7 @@ Pehle notifications aur classroom↔chat coupling `liveclass` app ke andar bikhr
 | `services.py` | `create_notification()` + `create_bulk_notifications()` — sirf bell-row(s) banate hain, push kabhi nahi bhejte |
 | `notification_batching.py` | `create_batched_notification()` — burst events (5 likes ek saath) ko ek notification me collapse karta hai. ✅ **Real implementation ab uploaded hai — see §5** (pehle yahan broken-content warning thi). |
 | `classroom_chat_bridge.py` | `liveclass` ↔ `message` app ke beech ka pura coupling, **ab `campus` app ke saath bhi** — 8 liveclass sync functions + `get_groups_for_classrooms()` (bulk helper) + `create_section_group()`/`provision_video_room()` (**NEW is pass, campus ↔ chat/video bridge**) + `resolve_parent_from_token()` (Task 5, parent-portal auth, ab #12) — **12 total public entry points — see §6/§6.1** |
-| `search.py` | Unified cross-app "search everything" (Postgres FTS + trigram, `message/search_utils.py` ka extension). **4 sources ab WIRED hain**: `message`, `campus.Notice` (Task F-4), aur `assignment`/`testseries` (Task 18, is pass me confirm hue) — `post`/`liveclass.ClassMaterial` abhi bhi STUB hain (model uploads na hone ki wajah se). Pure ranking/merging layer hai — koi bhi permission-scoping khud nahi karta, caller (`core/views.py::SearchView`) ka pehle se scoped queryset leta hai. §6.2 dekho. |
+| `search.py` | Unified cross-app "search everything" (Postgres FTS + trigram, `message/search_utils.py` ka extension). **4 sources ab WIRED hain**: `message`, `campus.Notice` (Task F-4), aur `assigments`/`testseries` (Task 18, is pass me confirm hue) — `post`/`liveclass.ClassMaterial` abhi bhi STUB hain (model uploads na hone ki wajah se). Pure ranking/merging layer hai — koi bhi permission-scoping khud nahi karta, caller (`core/views.py::SearchView`) ka pehle se scoped queryset leta hai. §6.2 dekho. |
 | `serializers.py` | Real DRF `ModelSerializer`s (`NotificationSerializer`, `NotificationPreferenceSerializer`), replacing this doc's own original `to_dict` suggestion — see §7 |
 | `views.py` | `NotificationViewSet` (list/retrieve/destroy + custom actions) + `NotificationPreferenceView` + **`SearchView`** (Task 18, unified search endpoint — is pass me "wired" confirm hua, see §6.2/§7) |
 | `urls.py` | Router wiring (`notifications/`) + `notification-preferences/me/` + **`search/`** (Task 18, `SearchView.as_view()`) — root urlconf me `include("core.urls")` karna hai |
@@ -104,9 +104,9 @@ Ye task 42 ke migration (`core/migrations/0001_move_notification_models.py`) ko 
 ```
 # --- Original liveclass block (28) ---
 JOIN_REQUEST_RECEIVED, JOIN_REQUEST_ACCEPTED, JOIN_REQUEST_REJECTED,
-PASS_REFUNDED, SESSION_REMINDER, ASSIGNMENT_GRADED, QUERY_ANSWERED,
+PASS_REFUNDED, SESSION_REMINDER, assigments_GRADED, QUERY_ANSWERED,
 CERTIFICATE_ISSUED, WAITLIST_PROMOTED, CLASSROOM_FLAGGED, NOTICE_POSTED,
-SESSION_LIVE, SESSION_CANCELLED, ASSIGNMENT_POSTED, SUBMISSION_RECEIVED,
+SESSION_LIVE, SESSION_CANCELLED, assigments_POSTED, SUBMISSION_RECEIVED,
 STAFF_ADDED, REVIEW_POSTED, REPORT_REVIEWED, WITHDRAWAL_APPROVED,
 WITHDRAWAL_REJECTED, WITHDRAWAL_PAID, CLASSROOM_SHARED,
 PASS_GIFT_RECEIVED, PASS_GIFT_CLAIMED, PASS_AUTO_RENEWED,
@@ -120,23 +120,23 @@ POST_LIKED, POST_COMMENTED
 
 # --- campus app, campus_app_design.md §10 (9) — ⚠️ pehle mention nahi tha ---
 CAMPUS_SESSION_SCHEDULED, CAMPUS_SESSION_LIVE, LOW_ATTENDANCE_ALERT,
-ASSIGNMENT_POSTED_CAMPUS, ASSIGNMENT_DUE_REMINDER, RESULT_PUBLISHED,
-FEE_DUE_REMINDER, STAFF_ASSIGNMENT_APPROVED, STAFF_ASSIGNMENT_REJECTED
+assigments_POSTED_CAMPUS, assigments_DUE_REMINDER, RESULT_PUBLISHED,
+FEE_DUE_REMINDER, STAFF_assigments_APPROVED, STAFF_assigments_REJECTED
 
-# --- testseries / assignment / campus-gamification (8) — ⚠️ pehle mention nahi tha ---
+# --- testseries / assigments / campus-gamification (8) — ⚠️ pehle mention nahi tha ---
 TESTSERIES_POSTED, TESTSERIES_CHECKED, TESTSERIES_PAYOUT_RELEASED,
-ASSIGNMENT_DUE_SOON, CAMPUS_REWARD_EARNED, TESTSERIES_REVIEW_RECEIVED,
+assigments_DUE_SOON, CAMPUS_REWARD_EARNED, TESTSERIES_REVIEW_RECEIVED,
 TESTSERIES_QUERY_RECEIVED, TESTSERIES_QUERY_ANSWERED
 
 # --- TASK 1 (is pass) — user_profile's Follow feature (5) — NAYA ---
 FOLLOW_REQUEST_RECEIVED, FOLLOW_REQUEST_ACCEPTED, NEW_POST_FROM_FOLLOWED,
 CLASSROOM_CREATED_BY_FOLLOWED, TESTSERIES_CREATED_BY_FOLLOWED
 ```
-**Total 55 values** (28 + 3 + 2 + 9 + 8 + 5). Pichli pass sirf pehle do block (31) document karti thi — baaki 24 values (post/campus/testseries-assignment/follow, sab already-existing PLUS is pass ke 5 naye follow-wale) is doc me kabhi nahi likhe gaye the.
+**Total 55 values** (28 + 3 + 2 + 9 + 8 + 5). Pichli pass sirf pehle do block (31) document karti thi — baaki 24 values (post/campus/testseries-assigments/follow, sab already-existing PLUS is pass ke 5 naye follow-wale) is doc me kabhi nahi likhe gaye the.
 
 **Notes:**
 - `NOTICE_POSTED` campus ke liye reuse hota hai (`campus.bridge.NotifTypes.NOTICE_POSTED` isi value ko point karta hai) — campus ke liye alag duplicate choice nahi banaya gaya.
-- `ASSIGNMENT_POSTED`/`ASSIGNMENT_GRADED` testseries/assignment block me bhi reuse hote hain (naya string nahi) — sirf `ASSIGNMENT_DUE_SOON` (assignment-app) naya hai, aur `ASSIGNMENT_DUE_REMINDER` (campus-app) se deliberately alag/separate value hai — do alag apps ke reminder events, aliases nahi.
+- `assigments_POSTED`/`assigments_GRADED` testseries/assigments block me bhi reuse hote hain (naya string nahi) — sirf `assigments_DUE_SOON` (assigments-app) naya hai, aur `assigments_DUE_REMINDER` (campus-app) se deliberately alag/separate value hai — do alag apps ke reminder events, aliases nahi.
 - `FOLLOW_REQUEST_RECEIVED`/`FOLLOW_REQUEST_ACCEPTED` do alag values hain (ek "follow_status_changed" + status field ki jagah) — same pattern jo `JOIN_REQUEST_RECEIVED`/`JOIN_REQUEST_ACCEPTED` already follow karte hain.
 - `NEW_POST_FROM_FOLLOWED`/`CLASSROOM_CREATED_BY_FOLLOWED`/`TESTSERIES_CREATED_BY_FOLLOWED` — "jisko follow karte ho usne X banaya" fan-out, ek value per content-type (generic `new_content_from_followed` nahi) — client `notif_type` se hi deep-link route kar sake, `data` inspect kiye bina.
 - ⚠️ **`TESTSERIES_CREATED_BY_FOLLOWED` (`"testseries_created_by_followed"`) exactly 30 characters hai — `max_length=30` ki hard limit par, zero headroom.** Agla koi naya value 30 se lamba hua to usi migration me `max_length` bump bhi karna hoga.
@@ -147,7 +147,7 @@ CLASSROOM_CREATED_BY_FOLLOWED, TESTSERIES_CREATED_BY_FOLLOWED
 | Frozenset | Values | Notes |
 |---|---|---|
 | `MESSAGE_APP_TYPES` (task 46) | `CHAT_MESSAGE`, `MENTION`, `INCOMING_CALL` | `views.py`/`serializers.py` dono yahi ek jagah se import karte hain — naya message-app type add karte waqt sirf yahi ek jagah update karni hai. |
-| `CAMPUS_APP_TYPES` | `CAMPUS_SESSION_SCHEDULED`, `CAMPUS_SESSION_LIVE`, `LOW_ATTENDANCE_ALERT`, `ASSIGNMENT_POSTED_CAMPUS`, `ASSIGNMENT_DUE_REMINDER`, `RESULT_PUBLISHED`, `FEE_DUE_REMINDER`, `STAFF_ASSIGNMENT_APPROVED`, `STAFF_ASSIGNMENT_REJECTED` | `NOTICE_POSTED` deliberately isme NAHI hai — wo campus se pehle ka hai, shared/generic value hai, campus-exclusive nahi (`MESSAGE_APP_TYPES` jo values claim nahi karta unke saath consistent reasoning). |
+| `CAMPUS_APP_TYPES` | `CAMPUS_SESSION_SCHEDULED`, `CAMPUS_SESSION_LIVE`, `LOW_ATTENDANCE_ALERT`, `assigments_POSTED_CAMPUS`, `assigments_DUE_REMINDER`, `RESULT_PUBLISHED`, `FEE_DUE_REMINDER`, `STAFF_assigments_APPROVED`, `STAFF_assigments_REJECTED` | `NOTICE_POSTED` deliberately isme NAHI hai — wo campus se pehle ka hai, shared/generic value hai, campus-exclusive nahi (`MESSAGE_APP_TYPES` jo values claim nahi karta unke saath consistent reasoning). |
 | `TESTSERIES_APP_TYPES` | `TESTSERIES_POSTED`, `TESTSERIES_CHECKED`, `TESTSERIES_PAYOUT_RELEASED`, `TESTSERIES_REVIEW_RECEIVED`, `TESTSERIES_QUERY_RECEIVED`, `TESTSERIES_QUERY_ANSWERED` | testseries ke apne notification-list routing ke liye. |
 | `FOLLOW_APP_TYPES` (TASK 1, NAYA) | `FOLLOW_REQUEST_RECEIVED`, `FOLLOW_REQUEST_ACCEPTED`, `NEW_POST_FROM_FOLLOWED`, `CLASSROOM_CREATED_BY_FOLLOWED`, `TESTSERIES_CREATED_BY_FOLLOWED` | `POST_LIKED`/`POST_COMMENTED` deliberately isme NAHI hain — wo post-app types (task 11) hain, Follow-relationship-driven nahi, chahe ek "jisko follow karte ho unka feed" us dono ko dikha sakta ho. Isi tarah `CAMPUS_APP_TYPES` bhi `NOTICE_POSTED` tak nahi phailta. |
 
@@ -317,14 +317,14 @@ Is doc ka §5 pehle bolta tha ki `push_utils.py` kabhi upload nahi hua aur uske 
 
 ### 10/11. Campus bridge functions — **NEW is pass, is doc me pehle bilkul mention nahi thi**
 
-`campus/bridge.py`'s own STATUS note flag karti thi ki `create_section_group`/`provision_video_room` campus se reference ho rahe the lekin yahan exist nahi karte the — is gap ko close karne ke liye add kiye gaye. Same "campus kabhi seedha `message`/`liveclass` models import nahi karta, `core.classroom_chat_bridge` hi ek darwaaza hai" pattern jo functions 1-8 already follow karte hain — sirf vocabulary campus ki hai (`StudentEnrollment`/`ClassTeacherAssignment`/`SubjectTeacherAssignment` instead of `ClassJoinRequest`/`ClassroomStaff`).
+`campus/bridge.py`'s own STATUS note flag karti thi ki `create_section_group`/`provision_video_room` campus se reference ho rahe the lekin yahan exist nahi karte the — is gap ko close karne ke liye add kiye gaye. Same "campus kabhi seedha `message`/`liveclass` models import nahi karta, `core.classroom_chat_bridge` hi ek darwaaza hai" pattern jo functions 1-8 already follow karte hain — sirf vocabulary campus ki hai (`StudentEnrollment`/`ClassTeacherassigments`/`SubjectTeacherassigments` instead of `ClassJoinRequest`/`ClassroomStaff`).
 
 | # | Function | Kab call hoti hai | Behavior |
 |---|---|---|---|
-| 10 | `create_section_group(section, actor)` | Class-teacher ka "create chat group" confirm action, `campus/bridge.py::create_section_group` se (ab us file ka ek direct top-level-import wrapper) | `create_classroom_group()`'s exact counterpart. **Idempotent** — section ke paas already group hai to wahi return (`_get_group_for_section()`, `_get_group_for_classroom()` ka apna counterpart). Members = ACTIVE `StudentEnrollment` + APPROVED `SubjectTeacherAssignment` (baad me `MODERATOR` pe promote), creator/ADMIN = section ka `ClassTeacherAssignment`. `actor` section ka assigned class-teacher na ho to `ValueError` (same "extra safety net" reasoning jo `create_classroom_group()` deta hai). Section ke paas Classroom jaisa koi cover-image field nahi hai (confirmed against `campus/models.py`) — isliye `photo_url=None` pass hota hai, koi `_section_cover_image_url()` helper nahi banaya gaya. |
+| 10 | `create_section_group(section, actor)` | Class-teacher ka "create chat group" confirm action, `campus/bridge.py::create_section_group` se (ab us file ka ek direct top-level-import wrapper) | `create_classroom_group()`'s exact counterpart. **Idempotent** — section ke paas already group hai to wahi return (`_get_group_for_section()`, `_get_group_for_classroom()` ka apna counterpart). Members = ACTIVE `StudentEnrollment` + APPROVED `SubjectTeacherassigments` (baad me `MODERATOR` pe promote), creator/ADMIN = section ka `ClassTeacherassigments`. `actor` section ka assigned class-teacher na ho to `ValueError` (same "extra safety net" reasoning jo `create_classroom_group()` deta hai). Section ke paas Classroom jaisa koi cover-image field nahi hai (confirmed against `campus/models.py`) — isliye `photo_url=None` pass hota hai, koi `_section_cover_image_url()` helper nahi banaya gaya. |
 | 11 | `provision_video_room(live_session, actor)` | `campus.CampusLiveSession` schedule/create hone pe, `campus/bridge.py` se | LiveKit room-identifier banata hai aur plain string return karta hai (`f"campus_live_session_{live_session.id}"`), jo caller `CampusLiveSession.room_id` (`CharField`) me store karta hai. **Yahan koi LiveKit JWT mint NAHI hoti** — `message/views.py` ke real call-sites (`CallInitiateView`/`StudyRoomJoinView`) confirm karte hain ki `generate_livekit_token(room_name, user_id, user_name)` har participant ke liye JOIN-TIME pe, per-participant call hoti hai, ek baar upfront nahi — ek token short-lived aur viewer-specific hota hai, abhi banaya to student actual join karne se pehle hi stale ho jaata. `actor` signature me accepted hai (campus/bridge.py isi se call karta hai) par unused — permission check yahan nahi hai, `CampusLiveSessionViewSet.perform_create` se already gate maana gaya hai. **Open gap:** "join this live session" endpoint jo per-participant `generate_livekit_token()` call karega, wo `campus/views.py` iss pass me upload nahi hua, isliye wire nahi hai — flagged, guess nahi kiya gaya. |
 
-**Verified against `campus/models.py` (this pass):** `Section.chat_group_enabled`/`linked_conversation_id` (naya, `Classroom`'s pair ko exactly mirror karta hai), `ClassTeacherAssignment(section, staff)`, `SubjectTeacherAssignment(section, subject, staff, status)` with `Status.APPROVED`, `StudentEnrollment(student, section, status)` with `Status.ACTIVE`, aur `CampusLiveSession.room_id` (plain `CharField`) — sab functions 10/11 ki assumptions se match karte hain.
+**Verified against `campus/models.py` (this pass):** `Section.chat_group_enabled`/`linked_conversation_id` (naya, `Classroom`'s pair ko exactly mirror karta hai), `ClassTeacherassigments(section, staff)`, `SubjectTeacherassigments(section, subject, staff, status)` with `Status.APPROVED`, `StudentEnrollment(student, section, status)` with `Status.ACTIVE`, aur `CampusLiveSession.room_id` (plain `CharField`) — sab functions 10/11 ki assumptions se match karte hain.
 
 ### ✅ ASSUMPTIONS — RESOLVED (pehle 4 the, ab sab verified)
 
@@ -349,7 +349,7 @@ Ye sab functions/models `message` app me already exist maane gaye hain — agar 
 ### `campus` app se dependency — **NEW is pass, pehle is doc me nahi thi**
 
 Functions 10/11 (upar) is cheez ko `campus` app se local-import karte hain:
-- `campus.models.ClassTeacherAssignment`, `StudentEnrollment`, `SubjectTeacherAssignment`
+- `campus.models.ClassTeacherassigments`, `StudentEnrollment`, `SubjectTeacherassigments`
 
 `campus/models.py` ke against verify ho chuka hai (upar dekho) — koi assumption gap nahi.
 
@@ -398,8 +398,8 @@ resolve_parent_from_token(token: str) -> resolution | None
 |---|---|
 | `message` (chat messages) | ✅ WIRED — `message.search_utils.search_messages` ko seedha reuse karta hai (`Message` ke paas already stored `search_vector` + trigger hai) |
 | `campus_notice` (`campus.Notice`, `title`/`body`) | ✅ WIRED — `_search_generic_model()` ke through. Caller (`SearchView`) ko phir bhi khud ek properly-scoped `Notice` queryset pass karna hai (golden rule upar) — ye file campus/department/section visibility rules khud nahi jaanti/guess karti. |
-| `assignment` (`assignment.Assignment`, `title`/`description`) | ✅ **WIRED (Task 18, naya is pass me confirm hua)** — `_search_generic_model()` ke through. `SearchView` (§7) scoped queryset `AssignmentViewSet.get_queryset()` ko VERBATIM mirror karta hai: staff sab kuch dekhte hain, baaki sirf jo unhone khud post kiya ya jispe unki personal submission hai. Campus/liveclass-sourced assignments non-staff ke liye deliberately excluded hain yahan bhi (wo viewset khud unhe bahar rakhta hai). |
-| `testseries` (`testseries.TestSeries`, `title`/`description`) | ✅ **WIRED (Task 18, naya is pass me confirm hua)** — `_search_generic_model()` ke through. `SearchView` scoped queryset: individual/published (marketplace) + user ki khud-banayi + jo attempt ki + campus-context series un sections ke liye jinme user ACTIVE enrolled hai (`campus.StudentEnrollment` se — wahi roster-source jo `campus.bridge.create_testseries()` khud use karta hai). Liveclass-context series abhi included NAHI hain — liveclass side pe koi roster/entitlement resolver abhi nahi hai (`liveclass/bridge.py` me sirf assignment functions hain), isliye wo rows silently absent hain search results se, kabhi leak nahi hoti. |
+| `assigments` (`assigments.assigments`, `title`/`description`) | ✅ **WIRED (Task 18, naya is pass me confirm hua)** — `_search_generic_model()` ke through. `SearchView` (§7) scoped queryset `assigmentsViewSet.get_queryset()` ko VERBATIM mirror karta hai: staff sab kuch dekhte hain, baaki sirf jo unhone khud post kiya ya jispe unki personal submission hai. Campus/liveclass-sourced assigmentss non-staff ke liye deliberately excluded hain yahan bhi (wo viewset khud unhe bahar rakhta hai). |
+| `testseries` (`testseries.TestSeries`, `title`/`description`) | ✅ **WIRED (Task 18, naya is pass me confirm hua)** — `_search_generic_model()` ke through. `SearchView` scoped queryset: individual/published (marketplace) + user ki khud-banayi + jo attempt ki + campus-context series un sections ke liye jinme user ACTIVE enrolled hai (`campus.StudentEnrollment` se — wahi roster-source jo `campus.bridge.create_testseries()` khud use karta hai). Liveclass-context series abhi included NAHI hain — liveclass side pe koi roster/entitlement resolver abhi nahi hai (`liveclass/bridge.py` me sirf assigments functions hain), isliye wo rows silently absent hain search results se, kabhi leak nahi hoti. |
 | `post` (post app) | ❌ **STUB ONLY** — `post/models.py` kabhi kisi upload ka hissa nahi raha, isliye `Post`'s searchable field(s) ka naam pata nahi. Wire karne ke liye `SOURCES` me ek naya `SearchSource` add karna hai (`NOTICE_SOURCE` jaisi shape) jab wo model milega. |
 | `class_material` (`liveclass.ClassMaterial`) | ❌ **STUB ONLY**, same reason — class exist karti hai (ek pehli `liveclass/models.py` upload me confirm hui thi) par uski field-list kabhi nahi dekhi gayi. |
 
@@ -448,7 +448,7 @@ search_everything(
 | POST | `notifications/{id}/mark-read/` | Mark ek read |
 | POST | `notifications/mark-all-read/` | Sab read, `{"marked_read": N}` |
 | GET/PATCH | `notification-preferences/me/` | Apni preference (get-or-create) |
-| GET | `search/` | **Task 18** — unified cross-app search, `?q=<query>` (required) + optional `?sources=assignment,testseries,...`. §6.2 me poori source-list; niche isi section me full behaviour. |
+| GET | `search/` | **Task 18** — unified cross-app search, `?q=<query>` (required) + optional `?sources=assigments,testseries,...`. §6.2 me poori source-list; niche isi section me full behaviour. |
 
 **Root urlconf me wire karna hai** (abhi tak nahi kiya gaya):
 ```python
@@ -481,11 +481,11 @@ Ye doc pehle bolta tha ki `NotificationSerializer` deliberately plain `to_dict` 
 Plain `APIView` (`IsAuthenticated`), `NotificationViewSet`/`NotificationPreferenceView` jaisa hi "own-scope only" spirit follow karta hai — bas yahan "own scope" ka matlab hai "jo bhi is user ko har source ki apni existing permission-rule allow karti hai", na ki sirf apne records.
 
 - `q` required — nahi diya to `search_everything()` `ValueError` raise karta hai, jise ye view `400 {"detail": ...}` me convert karta hai.
-- `sources` optional, comma-separated (`SOURCES` ke keys ka subset) — `?sources=assignment` jaisa; na diya jaye to har source jiska ye view khud queryset banata hai, search hoti hai.
+- `sources` optional, comma-separated (`SOURCES` ke keys ka subset) — `?sources=assigments` jaisa; na diya jaye to har source jiska ye view khud queryset banata hai, search hoti hai.
 - **Is view ki asli responsibility** — golden rule (§6.2) ke mutabik — HAR source ke liye ek already-permission-scoped queryset khud banana hai, `core.search` ko kabhi seedha model query nahi karne dena:
-  - `assignment` — `assignment.models.Assignment` ko `AssignmentViewSet.get_queryset()` (`assignment/views.py`) jaisa hi scope karta hai: `user.is_staff` ho to sab, warna sirf `posted_by=user` YA (`source=PERSONAL` aur `submissions__student=user`).
+  - `assigments` — `assigments.models.assigments` ko `assigmentsViewSet.get_queryset()` (`assigments/views.py`) jaisa hi scope karta hai: `user.is_staff` ho to sab, warna sirf `posted_by=user` YA (`source=PERSONAL` aur `submissions__student=user`).
   - `testseries` — `testseries.models.TestSeries` ko scope karta hai: `source=INDIVIDUAL, status=PUBLISHED` (marketplace) YA `creator=user` YA `attempts__student=user` YA (`source=CAMPUS`, `context_type="section"`, `context_id` un section-ids me jinme `campus.StudentEnrollment` ke through user `ACTIVE` enrolled hai).
-- In dono ke local imports (`from assignment.models import ...`, `from testseries.models import ...`, `from campus.models import StudentEnrollment`) function-body ke andar hain, module-level nahi — same lazy-import posture jo poore project me circular-import se bachne ke liye use hoti hai.
+- In dono ke local imports (`from assigments.models import ...`, `from testseries.models import ...`, `from campus.models import StudentEnrollment`) function-body ke andar hain, module-level nahi — same lazy-import posture jo poore project me circular-import se bachne ke liye use hoti hai.
 - `message`/`campus_notice` (`Notice`) sources ke liye **is view me abhi koi scoped-queryset builder nahi hai** — `search.py`'s `SOURCES` registry me dono entries maujood hain, lekin `SearchView.get()` unke liye koi queryset nahi banata, isliye `?sources=message`/`?sources=campus_notice` aaj **khaali results dete hain, error nahi** (`search_everything()`'s "sirf jo dono jagah present ho, wahi search hoti hai" contract ke mutabik). Ye apna alag open item hai (§9) — `search.py`'s docstring khud is gap ko wired-vs-scoped do alag cheezein maankar treat karta hai.
 - Response shape: `{"results": [...]}`, jahan har result `search_everything()`'s common dict shape follow karta hai (`source`, `id`, `title`, `snippet`, `created_at`, `rank`, `similarity`, `extra`).
 - **⚠️ NO TEST COVERAGE** — `tests.py` me is view/endpoint ke liye ek bhi test nahi hai (naya open item, §9).
@@ -515,8 +515,8 @@ liveclass.permissions.HasValidParentSessionToken ──uses──▶ core.classr
                             └──local-import──▶ message.models (ParentAccessCode, ParentToken)
 
 campus.bridge  ──uses──▶  core.classroom_chat_bridge.create_section_group / provision_video_room   [NEW]
-                            ├──local-import──▶ campus.models (ClassTeacherAssignment, StudentEnrollment,
-                            │                                  SubjectTeacherAssignment)
+                            ├──local-import──▶ campus.models (ClassTeacherassigments, StudentEnrollment,
+                            │                                  SubjectTeacherassigments)
                             └──local-import──▶ message.models (Group, GroupMember), message.services (create_group)
 
 message    ──(pending, task 44)──▶  core.services.create_notification   [bell-row for FCM pushes]
@@ -528,12 +528,12 @@ core.models.Notification  ──FK (SET_NULL)──▶  liveclass.Classroom, liv
 
 core.search.search_everything  ──uses──▶  message.search_utils.search_messages
                             └── caller ──must pass──▶ already permission-scoped querysets for each
-                                 source (message/campus.Notice/assignment/testseries/...) — core.search
-                                 itself never queries `campus`/`message`/`post`/`liveclass`/`assignment`/
+                                 source (message/campus.Notice/assigments/testseries/...) — core.search
+                                 itself never queries `campus`/`message`/`post`/`liveclass`/`assigments`/
                                  `testseries` models directly, only ranks/merges what the caller hands it.
 
 core.views.SearchView  ──uses──▶  core.search.search_everything   [Task 18, NOW WIRED]
-                            ├──local-import──▶ assignment.models (Assignment, AssignmentSource)
+                            ├──local-import──▶ assigments.models (assigments, assigmentsSource)
                             └──local-import──▶ campus.models (StudentEnrollment), testseries.models (TestSeries)
 ```
 
@@ -556,8 +556,8 @@ core.views.SearchView  ──uses──▶  core.search.search_everything   [Tas
 11. ✅ ~~`classroom_chat_bridge.py`'s apna module docstring khud ko "9 functions" bolta hai lekin `get_groups_for_classrooms()` (10wa entry point) us count me nahi hai~~ — **resolved.** Module docstring ab explicitly clarify karta hai ki "9 functions" sirf `liveclass`-facing count hai (functions 1-9); `get_groups_for_classrooms()` module ka 10wa entry point hai, `message/views_parent.py` se seedha call hota hai, isliye us 9 ki ginti me nahi tha. Koi functional bug nahi tha, sirf docstring stale/ambiguous tha — ab dono counts (9 liveclass-facing + 1 message-facing = 10 total) explicit hain.
 12. **NEW open item:** `models.py`'s naye `NotificationQuerySet.for_user()`/`.unread()` manager methods abhi kahin bhi call-site pe use nahi ho rahe (`views.py`/`tests.py` purane `.filter(...)` style se hi likhe hain) — functional issue nahi (dono equivalent hain), bas ek available convenience hai jo abhi adopt nahi hui.
 13. ✅ ~~`search.py` expose karne ke liye koi `views.py`/`urls.py` endpoint nahi tha~~ — **resolved, is pass me confirm hua.** `core/views.py::SearchView` + `core/urls.py`'s `path("search/", ...)` dono ab wired hain (§6.2, §7). `post`/`liveclass.ClassMaterial` sources abhi bhi stub hain (§6.2) un models ke upload hone tak — ye hissa khula hai.
-14. **NEW open item:** `SearchView`/`search_everything()` ke liye `tests.py` me **koi test nahi hai** — na success path (`?q=`, `?sources=`), na 400-on-short-query, na "assignment/testseries scoping sahi hai" wali regression. Sabse pehle iske liye tests likhna agla natural kaam hai.
-15. **NEW open item:** `SearchView` sirf `assignment`/`testseries` ke liye scoped queryset banata hai — `message`/`campus_notice` (`Notice`) `search.py`'s `SOURCES` me registered hain (§6.2) lekin `SearchView.get()` unke liye koi queryset nahi banata, isliye `?sources=message`/`?sources=campus_notice` aaj silently khaali result dete hain. Inke liye bhi scoped-queryset builder add karna hai (§7 me flag kiya) jab ye tasked ho.
+14. **NEW open item:** `SearchView`/`search_everything()` ke liye `tests.py` me **koi test nahi hai** — na success path (`?q=`, `?sources=`), na 400-on-short-query, na "assigments/testseries scoping sahi hai" wali regression. Sabse pehle iske liye tests likhna agla natural kaam hai.
+15. **NEW open item:** `SearchView` sirf `assigments`/`testseries` ke liye scoped queryset banata hai — `message`/`campus_notice` (`Notice`) `search.py`'s `SOURCES` me registered hain (§6.2) lekin `SearchView.get()` unke liye koi queryset nahi banata, isliye `?sources=message`/`?sources=campus_notice` aaj silently khaali result dete hain. Inke liye bhi scoped-queryset builder add karna hai (§7 me flag kiya) jab ye tasked ho.
 16. **NEW open item (this pass, `classroom_chat_bridge.py` §6 functions 10/11):** `provision_video_room()` sirf room-name banata hai — koi endpoint jo "join this campus live session" pe har participant ke liye `message.livekit_utils.generate_livekit_token()` fresh call kare, wo abhi wire nahi hai (`campus/views.py` iss pass upload nahi hua). Room-naming se lekar actual joinable-call tak ka path is pass me incomplete hai.
 17. **NEW open item (F-1, `check_config_drift.py`):** command khud apne docstring me `settings.py` me `CONFIG_DRIFT_APPS = ["user_profile", "core"]` set karne ko kehta hai — ye setting is upload me confirm nahi ho saki (settings.py iss pass me nahi aaya). Verify karo ye setting maujood hai, aur command ko CI me (`--strict` flag ke saath) wire karna hai taaki drift automatically catch ho — abhi sirf manually `python manage.py check_config_drift` chalane se hi kaam karta hai.
 

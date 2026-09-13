@@ -110,7 +110,7 @@ Auth model: `AUTH_USER_MODEL` is a **custom `User`** (app `login`), primary key 
 > migration, mistakenly still listed as present — and the `models_focus.py` file-map
 > entry now notes `FocusSession` is confirmed **merged** into `models.py` itself, not
 > still a separate pending-merge file. A new §2 entry was added for `message`'s own
-> `Assignment`/`AssignmentSubmission` models (distinct from `liveclass.Assignment`),
+> `assigments`/`assigmentsSubmission` models (distinct from `liveclass.assigments`),
 > which existed in `models.py` and were already referenced elsewhere in this doc (Parent
 > Dashboard §6) but had no dedicated model-section entry. Everything else checked came
 > back an exact match to what was already written — no other changes were needed.
@@ -556,28 +556,28 @@ confirmed in `models.py`)*
   §9.4 item 22 (updated) for the full current status, and §6 Parent Dashboard for the
   request/response shapes of the two new views.
 
-### `Assignment` / `AssignmentSubmission` (`message`'s own — distinct from
-`liveclass.Assignment`)
-- `Assignment`: `group` (FK, `related_name='message_assignments'`), `title`,
+### `assigments` / `assigmentsSubmission` (`message`'s own — distinct from
+`liveclass.assigments`)
+- `assigments`: `group` (FK, `related_name='message_assigmentss'`), `title`,
   `description` (blank ok), `due_at` (nullable), `created_by` (`SET_NULL`,
   `related_name='+'`). Index on `(group, due_at)`.
-- `AssignmentSubmission`: `assignment` (FK, `related_name='submissions'`),
-  `student` (FK, `related_name='message_assignment_submissions'`),
-  `is_submitted`, `submitted_at`. `unique_together = ('assignment',
-  'student')` — one submission row per student per assignment. Index on
+- `assigmentsSubmission`: `assigments` (FK, `related_name='submissions'`),
+  `student` (FK, `related_name='message_assigments_submissions'`),
+  `is_submitted`, `submitted_at`. `unique_together = ('assigments',
+  'student')` — one submission row per student per assigments. Index on
   `(student, is_submitted)`.
-- **Deliberately renamed `related_name`s** (`assignments` →
-  `message_assignments`, `assignment_submissions` →
-  `message_assignment_submissions`) — `liveclass` has its own, separately-
-  built `Assignment`/`AssignmentSubmission` models sharing the same
+- **Deliberately renamed `related_name`s** (`assigmentss` →
+  `message_assigmentss`, `assigments_submissions` →
+  `message_assigments_submissions`) — `liveclass` has its own, separately-
+  built `assigments`/`assigmentsSubmission` models sharing the same
   `Group`/`User` targets; Django can't register two identical reverse
   accessors on the same target model, so `makemigrations` failed
   (`fields.E304`/`E305`) until these were made unique. **Not yet resolved
   which one is authoritative** — see §6 Parent Dashboard's "Gap 1" note:
-  if `liveclass.Assignment` is meant to be the same concept as this one
+  if `liveclass.assigments` is meant to be the same concept as this one
   (not a genuinely different feature that happens to share a name), the
   cleaner long-term fix is deleting this duplicate pair and pointing
-  parent-dashboard code at `liveclass.Assignment` instead; that's a
+  parent-dashboard code at `liveclass.assigments` instead; that's a
   bigger structural call than this pass makes unilaterally, so both
   models currently coexist, unmerged.
 
@@ -841,7 +841,7 @@ Gap 2/Gap 3, supersedes the Group-primary shape described in earlier revisions o
         },
         "chat_group": {
           "group_name": "Physics Batch A",
-          "assignments": {"pending": 2, "submitted": 5, "total": 7}
+          "assigmentss": {"pending": 2, "submitted": 5, "total": 7}
         }
       }
     ]
@@ -871,14 +871,14 @@ Gap 2/Gap 3, supersedes the Group-primary shape described in earlier revisions o
   teacher/student/classroom concept of its own, only chat groups/group-study; that
   helper's own §10 entry and §7.16 remain accurate for what it's still used for
   (`StudyRoomStreakView`), just not here anymore. Consequently `chat_group` carries only
-  `group_name` + `assignments`, never an attendance field.
-- **`homework` vs `chat_group.assignments` are still never summed (Gap 1, unchanged)** —
+  `group_name` + `assigmentss`, never an attendance field.
+- **`homework` vs `chat_group.assigmentss` are still never summed (Gap 1, unchanged)** —
   two independently-sourced datasets from two different apps' same-named models
-  (`liveclass.Assignment`/`AssignmentSubmission` vs this app's own), imported here under
+  (`liveclass.assigments`/`assigmentsSubmission` vs this app's own), imported here under
   a `Liveclass*` alias specifically so no reference is ever ambiguous about which one it
-  means. `Assignment.group`'s/`AssignmentSubmission.student`'s `related_name`s were
-  separately renamed in `models.py` (`assignments`→`message_assignments`,
-  `assignment_submissions`→`message_assignment_submissions`) to resolve the reverse-
+  means. `assigments.group`'s/`assigmentsSubmission.student`'s `related_name`s were
+  separately renamed in `models.py` (`assigmentss`→`message_assigmentss`,
+  `assigments_submissions`→`message_assigments_submissions`) to resolve the reverse-
   accessor clash between the two apps' models sharing the same `Group`/`User` — doesn't
   affect this view since every query here goes forward through the FK, never through the
   renamed reverse accessor.
@@ -888,7 +888,7 @@ Gap 2/Gap 3, supersedes the Group-primary shape described in earlier revisions o
   for that classroom.
 - Still strictly scoped, unchanged from earlier revisions: `views_parent.py`'s own module
   docstring is explicit that this view must never return message text, media, contact
-  info, or anything beyond display name / attendance / homework / assignment counts /
+  info, or anything beyond display name / attendance / homework / assigments counts /
   report-card summary — "would this be fine on a report-card-style summary?" is the test
   before adding any new field here.
 - `POST /message/parent/verify/` (`ParentVerifyCodeView`, `AllowAny`, throttled by
@@ -1120,11 +1120,11 @@ confirmed via `views_ai.py`)*
   (`ImproperlyConfigured` on first call — see §9.4/§14). 503 if `AI_ENABLED` is False,
   500 with a generic message (`logger.exception`'d) on any other failure.
 - **Note on stale assumptions**: this view's own header comment says no
-  Assignment/StudyMaterial model exists in this codebase "confirmed against
+  assigments/StudyMaterial model exists in this codebase "confirmed against
   `CHAT_APP_DOCUMENTATION.md`" — that's now outdated, since `views_parent.py` (this
-  batch) confirms `Assignment`/`AssignmentSubmission` do exist and are queried
+  batch) confirms `assigments`/`assigmentsSubmission` do exist and are queried
   elsewhere (§ Parent Dashboard above). Worth revisiting whether Classroom Copilot
-  should add assignment context now that the model is confirmed present — not done as
+  should add assigments context now that the model is confirmed present — not done as
   of this batch.
 
 ### Revision Deck (`views_ai.py` → `RevisionDeckView`) *(NEW — route now fully confirmed

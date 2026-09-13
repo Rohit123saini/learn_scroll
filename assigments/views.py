@@ -1,8 +1,8 @@
-# assignment/views.py
+# assigments/views.py
 """
 §7 permissions and endpoint shapes, wired up as DRF viewsets. Every
 action here delegates the actual write to a model method
-(`AssignmentSubmission.submit_freeform` / `.submit_structured` /
+(`assigmentsSubmission.submit_freeform` / `.submit_structured` /
 `.grade_freeform` / `.mark_answer_and_maybe_finalize` / `.publish` /
 `.unpublish`) — this file's job is request validation, permission
 checks, and response shaping, never reimplementing that logic inline.
@@ -16,15 +16,15 @@ from rest_framework.decorators import action
 from rest_framework.response import Response
 
 from .bridge import notify_submission_received
-from .models import Assignment, AssignmentQuestion, AssignmentSource, AssignmentSubmission
-from .permissions import IsAssignmentStaffOrOwner, IsPersonalSourceOnly, IsSubmissionStudent
-from .throttling import AssignmentPublicPageThrottle
+from .models import assigments, assigmentsQuestion, assigmentsSource, assigmentsSubmission
+from .permissions import IsassigmentsStaffOrOwner, IsPersonalSourceOnly, IsSubmissionStudent
+from .throttling import assigmentsPublicPageThrottle
 from .serializers import (
     AnswerReviewSerializer,
-    AssignmentAnswerSerializer,
-    AssignmentCreateSerializer,
-    AssignmentSerializer,
-    AssignmentSubmissionSerializer,
+    assigmentsAnswerSerializer,
+    assigmentsCreateSerializer,
+    assigmentsSerializer,
+    assigmentsSubmissionSerializer,
     FreeformSubmitSerializer,
     GradeFreeformSerializer,
     PublicSubmissionSerializer,
@@ -32,10 +32,10 @@ from .serializers import (
 )
 
 
-class AssignmentViewSet(viewsets.ModelViewSet):
-    """§7 — `create` is personal-only. Campus/liveclass assignments never
+class assigmentsViewSet(viewsets.ModelViewSet):
+    """§7 — `create` is personal-only. Campus/liveclass assigmentss never
     reach this viewset; they're created via
-    `assignment.bridge.create_context_assignment()` from those apps' own
+    `assigments.bridge.create_context_assigments()` from those apps' own
     already-permission-checked endpoints, then surfaced to their users
     through campus's/liveclass's own thin-proxy viewsets (§5.2/§6.1 — not
     in this app), not through this one.
@@ -45,57 +45,57 @@ class AssignmentViewSet(viewsets.ModelViewSet):
 
     def get_serializer_class(self):
         if self.action in ("create", "update", "partial_update"):
-            return AssignmentCreateSerializer
-        return AssignmentSerializer
+            return assigmentsCreateSerializer
+        return assigmentsSerializer
 
     def get_queryset(self):
-        """Non-staff users see assignments they posted, plus personal
-        assignments they hold a submission for (covers the case where a
-        personal assignment's submission row was created before the
-        Assignment object itself is re-fetched by a different client)."""
+        """Non-staff users see assigmentss they posted, plus personal
+        assigmentss they hold a submission for (covers the case where a
+        personal assigments's submission row was created before the
+        assigments object itself is re-fetched by a different client)."""
         user = self.request.user
-        qs = Assignment.objects.all().prefetch_related("questions")
+        qs = assigments.objects.all().prefetch_related("questions")
         if user.is_staff:
             return qs
         return qs.filter(
-            Q(posted_by=user) | Q(source=AssignmentSource.PERSONAL, submissions__student=user)
+            Q(posted_by=user) | Q(source=assigmentsSource.PERSONAL, submissions__student=user)
         ).distinct()
 
     def perform_create(self, serializer):
         # Hard-wired regardless of what the client sent — see
         # IsPersonalSourceOnly's own docstring for why this, not that
         # permission class alone, is the real enforcement point.
-        serializer.save(source=AssignmentSource.PERSONAL, posted_by=self.request.user)
+        serializer.save(source=assigmentsSource.PERSONAL, posted_by=self.request.user)
 
 
-class AssignmentSubmissionViewSet(viewsets.ModelViewSet):
-    serializer_class = AssignmentSubmissionSerializer
+class assigmentsSubmissionViewSet(viewsets.ModelViewSet):
+    serializer_class = assigmentsSubmissionSerializer
     permission_classes = [permissions.IsAuthenticated]
 
     def get_queryset(self):
         user = self.request.user
-        qs = AssignmentSubmission.objects.select_related("assignment", "student").prefetch_related(
+        qs = assigmentsSubmission.objects.select_related("assigments", "student").prefetch_related(
             "answers__question"
         )
         if user.is_staff:
             return qs
-        return qs.filter(Q(student=user) | Q(assignment__posted_by=user)).distinct()
+        return qs.filter(Q(student=user) | Q(assigments__posted_by=user)).distinct()
 
     def get_permissions(self):
         if self.action in ("grade", "review_answer"):
-            return [permissions.IsAuthenticated(), IsAssignmentStaffOrOwner()]
+            return [permissions.IsAuthenticated(), IsassigmentsStaffOrOwner()]
         if self.action in ("submit_freeform", "submit_structured", "publish", "unpublish"):
             return [permissions.IsAuthenticated(), IsSubmissionStudent()]
         return [permissions.IsAuthenticated()]
 
     def perform_create(self, serializer):
-        """§2 — personal-assignment flow: there's no bridge-created
+        """§2 — personal-assigments flow: there's no bridge-created
         roster row to attach to (no roster exists for a personal
-        assignment), so the student's own first interaction creates the
-        `AssignmentSubmission` row directly. `unique_submission_per_
+        assigments), so the student's own first interaction creates the
+        `assigmentsSubmission` row directly. `unique_submission_per_
         student` still guards against a duplicate. Campus/liveclass
         submissions, by contrast, already exist (status=MISSING) the
-        moment `bridge.create_context_assignment()` ran — students there
+        moment `bridge.create_context_assigments()` ran — students there
         only ever reach the `submit_*` actions below, never this create().
         """
         serializer.save(student=self.request.user)
@@ -110,7 +110,7 @@ class AssignmentSubmissionViewSet(viewsets.ModelViewSet):
         serializer.is_valid(raise_exception=True)
         submission.submit_freeform(**serializer.validated_data)
         notify_submission_received(submission)
-        return Response(AssignmentSubmissionSerializer(submission).data)
+        return Response(assigmentsSubmissionSerializer(submission).data)
 
     @action(detail=True, methods=["post"])
     def submit_structured(self, request, pk=None):
@@ -129,7 +129,7 @@ class AssignmentSubmissionViewSet(viewsets.ModelViewSet):
         `files.get(f"answer_{question_id}")` convention
         `TestAttempt.submit()` uses. This merges that file back onto its
         matching answer dict before the serializer ever sees it, so
-        `AssignmentSubmission.submit_structured()` still just finds
+        `assigmentsSubmission.submit_structured()` still just finds
         `answer_attachment` already present in the entry, same as a
         plain JSON (no file) request. A non-multipart, JSON-only request
         (no `text`-question file answers) is untouched — `answers` is
@@ -163,7 +163,7 @@ class AssignmentSubmissionViewSet(viewsets.ModelViewSet):
         serializer.is_valid(raise_exception=True)
         submission.submit_structured(serializer.validated_data["answers"])
         notify_submission_received(submission)
-        return Response(AssignmentSubmissionSerializer(submission).data)
+        return Response(assigmentsSubmissionSerializer(submission).data)
 
     @action(detail=True, methods=["patch"])
     def grade(self, request, pk=None):
@@ -172,15 +172,15 @@ class AssignmentSubmissionViewSet(viewsets.ModelViewSet):
         serializer = GradeFreeformSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         submission.grade_freeform(**serializer.validated_data)
-        return Response(AssignmentSubmissionSerializer(submission).data)
+        return Response(assigmentsSubmissionSerializer(submission).data)
 
     @action(detail=True, methods=["post"], url_path=r"answer/(?P<question_id>[^/.]+)/review")
     def review_answer(self, request, pk=None, question_id=None):
         """§7 — 'Structured path: POST {id}/answer/{question_id}/review/
-        ... sirf text-type AssignmentAnswer pe allowed.'"""
+        ... sirf text-type assigmentsAnswer pe allowed.'"""
         submission = self.get_object()
-        question = get_object_or_404(submission.assignment.questions, pk=question_id)
-        if question.question_type != AssignmentQuestion.QuestionTypeChoices.TEXT:
+        question = get_object_or_404(submission.assigments.questions, pk=question_id)
+        if question.question_type != assigmentsQuestion.QuestionTypeChoices.TEXT:
             return Response(
                 {"detail": "Only text-type questions can be manually reviewed."},
                 status=status.HTTP_400_BAD_REQUEST,
@@ -190,11 +190,11 @@ class AssignmentSubmissionViewSet(viewsets.ModelViewSet):
         answer = submission.mark_answer_and_maybe_finalize(
             question=question, reviewed_by=request.user, **serializer.validated_data
         )
-        return Response(AssignmentAnswerSerializer(answer).data)
+        return Response(assigmentsAnswerSerializer(answer).data)
 
     @action(detail=True, methods=["post"])
     def publish(self, request, pk=None):
-        """§2 — always mints a fresh slug (see `AssignmentSubmission.
+        """§2 — always mints a fresh slug (see `assigmentsSubmission.
         publish()`'s own docstring for why re-publishing never reuses the
         previous URL)."""
         submission = self.get_object()
@@ -208,14 +208,14 @@ class AssignmentSubmissionViewSet(viewsets.ModelViewSet):
 
 
 class PublicSubmissionView(generics.RetrieveAPIView):
-    """§2 — 'GET /assignment/public/{public_slug}/ — auth-free, sirf tab
+    """§2 — 'GET /assigments/public/{public_slug}/ — auth-free, sirf tab
     data deta hai jab public_slug non-empty ho.'"""
 
     permission_classes = [permissions.AllowAny]
     # [HARDENING] — see PRODUCTION_DESIGN.md §1.1/§6. Requires
-    # DEFAULT_THROTTLE_RATES["assignment_public_page"] to be set in
+    # DEFAULT_THROTTLE_RATES["assigments_public_page"] to be set in
     # settings.py or DRF falls back to no limit for this scope.
-    throttle_classes = [AssignmentPublicPageThrottle]
+    throttle_classes = [assigmentsPublicPageThrottle]
     serializer_class = PublicSubmissionSerializer
     lookup_field = "public_slug"
     lookup_url_kwarg = "slug"
@@ -225,4 +225,4 @@ class PublicSubmissionView(generics.RetrieveAPIView):
         # comment on the field) — excluded here so an unpublished /
         # never-published submission 404s outright, rather than being
         # "reachable" via an empty-string URL segment.
-        return AssignmentSubmission.objects.exclude(public_slug="").select_related("assignment", "student")
+        return assigmentsSubmission.objects.exclude(public_slug="").select_related("assigments", "student")

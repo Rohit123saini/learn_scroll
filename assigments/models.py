@@ -1,9 +1,9 @@
-# assignment/models.py
+# assigments/models.py
 """
-New, unified `assignment` app — replaces `campus.Assignment`/
-`AssignmentSubmission` and `liveclass.Assignment`/`AssignmentSubmission`
-(assignment_app_design.md, full doc). Also adds a third flow that existed
-in neither old app: personal/self-assignment with a shareable public
+New, unified `assigments` app — replaces `campus.assigments`/
+`assigmentsSubmission` and `liveclass.assigments`/`assigmentsSubmission`
+(assigments_app_design.md, full doc). Also adds a third flow that existed
+in neither old app: personal/self-assigments with a shareable public
 verification URL.
 
 Every design decision below is traceable to a section of that doc — cited
@@ -12,24 +12,24 @@ here is a guess dressed up as a fact.
 
 GOLDEN RULE (§1, same shape as core/campus's own rule): this app never
 imports `campus.*` or `liveclass.*` models. Both directions go through
-`bridge.py` — `assignment/bridge.py` for campus/liveclass → assignment,
+`bridge.py` — `assigments/bridge.py` for campus/liveclass → assigments,
 and `campus/bridge.py` / `liveclass/bridge.py` (not in this file) for the
 reverse. `context_type` + `context_id` below are an **opaque soft
 reference**, never a hard FK — this app has no idea what a "section" or a
 "classroom" actually is, and must never gain one.
 
 WHAT'S IN THIS FILE:
-  1. `AssignmentBaseModel` — UUID-PK abstract base (§2, "UUID PK... kyunki
-     personal-assignment URLs public share hongi"). Applied to all four
-     concrete models here, not just `Assignment`, so nothing in this app
+  1. `assigmentsBaseModel` — UUID-PK abstract base (§2, "UUID PK... kyunki
+     personal-assigments URLs public share hongi"). Applied to all four
+     concrete models here, not just `assigments`, so nothing in this app
      leaks a sequential-integer enumeration surface even indirectly (e.g.
-     via `AssignmentAnswer` ids appearing in a per-question review API).
-  2. `Assignment` — the posted assignment itself. `source`/`context_type`/
+     via `assigmentsAnswer` ids appearing in a per-question review API).
+  2. `assigments` — the posted assigments itself. `source`/`context_type`/
      `context_id` (§1) route it to personal / campus / liveclass without
      this app knowing which. Deliberately has **no** `is_paid`/`price`
      field at all (§4 — "structurally impossible", same pattern as
      `campus.CampusLiveSession`), not just one defaulted to False.
-  3. `AssignmentQuestion` / `AssignmentAnswer` (§2a) — the structured-
+  3. `assigmentsQuestion` / `assigmentsAnswer` (§2a) — the structured-
      question path. Verified field-for-field against the real
      `testseries/models.py` source (`Question`/`QuestionResponse`): same
      `clean()`/`save()` shape-validation per question_type, same
@@ -43,16 +43,16 @@ WHAT'S IN THIS FILE:
      an `ImportError` on `GradingResult`/`QuestionType` at import time and
      is now fixed, along with `submit_structured()`'s call site — see
      that method's own docstring for the full list of what changed).
-  4. `AssignmentSubmission` — one student's attempt. Snapshots
+  4. `assigmentsSubmission` — one student's attempt. Snapshots
      `roll_number`/`enrollment_no` at submit time (never re-derived) so a
      submission stays independently verifiable even if enrollment changes
      later. Carries the free-form path (`written_content`/`file`) *and*
-     the structured path (`AssignmentAnswer` rows) — mutually exclusive in
-     practice, gated by `Assignment.has_structured_questions`. Also owns
+     the structured path (`assigmentsAnswer` rows) — mutually exclusive in
+     practice, gated by `assigments.has_structured_questions`. Also owns
      the shareable public-verification `public_slug` feature (§2, the
      genuinely new flow this app adds).
-  5. Every FileField (`Assignment.attachment`, `AssignmentQuestion.
-     attachment`, `AssignmentSubmission.file`) runs `common.
+  5. Every FileField (`assigments.attachment`, `assigmentsQuestion.
+     attachment`, `assigmentsSubmission.file`) runs `common.
      attachment_validators.ATTACHMENT_VALIDATORS` — the same extension +
      size rules `testseries` already enforces, moved to `common` so
      nothing here redefines them (see that module's own docstring).
@@ -60,7 +60,7 @@ WHAT'S IN THIS FILE:
 WHAT'S DELIBERATELY NOT HERE (see the doc's own §8 "Open items" — carried
 forward rather than silently resolved):
   - No `enrollment_no` dedicated field exists yet on the campus side
-    (§5 GAP) — `AssignmentSubmission.enrollment_no` will simply be blank
+    (§5 GAP) — `assigmentsSubmission.enrollment_no` will simply be blank
     for campus-sourced submissions until that's decided. Not this app's
     call to make.
   - No hard `source="personal"` restriction on who may call `.publish()`
@@ -69,7 +69,7 @@ forward rather than silently resolved):
     the serializer is still the primary enforcement point per the doc (it
     can surface a clean field-level 400 instead of a 500), using
     `can_change_question_mode()` below so both places check the exact same
-    condition. `Assignment.save()` now *also* raises `ValidationError` on
+    condition. `assigments.save()` now *also* raises `ValidationError` on
     an illegal flip, as a model-level backstop for callers that bypass the
     serializer entirely (management commands, `bridge.py`, shell) — belt
     and suspenders, not a redundant duplicate.
@@ -88,17 +88,17 @@ from common.attachment_validators import attachment_extension_validator, validat
 from common.question_grading import auto_grade
 from login.models import User
 
-# §2a / common/attachment_validators.py's own docstring: "assignment
+# §2a / common/attachment_validators.py's own docstring: "assigments
 # reuses the exact same rules instead of redefining them" — every
-# user-uploaded FileField in this app (teacher's assignment attachment,
+# user-uploaded FileField in this app (teacher's assigments attachment,
 # a question's attachment, a student's submitted file) runs through the
 # same extension + size checks `testseries` already uses, so there's one
 # place that decides what an "attachment" is allowed to be, not three.
 ATTACHMENT_VALIDATORS = [attachment_extension_validator, validate_attachment_size]
 
 
-class AssignmentSource(models.TextChoices):
-    """§1 — which of the three flows an `Assignment` belongs to. A plain
+class assigmentsSource(models.TextChoices):
+    """§1 — which of the three flows an `assigments` belongs to. A plain
     string, not a FK, precisely so this app never has to know the shape of
     whatever "campus" or "liveclass" actually are."""
 
@@ -107,12 +107,12 @@ class AssignmentSource(models.TextChoices):
     LIVECLASS = "liveclass", "LiveClass"
 
 
-class AssignmentBaseModel(models.Model):
+class assigmentsBaseModel(models.Model):
     """§2 — UUID PK on every concrete model in this app (not just
-    `Assignment`) because personal-assignment ids show up in public,
+    `assigments`) because personal-assigments ids show up in public,
     unauthenticated URLs (`public_slug` aside — the id itself is also
     exposed via API responses), and a sequential integer PK would let
-    anyone enumerate every assignment/submission/question in the system
+    anyone enumerate every assigments/submission/question in the system
     just by incrementing a number. `campus.CampusBaseModel` uses the same
     pattern for the same reason."""
 
@@ -124,14 +124,14 @@ class AssignmentBaseModel(models.Model):
         abstract = True
 
 
-class Assignment(AssignmentBaseModel):
-    source = models.CharField(max_length=10, choices=AssignmentSource.choices, db_index=True)
+class assigments(assigmentsBaseModel):
+    source = models.CharField(max_length=10, choices=assigmentsSource.choices, db_index=True)
 
     # §1 — opaque soft-reference to whatever posted this. `context_type` is
     # "section" | "classroom" | "" (blank for source=personal).
     # `context_id` is NEVER resolved to a real row from this app — the
     # caller (campus/liveclass bridge) already did that before calling
-    # `assignment.bridge.create_context_assignment()`, and only the caller
+    # `assigments.bridge.create_context_assigments()`, and only the caller
     # ever dereferences it again.
     context_type = models.CharField(max_length=20, blank=True)
     context_id = models.UUIDField(null=True, blank=True)
@@ -141,12 +141,12 @@ class Assignment(AssignmentBaseModel):
         on_delete=models.SET_NULL,
         null=True,
         blank=True,
-        related_name="posted_assignments",
+        related_name="posted_assigmentss",
     )
 
     title = models.CharField(max_length=200)
 
-    # For source=personal this field IS the assignment: the student's own
+    # For source=personal this field IS the assigments: the student's own
     # written content, not a teacher's instructions. Kept as one field
     # rather than two (`instructions` vs `personal_content`) because the
     # doc treats it as literally the same slot used two different ways
@@ -155,33 +155,33 @@ class Assignment(AssignmentBaseModel):
     description = models.TextField(blank=True)
 
     attachment = models.FileField(
-        upload_to="assignment/attachments/", null=True, blank=True, validators=ATTACHMENT_VALIDATORS
+        upload_to="assigments/attachments/", null=True, blank=True, validators=ATTACHMENT_VALIDATORS
     )
 
-    # Optional — personal assignments are self-paced (§2: "personal
-    # assignments me due date optional").
+    # Optional — personal assigmentss are self-paced (§2: "personal
+    # assigmentss me due date optional").
     due_date = models.DateField(null=True, blank=True)
 
     # NOTE: there is deliberately no `is_paid` / `price` field anywhere on
-    # this model. §4 — "Assignment model me price/is_paid/koin field hi
+    # this model. §4 — "assigments model me price/is_paid/koin field hi
     # nahi hai... structurally impossible rakha gaya hai", mirroring
     # `campus.CampusLiveSession`'s "free for students" enforcement. If a
-    # future "premium assignment review" feature is ever wanted, that is
+    # future "premium assigments review" feature is ever wanted, that is
     # an explicit new decision (and almost certainly a new field on THIS
     # model, made deliberately) — never route it around this omission by
     # stuffing a price into `data` below.
 
-    # Auto-summed from AssignmentQuestion.marks when
+    # Auto-summed from assigmentsQuestion.marks when
     # has_structured_questions=True (see `recompute_total_marks()` and the
     # post_save/post_delete signals below); otherwise a manual, optional
-    # scale set directly by whoever posts the assignment.
+    # scale set directly by whoever posts the assigments.
     total_marks = models.PositiveIntegerField(null=True, blank=True)
 
     has_structured_questions = models.BooleanField(default=False)
 
     # §3 — "{"context_type": ..., "context_id": ...}" for client-side
     # deep-linking, same shape as `core.Notification.data`. Populated by
-    # `bridge.create_context_assignment()`, not hand-maintained here.
+    # `bridge.create_context_assigments()`, not hand-maintained here.
     data = models.JSONField(default=dict, blank=True)
 
     class Meta:
@@ -195,7 +195,7 @@ class Assignment(AssignmentBaseModel):
 
     def can_change_question_mode(self) -> bool:
         """§2a — `has_structured_questions` is immutable once any
-        submission exists for this assignment (changing the mode after
+        submission exists for this assigments (changing the mode after
         students have started answering makes scoring inconsistent, same
         reasoning as `TestSeries.status="published"` locking after
         publish). This is a query, not an enforcement point on `save()` —
@@ -204,7 +204,7 @@ class Assignment(AssignmentBaseModel):
         the serializer and any other caller check the exact same
         condition instead of re-deriving it.
         """
-        return not self.submissions.exclude(status=AssignmentSubmission.SubmissionStatus.MISSING).exists()
+        return not self.submissions.exclude(status=assigmentsSubmission.SubmissionStatus.MISSING).exists()
 
     def save(self, *args, **kwargs):
         """Model-level backstop for the `has_structured_questions`
@@ -225,8 +225,8 @@ class Assignment(AssignmentBaseModel):
         """
         if self.pk:
             try:
-                old = Assignment.objects.only("has_structured_questions").get(pk=self.pk)
-            except Assignment.DoesNotExist:
+                old = assigments.objects.only("has_structured_questions").get(pk=self.pk)
+            except assigments.DoesNotExist:
                 old = None
             if (
                 old is not None
@@ -234,14 +234,14 @@ class Assignment(AssignmentBaseModel):
                 and not self.can_change_question_mode()
             ):
                 raise ValidationError(
-                    "has_structured_questions cannot be changed once a submission exists for this assignment."
+                    "has_structured_questions cannot be changed once a submission exists for this assigments."
                 )
         super().save(*args, **kwargs)
 
     def recompute_total_marks(self) -> None:
-        """§2a — `total_marks` is "auto" (sum of `AssignmentQuestion.marks`)
+        """§2a — `total_marks` is "auto" (sum of `assigmentsQuestion.marks`)
         when `has_structured_questions=True`. Called from the
-        AssignmentQuestion post_save/post_delete signals below rather than
+        assigmentsQuestion post_save/post_delete signals below rather than
         computed on read, so `total_marks` stays a plain, indexable/
         filterable column instead of a property that hits the DB on every
         access.
@@ -252,11 +252,11 @@ class Assignment(AssignmentBaseModel):
         # update() (not .save()) — avoids re-triggering this model's own
         # save-time side effects and avoids a stale in-memory `self` write
         # racing a concurrent question add/remove.
-        Assignment.objects.filter(pk=self.pk).update(total_marks=total)
+        assigments.objects.filter(pk=self.pk).update(total_marks=total)
 
 
-@receiver(pre_save, sender=Assignment)
-def _delete_old_assignment_attachment_on_change(sender, instance: Assignment, **kwargs):
+@receiver(pre_save, sender=assigments)
+def _delete_old_assigments_attachment_on_change(sender, instance: assigments, **kwargs):
     """Same storage-agnostic cleanup pattern as `login.models`'s
     `profile_photo` signal — goes through `field.storage`, never a raw
     filesystem path, so this keeps working unchanged if/when
@@ -271,8 +271,8 @@ def _delete_old_assignment_attachment_on_change(sender, instance: Assignment, **
         old_attachment.storage.delete(old_attachment.name)
 
 
-@receiver(post_delete, sender=Assignment)
-def _delete_assignment_attachment_on_delete(sender, instance: Assignment, **kwargs):
+@receiver(post_delete, sender=assigments)
+def _delete_assigments_attachment_on_delete(sender, instance: assigments, **kwargs):
     """Fires for both `instance.delete()` and bulk `queryset.delete()` —
     see login/models.py's identical comment on why a `delete()` override
     would silently miss the bulk case."""
@@ -280,7 +280,7 @@ def _delete_assignment_attachment_on_delete(sender, instance: Assignment, **kwar
         instance.attachment.storage.delete(instance.attachment.name)
 
 
-class AssignmentQuestion(AssignmentBaseModel):
+class assigmentsQuestion(assigmentsBaseModel):
     """§2a — field-for-field clone of `testseries.Question`, verified
     against the real `testseries/models.py` source (previously
     [NOT YET VERIFIED] — that source is now available). `clean()`/`save()`
@@ -303,7 +303,7 @@ class AssignmentQuestion(AssignmentBaseModel):
         MSQ = "msq", "Multiple Select (multiple answers)"
         LIST = "list", "List / Ordered Items"
 
-    assignment = models.ForeignKey(Assignment, on_delete=models.CASCADE, related_name="questions")
+    assigments = models.ForeignKey(assigments, on_delete=models.CASCADE, related_name="questions")
 
     # No default — matches `testseries.Question.order` exactly. A caller
     # must pick an explicit order; silently defaulting to 0 (the old
@@ -318,7 +318,7 @@ class AssignmentQuestion(AssignmentBaseModel):
     question_type = models.CharField(max_length=4, choices=QuestionTypeChoices.choices, db_index=True)
     text = models.TextField()
     attachment = models.FileField(
-        upload_to="assignment/question_attachments/", null=True, blank=True, validators=ATTACHMENT_VALIDATORS
+        upload_to="assigments/question_attachments/", null=True, blank=True, validators=ATTACHMENT_VALIDATORS
     )
     marks = models.PositiveIntegerField()
 
@@ -330,13 +330,13 @@ class AssignmentQuestion(AssignmentBaseModel):
     # mcq: a single option id from `options`. msq/list: a list/subset of
     # `options`. text: unused (blank) — a `text` question is never
     # auto-graded, so there is no "correct answer" to store, only a human
-    # reviewer's judgment on the submitted `AssignmentAnswer.answer_data`.
+    # reviewer's judgment on the submitted `assigmentsAnswer.answer_data`.
     correct_answer = models.JSONField(default=dict, blank=True)
 
     class Meta:
         ordering = ["order"]
         constraints = [
-            models.UniqueConstraint(fields=["assignment", "order"], name="unique_question_order_per_assignment"),
+            models.UniqueConstraint(fields=["assigments", "order"], name="unique_question_order_per_assigments"),
         ]
 
     def clean(self):
@@ -393,7 +393,7 @@ class AssignmentQuestion(AssignmentBaseModel):
         # clean() above (called unconditionally by full_clean()), so they're
         # excluded here to avoid a redundant/incompatible generic JSONField
         # check; every other field (text, marks, question_type, order, and
-        # the (assignment, order) uniqueness) stays IN the validated set.
+        # the (assigments, order) uniqueness) stays IN the validated set.
         self.full_clean(exclude=["options", "correct_answer"])
         super().save(*args, **kwargs)
 
@@ -409,23 +409,23 @@ class AssignmentQuestion(AssignmentBaseModel):
         return self.question_type != self.QuestionTypeChoices.TEXT
 
 
-@receiver(post_save, sender=AssignmentQuestion)
-def _recompute_total_marks_on_question_save(sender, instance: AssignmentQuestion, **kwargs):
-    instance.assignment.recompute_total_marks()
+@receiver(post_save, sender=assigmentsQuestion)
+def _recompute_total_marks_on_question_save(sender, instance: assigmentsQuestion, **kwargs):
+    instance.assigments.recompute_total_marks()
 
 
-@receiver(post_delete, sender=AssignmentQuestion)
-def _recompute_total_marks_on_question_delete(sender, instance: AssignmentQuestion, **kwargs):
-    # instance.assignment may already be gone from the DB if this fired as
-    # part of the assignment's own CASCADE delete — the FK is still
+@receiver(post_delete, sender=assigmentsQuestion)
+def _recompute_total_marks_on_question_delete(sender, instance: assigmentsQuestion, **kwargs):
+    # instance.assigments may already be gone from the DB if this fired as
+    # part of the assigments's own CASCADE delete — the FK is still
     # readable off the in-memory `instance` either way, and
     # recompute_total_marks() no-ops safely via `.filter(pk=...).update()`
-    # against a possibly-already-deleted Assignment row (matches 0 rows,
+    # against a possibly-already-deleted assigments row (matches 0 rows,
     # simply does nothing).
-    instance.assignment.recompute_total_marks()
+    instance.assigments.recompute_total_marks()
 
 
-class AssignmentSubmission(AssignmentBaseModel):
+class assigmentsSubmission(assigmentsBaseModel):
     class SubmissionStatus(models.TextChoices):
         MISSING = "missing", "Missing"
         SUBMITTED = "submitted", "Submitted"
@@ -438,14 +438,14 @@ class AssignmentSubmission(AssignmentBaseModel):
         PARTIALLY_CHECKED = "partially_checked", "Partially Checked"
         CHECKED = "checked", "Checked"
 
-    assignment = models.ForeignKey(Assignment, on_delete=models.CASCADE, related_name="submissions")
-    student = models.ForeignKey(User, on_delete=models.CASCADE, related_name="assignment_submissions")
+    assigments = models.ForeignKey(assigments, on_delete=models.CASCADE, related_name="submissions")
+    student = models.ForeignKey(User, on_delete=models.CASCADE, related_name="assigments_submissions")
 
     # --- free-form path fields — only meaningful when
-    # assignment.has_structured_questions is False. ---
+    # assigments.has_structured_questions is False. ---
     written_content = models.TextField(blank=True)
     file = models.FileField(
-        upload_to="assignment/submissions/", null=True, blank=True, validators=ATTACHMENT_VALIDATORS
+        upload_to="assigments/submissions/", null=True, blank=True, validators=ATTACHMENT_VALIDATORS
     )
 
     # --- snapshots, taken once at submit/pre-create time, never
@@ -469,19 +469,19 @@ class AssignmentSubmission(AssignmentBaseModel):
     # per §2's own note.
     grade = models.CharField(max_length=10, blank=True)
 
-    # Structured path only — sum of AssignmentAnswer.marks_awarded, only
+    # Structured path only — sum of assigmentsAnswer.marks_awarded, only
     # fully populated once every question (including every `text`
     # question) has been reviewed. See `_recompute_structured_status()`.
     total_marks_awarded = models.PositiveIntegerField(null=True, blank=True)
 
-    # Free-form path: the assignment-level comment. Structured path: an
+    # Free-form path: the assigments-level comment. Structured path: an
     # optional overall remark — per-question detail lives on
-    # AssignmentAnswer.reviewer_feedback instead.
+    # assigmentsAnswer.reviewer_feedback instead.
     feedback = models.TextField(blank=True)
 
     # §2 — the actual new feature this app adds. Blank = not published, no
     # public page exists at all. Non-empty = `GET
-    # /assignment/public/{public_slug}/` serves a read-only view.
+    # /assigments/public/{public_slug}/` serves a read-only view.
     # `unique=True` + `blank=True` has the same NULL-vs-'' footgun noted in
     # login/models.py's `phone` field, EXCEPT here it's harmless: every
     # unpublished submission shares the value `""`, but Django/Postgres
@@ -501,7 +501,7 @@ class AssignmentSubmission(AssignmentBaseModel):
 
     class Meta:
         constraints = [
-            models.UniqueConstraint(fields=["assignment", "student"], name="unique_submission_per_student"),
+            models.UniqueConstraint(fields=["assigments", "student"], name="unique_submission_per_student"),
             # See public_slug comment above — only enforce uniqueness
             # among rows that have actually published (non-blank slug),
             # so the many `""` "not published" rows never collide.
@@ -512,16 +512,16 @@ class AssignmentSubmission(AssignmentBaseModel):
             ),
         ]
         indexes = [
-            models.Index(fields=["assignment", "status"]),
+            models.Index(fields=["assigments", "status"]),
         ]
 
     def __str__(self):
-        return f"{self.student} - {self.assignment} ({self.status})"
+        return f"{self.student} - {self.assigments} ({self.status})"
 
     def is_late(self) -> bool:
-        if not self.assignment.due_date or not self.submitted_at:
+        if not self.assigments.due_date or not self.submitted_at:
             return False
-        return self.submitted_at.date() > self.assignment.due_date
+        return self.submitted_at.date() > self.assigments.due_date
 
     # ---------------------------------------------------------------
     # Free-form path
@@ -554,7 +554,7 @@ class AssignmentSubmission(AssignmentBaseModel):
     def submit_structured(self, answers: list[dict]) -> None:
         """`answers = [{"question_id": ..., "answer_data": ..., "answer_attachment": <file, optional>}, ...]`
 
-        Bulk-creates one `AssignmentAnswer` per question, mirroring
+        Bulk-creates one `assigmentsAnswer` per question, mirroring
         `TestAttempt.submit()` field-for-field:
           - `is_auto_graded` is computed from `question_type != TEXT`
             *before* grading (same as `TestAttempt.submit()`), not derived
@@ -583,12 +583,12 @@ class AssignmentSubmission(AssignmentBaseModel):
         is still awaiting human review) — no SUBMITTED/LATE intermediate
         status on this path, per §2's submit-flow description.
         """
-        questions = {str(q.id): q for q in self.assignment.questions.all()}
+        questions = {str(q.id): q for q in self.assigments.questions.all()}
         answer_rows = []
         for entry in answers:
             question = questions[str(entry["question_id"])]
             answer_data = entry["answer_data"]
-            is_auto_graded = question.question_type != AssignmentQuestion.QuestionTypeChoices.TEXT
+            is_auto_graded = question.question_type != assigmentsQuestion.QuestionTypeChoices.TEXT
             is_correct, marks_awarded = auto_grade(
                 question_type=question.question_type,
                 options=question.options,
@@ -597,7 +597,7 @@ class AssignmentSubmission(AssignmentBaseModel):
                 marks=question.marks,
             )
             answer_rows.append(
-                AssignmentAnswer(
+                assigmentsAnswer(
                     submission=self,
                     question=question,
                     answer_data=answer_data,
@@ -607,7 +607,7 @@ class AssignmentSubmission(AssignmentBaseModel):
                     marks_awarded=marks_awarded,
                 )
             )
-        AssignmentAnswer.objects.bulk_create(answer_rows)
+        assigmentsAnswer.objects.bulk_create(answer_rows)
 
         self.submitted_at = timezone.now()
         self._recompute_structured_status()
@@ -618,7 +618,7 @@ class AssignmentSubmission(AssignmentBaseModel):
         "has every text question been reviewed yet?" check, so it lives
         in one place rather than two copies drifting apart."""
         pending_review = self.answers.filter(
-            question__question_type=AssignmentQuestion.QuestionTypeChoices.TEXT, marks_awarded__isnull=True
+            question__question_type=assigmentsQuestion.QuestionTypeChoices.TEXT, marks_awarded__isnull=True
         ).exists()
         if pending_review:
             self.status = self.SubmissionStatus.PARTIALLY_CHECKED
@@ -630,10 +630,10 @@ class AssignmentSubmission(AssignmentBaseModel):
             self.checked_at = timezone.now()
         self.save(update_fields=["submitted_at", "status", "checked_at", "total_marks_awarded", "updated_at"])
 
-    def mark_answer_and_maybe_finalize(self, *, question: "AssignmentQuestion", marks_awarded: int,
-                                        feedback: str = "", reviewed_by: User) -> "AssignmentAnswer":
+    def mark_answer_and_maybe_finalize(self, *, question: "assigmentsQuestion", marks_awarded: int,
+                                        feedback: str = "", reviewed_by: User) -> "assigmentsAnswer":
         """§2a — "review flow bhi identical" to testseries. Reviews exactly
-        one `text`-type `AssignmentAnswer`, then re-runs
+        one `text`-type `assigmentsAnswer`, then re-runs
         `_recompute_structured_status()` so the submission flips from
         PARTIALLY_CHECKED to CHECKED the moment the *last* pending text
         question gets reviewed — callers never need to separately "check
@@ -662,8 +662,8 @@ class AssignmentSubmission(AssignmentBaseModel):
         self.save(update_fields=["public_slug", "updated_at"])
 
 
-@receiver(pre_save, sender=AssignmentSubmission)
-def _delete_old_submission_file_on_change(sender, instance: AssignmentSubmission, **kwargs):
+@receiver(pre_save, sender=assigmentsSubmission)
+def _delete_old_submission_file_on_change(sender, instance: assigmentsSubmission, **kwargs):
     """Same pattern as the two attachment-cleanup signals above / the
     original `profile_photo` signal in login/models.py."""
     if not instance.pk:
@@ -676,21 +676,21 @@ def _delete_old_submission_file_on_change(sender, instance: AssignmentSubmission
         old_file.storage.delete(old_file.name)
 
 
-@receiver(post_delete, sender=AssignmentSubmission)
-def _delete_submission_file_on_delete(sender, instance: AssignmentSubmission, **kwargs):
+@receiver(post_delete, sender=assigmentsSubmission)
+def _delete_submission_file_on_delete(sender, instance: assigmentsSubmission, **kwargs):
     if instance.file:
         instance.file.storage.delete(instance.file.name)
 
 
-class AssignmentAnswer(AssignmentBaseModel):
+class assigmentsAnswer(assigmentsBaseModel):
     """§2a — field-for-field clone of `testseries.QuestionResponse`,
     verified against the real `testseries/models.py` source (previously
     [NOT YET VERIFIED] — now confirmed, and two real gaps fixed below:
     the missing `answer_attachment` field, and `mark_answer()` setting
     `is_correct` when testseries's version never does)."""
 
-    submission = models.ForeignKey(AssignmentSubmission, on_delete=models.CASCADE, related_name="answers")
-    question = models.ForeignKey(AssignmentQuestion, on_delete=models.CASCADE, related_name="answers")
+    submission = models.ForeignKey(assigmentsSubmission, on_delete=models.CASCADE, related_name="answers")
+    question = models.ForeignKey(assigmentsQuestion, on_delete=models.CASCADE, related_name="answers")
 
     # mcq: a single option id. msq/list: a list. text: free-form text.
     # Opaque JSON on purpose — this model doesn't need to know the exact
@@ -707,7 +707,7 @@ class AssignmentAnswer(AssignmentBaseModel):
     # structured path here had no way to accept a file answer at all —
     # a real functional gap, not just a shape mismatch.
     answer_attachment = models.FileField(
-        upload_to="assignment/answer_attachments/", null=True, blank=True, validators=ATTACHMENT_VALIDATORS
+        upload_to="assigments/answer_attachments/", null=True, blank=True, validators=ATTACHMENT_VALIDATORS
     )
 
     is_auto_graded = models.BooleanField()
@@ -716,7 +716,7 @@ class AssignmentAnswer(AssignmentBaseModel):
 
     reviewer_feedback = models.TextField(blank=True)
     reviewed_by = models.ForeignKey(
-        User, on_delete=models.SET_NULL, null=True, blank=True, related_name="reviewed_assignment_answers"
+        User, on_delete=models.SET_NULL, null=True, blank=True, related_name="reviewed_assigments_answers"
     )
     reviewed_at = models.DateTimeField(null=True, blank=True)
 
@@ -745,7 +745,7 @@ class AssignmentAnswer(AssignmentBaseModel):
         """
         if self.is_auto_graded:
             raise ValueError(
-                f"AssignmentAnswer {self.pk} is auto-graded; mark_answer() is only valid for text-type answers."
+                f"assigmentsAnswer {self.pk} is auto-graded; mark_answer() is only valid for text-type answers."
             )
         if marks_awarded < 0:
             raise ValueError(f"marks_awarded ({marks_awarded}) cannot be negative.")

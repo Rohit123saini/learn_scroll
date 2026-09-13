@@ -380,8 +380,8 @@ class StaffProfile(CampusBaseModel):
         return f"{self.user.username} @ {self.campus.name} ({self.role})"
 
 
-class ClassTeacherAssignment(CampusBaseModel):
-    section = models.OneToOneField(Section, on_delete=models.CASCADE, related_name="class_teacher_assignment")
+class ClassTeacherassigments(CampusBaseModel):
+    section = models.OneToOneField(Section, on_delete=models.CASCADE, related_name="class_teacher_assigments")
     staff = models.ForeignKey(StaffProfile, on_delete=models.CASCADE, related_name="class_teacher_of")
 
     class Meta:
@@ -391,15 +391,15 @@ class ClassTeacherAssignment(CampusBaseModel):
         return f"{self.section} - {self.staff.user.username}"
 
 
-class SubjectTeacherAssignment(CampusBaseModel):
+class SubjectTeacherassigments(CampusBaseModel):
     class Status(models.TextChoices):
         PENDING = "pending", "Pending"
         APPROVED = "approved", "Approved"
         REJECTED = "rejected", "Rejected"
 
-    section = models.ForeignKey(Section, on_delete=models.CASCADE, related_name="subject_teacher_assignments")
-    subject = models.ForeignKey(Subject, on_delete=models.CASCADE, related_name="teacher_assignments")
-    staff = models.ForeignKey(StaffProfile, on_delete=models.CASCADE, related_name="subject_assignments")
+    section = models.ForeignKey(Section, on_delete=models.CASCADE, related_name="subject_teacher_assigmentss")
+    subject = models.ForeignKey(Subject, on_delete=models.CASCADE, related_name="teacher_assigmentss")
+    staff = models.ForeignKey(StaffProfile, on_delete=models.CASCADE, related_name="subject_assigmentss")
     # The class-teacher who approved/rejected this — matches the "class
     # teacher subject-teacher ko allow karega" flow from the design doc.
     approved_by = models.ForeignKey(
@@ -415,7 +415,7 @@ class SubjectTeacherAssignment(CampusBaseModel):
     class Meta:
         ordering = ["id"]
         constraints = [
-            UniqueConstraint(fields=["section", "subject", "staff"], name="unique_subject_teacher_assignment")
+            UniqueConstraint(fields=["section", "subject", "staff"], name="unique_subject_teacher_assigments")
         ]
 
     def __str__(self):
@@ -432,9 +432,9 @@ class StudentEnrollment(CampusBaseModel):
     section = models.ForeignKey(Section, on_delete=models.CASCADE, related_name="enrollments")
     session = models.ForeignKey(AcademicSession, on_delete=models.CASCADE, related_name="enrollments")
     roll_number = models.CharField(max_length=30, blank=True)
-    # [ADDED — Task 11] Closes the GAP the unified `assignment` app's own
-    # models.py flagged against this exact model: `AssignmentSubmission.
-    # enrollment_no` (assignment app) was shipped as an always-blank
+    # [ADDED — Task 11] Closes the GAP the unified `assigments` app's own
+    # models.py flagged against this exact model: `assigmentsSubmission.
+    # enrollment_no` (assigments app) was shipped as an always-blank
     # snapshot field because `StudentEnrollment` had no dedicated
     # `enrollment_no` of its own to snapshot — only `(student, section,
     # session)` as the de-facto enrollment key. This is the school's own
@@ -442,8 +442,8 @@ class StudentEnrollment(CampusBaseModel):
     # section-scoped and can change every session) — blank-by-default so
     # existing rows don't need a backfill value to pass validation;
     # campuses that care about tracking it can start setting it going
-    # forward, and `campus.bridge.create_assignment()` now has a real
-    # value to snapshot into new `assignment.AssignmentSubmission` rows
+    # forward, and `campus.bridge.create_assigments()` now has a real
+    # value to snapshot into new `assigments.assigmentsSubmission` rows
     # instead of always passing `enrollment_no=""`.
     enrollment_no = models.CharField(max_length=30, blank=True)
     status = models.CharField(max_length=15, choices=Status.choices, default=Status.ACTIVE, db_index=True)
@@ -503,7 +503,7 @@ class Notice(CampusBaseModel):
     section = models.ForeignKey(Section, on_delete=models.CASCADE, null=True, blank=True, related_name="notices")
     session = models.ForeignKey(AcademicSession, on_delete=models.CASCADE, related_name="notices")
 
-    posted_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, related_name="notices_posted")
+    posted_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, related_name="campus_notices_posted")
     title = models.CharField(max_length=200)
     body = models.TextField()
     pin_until = models.DateTimeField(null=True, blank=True)
@@ -643,32 +643,32 @@ class Attendance(CampusBaseModel):
 
 
 # ---------------------------------------------------------------------------
-# 6. Homework / assignments + syllabus tracker
+# 6. Homework / assigmentss + syllabus tracker
 # ---------------------------------------------------------------------------
 
-class Assignment(CampusBaseModel):
-    """[DEPRECATED — Task 11] Superseded by the unified `assignment` app
-    (`assignment.Assignment`, `source="campus"`, `context_type="section"`,
+class assigments(CampusBaseModel):
+    """[DEPRECATED — Task 11] Superseded by the unified `assigments` app
+    (`assigments.assigments`, `source="campus"`, `context_type="section"`,
     `context_id=<this section's id>`). Every write path in this app now
-    goes through `campus.bridge.create_assignment()` ->
-    `assignment.bridge.create_context_assignment()` instead —
-    `AssignmentViewSet` in views.py is a thin proxy over the unified
+    goes through `campus.bridge.create_assigments()` ->
+    `assigments.bridge.create_context_assigments()` instead —
+    `assigmentsViewSet` in views.py is a thin proxy over the unified
     model, not this one, going forward. Existing rows are kept purely as
     historical data (backfilled into the unified app by the one-time
-    `migrate_campus_assignments_to_unified` management command); nothing
+    `migrate_campus_assigmentss_to_unified` management command); nothing
     in this app should create a NEW row here again. `save()` below
     enforces that — see its own docstring for the one legitimate
     exception (the migration command itself).
     """
 
-    section = models.ForeignKey(Section, on_delete=models.CASCADE, related_name="assignments")
-    subject = models.ForeignKey(Subject, on_delete=models.CASCADE, related_name="assignments")
-    posted_by = models.ForeignKey(StaffProfile, on_delete=models.SET_NULL, null=True, related_name="assignments_posted")
+    section = models.ForeignKey(Section, on_delete=models.CASCADE, related_name="assigmentss")
+    subject = models.ForeignKey(Subject, on_delete=models.CASCADE, related_name="assigmentss")
+    posted_by = models.ForeignKey(StaffProfile, on_delete=models.SET_NULL, null=True, related_name="assigmentss_posted")
     title = models.CharField(max_length=200)
     description = models.TextField(blank=True)
-    attachment = models.FileField(upload_to="campus/assignments/", null=True, blank=True)
+    attachment = models.FileField(upload_to="campus/assigmentss/", null=True, blank=True)
     due_date = models.DateField()
-    session = models.ForeignKey(AcademicSession, on_delete=models.CASCADE, related_name="assignments")
+    session = models.ForeignKey(AcademicSession, on_delete=models.CASCADE, related_name="assigmentss")
 
     class Meta:
         ordering = ["-due_date"]
@@ -685,24 +685,24 @@ class Assignment(CampusBaseModel):
         only stopping the model from silently growing new rows once the
         rest of the app has moved off it). `migration_write=True` is the
         one sanctioned bypass, used only by
-        `migrate_campus_assignments_to_unified` for the deliberate,
+        `migrate_campus_assigmentss_to_unified` for the deliberate,
         one-time historical backfill — never pass it from application
         code.
         """
         if self.pk is None and not migration_write:
             raise RuntimeError(
-                "campus.Assignment is deprecated (Task 11) — new assignments must be created "
-                "via campus.bridge.create_assignment(), which writes to the unified "
-                "assignment.Assignment model instead. If this is the one-time historical "
+                "campus.assigments is deprecated (Task 11) — new assigmentss must be created "
+                "via campus.bridge.create_assigments(), which writes to the unified "
+                "assigments.assigments model instead. If this is the one-time historical "
                 "backfill, call save(migration_write=True)."
             )
         super().save(*args, **kwargs)
 
 
-class AssignmentSubmission(CampusBaseModel):
-    """[DEPRECATED — Task 11] See `Assignment`'s docstring above — same
+class assigmentsSubmission(CampusBaseModel):
+    """[DEPRECATED — Task 11] See `assigments`'s docstring above — same
     reasoning, same `save()` guard, superseded by
-    `assignment.AssignmentSubmission`.
+    `assigments.assigmentsSubmission`.
     """
 
     class Status(models.TextChoices):
@@ -710,8 +710,8 @@ class AssignmentSubmission(CampusBaseModel):
         LATE = "late", "Late"
         MISSING = "missing", "Missing"
 
-    assignment = models.ForeignKey(Assignment, on_delete=models.CASCADE, related_name="submissions")
-    student = models.ForeignKey(User, on_delete=models.CASCADE, related_name="assignment_submissions")
+    assigments = models.ForeignKey(assigments, on_delete=models.CASCADE, related_name="submissions")
+    student = models.ForeignKey(User, on_delete=models.CASCADE, related_name="campus_assigments_submissions")
     submitted_at = models.DateTimeField(null=True, blank=True)
     file = models.FileField(upload_to="campus/submissions/", null=True, blank=True)
     status = models.CharField(max_length=10, choices=Status.choices, default=Status.MISSING, db_index=True)
@@ -720,18 +720,18 @@ class AssignmentSubmission(CampusBaseModel):
 
     class Meta:
         ordering = ["id"]
-        constraints = [UniqueConstraint(fields=["assignment", "student"], name="unique_submission_per_student")]
+        constraints = [UniqueConstraint(fields=["assigments", "student"], name="campus_unique_submission_per_student")]
 
     def __str__(self):
-        return f"{self.student.username} - {self.assignment.title} ({self.status})"
+        return f"{self.student.username} - {self.assigments.title} ({self.status})"
 
     def save(self, *args, migration_write=False, **kwargs):
-        """See `Assignment.save()` above — identical guard/rationale."""
+        """See `assigments.save()` above — identical guard/rationale."""
         if self.pk is None and not migration_write:
             raise RuntimeError(
-                "campus.AssignmentSubmission is deprecated (Task 11) — new submissions now "
-                "live on the unified assignment.AssignmentSubmission model (pre-created by "
-                "campus.bridge.create_assignment(), submitted/graded via that app's own model "
+                "campus.assigmentsSubmission is deprecated (Task 11) — new submissions now "
+                "live on the unified assigments.assigmentsSubmission model (pre-created by "
+                "campus.bridge.create_assigments(), submitted/graded via that app's own model "
                 "methods). If this is the one-time historical backfill, call "
                 "save(migration_write=True)."
             )

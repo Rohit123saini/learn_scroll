@@ -2,7 +2,7 @@
 """
 Shared auto-grading logic — originally `Question.auto_grade()` in
 `testseries/models.py`. Moved here as a plain function (no Django/model
-imports) so `assignment` (Task 7) can reuse the exact same grading rules
+imports) so `assigments` (Task 7) can reuse the exact same grading rules
 instead of duplicating them.
 
 Deliberately takes `question_type`/`options`/`correct_answer` as plain
@@ -13,12 +13,12 @@ one app's models. `question_type` is compared against the raw string
 values ("text"/"mcq"/"msq"/"list") that `Question.QuestionType` stores
 in the DB, not the enum itself.
 
-NOTE for whoever wires this into `assignment` (Task 7): the original
+NOTE for whoever wires this into `assigments` (Task 7): the original
 `Question.auto_grade(self, answer_data)` used `self.marks` for the
 "full marks on correct" number. That's now the `marks` parameter here
 — pass the question's own marks value at the call site. `testseries`
 does this in its `Question.auto_grade()` wrapper below (see
-`testseries/models.py`); `assignment` should do the same when it wires
+`testseries/models.py`); `assigments` should do the same when it wires
 this in for Task 7.
 """
 

@@ -1,4 +1,4 @@
-# assignment/throttling.py
+# assigments/throttling.py
 """
 [HARDENING] — not in the functional design doc, added per
 PRODUCTION_DESIGN.md §1.1/§6. The public share page (`PublicSubmissionView`)
@@ -10,7 +10,7 @@ slug it's been handed at high speed. Rate limiting is the actual control
 for that; entropy and rate limiting solve different problems and this
 endpoint needs both.
 
-A dedicated scope (`assignment_public_page`) rather than reusing DRF's
+A dedicated scope (`assigments_public_page`) rather than reusing DRF's
 built-in `anon` scope, so tuning this rate in settings can never
 accidentally change the limit on unrelated public endpoints elsewhere in
 the project.
@@ -18,5 +18,5 @@ the project.
 from rest_framework.throttling import AnonRateThrottle
 
 
-class AssignmentPublicPageThrottle(AnonRateThrottle):
-    scope = "assignment_public_page"
+class assigmentsPublicPageThrottle(AnonRateThrottle):
+    scope = "assigments_public_page"

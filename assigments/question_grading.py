@@ -2,23 +2,23 @@
 common/question_grading.py
 
 Shared auto-grading utility for any app that clones `testseries.Question`'s
-type/grading shape — today that's just `assignment` (assignment_app_design.md
+type/grading shape — today that's just `assigments` (assigments_app_design.md
 §2a), and per that same section `testseries` is expected to import this too
 once it exists, so neither app duplicates `_auto_grade()` and the two drift
 apart the moment one of them tweaks partial-credit rules.
 
 THIS IS NOT A DJANGO APP — deliberately. It's a pure-function module with no
 models, no migrations, no settings entry. That's the whole point (§8.6 of the
-design doc): a shared Django *app* between `assignment` and `testseries`
+design doc): a shared Django *app* between `assigments` and `testseries`
 would recreate exactly the cross-app coupling problem `core`/`campus`/
-`assignment` all go out of their way to avoid via bridge.py. A stdlib-only
+`assigments` all go out of their way to avoid via bridge.py. A stdlib-only
 utility module has no such coupling — either app can `import` it without
 taking on a dependency edge in the app graph.
 
 IMPORTANT — provenance flag: `testseries.Question`'s actual as-built
 type/grading semantics were **not available to verify** in this pass (no
 testseries source was provided alongside login/models.py, core/models.py, or
-assignment_app_design.md). The behaviour below is written to match what the
+assigments_app_design.md). The behaviour below is written to match what the
 design doc *describes* (§2a: "text/subjective, multiple-choice, list-based",
 "same `mark_answer()` semantics", "msq/list partial-credit non-goal" per §8.4/
 §8.7). Treat this as [NOT YET VERIFIED] against the real testseries
@@ -31,7 +31,7 @@ from typing import Any
 
 
 class QuestionType:
-    """Mirrors `AssignmentQuestion.question_type` / (future)
+    """Mirrors `assigmentsQuestion.question_type` / (future)
     `testseries.Question.question_type` choices. Kept as plain string
     constants here (not a Django TextChoices) because this module has no
     Django dependency at all — the calling app's own TextChoices enum is
@@ -52,8 +52,8 @@ class QuestionType:
 class GradingResult:
     """Return shape for `auto_grade()`. `is_auto_graded=False` means the
     caller MUST leave `marks_awarded`/`is_correct` as None and route the
-    answer to a human reviewer (`AssignmentAnswer.mark_answer` /
-    `AssignmentSubmission.mark_answer_and_maybe_finalize`) — never guess."""
+    answer to a human reviewer (`assigmentsAnswer.mark_answer` /
+    `assigmentsSubmission.mark_answer_and_maybe_finalize`) — never guess."""
 
     is_auto_graded: bool
     is_correct: bool | None

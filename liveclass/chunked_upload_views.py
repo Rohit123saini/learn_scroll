@@ -9,8 +9,8 @@ comment_view.py, so this can be reviewed/tested/modified in isolation).
 Four purposes supported (see ChunkedUpload.Purpose in models.py):
     cover_image             -> updates Classroom.cover_image (must already exist)
     material                 -> creates a new ClassMaterial row
-    assignment_attachment   -> updates Assignment.attachment (must already exist)
-    submission_file          -> creates a new AssignmentSubmission row
+    assigments_attachment   -> updates assigments.attachment (must already exist)
+    submission_file          -> creates a new assigmentsSubmission row
 
 Design notes (read before changing anything):
   - Temp chunks are written OUTSIDE MEDIA_ROOT (settings.CHUNKED_UPLOAD_TMP_ROOT)
@@ -56,8 +56,8 @@ from rest_framework.response import Response
 from rest_framework.throttling import ScopedRateThrottle
 
 from .models import (
-    Assignment,
-    AssignmentSubmission,
+    assigments,
+    assigmentsSubmission,
     ChunkedUpload,
     Classroom,
     ClassMaterial,
@@ -71,7 +71,7 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 # Per-purpose limits — kept in lockstep with the actual model field
 # validators (Classroom.cover_image=5MB, ClassMaterial.file=100MB,
-# Assignment.attachment=50MB, AssignmentSubmission.file=50MB). If those
+# assigments.attachment=50MB, assigmentsSubmission.file=50MB). If those
 # validators ever change, update this dict in the same pass.
 # ---------------------------------------------------------------------------
 IMAGE_EXTENSIONS = ["png", "jpg", "jpeg", "webp", "gif"]
@@ -79,7 +79,7 @@ IMAGE_EXTENSIONS = ["png", "jpg", "jpeg", "webp", "gif"]
 PURPOSE_LIMITS = {
     ChunkedUpload.Purpose.COVER_IMAGE: {"max_mb": 5, "extensions": IMAGE_EXTENSIONS},
     ChunkedUpload.Purpose.MATERIAL: {"max_mb": 100, "extensions": DOCUMENT_MEDIA_EXTENSIONS},
-    ChunkedUpload.Purpose.ASSIGNMENT_ATTACHMENT: {"max_mb": 50, "extensions": DOCUMENT_MEDIA_EXTENSIONS},
+    ChunkedUpload.Purpose.assigments_ATTACHMENT: {"max_mb": 50, "extensions": DOCUMENT_MEDIA_EXTENSIONS},
     ChunkedUpload.Purpose.SUBMISSION_FILE: {"max_mb": 50, "extensions": DOCUMENT_MEDIA_EXTENSIONS},
 }
 
@@ -263,38 +263,38 @@ def _validate_and_build_extra_data(purpose, data, user):
             "session_id": session_id,
         }, None
 
-    if purpose == ChunkedUpload.Purpose.ASSIGNMENT_ATTACHMENT:
-        assignment_id = _int_or_none(data.get("assignment_id"))
-        if not assignment_id or assignment_id == "invalid":
-            return None, _error("assignment_id is required for purpose=assignment_attachment.")
-        assignment = Assignment.objects.filter(pk=assignment_id).select_related("classroom").first()
-        if not assignment:
-            return None, _error("Assignment not found.", code=http_status.HTTP_404_NOT_FOUND)
-        if not _can_manage_classroom(assignment.classroom, user):
+    if purpose == ChunkedUpload.Purpose.assigments_ATTACHMENT:
+        assigments_id = _int_or_none(data.get("assigments_id"))
+        if not assigments_id or assigments_id == "invalid":
+            return None, _error("assigments_id is required for purpose=assigments_attachment.")
+        assigments = assigments.objects.filter(pk=assigments_id).select_related("classroom").first()
+        if not assigments:
+            return None, _error("assigments not found.", code=http_status.HTTP_404_NOT_FOUND)
+        if not _can_manage_classroom(assigments.classroom, user):
             return None, _error(
                 "Only the classroom's teacher, co-teacher, or moderator can "
-                "attach a file to this assignment.", code=http_status.HTTP_403_FORBIDDEN,
+                "attach a file to this assigments.", code=http_status.HTTP_403_FORBIDDEN,
             )
-        return {"assignment_id": assignment_id}, None
+        return {"assigments_id": assigments_id}, None
 
     if purpose == ChunkedUpload.Purpose.SUBMISSION_FILE:
-        assignment_id = _int_or_none(data.get("assignment_id"))
-        if not assignment_id or assignment_id == "invalid":
-            return None, _error("assignment_id is required for purpose=submission_file.")
-        assignment = Assignment.objects.filter(pk=assignment_id).select_related("classroom").first()
-        if not assignment:
-            return None, _error("Assignment not found.", code=http_status.HTTP_404_NOT_FOUND)
-        if not _can_view_classroom_internals(assignment.classroom, user):
+        assigments_id = _int_or_none(data.get("assigments_id"))
+        if not assigments_id or assigments_id == "invalid":
+            return None, _error("assigments_id is required for purpose=submission_file.")
+        assigments = assigments.objects.filter(pk=assigments_id).select_related("classroom").first()
+        if not assigments:
+            return None, _error("assigments not found.", code=http_status.HTTP_404_NOT_FOUND)
+        if not _can_view_classroom_internals(assigments.classroom, user):
             return None, _error(
-                "A pass (active or expired) is required to submit this assignment.",
+                "A pass (active or expired) is required to submit this assigments.",
                 code=http_status.HTTP_403_FORBIDDEN,
             )
-        if AssignmentSubmission.objects.filter(assignment=assignment, student=user).exists():
+        if assigmentsSubmission.objects.filter(assigments=assigments, student=user).exists():
             return None, _error(
-                "You've already submitted this assignment — update your "
+                "You've already submitted this assigments — update your "
                 "existing submission instead."
             )
-        return {"assignment_id": assignment_id}, None
+        return {"assigments_id": assigments_id}, None
 
     return None, _error("Unsupported purpose.")
 
@@ -504,62 +504,62 @@ def _finalize_purpose(upload: ChunkedUpload, final_path: str, final_size: int, r
             django_file.close()
         return {"material_id": material.id, "file": material.file.url if material.file else None}
 
-    if upload.purpose == ChunkedUpload.Purpose.ASSIGNMENT_ATTACHMENT:
-        assignment = Assignment.objects.filter(pk=extra.get("assignment_id")).select_related("classroom").first()
-        if not assignment:
-            raise _FinalizeError("Assignment no longer exists.", code=http_status.HTTP_404_NOT_FOUND)
-        if not _can_manage_classroom(assignment.classroom, user):
-            raise _FinalizeError("You no longer have permission to edit this assignment.", code=http_status.HTTP_403_FORBIDDEN)
+    if upload.purpose == ChunkedUpload.Purpose.assigments_ATTACHMENT:
+        assigments = assigments.objects.filter(pk=extra.get("assigments_id")).select_related("classroom").first()
+        if not assigments:
+            raise _FinalizeError("assigments no longer exists.", code=http_status.HTTP_404_NOT_FOUND)
+        if not _can_manage_classroom(assigments.classroom, user):
+            raise _FinalizeError("You no longer have permission to edit this assigments.", code=http_status.HTTP_403_FORBIDDEN)
         django_file = File(open(final_path, "rb"), name=file_name)
         try:
-            assignment.attachment = django_file
-            assignment.full_clean(validate_unique=False)
-            assignment.save(update_fields=["attachment"])
+            assigments.attachment = django_file
+            assigments.full_clean(validate_unique=False)
+            assigments.save(update_fields=["attachment"])
         finally:
             django_file.close()
-        return {"assignment_id": assignment.id, "attachment": assignment.attachment.url if assignment.attachment else None}
+        return {"assigments_id": assigments.id, "attachment": assigments.attachment.url if assigments.attachment else None}
 
     if upload.purpose == ChunkedUpload.Purpose.SUBMISSION_FILE:
-        assignment = Assignment.objects.filter(pk=extra.get("assignment_id")).select_related("classroom").first()
-        if not assignment:
-            raise _FinalizeError("Assignment no longer exists.", code=http_status.HTTP_404_NOT_FOUND)
-        if not _can_view_classroom_internals(assignment.classroom, user):
-            raise _FinalizeError("A pass (active or expired) is required to submit this assignment.", code=http_status.HTTP_403_FORBIDDEN)
-        if AssignmentSubmission.objects.filter(assignment=assignment, student=user).exists():
+        assigments = assigments.objects.filter(pk=extra.get("assigments_id")).select_related("classroom").first()
+        if not assigments:
+            raise _FinalizeError("assigments no longer exists.", code=http_status.HTTP_404_NOT_FOUND)
+        if not _can_view_classroom_internals(assigments.classroom, user):
+            raise _FinalizeError("A pass (active or expired) is required to submit this assigments.", code=http_status.HTTP_403_FORBIDDEN)
+        if assigmentsSubmission.objects.filter(assigments=assigments, student=user).exists():
             raise _FinalizeError(
-                "You've already submitted this assignment — update your existing submission instead.",
+                "You've already submitted this assigments — update your existing submission instead.",
                 code=http_status.HTTP_409_CONFLICT,
             )
         django_file = File(open(final_path, "rb"), name=file_name)
         try:
-            submission = AssignmentSubmission(assignment=assignment, student=user, file=django_file)
+            submission = assigmentsSubmission(assigments=assigments, student=user, file=django_file)
             submission.full_clean(validate_unique=False)
             with transaction.atomic():
                 try:
                     submission.save()
                 except IntegrityError:
                     raise _FinalizeError(
-                        "You've already submitted this assignment — update your existing submission instead.",
+                        "You've already submitted this assigments — update your existing submission instead.",
                         code=http_status.HTTP_409_CONFLICT,
                     )
         finally:
             django_file.close()
         # Same notification the normal (non-chunked) submission path fires —
-        # see AssignmentSubmissionViewSet.perform_create in views.py.
+        # see assigmentsSubmissionViewSet.perform_create in views.py.
         try:
             from .models import Notification
             from .views import create_notification, _safe_delay
             from .tasks import notify_submission_received
 
             create_notification(
-                recipient=assignment.classroom.teacher,
+                recipient=assigments.classroom.teacher,
                 notif_type=Notification.NotifType.SUBMISSION_RECEIVED,
                 title="New submission to grade",
                 message=(
                     f"{user.get_full_name() or user.username} submitted "
-                    f"'{assignment.title}' in '{assignment.classroom.title}'."
+                    f"'{assigments.title}' in '{assigments.classroom.title}'."
                 ),
-                classroom=assignment.classroom,
+                classroom=assigments.classroom,
             )
             _safe_delay(notify_submission_received, submission.id)
         except Exception:

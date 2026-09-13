@@ -1095,7 +1095,7 @@ class DoubtQuestion(BaseModel):
         # nothing to permission-check it against).
         constraints = [
             models.CheckConstraint(
-                check=(
+                condition=(
                     models.Q(group__isnull=False)
                     | (models.Q(context_type__isnull=False) & models.Q(context_id__isnull=False))
                 ),
@@ -1130,9 +1130,9 @@ class DoubtUpvote(BaseModel):
 # parent/guardian. NEVER chat content, NEVER message text, NEVER contact
 # details beyond the student's display name. Only:
 #   - attendance (reuses `StudyRoomAttendance`, per classroom)
-#   - assignment status (new `Assignment`/`AssignmentSubmission` below —
-#     this app had NO assignment concept anywhere before this; it's new
-#     groundwork, added specifically so "assignment pending" has real
+#   - assigments status (new `assigments`/`assigmentsSubmission` below —
+#     this app had NO assigments concept anywhere before this; it's new
+#     groundwork, added specifically so "assigments pending" has real
 #     data instead of being a placeholder number)
 #
 # Parents do NOT get a normal `User` row / login here. Flow:
@@ -1295,31 +1295,107 @@ class ParentToken(BaseModel):
         self.save(update_fields=['last_seen_at', 'updated_at'])
 
 
+# ======================================================================
+# 🔧 GAP FIX — PARENT MODE QUERY THREADS (Phase 5, Task 24 + 27)
+# ------------------------------------------------------------
+# `liveclass/parent_link_views.py` (ClassroomParentQueryListView,
+# ParentQueryReplyView) already imports and uses these two models, but
+# they were never actually added here — that's what broke
+# `from message.models import ..., ParentModeQuery, ParentModeQueryMessage`
+# with ImportError. Added now, shaped to match exactly how those views
+# use them (classroom_id filter, .select_related('parent_access_code'),
+# .category/.subject/.status, .messages.count(), sender_type='teacher').
+#
+# Deliberately a separate model from `DoubtQuestion` above — this is the
+# token-based Parent Mode equivalent, scoped directly to a `Classroom`
+# rather than a `Group`, and answerable by a parent who has no `User`
+# login at all (only a `ParentAccessCode`/`ParentToken`).
+# ======================================================================
+class ParentModeQuery(BaseModel):
+    class Category(models.TextChoices):
+        ATTENDANCE = 'attendance', 'Attendance'
+        HOMEWORK = 'homework', 'Homework'
+        BEHAVIOUR = 'behaviour', 'Behaviour'
+        GENERAL = 'general', 'General'
+
+    class Status(models.TextChoices):
+        OPEN = 'open', 'Open'
+        ANSWERED = 'answered', 'Answered'
+        CLOSED = 'closed', 'Closed'
+
+    # String FK — avoids a hard `liveclass` import in this app (matches
+    # how `liveclass` already imports `message` directly; importing back
+    # the other way would risk a circular import).
+    classroom = models.ForeignKey(
+        'liveclass.Classroom', on_delete=models.CASCADE, related_name='parent_mode_queries',
+    )
+    parent_access_code = models.ForeignKey(
+        ParentAccessCode, on_delete=models.CASCADE, related_name='queries',
+    )
+    category = models.CharField(max_length=20, choices=Category.choices, default=Category.GENERAL)
+    subject = models.CharField(max_length=200)
+    status = models.CharField(max_length=20, choices=Status.choices, default=Status.OPEN, db_index=True)
+
+    class Meta(BaseModel.Meta):
+        indexes = [
+            models.Index(fields=['classroom', 'status']),
+            models.Index(fields=['parent_access_code']),
+        ]
+
+    def __str__(self):
+        return f"ParentModeQuery({self.classroom_id}, {self.subject[:30]})"
+
+
+class ParentModeQueryMessage(BaseModel):
+    class SenderType(models.TextChoices):
+        PARENT = 'parent', 'Parent'
+        TEACHER = 'teacher', 'Teacher'
+
+    query = models.ForeignKey(
+        ParentModeQuery, on_delete=models.CASCADE, related_name='messages',
+    )
+    sender_type = models.CharField(max_length=10, choices=SenderType.choices)
+    text = models.TextField(max_length=2000)
+    # Only set when sender_type='teacher' — a parent has no `User` row to
+    # point at (see ParentModeQuery's docstring above).
+    sent_by_teacher = models.ForeignKey(
+        User, null=True, blank=True, on_delete=models.SET_NULL, related_name='+',
+    )
+
+    class Meta(BaseModel.Meta):
+        indexes = [
+            models.Index(fields=['query', 'created_at']),
+        ]
+
+    def __str__(self):
+        return f"ParentModeQueryMessage({self.query_id}, {self.sender_type})"
+
+
 # ----------------------------------------------------------------------
-# ASSIGNMENTS — minimal tracking, added so "assignment pending" in the
+# assigmentsS — minimal tracking, added so "assigments pending" in the
 # parent dashboard is real data. Nothing else in the app touches this
-# yet (no teacher-facing "create assignment" UI included here) — this is
+# yet (no teacher-facing "create assigments" UI included here) — this is
 # intentionally the smallest schema that supports the parent-view number;
 # a teacher-facing create/submit flow can build on top without changing
 # this shape.
 #
 # 🔧 FIX (this session) — `related_name` on both FKs below renamed
-# (`assignments` -> `message_assignments`, `assignment_submissions` ->
-# `message_assignment_submissions`) because a separate `liveclass` app
-# already defines its own `Assignment`/`AssignmentSubmission` models with
+# (`assigmentss` -> `message_assigmentss`, `assigments_submissions` ->
+# `message_assigments_submissions`) because a separate `liveclass` app
+# already defines its own `assigments`/`assigmentsSubmission` models with
 # the SAME related_names pointing at the SAME `User`/`Group` models.
 # Django can't register two identical reverse accessors on `User`, so
 # `makemigrations` failed with fields.E304/E305 until these were made
-# unique. NOTE: if `liveclass.Assignment` is meant to be the SAME concept
+# unique. NOTE: if `liveclass.assigments` is meant to be the SAME concept
 # as this one (not a different feature that happens to share a name), the
 # better long-term fix is to delete this duplicate pair entirely and have
-# the parent-dashboard code query `liveclass.Assignment` instead — see
+# the parent-dashboard code query `liveclass.assigments` instead — see
 # chat discussion. Kept here for now since that's a bigger structural
 # decision than a naming clash fix.
 # ----------------------------------------------------------------------
-class Assignment(BaseModel):
+class assigments(BaseModel):
     group = models.ForeignKey(
-        Group, on_delete=models.CASCADE, related_name='message_assignments',
+        Group, on_delete=models.CASCADE, related_name='message_assigmentss',
     )
     title = models.CharField(max_length=200)
     description = models.TextField(blank=True, default='')
@@ -1337,16 +1413,16 @@ class Assignment(BaseModel):
         return f"{self.title} ({self.group_id})"
 
 
-class AssignmentSubmission(BaseModel):
-    assignment = models.ForeignKey(Assignment, on_delete=models.CASCADE, related_name='submissions')
+class assigmentsSubmission(BaseModel):
+    assigments = models.ForeignKey(assigments, on_delete=models.CASCADE, related_name='submissions')
     student = models.ForeignKey(
-        User, on_delete=models.CASCADE, related_name='message_assignment_submissions',
+        User, on_delete=models.CASCADE, related_name='message_assigments_submissions',
     )
     is_submitted = models.BooleanField(default=False)
     submitted_at = models.DateTimeField(null=True, blank=True)
 
     class Meta(BaseModel.Meta):
-        unique_together = ('assignment', 'student')
+        unique_together = ('assigments', 'student')
         indexes = [
             models.Index(fields=['student', 'is_submitted']),
         ]

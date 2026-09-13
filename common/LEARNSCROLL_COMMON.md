@@ -3,7 +3,7 @@
 > **Purpose of this file:** single source of truth for the `common` folder —
 > **not a Django app of its own** (no `models.py`/`admin.py`/`apps.py`, not in
 > `INSTALLED_APPS`), just a place for small, import-free, cross-app utility
-> modules that more than one real app (`testseries`, `assignment`, and
+> modules that more than one real app (`testseries`, `assigments`, and
 > potentially others — `liveclass`, `campus`) needs and shouldn't each
 > redefine independently. Share only this file (plus the relevant app's own
 > doc, e.g. `LEARNSCROLL_LIVECLASS.md`) in a future chat when touching
@@ -24,7 +24,7 @@
 - **Origin pattern to remember**: everything seen in `common/` so far was
   **moved out of `testseries/models.py`**, where it started life as
   app-specific code (a model method, inline validators) before a second app
-  (`assignment`) needed the exact same logic and the choice was "duplicate
+  (`assigments`) needed the exact same logic and the choice was "duplicate
   it" vs. "extract it to a shared, import-free module". Both files below
   followed the second path. **When a new file shows up in `common/`, expect
   the same story**: check its docstring for "originally lived in
@@ -37,8 +37,8 @@
 
 | File | Moved from | Used by (confirmed) | Role |
 |---|---|---|---|
-| `attachment_validators.py` | `testseries/models.py` (validated `Question.attachment` / `QuestionResponse.answer_attachment`) | `testseries` (original caller, unchanged), `assignment` (reuses as-is, not redefined) | File-upload validation: extension safelist + max-size check, for any app's `FileField` that accepts a user-uploaded document/image. |
-| `question_grading.py` | `testseries/models.py` (`Question.auto_grade()`, now a thin wrapper around this) | `testseries` (via its `Question.auto_grade()` wrapper), `assignment` (**Task 7 — wiring described but not yet confirmed done**, see §4) | Pure auto-grading logic for `mcq`/`msq`/`list`(`match`/`order`) question types; `text` always routes to manual review. |
+| `attachment_validators.py` | `testseries/models.py` (validated `Question.attachment` / `QuestionResponse.answer_attachment`) | `testseries` (original caller, unchanged), `assigments` (reuses as-is, not redefined) | File-upload validation: extension safelist + max-size check, for any app's `FileField` that accepts a user-uploaded document/image. |
+| `question_grading.py` | `testseries/models.py` (`Question.auto_grade()`, now a thin wrapper around this) | `testseries` (via its `Question.auto_grade()` wrapper), `assigments` (**Task 7 — wiring described but not yet confirmed done**, see §4) | Pure auto-grading logic for `mcq`/`msq`/`list`(`match`/`order`) question types; `text` always routes to manual review. |
 
 **Both files share the same design contract**: plain functions/values only,
 **zero Django-model imports**, so a file in `common/` never secretly depends
@@ -60,21 +60,21 @@ attachment_extension_validator  = FileExtensionValidator(allowed_extensions=ATTA
 validate_attachment_size(file)  # raises django.core.exceptions.ValidationError if file.size > max_bytes
 ```
 
-- **Settings keys are still named `TESTSERIES_*`**, even though `assignment`
+- **Settings keys are still named `TESTSERIES_*`**, even though `assigments`
   (and potentially other apps) now reuse this module — the move to
   `common/` was explicitly a **pure move, behavior unchanged**: "same
   settings keys, same defaults, same error message". This means every app
   reusing this module shares **one global** extensions/size policy, keyed
   under `testseries`'s original settings names. There is currently no
-  per-app override (e.g. no `ASSIGNMENT_ATTACHMENT_MAX_MB`) — if
-  `assignment` (or anything else) ever needs a *different* limit than
+  per-app override (e.g. no `assigments_ATTACHMENT_MAX_MB`) — if
+  `assigments` (or anything else) ever needs a *different* limit than
   `testseries`, that's a real feature gap, not a bug, and should be raised
   explicitly rather than assumed to already work.
 - **Safelist, not blocklist** — `FileExtensionValidator(allowed_extensions=...)`
   only accepts what's on the list (`pdf`/`jpg`/`jpeg`/`png`/`webp` by
   default). This is the same safelist-over-blocklist posture
   `liveclass/models.py`'s own `DOCUMENT_MEDIA_EXTENSIONS` safelist takes for
-  its own plain `FileField`s (material/assignment attachment/assignment
+  its own plain `FileField`s (material/assigments attachment/assigments
   submission/certificate — see `LEARNSCROLL_LIVECLASS.md` §3) — **but it is
   a separate, independent safelist**, not the same one. Don't assume
   `liveclass`'s `MaxFileSizeValidator`/`DOCUMENT_MEDIA_EXTENSIONS` and this
@@ -137,15 +137,15 @@ Returns `(is_correct, marks_awarded)`.
   leftover — as documented, it currently does nothing.
 - **`marks` is the question's own full-marks value, supplied by the
   caller** — this function does not look it up. The module docstring
-  explicitly calls this out for whoever wires `assignment` in: the original
+  explicitly calls this out for whoever wires `assigments` in: the original
   `Question.auto_grade(self, answer_data)` read `self.marks` off the model
   instance itself; this standalone version has no instance to read from, so
   `testseries`'s own wrapper (`Question.auto_grade()` in
   `testseries/models.py` — not part of this upload, referenced only) is
   presumably now a thin shim that calls `auto_grade(..., marks=self.marks)`.
-  **`assignment` must do the exact same** — pass its own question's marks
+  **`assigments` must do the exact same** — pass its own question's marks
   value explicitly at the call site. This is flagged as a to-do
-  ("NOTE for whoever wires this into `assignment` (Task 7)"), **not
+  ("NOTE for whoever wires this into `assigments` (Task 7)"), **not
   confirmed done** — see §4.
 - **`list`/`match` vs `list`/`order` both use exact equality, no partial
   credit** — a `match` answer with 3 of 4 pairs correct, or an `order`
@@ -171,14 +171,14 @@ Returns `(is_correct, marks_awarded)`.
   `question_grading.py` backs `Question.auto_grade()`. Neither module's
   *behavior* changed in the move to `common/` — same settings keys, same
   defaults, same error message, same grading rules.
-- **`assignment`**: confirmed to **reuse** `attachment_validators.py`
-  as-is (per that module's own docstring: "`assignment` reuses the exact
+- **`assigments`**: confirmed to **reuse** `attachment_validators.py`
+  as-is (per that module's own docstring: "`assigments` reuses the exact
   same rules instead of redefining them"). `question_grading.py`'s wiring
-  into `assignment` is **Task 7**, described in the module's own docstring
+  into `assigments` is **Task 7**, described in the module's own docstring
   as a note *for whoever does that wiring* — i.e. **written as guidance for
   a not-yet-done integration, not confirmation that it's done**. Before
-  relying on `assignment` auto-grading anything, confirm `assignment`'s own
-  code (`assignment/models.py`/`assignment/bridge.py` — see
+  relying on `assigments` auto-grading anything, confirm `assigments`'s own
+  code (`assigments/models.py`/`assigments/bridge.py` — see
   `LEARNSCROLL_LIVECLASS.md` §6d for what's been read of that app so far)
   actually calls `common.question_grading.auto_grade(..., marks=<the
   question's own marks>)` the way the docstring instructs, rather than
@@ -188,8 +188,8 @@ Returns `(is_correct, marks_awarded)`.
   its own file-upload validation is a separate, independently-maintained
   safelist (`DOCUMENT_MEDIA_EXTENSIONS` + `MaxFileSizeValidator`, see §2
   above and that doc's §3). `liveclass` also has no auto-graded
-  MCQ/MSQ-style question model — its `Assignment`/`AssignmentSubmission`
-  (legacy) and the unified `assignment` app's submissions are file-upload +
+  MCQ/MSQ-style question model — its `assigments`/`assigmentsSubmission`
+  (legacy) and the unified `assigments` app's submissions are file-upload +
   manual-score based, not option-based, so `question_grading.py` has no
   obvious call site there. Treat `liveclass` as **not currently a consumer**
   of either `common/` module unless/until a future upload shows otherwise.
@@ -244,7 +244,7 @@ Returns `(is_correct, marks_awarded)`.
   identical to the original if this is a move, not a rewrite — call that
   out explicitly in the docstring the way both existing files do.
 - **Changing `attachment_validators.py`'s defaults or settings keys** →
-  remember every consumer (`testseries` confirmed, `assignment` confirmed)
+  remember every consumer (`testseries` confirmed, `assigments` confirmed)
   shares the same global settings keys — a change here is a change for
   every app importing it, not just the one you're currently working on.
 - **Wiring `question_grading.auto_grade()` into a new app** → pass the
@@ -252,8 +252,8 @@ Returns `(is_correct, marks_awarded)`.
   itself), pass `question_type` as the raw DB string not an enum member,
   and confirm your `answer_data`/`correct_answer` shapes line up
   key-for-key with the table in §3 before assuming grading will work.
-- **Confirming Task 7 (`assignment` × `question_grading.py`)** → check
-  `assignment/models.py`/`assignment/bridge.py` directly for an actual call
+- **Confirming Task 7 (`assigments` × `question_grading.py`)** → check
+  `assigments/models.py`/`assigments/bridge.py` directly for an actual call
   to `common.question_grading.auto_grade(...)` before documenting it as
   done anywhere else — as of this file, it's a documented *intention*, not
   a confirmed integration (§4).

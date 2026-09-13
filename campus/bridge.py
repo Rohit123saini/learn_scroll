@@ -26,12 +26,12 @@ blocked are now resolved):
     create_section_group`/`...provision_video_room` now exist for real
     (added this same pass — see that module's functions 10/11). Both
     are confirmed, established dependencies now, the same position
-    `create_assignment()`/`get_assignment_submissions()` below are
-    already in re: `assignment` — so both import at module level, no
+    `create_assigments()`/`get_assigments_submissions()` below are
+    already in re: `assigments` — so both import at module level, no
     lazy import, no `except ImportError` degrade.
     ⚠️ CORRECTION (this pass) — a prior revision of this file removed
     the `except ImportError` wrapper but left the `from core.
-    classroom_chat_bridge import ...` / `from assignment.bridge import
+    classroom_chat_bridge import ...` / `from assigments.bridge import
     ...` / `from testseries.bridge import ...` lines as LOCAL imports
     inside each function body, contradicting this very docstring's
     "import at module level" claim. Functionally the difference matters:
@@ -39,14 +39,14 @@ blocked are now resolved):
     a broken/missing dependency would pass Django startup and any health
     check, then 500 the first time a real user hits it. Moved to actual
     module-level imports below (top of file) to match what this
-    docstring always claimed — a missing `core`/`assignment`/`testseries`
+    docstring always claimed — a missing `core`/`assigments`/`testseries`
     now fails at Django startup (import time), same as any other hard
     dependency, not silently deferred to first request. Verified this
     doesn't introduce a cycle: `core.classroom_chat_bridge`'s own
     cross-app imports (`campus.models`, `message.models`) are
     deliberately local/deferred on ITS end specifically so apps like this
     one CAN import it at module level without a circular-import error —
-    see that module's own docstring, item 2. `assignment/bridge.py`'s
+    see that module's own docstring, item 2. `assigments/bridge.py`'s
     top-level imports don't reach back into `campus` either, so the same
     holds there. `testseries.bridge`'s import graph wasn't part of this
     pass (no `testseries/bridge.py` upload this time) — carried over the
@@ -81,23 +81,23 @@ blocked are now resolved):
     lookup below to use it once that file is available, instead of a
     naming-convention check.
 
-TASK 11 ADDITION: `create_assignment()` / `get_assignment_submissions()`
+TASK 11 ADDITION: `create_assigments()` / `get_assigments_submissions()`
 below are a DIFFERENT kind of bridge call than `notify()`/`resolve_
 parent_from_token()`/`create_section_group()`/`provision_video_room()`
-above. `assignment` is a confirmed, fully-built sibling app (Tasks
-6-10), the same kind of established dependency `assignment/bridge.py`
+above. `assigments` is a confirmed, fully-built sibling app (Tasks
+6-10), the same kind of established dependency `assigments/bridge.py`
 itself treats `core.services` as (a top-level import, no degrade) —
 same treatment the other four functions above now get too. So these two
-import `assignment.bridge`/`assignment.models` directly at module
+import `assigments.bridge`/`assigments.models` directly at module
 level, not lazily, and do not degrade to a no-op on `ImportError` — if
-`assignment` genuinely isn't installed, campus's own assignment feature
+`assigments` genuinely isn't installed, campus's own assigments feature
 has nothing to fall back to anyway, so a hard import error at startup
 is the honest failure mode, not a silently-neutered feature.
 """
 import logging
 
-from assignment.bridge import create_context_assignment, get_submissions_for_context
-from assignment.models import AssignmentSource
+from assigments.bridge import create_context_assigments, get_submissions_for_context
+from assigments.models import assigmentsSource
 from core.classroom_chat_bridge import create_section_group as _create_section_group
 from core.classroom_chat_bridge import provision_video_room as _provision_video_room
 from core.classroom_chat_bridge import resolve_parent_from_token as _resolve_parent_from_token
@@ -123,18 +123,18 @@ class NotifTypes:
     CAMPUS_SESSION_SCHEDULED = "campus_session_scheduled"
     CAMPUS_SESSION_LIVE = "campus_session_live"
     LOW_ATTENDANCE_ALERT = "low_attendance_alert"
-    ASSIGNMENT_POSTED_CAMPUS = "assignment_posted_campus"
-    ASSIGNMENT_DUE_REMINDER = "assignment_due_reminder"
+    assigments_POSTED_CAMPUS = "assigments_posted_campus"
+    assigments_DUE_REMINDER = "assigments_due_reminder"
     RESULT_PUBLISHED = "result_published"
     FEE_DUE_REMINDER = "fee_due_reminder"
-    STAFF_ASSIGNMENT_APPROVED = "staff_assignment_approved"
-    STAFF_ASSIGNMENT_REJECTED = "staff_assignment_rejected"
+    STAFF_assigments_APPROVED = "staff_assigments_approved"
+    STAFF_assigments_REJECTED = "staff_assigments_rejected"
     # NOTICE_POSTED already exists on core.models.NotifType per the
     # design doc — reused as-is, not redefined here.
     NOTICE_POSTED = "notice_posted"
 
     # F-3 (Task 14) — ADDED. `tasks.check_attendance_streak_rewards()`
-    # and `check_assignment_ontime_streak_rewards()` already referenced
+    # and `check_assigments_ontime_streak_rewards()` already referenced
     # `NotifTypes.CAMPUS_REWARD_EARNED`, but it did not exist on this
     # class — every call to `bridge.notify(notif_type=NotifTypes.
     # CAMPUS_REWARD_EARNED, ...)` in either task raised `AttributeError`
@@ -156,7 +156,7 @@ def create_section_group(section, actor):
     `core.classroom_chat_bridge.create_section_group` is now a
     confirmed, wired dependency (see module STATUS above) — no more
     `except ImportError` degrade; a missing `core` here is a real
-    startup failure, same as `assignment` below, not a silently
+    startup failure, same as `assigments` below, not a silently
     neutered feature.
 
     Returns the created (or, if one already exists for this section,
@@ -283,34 +283,34 @@ def resolve_parent_from_token(token):
     return parent_user, resolution.student
 
 
-def create_assignment(*, section, subject, posted_by, title, description="", attachment=None, due_date=None):
-    """[Task 11] Creates a campus assignment via the unified `assignment`
-    app instead of the now-deprecated `campus.Assignment` model (see that
+def create_assigments(*, section, subject, posted_by, title, description="", attachment=None, due_date=None):
+    """[Task 11] Creates a campus assigments via the unified `assigments`
+    app instead of the now-deprecated `campus.assigments` model (see that
     model's own docstring in models.py). Delegates the actual row
-    creation + roster bulk-pre-create to `assignment.bridge.
-    create_context_assignment()` — the same entry point `liveclass` is
-    expected to use too (§1, §3 of assignment_app_design.md). `campus`
+    creation + roster bulk-pre-create to `assigments.bridge.
+    create_context_assigments()` — the same entry point `liveclass` is
+    expected to use too (§1, §3 of assigments_app_design.md). `campus`
     resolves its own roster (`StudentEnrollment`) here, since
-    `assignment` itself has no concept of what a `Section` or an
+    `assigments` itself has no concept of what a `Section` or an
     enrollment is (opaque `context_id`, per that app's golden rule).
 
     `context_type="section"` / `context_id=section.id` is the
-    (context_type, context_id) shape `assignment` stores opaquely;
+    (context_type, context_id) shape `assigments` stores opaquely;
     `campus`-side code (this bridge, and views.py's thin proxy) is the
     only thing that ever turns `context_id` back into a real `Section`.
 
-    `subject` has nowhere to live on the unified `Assignment` model — a
+    `subject` has nowhere to live on the unified `assigments` model — a
     `Section` spans multiple subjects, so unlike `session` (always
     derivable from `section.school_class.session_id`, so the caller
     never needs to pass or store it separately) `subject_id` genuinely
-    needs its own slot. Passed via `extra_data` into `Assignment.data`
-    (see that parameter's own docstring on `create_context_assignment`)
+    needs its own slot. Passed via `extra_data` into `assigments.data`
+    (see that parameter's own docstring on `create_context_assigments`)
     rather than inventing a new model field on the unified app for a
     campus-only concept — `views.py`'s thin-proxy serializer reads it
-    back out of `assignment.data["subject_id"]` to reconstruct the old
+    back out of `assigments.data["subject_id"]` to reconstruct the old
     API's `subject` field.
 
-    Returns the created `assignment.models.Assignment` instance.
+    Returns the created `assigments.models.assigments` instance.
     """
     from .models import StudentEnrollment
 
@@ -324,8 +324,8 @@ def create_assignment(*, section, subject, posted_by, title, description="", att
             section=section, status=StudentEnrollment.Status.ACTIVE
         )
     ]
-    return create_context_assignment(
-        source=AssignmentSource.CAMPUS,
+    return create_context_assigments(
+        source=assigmentsSource.CAMPUS,
         context_type="section",
         context_id=section.id,
         posted_by=posted_by,
@@ -338,11 +338,11 @@ def create_assignment(*, section, subject, posted_by, title, description="", att
     )
 
 
-def get_assignment_submissions(section):
-    """[Task 11] Returns every `assignment.AssignmentSubmission` row for
-    a campus `section`, via `assignment.bridge.
+def get_assigments_submissions(section):
+    """[Task 11] Returns every `assigments.assigmentsSubmission` row for
+    a campus `section`, via `assigments.bridge.
     get_submissions_for_context()` — never a direct
-    `assignment.models.AssignmentSubmission` import from campus code
+    `assigments.models.assigmentsSubmission` import from campus code
     outside this bridge module. Unfiltered by permission, same contract
     `get_submissions_for_context()` itself documents: the caller (views.py)
     is responsible for any further staff/student-scoped narrowing.
@@ -354,14 +354,14 @@ def create_testseries(*, section, creator, title, description="", duration_minut
                        attempts_allowed=1, questions, is_paid=False, price_coins=0):
     """[Task 13] Creates a campus test series via the unified
     `testseries` app — the same "one function is the app boundary"
-    pattern `create_assignment()` above already uses for `assignment`,
+    pattern `create_assigments()` above already uses for `assigments`,
     and the same pattern `testseries/bridge.py`'s own module docstring
     says it exists for (`campus`/`liveclass` bridge modules call
     `create_context_testseries()`, never `testseries` models directly).
     `testseries` is a confirmed, fully-built sibling app for this task —
     its own bridge module docstring spells out exactly this calling
     contract for `source="campus"` — not an unverified dependency, so
-    same as `create_assignment()`'s own Task 11 addition reasoning, this
+    same as `create_assigments()`'s own Task 11 addition reasoning, this
     imports `testseries.bridge`/`testseries.models` as hard imports
     below, no lazy-import/`ImportError` degrade.
 
@@ -390,12 +390,12 @@ def create_testseries(*, section, creator, title, description="", duration_minut
     bridge doesn't blindly trust it either" posture `create_section_
     group()`'s class-teacher check above takes.
 
-    No `subject` parameter, unlike `create_assignment()` above.
+    No `subject` parameter, unlike `create_assigments()` above.
     `create_context_testseries()`'s full kwarg list (confirmed against
     this pass's `testseries/bridge.py` upload) is `source, context_type,
     context_id, creator, title, description, is_paid, price_coins,
     duration_minutes, attempts_allowed, questions, roster` — there's no
-    `extra_data`-shaped slot the way `create_context_assignment()` has,
+    `extra_data`-shaped slot the way `create_context_assigments()` has,
     so there's nowhere to persist a `subject_id` even if this function
     accepted one. A campus test series is therefore scoped to a
     `Section` only, not a `Section`+`Subject` pair, until `testseries`
@@ -404,7 +404,7 @@ def create_testseries(*, section, creator, title, description="", duration_minut
     entirely `views.py`'s job, checked BEFORE this function is ever
     called (Task 13 checklist: "Staff permission check bridge call se
     pehle hota hai, testseries khud trust karta hai caller ko" — the
-    same golden rule `create_assignment()` operates under) — this
+    same golden rule `create_assigments()` operates under) — this
     function itself does not accept or check a `subject` at all, so
     there's no way for it to enforce that even if it wanted to.
 
@@ -412,12 +412,12 @@ def create_testseries(*, section, creator, title, description="", duration_minut
     (each dict `full_clean()`-ed as a `Question`) is entirely
     `create_context_testseries()`'s own contract — same "caller resolves
     context, testseries resolves everything about a Question" boundary
-    `assignment` draws for its own roster dicts.
+    `assigments` draws for its own roster dicts.
 
     Roster is every ACTIVE `StudentEnrollment` for `section`, passed as
     plain `login.User` instances (via `.student`) — `create_context_
     testseries()`'s own `roster` docstring asks for exactly that shape
-    ("iterable of `login.User`, or `None`"), unlike `assignment`'s
+    ("iterable of `login.User`, or `None`"), unlike `assigments`'s
     roster dicts (which additionally seed per-student roll_number/
     enrollment_no onto pre-created submission rows; `testseries` has no
     pre-created-attempt-row concept per its own bridge module docstring,
@@ -489,7 +489,7 @@ def can_review_testseries_attempt(*, user, context_type, context_id):
 
     Only `context_type="section"` is supported — the only shape
     `campus.bridge.create_testseries()` ever produces. Unlike
-    `create_assignment()`'s subject-scoped `can_manage_section_
+    `create_assigments()`'s subject-scoped `can_manage_section_
     subject()` check, a campus test series has no subject concept at
     all (see `create_testseries()`'s own docstring above — there's
     nowhere on `TestSeries` to even store one) — so this checks only
@@ -528,8 +528,8 @@ def get_testseries_attempts(section):
     get_attempts_for_context()` — never a direct `testseries.models.
     TestAttempt` import from campus code outside this bridge module.
     Same "unfiltered by permission, caller narrows further" contract
-    `get_assignment_submissions()` above documents for its own
-    `assignment` analogue — `views.py`'s review endpoint still needs to
+    `get_assigments_submissions()` above documents for its own
+    `assigments` analogue — `views.py`'s review endpoint still needs to
     check `can_review_testseries_attempt()` per-attempt (or gate the
     whole call on `is_any_active_staff()` for this section's campus)
     before showing anything back to a non-owning caller.

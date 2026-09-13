@@ -228,7 +228,7 @@ particular endpoint:
 
 ### 🎓 F-3 (folded into this same pass) — `CAMPUS_REWARD` transaction type
 - New `TransactionType.CAMPUS_REWARD`, for `campus`'s small engagement
-  bonuses (attendance-streak, on-time-assignment-streak). Kept
+  bonuses (attendance-streak, on-time-assigments-streak). Kept
   **distinct from `EARN`** on purpose: `FEE-3`/`FEE-6`
   (`campus/tasks.py`) already reads a student's `User.coin` balance to
   decide whether it covers an upcoming fee, and `FEE-2` now routes real
@@ -405,7 +405,7 @@ Is baar sirf 2 files me change hua — `admin.py` (naya upload) aur
 3. **F-3 — naya `TransactionType.CAMPUS_REWARD`.** `models.py` me
    `CoinLedger.TransactionType` me ek naya choice add hua —
    `campus_reward` — jo `campus` app ke chhote engagement bonuses
-   (attendance streak, on-time assignment streak) ke liye hai.
+   (attendance streak, on-time assigments streak) ke liye hai.
    Deliberately `EARN` se alag rakha gaya hai: `FEE-3`/`FEE-6`
    (`campus/tasks.py`, is upload ka hissa nahi) already student ka
    `User.coin` balance padhta hai ye decide karne ke liye ki wo upcoming
@@ -1115,7 +1115,7 @@ class CoinLedger(models.Model):
 
     F-3 (this pass): added `TransactionType.CAMPUS_REWARD` for
     `campus`'s small engagement bonuses (attendance-streak,
-    assignment-on-time-streak) -- see that choice's own comment below for
+    assigments-on-time-streak) -- see that choice's own comment below for
     why it's kept distinct from `EARN` rather than reusing it.
 
     TASK 1 (this pass): added `TESTSERIES_PURCHASE`/`TESTSERIES_PAYOUT`/
@@ -1167,7 +1167,7 @@ class CoinLedger(models.Model):
         GIFT_RECEIVED = "gift_received", "Gift Received"
         ADMIN_ADJUSTMENT = "admin_adjustment", "Admin Adjustment"
         # F-3: campus engagement bonuses (attendance streak, on-time
-        # assignment streak) — deliberately its own type, not EARN.
+        # assigments streak) — deliberately its own type, not EARN.
         # Keeping tuition-fee payments (real money, via FeeInvoice/
         # FeePayment) and these small in-app coin bonuses on visibly
         # different transaction_type values matters here specifically
@@ -4411,7 +4411,7 @@ TASK 2 — thin `_notify(...)` wrapper around
 `core.services.create_notification` for the Follow feature
 (FollowAPIView / AcceptFollowRequestView in this app's views.py).
 
-No `assignment`/`testseries` services.py actually exists to copy
+No `assigments`/`testseries` services.py actually exists to copy
 verbatim, so this follows the *pattern* those apps' docstrings point at
 instead: `core.services.create_notification` is lazy-imported, never at
 module top. That matters here specifically because the dependency
@@ -5692,17 +5692,20 @@ Items 5–7 are still open.
    own admin (your custom `User` model's `ModelAdmin`) to declare
    `search_fields` — verify this exists on your `User` admin, or Django
    will raise a startup error (`E040`).
-7. **`CheckConstraint` needs Django ≥ 5.1.** All four `CheckConstraint`
-   calls (`Follow`, `BlockUser`, `RestrictUser`, `CoinLedger`) use
-   `condition=` rather than the older `check=` kwarg. `condition=` was
-   only added in Django 5.1; on anything older, use `check=` instead. On
-   Django 6.0+, `check=` was removed outright and raises `TypeError:
+7. ~~`CheckConstraint` needs Django ≥ 5.1.~~ — **confirmed resolved**:
+   project's `requirements.txt` pins `Django==6.0.6`, which is not just
+   ≥5.1 but past the point (6.0) where `check=` was removed outright —
+   so `condition=` on all four `CheckConstraint` calls (`Follow`,
+   `BlockUser`, `RestrictUser`, `CoinLedger`) is not just safe but
+   required; `check=` would raise `TypeError:
    CheckConstraint.__init__() got an unexpected keyword argument
-   'check'` at model-import time — which surfaces as `makemigrations`/
-   `migrate`/`runserver` all failing with a traceback pointing at
-   `models.py`, not as a normal migration error. Run
-   `python -m django --version` to confirm you're on 5.1+ before relying
-   on `condition=`.
+   'check'` at model-import time on this project's actual version. No
+   code change needed — `models.py` already uses `condition=`
+   everywhere. (Original note, kept for history: `condition=` was only
+   added in Django 5.1; on anything older, use `check=` instead. On
+   Django 6.0+, `check=` was removed outright, which surfaces as
+   `makemigrations`/`migrate`/`runserver` all failing with a traceback
+   pointing at `models.py`, not as a normal migration error.)
 8. **Restrict's effects are still not consumed anywhere.** `is_restricted_
    between()` exists and `am_i_restricting` is exposed on the profile
    response, but no app in this upload (posts, message, notifications)
@@ -5878,7 +5881,7 @@ any upload for this app — everything below is inferred from how
 |---|---|---|
 | **`login`** | `settings.AUTH_USER_MODEL` (`login.User`) is the target of every FK in this app (`Follow`, `BlockUser`, `RestrictUser`, `CoinLedger`, `CoinPurchaseRequest`, `CoinWithdrawalRequest`). `user_profile` never imports `login.User` directly — always via `settings.AUTH_USER_MODEL` or `type(user)` — to stay decoupled. | The custom fields §2 lists (`profile_photo`, `bio`, `is_private`, `is_verified`, `is_active`, `followers_count`, `following_count`, `posts_count`, `coin`) must exist on `login.User`. Its own `ModelAdmin` must declare `search_fields` for `autocomplete_fields` elsewhere in this app's `admin.py` to work (§11 item 6). |
 | **`testseries`** | `TestSeriesPurchase.purchase_and_start_attempt()` / `.release()` reference `CoinLedger.TransactionType.TESTSERIES_PURCHASE` / `TESTSERIES_PAYOUT` directly (TASK 1) — those values existing in this app's enum is a hard dependency; they were missing before TASK 1 and it was a live `AttributeError`. | Nothing — `testseries` is purely a consumer of this app's `TransactionType` enum and (presumably) calls `CoinLedger.objects.record_transaction()` itself for its own purchase/payout flow. |
-| **`campus`** | `campus/tasks.py` (FEE-3/FEE-6) reads a student's `User.coin` balance to decide whether it covers an upcoming fee. `FEE-2` routes real tuition-fee payments through this same `CoinLedger`. Small engagement bonuses (attendance-streak, on-time-assignment-streak) credit coins via `TransactionType.CAMPUS_REWARD` (F-3) — and are therefore automatically subject to TASK 5's earn-rate limiter, the same as any other `EARN`/`CAMPUS_REWARD` credit. | Nothing structural — `campus` just needs `CAMPUS_REWARD` to exist (it does, as of F-3) and to call `record_transaction()` rather than writing `User.coin` directly, or its credits would silently escape both the audit trail and the rate limiter. |
+| **`campus`** | `campus/tasks.py` (FEE-3/FEE-6) reads a student's `User.coin` balance to decide whether it covers an upcoming fee. `FEE-2` routes real tuition-fee payments through this same `CoinLedger`. Small engagement bonuses (attendance-streak, on-time-assigments-streak) credit coins via `TransactionType.CAMPUS_REWARD` (F-3) — and are therefore automatically subject to TASK 5's earn-rate limiter, the same as any other `EARN`/`CAMPUS_REWARD` credit. | Nothing structural — `campus` just needs `CAMPUS_REWARD` to exist (it does, as of F-3) and to call `record_transaction()` rather than writing `User.coin` directly, or its credits would silently escape both the audit trail and the rate limiter. |
 | **`liveclass`** | Nothing currently — not a consumer of this app. | `liveclass.CoinPurchase` and `liveclass.CoinWithdrawal`/`CoinTransaction` were used as **reference reads** (not code dependencies) when designing `CoinPurchaseRequest` (TASK 3) and `CoinWithdrawalRequest` (TASK 4) respectively — both reproduce `liveclass`'s escrow/lifecycle patterns on top of `CoinLedger` instead of `liveclass.CoinTransaction`, since `CoinLedger` is this codebase's one shared ledger. `liveclass/models.py` itself was never uploaded, so these two models' exact field shapes are inferred, not verified against it (§11 items 10–11) — worth reconciling if the two ever need to match exactly.
 | **`post`** | Nothing currently — not a consumer. | `post/models.py`'s `update_shares_count`/`update_saves_count`/`update_story_views_count` signal pattern is the reference design `tasks.py`'s module docstring points to as the *real* fix for follow-count drift (a `Follow` `post_save`/`post_delete` signal, instead of `reconcile_follow_counts`'s periodic detect-and-correct). Not implemented here — out of scope for this pass, noted for a future one. `post.views.TrendingHashtagsAPIView`'s "bounded recompute now, revisit at scale" trade-off is the same one `reconcile_follow_counts` makes. |
 | **`message`** | Consumes `is_blocked_between()` for chat/contact-search filtering (block) and is expected to eventually consume `is_restricted_between()` to suppress read-receipts/online-status/notifications from a restricted user (not implemented yet — §11 item 8). Gifting flows in `message` are expected to call `CoinLedger.objects.record_transaction(transaction_type=GIFT_SENT / GIFT_RECEIVED)` — not verified against actual `message` code since it wasn't uploaded. | `MessageContactSearchView`/`MessageContactSearchSerializer` exist specifically to serve `message`'s "add members" flow. |

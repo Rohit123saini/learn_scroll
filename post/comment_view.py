@@ -14,6 +14,7 @@ import os
 import uuid
 import shutil
 from django.conf import settings
+from django.core.exceptions import ValidationError
 from django.db import transaction
 from django.db.models import F, Count
 from django.shortcuts import get_object_or_404
@@ -28,7 +29,7 @@ from drf_spectacular.utils import extend_schema
 
 from.models import Post, PostComment, CommentMedia, ChunkedUpload, CommentLike
 from.comment_serializers import CreateCommentSerializer, PostCommentSerializer
-from.services import notify_post_commented
+from.Services import notify_post_commented
 
 def get_media_type(file):
     content_type = getattr(file, 'content_type', '') or ''
@@ -142,19 +143,44 @@ def chunked_upload_init(request):
         if not file_name or (not post_id and not parent_id) or total_chunks == 0:
             return Response({"error": "file_name, post_id, total_chunks required"}, status=400)
 
+        # FIX (post_app.md §14 issue #7): ChunkedUpload.post_id/parent_id
+        # are plain CharFields (no DB-level FK — see models.py's own note
+        # on why: validated in the view instead, kept deliberately loose
+        # at the model layer). Before this fix, `chunked_upload_init`
+        # never explicitly checked that the target actually existed — a
+        # stale/invalid post_id or parent_id would sail through init(),
+        # get stored as-is on the ChunkedUpload row, and only surface as
+        # a 404 in `chunked_upload_complete`'s own get_object_or_404
+        # calls, AFTER the client had already spent time/bandwidth
+        # pushing every chunk. This is a dedicated, explicit existence
+        # check — separate from (and running before) the §14 issue #10
+        # `is_comments_disabled` check below — with a field-specific
+        # error message so the client knows exactly which of
+        # `post_id`/`parent_id` was bad, rather than a generic 400 from
+        # letting Http404 fall through to the blanket `except Exception`
+        # at the bottom of this view.
+        if parent_id:
+            try:
+                parent_comment = PostComment.objects.get(id=parent_id, is_deleted=False)
+            except (PostComment.DoesNotExist, ValueError, ValidationError):
+                return Response({"error": "Invalid parent_id: comment not found"}, status=400)
+            target_post = parent_comment.post
+        else:
+            try:
+                target_post = Post.objects.get(id=post_id)
+            except (Post.DoesNotExist, ValueError, ValidationError):
+                return Response({"error": "Invalid post_id: post not found"}, status=400)
+
         # FIX (post_app.md §14 issue #10): the regular CommentCreateAPIView
         # already blocks new comments on a post with `is_comments_disabled`,
         # but this chunked-upload path (used for large video comments)
         # never checked it — someone could still start (and finish) a 4GB
         # video-comment upload on a post whose owner explicitly disabled
-        # comments. Checked here, at `init` time, so a blocked upload fails
+        # comments. Checked here, at `init` time (reusing the same
+        # target_post/parent_comment the existence check above already
+        # resolved — no second query), so a blocked upload fails
         # immediately instead of after the client has already spent time/
         # bandwidth pushing chunks.
-        if parent_id:
-            parent_comment = get_object_or_404(PostComment, id=parent_id, is_deleted=False)
-            target_post = parent_comment.post
-        else:
-            target_post = get_object_or_404(Post, id=post_id)
         if target_post.is_comments_disabled:
             return Response({"error": "Comments disabled"}, status=403)
 
@@ -234,6 +260,17 @@ def chunked_upload_complete(request):
         # of first paying the disk I/O to stitch together a multi-GB file
         # it's about to reject anyway. `post`/`parent` are reused below
         # instead of being re-queried a second time after assembly.
+        #
+        # FIX (post_app.md §14 issue #7): the get_object_or_404 calls
+        # below are now a defense-in-depth backstop, not the primary
+        # existence check — `chunked_upload_init` validates post_id/
+        # parent_id up front (see its own FIX comment), so a stale ID
+        # normally never gets this far. They stay here because the two
+        # calls are separated by however long the chunk-push phase takes
+        # — the target Post/Comment could still be deleted mid-upload —
+        # and because this view is reachable with any `upload_id` a
+        # caller has, independent of whether init's check already ran
+        # for it in this process.
         if upload.parent_id:
             parent = get_object_or_404(PostComment, id=upload.parent_id)
             post = parent.post

@@ -214,7 +214,7 @@ def seconds_until_next_notice_expiry(classroom_id, default_seconds: int) -> int:
 
 # ---------------------------------------------------------------------------
 # NOTE (fix): none of the FileField/ImageField columns below (cover_image,
-# class materials, assignment attachments/submissions, certificate files)
+# class materials, assigments attachments/submissions, certificate files)
 # had any size limit. An authenticated user could upload an arbitrarily
 # large file to any of these — slow requests, unbounded storage/bandwidth
 # cost, and an easy denial-of-service vector against disk/object-storage
@@ -222,9 +222,9 @@ def seconds_until_next_notice_expiry(classroom_id, default_seconds: int) -> int:
 # (a plain closure/lambda can't be).
 #
 # NOTE (fix — file-type spoofing): the four plain FileFields below (material,
-# assignment attachment, assignment submission, certificate) had NO
+# assigments attachment, assigments submission, certificate) had NO
 # extension restriction at all beyond the size cap — a student could upload
-# a renamed .exe/.php/.js/.sh as their "assignment submission" or a teacher
+# a renamed .exe/.php/.js/.sh as their "assigments submission" or a teacher
 # could do the same as "class material", which then sits in storage and
 # gets served back to every other student/teacher who opens it (a stored-
 # malware / drive-by vector, not something the size cap touches at all).
@@ -525,7 +525,7 @@ class Classroom(models.Model):
         classroom — active OR expired? Broader than has_access() on purpose:
         a lapsed pass should still unlock the classroom's general content
         (materials, notices, holidays, schedule/session listing, doubts,
-        assignments, certificates, reviews) — everything except actually
+        assigmentss, certificates, reviews) — everything except actually
         entering a live session, which stays gated behind has_access() /
         _has_room_access(). A user who never held any pass (or whose only
         request is still pending/rejected/cancelled) gets False here, and is
@@ -1721,7 +1721,7 @@ class ClassJoinRequest(models.Model):
 # while a breakout is actually running; ClassSessionViewSet.breakout_close
 # deletes every row for the session to return everyone to the main room in
 # one shot (SessionParticipant.breakout_room below is SET_NULL, so that
-# single delete also clears every participant's assignment for free).
+# single delete also clears every participant's assigments for free).
 # ---------------------------------------------------------------------------
 class BreakoutRoom(models.Model):
     session = models.ForeignKey(ClassSession, on_delete=models.CASCADE, related_name="breakout_rooms")
@@ -2238,7 +2238,7 @@ class PollTemplate(models.Model):
     Scoped to a classroom (not global/platform-wide) — a teacher's poll
     templates are their own classroom's shorthand, not a shared library
     across every classroom on the platform; `_can_manage_classroom` (the
-    same boundary already used for Assignment/Notice/ClassHoliday) gates
+    same boundary already used for assigments/Notice/ClassHoliday) gates
     create/update/delete in PollTemplateViewSet.
     """
 
@@ -2258,18 +2258,18 @@ class PollTemplate(models.Model):
 
 
 # ---------------------------------------------------------------------------
-# 10. ASSIGNMENTS / HOMEWORK
+# 10. assigmentsS / HOMEWORK
 # ---------------------------------------------------------------------------
-class Assignment(models.Model):
-    classroom = models.ForeignKey(Classroom, on_delete=models.CASCADE, related_name="assignments")
+class assigments(models.Model):
+    classroom = models.ForeignKey(Classroom, on_delete=models.CASCADE, related_name="assigmentss")
     session = models.ForeignKey(
-        ClassSession, on_delete=models.SET_NULL, null=True, blank=True, related_name="assignments"
+        ClassSession, on_delete=models.SET_NULL, null=True, blank=True, related_name="assigmentss"
     )
 
     title = models.CharField(max_length=150)
     description = models.TextField(blank=True)
     attachment = models.FileField(
-        upload_to="assignments/", null=True, blank=True,
+        upload_to="assigmentss/", null=True, blank=True,
         validators=[MaxFileSizeValidator(50), FileExtensionValidator(DOCUMENT_MEDIA_EXTENSIONS)],
     )
 
@@ -2285,12 +2285,12 @@ class Assignment(models.Model):
         return f"{self.title} ({self.classroom.title})"
 
 
-class AssignmentSubmission(models.Model):
-    assignment = models.ForeignKey(Assignment, on_delete=models.CASCADE, related_name="submissions")
-    student = models.ForeignKey(User, on_delete=models.CASCADE, related_name="assignment_submissions")
+class assigmentsSubmission(models.Model):
+    assigments = models.ForeignKey(assigments, on_delete=models.CASCADE, related_name="submissions")
+    student = models.ForeignKey(User, on_delete=models.CASCADE, related_name="liveclass_assigments_submissions")
 
     file = models.FileField(
-        upload_to="assignment_submissions/",
+        upload_to="assigments_submissions/",
         validators=[MaxFileSizeValidator(50), FileExtensionValidator(DOCUMENT_MEDIA_EXTENSIONS)],
     )
     submitted_at = models.DateTimeField(auto_now_add=True)
@@ -2300,14 +2300,14 @@ class AssignmentSubmission(models.Model):
     graded_at = models.DateTimeField(null=True, blank=True)
 
     class Meta:
-        unique_together = ("assignment", "student")
+        unique_together = ("assigments", "student")
         ordering = ["-submitted_at"]
 
     def is_late(self) -> bool:
-        return self.submitted_at > self.assignment.due_date
+        return self.submitted_at > self.assigments.due_date
 
     def __str__(self):
-        return f"{self.student} -> {self.assignment}"
+        return f"{self.student} -> {self.assigments}"
 
 
 # ---------------------------------------------------------------------------
@@ -3047,7 +3047,7 @@ class Notice(models.Model):
         URGENT = "urgent", "Urgent"
 
     classroom = models.ForeignKey(Classroom, on_delete=models.CASCADE, related_name="notices")
-    posted_by = models.ForeignKey(User, on_delete=models.CASCADE, related_name="notices_posted")
+    posted_by = models.ForeignKey(User, on_delete=models.CASCADE, related_name="liveclass_notices_posted")
 
     title = models.CharField(max_length=150)
     message = models.TextField()
@@ -3298,7 +3298,7 @@ class ParentTeacherMessage(models.Model):
 # Why this exists: DATA_UPLOAD_MAX_MEMORY_SIZE is 10MB (see settings.py —
 # deliberately capped there as a DoS guard on the request body size Django
 # will parse at all). ClassMaterial.file allows up to 100MB and
-# Assignment.attachment / AssignmentSubmission.file allow up to 50MB — all
+# assigments.attachment / assigmentsSubmission.file allow up to 50MB — all
 # three would be rejected outright as a single request well before hitting
 # their own MaxFileSizeValidator. Chunked upload splits a big file into
 # small pieces (each comfortably under the 10MB request-body cap), uploads
@@ -3316,8 +3316,8 @@ class ChunkedUpload(models.Model):
     class Purpose(models.TextChoices):
         COVER_IMAGE = "cover_image", "Classroom Cover Image"
         MATERIAL = "material", "Class Material"
-        ASSIGNMENT_ATTACHMENT = "assignment_attachment", "Assignment Attachment"
-        SUBMISSION_FILE = "submission_file", "Assignment Submission File"
+        assigments_ATTACHMENT = "assigments_attachment", "assigments Attachment"
+        SUBMISSION_FILE = "submission_file", "assigments Submission File"
 
     class Status(models.TextChoices):
         IN_PROGRESS = "in_progress", "In Progress"       # accepting chunks
@@ -3345,8 +3345,8 @@ class ChunkedUpload(models.Model):
     #   cover_image           -> {"classroom_id": <id>}
     #   material               -> {"classroom_id": <id>, "title": str,
     #                              "material_type": str, "session_id": <id>|None}
-    #   assignment_attachment -> {"assignment_id": <id>}
-    #   submission_file        -> {"assignment_id": <id>}
+    #   assigments_attachment -> {"assigments_id": <id>}
+    #   submission_file        -> {"assigments_id": <id>}
     extra_data = models.JSONField(default=dict, blank=True)
 
     status = models.CharField(max_length=15, choices=Status.choices, default=Status.IN_PROGRESS)

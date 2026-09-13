@@ -5,7 +5,7 @@ TASK 2 — thin `_notify(...)` wrapper around
 `core.services.create_notification` for the Follow feature
 (FollowAPIView / AcceptFollowRequestView in this app's views.py).
 
-No `assignment`/`testseries` services.py actually exists to copy
+No `assigments`/`testseries` services.py actually exists to copy
 verbatim, so this follows the *pattern* those apps' docstrings point at
 instead: `core.services.create_notification` is lazy-imported, never at
 module top. That matters here specifically because the dependency

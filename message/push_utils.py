@@ -521,3 +521,30 @@ def send_call_cancelled_push(recipient_ids, call_id, conversation_id):
         },
         android_priority='high',
     )
+
+
+def send_parent_push(*, fcm_token, title, body, data=None):
+    """
+    🔧 GAP FIX — `liveclass/parent_link_views.py` (ClassroomParentCodeGenerateView,
+    ParentQueryReplyView) calls this for Parent Mode notifications. Every
+    other push function above resolves FCM tokens FROM a `recipient_ids`
+    list via `_tokens_for_users()` (DeviceToken.objects.filter(user_id__in=...)),
+    which only works for actual `User` rows — a parent has none (see
+    `ParentAccessCode`/`ParentToken` in message/models.py: Parent Mode is
+    deliberately loginless). The caller already has the raw FCM token in
+    hand (`ParentToken.token`, stored on the device at verify-time), so
+    this sends straight to that ONE token instead of doing a user lookup.
+
+    Uses a real `notification` (not data-only like the chat pushes above)
+    since the parent-side app has no separate local-notification-building
+    logic the way the main chat client does — a plain FCM notification is
+    simplest here and sufficient for this surface.
+    """
+    if not fcm_token:
+        return
+    _send_multicast(
+        [fcm_token],
+        notification=messaging.Notification(title=title, body=body),
+        data=data,
+        android_priority='high',
+    )

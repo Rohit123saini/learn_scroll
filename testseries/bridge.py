@@ -4,7 +4,7 @@ Entry point for OTHER apps (`campus`, `liveclass`) to create test series
 without importing `testseries` models into their own model layer, and
 without `testseries` ever importing `campus.Section` / `liveclass.
 Classroom` back — same "one function is the app boundary" pattern the
-design doc references for `assignment`.
+design doc references for `assigments`.
 
 Per design doc §6:
   - `campus/bridge.py::create_testseries()` calls this with
@@ -41,8 +41,8 @@ this file. `campus/bridge.py::can_review_testseries_attempt()` and a
 review endpoint on `campus`'s `TestSeriesViewSet` both need a way to
 list `TestAttempt` rows for a `(context_type, context_id)` pair without
 importing `TestAttempt` directly — the `testseries` analogue of
-`assignment.bridge.get_submissions_for_context()`, which `campus.
-bridge.get_assignment_submissions()` already calls the same way.
+`assigments.bridge.get_submissions_for_context()`, which `campus.
+bridge.get_assigments_submissions()` already calls the same way.
 """
 from django.db import transaction
 
@@ -74,7 +74,7 @@ def create_context_testseries(
     `roster`: iterable of `login.User`, or `None`. Used ONLY to fan out
     the `TESTSERIES_POSTED` notification (§4) — this function never
     queries campus/liveclass to build that list itself, the caller
-    already has it (same reasoning `assignment`'s roster param uses).
+    already has it (same reasoning `assigments`'s roster param uses).
     Individual/marketplace series never call this function at all (they
     go through `TestSeriesViewSet.create` instead, see views.py), which
     is why "no bulk-notify for individual series" (§4) doesn't need a
@@ -130,7 +130,7 @@ def create_context_testseries(
 def get_attempts_for_context(*, context_type: str, context_id):
     """Returns every `TestAttempt` for every campus/liveclass `TestSeries`
     in this `(context_type, context_id)` — the `testseries` analogue of
-    `assignment.bridge.get_submissions_for_context()`, added so
+    `assigments.bridge.get_submissions_for_context()`, added so
     `campus`/`liveclass` bridge modules have a context-scoped way to
     list attempts for review without ever touching `TestAttempt`/
     `TestSeries` directly (golden rule).

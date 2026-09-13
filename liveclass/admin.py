@@ -8,8 +8,8 @@ from django.contrib import admin
 from django.contrib.auth import get_user_model
 
 from .models import (
-    Assignment,
-    AssignmentSubmission,
+    assigments,
+    assigmentsSubmission,
     BreakoutRoom,
     Certificate,
     ChatMessage,
@@ -346,10 +346,10 @@ class PollResponseAdmin(admin.ModelAdmin):
 
 
 # ---------------------------------------------------------------------------
-# 10. Assignment / AssignmentSubmission
+# 10. assigments / assigmentsSubmission
 # ---------------------------------------------------------------------------
-@admin.register(Assignment)
-class AssignmentAdmin(admin.ModelAdmin):
+@admin.register(assigments)
+class assigmentsAdmin(admin.ModelAdmin):
     list_display = ("title", "classroom", "session", "due_date", "max_score", "created_at")
     search_fields = ("title", "classroom__title")
     autocomplete_fields = ["classroom", "session"]
@@ -357,11 +357,11 @@ class AssignmentAdmin(admin.ModelAdmin):
     date_hierarchy = "due_date"
 
 
-@admin.register(AssignmentSubmission)
-class AssignmentSubmissionAdmin(admin.ModelAdmin):
-    list_display = ("assignment", "student", "submitted_at", "score", "graded_at", "is_late_display")
-    search_fields = ("student__username", "assignment__title")
-    autocomplete_fields = ["assignment", "student"]
+@admin.register(assigmentsSubmission)
+class assigmentsSubmissionAdmin(admin.ModelAdmin):
+    list_display = ("assigments", "student", "submitted_at", "score", "graded_at", "is_late_display")
+    search_fields = ("student__username", "assigments__title")
+    autocomplete_fields = ["assigments", "student"]
     readonly_fields = ("submitted_at",)
 
     @admin.display(description="Late?", boolean=True)

@@ -9,7 +9,7 @@ SearchView (Task 18) is the unified "search everything" endpoint. It is
 the ONLY place that builds each source's permission-scoped queryset —
 `core.search` itself never queries a model directly (golden rule, see
 that module's own docstring). Every scoped queryset built below either
-mirrors an existing viewset's own scoping exactly (assignment) or reuses
+mirrors an existing viewset's own scoping exactly (assigments) or reuses
 the same underlying entitlement table a bridge module already treats as
 the source of truth (testseries' campus roster), so this endpoint can
 never surface a row a user couldn't already reach through the normal UI
@@ -145,7 +145,7 @@ class NotificationPreferenceView(APIView):
 
 
 class SearchView(APIView):
-    """[Task 18] GET /core/search/?q=...&sources=assignment,testseries,...
+    """[Task 18] GET /core/search/?q=...&sources=assigments,testseries,...
 
     Unified "search everything" endpoint. `q` is required; `sources` is
     an optional comma-separated subset of `core.search.SOURCES` keys —
@@ -161,10 +161,10 @@ class SearchView(APIView):
     independently-maintained copy of an access rule.
 
     STATUS (Task 18 pass):
-      - ✅ assignment — mirrors `AssignmentViewSet.get_queryset()`
-        (assignment/views.py) exactly: staff see everything, everyone
-        else only what they posted or a personal assignment they hold
-        a submission for. Campus/liveclass-sourced assignments are
+      - ✅ assigments — mirrors `assigmentsViewSet.get_queryset()`
+        (assigments/views.py) exactly: staff see everything, everyone
+        else only what they posted or a personal assigments they hold
+        a submission for. Campus/liveclass-sourced assigmentss are
         deliberately excluded here for non-staff too — that viewset
         already keeps them out (surfaced only through campus's/
         liveclass's own thin-proxy viewsets, per that file's own
@@ -182,11 +182,11 @@ class SearchView(APIView):
         Liveclass-context series (`source="liveclass"`) are NOT
         included — no roster/entitlement resolver for testseries
         exists on the liveclass side yet (`liveclass/bridge.py` only
-        has assignment functions as of this pass). Those rows are
+        has assigments functions as of this pass). Those rows are
         simply absent from search results, never leaked; add a branch
         here once that resolver exists.
       - ⏳ message / campus_notice — NOT wired in this pass (out of
-        Task 18's scope, which is assignment + testseries only). Their
+        Task 18's scope, which is assigments + testseries only). Their
         own scoped-queryset builders belong here too once that's
         tasked — `core.search.SOURCES` already has both registered,
         this view just doesn't build a queryset for them yet, so
@@ -205,18 +205,18 @@ class SearchView(APIView):
         user = request.user
         scoped_querysets = {}
 
-        # --- assignment ------------------------------------------------
-        # Mirrors AssignmentViewSet.get_queryset() (assignment/views.py)
+        # --- assigments ------------------------------------------------
+        # Mirrors assigmentsViewSet.get_queryset() (assigments/views.py)
         # verbatim. See class docstring above for why campus/liveclass
-        # sourced assignments stay excluded for non-staff here too.
-        from assignment.models import Assignment, AssignmentSource
+        # sourced assigmentss stay excluded for non-staff here too.
+        from assigments.models import assigments, assigmentsSource
 
-        assignment_qs = Assignment.objects.all()
+        assigments_qs = assigments.objects.all()
         if not user.is_staff:
-            assignment_qs = assignment_qs.filter(
-                Q(posted_by=user) | Q(source=AssignmentSource.PERSONAL, submissions__student=user)
+            assigments_qs = assigments_qs.filter(
+                Q(posted_by=user) | Q(source=assigmentsSource.PERSONAL, submissions__student=user)
             ).distinct()
-        scoped_querysets["assignment"] = assignment_qs
+        scoped_querysets["assigments"] = assigments_qs
 
         # --- testseries --------------------------------------------------
         # individual/published + own-created + attempted + campus-context

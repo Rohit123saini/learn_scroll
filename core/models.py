@@ -33,18 +33,18 @@ changes beyond two additive indexes):
    all — that's a from-scratch index for a different query shape, not a
    duplicate of anything above.
 
-4. Added 10 new NotifType choices for the testseries, assignment, and
+4. Added 10 new NotifType choices for the testseries, assigments, and
    campus-gamification apps: TESTSERIES_POSTED, TESTSERIES_CHECKED,
-   TESTSERIES_PAYOUT_RELEASED, ASSIGNMENT_POSTED, ASSIGNMENT_GRADED,
-   ASSIGNMENT_DUE_SOON, CAMPUS_REWARD_EARNED, TESTSERIES_REVIEW_RECEIVED,
+   TESTSERIES_PAYOUT_RELEASED, assigments_POSTED, assigments_GRADED,
+   assigments_DUE_SOON, CAMPUS_REWARD_EARNED, TESTSERIES_REVIEW_RECEIVED,
    TESTSERIES_QUERY_RECEIVED, TESTSERIES_QUERY_ANSWERED. Pure addition —
    no existing choice was renamed or removed, and choices-only changes
-   need no migration. NOTE: ASSIGNMENT_POSTED and ASSIGNMENT_GRADED
-   already existed above under the task-44/46 block (ASSIGNMENT_POSTED,
-   ASSIGNMENT_GRADED) — reused rather than duplicated with a new string,
+   need no migration. NOTE: assigments_POSTED and assigments_GRADED
+   already existed above under the task-44/46 block (assigments_POSTED,
+   assigments_GRADED) — reused rather than duplicated with a new string,
    since NotifType.values must stay a set of unique choice values. Only
-   ASSIGNMENT_DUE_SOON was actually new for that pair
-   (ASSIGNMENT_DUE_REMINDER already exists under the campus block and is
+   assigments_DUE_SOON was actually new for that pair
+   (assigments_DUE_REMINDER already exists under the campus block and is
    a distinct value/label — kept both since they're two different apps'
    reminder events, not aliases).
 
@@ -67,7 +67,7 @@ changes beyond two additive indexes):
        TESTSERIES_CREATED_BY_FOLLOWED — "someone I follow just created
        X" fan-out, one value per content type (post / liveclass
        classroom / testseries), same one-type-per-source-app pattern
-       already used for TESTSERIES_POSTED vs ASSIGNMENT_POSTED vs
+       already used for TESTSERIES_POSTED vs assigments_POSTED vs
        CAMPUS_SESSION_SCHEDULED above rather than a single generic
        "new_content_from_followed" type — each source app's caller
        fires only its own value, and a client can route/deep-link on
@@ -85,6 +85,27 @@ changes beyond two additive indexes):
    30 characters — exactly at the `max_length=30` ceiling below, with
    zero headroom left. The next NotifType value longer than 30 chars
    will need `max_length` bumped in the same migration that adds it.
+
+6. G-6 (this pass) — CHAT_APP_DOCUMENTATION.md §9.4 item 22's still-open
+   half: a new `ParentToken` landing on `status=PENDING`
+   (`message/views_parent.py`'s `ParentVerifyCodeView`) previously
+   notified the student in no way at all — `ParentPendingRequestsView`
+   was the only way to discover one, and only by polling it. Added
+   `PARENT_DEVICE_PENDING` — no existing value fit (it's neither a
+   join/follow/assigments event nor any liveclass type), so this is a
+   new choice, not a reuse, same reasoning already applied above for
+   assigments_DUE_SOON vs assigments_DUE_REMINDER. Grouped under the
+   task-44 message-app block above (Parent Mode lives in `message`, per
+   that view file's own module docstring) and added to
+   `MESSAGE_APP_TYPES` alongside CHAT_MESSAGE/MENTION/INCOMING_CALL for
+   the same reason. `"parent_device_pending"` is 22 characters — well
+   under the `max_length=30` ceiling item 5 above flagged as
+   zero-headroom at 30. Same migration story as every other choices-only
+   addition in this file: no schema change, but this codebase's
+   convention is still to generate a state-only `AlterField` migration
+   so `makemigrations --check` doesn't flag drift in CI — that migration
+   file wasn't part of this pass's upload, so it still needs to be
+   generated against this change before it lands.
 
 Everything else (fields, db_table, choices, on_delete choices, the
 task-44/46 comments) is unchanged from the original — it was already
@@ -119,7 +140,7 @@ class Notification(models.Model):
         JOIN_REQUEST_REJECTED = "join_request_rejected", "Join Request Rejected"
         PASS_REFUNDED = "pass_refunded", "Pass Refunded"
         SESSION_REMINDER = "session_reminder", "Session Reminder"
-        ASSIGNMENT_GRADED = "assignment_graded", "Assignment Graded"
+        assigments_GRADED = "assigments_graded", "assigments Graded"
         QUERY_ANSWERED = "query_answered", "Doubt Answered"
         CERTIFICATE_ISSUED = "certificate_issued", "Certificate Issued"
         WAITLIST_PROMOTED = "waitlist_promoted", "Waitlist Promoted"
@@ -127,7 +148,7 @@ class Notification(models.Model):
         NOTICE_POSTED = "notice_posted", "Notice Posted"
         SESSION_LIVE = "session_live", "Class Started"
         SESSION_CANCELLED = "session_cancelled", "Session Cancelled"
-        ASSIGNMENT_POSTED = "assignment_posted", "New Assignment"
+        assigments_POSTED = "assigments_posted", "New assigments"
         SUBMISSION_RECEIVED = "submission_received", "New Submission"
         STAFF_ADDED = "staff_added", "Added As Staff"
         REVIEW_POSTED = "review_posted", "New Review"
@@ -153,6 +174,19 @@ class Notification(models.Model):
         MENTION = "mention", "You Were Mentioned"
         INCOMING_CALL = "incoming_call", "Incoming Call"
 
+        # --- G-6 (this pass) — Parent Mode mutual-consent gap,
+        # CHAT_APP_DOCUMENTATION.md §9.4 item 22's still-open half: a new
+        # ParentToken landing on status=PENDING (message/views_parent.py
+        # ParentVerifyCodeView) previously told the student nothing —
+        # ParentPendingRequestsView was the only way to find out, and
+        # only if they thought to poll it. No existing value fit ("new
+        # parent device wants access" isn't a join/follow/assigments
+        # event), so this is a new choice, not a reuse. Grouped with the
+        # other message-app types above (Parent Mode lives in `message`,
+        # per views_parent.py's own module docstring) — added to
+        # MESSAGE_APP_TYPES below for the same reason. ---
+        PARENT_DEVICE_PENDING = "parent_device_pending", "Parent Device Pending Approval"
+
         # --- task 11 (post app) — new types for post/services.py's
         # notify_post_liked()/notify_post_commented(). These are neither
         # a liveclass type nor a message-app type (see MESSAGE_APP_TYPES
@@ -176,28 +210,28 @@ class Notification(models.Model):
         CAMPUS_SESSION_SCHEDULED = "campus_session_scheduled", "Campus Session Scheduled"
         CAMPUS_SESSION_LIVE = "campus_session_live", "Campus Session Live"
         LOW_ATTENDANCE_ALERT = "low_attendance_alert", "Low Attendance Alert"
-        ASSIGNMENT_POSTED_CAMPUS = "assignment_posted_campus", "New Campus Assignment"
-        ASSIGNMENT_DUE_REMINDER = "assignment_due_reminder", "Assignment Due Reminder"
+        assigments_POSTED_CAMPUS = "assigments_posted_campus", "New Campus assigments"
+        assigments_DUE_REMINDER = "assigments_due_reminder", "assigments Due Reminder"
         RESULT_PUBLISHED = "result_published", "Result Published"
         FEE_DUE_REMINDER = "fee_due_reminder", "Fee Due Reminder"
-        STAFF_ASSIGNMENT_APPROVED = "staff_assignment_approved", "Staff Assignment Approved"
-        STAFF_ASSIGNMENT_REJECTED = "staff_assignment_rejected", "Staff Assignment Rejected"
+        STAFF_assigments_APPROVED = "staff_assigments_approved", "Staff assigments Approved"
+        STAFF_assigments_REJECTED = "staff_assigments_rejected", "Staff assigments Rejected"
 
-        # --- testseries / assignment / campus-gamification apps — new
+        # --- testseries / assigments / campus-gamification apps — new
         # types added in this pass. TESTSERIES_* cover posting, checking
         # (grading), and payout-release notifications for the testseries
         # app; TESTSERIES_REVIEW_RECEIVED / TESTSERIES_QUERY_RECEIVED /
         # TESTSERIES_QUERY_ANSWERED cover the review/doubt-query flow on
-        # test series. ASSIGNMENT_DUE_SOON is the assignment-app deadline
-        # reminder (distinct from campus's own ASSIGNMENT_DUE_REMINDER
+        # test series. assigments_DUE_SOON is the assigments-app deadline
+        # reminder (distinct from campus's own assigments_DUE_REMINDER
         # above — two different apps' reminder events, not aliases).
         # CAMPUS_REWARD_EARNED covers campus gamification payouts/rewards.
-        # ASSIGNMENT_POSTED / ASSIGNMENT_GRADED already exist above (task
+        # assigments_POSTED / assigments_GRADED already exist above (task
         # 44/46 block) and are reused as-is rather than duplicated. ---
         TESTSERIES_POSTED = "testseries_posted", "New Test Series"
         TESTSERIES_CHECKED = "testseries_checked", "Test Series Checked"
         TESTSERIES_PAYOUT_RELEASED = "testseries_payout_released", "Test Series Payout Released"
-        ASSIGNMENT_DUE_SOON = "assignment_due_soon", "Assignment Due Soon"
+        assigments_DUE_SOON = "assigments_due_soon", "assigments Due Soon"
         CAMPUS_REWARD_EARNED = "campus_reward_earned", "Campus Reward Earned"
         TESTSERIES_REVIEW_RECEIVED = "testseries_review_received", "New Test Series Review"
         TESTSERIES_QUERY_RECEIVED = "testseries_query_received", "New Test Series Query"
@@ -281,8 +315,13 @@ class Notification(models.Model):
     #: than liveclass. Lives here (not in views.py/serializers.py) so
     #: both can import the same set instead of maintaining two copies.
     #: Keep in sync with NotifType above whenever a new message-app type
-    #: is added.
-    MESSAGE_APP_TYPES = frozenset({NotifType.CHAT_MESSAGE, NotifType.MENTION, NotifType.INCOMING_CALL})
+    #: is added. PARENT_DEVICE_PENDING (G-6, this pass) added here too —
+    #: Parent Mode is part of `message`, same as CHAT_MESSAGE/MENTION/
+    #: INCOMING_CALL above.
+    MESSAGE_APP_TYPES = frozenset({
+        NotifType.CHAT_MESSAGE, NotifType.MENTION, NotifType.INCOMING_CALL,
+        NotifType.PARENT_DEVICE_PENDING,
+    })
 
     #: campus app — same "which NotifType values came from app X" pattern
     #: as MESSAGE_APP_TYPES above, for whatever views.py/serializers.py
@@ -292,13 +331,13 @@ class Notification(models.Model):
     #: already applies to types it doesn't claim.
     CAMPUS_APP_TYPES = frozenset({
         NotifType.CAMPUS_SESSION_SCHEDULED, NotifType.CAMPUS_SESSION_LIVE,
-        NotifType.LOW_ATTENDANCE_ALERT, NotifType.ASSIGNMENT_POSTED_CAMPUS,
-        NotifType.ASSIGNMENT_DUE_REMINDER, NotifType.RESULT_PUBLISHED,
-        NotifType.FEE_DUE_REMINDER, NotifType.STAFF_ASSIGNMENT_APPROVED,
-        NotifType.STAFF_ASSIGNMENT_REJECTED,
+        NotifType.LOW_ATTENDANCE_ALERT, NotifType.assigments_POSTED_CAMPUS,
+        NotifType.assigments_DUE_REMINDER, NotifType.RESULT_PUBLISHED,
+        NotifType.FEE_DUE_REMINDER, NotifType.STAFF_assigments_APPROVED,
+        NotifType.STAFF_assigments_REJECTED,
     })
 
-    #: testseries / assignment-app / campus-gamification — same
+    #: testseries / assigments-app / campus-gamification — same
     #: "which NotifType values came from app X" pattern as the two sets
     #: above, for testseries's own notification-list routing.
     TESTSERIES_APP_TYPES = frozenset({

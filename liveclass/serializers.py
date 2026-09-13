@@ -16,8 +16,8 @@ from django.contrib.auth import get_user_model
 from rest_framework import serializers
 
 from .models import (
-    Assignment,
-    AssignmentSubmission,
+    assigments,
+    assigmentsSubmission,
     BreakoutRoom,
     Certificate,
     ChatMessage,
@@ -57,6 +57,7 @@ from .models import (
     SessionReaction,
     SessionReadState,
     SessionWaitlist,
+    StudentReportCard,
 )
 
 
@@ -646,7 +647,7 @@ class ClassMaterialSerializer(serializers.ModelSerializer):
         # set classroom=A, session=<some session that's actually classroom
         # B's>, silently cross-linking material to the wrong classroom's
         # session with no error. Same class of bug fixed below in
-        # AssignmentSerializer/ClassQuerySerializer.
+        # assigmentsSerializer/ClassQuerySerializer.
         classroom = attrs.get("classroom", getattr(self.instance, "classroom", None))
         session = attrs.get("session", getattr(self.instance, "session", None))
         if session and classroom and session.classroom_id != classroom.id:
@@ -950,11 +951,11 @@ class PollTemplateSerializer(serializers.ModelSerializer):
 
 
 # ---------------------------------------------------------------------------
-# 10. ASSIGNMENT + SUBMISSION
+# 10. assigments + SUBMISSION
 # ---------------------------------------------------------------------------
-class AssignmentSerializer(serializers.ModelSerializer):
+class assigmentsSerializer(serializers.ModelSerializer):
     class Meta:
-        model = Assignment
+        model = assigments
         fields = [
             "id", "classroom", "session", "title", "description",
             "attachment", "due_date", "max_score", "created_at",
@@ -964,7 +965,7 @@ class AssignmentSerializer(serializers.ModelSerializer):
     def validate(self, attrs):
         # NOTE (fix): same gap as ClassMaterialSerializer above — `session`
         # is optional and independent of `classroom`; nothing stopped an
-        # assignment from being filed under classroom A while pointing at
+        # assigments from being filed under classroom A while pointing at
         # a session that actually belongs to classroom B.
         classroom = attrs.get("classroom", getattr(self.instance, "classroom", None))
         session = attrs.get("session", getattr(self.instance, "session", None))
@@ -973,14 +974,14 @@ class AssignmentSerializer(serializers.ModelSerializer):
         return attrs
 
 
-class AssignmentSubmissionSerializer(serializers.ModelSerializer):
+class assigmentsSubmissionSerializer(serializers.ModelSerializer):
     student = UserMiniSerializer(read_only=True)
     is_late = serializers.SerializerMethodField()
 
     class Meta:
-        model = AssignmentSubmission
+        model = assigmentsSubmission
         fields = [
-            "id", "assignment", "student", "file", "submitted_at",
+            "id", "assigments", "student", "file", "submitted_at",
             "score", "feedback", "graded_at", "is_late",
         ]
         read_only_fields = ["id", "submitted_at", "score", "feedback", "graded_at"]
@@ -991,23 +992,23 @@ class AssignmentSubmissionSerializer(serializers.ModelSerializer):
         return obj.is_late()
 
 
-class AssignmentGradeSerializer(serializers.ModelSerializer):
+class assigmentsGradeSerializer(serializers.ModelSerializer):
     """Narrow serializer used only by the teacher-only 'grade' action.
 
     NOTE (fix): `score` was a bare PositiveIntegerField with no upper
-    bound, so a grade could be entered above the assignment's own
+    bound, so a grade could be entered above the assigments's own
     `max_score` (e.g. 150/100) with no error — validated here against the
-    parent assignment instead.
+    parent assigments instead.
     """
 
     class Meta:
-        model = AssignmentSubmission
+        model = assigmentsSubmission
         fields = ["score", "feedback"]
 
     def validate_score(self, value):
-        max_score = self.instance.assignment.max_score if self.instance else None
+        max_score = self.instance.assigments.max_score if self.instance else None
         if max_score is not None and value > max_score:
-            raise serializers.ValidationError(f"Score can't exceed this assignment's max_score ({max_score}).")
+            raise serializers.ValidationError(f"Score can't exceed this assigments's max_score ({max_score}).")
         return value
 
 
@@ -1394,7 +1395,7 @@ class CertificateSerializer(serializers.ModelSerializer):
 class CertificateIssueSerializer(serializers.ModelSerializer):
     """Teacher/co-teacher/moderator-only write path (CertificateViewSet.create).
     certificate_id / issued_at are set server-side (see perform_create), not
-    accepted from the client — same pattern as AssignmentGradeSerializer."""
+    accepted from the client — same pattern as assigmentsGradeSerializer."""
 
     class Meta:
         model = Certificate
@@ -1473,7 +1474,7 @@ class ClassQuerySerializer(serializers.ModelSerializer):
         # teacher-only "answer" action below — never directly writable here.
 
     def validate(self, attrs):
-        # NOTE (fix): same gap as ClassMaterialSerializer/AssignmentSerializer
+        # NOTE (fix): same gap as ClassMaterialSerializer/assigmentsSerializer
         # above — `session` is optional and independent of `classroom`.
         classroom = attrs.get("classroom", getattr(self.instance, "classroom", None))
         session = attrs.get("session", getattr(self.instance, "session", None))
@@ -1743,14 +1744,14 @@ class TeacherEarningsSerializer(serializers.Serializer):
 # STUDENT PROGRESS — composite read-only payload, same pattern as
 # ClassroomStatsSerializer/TeacherEarningsSerializer above (wraps a plain
 # dict assembled in StudentProgressView.get() from several aggregate
-# queries — SessionParticipant/PassPurchase/AssignmentSubmission/
+# queries — SessionParticipant/PassPurchase/assigmentsSubmission/
 # Certificate counts + the attendance-streak helper — not a single model
 # instance).
 # ---------------------------------------------------------------------------
 class StudentProgressSerializer(serializers.Serializer):
     classes_attended = serializers.IntegerField()
     classrooms_enrolled = serializers.IntegerField()
-    assignments_submitted = serializers.IntegerField()
+    assigmentss_submitted = serializers.IntegerField()
     certificates_earned = serializers.IntegerField()
     current_streak_days = serializers.IntegerField()
     longest_streak_days = serializers.IntegerField()
@@ -1761,6 +1762,36 @@ class StudentProgressSerializer(serializers.Serializer):
 # sessions. Deliberately narrow (not the full ClassSessionSerializer): the
 # recordings tab only needs enough to render a browsable list + play link.
 # ---------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# STUDENT REPORT CARD — Phase 4 (Task 17 + 18). Used by
+# parent_link_views.ReportCardViewSet.
+#
+# attendance_percent / homework_completion_percent / average_marks are
+# always server-computed (compute_attendance_percent_bulk() +
+# ReportCardViewSet._homework_stats()) and never accepted from the
+# request body, so they're read_only here too — this protects the default
+# ModelViewSet update()/partial_update() the same way the view's own
+# create() override already protects POST.
+# ---------------------------------------------------------------------------
+class StudentReportCardSerializer(serializers.ModelSerializer):
+    student = UserMiniSerializer(read_only=True)
+    classroom_title = serializers.CharField(source="classroom.title", read_only=True)
+
+    class Meta:
+        model = StudentReportCard
+        fields = [
+            "id", "classroom", "classroom_title", "student",
+            "period_label", "attendance_percent", "homework_completion_percent",
+            "average_marks", "teacher_remark", "created_by",
+            "created_at", "updated_at",
+        ]
+        read_only_fields = [
+            "id", "classroom_title", "student", "attendance_percent",
+            "homework_completion_percent", "average_marks", "created_by",
+            "created_at", "updated_at",
+        ]
+
+
 class SessionRecordingSerializer(serializers.ModelSerializer):
     classroom_title = serializers.CharField(source="classroom.title", read_only=True)
 

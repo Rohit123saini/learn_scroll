@@ -7,6 +7,7 @@ from .views import (
     BuyCoinConfirmView,
     BuyCoinView,
     CoinLedgerListView,
+    CoinWithdrawalAdminActionView,
     CoinWithdrawalRequestView,
     FollowAPIView,
     FollowersListView,
@@ -56,6 +57,17 @@ urlpatterns = [
     # /profile/... URL-shape consistency RestrictUser's docstring
     # (models.py) calls out for restricted-users/ vs blocked-users/.
     path("coin-withdrawals/", CoinWithdrawalRequestView.as_view(), name="coin-withdrawal-requests"),
+    # §11 item 12 — staff-only lifecycle actions (processing/success/
+    # reject) on someone else's withdrawal request. Deliberately a
+    # separate path/view from coin-withdrawals/ above rather than a
+    # PATCH on the same route: that route is scoped to "my own
+    # requests" (filters by request.user); this one acts on any
+    # user's request and needs a different permission class entirely.
+    path(
+        "coin-withdrawals/<int:withdrawal_id>/action/",
+        CoinWithdrawalAdminActionView.as_view(),
+        name="coin-withdrawal-admin-action",
+    ),
     # TASK 1 — theme/language preferences, same URL shape as core's
     # notification-preferences/me/.
     path("preferences/me/", UserPreferenceView.as_view(), name="user-preferences"),

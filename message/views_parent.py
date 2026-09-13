@@ -72,7 +72,7 @@ flagging explicitly rather than silently assuming their shape.
 
 STRICT SCOPE — `ParentDashboardView` must NEVER return message text,
 media, contact info, or anything beyond: the student's display name,
-per-classroom attendance stats, and assignment pending/submitted
+per-classroom attendance stats, and assigments pending/submitted
 counts. Before adding a field here, ask: "would this be fine on a
 report-card-style summary a parent sees?" — if it's chat content
 (even metadata like who they talked to), it does NOT belong here.
@@ -88,7 +88,7 @@ silently missing from a parent's view for no reason a parent could see.
 Fixed by making the student's `liveclass` Classrooms the PRIMARY loop
 (via `is_enrolled()`-equivalent — active OR lapsed pass, same breadth
 `ClassroomParentCodeGenerateView`/`ReportCardViewSet` already use), with
-the chat-group's own `assignments` data attached as an OPTIONAL nested
+the chat-group's own `assigmentss` data attached as an OPTIONAL nested
 `chat_group` block, present only when `core.classroom_chat_bridge.
 get_groups_for_classrooms()` finds a real linked Group for that
 classroom. No classroom ever disappears
@@ -96,8 +96,8 @@ from the dashboard just because it has no chat group; it just has
 `chat_group: null` instead.
 
 This keeps the Gap 1 rule intact — liveclass homework and message-app
-assignments are still never summed into one number — just expressed via
-nesting (`homework` at the classroom's top level, `assignments` only
+assigmentss are still never summed into one number — just expressed via
+nesting (`homework` at the classroom's top level, `assigmentss` only
 inside its `chat_group`) instead of two parallel top-level lists.
 
 🔧 GAP FIX (Gap 3) — ALL attendance shown by this view now comes
@@ -109,7 +109,7 @@ compute_attendance_stats_bulk`) is a separate, unrelated feature — this
 app has no teacher/student/classroom concept of its own, only chat
 groups/group-study — and per product decision it is no longer used
 anywhere in this view. `chat_group` below therefore only ever carries
-`group_name` + `assignments`, never an attendance field.
+`group_name` + `assigmentss`, never an attendance field.
 """
 from django.db.models import Count
 from django.utils import timezone
@@ -118,45 +118,57 @@ from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
+# 🔧 GAP FIX (G-6, this pass) — CHAT_APP_DOCUMENTATION.md §9.4 item 22's
+# still-open half: "no push/in-app notification tells the student a new
+# pending parent-device request exists at all". Top-level import, not a
+# lazy/local one — matches how `push_utils.py`'s
+# send_chat_message_push`/`send_incoming_call_push`/`send_mention_push`
+# and `services.py` already import `core.services.create_notification`
+# / `core.models.Notification` directly elsewhere in this same app (no
+# circular-import concern on this side, since `core` never imports
+# `message`).
+from core.models import Notification
+from core.services import create_notification
+
 from .models import (
-    Assignment,
-    AssignmentSubmission,
+    assigments,
+    assigmentsSubmission,
     Group,
     GroupMember,
     ParentAccessCode,
     ParentToken,
 )
-# 🔧 NOTE (this session) — `Assignment.group` and `AssignmentSubmission.
+# 🔧 NOTE (this session) — `assigments.group` and `assigmentsSubmission.
 # student` had their `related_name` renamed in `models.py`
-# (`assignments` -> `message_assignments`, `assignment_submissions` ->
-# `message_assignment_submissions`) to fix a reverse-accessor clash with
-# a separate `liveclass` app's own `Assignment`/`AssignmentSubmission`
+# (`assigmentss` -> `message_assigmentss`, `assigments_submissions` ->
+# `message_assigments_submissions`) to fix a reverse-accessor clash with
+# a separate `liveclass` app's own `assigments`/`assigmentsSubmission`
 # models pointing at the same `Group`/`User`. Confirmed NO code below
-# needs to change: every query here (`assignment_totals`,
+# needs to change: every query here (`assigments_totals`,
 # `submitted_counts`) filters *forward* through the FK
-# (`group_id__in=`, `assignment__group_id__in=`, `student=`) rather than
-# via the reverse accessor (`some_group.message_assignments.all()` /
-# `some_user.message_assignment_submissions.all()`), and forward lookups
+# (`group_id__in=`, `assigments__group_id__in=`, `student=`) rather than
+# via the reverse accessor (`some_group.message_assigmentss.all()` /
+# `some_user.message_assigments_submissions.all()`), and forward lookups
 # are unaffected by a `related_name` change.
 from .permissions import HasValidParentToken
 from .throttles import ParentCodeRevealThrottle, ParentCodeVerifyThrottle
 
-# 🔧 GAP FIX (Gap 1 — liveclass Assignment vs message Assignment collision):
-# `liveclass` has its own `Classroom` / `Assignment` / `AssignmentSubmission`
+# 🔧 GAP FIX (Gap 1 — liveclass assigments vs message assigments collision):
+# `liveclass` has its own `Classroom` / `assigments` / `assigmentsSubmission`
 # / `StudentReportCard` models — a completely different domain object from
-# the `Group` / `Assignment` / `AssignmentSubmission` imported above (this
+# the `Group` / `assigments` / `assigmentsSubmission` imported above (this
 # app's own). They share class names because they model similar concepts,
 # but they are NOT the same rows and must never be summed or merged
 # together into one number on the parent dashboard. Imported here under a
 # `Liveclass*` alias so every reference below stays unambiguous about which
-# app's assignment it means. This is the mirror image of the cross-app
+# app's assigments it means. This is the mirror image of the cross-app
 # import `liveclass/parent_link_views.py` already does in the other
 # direction (`from message.models import ParentAccessCode, ...`); neither
 # app's `models.py` imports the other, so this does not create an import
 # cycle.
 from liveclass.models import (
-    Assignment as LiveclassAssignment,
-    AssignmentSubmission as LiveclassAssignmentSubmission,
+    assigments as Liveclassassigments,
+    assigmentsSubmission as LiveclassassigmentsSubmission,
     Classroom as LiveclassClassroom,
     PassPurchase as LiveclassPassPurchase,
     StudentReportCard as LiveclassStudentReportCard,
@@ -515,11 +527,28 @@ class ParentVerifyCodeView(APIView):
             status=ParentToken.Status.PENDING,
         )
 
-        # TODO(notifications) — this is where the student should get a
-        # push/in-app "new parent device wants access" ping so
-        # `ParentPendingRequestsView` isn't the only way they'd find out.
-        # No notification service was in the provided files to wire this
-        # into, so left as an explicit follow-up rather than guessed at.
+        # 🔧 GAP FIX (G-6, this pass) — closes the TODO that used to sit
+        # here (CHAT_APP_DOCUMENTATION.md §9.4 item 22's still-open half):
+        # the student gets an in-app bell-row the moment a new device
+        # verifies their code, instead of `ParentPendingRequestsView`
+        # being the only way to ever find out. `core.models.Notification.
+        # NotifType.PARENT_DEVICE_PENDING` is a new choice added this
+        # pass — no existing value fit "a new parent device wants
+        # access". `create_notification()` swallows its own exceptions
+        # and never raises (see core/services.py's fail-safe contract),
+        # so a notification-write hiccup here can never fail this verify
+        # call or leave `token` uncreated.
+        create_notification(
+            access_code.student,
+            Notification.NotifType.PARENT_DEVICE_PENDING,
+            "New parent device wants access",
+            f"A new device is requesting parent access using your "
+            f"\"{access_code.label}\" code.",
+            data={
+                "parent_access_code_id": str(access_code.id),
+                "parent_token_id": str(token.id),
+            },
+        )
 
         return Response({
             'parent_token': token.token,
@@ -550,7 +579,7 @@ class ParentDashboardView(APIView):
           },
           "chat_group": {
             "group_name": "Physics Batch A",
-            "assignments": {"pending": 2, "submitted": 5, "total": 7}
+            "assigmentss": {"pending": 2, "submitted": 5, "total": 7}
           }
         }
       ]
@@ -569,7 +598,7 @@ class ParentDashboardView(APIView):
     `chat_group: null`.
 
     🔧 GAP FIX (Gap 1, still enforced) — `homework` (liveclass) and
-    `chat_group.assignments` (message-app) are two independently-sourced
+    `chat_group.assigmentss` (message-app) are two independently-sourced
     datasets from two different apps and are NEVER summed into one
     number — see the imports above for why. Keep any future per-app
     addition (quizzes, tests, etc.) inside its own app's part of the
@@ -619,21 +648,21 @@ class ParentDashboardView(APIView):
 
         # ---- liveclass-side data: homework + attendance % + report card ----
         # (unchanged from Gap 1 — see class docstring: this never merges
-        # with the message-app assignment counts below.)
+        # with the message-app assigments counts below.)
         homework_totals = dict(
-            LiveclassAssignment.objects.filter(classroom_id__in=classroom_ids)
+            Liveclassassigments.objects.filter(classroom_id__in=classroom_ids)
             .values('classroom_id')
             .annotate(total=Count('id'))
             .values_list('classroom_id', 'total')
         )
         homework_submitted = dict(
-            LiveclassAssignmentSubmission.objects.filter(
-                assignment__classroom_id__in=classroom_ids,
+            LiveclassassigmentsSubmission.objects.filter(
+                assigments__classroom_id__in=classroom_ids,
                 student=student,
             )
-            .values('assignment__classroom_id')
+            .values('assigments__classroom_id')
             .annotate(submitted=Count('id'))
-            .values_list('assignment__classroom_id', 'submitted')
+            .values_list('assigments__classroom_id', 'submitted')
         )
         attendance_percent_by_classroom = compute_attendance_percent_bulk(classroom_ids, student)
 
@@ -661,7 +690,7 @@ class ParentDashboardView(APIView):
                 'classroom_id': classroom_id,
                 'classroom_title': classroom.title,
                 'attendance_percent': attendance_percent_by_classroom.get(classroom_id, 0),
-                # Deliberately named 'homework', not 'assignments' — see
+                # Deliberately named 'homework', not 'assigmentss' — see
                 # class docstring (Gap 1).
                 'homework': {
                     'pending': max(total - submitted, 0),
@@ -688,13 +717,13 @@ class ParentDashboardView(APIView):
         """
         🔧 GAP FIX (Gap 2/3) — builds the optional `chat_group` sub-block
         for whichever of `classrooms` actually have a linked Group. Only
-        ever `{group_name, assignments}` — no attendance field (Gap 3:
+        ever `{group_name, assigmentss}` — no attendance field (Gap 3:
         the message app has no classroom-attendance concept; it's
         chat/group-study only, see module docstring). Every query here
         is bulk (fixed count, not one per classroom):
           1. `get_groups_for_classrooms()` — 2 queries total.
           2. GroupMember (unbanned-membership check) — 1 query.
-          3. message-app Assignment totals/submissions — 2 queries.
+          3. message-app assigments totals/submissions — 2 queries.
         Returns {classroom_id: {...}} — a classroom with no eligible
         linked group is simply absent (caller does `.get(classroom_id)`).
         """
@@ -726,32 +755,32 @@ class ParentDashboardView(APIView):
 
         # 🔧 FIX (N+1, preserved from the pre-Gap-2 loop) — bulk, not one
         # query per classroom.
-        assignment_totals = dict(
-            Assignment.objects.filter(group_id__in=eligible_group_ids)
+        assigments_totals = dict(
+            assigments.objects.filter(group_id__in=eligible_group_ids)
             .values('group_id')
             .annotate(total=Count('id'))
             .values_list('group_id', 'total')
         )
         submitted_counts = dict(
-            AssignmentSubmission.objects.filter(
-                assignment__group_id__in=eligible_group_ids,
+            assigmentsSubmission.objects.filter(
+                assigments__group_id__in=eligible_group_ids,
                 student=student,
                 is_submitted=True,
             )
-            .values('assignment__group_id')
+            .values('assigments__group_id')
             .annotate(submitted=Count('id'))
-            .values_list('assignment__group_id', 'submitted')
+            .values_list('assigments__group_id', 'submitted')
         )
 
         return {
             classroom_id: {
                 'group_name': group.name,
-                'assignments': {
+                'assigmentss': {
                     'pending': max(
-                        assignment_totals.get(group.id, 0) - submitted_counts.get(group.id, 0), 0,
+                        assigments_totals.get(group.id, 0) - submitted_counts.get(group.id, 0), 0,
                     ),
                     'submitted': submitted_counts.get(group.id, 0),
-                    'total': assignment_totals.get(group.id, 0),
+                    'total': assigments_totals.get(group.id, 0),
                 },
             }
             for classroom_id, group in eligible.items()

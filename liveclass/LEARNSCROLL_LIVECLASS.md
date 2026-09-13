@@ -20,7 +20,7 @@ are top-upped via Razorpay). Other users don't buy directly — they raise a
 **ClassJoinRequest**, and only when the teacher/staff **accepts** it is a
 **PassPurchase** created and coins debited. A valid purchase gates access to
 live **ClassSession**s (video via **LiveKit**), chat, materials, polls,
-assignments, breakout rooms, etc. Coins are released to the teacher **per
+assigmentss, breakout rooms, etc. Coins are released to the teacher **per
 completed day taught** (escrow model), not all at once, with an optional
 ongoing referral commission carved out of the teacher's own cut. Realtime
 (chat, hand-raise, presence, notifications) runs over **Django Channels**
@@ -28,11 +28,11 @@ WebSockets backed by **Redis**. Scheduled jobs (session generation,
 reminders, escrow charge catch-up, refunds, digestion, transcription) run
 via **Celery beat + worker**.
 
-> **Two cross-app migrations to know about before touching money or assignments:**
+> **Two cross-app migrations to know about before touching money or assigmentss:**
 > coin top-up/withdrawal **request workflows** now live in the `user_profile` app
 > (`liveclass.CoinPurchase`/`CoinWithdrawal` are read-only history — §6e), and new
-> classroom **assignments** now route through the unified, project-wide `assignment`
-> app via `liveclass/bridge.py` (`liveclass.Assignment`/`AssignmentSubmission` are
+> classroom **assigmentss** now route through the unified, project-wide `assigments`
+> app via `liveclass/bridge.py` (`liveclass.assigments`/`assigmentsSubmission` are
 > read-only history — §6d). `User.coin` and `CoinTransaction` (the wallet + its
 > ledger) are untouched by the coin migration — only the request/approval flow moved.
 
@@ -61,8 +61,8 @@ via **Celery beat + worker**.
 | `notifications.py` | ~260 | Single fan-out point for push/email/SMS/WhatsApp — provider-agnostic |
 | `exceptions.py` | 184 | DRF custom exception handler — normalises every error response to one JSON shape |
 | `chunked_upload_views.py` | ~607 | Chunked file upload (init/chunk/complete/abort) for large files (cover images, recordings, materials) |
-| `bridge.py` | 141 | **NEW (Task 12)** — `liveclass`'s only door into the unified, project-wide `assignment` app: `create_assignment()` / `get_assignment_submissions()`. Mirrors `campus/bridge.py`'s Task 11 pair field-for-field. Golden rule: `assignment` never imports `liveclass.*`, and `liveclass` never imports `assignment.models.Assignment`/`AssignmentSubmission` directly anywhere outside this module (or the one-off backfill command below). See §6d. |
-| `management/commands/migrate_liveclass_assignments_to_unified.py` | 258 | **NEW (Task 12)** — one-off, idempotent, rollback-logged data migration: copies every legacy `liveclass.Assignment`/`AssignmentSubmission` row into the unified `assignment` app so history survives the cutover to `bridge.py`. See §6d. |
+| `bridge.py` | 141 | **NEW (Task 12)** — `liveclass`'s only door into the unified, project-wide `assigments` app: `create_assigments()` / `get_assigments_submissions()`. Mirrors `campus/bridge.py`'s Task 11 pair field-for-field. Golden rule: `assigments` never imports `liveclass.*`, and `liveclass` never imports `assigments.models.assigments`/`assigmentsSubmission` directly anywhere outside this module (or the one-off backfill command below). See §6d. |
+| `management/commands/migrate_liveclass_assigmentss_to_unified.py` | 258 | **NEW (Task 12)** — one-off, idempotent, rollback-logged data migration: copies every legacy `liveclass.assigments`/`assigmentsSubmission` row into the unified `assigments` app so history survives the cutover to `bridge.py`. See §6d. |
 | `management/commands/migrate_liveclass_coin_models.py` | 348 | **NEW (Task 6)** — one-off, idempotent, rollback-logged backfill of `liveclass.CoinPurchase`/`CoinWithdrawal` history into `user_profile`'s `CoinPurchaseRequest`/`CoinWithdrawalRequest` + `CoinLedger`. Never touches `User.coin` — writes audit-trail rows only, via direct `.objects.create()`, bypassing `user_profile`'s live-write managers on purpose (those apply a balance delta; the balance has already moved once). See §6e. |
 | `classroom_chat_views.py` | 86 (re-measured this pass; previously noted as 95 — same 2 views, no functional change) | **NEW (tasks 29/30)** — `ClassroomCreateGroupView` (teacher-only "haan" confirm, POST) + `ClassroomGroupStatusView` (manager-tier read) for the classroom↔chat-group bridge. Deliberately its own file/own explicit `path()`s rather than `ClassroomViewSet` actions — see §6b. **✅ (Task 3) manager-tier check now reuses the real `_can_manage_classroom()` from `views.py`** instead of a local hand-rolled duplicate — see §6b known-gaps. |
 | `core/classroom_chat_bridge.py` | 396 | **NEW, outside this app** (lives in the `core` app). ✅ **Source now actually seen** — not directly (still not uploaded under its own name), but the file uploaded under the `test_classroom_chat_bridge.py` name contains it verbatim (see next row's mismatch note) and has been read as such. **9 functions**, not 6: `create_classroom_group(classroom, actor)` (idempotent, teacher-only, raises `ValueError` for a non-teacher), `get_groups_for_classrooms(classrooms)` (🔧 Gap 2 fix — bulk read-only lookup, `{classroom_id: Group}`, 2 fixed queries regardless of count, silently omits any classroom with no linked group), `sync_membership_on_join_accept(classroom, student)`, `sync_membership_on_removal(classroom, student, reason="")`, `promote_to_moderator(classroom, user)`, `sync_group_metadata(classroom)`, `archive_group_on_classroom_close(classroom)` (posts a system message, broadcasts `group_deleted` over the channel layer, then soft-deletes both `Group` and `Conversation`), `post_welcome_message(classroom)`, `post_session_live_announcement(session)`. Referenced by `classroom_chat_views.py`, `signals.py` (6 call sites — see §13), `tasks.notify_session_live` (`post_session_live_announcement`), and (per its own docstring) `liveclass/views.py`. Every function except `create_classroom_group` is a silent no-op if the classroom has no linked group (`chat_group_enabled=False` or `linked_conversation_id` missing) — see §6b. Still carries a couple of `⚠️ ASSUMPTION` markers in its own docstring about `ClassJoinRequest`/`ClassroomStaff` field shapes, inferred from `tests.py`/`signals.py` rather than `models.py` directly — both shapes are independently confirmed correct elsewhere in this doc (§3), so treat those markers as resolved, just not yet edited out of the source comment itself. |
@@ -105,7 +105,7 @@ User (login.User, AbstractUser — no fixed teacher/student role)
      │         └─ teacher/co-teacher/moderator **accepts** →
      │              → PassPurchase created + coins debited (only if balance sufficient at accept-time)
      │              → optional Referral credit if a referral code was attached
-     ├─ ClassMaterial, Assignment → AssignmentSubmission → grade
+     ├─ ClassMaterial, assigments → assigmentsSubmission → grade
      ├─ ClassroomReview, ClassroomWishlist, ClassroomShare, ClassroomReport
      ├─ ClassHoliday, Notice, ClassQuery (student Q&A)
      ├─ ClassroomStaff (co-teacher/moderator roles)
@@ -147,7 +147,7 @@ Coin economy (platform-wide, not per-classroom):
 
 ### File upload safety
 - `MaxFileSizeValidator` (`@deconstructible`, so it survives migration serialization) — every FileField/ImageField has a size cap (`cover_image`: 5MB).
-- `DOCUMENT_MEDIA_EXTENSIONS = ["pdf","doc","docx","ppt","pptx","xls","xlsx","png","jpg","jpeg","gif","webp","mp4","mov","webm","zip"]` — the safelist used by the four plain `FileField`s (material, assignment attachment, assignment submission, certificate). **Safelist, not blocklist** — a brand-new dangerous extension can't slip through just because nobody thought to blocklist it. Closes a renamed-`.exe`/`.php`/`.js`/`.sh` upload vector (stored-malware / drive-by risk, since the uploaded file gets served back to every other student/teacher who opens it). `cover_image` is inherently safe for free: Django's `ImageField` Pillow-decodes the upload to confirm it's a real image — a renamed `.exe` fails outright, and SVG is rejected too (Pillow can't decode it), which also closes the classic SVG/XSS vector as a side effect.
+- `DOCUMENT_MEDIA_EXTENSIONS = ["pdf","doc","docx","ppt","pptx","xls","xlsx","png","jpg","jpeg","gif","webp","mp4","mov","webm","zip"]` — the safelist used by the four plain `FileField`s (material, assigments attachment, assigments submission, certificate). **Safelist, not blocklist** — a brand-new dangerous extension can't slip through just because nobody thought to blocklist it. Closes a renamed-`.exe`/`.php`/`.js`/`.sh` upload vector (stored-malware / drive-by risk, since the uploaded file gets served back to every other student/teacher who opens it). `cover_image` is inherently safe for free: Django's `ImageField` Pillow-decodes the upload to confirm it's a real image — a renamed `.exe` fails outright, and SVG is rejected too (Pillow can't decode it), which also closes the classic SVG/XSS vector as a side effect.
 
 ### `Classroom` (full field list)
 - `classroom_type` (`individual`/`organisation`, default individual), `organisation_name` (required if organisation).
@@ -219,8 +219,8 @@ The pending ask before a purchase exists. Carries `referred_by` (attribution for
 ### `LivePoll`, `PollResponse`, `PollTemplate`
 `PollTemplate` — reusable poll presets a teacher can `quick-create` from.
 
-### `Assignment`, `AssignmentSubmission` — ⚠️ **local models frozen/legacy as of Task 12**
-`AssignmentSubmission.is_late()`. Schema unchanged (no migration), but as of Task 12 these two models are **no longer the live write/read path for new assignments** — `liveclass/bridge.py`'s `create_assignment()`/`get_assignment_submissions()` routes new classroom assignments through the project-wide unified `assignment` app instead (see §6d). These rows still exist for **historical data only**, backfilled into the unified app one-time via `migrate_liveclass_assignments_to_unified` (§6d) — `AssignmentAdmin`/`AssignmentSubmissionAdmin` (§14) stay registered so that history stays visible in Django admin, but no new code path should create rows here going forward.
+### `assigments`, `assigmentsSubmission` — ⚠️ **local models frozen/legacy as of Task 12**
+`assigmentsSubmission.is_late()`. Schema unchanged (no migration), but as of Task 12 these two models are **no longer the live write/read path for new assigmentss** — `liveclass/bridge.py`'s `create_assigments()`/`get_assigments_submissions()` routes new classroom assigmentss through the project-wide unified `assigments` app instead (see §6d). These rows still exist for **historical data only**, backfilled into the unified app one-time via `migrate_liveclass_assigmentss_to_unified` (§6d) — `assigmentsAdmin`/`assigmentsSubmissionAdmin` (§14) stay registered so that history stays visible in Django admin, but no new code path should create rows here going forward.
 
 ### `ClassroomReview`, `ClassroomWishlist`, `ClassroomShare`
 `ClassroomShare` backs `share_count` and `share-stats`/`my-shares`.
@@ -329,8 +329,8 @@ docstring.
 | `ChatMessageReportViewSet` (4098) | yes, create | `review` (POST, moderator — soft-deletes the reported message when actioned) — Pass 14 |
 | `LivePollViewSet` (4200) | yes, all 4 | `vote` (POST), `close` (POST), `quick-create` (POST, detail=False, from a `PollTemplate` — Pass 13) |
 | `PollTemplateViewSet` (4378) | yes, all 4 | CRUD (reusable poll presets) — Pass 13 |
-| `AssignmentViewSet` (4704) | ⚠️ **no longer accurate — see §6d** | — |
-| `AssignmentSubmissionViewSet` (4815) | ⚠️ **no longer accurate — see §6d** | — |
+| `assigmentsViewSet` (4704) | ⚠️ **no longer accurate — see §6d** | — |
+| `assigmentsSubmissionViewSet` (4815) | ⚠️ **no longer accurate — see §6d** | — |
 | `ClassroomReviewViewSet` (4673) | yes, all 4 (`perform_update`/`perform_destroy` ownership-gated — Pass 19/21 fix, see §17 item 19) | — |
 | `ClassroomWishlistViewSet` (4757) | yes, create/destroy | — |
 | `CouponViewSet` (4794) | yes, all 4 | `validate` (GET, detail=False, `?code=`, throttled `coupon_validate` scope — dry-run check without spending) |
@@ -367,7 +367,7 @@ One `DefaultRouter` with ~28 `router.register(...)` entries, mounted at project 
 |---|---|---|
 | `dashboard/` | GET | `MyDashboardView` — single-call home-screen summary |
 | `my-earnings/` | GET | `TeacherEarningsView` — teacher-only earnings summary; optional `?classroom=<id>` |
-| `my-progress/` | GET | `StudentProgressView` — caller's own attendance/assignment/certificate stats + streak |
+| `my-progress/` | GET | `StudentProgressView` — caller's own attendance/assigments/certificate stats + streak |
 | ~~`notification-preferences/me/`~~ | — | ✅ CORRECTED — **no longer registered here**. `NotificationPreferenceView` moved to `core` (task 42); this path is now served under the `core/` prefix in the root urlconf, not `liveclass/urls.py`. |
 | `classrooms/<uuid:classroom_id>/create_group/` | POST | `classroom_chat_views.ClassroomCreateGroupView` — NEW, tasks 29/30, see §6b |
 | `classrooms/<uuid:classroom_id>/group/` | GET | `classroom_chat_views.ClassroomGroupStatusView` — NEW, tasks 29/30, see §6b |
@@ -583,28 +583,28 @@ polls/quick-create/                  POST              (from a PollTemplate)
 poll-templates/                      GET, POST
 poll-templates/{id}/                 GET, PUT, PATCH, DELETE
 
-assignments/                         GET, POST         ⚠️ STALE per this urls.py docstring — see §6d/§17.
-                                                          As of Task 12, AssignmentViewSet is a plain
+assigmentss/                         GET, POST         ⚠️ STALE per this urls.py docstring — see §6d/§17.
+                                                          As of Task 12, assigmentsViewSet is a plain
                                                           viewsets.ViewSet with ONLY list/create; no
                                                           retrieve/update/destroy exist any more (both
-                                                          proxy to bridge.py -> the unified `assignment`
+                                                          proxy to bridge.py -> the unified `assigments`
                                                           app). GET filters by required ?classroom=.
-assignments/{id}/                    ❌ REMOVED (Task 12) — retrieve/update/destroy are gone; the unified
-                                                          assignment.views.AssignmentViewSet doesn't serve
-                                                          context-sourced (campus/liveclass) assignments
+assigmentss/{id}/                    ❌ REMOVED (Task 12) — retrieve/update/destroy are gone; the unified
+                                                          assigments.views.assigmentsViewSet doesn't serve
+                                                          context-sourced (campus/liveclass) assigmentss
                                                           either, so there is currently NO way to edit or
-                                                          delete an already-posted classroom assignment
+                                                          delete an already-posted classroom assigments
                                                           anywhere in the system — flagged in bridge.py/
                                                           views.py as a gap in the unified app, not patched
                                                           around locally. See §6d.
 submissions/                         GET only          ⚠️ STALE per this urls.py docstring — POST/grade
                                                           are gone (Task 12). List-only proxy: teacher's
                                                           classroom-wide queue (?classroom= required,
-                                                          optional ?assignment=) or a student's own rows.
+                                                          optional ?assigments=) or a student's own rows.
 submissions/{id}/                    ❌ REMOVED (Task 12)
 submissions/{id}/grade/              ❌ REMOVED (Task 12) — grading now happens directly against the
                                                           unified app's own submission endpoint
-                                                          (`/assignment/submissions/{id}/...`, not part of
+                                                          (`/assigments/submissions/{id}/...`, not part of
                                                           this app). See §6d.
 
 reviews/                             GET, POST
@@ -865,19 +865,19 @@ signed token any more.
   to that student via `send_parent_push`. **✅ Now wired**, and `StudentReportCard` (§3) is now a real
   model — see §1/§5 (Task 10 fix).
   - 🐛 **Two confirmed bugs in `_homework_stats()`, both currently make report-card creation crash or
-    lie**: (1) it filters `Assignment.objects.filter(classroom=classroom, category=Assignment.Category.
-    HOMEWORK)` — but `Assignment` (§3) has **no `category` field and no `Category` enum at all** (see the
+    lie**: (1) it filters `assigments.objects.filter(classroom=classroom, category=assigments.Category.
+    HOMEWORK)` — but `assigments` (§3) has **no `category` field and no `Category` enum at all** (see the
     model's full field list). This raises `AttributeError` on the very first `POST report-cards/` for
     any classroom, every time — not a lookup that returns zero rows, a hard crash. (2) Even once that's
-    fixed, this method reads the **local, legacy `liveclass.Assignment`/`AssignmentSubmission` models
-    directly** (§3) — but per Task 12 (§6d), new assignments no longer get created there at all; they go
-    through the unified `assignment` app via `bridge.create_assignment()`. Left as-is, a report card's
-    homework numbers would be correct only for assignments created *before* the Task 12 cutover and
-    silently blind to every assignment posted after it — a report card that looks complete but is
+    fixed, this method reads the **local, legacy `liveclass.assigments`/`assigmentsSubmission` models
+    directly** (§3) — but per Task 12 (§6d), new assigmentss no longer get created there at all; they go
+    through the unified `assigments` app via `bridge.create_assigments()`. Left as-is, a report card's
+    homework numbers would be correct only for assigmentss created *before* the Task 12 cutover and
+    silently blind to every assigments posted after it — a report card that looks complete but is
     quietly stale. Fixing bug (1) alone would hide bug (2), since a working-but-wrong query stops
     throwing and starts just returning `0`/`None` for every classroom's post-cutover homework. Whoever
-    fixes this should route `_homework_stats()` through `bridge.get_assignment_submissions(classroom)`
-    (§6d) instead, the same source `AssignmentViewSet`/`AssignmentSubmissionViewSet` (`views.py`) already
+    fixes this should route `_homework_stats()` through `bridge.get_assigments_submissions(classroom)`
+    (§6d) instead, the same source `assigmentsViewSet`/`assigmentsSubmissionViewSet` (`views.py`) already
     use post-Task-12.
 - **`ClassroomParentQueryListView`** / **`ParentQueryReplyView`** — teacher side of parent-initiated query
   threads (`ParentModeQuery`/`ParentModeQueryMessage`, `message` app models — deliberately a
@@ -926,80 +926,80 @@ still-live parent-auth path.
 
 ---
 
-## 6d. `liveclass` ↔ `assignment` bridge (Task 12) — **NEW**
+## 6d. `liveclass` ↔ `assigments` bridge (Task 12) — **NEW**
 
-Same shape as §6b/§6c: a project-wide feature (here, a **unified cross-app `assignment` app**, shared
+Same shape as §6b/§6c: a project-wide feature (here, a **unified cross-app `assigments` app**, shared
 with at least the `campus` app — Task 11's `campus/bridge.py` is its sibling/reference implementation)
-gets exactly one door into `liveclass`, and `liveclass`'s own local `Assignment`/`AssignmentSubmission`
+gets exactly one door into `liveclass`, and `liveclass`'s own local `assigments`/`assigmentsSubmission`
 models (§3) step back to read-only history.
 
-**The rule (same golden rule `campus/bridge.py` and `assignment/models.py`'s own docstring both state):**
-`assignment` never imports `liveclass.*`. `liveclass` never imports `assignment.models.Assignment` /
-`AssignmentSubmission` directly anywhere **outside `bridge.py`** — with one deliberate, audited, one-off
-exception: `migrate_liveclass_assignments_to_unified` (below) talks to `assignment.models` directly,
+**The rule (same golden rule `campus/bridge.py` and `assigments/models.py`'s own docstring both state):**
+`assigments` never imports `liveclass.*`. `liveclass` never imports `assigments.models.assigments` /
+`assigmentsSubmission` directly anywhere **outside `bridge.py`** — with one deliberate, audited, one-off
+exception: `migrate_liveclass_assigmentss_to_unified` (below) talks to `assigments.models` directly,
 because it needs parameters (`submitted_at`, `file`, `score`, `feedback`, `graded_at` per student) that
 the always-fresh-roster `bridge.py` functions have no slot for.
 
 ### `bridge.py` — the two functions
 
-- **`create_assignment(*, classroom, posted_by, title, description="", attachment=None, due_date=None)`**
-  — delegates to `assignment.bridge.create_context_assignment(source=AssignmentSource.LIVECLASS,
+- **`create_assigments(*, classroom, posted_by, title, description="", attachment=None, due_date=None)`**
+  — delegates to `assigments.bridge.create_context_assigments(source=assigmentsSource.LIVECLASS,
   context_type="classroom", context_id=classroom.id, ..., roster=[...])`. `liveclass`-side code (this
   bridge + `views.py`'s thin proxy) is the only thing that ever turns `context_id` back into a real
-  `Classroom` — `assignment` stores it opaquely.
+  `Classroom` — `assigments` stores it opaquely.
   - **Roster source**: `PassPurchase(status=SUCCESS, is_active=True, expires_at__gt=now)` against the
-    classroom's passes — the **exact same filter** `AssignmentViewSet.perform_create` (old
-    `liveclass/views.py`) already used to fan out `ASSIGNMENT_POSTED` notifications, not a new query.
+    classroom's passes — the **exact same filter** `assigmentsViewSet.perform_create` (old
+    `liveclass/views.py`) already used to fan out `assigments_POSTED` notifications, not a new query.
     `SessionParticipant` was considered and **rejected** as the roster source: it's per-`ClassSession`
-    attendance, but an `Assignment` here is classroom-scoped (no per-session `context_type` on the
+    attendance, but an `assigments` here is classroom-scoped (no per-session `context_type` on the
     unified model — it's exactly `"section" | "classroom" | ""`), so session-level would be the wrong
     grain.
-  - **Paid/unpaid is never asked, structurally** — the unified `assignment.models.Assignment` has no
+  - **Paid/unpaid is never asked, structurally** — the unified `assigments.models.assigments` has no
     `is_paid`/`price` field at all, same as `campus.CampusLiveSession`. This satisfies the "paid/unpaid
     kabhi nahi poocha jaata" requirement by construction, not by a check added here.
-  - **`due_date` gotcha**: the unified `Assignment.due_date` is a `DateField`; the old local
-    `liveclass.Assignment.due_date` was a `DateTimeField`. `create_assignment()` does **not** silently
-    `.date()` a datetime passed in — a caller passing a full `datetime` gets whatever `assignment`'s own
+  - **`due_date` gotcha**: the unified `assigments.due_date` is a `DateField`; the old local
+    `liveclass.assigments.due_date` was a `DateTimeField`. `create_assigments()` does **not** silently
+    `.date()` a datetime passed in — a caller passing a full `datetime` gets whatever `assigments`'s own
     field validation does with it, so a time-of-day component isn't dropped without a trace.
     `views.py`'s thin proxy owns deciding what "due date" means going forward and must pass a `date`.
-  - **⚠️ Open assumption, flagged not guessed around**: `assignment.bridge.create_context_assignment()`'s
+  - **⚠️ Open assumption, flagged not guessed around**: `assigments.bridge.create_context_assigments()`'s
     `roster` parameter shape was only ever confirmed via `campus/bridge.py`'s call site, which sends
     `{"user_id", "roll_number", "enrollment_no"}` per entry — `liveclass` has no roll-number/
     enrollment-number concept, so its roster entries are `{"user_id": student_id}` only. This assumes
-    `create_context_assignment()` treats a missing key the same way `campus`'s own docs already note for
+    `create_context_assigments()` treats a missing key the same way `campus`'s own docs already note for
     a blank `enrollment_no` (defaults to `""`, not `KeyError`). **Needed to close this**:
-    `assignment/bridge.py` itself (not part of this upload — verify before this ships).
-- **`get_assignment_submissions(classroom)`** — delegates to `assignment.bridge.
+    `assigments/bridge.py` itself (not part of this upload — verify before this ships).
+- **`get_assigments_submissions(classroom)`** — delegates to `assigments.bridge.
   get_submissions_for_context(context_type="classroom", context_id=classroom.id)`. **Unfiltered by
-  permission**, same contract `campus.bridge.get_assignment_submissions()` documents — the caller
+  permission**, same contract `campus.bridge.get_assigments_submissions()` documents — the caller
   (`views.py`) owns any further teacher/student-scoped narrowing (mirror the old
-  `AssignmentSubmissionViewSet.get_queryset`'s `_can_manage_classroom` vs. `student=user` split).
+  `assigmentsSubmissionViewSet.get_queryset`'s `_can_manage_classroom` vs. `student=user` split).
 
-### `migrate_liveclass_assignments_to_unified` (management command)
+### `migrate_liveclass_assigmentss_to_unified` (management command)
 
 One-off **data** migration (no `makemigrations` involved) — backfills every historical
-`liveclass.Assignment`/`AssignmentSubmission` row into the unified `assignment` app so old assignments
-survive the cutover. Deliberately does **not** reuse `bridge.create_assignment()` (that always
+`liveclass.assigments`/`assigmentsSubmission` row into the unified `assigments` app so old assigmentss
+survive the cutover. Deliberately does **not** reuse `bridge.create_assigments()` (that always
 bulk-pre-creates fresh `MISSING` rows for the *current* roster — wrong for a backfill, which needs each
 student's *real* historical `submitted_at`/`file`/`score`/`feedback`/`graded_at`).
 
-- **Roster for a backfilled assignment** = whoever actually submitted historically **UNION** whoever
+- **Roster for a backfilled assigments** = whoever actually submitted historically **UNION** whoever
   currently holds an active pass — so a student who submitted but has since let their pass lapse still
   keeps their real submission, and a current student with no historical submission still gets a
-  `MISSING` placeholder (matching what `bridge.create_assignment()` would produce for them going
+  `MISSING` placeholder (matching what `bridge.create_assigments()` would produce for them going
   forward).
-- **Idempotent**: every migrated `Assignment` is stamped with `data["legacy_liveclass_assignment_id"] =
-  str(old.id)`; re-running skips any old assignment whose new row already has that stamp (a Postgres
-  `jsonb` lookup, `data__legacy_liveclass_assignment_id` — matches the `GinIndex`-on-Postgres assumption
+- **Idempotent**: every migrated `assigments` is stamped with `data["legacy_liveclass_assigments_id"] =
+  str(old.id)`; re-running skips any old assigments whose new row already has that stamp (a Postgres
+  `jsonb` lookup, `data__legacy_liveclass_assigments_id` — matches the `GinIndex`-on-Postgres assumption
   already made elsewhere in `models.py`). Submissions are additionally protected via
   `bulk_create(..., ignore_conflicts=True)` against `unique_submission_per_student`.
 - **Free-text `grade` field**: `f"{old_sub.score}/{old.max_score}"` — the unified model has no separate
   "max_score" slot, so this is how the original score *and its scale* both survive the migration.
-- **Rollback**: every successful migration appends one JSON line (`old_assignment_id`,
-  `new_assignment_id`, `old_submission_ids`, `new_submission_ids`) to `--log-file` (default
-  `liveclass_assignment_migration_log.jsonl`); `--rollback <path>` reads it back and deletes exactly
-  those new rows (submissions first, then assignments — FK order).
-- **Usage**: `python manage.py migrate_liveclass_assignments_to_unified [--dry-run]
+- **Rollback**: every successful migration appends one JSON line (`old_assigments_id`,
+  `new_assigments_id`, `old_submission_ids`, `new_submission_ids`) to `--log-file` (default
+  `liveclass_assigments_migration_log.jsonl`); `--rollback <path>` reads it back and deletes exactly
+  those new rows (submissions first, then assigmentss — FK order).
+- **Usage**: `python manage.py migrate_liveclass_assigmentss_to_unified [--dry-run]
   [--log-file PATH] [--rollback LOG_FILE]`.
 
 ---
@@ -1049,8 +1049,8 @@ function.
 
 ⚠️ **`urls.py`'s own module-docstring endpoint reference was not updated for Task 6 or Task 12** — it
 still describes `coin-purchases/initiate/`, `withdrawals/` POST/cancel/approve/reject/mark-paid, and the
-full assignments/submissions CRUD as if they were live, ordinary endpoints. Per this audit's direct read
-of `views.py`, all of the coin ones are 410 Gone and most of the assignment ones don't exist at all (§5,
+full assigmentss/submissions CRUD as if they were live, ordinary endpoints. Per this audit's direct read
+of `views.py`, all of the coin ones are 410 Gone and most of the assigments ones don't exist at all (§5,
 §6d). Treat `urls.py`'s docstring as aspirational/historical wherever it disagrees with what a ViewSet's
 own methods actually do — this doc's §5 has been corrected against `views.py`, not against that
 docstring.
@@ -1111,7 +1111,7 @@ Flow: `init` → many `chunk` calls → `complete` (assembles + validates + fina
 
 - `_tmp_root()` (95), `_upload_tmp_dir(upload_id)` (107), `_safe_extension(file_name)` (111), `_error(message, code=400)` (119) — filesystem/response safety helpers.
 - `chunked_upload_init(request)` (130) — creates a `ChunkedUpload` row; enforces `MAX_IN_PROGRESS_UPLOADS_PER_USER` (indexed on `(user, status)`).
-- `_validate_and_build_extra_data(purpose, data, user)` (207) — purpose-specific validation. `purpose` drives what `extra_data` JSON must contain: `material` needs `classroom_id`/`material_type`/optional `session_id`; `assignment_attachment`/`submission_file` need `assignment_id`.
+- `_validate_and_build_extra_data(purpose, data, user)` (207) — purpose-specific validation. `purpose` drives what `extra_data` JSON must contain: `material` needs `classroom_id`/`material_type`/optional `session_id`; `assigments_attachment`/`submission_file` need `assigments_id`.
 - `chunked_upload_chunk(request)` (309) — appends one chunk to the temp file.
 - `chunked_upload_complete(request)` (368) → `_assemble_chunks(upload)` (431) → `_finalize_purpose(upload, final_path, final_size, request)` (461, routes to the right model field based on `purpose`) → `_assert_is_real_image(path)` (572, Pillow-verifies anything claiming to be an image — same anti-spoofing logic as the model-level `ImageField`).
 - `chunked_upload_abort(request)` (597) / `_cleanup_tmp_dir(upload_id)` (585) — cleanup on cancel.
@@ -1144,7 +1144,7 @@ App bootstrap is `LearnScroll/celery.py` (project-level — see §1 file map): b
 **Not currently in `CELERY_BEAT_SCHEDULE`** (triggered another way, or worth double-checking if a captions/transcript bug is ever reported): `transcribe_recording` (queued via `.delay()` from `LiveKitWebhookView`'s `egress_ended` handler when `Classroom.captions_enabled`), `poll_transcription_jobs` (polls transcription job status — check whether this is chained/queued elsewhere or genuinely needs a beat entry).
 
 ### Every `notify_*` fire-and-forget task (queued via `.delay()`, never called synchronously in the request path)
-`notify_waitlist_promotion(student_id, session_id)`, `notify_classroom_shared(share_id)`, `notify_purchase_refunded(purchase_id)`, `notify_pass_auto_renewed(purchase_id)`, `notify_auto_renew_failed(purchase_id)`, `notify_gift_expired(gift_id)`, `notify_pass_gift_received(gift_id)`, `notify_pass_gift_claimed(gift_id)`, `notify_classroom_flagged(classroom_id)`, `notify_session_auto_completed(session_id)`, `notify_join_request_received(join_request_id)`, `notify_join_request_accepted(join_request_id)`, `notify_join_request_rejected(join_request_id)`, `notify_assignment_graded(submission_id)`, `notify_certificate_issued(certificate_id)`, `notify_notice_posted(notice_id, student_ids)`, `notify_session_live(session_id, exclude_user_id=None)`, `notify_session_cancelled(classroom_id, classroom_title, session_id, scheduled_start_iso, exclude_user_id=None)`, `notify_assignment_posted(assignment_id, student_ids)`, `notify_submission_received(submission_id)`, `notify_staff_added(staff_id)`, `notify_review_posted(review_id)`, `notify_report_reviewed(report_id)`, `notify_query_answered(query_id)`, **`notify_followers_new_classroom(classroom_id)` (TASK 4, NEW)**.
+`notify_waitlist_promotion(student_id, session_id)`, `notify_classroom_shared(share_id)`, `notify_purchase_refunded(purchase_id)`, `notify_pass_auto_renewed(purchase_id)`, `notify_auto_renew_failed(purchase_id)`, `notify_gift_expired(gift_id)`, `notify_pass_gift_received(gift_id)`, `notify_pass_gift_claimed(gift_id)`, `notify_classroom_flagged(classroom_id)`, `notify_session_auto_completed(session_id)`, `notify_join_request_received(join_request_id)`, `notify_join_request_accepted(join_request_id)`, `notify_join_request_rejected(join_request_id)`, `notify_assigments_graded(submission_id)`, `notify_certificate_issued(certificate_id)`, `notify_notice_posted(notice_id, student_ids)`, `notify_session_live(session_id, exclude_user_id=None)`, `notify_session_cancelled(classroom_id, classroom_title, session_id, scheduled_start_iso, exclude_user_id=None)`, `notify_assigments_posted(assigments_id, student_ids)`, `notify_submission_received(submission_id)`, `notify_staff_added(staff_id)`, `notify_review_posted(review_id)`, `notify_report_reviewed(report_id)`, `notify_query_answered(query_id)`, **`notify_followers_new_classroom(classroom_id)` (TASK 4, NEW)**.
 
 #### `notify_followers_new_classroom(classroom_id)` (TASK 4, NEW — line ~1791)
 
@@ -1255,7 +1255,7 @@ Purpose: side-effects that must fire **regardless of which code path** changed t
 
 - A patch near the top adjusts whatever `ModelAdmin` Django/another app already registered for `User` (via `@admin.register(_User)`) — auto-detects if `User` is already registered (adds `search_fields` only if missing, without replacing the class) vs. registers a minimal fallback admin if it isn't registered at all yet, so every `autocomplete_fields = [..., "student"/"teacher"/...]` below has something to search regardless of registration order between apps.
 - **Inlines**: `ClassScheduleInline`, `ClassPassInline`, `ClassroomStaffInline`, `PassDailyChargeInline` (`TabularInline`) — surfaced on their parent model's admin page (e.g. schedules/passes/staff nested under `ClassroomAdmin`; daily charges nested under `PassPurchaseAdmin`).
-- **Registered `ModelAdmin`s** (one per model, list filters/search/bulk actions tuned per model): `ClassroomAdmin`, `ClassScheduleAdmin`, `ClassSessionAdmin`, `ClassPassAdmin`, `PassPurchaseAdmin`, `PassGiftAdmin`, `PassDailyChargeAdmin`, `ClassJoinRequestAdmin`, `BreakoutRoomAdmin`, `SessionParticipantAdmin`, `ClassMaterialAdmin`, `ChatMessageAdmin`, `ChatMessageReportAdmin`, `LivePollAdmin`, `PollResponseAdmin`, `AssignmentAdmin`, `AssignmentSubmissionAdmin`, `ClassroomReviewAdmin`, `ClassroomWishlistAdmin`, `CouponAdmin`, `CoinTransactionAdmin`, `CoinPurchaseAdmin`, `CoinWithdrawalAdmin`, `ClassroomStaffAdmin`, `SessionWaitlistAdmin`, `ClassroomReportAdmin`, `CertificateAdmin`, `ClassReminderAdmin`, `ClassHolidayAdmin`, `NoticeAdmin`, `ClassQueryAdmin`, `ReferralAdmin`, `ClassroomBanAdmin`. That's 33, **not** the 40+ this file previously claimed — see the correction below.
+- **Registered `ModelAdmin`s** (one per model, list filters/search/bulk actions tuned per model): `ClassroomAdmin`, `ClassScheduleAdmin`, `ClassSessionAdmin`, `ClassPassAdmin`, `PassPurchaseAdmin`, `PassGiftAdmin`, `PassDailyChargeAdmin`, `ClassJoinRequestAdmin`, `BreakoutRoomAdmin`, `SessionParticipantAdmin`, `ClassMaterialAdmin`, `ChatMessageAdmin`, `ChatMessageReportAdmin`, `LivePollAdmin`, `PollResponseAdmin`, `assigmentsAdmin`, `assigmentsSubmissionAdmin`, `ClassroomReviewAdmin`, `ClassroomWishlistAdmin`, `CouponAdmin`, `CoinTransactionAdmin`, `CoinPurchaseAdmin`, `CoinWithdrawalAdmin`, `ClassroomStaffAdmin`, `SessionWaitlistAdmin`, `ClassroomReportAdmin`, `CertificateAdmin`, `ClassReminderAdmin`, `ClassHolidayAdmin`, `NoticeAdmin`, `ClassQueryAdmin`, `ReferralAdmin`, `ClassroomBanAdmin`. That's 33, **not** the 40+ this file previously claimed — see the correction below.
 - **✅ Correction (was previously mis-documented here as `NotificationAdmin` still living in this file)**: `admin.py`'s own module comment (task 42, "core-app migration") confirms `Notification` now lives in `core/models.py`, and its admin registration moved to `core/admin.py` accordingly — importing a cross-app model into this file would have been the wrong direction (same "liveclass calls into other apps, not the reverse" invariant as §6b/§6c). `NotificationAdmin`/`NotificationPreferenceAdmin` are **not** in this file; look in `core/admin.py` (not uploaded/audited here) for them.
 - **⚠️ Gap — imported but never registered**: `ParentMessageTemplate` and `ParentTeacherMessage` (task 69's structured parent/student→teacher messaging, §5 `parent-message-templates/`/`parent-messages/`) are both imported at the top of this file from `.models`, but neither has an `@admin.register(...)`/`ModelAdmin` class anywhere in it — the import is currently dead weight, and platform staff have no admin-panel visibility into either model. Same shape of gap as the historical `PassGift`/`ChatMessageReport`/`Referral`/`ClassroomBan` fixes already called out in this file's own comments (§17-style "existed since Pass N, no admin registration" pattern) — worth the same fix.
 - Use this section as the map for "which model has admin visibility" when debugging data issues via Django admin rather than the API.
@@ -1356,7 +1356,7 @@ All extend `LiveClassTestBase(TestCase)` (line 120 — shared fixtures: a teache
 2b. `DEFAULT_THROTTLE_RATES` (settings.py) must have a matching entry for every `ScopedRateThrottle`/custom-throttle `scope` used anywhere in `views.py` — a missing one isn't a soft degrade, it's `ImproperlyConfigured` (an unhandled 500) on the very first request that hits that endpoint. `session_join`, `session_token`, `coupon_validate`, `chat_message_create`, `chat_reaction`, `classroom_share`, `chunked_upload_init/chunk/complete`, and `coin_withdrawal`/`coin_purchase` **all had this exact bug at least once** — same "written correctly but not wired everywhere it needs to be" shape as item 2 above, just at the settings layer instead of Celery's.
 3. `TeacherEarningsView`/`StudentProgressView` are plain `APIView`s — `router.register()` never auto-wires a non-ViewSet; each needs its own explicit `path()` in `urls.py` (this was missing at least once historically). (`NotificationPreferenceView` no longer lives in this app at all — see §1/§4/§5 corrections.)
 4. `LiveKitError` must subclass DRF's `APIException` (not bare `Exception`) or it bypasses `exceptions.py` entirely and every call site has to hand-build its own error response.
-5. All File/ImageFields need `MaxFileSizeValidator`; the four plain FileFields (material, assignment attachment, assignment submission, certificate) also need a **safelist** `FileExtensionValidator` — `cover_image` is safe for free via Pillow decoding.
+5. All File/ImageFields need `MaxFileSizeValidator`; the four plain FileFields (material, assigments attachment, assigments submission, certificate) also need a **safelist** `FileExtensionValidator` — `cover_image` is safe for free via Pillow decoding.
 6. `_first_message()` in `exceptions.py` must recurse (dict/list nesting) — flat `data[field][0]` indexing breaks on nested/list-of-dict serializer errors, and breaks *inside the exception handler itself*, producing a raw 500 instead of a clean error.
 7. `PassPurchase.charge_for_session()` existing isn't enough — it needs `ClassSession`'s post_save signal (`_charge_passes_for_completed_session`) to actually call it on transition into COMPLETED, and `sync_missed_charges()` as the catch-up safety net if that signal is ever bypassed.
 8. `_phone_for(user)` must be the **one** shared lookup for SMS/WhatsApp, or the two channels can silently disagree on which field they trust.
@@ -1370,25 +1370,25 @@ All extend `LiveClassTestBase(TestCase)` (line 120 — shared fixtures: a teache
 16. `notify_waitlist_promotion` must be dispatched from `signals.py`'s `on_participant_left` via `tasks.notify_waitlist_promotion.delay(...)` **and** a `create_notification(...)` bell row — a prior version imported a function (`notify_waitlist_seat_open`) that never existed anywhere in the codebase, silently swallowed by the surrounding try/except, so no student was ever notified of a freed seat.
 17. WebSocket JWT auth must live in exactly **one** place (`LearnScroll/ws_auth.py`, project-level) — `message` and `liveclass` each used to keep their own independent copy (`message/Middleware.py` vs the old `liveclass/ws_auth.py`) that was never diffed against the other, risking silent mismatch. Both apps now import the same file; `liveclass/ws_auth.py` is a re-export shim only, kept so existing `from liveclass.ws_auth import JWTAuthMiddleware` call sites don't need to change.
 18. **A `broadcast_to_*` call site and its receiving consumer must be added together, or the failure is silent.** `models.py`'s `_broadcast_classroom_stats()` called `from .realtime import broadcast_to_classroom` long before that function — or `ClassroomConsumer`/the `ws/liveclass/classroom/<id>/` route it needs — actually existed anywhere in `realtime.py`/`consumers.py`/`routing.py`. Every call was a plain `ImportError`, caught by that function's own broad try/except (by design — a realtime push must never break the rating/enrollment recompute it's attached to), so nothing ever crashed and nothing ever alerted anyone; the classroom-detail screen's socket just always failed to connect and fell back to its slower backstop poll. The general lesson: a broadcast helper's own try/except is the right fail-open contract for *runtime* Redis/channel-layer errors, but it also hides a genuinely missing counterpart at the code level — grep for the consumer/group name whenever adding a new `broadcast_to_*` call, don't assume the receiving side already exists just because the sending side compiles.
-19. **`ClassroomReviewViewSet`/`ClassHolidayViewSet`/`ClassQueryViewSet` must have their own `perform_update`/`perform_destroy` ownership checks (Pass 19, re-verified Pass 21)** — all three used to be plain `ModelViewSet`s with no override at all. Because their `classroom`/`asked_by`/etc. fields are writable on the serializer and `get_queryset()` only enforces a *read*-tier check (or none), this let any authenticated user PATCH/DELETE another student's review, a manager PATCH another classroom's holiday by guessing its id, or a manager overwrite a student's own query just by sending `?classroom=<id>` — a write reachable through a read-only boundary. Fixed shape, same in all three: `perform_update` re-checks the real ownership/manage-tier rule on `serializer.instance` (not just on the incoming payload), `perform_destroy` does the same, and any writable `classroom` field is explicitly blocked from being reassigned mid-update (mirrors the same guard already on `Assignment`/`Notice`/`LivePoll`). `ClassQueryViewSet.perform_update` additionally freezes a query once it's `ANSWERED`. Regression-covered in `tests.py`'s `ReviewHolidayQueryOwnershipTests` (§16, class 17) — if a new viewset in this file skips its own `perform_update`/`perform_destroy`, it has this exact hole by default.
+19. **`ClassroomReviewViewSet`/`ClassHolidayViewSet`/`ClassQueryViewSet` must have their own `perform_update`/`perform_destroy` ownership checks (Pass 19, re-verified Pass 21)** — all three used to be plain `ModelViewSet`s with no override at all. Because their `classroom`/`asked_by`/etc. fields are writable on the serializer and `get_queryset()` only enforces a *read*-tier check (or none), this let any authenticated user PATCH/DELETE another student's review, a manager PATCH another classroom's holiday by guessing its id, or a manager overwrite a student's own query just by sending `?classroom=<id>` — a write reachable through a read-only boundary. Fixed shape, same in all three: `perform_update` re-checks the real ownership/manage-tier rule on `serializer.instance` (not just on the incoming payload), `perform_destroy` does the same, and any writable `classroom` field is explicitly blocked from being reassigned mid-update (mirrors the same guard already on `assigments`/`Notice`/`LivePoll`). `ClassQueryViewSet.perform_update` additionally freezes a query once it's `ANSWERED`. Regression-covered in `tests.py`'s `ReviewHolidayQueryOwnershipTests` (§16, class 17) — if a new viewset in this file skips its own `perform_update`/`perform_destroy`, it has this exact hole by default.
 20. **A cross-app bridge module (`core/classroom_chat_bridge.py`) must ship its model dependencies alongside its call sites, or every caller is dead code.** Tasks 29–40 wired `classroom_chat_views.py`, 6 signal receivers in `signals.py`, and 2 new `urls.py` paths — all against `Classroom.chat_group_enabled`/`Classroom.linked_conversation_id`. **✅ Resolved as of this audit** — both fields are now defined in `models.py` (§1, §3). Lesson stands for the next feature that spans an app boundary: confirm the model fields it depends on are actually migrated before wiring the views/signals/urls that assume them, not after.
 21. ✅ **RESOLVED (Task 10 fix) — a new file with real logic isn't the same as a *wired* feature.** `parent_link_views.py` (Phases 2/4/5) was fully written — permission checks, viewset, notification calls, ownership checks — but had zero `path()`/`router.register()` entries in `urls.py` and imported a `StudentReportCard` model that didn't exist in `models.py`. Same lesson as item 20, one layer earlier: a file existing in the codebase says nothing about whether it's reachable. **Both now fixed**: all four views are wired (§1/§5), `StudentReportCard` is a real model (§3). The second point from this lesson — **a new parent-facing feature was built without checking whether one already existed** (`ClassSessionViewSet.parent_join`, live since an earlier task) — is **also now resolved**: `parent_join()` has been consolidated onto the same `ParentAccessCode` mechanism `parent_link_views.py` already used, rather than staying a second, unreconciled parent-auth path. See §6c for the full before/after.
-22. **A model whose write methods are disabled must raise loudly, not silently no-op.** Task 12 (assignment) and Task 6 (coin models) both retire a local model's write path in favor of a cross-app one — in both cases every retired method is a `RuntimeError` stub naming its replacement, not a quiet `pass`/`return None`. Follow this same shape for any future "the real write path moved to another app" migration: a silent no-op here would look like success to the caller while doing nothing, which is far worse than a loud, traceable crash.
-23. **A cross-app bridge's roster/payload shape copied from a sibling bridge is an assumption until the sibling's own source is read, not a fact.** `liveclass/bridge.py`'s `roster` dict shape (`{"user_id": ...}` only, no `roll_number`/`enrollment_no`) was inferred from `campus/bridge.py`'s call site, not from `assignment/bridge.py` itself (not part of this audit) — flagged explicitly in the code rather than padded with guessed placeholder values. Don't quietly "fix" this into certainty; confirm against `assignment/bridge.py` first.
+22. **A model whose write methods are disabled must raise loudly, not silently no-op.** Task 12 (assigments) and Task 6 (coin models) both retire a local model's write path in favor of a cross-app one — in both cases every retired method is a `RuntimeError` stub naming its replacement, not a quiet `pass`/`return None`. Follow this same shape for any future "the real write path moved to another app" migration: a silent no-op here would look like success to the caller while doing nothing, which is far worse than a loud, traceable crash.
+23. **A cross-app bridge's roster/payload shape copied from a sibling bridge is an assumption until the sibling's own source is read, not a fact.** `liveclass/bridge.py`'s `roster` dict shape (`{"user_id": ...}` only, no `roll_number`/`enrollment_no`) was inferred from `campus/bridge.py`'s call site, not from `assigments/bridge.py` itself (not part of this audit) — flagged explicitly in the code rather than padded with guessed placeholder values. Don't quietly "fix" this into certainty; confirm against `assigments/bridge.py` first.
 24. 🐛 **Three concrete, currently-live bugs confirmed by direct code read this pass — not theoretical, worth fixing before anything else touches these areas:**
     - `ClassSessionViewSet.parent_join` (`views.py`) calls `ParticipantRole.OBSERVER`, which doesn't exist (`livekit_utils.py` only defines `PARENT_OBSERVER`) — `AttributeError` on every real call. See §6c.
     - `urls.py` wires 4 `classrooms/<...>/` paths (`create_group/`, `group/`, `participants/<id>/parent-code/`, `parent-queries/`) with the `<uuid:classroom_id>` converter, but `Classroom`'s pk is a plain integer `AutoField`, not a UUID — these 4 paths 404 for every real classroom id before the view even runs. See §6b.
-    - `ReportCardViewSet._homework_stats()` (`parent_link_views.py`) filters on `Assignment.Category.HOMEWORK`, a field/enum `Assignment` doesn't have — `AttributeError` on every `POST report-cards/`. Separately, once that's fixed, it should read through `bridge.get_assignment_submissions()` (§6d) rather than the local, Task-12-frozen `Assignment`/`AssignmentSubmission` models directly, or it'll silently miss every assignment posted after the Task 12 cutover. See §6c.
+    - `ReportCardViewSet._homework_stats()` (`parent_link_views.py`) filters on `assigments.Category.HOMEWORK`, a field/enum `assigments` doesn't have — `AttributeError` on every `POST report-cards/`. Separately, once that's fixed, it should read through `bridge.get_assigments_submissions()` (§6d) rather than the local, Task-12-frozen `assigments`/`assigmentsSubmission` models directly, or it'll silently miss every assigments posted after the Task 12 cutover. See §6c.
     - **DIRECTLY RE-CONFIRMED against `views.py`/`urls.py` themselves this pass (previously only the model/util side had been checked) — all three still fully live, no fix landed:**
       - `views.py` line 1821 `ClassSessionViewSet.parent_join`, lines 1879 and 1886, still literally write `role=ParticipantRole.OBSERVER` and `"livekit_role": ParticipantRole.OBSERVER` — `livekit_utils.py`'s `ParticipantRole` (line ~178) still only has `HOST`/`CO_HOST`/`STUDENT`/`PARENT_OBSERVER`. This is now an `AttributeError` confirmed at the exact call site, not inferred from the util file alone.
       - `urls.py` lines 452, 457, 466, 473 still register `classrooms/<uuid:classroom_id>/create_group/`, `.../group/`, `.../participants/<int:user_id>/parent-code/`, `.../parent-queries/` with the `uuid` path converter; `Classroom` (`models.py`) still has no explicit pk override, so its pk is still the default integer `AutoField`. All 4 still 404 before the view runs.
-      - `parent_link_views.py`'s `ReportCardViewSet._homework_stats()` still filters `Assignment.Category.HOMEWORK`; `Assignment` (`models.py`) still has no `category` field or `Category` enum.
-25. **A module's own docstring (or a whole file's module-level docstring, like `urls.py`'s endpoint reference) can go stale the moment the code beneath it changes, and nothing forces it to be re-synced.** `urls.py`'s docstring (lines 49-51, 192-196, 206-219 as of this upload) still describes `coin-purchases/initiate/`, full `withdrawals/{id}/{cancel,approve,reject,mark-paid}/`, and full `assignments/`/`submissions/{id}/{grade}` CRUD as live — Task 6 and Task 12 changed the actual view behavior underneath without anyone updating that comment block. **Directly re-confirmed this pass**: `AssignmentViewSet` (`views.py` line 4715) is now a plain `viewsets.ViewSet` with only `list`/`create` implemented (its own docstring calls it a "Thin proxy") — no `retrieve`/`update`/`destroy`, so the documented `assignments/{id}/ GET, PUT, PATCH, DELETE` line is simply false against the current code. `CoinWithdrawalViewSet` (`views.py` line 5131) is `ListModelMixin`+`RetrieveModelMixin` only — every one of `create`/`cancel`/`approve`/`reject`/`mark_paid` is now a stub returning `_deprecated_write_response(...)` → HTTP 410 Gone pointing at `/api/user-profile/coin-withdrawals/`, not the write it used to be. Trust the ViewSet's own method bodies over a docstring describing them, especially in a codebase with this much "as of Task N" churn — see §5/§6d/§6e for what's actually true as of this audit.
+      - `parent_link_views.py`'s `ReportCardViewSet._homework_stats()` still filters `assigments.Category.HOMEWORK`; `assigments` (`models.py`) still has no `category` field or `Category` enum.
+25. **A module's own docstring (or a whole file's module-level docstring, like `urls.py`'s endpoint reference) can go stale the moment the code beneath it changes, and nothing forces it to be re-synced.** `urls.py`'s docstring (lines 49-51, 192-196, 206-219 as of this upload) still describes `coin-purchases/initiate/`, full `withdrawals/{id}/{cancel,approve,reject,mark-paid}/`, and full `assigmentss/`/`submissions/{id}/{grade}` CRUD as live — Task 6 and Task 12 changed the actual view behavior underneath without anyone updating that comment block. **Directly re-confirmed this pass**: `assigmentsViewSet` (`views.py` line 4715) is now a plain `viewsets.ViewSet` with only `list`/`create` implemented (its own docstring calls it a "Thin proxy") — no `retrieve`/`update`/`destroy`, so the documented `assigmentss/{id}/ GET, PUT, PATCH, DELETE` line is simply false against the current code. `CoinWithdrawalViewSet` (`views.py` line 5131) is `ListModelMixin`+`RetrieveModelMixin` only — every one of `create`/`cancel`/`approve`/`reject`/`mark_paid` is now a stub returning `_deprecated_write_response(...)` → HTTP 410 Gone pointing at `/api/user-profile/coin-withdrawals/`, not the write it used to be. Trust the ViewSet's own method bodies over a docstring describing them, especially in a codebase with this much "as of Task N" churn — see §5/§6d/§6e for what's actually true as of this audit.
 26. **(NEW, TASK 4) A "notify my followers when I create X" fan-out is now a repeated, cross-app pattern — and each copy carries its own unconfirmed enum until checked.** `liveclass.tasks.notify_followers_new_classroom` is the third instance of this exact shape in the codebase (`post.tasks.notify_followers_new_post`, `testseries.tasks.notify_followers_new_testseries` are the other two) — same `Follow`/`RestrictUser` bulk-query pattern, same `core.services.create_bulk_notifications()` call, each referencing its own new `Notification.NotifType` member (`CLASSROOM_CREATED_BY_FOLLOWED` here) with no independent confirmation that `core` actually defines it. Don't assume this one is safe just because the pattern is now proven elsewhere — each app's enum member is a separate, individually-unverified claim. See §3, §9.
-27. **(RE-SYNC PASS 1 — no `views.py`/`urls.py`/`tasks.py`/`tests.py` re-supplied yet) Re-checked this doc against a fresh upload of `models.py`, `serializers.py`, `signals.py`, `consumers.py`, `realtime.py`, `livekit_utils.py`, `admin.py`, `chunked_upload_views.py`, `migrate_liveclass_coin_models.py`, plus re-confirmed `bridge.py`/`apps.py`/`classroom_chat_views.py`/`exceptions.py`/`moderation.py`/`notifications.py`/`parent_link_views.py`/`permissions.py`/`routing.py`/`migrate_liveclass_assignments_to_unified.py`.** Net result: **no behavioral drift found** in any file that was actually re-uploaded — every model/field/function this pass checked (`Classroom.chat_group_enabled`/`linked_conversation_id`, `StudentReportCard`, `ParticipantRole`, `Assignment`'s field set, `ClassroomStaff`, the 6 chat-sync signal receivers, `LiveKitError` as an `APIException`) matches what this file already claimed. What changed is bookkeeping only: (a) §1's line counts were stale for `serializers.py`/`livekit_utils.py`/`parent_link_views.py`/`classroom_chat_views.py`/`realtime.py`/`models.py` — corrected; (b) `serializers.py` actually has **67** classes, not the previously-stated 55 — the 12 uncounted ones are plain output serializers for already-documented endpoints (referrals, earnings, progress, share history), not a new feature — see the note under §1's table; (c) item 24's three live bugs were independently re-verified against the model/util side (not the view/url side, since `views.py`/`urls.py` weren't re-uploaded this pass) and are **still open**. **No `views.py`, `urls.py`, `tasks.py`, `throttles.py`, or `tests.py` content was available this pass** — anything in this file sourced from those (URL paths in §5, task list in §9, test-class lists in §16) is carried forward unverified, same status as before, not newly confirmed.
+27. **(RE-SYNC PASS 1 — no `views.py`/`urls.py`/`tasks.py`/`tests.py` re-supplied yet) Re-checked this doc against a fresh upload of `models.py`, `serializers.py`, `signals.py`, `consumers.py`, `realtime.py`, `livekit_utils.py`, `admin.py`, `chunked_upload_views.py`, `migrate_liveclass_coin_models.py`, plus re-confirmed `bridge.py`/`apps.py`/`classroom_chat_views.py`/`exceptions.py`/`moderation.py`/`notifications.py`/`parent_link_views.py`/`permissions.py`/`routing.py`/`migrate_liveclass_assigmentss_to_unified.py`.** Net result: **no behavioral drift found** in any file that was actually re-uploaded — every model/field/function this pass checked (`Classroom.chat_group_enabled`/`linked_conversation_id`, `StudentReportCard`, `ParticipantRole`, `assigments`'s field set, `ClassroomStaff`, the 6 chat-sync signal receivers, `LiveKitError` as an `APIException`) matches what this file already claimed. What changed is bookkeeping only: (a) §1's line counts were stale for `serializers.py`/`livekit_utils.py`/`parent_link_views.py`/`classroom_chat_views.py`/`realtime.py`/`models.py` — corrected; (b) `serializers.py` actually has **67** classes, not the previously-stated 55 — the 12 uncounted ones are plain output serializers for already-documented endpoints (referrals, earnings, progress, share history), not a new feature — see the note under §1's table; (c) item 24's three live bugs were independently re-verified against the model/util side (not the view/url side, since `views.py`/`urls.py` weren't re-uploaded this pass) and are **still open**. **No `views.py`, `urls.py`, `tasks.py`, `throttles.py`, or `tests.py` content was available this pass** — anything in this file sourced from those (URL paths in §5, task list in §9, test-class lists in §16) is carried forward unverified, same status as before, not newly confirmed.
 28. **(RE-SYNC PASS 2 — `views.py`, `urls.py`, `tasks.py`, `tests.py`, `test_classroom_chat_bridge.py`, `throttles.py`, `ws_auth.py` now supplied, closing out most of pass 1's "unverified" list.)** Findings:
     - **Item 24's three live bugs are now DIRECTLY confirmed against `views.py`/`urls.py` themselves** (previously only checked model/util-side) — see the updated bullets under item 24 with exact line numbers. All three remain open, unfixed.
-    - **Item 25's stale-docstring claim is now DIRECTLY confirmed** — `AssignmentViewSet` and `CoinWithdrawalViewSet` in `views.py` were read line-by-line and do exactly what §6d/§6e already said (thin proxy / 410-Gone stubs), while `urls.py`'s own module docstring still advertises the old full-CRUD shape. See the updated item 25.
+    - **Item 25's stale-docstring claim is now DIRECTLY confirmed** — `assigmentsViewSet` and `CoinWithdrawalViewSet` in `views.py` were read line-by-line and do exactly what §6d/§6e already said (thin proxy / 410-Gone stubs), while `urls.py`'s own module docstring still advertises the old full-CRUD shape. See the updated item 25.
     - **`tasks.py`**: line count (1846) and the "38 `@shared_task`s" count both match this doc exactly, no correction needed. `notify_followers_new_classroom` (line 1790) and `notify_waitlist_promotion` (line 651) both confirmed present and implemented as described in §9/item 16/item 26 — including item 26's flagged, still-unconfirmed `Notification.NotifType.CLASSROOM_CREATED_BY_FOLLOWED` reference (no fallback, `core/models.py` still not part of any upload).
     - **`tests.py`**: grew from ~2610 to 2885 lines, 25→26 test classes — the new one, `ParentTeacherMessageTests`, was previously uncatalogued (§16 table updated). `StudentProgressTests` gap re-confirmed still absent.
     - **`test_classroom_chat_bridge.py`**: STILL the wrong content on this, its **third** upload running — still `core/classroom_chat_bridge.py` source, not the 6 test classes this doc has described from memory since the first mismatch. Downgraded that description to explicitly-unverified in §16.
@@ -1411,6 +1411,6 @@ When continuing work in a new chat, paste this file and say what you want change
 - **File uploads** → new FileField needs both `MaxFileSizeValidator` and, if it's a plain `FileField` (not `ImageField`), a safelist `FileExtensionValidator`.
 - **Error responses** → any new exception type raised in a view should either already be a DRF `APIException` (flows through `exceptions.py` automatically) or get an entry in `_CODE_BY_EXC` if it needs a specific machine-readable `code`.
 - **Parent-facing work** → check §6c first — parent auth now runs through exactly one mechanism (`ParentAccessCode`/`ParentToken`, resolved via `core.classroom_chat_bridge.resolve_parent_from_token()`), used by `ClassroomParentCodeGenerateView`, `ReportCardViewSet`, `ClassroomParentQueryListView`, `ParentQueryReplyView`, and `ClassSessionViewSet.parent_join` alike. Don't resurrect the old signed-token path (`PARENT_JOIN_TOKEN_SALT`/`generate_parent_join_token`/`ParentJoinSerializer`) — it's dead code kept only pending a project-wide grep-and-delete, see §6c.
-- **Assignments** → check §6d first. New assignments never touch `liveclass.Assignment`/`AssignmentSubmission` directly — go through `bridge.create_assignment()`/`get_assignment_submissions()`, which delegate to `assignment.bridge.*`. The local models are read-only history now; the only sanctioned exception to "liveclass never imports `assignment.models` outside `bridge.py`" is the one-off `migrate_liveclass_assignments_to_unified` command. If `assignment/bridge.py`'s real `create_context_assignment()` signature requires `roll_number`/`enrollment_no` keys unconditionally, `bridge.py`'s roster dict needs a one-line fix — this is a flagged, unconfirmed assumption, not settled fact (see §6d).
+- **assigmentss** → check §6d first. New assigmentss never touch `liveclass.assigments`/`assigmentsSubmission` directly — go through `bridge.create_assigments()`/`get_assigments_submissions()`, which delegate to `assigments.bridge.*`. The local models are read-only history now; the only sanctioned exception to "liveclass never imports `assigments.models` outside `bridge.py`" is the one-off `migrate_liveclass_assigmentss_to_unified` command. If `assigments/bridge.py`'s real `create_context_assigments()` signature requires `roll_number`/`enrollment_no` keys unconditionally, `bridge.py`'s roster dict needs a one-line fix — this is a flagged, unconfirmed assumption, not settled fact (see §6d).
 - **Coin purchases/withdrawals** → check §6e first. `CoinPurchase.mark_success`/`mark_failed` and all six `CoinWithdrawal` write methods now raise `RuntimeError` by design — this is not a bug to "fix" by removing the stub, it's Task 6's intended read-only freeze. Any new money-moving code for top-ups/payouts belongs in `user_profile` (`CoinPurchaseRequest`/`CoinWithdrawalRequest`), writing through `user_profile.CoinLedger`, never back through these two `liveclass` models. `User.coin` and `liveclass.CoinTransaction` are still live/authoritative for the wallet balance itself.
 - **Follower fan-out on create (TASK 4)** → before relying on `notify_followers_new_classroom` (or copying its shape for a fourth app), confirm `Notification.NotifType.CLASSROOM_CREATED_BY_FOLLOWED` and a `classroom` FK on `Notification` actually exist in `models.py` (§3, §17 item 26) — both are referenced directly with no fallback, so a missing one fails the task silently (async, after the classroom-create request has already returned 201).

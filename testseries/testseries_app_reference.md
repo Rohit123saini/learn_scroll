@@ -47,7 +47,7 @@ testseries/
 **Missing on purpose, not forgotten:** koi campus/liveclass-specific
 viewset `testseries/views.py` me nahi hai — us wiring ka apna
 proxy-endpoint `campus/views.py` / `liveclass/views.py` me banega
-(jaisa `assignment` app ke liye tha), jo `testseries.bridge.
+(jaisa `assigments` app ke liye tha), jo `testseries.bridge.
 create_context_testseries()` ko call karega. Golden rule (§1) ke
 hisaab se `testseries` khud campus/liveclass ka URL-space nahi
 define karta.
@@ -110,7 +110,7 @@ TESTSERIES_REMINDER_DAYS = 3       # proactive "please review" nudge to creator
 
 # Optional overrides (defaults shown — see models.py's shared
 # common.attachment_validators, used by both Question.attachment and
-# QuestionResponse.answer_attachment; shared with `assignment` too):
+# QuestionResponse.answer_attachment; shared with `assigments` too):
 TESTSERIES_ATTACHMENT_EXTENSIONS = ["pdf", "jpg", "jpeg", "png", "webp"]
 TESTSERIES_ATTACHMENT_MAX_MB = 10
 ```
@@ -153,8 +153,8 @@ nahi. Jo already resolved ho chuke hain unko bhi list me rakha hai
 | 3.2 | `Notification.NotifType.TESTSERIES_POSTED` / `TESTSERIES_CHECKED` / `TESTSERIES_PAYOUT_RELEASED` | `core` | ✅ **RESOLVED** — same, direct reference, koi shim nahi |
 | 3.3 | `Notification.NotifType.TESTSERIES_REVIEW_RECEIVED` | `core` | ❌ **OPEN (NEW, Task 15)** — `TestSeriesReview.create_review()` (`models.py`) is enum member ko reference karta hai; jab tak `core` isse add nahi karta, review-create khud kaam karega (row + uniqueness + checked-status guard sab real hain) lekin notify-the-creator step pe `AttributeError` aayega. Add karo: `TESTSERIES_REVIEW_RECEIVED = "testseries_review_received", "New Test Series Review"` |
 | 3.4 | `campus.bridge.can_review_testseries_attempt(user, context_type, context_id) -> bool` | `campus` | ❌ **STILL OPEN** — `permissions.py::user_can_review_attempt()` ImportError par safe-default `False` deta hai (deny). Campus subject-teacher tab tak review nahi kar payega |
-| 3.5 | `campus.bridge.create_testseries(...)` + campus proxy endpoint | `campus` | ❌ **STILL OPEN** — calls `testseries.bridge.create_context_testseries(source="campus", is_paid=False, ...)` |
-| 3.6 | `liveclass.bridge.create_testseries(...)` | `liveclass` | ❌ **STILL OPEN** — calls `create_context_testseries(source="liveclass", is_paid=<teacher's choice>, ...)` |
+| 3.5 | `campus.bridge.create_testseries(...)` + campus proxy endpoint | `campus` | ❌ **STILL OPEN** per this doc's own records — calls `testseries.bridge.create_context_testseries(source="campus", is_paid=False, ...)`. ⚠️ **Flagging a conflict, not resolving it**: `campus_app_design.md` (that app's own reference) describes this function as already `[WIRED]` (Task 13/19), with a full signature (`is_paid`/`price_coins` kwargs, `testseries_paid_allowed` force-reset) and calls it out as done. The real `campus/bridge.py` source wasn't part of this pass to verify directly — until it is, don't trust either doc's status for §3.5 over the other; diff the real file next time it's uploaded. |
+| 3.6 | `liveclass.bridge.create_testseries(...)` | `liveclass` | ✅ **RESOLVED** (this pass) — `liveclass/bridge.py` now has `create_testseries(*, classroom, creator, title, description="", is_paid=False, price_coins=0, duration_minutes=None, attempts_allowed=1, questions)`, calling `testseries.bridge.create_context_testseries(source=TestSeries.Source.LIVECLASS, context_type="classroom", context_id=classroom.id, ..., is_paid=<teacher's choice>, roster=<resolved `login.User` list>)`. Roster source: `PassPurchase(status=SUCCESS, is_active=True, expires_at__gt=now)` for the classroom, same query `create_assigments()` in the same file already uses — resolved into actual `User` rows (not `{"user_id": ...}` dicts, see below) since `create_context_testseries()`'s `roster` param wants real user instances, unlike `create_context_assigments()`'s dict-shaped one. No `is_paid` force-reset (unlike campus) — confirmed no `liveclass`-side equivalent of `Campus.testseries_paid_allowed` exists to gate against. |
 | 3.7 | `message.models.DoubtQuestion.context_type` / `.context_id` (generic opaque pointer fields) | `message` | ⚠️ **ASSUMED ADDED this pass** — `bridge.py`'s Task 16 comment says these were added to `DoubtQuestion` this pass so `testseries` can attach queries without a new Q&A model. `message/models.py`'s own source wasn't shared to `testseries` for direct verification — confirm the migration actually landed in `message` before relying on `ask_query_on_series()` in production. |
 | 3.8 | `message.services.answer_doubt_question(doubt, actor, answer_text, answered_by=...)` — `answered_by` param | `message` | ⚠️ **ASSUMED ADDED this pass** — same Task 16 pass per `bridge.py`'s comment; `actor=None` skips `message`'s own group-admin/mod check (a testseries doubt has no group). Confirm signature in `message/services.py` before deploy. |
 | 3.9 | `Notification.NotifType.TESTSERIES_CREATED_BY_FOLLOWED` (NEW, Task 5) | `core` | ⚠️ **UNCONFIRMED** — `tasks.py::notify_followers_new_testseries()` references this enum member directly (no `_TransactionTypeGap`-style shim, unlike how §3.1/§3.2 were guarded before they landed). Not flagged as an assumption in the task's own code comments, but `core`'s enum source wasn't available this pass to verify it actually exists — confirm before relying on the follower-notify fan-out in production; if missing, `TestSeriesViewSet.publish()` itself still succeeds (the notify task runs async, after `publish()` has already returned 200), but the task run will fail with `AttributeError`. |
@@ -241,7 +241,7 @@ clean `ValidationError` instead of a raw DB `IntegrityError` (this was
 a bug found + fixed in the earlier hardening pass, §16 item 2).
 **`auto_grade(answer_data) -> (is_correct, marks_awarded)`** — thin
 wrapper around **`common.question_grading.auto_grade()`** (shared with
-`assignment`, so both apps grade mcq/msq/list identically instead of
+`assigments`, so both apps grade mcq/msq/list identically instead of
 duplicating logic); returns `(None, None)` for `text`.
 
 ### 4.4 `QuestionResponse`
@@ -375,7 +375,7 @@ individually since `bulk_create()` skips `Model.save()`), then
 > `_notify()`/`_record_coin_transaction()` already use.
 
 ### 5.2 `get_attempts_for_context(*, context_type, context_id)` (NEW)
-`assignment.bridge.get_submissions_for_context()` ka `testseries`
+`assigments.bridge.get_submissions_for_context()` ka `testseries`
 analogue. Returns every `TestAttempt` across every campus/liveclass
 `TestSeries` in that `(context_type, context_id)` —
 `.select_related("series", "student")`, **unfiltered by permission**
@@ -596,7 +596,7 @@ questions):
 |---|---|
 | Create individual series | any authenticated user |
 | Create campus series | **not via this app's API** — only `campus`'s own staff/teacher-checked proxy endpoint, via `bridge.create_context_testseries()` (§3.5, still open) |
-| Create liveclass series | **not via this app's API** — only `liveclass`'s own teacher-checked proxy endpoint, via `bridge.create_context_testseries()` (§3.6, still open) |
+| Create liveclass series | **not via this app's API** — only `liveclass`'s own teacher-checked proxy endpoint, via `bridge.create_context_testseries()` (§3.6, ✅ resolved this pass — `liveclass/bridge.create_testseries()` now implemented) |
 | Edit/delete a series | `series.creator` only |
 | Add/edit/delete questions | `series.creator` only, and only while `series.status="draft"` |
 | Start/submit an attempt | the student themself |
@@ -757,11 +757,11 @@ Har jagah jahan `testseries` doosre apps ko chhoo raha hai:
 |---|---|---|---|
 | `login.User` | `testseries` imports directly | `creator`/`student`/`buyer`/`reviewed_by`/`checked_by` FKs | Not a bridge case — `User` is the shared identity model every app uses directly, same as everywhere else in the codebase. |
 | `campus` | `campus -> testseries` only (never reverse) | `campus`'s own proxy endpoint calls `bridge.create_context_testseries(source="campus", ...)`; `testseries.permissions.user_can_review_attempt()` calls `campus.bridge.can_review_testseries_attempt()` (§3.4, still a gap) | Golden rule: `testseries` never imports `campus.Section` etc. Context is opaque (`context_type`/`context_id`). |
-| `liveclass` | `liveclass -> testseries` only | Same shape as campus — `liveclass.bridge.create_testseries()` (§3.6, still a gap) calls `create_context_testseries(source="liveclass", ...)` with teacher-chosen `is_paid`/`price_coins` | No server-side force on `is_paid` for liveclass (unlike campus). |
+| `liveclass` | `liveclass -> testseries` only | Same shape as campus — `liveclass.bridge.create_testseries()` (§3.6, ✅ resolved this pass) calls `create_context_testseries(source="liveclass", ...)` with teacher-chosen `is_paid`/`price_coins` | No server-side force on `is_paid` for liveclass (unlike campus) — confirmed intentional, not just unimplemented: no `liveclass`-side equivalent of `Campus.testseries_paid_allowed` exists at all. |
 | `user_profile` | `testseries -> user_profile` (lazy import) | `CoinLedger.record_transaction()` via `_record_coin_transaction()` — used for purchase debit, payout release, refund. **(Task 5, NEW)** `tasks.py::notify_followers_new_testseries()` also reads `user_profile.models.Follow` (accepted-follower ids) and `user_profile.models.RestrictUser` (bulk exclusion) directly — read-only, no coin/ledger involvement. | Enum members `TESTSERIES_PURCHASE`/`TESTSERIES_PAYOUT` confirmed to exist (§3.1, resolved). `REFUND` type reused as-is for refunds. `Follow`/`RestrictUser` are read directly (not via a bridge function) — same lazy-import-inside-the-task pattern as everywhere else in this app. |
 | `core` | `testseries -> core` (lazy import) | `core.services.create_notification()` via `_notify()` — `TESTSERIES_POSTED`, `TESTSERIES_CHECKED`, `TESTSERIES_PAYOUT_RELEASED` (all resolved, §3.2), `TESTSERIES_REVIEW_RECEIVED` (**still a gap, §3.3**), and a plain `"generic"` string for the reminder task. **(Task 5, NEW)** `tasks.py::notify_followers_new_testseries()` calls `core.services.create_bulk_notifications()` directly (bypassing `_notify()`) with `Notification.NotifType.TESTSERIES_CREATED_BY_FOLLOWED` | `TESTSERIES_CREATED_BY_FOLLOWED` is **unconfirmed** (§3.9); `create_bulk_notifications` itself is assumed to already exist, reused from `post`/`liveclass`'s equivalent tasks (§3.10). |
 | `message` | `testseries -> message` (lazy import) **(Task 16, NEW)** | `message.models.DoubtQuestion` (created via `bridge.ask_query_on_series()`), `message.services.answer_doubt_question()` (via `bridge.answer_query_on_series()`) | Assumes `DoubtQuestion.context_type`/`context_id` generic pointer fields exist (§3.7) and `answer_doubt_question()` accepts an `answered_by` kwarg (§3.8) — **both assumed added this pass, not independently verified against `message`'s real source**. Confirm before relying on this in production. `message` never imports `testseries` back. |
-| `assignment` | no direct link | `Question.auto_grade()` uses the **shared** `common.question_grading.auto_grade()` module — same grading logic as `assignment`, avoiding duplication. Attachment validators (`common.attachment_validators`) are also shared with `assignment` (Task 7). | Not a runtime cross-app call, just shared utility code both apps import from `common`. |
+| `assigments` | no direct link | `Question.auto_grade()` uses the **shared** `common.question_grading.auto_grade()` module — same grading logic as `assigments`, avoiding duplication. Attachment validators (`common.attachment_validators`) are also shared with `assigments` (Task 7). | Not a runtime cross-app call, just shared utility code both apps import from `common`. |
 
 ---
 
@@ -825,7 +825,7 @@ by the same shared rules:
 | `QuestionResponse.answer_attachment` | A student's photo/file answer (e.g. a photo of handwritten work) | student, via `TestAttempt.submit()` — **not** exposed as a writable serializer field, only ever set from `request.FILES` inside the `submit` action |
 
 **Validation (defence-in-depth, three layers), all via the shared
-`common.attachment_validators` module (also used by `assignment`):**
+`common.attachment_validators` module (also used by `assigments`):**
 1. `FileField(validators=[attachment_extension_validator,
    validate_attachment_size])` on both model fields (`models.py`) —
    enforced whenever `full_clean()` runs (`Question.save()`).
@@ -970,7 +970,7 @@ sections above and in the code itself.
 - [ ] §3.3 — `Notification.NotifType.TESTSERIES_REVIEW_RECEIVED` — **still open**
 - [ ] §3.4 — `campus.bridge.can_review_testseries_attempt()` implemented — **still open**
 - [ ] §3.5 — `campus.bridge.create_testseries()` + campus proxy endpoint implemented — **still open**
-- [ ] §3.6 — `liveclass.bridge.create_testseries()` implemented — **still open**
+- [x] §3.6 — `liveclass.bridge.create_testseries()` implemented — **resolved this pass**
 - [ ] §3.7 — confirm `message.DoubtQuestion.context_type`/`context_id` fields actually exist/migrated — **verify, assumed only**
 - [ ] §3.8 — confirm `message.services.answer_doubt_question()` accepts `answered_by=` — **verify, assumed only**
 - [ ] §3.9 — confirm `Notification.NotifType.TESTSERIES_CREATED_BY_FOLLOWED` exists on `core` — **still open, unconfirmed (Task 5)**

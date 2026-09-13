@@ -11,7 +11,7 @@ In the project's main urls.py add:
     my-earnings/                         GET               (teacher-only earnings summary; optional
                                                           ?classroom=<id> to scope to one classroom —
                                                           see TeacherEarningsView in views.py)
-    my-progress/                         GET               (caller's own attendance/assignment/
+    my-progress/                         GET               (caller's own attendance/assigments/
                                                           certificate stats + attendance streak —
                                                           see StudentProgressView in views.py)
 
@@ -189,8 +189,8 @@ router — list/retrieve/create/update/delete on each, plus the custom
     poll-templates/{id}/                 GET, PUT, PATCH, DELETE            (Pass 13)
     sessions/{id}/unread/                GET                                (Pass 13)
     sessions/{id}/mark-read/             POST                               (Pass 13)
-    assignments/                         GET, POST
-    assignments/{id}/                    GET, PUT, PATCH, DELETE
+    assigmentss/                         GET, POST
+    assigmentss/{id}/                    GET, PUT, PATCH, DELETE
     submissions/                         GET, POST
     submissions/{id}/                    GET, PUT, PATCH, DELETE
     submissions/{id}/grade/              POST             (teacher only)
@@ -316,8 +316,8 @@ except ImportError:
     _SPECTACULAR_AVAILABLE = False
 
 from .views import (
-    AssignmentSubmissionViewSet,
-    AssignmentViewSet,
+    assigmentsSubmissionViewSet,
+    assigmentsViewSet,
     CertificateViewSet,
     ChatMessageReportViewSet,
     ChatMessageViewSet,
@@ -397,8 +397,8 @@ router.register(r"materials", ClassMaterialViewSet, basename="classmaterial")
 router.register(r"chat-messages", ChatMessageViewSet, basename="chatmessage")
 router.register(r"polls", LivePollViewSet, basename="livepoll")
 router.register(r"poll-templates", PollTemplateViewSet, basename="polltemplate")
-router.register(r"assignments", AssignmentViewSet, basename="assignment")
-router.register(r"submissions", AssignmentSubmissionViewSet, basename="assignmentsubmission")
+router.register(r"assigmentss", assigmentsViewSet, basename="assigments")
+router.register(r"submissions", assigmentsSubmissionViewSet, basename="assigmentssubmission")
 router.register(r"reviews", ClassroomReviewViewSet, basename="classroomreview")
 router.register(r"wishlist-classrooms", ClassroomWishlistViewSet, basename="classroomwishlist")
 router.register(r"coupons", CouponViewSet, basename="coupon")

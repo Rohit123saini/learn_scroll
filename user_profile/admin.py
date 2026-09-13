@@ -29,9 +29,9 @@ than letting this overwrite them — this file only defines
 `CoinLedger`'s registration; it doesn't know about or touch the
 others.
 """
-from django.contrib import admin
+from django.contrib import admin, messages
 
-from .models import CoinLedger, UserPreference
+from .models import CoinLedger, CoinWithdrawalRequest, UserPreference
 
 
 class WithdrawalEligibleFilter(admin.SimpleListFilter):
@@ -96,6 +96,107 @@ class CoinLedgerAdmin(admin.ModelAdmin):
         # explains every balance change" guarantee. Blocked for the
         # same reason.
         return False
+
+@admin.register(CoinWithdrawalRequest)
+class CoinWithdrawalRequestAdmin(admin.ModelAdmin):
+    """
+    §11 item 12 — the Django-admin half of the same gap
+    `CoinWithdrawalAdminActionView` (views.py) fills over the API:
+    `CoinWithdrawalRequestManager.mark_processing()`/`confirm_success()`/
+    `reject()` existed and were unit-tested, but nothing (view or admin)
+    could reach them without a Django shell.
+
+    Same read-only reasoning as `CoinLedgerAdmin` above applies to the
+    fields themselves — letting admin hand-edit `status`/`coins`/
+    `debit_ledger_entry` etc. directly would let a withdrawal's status
+    change without going through the manager methods that keep it in
+    sync with `CoinLedger` (a REJECTED row with no refund entry, or a
+    SUCCESS row that never actually got debited). So add/change/delete
+    stay blocked here exactly like `CoinLedgerAdmin`. Unlike
+    `CoinLedgerAdmin` though, this table isn't meant to be *inert* in
+    admin — ops needs a way to actually move a request forward — so the
+    three actions below are the sanctioned way in: each calls the
+    matching manager method (never touches a field directly), so admin
+    becomes a safe front end for that method instead of a second write
+    path around it.
+    """
+
+    list_display = (
+        "id",
+        "user",
+        "coins",
+        "payout_method",
+        "status",
+        "failure_reason",
+        "created_at",
+        "updated_at",
+    )
+    list_filter = ("status", "payout_method")
+    search_fields = ("user__username", "failure_reason")
+    date_hierarchy = "created_at"
+
+    # Every field, for the same "don't let a future field addition
+    # sneak in editable" reason CoinLedgerAdmin's readonly_fields lists
+    # every field rather than a hand-picked subset.
+    readonly_fields = [f.name for f in CoinWithdrawalRequest._meta.fields]
+
+    actions = ["mark_processing_action", "confirm_success_action", "reject_action"]
+
+    def has_add_permission(self, request):
+        return False
+
+    def has_change_permission(self, request, obj=None):
+        return False
+
+    def has_delete_permission(self, request, obj=None):
+        # Same reasoning as CoinLedgerAdmin.has_delete_permission: a
+        # deleted request row would make an already-applied debit (or
+        # refund) vanish from the audit trail while the coin movement
+        # itself stands, which is exactly the drift this table's
+        # ForeignKeys to CoinLedger exist to prevent.
+        return False
+
+    def _run_bulk_action(self, request, queryset, method_name, ok_message, **kwargs):
+        """
+        Shared runner for the three actions below: calls
+        `CoinWithdrawalRequest.objects.<method_name>(withdrawal_id=...,
+        **kwargs)` per selected row, catching the `ValueError` each
+        manager method raises for an invalid state transition (e.g.
+        rejecting an already-SUCCESS request) so one bad row in a bulk
+        selection doesn't stop the rest — same "well-formed action,
+        wrong current state" case `CoinWithdrawalAdminActionView`
+        (views.py) turns into a 409 for the single-row API equivalent.
+        """
+        succeeded = 0
+        for withdrawal in queryset:
+            try:
+                getattr(CoinWithdrawalRequest.objects, method_name)(
+                    withdrawal_id=withdrawal.pk, **kwargs
+                )
+                succeeded += 1
+            except ValueError as exc:
+                self.message_user(request, f"Withdrawal {withdrawal.pk}: {exc}", level=messages.WARNING)
+        if succeeded:
+            self.message_user(request, f"{ok_message} ({succeeded} request(s)).")
+
+    @admin.action(description="Mark selected withdrawals as processing")
+    def mark_processing_action(self, request, queryset):
+        self._run_bulk_action(request, queryset, "mark_processing", "Moved to processing")
+
+    @admin.action(description="Mark selected withdrawals as successful")
+    def confirm_success_action(self, request, queryset):
+        self._run_bulk_action(request, queryset, "confirm_success", "Marked successful")
+
+    @admin.action(description="Reject selected withdrawals (refunds coins)")
+    def reject_action(self, request, queryset):
+        self._run_bulk_action(
+            request,
+            queryset,
+            "reject",
+            "Rejected and refunded",
+            reason="Rejected via admin bulk action",
+        )
+
 
 @admin.register(UserPreference)
 class UserPreferenceAdmin(admin.ModelAdmin):

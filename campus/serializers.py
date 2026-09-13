@@ -5,14 +5,14 @@ from rest_framework import serializers
 
 from .models import (
     AcademicSession,
-    Assignment,
-    AssignmentSubmission,
+    assigments,
+    assigmentsSubmission,
     Attendance,
     Campus,
     CampusAnalyticsSnapshot,
     CampusLiveSession,
     CampusParentLink,
-    ClassTeacherAssignment,
+    ClassTeacherassigments,
     Department,
     DigitalIDCard,
     ExamTerm,
@@ -27,7 +27,7 @@ from .models import (
     StaffProfile,
     StudentEnrollment,
     Subject,
-    SubjectTeacherAssignment,
+    SubjectTeacherassigments,
     SyllabusProgress,
     SyllabusUnit,
     TimeSlot,
@@ -162,13 +162,13 @@ class StaffProfileSerializer(serializers.ModelSerializer):
 
 
 # ============================================================
-# Phase 2 — assignments & enrollment
+# Phase 2 — assigmentss & enrollment
 # ============================================================
-class ClassTeacherAssignmentSerializer(serializers.ModelSerializer):
+class ClassTeacherassigmentsSerializer(serializers.ModelSerializer):
     staff_detail = StaffProfileSerializer(source="staff", read_only=True)
 
     class Meta:
-        model = ClassTeacherAssignment
+        model = ClassTeacherassigments
         fields = ["id", "section", "staff", "staff_detail"]
         read_only_fields = ["id"]
 
@@ -180,12 +180,12 @@ class ClassTeacherAssignmentSerializer(serializers.ModelSerializer):
         return attrs
 
 
-class SubjectTeacherAssignmentSerializer(serializers.ModelSerializer):
+class SubjectTeacherassigmentsSerializer(serializers.ModelSerializer):
     staff_detail = StaffProfileSerializer(source="staff", read_only=True)
     subject_detail = SubjectSerializer(source="subject", read_only=True)
 
     class Meta:
-        model = SubjectTeacherAssignment
+        model = SubjectTeacherassigments
         fields = [
             "id", "section", "subject", "staff", "staff_detail", "subject_detail",
             "approved_by", "status", "responded_at",
@@ -319,11 +319,11 @@ class AttendanceSerializer(serializers.ModelSerializer):
 
 
 # ============================================================
-# Phase 6 — assignments & syllabus
+# Phase 6 — assigmentss & syllabus
 # ============================================================
-class AssignmentSerializer(serializers.ModelSerializer):
+class assigmentsSerializer(serializers.ModelSerializer):
     class Meta:
-        model = Assignment
+        model = assigments
         fields = [
             "id", "section", "subject", "posted_by", "title", "description",
             "attachment", "due_date", "session",
@@ -331,13 +331,13 @@ class AssignmentSerializer(serializers.ModelSerializer):
         read_only_fields = ["id", "posted_by"]
 
 
-class AssignmentSubmissionSerializer(serializers.ModelSerializer):
+class assigmentsSubmissionSerializer(serializers.ModelSerializer):
     student_detail = MinimalUserSerializer(source="student", read_only=True)
 
     class Meta:
-        model = AssignmentSubmission
+        model = assigmentsSubmission
         fields = [
-            "id", "assignment", "student", "student_detail", "submitted_at",
+            "id", "assigments", "student", "student_detail", "submitted_at",
             "file", "status", "grade", "feedback",
         ]
         read_only_fields = ["id", "student", "submitted_at", "status"]

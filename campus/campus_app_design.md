@@ -14,7 +14,7 @@
 
 > **Reconciliation pass (newest — this update)**: `bridge.py`, `models.py`, aur `views.py` firse check kiye gaye — **§10 ka "PARTIALLY WIRED" title ab STALE hai, aur ek naya real bug mila hai** (guess nahi, code se confirmed):
 > - **Group A (`create_section_group`/`notify`/`provision_video_room`/`resolve_parent_from_token`) ab FULLY WIRED hai** — `bridge.py`'s apna module STATUS ab khud bolta hai "all three gaps this file previously flagged as blocked are now resolved". Sab 4 functions ab `core.classroom_chat_bridge`/`core.models` ko **module-level hard import** se call karte hain (pehle `except ImportError` degrade tha) — koi bhi missing `core` ab Django startup pe hi fail hoga, request-time silent no-op nahi. `resolve_parent_from_token`'s purana `[SHAPE MISMATCH]` (jo deliberately `(None, None)` return karta tha) bhi ab RESOLVED hai — `_get_or_create_shadow_parent_user()` naya helper har `ParentAccessCode` ke liye ek non-loginable "shadow" `login.User` bana/reuse karta hai (username convention `parent_shadow_<access_code_id>`, `set_unusable_password()`), taaki `(parent_user, student_user)` ek real tuple ho, `(None, None)` nahi. §0, §10 poora rewrite kiya.
-> - **🔴 NEW CRITICAL BUG mila (is pass ka sabse important finding):** `views.py::SectionViewSet.perform_create()` `bridge.create_section_group(section, actor=self.request.user)` ko **koi try/except ke bina** call karta hai — comment ab bhi stale hai ("no-ops with a logged warning until core.classroom_chat_bridge actually exists"). Ab jab ye hard-wired hai, real `core.classroom_chat_bridge.create_section_group()` `ValueError` raise karta hai agar `actor` section ka assigned class-teacher na ho — aur ek abhi-abhi bani section ke paas **koi `ClassTeacherAssignment` hota hi nahi** (wo alag endpoint se, baad me banta hai). Matlab: section creation ka **har normal real call ab 500 dega** — aur wo bhi partial-failure ke saath, kyunki `serializer.save()` bridge call se PEHLE ho chuka hota hai, isliye Section row DB me ban chuki hoti hai jab response 500 deta hai. `tests.py`'s locked-in `test_bridge_not_being_wired_up_yet_does_not_break_section_creation` (real bridge, no mock, `201` assert karta hai) ab is naye behavior ke against stale hai — uska apna docstring khud "core app not installed in this test project" maanta hai, jo test-project ki setup pe depend karta hai, real deployment (jahan `core` install hai) me ye test fail hoga. §1, §10, §16, §17 me flag kiya.
+> - **🔴 NEW CRITICAL BUG mila (is pass ka sabse important finding):** `views.py::SectionViewSet.perform_create()` `bridge.create_section_group(section, actor=self.request.user)` ko **koi try/except ke bina** call karta hai — comment ab bhi stale hai ("no-ops with a logged warning until core.classroom_chat_bridge actually exists"). Ab jab ye hard-wired hai, real `core.classroom_chat_bridge.create_section_group()` `ValueError` raise karta hai agar `actor` section ka assigned class-teacher na ho — aur ek abhi-abhi bani section ke paas **koi `ClassTeacherassigments` hota hi nahi** (wo alag endpoint se, baad me banta hai). Matlab: section creation ka **har normal real call ab 500 dega** — aur wo bhi partial-failure ke saath, kyunki `serializer.save()` bridge call se PEHLE ho chuka hota hai, isliye Section row DB me ban chuki hoti hai jab response 500 deta hai. `tests.py`'s locked-in `test_bridge_not_being_wired_up_yet_does_not_break_section_creation` (real bridge, no mock, `201` assert karta hai) ab is naye behavior ke against stale hai — uska apna docstring khud "core app not installed in this test project" maanta hai, jo test-project ki setup pe depend karta hai, real deployment (jahan `core` install hai) me ye test fail hoga. §1, §10, §16, §17 me flag kiya.
 > - **Task 19 (`Campus.testseries_paid_allowed`) ab ENFORCED hai — §5a ka "field only, NOT yet enforced" title STALE hai.** `campus.bridge.create_testseries()` me ab `is_paid`/`price_coins` kwargs hain (pehle exist hi nahi karte the), `section.school_class.campus.testseries_paid_allowed` ke against force-reset karte hain jab `False` ho. `TestSeriesViewSet.create()` bhi isi flag pe seedha gate karta hai (paid request `403` agar flag off hai) bridge call se pehle. `models.py`'s apna comment ye bhi claim karta hai ki `TestSeries.save()` (testseries/models.py) ab `source==CAMPUS` re-check nahi karta — **ye specific claim sirf `models.py`/`bridge.py` ke apne comments se hai, `testseries/models.py` khud is pass upload nahi hua, isliye independently verify nahi ho paaya** (same "flag, don't guess" posture jo baaki cross-app claims ke liye already hai). §0, §5a, §16 update kiye.
 > - `models.py` me `Section.chat_group_enabled`/`linked_conversation_id` aur `Campus.testseries_paid_allowed` dono fields confirmed maujood hain — bridge.py ki assumptions se match karte hain.
 
@@ -48,10 +48,10 @@
 >   kiye.
 > - **F-3 (gamification/streak rewards) — naya, partially built**:
 >   `tasks.py` mein `check_attendance_streak_rewards`/
->   `check_assignment_ontime_streak_rewards` naye tasks hain jo
+>   `check_assigments_ontime_streak_rewards` naye tasks hain jo
 >   `CoinLedger` bonus dete hain — lekin ye do REAL gaps ke saath aaye hain
 >   jo guess nahi kiye gaye, sirf flag kiye: (1) `services.py` mein
->   `compute_attendance_streak`/`compute_assignment_ontime_streak` functions
+>   `compute_attendance_streak`/`compute_assigments_ontime_streak` functions
 >   **exist hi nahi karte** jinhe ye tasks import karte hain — ye tasks
 >   `ImportError` denge jab bhi chalenge; (2) `bridge.NotifTypes` mein
 >   `CAMPUS_REWARD_EARNED` **define nahi hai** jise dono naye tasks
@@ -86,25 +86,25 @@
 > ko is against update kiya gaya:
 > - **F-3 ab poora RESOLVED hai — pichli pass ke "PARTIALLY BUILT, currently
 >   broken end-to-end" wale dono gaps fix ho chuke hain**: `services.py` me
->   ab `compute_attendance_streak`/`compute_assignment_ontime_streak` dono
+>   ab `compute_attendance_streak`/`compute_assigments_ontime_streak` dono
 >   real definitions ke saath maujood hain (pichli pass me bilkul missing
 >   the), aur `bridge.NotifTypes` me `CAMPUS_REWARD_EARNED` bhi ab defined
 >   hai. Dono streak-reward Celery tasks ab crash nahi karenge — §7a, §9,
 >   §11, §16, §18 update kiye is resolution ko reflect karne ke liye.
 >   **Test coverage ab bhi zero hai** dono tasks ke liye — ye gap abhi bhi
 >   khula hai, §16/§17 me flag kiya.
-> - **Task 11 (Assignment unification) — naya, is doc me pehli baar
->   document ho raha hai**: purana `campus.Assignment`/
->   `AssignmentSubmission` model ab **`[DEPRECATED]`** hai — `save()` khud
+> - **Task 11 (assigments unification) — naya, is doc me pehli baar
+>   document ho raha hai**: purana `campus.assigments`/
+>   `assigmentsSubmission` model ab **`[DEPRECATED]`** hai — `save()` khud
 >   naya row banane se `RuntimeError` deta hai (sirf ek-time migration
->   command ke liye `migration_write=True` bypass) — sab naya assignment
->   data ab unified `assignment` app me jaata hai
+>   command ke liye `migration_write=True` bypass) — sab naya assigments
+>   data ab unified `assigments` app me jaata hai
 >   (`source="campus"`/`context_type="section"`), `campus.bridge.
->   create_assignment()`/`get_assignment_submissions()` ke through.
->   `AssignmentViewSet`/`AssignmentSubmissionViewSet` ab `ModelViewSet`
+>   create_assigments()`/`get_assigments_submissions()` ke through.
+>   `assigmentsViewSet`/`assigmentsSubmissionViewSet` ab `ModelViewSet`
 >   nahi, thin proxy `ViewSet`s hain jo purani JSON shape preserve karte
 >   hain. Ek-time historical backfill
->   `migrate_campus_assignments_to_unified` management command se hota
+>   `migrate_campus_assigmentss_to_unified` management command se hota
 >   hai (idempotent, rollback-log ke saath). §0, §5, §10, §14, §16, §18,
 >   §23 update kiye.
 > - **Task 13 (Test series bridge) — naya, is doc me pehli baar
@@ -115,7 +115,7 @@
 >   `get_testseries_attempts()`. Naye `TestSeriesViewSet`/
 >   `TestAttemptViewSet` (`test-series/`, `test-attempts/`) — dono thin
 >   `ViewSet`s, `testseries` model layer par seedha proxy, purani
->   `Assignment`/`AssignmentSubmission` proxy jaisi hi shape me. Naya
+>   `assigments`/`assigmentsSubmission` proxy jaisi hi shape me. Naya
 >   **§5a** poora document karta hai; §0, §10, §14, §16, §18, §23 bhi
 >   update kiye.
 > - **Task 19 (`Campus.testseries_paid_allowed`) — naya field, abhi sirf
@@ -128,7 +128,7 @@
 >   the recommended path" bolta hai). §5a, §16, §23 me flag kiya.
 > - **2 naye ad-hoc management commands, is doc me pehli baar
 >   document ho rahe hain**: `add_testseries_paid_allowed_field` aur
->   `migrate_campus_assignments_to_unified` — dono `django_migrations`
+>   `migrate_campus_assigmentss_to_unified` — dono `django_migrations`
 >   se bahar operate karte hain (dono ke apne module docstring me hi ye
 >   caveat likha hai: `makemigrations` inhe abhi bhi unapplied model
 >   change ki tarah detect karega). Naya **§0** row aur **§23** note.
@@ -172,12 +172,12 @@
 | `views.py` | Har model ka ViewSet + custom `@action`s — §14 |
 | `urls.py` | `DefaultRouter` registrations + 1 plain `path()` — §14 |
 | `throttles.py` | **B-4, new** — 4 `ScopedRateThrottle` subclasses, each with its own fixed `scope` (not `view.throttle_scope`, since several apply to different `@action`s on the SAME ViewSet): `CampusFeePaymentThrottle` (`FeePaymentViewSet.pay`/`.record`/`.refund`), `CampusLiveSessionJoinThrottle` (`CampusLiveSessionViewSet.start`), `CampusNoticePostThrottle` (`NoticeViewSet.create` only, via `get_throttles()`), `CampusParentLinkVerifyThrottle` (`ParentLinkVerifyView`, class-level). §12a |
-| `bridge.py` | `campus` → `core`/`message`/`liveclass`/`assignment`/`testseries` ka **ONLY** door — §10. **Ab SAB functions hard-import/fully wired hain** — `create_section_group`/`notify`/`provision_video_room`/`resolve_parent_from_token` (`core`/`message` ki taraf) aur `create_assignment`/`get_assignment_submissions` (Task 11) aur `create_testseries`/`can_review_testseries_attempt`/`get_testseries_attempts` (Task 13, `is_paid`/`price_coins` ab wired — Task 19) — koi lazy-import/no-op degrade kahin nahi bacha. `resolve_parent_from_token` shadow-parent-user resolve karta hai (naya). ⚠️ **`create_section_group`'s caller (`SectionViewSet.perform_create`) me is wiring se ek real bug expose hua hai — §1/§10/§16 dekho.** |
-| `services.py` | `compute_attendance_summary`, `generate_report_card_data`, `compute_attendance_streak`, `compute_assignment_ontime_streak` (F-3, ab resolved) — §11 |
-| `tasks.py` | 7 Celery tasks (`rollover_session`, `check_low_attendance`, `check_attendance_streak_rewards`, `send_assignment_due_reminders`, `check_assignment_ontime_streak_rewards`, `send_fee_due_reminders`, `refresh_analytics_snapshot`) — §12. **F-3's two streak tasks (`check_attendance_streak_rewards`, `check_assignment_ontime_streak_rewards`) ab poore wired hain (see §7a resolution) — pehle crash karte the, ab nahi, lekin koi test coverage abhi bhi nahi hai.** |
+| `bridge.py` | `campus` → `core`/`message`/`liveclass`/`assigments`/`testseries` ka **ONLY** door — §10. **Ab SAB functions hard-import/fully wired hain** — `create_section_group`/`notify`/`provision_video_room`/`resolve_parent_from_token` (`core`/`message` ki taraf) aur `create_assigments`/`get_assigments_submissions` (Task 11) aur `create_testseries`/`can_review_testseries_attempt`/`get_testseries_attempts` (Task 13, `is_paid`/`price_coins` ab wired — Task 19) — koi lazy-import/no-op degrade kahin nahi bacha. `resolve_parent_from_token` shadow-parent-user resolve karta hai (naya). ⚠️ **`create_section_group`'s caller (`SectionViewSet.perform_create`) me is wiring se ek real bug expose hua hai — §1/§10/§16 dekho.** |
+| `services.py` | `compute_attendance_summary`, `generate_report_card_data`, `compute_attendance_streak`, `compute_assigments_ontime_streak` (F-3, ab resolved) — §11 |
+| `tasks.py` | 7 Celery tasks (`rollover_session`, `check_low_attendance`, `check_attendance_streak_rewards`, `send_assigments_due_reminders`, `check_assigments_ontime_streak_rewards`, `send_fee_due_reminders`, `refresh_analytics_snapshot`) — §12. **F-3's two streak tasks (`check_attendance_streak_rewards`, `check_assigments_ontime_streak_rewards`) ab poore wired hain (see §7a resolution) — pehle crash karte the, ab nahi, lekin koi test coverage abhi bhi nahi hai.** |
 | `tests.py` | 54 tests covering most flows below — §17 lists what's locked-in, and what's still untested. **Task 11/13/19 ke liye abhi tak koi naya test nahi hai (count wahi 54 hai).** |
 | `apps.py`, `__init__.py` | Standard Django boilerplate, nothing app-specific |
-| `management/commands/migrate_campus_assignments_to_unified.py` | **[Task 11]** One-time, idempotent historical backfill: purane `campus.Assignment`/`AssignmentSubmission` rows ko unified `assignment` app me copy karta hai. Rollback-log (`--log-dir`, default `campus_migration_logs/`) + `--rollback <log-file>` + `--dry-run` support karta hai. Purane rows ko kabhi touch/delete nahi karta — §5, §23 |
+| `management/commands/migrate_campus_assigmentss_to_unified.py` | **[Task 11]** One-time, idempotent historical backfill: purane `campus.assigments`/`assigmentsSubmission` rows ko unified `assigments` app me copy karta hai. Rollback-log (`--log-dir`, default `campus_migration_logs/`) + `--rollback <log-file>` + `--dry-run` support karta hai. Purane rows ko kabhi touch/delete nahi karta — §5, §23 |
 | `management/commands/add_testseries_paid_allowed_field.py` | **[Task 19]** Ad-hoc raw-SQL command jo `Campus.testseries_paid_allowed` column seedha DB me add karta hai, migration ke bajaye — apna khud ka module docstring hi isse "not the recommended path" bolta hai. Idempotent (`--dry-run` support), postgresql/sqlite/mysql teeno backends ke liye SQL hai — §5a, §23 |
 
 ---
@@ -300,31 +300,31 @@ ANY pending campus, not just ones they're already a member of. Sets
   the very first one: `CampusViewSet.perform_create` auto-creates the creator
   as `ADMIN` in the same transaction as campus creation.
 
-### `ClassTeacherAssignment`
-- `section` **OneToOne** → `Section`, `related_name="class_teacher_assignment"`
+### `ClassTeacherassigments`
+- `section` **OneToOne** → `Section`, `related_name="class_teacher_assigments"`
   (one class-teacher per section, enforced at DB level via OneToOne)
 - `staff` FK → `StaffProfile`, `related_name="class_teacher_of"`
 - Cross-check: `staff.campus_id == section.school_class.campus_id`
 
-### `SubjectTeacherAssignment`
+### `SubjectTeacherassigments`
 - `section` FK, `subject` FK, `staff` FK (all CASCADE)
 - `approved_by` FK → `StaffProfile`, nullable, `SET_NULL`, `related_name="approvals_made"`
 - `status` CharField(10), choices `pending`/`approved`/`rejected`, default
   `pending`, `db_index=True`
 - `responded_at` DateTimeField, null/blank — set when approved/rejected
 - `updated_at` auto_now
-- **DB constraint**: `unique_subject_teacher_assignment` on `(section, subject, staff)`
+- **DB constraint**: `unique_subject_teacher_assigments` on `(section, subject, staff)`
 - **Flow (design doc's "class-teacher subject-teacher ko allow karega")**:
   - Create: **any authenticated user** can request (no special role needed) —
-    `SubjectTeacherAssignmentViewSet.permission_classes = [IsAuthenticated]`
+    `SubjectTeacherassigmentsViewSet.permission_classes = [IsAuthenticated]`
     (overridden from the campus-scoped default). Lands `PENDING`.
-  - `POST /subject-teacher-assignments/{id}/approve/` and `.../reject/`:
-    only that section's `ClassTeacherAssignment` holder, OR a campus
+  - `POST /subject-teacher-assigmentss/{id}/approve/` and `.../reject/`:
+    only that section's `ClassTeacherassigments` holder, OR a campus
     admin/principal-HOD (fallback for when no class-teacher assigned yet), can
     decide (`_can_decide()`). Sets `status`, `approved_by` (the deciding
     staff's own `StaffProfile` row), `responded_at=now()`. Fires
-    `bridge.notify(...)` with `STAFF_ASSIGNMENT_APPROVED` /
-    `STAFF_ASSIGNMENT_REJECTED` to the requesting staff's user.
+    `bridge.notify(...)` with `STAFF_assigments_APPROVED` /
+    `STAFF_assigments_REJECTED` to the requesting staff's user.
   - Cross-check on create: `subject.campus_id` and `staff.campus_id` must both
     equal `section.school_class.campus_id`.
   - Locked in by tests: `test_class_teacher_can_approve`,
@@ -402,7 +402,7 @@ ANY pending campus, not just ones they're already a member of. Sets
   `department`/`school_class`/`section` is set, its own campus (via
   `.campus_id`, or `.school_class.campus_id` for `section`) must equal the
   given `campus`.
-- Section-group message send on `CampusLiveSession` scheduling/`Assignment`
+- Section-group message send on `CampusLiveSession` scheduling/`assigments`
   posting also creates a `Notice` (see below) — `Notice` isn't only
   manually posted.
 
@@ -510,20 +510,20 @@ Locked in by tests: `test_approved_subject_teacher_can_schedule_session`,
 
 ---
 
-## 5. Assignments + syllabus tracker (Phase 6, DONE — **`Assignment`/`AssignmentSubmission` models now `[DEPRECATED — Task 11]`, superseded by a thin proxy over the unified `assignment` app**)
+## 5. assigmentss + syllabus tracker (Phase 6, DONE — **`assigments`/`assigmentsSubmission` models now `[DEPRECATED — Task 11]`, superseded by a thin proxy over the unified `assigments` app**)
 
-### `Assignment` / `AssignmentSubmission` models — **`[DEPRECATED — Task 11]`, read-only history**
+### `assigments` / `assigmentsSubmission` models — **`[DEPRECATED — Task 11]`, read-only history**
 These two models are frozen — kept ONLY as historical data, never written
 to going forward:
-- `Assignment.save()` raises `RuntimeError` for any NEW row
+- `assigments.save()` raises `RuntimeError` for any NEW row
   (`self.pk is None`) unless called with the internal
   `save(migration_write=True)` bypass — the ONE sanctioned caller of that
-  bypass is `migrate_campus_assignments_to_unified` (below), never
+  bypass is `migrate_campus_assigmentss_to_unified` (below), never
   application code. Updates to an already-existing (already-migrated) row
   are still technically allowed by the guard, but nothing in this app does
   that either.
-- `AssignmentSubmission` carries the identical guard/reasoning, same
-  docstring pointer back to `Assignment`'s.
+- `assigmentsSubmission` carries the identical guard/reasoning, same
+  docstring pointer back to `assigments`'s.
 - Field shapes are unchanged from before (`section`/`subject` FK CASCADE,
   `posted_by` → `StaffProfile` SET_NULL, `title`/`description`/
   `attachment`/`due_date`/`session`; submission's `status` choices
@@ -531,48 +531,48 @@ to going forward:
   — this is purely a "stop writing new rows here" change, not a schema
   change.
 
-### The real, current path: unified `assignment` app via `campus.bridge`
-Every assignment now actually lives on `assignment.models.Assignment`
+### The real, current path: unified `assigments` app via `campus.bridge`
+Every assigments now actually lives on `assigments.models.assigments`
 (`source="campus"`, `context_type="section"`, `context_id=<Section.id>`) —
-`campus` never imports `assignment.models` outside `bridge.py` (golden
-rule), and never imports `campus.Assignment`/`AssignmentSubmission` for
+`campus` never imports `assigments.models` outside `bridge.py` (golden
+rule), and never imports `campus.assigments`/`assigmentsSubmission` for
 writes at all any more.
 
-- **`campus.bridge.create_assignment(*, section, subject, posted_by, title,
+- **`campus.bridge.create_assigments(*, section, subject, posted_by, title,
   description="", attachment=None, due_date=None)`** → delegates to
-  `assignment.bridge.create_context_assignment()`, which does the roster
+  `assigments.bridge.create_context_assigments()`, which does the roster
   bulk-pre-create itself (same "MISSING row per ACTIVE enrollment" behaviour
-  as before, just inside `assignment` now). `subject_id` has no field on the
+  as before, just inside `assigments` now). `subject_id` has no field on the
   unified model (a `Section` spans multiple subjects, unlike `session` which
-  is always derivable) — stashed in `Assignment.data["subject_id"]` instead;
-  `_serialize_campus_assignment()` reads it back out to keep the OLD
+  is always derivable) — stashed in `assigments.data["subject_id"]` instead;
+  `_serialize_campus_assigments()` reads it back out to keep the OLD
   response shape (`id, section, subject, posted_by, title, description,
   attachment, due_date, session`) intact for existing frontend code.
-- **`campus.bridge.get_assignment_submissions(section)`** → delegates to
-  `assignment.bridge.get_submissions_for_context(context_type="section",
+- **`campus.bridge.get_assigments_submissions(section)`** → delegates to
+  `assigments.bridge.get_submissions_for_context(context_type="section",
   context_id=section.id)`. Unfiltered by permission — `views.py` narrows.
-- **`AssignmentViewSet`** (`assignments/`) — thin proxy `ViewSet`, NOT a
+- **`assigmentsViewSet`** (`assigmentss/`) — thin proxy `ViewSet`, NOT a
   `ModelViewSet`/`CampusMemberScopedMixin` subclass (`context_id` is an
   opaque `UUIDField`, not a real FK that mixin's campus-traversal could
   follow). `list`/`retrieve`/`create` only.
   - `create`: same staff-permission check as before
-    (`can_manage_section_subject`) BEFORE calling `bridge.create_assignment()`
+    (`can_manage_section_subject`) BEFORE calling `bridge.create_assigments()`
     — **`[ASSUMPTION — NOT VERIFIED]`** this mirrors what the old, no-longer-
     reviewed `IsSectionSubjectStaffOrReadOnly` permission class likely did,
     since that class's own source wasn't re-confirmed this pass. Also
-    (re-)creates the `Notice` + `ASSIGNMENT_POSTED_CAMPUS` fan-out itself,
+    (re-)creates the `Notice` + `assigments_POSTED_CAMPUS` fan-out itself,
     now directly in the view rather than inside the old model's
     `perform_create` — same two side effects, just moved.
   - **`[GAP — flagged, not guessed]`** `update`/`partial_update`/`destroy`
-    are NOT implemented on `AssignmentViewSet` — the old `ModelViewSet`
-    allowed arbitrary PATCHes on a posted assignment, but the unified
+    are NOT implemented on `assigmentsViewSet` — the old `ModelViewSet`
+    allowed arbitrary PATCHes on a posted assigments, but the unified
     model's mutation surface is explicit-method-based and no design input
-    covers what "edit a posted campus assignment" should mean against it.
+    covers what "edit a posted campus assigments" should mean against it.
     See §16.
-- **`AssignmentSubmissionViewSet`** (`assignment-submissions/`) — same thin-
+- **`assigmentsSubmissionViewSet`** (`assigments-submissions/`) — same thin-
   proxy posture, `http_method_names = ["get", "post", "patch", "head",
   "options"]` (unchanged). `_serialize_campus_submission()` preserves the
-  OLD JSON shape (`id, assignment, student, submitted_at, file, status,
+  OLD JSON shape (`id, assigments, student, submitted_at, file, status,
   grade, feedback`) even though `status` can now ALSO be
   `"checked"`/`"partially_checked"` — values the old 3-state model never
   produced, now possible via the unified model's structured-question
@@ -582,17 +582,17 @@ writes at all any more.
     neither the submission's student nor active staff at that campus).
   - `create`: edge case only (student enrolled after posting) — written
     directly against the unified model (`get_or_create`), not through
-    `assignment`'s own public-facing serializer/viewset (whose
-    `validate_assignment()` rejects `create()` for a non-personal-source
-    assignment) — same "trusted, internal bridge-style write" posture
-    `create_context_assignment()` itself already uses.
+    `assigments`'s own public-facing serializer/viewset (whose
+    `validate_assigments()` rejects `create()` for a non-personal-source
+    assigments) — same "trusted, internal bridge-style write" posture
+    `create_context_assigments()` itself already uses.
   - `partial_update`: branches on caller same as before — own student →
     `submit_freeform(file=...)`; anyone else → grading path, still gated on
     `can_manage_section_subject`.
-- **Historical backfill**: `migrate_campus_assignments_to_unified`
+- **Historical backfill**: `migrate_campus_assigmentss_to_unified`
   management command (one-time, idempotent — see §0/§23) copies every
-  existing `campus.Assignment`/`AssignmentSubmission` row into the unified
-  app, tagged `data["migrated_from_campus_assignment_id"]` for re-run
+  existing `campus.assigments`/`assigmentsSubmission` row into the unified
+  app, tagged `data["migrated_from_campus_assigments_id"]` for re-run
   safety. Roster is built from the OLD submission rows themselves (not
   current `StudentEnrollment`), so a student who's since left the section
   doesn't lose their historical row. `status` copied verbatim (the 3 old
@@ -600,12 +600,12 @@ writes at all any more.
   for every migrated row (no historical value existed to backfill).
   `--rollback <log-file>` deletes exactly the NEW rows that specific run
   created (never rows a run merely re-touched).
-- Old lock-in tests (`test_posting_assignment_precreates_submissions_and_notifies`,
-  `test_student_can_submit_own_assignment`) still exist in `tests.py` and
+- Old lock-in tests (`test_posting_assigments_precreates_submissions_and_notifies`,
+  `test_student_can_submit_own_assigments`) still exist in `tests.py` and
   still pass — **`[GAP]`** neither was updated to assert against the new
-  unified-model-backed shape specifically (e.g. `Assignment.data["subject_id"]`,
+  unified-model-backed shape specifically (e.g. `assigments.data["subject_id"]`,
   or a `"checked"`/`"partially_checked"` submission status); no new test
-  exists for `AssignmentViewSet`/`AssignmentSubmissionViewSet`'s Task 11
+  exists for `assigmentsViewSet`/`assigmentsSubmissionViewSet`'s Task 11
   behaviour, or for the migration command. See §16/§17.
 
 ### `SyllabusUnit` / `SyllabusProgress` — unchanged, still native `campus` models
@@ -629,12 +629,12 @@ writes at all any more.
 ## 5a. Test series — campus thin proxy over `testseries` (Task 13, DONE) + `Campus.testseries_paid_allowed` (Task 19, NOW ENFORCED this pass)
 
 New this pass, no prior version of this doc covered it — `campus` has no
-native test-series model at all (unlike Assignment, which started native
+native test-series model at all (unlike assigments, which started native
 and only got unified in Task 11); this went straight to the unified
 `testseries` app from day one, same "one function is the app boundary"
-pattern `create_assignment()` established for `assignment`.
+pattern `create_assigments()` established for `assigments`.
 
-### `campus.bridge` functions (hard imports — `testseries` is a confirmed sibling app, no lazy-import/no-op degrade, same posture Task 11's `assignment` calls take)
+### `campus.bridge` functions (hard imports — `testseries` is a confirmed sibling app, no lazy-import/no-op degrade, same posture Task 11's `assigments` calls take)
 - **`create_testseries(*, section, creator, title, description="",
   duration_minutes=None, attempts_allowed=1, questions, is_paid=False,
   price_coins=0)`** → delegates to
@@ -648,7 +648,7 @@ pattern `create_assignment()` established for `assignment`.
   enforcement point**, not defence-in-depth alongside `TestSeries.save()`
   (see Task 19 note below for why that changed). No `subject`
   parameter either — `create_context_testseries()` has no `extra_data`-
-  shaped slot the way `create_context_assignment()` does, so a campus test
+  shaped slot the way `create_context_assigments()` does, so a campus test
   series is scoped to a `Section` only, not `Section`+`Subject`. Roster =
   every ACTIVE `StudentEnrollment.student` for the section (plain
   `login.User` instances — matches what `create_context_testseries()`'s own
@@ -676,14 +676,14 @@ pattern `create_assignment()` established for `assignment`.
 
 ### `TestSeriesViewSet` (`test-series/`) — thin proxy `ViewSet`
 `list`/`retrieve`/`create` only, same non-`ModelViewSet` posture
-`AssignmentViewSet` takes for the identical opaque-`context_id` reason.
+`assigmentsViewSet` takes for the identical opaque-`context_id` reason.
 `create` requires `section`, `subject` (permission-check only — never
 persisted, see `create_testseries()`'s docstring above for why there's
 nowhere to put it), `title`, `questions` in the body; gates on
 `can_manage_section_subject(user, campus_id, section.id, subject_id)`
 BEFORE calling `bridge.create_testseries()` — same "staff-permission
 check happens before the bridge call, testseries trusts its caller"
-golden rule `AssignmentViewSet.create()` already follows.
+golden rule `assigmentsViewSet.create()` already follows.
 
 ### `TestAttemptViewSet` (`test-attempts/`) — thin proxy `ViewSet`, review/grade only
 **No `create()`** — confirmed a campus student starts/submits their OWN
@@ -694,11 +694,11 @@ attempt through `testseries`'s own shared attempt endpoints directly
 purchase path). Nothing campus-specific is missing there.
 
 `http_method_names = ["get", "patch", "head", "options"]`. `list`/
-`retrieve` — same breadth as `AssignmentSubmissionViewSet`: a student
+`retrieve` — same breadth as `assigmentsSubmissionViewSet`: a student
 sees only their own attempts; staff at the relevant campus see every
 student's attempt for any section in that campus. `_get_scoped_attempt()`
 — same unrestricted-lookup + explicit `PermissionDenied` (403, not a
-queryset-filtered 404) posture as `AssignmentSubmissionViewSet`'s
+queryset-filtered 404) posture as `assigmentsSubmissionViewSet`'s
 `_get_scoped_submission()`.
 
 `partial_update` (grading, ONE question at a time — `question`,
@@ -713,8 +713,8 @@ says they SHOULD be allowed through — `[FLAGGED — NOT FIXED]` directly in
 partial_update()` here sidesteps that gap by resolving campus review
 rights independently (`bridge.can_review_testseries_attempt()`) and
 calling `TestAttempt.mark_answer_and_maybe_finalize()` directly — same
-"trusted, internal bridge-style write" posture `AssignmentSubmissionViewSet.
-partial_update()`'s grading branch already takes toward `assignment`.
+"trusted, internal bridge-style write" posture `assigmentsSubmissionViewSet.
+partial_update()`'s grading branch already takes toward `assigments`.
 `ValueError`/`InvalidOperation` from that model method (auto-graded
 question, negative marks, marks over question.marks) surfaces as a clean
 400, not a 500.
@@ -993,18 +993,18 @@ first-class write paths** (neither bolted onto the other):
 
 `tasks.py` has two Celery tasks that pay a `CoinLedger` bonus for good
 engagement streaks, sibling in shape to `check_low_attendance`/
-`send_assignment_due_reminders`:
+`send_assigments_due_reminders`:
 
 - **`check_attendance_streak_rewards`** — for every ACTIVE enrollment,
   recomputes the current daily-attendance streak via
   `services.compute_attendance_streak(enrollment)` and pays a bonus every
   time it crosses a fresh multiple of
   `settings.CAMPUS_ATTENDANCE_STREAK_DAYS` (assumed default 7).
-- **`check_assignment_ontime_streak_rewards`** — for every ACTIVE
+- **`check_assigments_ontime_streak_rewards`** — for every ACTIVE
   enrollment, recomputes the on-time-submission streak via
-  `services.compute_assignment_ontime_streak(student, section)` and pays a
+  `services.compute_assigments_ontime_streak(student, section)` and pays a
   bonus every time it crosses a fresh multiple of
-  `settings.CAMPUS_ASSIGNMENT_STREAK_COUNT` (assumed default 5).
+  `settings.CAMPUS_assigments_STREAK_COUNT` (assumed default 5).
 
 Both pay via `CoinLedger.objects.record_transaction(transaction_type=
 CoinLedger.TransactionType.CAMPUS_REWARD, ...)`, imported **directly** from
@@ -1021,7 +1021,7 @@ rewarded" — the `CoinLedger` `reference` is built from
 length)`, which can only happen once ever (dates don't repeat), so
 `record_transaction`'s own reference check is the real double-credit guard.
 Both are safe to re-run more than once a day for the same reason
-`send_assignment_due_reminders` is — no state of their own, only reads.
+`send_assigments_due_reminders` is — no state of their own, only reads.
 
 **`[RESOLVED — both real gaps from the previous pass are now fixed]`**
 Previously this section flagged that both tasks would crash the moment
@@ -1035,13 +1035,13 @@ either one actually ran:
    this only walks actual marked records. Returns `(streak_length,
    last_date)` — `(0, None)` if there's no current streak or no records at
    all. This is now **defined and present** in `services.py`.
-2. `services.compute_assignment_ontime_streak(student, section)` — reads
-   through `campus.bridge.get_assignment_submissions(section)` (Task 11's
-   unified-app redirect, same query path `send_assignment_due_reminders`
-   already uses — never the deprecated `campus.AssignmentSubmission`
-   model), walking backward ordered by `-assignment__due_date`. "On-time"
+2. `services.compute_assigments_ontime_streak(student, section)` — reads
+   through `campus.bridge.get_assigments_submissions(section)` (Task 11's
+   unified-app redirect, same query path `send_assigments_due_reminders`
+   already uses — never the deprecated `campus.assigmentsSubmission`
+   model), walking backward ordered by `-assigments__due_date`. "On-time"
    is `submitted_at is not None and not submission.is_late()` — confirmed
-   against the real `assignment/models.py`: a submission's `status` does
+   against the real `assigments/models.py`: a submission's `status` does
    NOT reliably stay `"submitted"` (grading moves it to `CHECKED`
    regardless of on-time-ness; the structured path never sets `SUBMITTED`/
    `LATE` at all), so `status`-based on-time detection would have been
@@ -1050,15 +1050,15 @@ either one actually ran:
    workflow status, so it works for both. Returns `(streak_length,
    last_due_date)` — `(0, None)` if no current streak. **`[EDGE CASE,
    FLAGGED NOT FIXED]`** if the most-recent submission in the streak
-   belongs to an assignment with `due_date=None` (the unified model allows
+   belongs to an assigments with `due_date=None` (the unified model allows
    this), this returns `(streak, None)` — but
-   `check_assignment_ontime_streak_rewards` calls
+   `check_assigments_ontime_streak_rewards` calls
    `last_due_date.isoformat()` unconditionally once `streak != 0`, which
    would raise `AttributeError` on that `None`. Not fixed because it's a
-   genuine product-rule gap (should a due-date-less assignment count
+   genuine product-rule gap (should a due-date-less assigments count
    toward an on-time streak at all?), not a coding guess — in practice
    this likely never fires since every other campus task touching
-   `due_date` assumes it's always set for a campus-sourced assignment, but
+   `due_date` assumes it's always set for a campus-sourced assigments, but
    the model doesn't enforce that. See §16.
 3. `bridge.NotifTypes.CAMPUS_REWARD_EARNED = "campus_reward_earned"` is now
    **defined** (§9's table updated below) — both tasks' post-reward
@@ -1069,8 +1069,8 @@ either one actually ran:
 were part of any upload so far): `CoinLedger.TransactionType.CAMPUS_REWARD`
 actually existing on the real `user_profile.models.CoinLedger`, and
 `settings.CAMPUS_ATTENDANCE_STREAK_DAYS` /
-`CAMPUS_ATTENDANCE_STREAK_BONUS_COINS` / `CAMPUS_ASSIGNMENT_STREAK_COUNT` /
-`CAMPUS_ASSIGNMENT_STREAK_BONUS_COINS` actually existing in the project's
+`CAMPUS_ATTENDANCE_STREAK_BONUS_COINS` / `CAMPUS_assigments_STREAK_COUNT` /
+`CAMPUS_assigments_STREAK_BONUS_COINS` actually existing in the project's
 settings.py — see §22. **No test in `tests.py` exercises either task** —
 this gap is NOT resolved, see §16/§17.
 
@@ -1099,12 +1099,12 @@ reference a type:
 CAMPUS_SESSION_SCHEDULED = "campus_session_scheduled"
 CAMPUS_SESSION_LIVE = "campus_session_live"
 LOW_ATTENDANCE_ALERT = "low_attendance_alert"
-ASSIGNMENT_POSTED_CAMPUS = "assignment_posted_campus"
-ASSIGNMENT_DUE_REMINDER = "assignment_due_reminder"
+assigments_POSTED_CAMPUS = "assigments_posted_campus"
+assigments_DUE_REMINDER = "assigments_due_reminder"
 RESULT_PUBLISHED = "result_published"
 FEE_DUE_REMINDER = "fee_due_reminder"          # constant exists; no emitter wired to it yet — see §16.3
-STAFF_ASSIGNMENT_APPROVED = "staff_assignment_approved"
-STAFF_ASSIGNMENT_REJECTED = "staff_assignment_rejected"
+STAFF_assigments_APPROVED = "staff_assigments_approved"
+STAFF_assigments_REJECTED = "staff_assigments_rejected"
 NOTICE_POSTED = "notice_posted"                # reused as-is from core.models.NotifType, not redefined
 CAMPUS_REWARD_EARNED = "campus_reward_earned"  # F-3, RESOLVED — see §7a
 ```
@@ -1113,15 +1113,15 @@ CAMPUS_REWARD_EARNED = "campus_reward_earned"  # F-3, RESOLVED — see §7a
 `core.models.NotifType`** once that lands — don't rename these casually.
 
 **`[RESOLVED — see §7a]`**: `CAMPUS_REWARD_EARNED` is now defined above.
-`tasks.check_attendance_streak_rewards`/`check_assignment_ontime_streak_
+`tasks.check_attendance_streak_rewards`/`check_assigments_ontime_streak_
 rewards`'s post-reward `bridge.notify(...)` calls no longer `AttributeError`.
 
 ---
 
-## 10. `bridge.py` — the golden-rule enforcement point `[FULLY WIRED — Group A (core/message) resolved this pass, alongside the already-wired assignment/testseries group]`
+## 10. `bridge.py` — the golden-rule enforcement point `[FULLY WIRED — Group A (core/message) resolved this pass, alongside the already-wired assigments/testseries group]`
 
 `campus/bridge.py` is `campus`'s **ONLY** door into `core`/`message`/
-`liveclass`/`assignment`/`testseries`. Two groups used to have different
+`liveclass`/`assigments`/`testseries`. Two groups used to have different
 postures (see the module docstring's own "TASK 11 ADDITION" note); **as of
 this pass both groups are hard-wired, no degrade anywhere** — the distinction
 below is now historical/organizational, not a behavior difference.
@@ -1158,7 +1158,7 @@ lazy import, that was safe. **It no longer is**: `create_section_group()`
 now calls straight through to the real
 `core.classroom_chat_bridge.create_section_group()`, which raises
 `ValueError` unless `actor` is already this section's assigned
-class-teacher (`ClassTeacherAssignment`) — and a section that was **just
+class-teacher (`ClassTeacherassigments`) — and a section that was **just
 created this request** never has one yet (that's a separate endpoint,
 done afterward). So **every normal section-creation request now 500s**,
 and does so as a **partial failure**: `serializer.save()` already
@@ -1170,17 +1170,17 @@ and log, or don't call `create_section_group` until a class-teacher is
 actually assigned) — not a guess this doc will make for you. See §1,
 §16, §17 for the related test/doc fallout.
 
-**Group B — `assignment`/`core.models.NotifType` fix (Task 11) and
+**Group B — `assigments`/`core.models.NotifType` fix (Task 11) and
 `testseries` (Task 13) — confirmed, fully-built sibling apps, HARD imports,
 no degrade**: if these genuinely aren't installed, campus's own
-assignment/testseries features have nothing to fall back to anyway, so a
+assigments/testseries features have nothing to fall back to anyway, so a
 hard import error at startup is the honest failure mode here, not a
 silently-neutered feature.
 
 | Function | Target | Status |
 |---|---|---|
-| `create_assignment(*, section, subject, posted_by, title, description="", attachment=None, due_date=None)` | `assignment.bridge.create_context_assignment()` | `[WIRED]` — Task 11, §5 |
-| `get_assignment_submissions(section)` | `assignment.bridge.get_submissions_for_context()` | `[WIRED]` — Task 11, §5 |
+| `create_assigments(*, section, subject, posted_by, title, description="", attachment=None, due_date=None)` | `assigments.bridge.create_context_assigments()` | `[WIRED]` — Task 11, §5 |
+| `get_assigments_submissions(section)` | `assigments.bridge.get_submissions_for_context()` | `[WIRED]` — Task 11, §5 |
 | `create_testseries(*, section, creator, title, description="", duration_minutes=None, attempts_allowed=1, questions, is_paid=False, price_coins=0)` | `testseries.bridge.create_context_testseries()` | `[WIRED]` — Task 13, §5a. **`is_paid`/`price_coins` NEW this pass (Task 19)** — gated on `section.school_class.campus.testseries_paid_allowed`, force-reset to `False`/`0` when that flag is off |
 | `can_review_testseries_attempt(*, user, context_type, context_id)` | `.models.Section` + `.permissions.is_any_active_staff` (local, no external app) | `[WIRED, SIGNATURE FIXED]` — Task 13, §5a. Real call site confirmed keyword-only `user`/`context_type`/`context_id`, not `(user, attempt)` — an earlier draft's guess was wrong and has been corrected, along with both call sites in `TestAttemptViewSet` |
 | `get_testseries_attempts(section)` | `testseries.bridge.get_attempts_for_context()` | `[WIRED]` — Task 13, §5a |
@@ -1238,13 +1238,13 @@ degrading and started actually enforcing its real contract.
   reached on one real calendar date, ever). `(0, None)` if there's no
   current streak or no records at all.
 
-### `compute_assignment_ontime_streak(student, section)` — **F-3, RESOLVED this pass**
-- Reads through `campus.bridge.get_assignment_submissions(section)` (Task
+### `compute_assigments_ontime_streak(student, section)` — **F-3, RESOLVED this pass**
+- Reads through `campus.bridge.get_assigments_submissions(section)` (Task
   11's unified-app redirect — never the deprecated `campus.
-  AssignmentSubmission`), filtered to `student` and ordered by
-  `-assignment__due_date`, walked backward.
+  assigmentsSubmission`), filtered to `student` and ordered by
+  `-assigments__due_date`, walked backward.
 - "On-time" = `submission.submitted_at is not None and not submission.
-  is_late()` — confirmed against the real `assignment/models.py`:
+  is_late()` — confirmed against the real `assigments/models.py`:
   `status` alone is NOT a reliable on-time signal (grading moves status to
   `CHECKED` regardless of on-time-ness; the structured submission path
   never sets `SUBMITTED`/`LATE` at all), whereas `is_late()` recomputes
@@ -1252,12 +1252,12 @@ degrading and started actually enforcing its real contract.
   so it's correct for both the free-form and structured paths.
 - Returns `(streak_length, last_due_date)`. **`[EDGE CASE, FLAGGED NOT
   FIXED]`**: if the most-recent submission in the streak belongs to an
-  assignment with `due_date=None` (allowed by the unified model), this
+  assigments with `due_date=None` (allowed by the unified model), this
   returns `(streak, None)` with `streak > 0` — `tasks.
-  check_assignment_ontime_streak_rewards()` calls `last_due_date.
+  check_assigments_ontime_streak_rewards()` calls `last_due_date.
   isoformat()` unconditionally once `streak != 0`, which would
   `AttributeError` on that `None`. Not fixed here — whether a due-date-less
-  assignment should count toward an on-time streak at all, and what should
+  assigments should count toward an on-time streak at all, and what should
   stand in for the idempotency reference if so, is a product-rule decision,
   not a coding guess. See §16.
 
@@ -1277,13 +1277,13 @@ correctly with that same try/except, since a bare function call still runs.
 | `rollover_session(campus_id, new_session_id)` | Called on-demand via `AcademicSessionViewSet.rollover` action, not on a schedule | Carries forward ACTIVE enrollments from the campus's OTHER sessions into the new one, matching by **same class name + same section name** in the new session. No match → skipped and counted, not guessed at. Returns `{carried_forward, skipped}` or `{"detail": "Session not found...", carried_forward: 0, skipped: 0}` if the session doesn't belong to that campus. Whole operation wrapped in `transaction.atomic()`. |
 | `check_low_attendance()` | `campus-daily-attendance-check` — **daily** | For every ACTIVE enrollment of every active `Campus`, recomputes overall %-age via `compute_attendance_summary` (skips if `total==0`); if `< campus.attendance_alert_threshold_percent`, fires `LOW_ATTENDANCE_ALERT` to the student + every `CampusParentLink` parent for that campus. Returns `{alerted: N}`. |
 | **`check_attendance_streak_rewards()`** — new (F-3) | Suggested against the same daily schedule as `check_low_attendance` | For every ACTIVE enrollment of every active `Campus`, recomputes the daily-attendance streak via `services.compute_attendance_streak(enrollment)` and pays a `CoinLedger` bonus (`settings.CAMPUS_ATTENDANCE_STREAK_BONUS_COINS`) every time it crosses a fresh multiple of `settings.CAMPUS_ATTENDANCE_STREAK_DAYS`. Idempotency key: `campus_attendance_streak:{enrollment_id}:{streak}:{last_date}` — see §7a. Returns `{rewarded: N}`. **`[BROKEN — see §7a/§9]`: crashes on the missing `services.compute_attendance_streak` and `NotifTypes.CAMPUS_REWARD_EARNED`.** |
-| `send_assignment_due_reminders()` | Daily, but **safe to run more than once a day** (re-run only re-notifies students still `MISSING`, no double-notify for ones who've since submitted, since it holds no state of its own) | For every `Assignment` with `due_date == today`, notifies every student whose `AssignmentSubmission.status == MISSING` with `ASSIGNMENT_DUE_REMINDER`. Returns `{reminded: N}`. |
-| **`check_assignment_ontime_streak_rewards()`** — new (F-3) | Suggested against the same daily schedule as `send_assignment_due_reminders` | For every ACTIVE enrollment, recomputes the on-time-submission streak via `services.compute_assignment_ontime_streak(student, section)` and pays a `CoinLedger` bonus (`settings.CAMPUS_ASSIGNMENT_STREAK_BONUS_COINS`) every time it crosses a fresh multiple of `settings.CAMPUS_ASSIGNMENT_STREAK_COUNT`. Idempotency key: `campus_assignment_streak:{enrollment_id}:{streak}:{last_due_date}` — see §7a. Returns `{rewarded: N}`. **`[BROKEN — see §7a/§9]`: same two missing dependencies as the attendance-streak task above.** |
+| `send_assigments_due_reminders()` | Daily, but **safe to run more than once a day** (re-run only re-notifies students still `MISSING`, no double-notify for ones who've since submitted, since it holds no state of its own) | For every `assigments` with `due_date == today`, notifies every student whose `assigmentsSubmission.status == MISSING` with `assigments_DUE_REMINDER`. Returns `{reminded: N}`. |
+| **`check_assigments_ontime_streak_rewards()`** — new (F-3) | Suggested against the same daily schedule as `send_assigments_due_reminders` | For every ACTIVE enrollment, recomputes the on-time-submission streak via `services.compute_assigments_ontime_streak(student, section)` and pays a `CoinLedger` bonus (`settings.CAMPUS_assigments_STREAK_BONUS_COINS`) every time it crosses a fresh multiple of `settings.CAMPUS_assigments_STREAK_COUNT`. Idempotency key: `campus_assigments_streak:{enrollment_id}:{streak}:{last_due_date}` — see §7a. Returns `{rewarded: N}`. **`[BROKEN — see §7a/§9]`: same two missing dependencies as the attendance-streak task above.** |
 | **`send_fee_due_reminders()`** — new (FEE-6, resolves what used to be open question §16.3) | Suggested daily | For every `FeeInvoice` whose `status` is still `PENDING`/`PARTIAL`/`OVERDUE` and whose `fee_structure.due_date` is today or past, notifies the student + linked parents with `FEE_DUE_REMINDER`. Since fee now debits the wallet (FEE-2), also appends a shortfall hint to the notification body when the **student's own** `User.coin` balance is short of what's still owed (never checks a linked parent's balance — a parent might pay from their own wallet, so this only names the shortfall it can state without ambiguity). Safe to re-run — reads `FeeInvoice.status`/`due_date` only, no state of its own. Returns `{reminded: N}`. |
 | `refresh_analytics_snapshot(campus_id, session_id)` | `campus-refresh-analytics-snapshot` — hourly/daily | Computes `avg_attendance_percent` (via `compute_attendance_summary` per active enrollment), `avg_marks_obtained` (DB `Avg` over `ResultEntry`), `syllabus_completion_percent` (`covered_units / total_units` over `SyllabusProgress`), `active_enrollments` count. Creates and returns the new `CampusAnalyticsSnapshot`'s id. **Deliberately minimal** — teacher-workload etc. from the original design-doc wishlist are NOT computed yet; this is a follow-up, not a guess at a shape nothing has asked for. |
 
 **F-3 note on `CoinLedger` imports**: `check_attendance_streak_rewards`/
-`check_assignment_ontime_streak_rewards` import
+`check_assigments_ontime_streak_rewards` import
 `user_profile.models.CoinLedger` **directly**, not through `bridge.py`.
 Deliberate, not an inconsistency with the `campus` → `core`/`message`
 golden rule — see §7a for why.
@@ -1340,7 +1340,7 @@ pass, G-2):
 - `can_manage_section_subject(user, campus_id, section_id, subject_id=None)` —
   the central "can this user touch this section's content" check, true if
   ANY of: class-teacher of the section; campus admin/principal-HOD; OR (only
-  if `subject_id` given) an APPROVED `SubjectTeacherAssignment` for that
+  if `subject_id` given) an APPROVED `SubjectTeacherassigments` for that
   exact section+subject. **When `subject_id` is `None`, the subject-teacher
   path never applies — only class-teacher/admin can act.**
 - **`can_post_notice(user, campus_id, department_id=None, school_class_id=None, section_id=None)`**
@@ -1408,8 +1408,8 @@ action) stays on the project-wide default throttle only.
 | `subject` | `subjects/` | `SubjectViewSet` | — |
 | `room` | `rooms/` | `RoomViewSet` | — |
 | `staff-profile` | `staff/` | `StaffProfileViewSet` | — |
-| `class-teacher-assignment` | `class-teacher-assignments/` | `ClassTeacherAssignmentViewSet` | — |
-| `subject-teacher-assignment` | `subject-teacher-assignments/` | `SubjectTeacherAssignmentViewSet` | `POST {id}/approve/`, `POST {id}/reject/` |
+| `class-teacher-assigments` | `class-teacher-assigmentss/` | `ClassTeacherassigmentsViewSet` | — |
+| `subject-teacher-assigments` | `subject-teacher-assigmentss/` | `SubjectTeacherassigmentsViewSet` | `POST {id}/approve/`, `POST {id}/reject/` |
 | `student-enrollment` | `enrollments/` | `StudentEnrollmentViewSet` | — |
 | `campus-parent-link` | `parent-links/` | `CampusParentLinkViewSet` (read-only) | plus standalone `POST parent-links/verify/` → `ParentLinkVerifyView` |
 | `notice` | `notices/` | `NoticeViewSet` | — |
@@ -1417,8 +1417,8 @@ action) stays on the project-wide default throttle only.
 | `time-slot` | `time-slots/` | `TimeSlotViewSet` | — |
 | `timetable-entry` | `timetable-entries/` | `TimetableEntryViewSet` | — |
 | `attendance` | `attendance/` | `AttendanceViewSet` | `GET summary/?enrollment=&subject=` |
-| `assignment` | `assignments/` | `AssignmentViewSet` | **Task 11 — thin proxy over unified `assignment` app now, not `campus.Assignment`.** `list`/`retrieve`/`create` only — no update/partial_update/destroy (§5 gap) |
-| `assignment-submission` | `assignment-submissions/` | `AssignmentSubmissionViewSet` | **Task 11 — thin proxy over unified `assignment.AssignmentSubmission`.** GET/POST/PATCH only, no PUT/DELETE |
+| `assigments` | `assigmentss/` | `assigmentsViewSet` | **Task 11 — thin proxy over unified `assigments` app now, not `campus.assigments`.** `list`/`retrieve`/`create` only — no update/partial_update/destroy (§5 gap) |
+| `assigments-submission` | `assigments-submissions/` | `assigmentsSubmissionViewSet` | **Task 11 — thin proxy over unified `assigments.assigmentsSubmission`.** GET/POST/PATCH only, no PUT/DELETE |
 | `campus-test-series` | `test-series/` | `TestSeriesViewSet` | **Task 13, new.** `list`/`retrieve`/`create` only — thin proxy over unified `testseries` app |
 | `campus-test-attempt` | `test-attempts/` | `TestAttemptViewSet` | **Task 13, new.** `list`/`retrieve`/`PATCH` only (grading) — no `create` (student starts/submits via `testseries`'s own attempt endpoints directly, see §5a) |
 | `syllabus-unit` | `syllabus-units/` | `SyllabusUnitViewSet` | — |
@@ -1445,10 +1445,10 @@ the router's own `parent-links/<pk>/` pattern would otherwise greedily match
 | Platform Admin (`is_staff`/`is_superuser`) | **New (G-2)** — approve/reject a pending `Campus` (`verification_status`). Independent of any campus's own `StaffProfile`. |
 | Campus Admin | Full campus — structural setup (departments/classes/sections/subjects/rooms/staff, gated on the campus being platform-APPROVED for staff/enrollment — see §13's `is_campus_approved`), session set-current/rollover, exam terms, timetable, fee-structure setup (if enabled), analytics, a fallback approver for subject-teacher requests, and can post a `Notice` at any scope |
 | Principal/HOD | Same permission level as Admin everywhere in the current code (`is_campus_admin_or_principal` never distinguishes the two) — `[FLAGGED]` if a real distinction is ever needed, it isn't there yet |
-| Class Teacher | Approve/reject subject-teacher requests for their own section; mark daily attendance for their section; manage (attendance/assignments/live-sessions/syllabus/results) anything scoped to their section regardless of subject; **can post a `Notice`, but ONLY scoped to their own section (G-1)** |
-| Subject Teacher (APPROVED only) | Only their approved section+subject: live sessions, subject-wise attendance, assignments, syllabus progress, results — never a daily (subject-less) attendance mark; **cannot post a `Notice` at all (G-1)** |
+| Class Teacher | Approve/reject subject-teacher requests for their own section; mark daily attendance for their section; manage (attendance/assigmentss/live-sessions/syllabus/results) anything scoped to their section regardless of subject; **can post a `Notice`, but ONLY scoped to their own section (G-1)** |
+| Subject Teacher (APPROVED only) | Only their approved section+subject: live sessions, subject-wise attendance, assigmentss, syllabus progress, results — never a daily (subject-less) attendance mark; **cannot post a `Notice` at all (G-1)** |
 | Non-teaching staff | Same as subject-teacher for notices: **cannot post one yet (G-1)** — no notice-scope of their own |
-| Student | Own schedule/notice/attendance/assignment/result/fee/ID card; submit own assignment; pay own fee invoice **from their own coin wallet (FEE-2)**; sees only their own `AssignmentSubmission` rows |
+| Student | Own schedule/notice/attendance/assigments/result/fee/ID card; submit own assigments; pay own fee invoice **from their own coin wallet (FEE-2)**; sees only their own `assigmentsSubmission` rows |
 | Parent (via verified `CampusParentLink`) | Read-only attendance/result/notice; can pay a linked child's fee invoice **from their own coin wallet (FEE-2)**; gets `LOW_ATTENDANCE_ALERT`/`RESULT_PUBLISHED`/`FEE_DUE_REMINDER` notifications |
 
 ---
@@ -1465,7 +1465,7 @@ the router's own `parent-links/<pk>/` pattern would otherwise greedily match
    revisiting.
 3. **`[NEW, CRITICAL]` `SectionViewSet.perform_create()` doesn't handle
    `create_section_group()`'s `ValueError`** — now that Group A (§10) is
-   hard-wired, a freshly-created section has no `ClassTeacherAssignment` yet,
+   hard-wired, a freshly-created section has no `ClassTeacherassigments` yet,
    so the real `core.classroom_chat_bridge.create_section_group()` raises on
    essentially every normal section-creation request — **after** the
    `Section` row is already saved. This is not a design question, it's a bug
@@ -1475,12 +1475,12 @@ the router's own `parent-links/<pk>/` pattern would otherwise greedily match
    itself (FEE-2), not fixed. Noting this so nobody re-derives the "any
    campus member can confirm anyone's payment" gap this used to flag; it no
    longer applies because there's nothing left to confirm.
-5. **`compute_assignment_ontime_streak()`'s `due_date=None` edge case** —
-   see §11/§7a for the full detail. If the assignment behind the most
+5. **`compute_assigments_ontime_streak()`'s `due_date=None` edge case** —
+   see §11/§7a for the full detail. If the assigments behind the most
    recent streak-extending submission has no `due_date`, `tasks.
-   check_assignment_ontime_streak_rewards()` will `AttributeError` calling
+   check_assigments_ontime_streak_rewards()` will `AttributeError` calling
    `.isoformat()` on the resulting `None`. Whether a due-date-less
-   assignment should count toward the streak at all is a product-rule
+   assigments should count toward the streak at all is a product-rule
    decision, not something this doc will guess at.
 6. **No test coverage for G-1, G-2, or F-3** — `tests.py` (54 tests) still
    only exercises the pre-existing flows plus the fee-wallet/refund paths.
@@ -1491,17 +1491,17 @@ the router's own `parent-links/<pk>/` pattern would otherwise greedily match
    are actually runnable (F-3 — no longer "arguably moot", genuinely
    testable and genuinely untested). Flagged so this isn't mistaken for
    "tested, therefore safe to build on."
-7. **`[NEW]` `AssignmentViewSet` has no update/partial_update/destroy
+7. **`[NEW]` `assigmentsViewSet` has no update/partial_update/destroy
    (Task 11)** — the old `ModelViewSet` allowed arbitrary PATCHes on a
-   posted campus assignment; the unified model's mutation surface is
+   posted campus assigments; the unified model's mutation surface is
    explicit-method-based (e.g. structured-question immutability once a
    submission exists) and no design input covers what "edit a posted
-   campus assignment" should mean against that surface now. See §5.
+   campus assigments" should mean against that surface now. See §5.
 8. **`Campus.testseries_paid_allowed` (Task 19) — now RESOLVED, see
    "Resolved this pass" below.**
 9. **No test coverage for Task 11, Task 13, or the now-wired Task 19
    enforcement** — `tests.py` is still exactly 54 tests. Zero tests for the
-   unified-assignment proxy (Task 11), the testseries campus bridge
+   unified-assigments proxy (Task 11), the testseries campus bridge
    (Task 13), or (newly relevant now that it's enforced, not just present)
    `testseries_paid_allowed`'s bridge-level force-reset and
    `TestSeriesViewSet`'s view-level `403` gate (Task 19). See §17.
@@ -1562,7 +1562,7 @@ not an accidental regression:
   rejected.
 - **Attendance**: subject-teacher can mark; an outsider cannot; summary %-age
   reflects marked records.
-- **Assignments** (pre-Task-11 tests, still passing but NOT updated to
+- **assigmentss** (pre-Task-11 tests, still passing but NOT updated to
   assert against the new unified-model-backed shape — see §5/§16.9):
   posting pre-creates submissions + notifies; a student can submit their
   own; a teacher can grade; an unrelated user cannot grade.
@@ -1598,14 +1598,14 @@ not an accidental regression:
 **`[GAP — see §16.6]`** entirely untested: `CampusViewSet.approve`/`.reject`
 (`IsPlatformAdmin` gating, `verification_status` transitions), and both
 streak-reward Celery tasks (`check_attendance_streak_rewards`,
-`check_assignment_ontime_streak_rewards` — now fully wired per §7a, so this
+`check_assigments_ontime_streak_rewards` — now fully wired per §7a, so this
 is a real, meaningful gap, not "can't test it yet anyway").
 
-**`[GAP — see §16.9]`** entirely untested, new this pass: `AssignmentViewSet`/
-`AssignmentSubmissionViewSet`'s Task 11 unified-app proxy behaviour (e.g.
-`Assignment.data["subject_id"]` round-tripping, a `"checked"`/
+**`[GAP — see §16.9]`** entirely untested, new this pass: `assigmentsViewSet`/
+`assigmentsSubmissionViewSet`'s Task 11 unified-app proxy behaviour (e.g.
+`assigments.data["subject_id"]` round-tripping, a `"checked"`/
 `"partially_checked"` submission status reaching `_serialize_campus_
-submission()`), `migrate_campus_assignments_to_unified`'s backfill/rollback
+submission()`), `migrate_campus_assigmentss_to_unified`'s backfill/rollback
 correctness, `TestSeriesViewSet`/`TestAttemptViewSet` (Task 13) end-to-end
 (create, list/retrieve scoping, the grading `partial_update` path,
 `can_review_testseries_attempt()`'s section-resolution/deny-on-missing-
@@ -1622,12 +1622,12 @@ is still exactly 54 tests.
 | Phase | Scope | Status |
 |---|---|---|
 | 1 | `Campus`, `AcademicSession`, `Department`, `SchoolClass`, `Section`, `Subject`, `Room`, `StaffProfile` | **DONE** |
-| 2 | `ClassTeacherAssignment`, `SubjectTeacherAssignment` (approval flow), `StudentEnrollment` | **DONE** |
+| 2 | `ClassTeacherassigments`, `SubjectTeacherassigments` (approval flow), `StudentEnrollment` | **DONE** |
 | 3 | Section-group auto-creation, `Notice` | **DONE (bridge call now HARD-WIRED — see §10 for a new bug this exposed in `SectionViewSet.perform_create`; posting now role-scoped per G-1)** |
 | 4 | `CampusLiveSession` (coin-free) + notifications | **DONE (video provisioning + notify now HARD-WIRED, §10 — no known bug at these call sites)** |
 | 5 | `TimeSlot`, `TimetableEntry` (clash-detection) | **DONE** |
 | 6 | `Attendance` + auto low-attendance alert task | **DONE (`notify()` now HARD-WIRED — §10)** |
-| 7 | `Assignment`, `AssignmentSubmission` + auto-reminder task | **DONE (`notify()` now HARD-WIRED — §10)** |
+| 7 | `assigments`, `assigmentsSubmission` + auto-reminder task | **DONE (`notify()` now HARD-WIRED — §10)** |
 | 8 | `SyllabusUnit`, `SyllabusProgress` | **DONE** |
 | 9 | `ExamTerm`, `ResultEntry` | **DONE** |
 | 10 | `CampusParentLink` wiring (reuse `message.ParentAccessCode`) | **DONE end-to-end — `resolve_parent_from_token` now HARD-WIRED in `core` too (§10), shadow-parent-user resolution; write path also gated on campus verification (G-2)** |
@@ -1758,7 +1758,7 @@ APPROVED`. Does not apply to the campus's own creator, whose first
 `StaffProfile` row is created directly in `CampusViewSet.perform_create`,
 bypassing this check entirely.
 
-### `POST /class-teacher-assignments/`
+### `POST /class-teacher-assigmentss/`
 Request: `{section: uuid W, staff: uuid W}`.
 Validation: `400 "This staff member doesn't belong to this section's
 campus."` (bare string → `non_field_errors`) if `staff.campus_id !=
@@ -1770,14 +1770,14 @@ raise an unhandled `IntegrityError` (→ `500`) since `section` is a
 `validate()` check for "this section already has a class-teacher" before it
 reaches the DB.
 
-### `POST /subject-teacher-assignments/`
+### `POST /subject-teacher-assigmentss/`
 Request: `{section: uuid W, subject: uuid W, staff: uuid W}`. Server ignores
 any client-supplied `status`/`approved_by`/`responded_at` (all
 `read_only_fields`). Lands `status: "pending"`.
 Response fields: `id, section, subject, staff, staff_detail
 {StaffProfileSerializer}, subject_detail {SubjectSerializer}, approved_by,
 status, responded_at`.
-`POST /subject-teacher-assignments/{id}/approve/` and `.../reject/` — no
+`POST /subject-teacher-assigmentss/{id}/approve/` and `.../reject/` — no
 body. `403 {"detail": "Not allowed."}` if requester is neither that section's
 class-teacher nor campus admin/principal. `200` with the updated row on
 success — `approved_by` is now the deciding user's own `StaffProfile.id`.
@@ -1857,7 +1857,7 @@ Request: `{enrollment: uuid W, date: date W, subject: uuid|null W, status:
 "present"|"absent"|"late"|"leave" W}`. `marked_by` always server-set.
 DB-level: a second `POST` for the same `(enrollment, date, subject)` →
 unhandled `IntegrityError` (`500`) — **no serializer-level duplicate check
-exists**, same gotcha class as `ClassTeacherAssignment` above. `[GOTCHA]`
+exists**, same gotcha class as `ClassTeacherassigments` above. `[GOTCHA]`
 `GET /attendance/summary/?enrollment=<id>&subject=<id, optional>` — `400
 {"detail": "enrollment query param is required."}` if missing. `404
 {"detail": "Not found."}` if the enrollment doesn't exist or the requester
@@ -1865,7 +1865,7 @@ isn't staff/the student/a linked parent. `200` body:
 `{enrollment: uuid, subject: uuid|null, total: int, present: int, absent: int,
 late: int, leave: int, percent: float}`.
 
-### `POST /assignments/`
+### `POST /assigmentss/`
 Request: `{section: uuid W, subject: uuid W, title: str W, description: str W
 (blank ok), attachment: file|null W, due_date: date W, session: uuid W}`.
 `posted_by` server-resolved from the requester's `StaffProfile` at that
@@ -1874,13 +1874,13 @@ campus — **can be `null` in the DB if the requester somehow has no
 `SET_NULL`-nullable; `IsSectionSubjectStaffOrReadOnly` should normally prevent
 this, but it's not double-enforced at the model layer. `[GOTCHA — same class
 as above, not currently guarded twice]`
-Response `201` also silently bulk-creates `AssignmentSubmission` rows (not
+Response `201` also silently bulk-creates `assigmentsSubmission` rows (not
 visible in this response) + a `Notice` + notifications — none of those appear
-in the `Assignment` response body itself; a separate `GET
-/assignment-submissions/?assignment=<id>` shows the roster.
+in the `assigments` response body itself; a separate `GET
+/assigments-submissions/?assigments=<id>` shows the roster.
 
-### `GET/POST/PATCH /assignment-submissions/`
-`POST` request: `{assignment: uuid W, student: uuid|omit W}` — `student`
+### `GET/POST/PATCH /assigments-submissions/`
+`POST` request: `{assigments: uuid W, student: uuid|omit W}` — `student`
 should normally be omitted (server forces it to `request.user`); supplying a
 different `student` → `403 PermissionDenied("You can only create your own submission.")`.
 `PATCH` request (student/self path): `{file: file W}` (or nothing) — server
@@ -2014,8 +2014,8 @@ campus-scoped role).
 | `POST /staff/` | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ (**also requires campus `verification_status=approved` — G-2**, except the creator's own first row, set directly by `CampusViewSet.perform_create`) | — |
 | `POST /sessions/{id}/set-current/`, `.../rollover/` | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ | — |
 | `POST /sections/` | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ | — |
-| `POST /class-teacher-assignments/` | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ | — |
-| `POST /subject-teacher-assignments/` (create/request) | ✅ (any campus member incl. self) | — | — | ✅ | ✅ | ✅ | ✅ | — |
+| `POST /class-teacher-assigmentss/` | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ | — |
+| `POST /subject-teacher-assigmentss/` (create/request) | ✅ (any campus member incl. self) | — | — | ✅ | ✅ | ✅ | ✅ | — |
 | `.../approve/`, `.../reject/` | ❌ | ❌ | ❌ | ❌ | ✅ (own section) | ❌ | ✅ (fallback) | — |
 | `POST /enrollments/` | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ (**also requires campus `verification_status=approved` — G-2**) | — |
 | `POST /parent-links/verify/` | ✅ (any authenticated, subject to a valid token **and** the campus being `verification_status=approved` — G-2) | — | — | — | — | — | — | — |
@@ -2026,10 +2026,10 @@ campus-scoped role).
 | `POST /attendance/` (`subject` given) | ❌ | ❌ | ❌ | ❌ | ✅ | ✅ (own section+subject) | ✅ | — |
 | `POST /attendance/` (`subject=null`, daily) | ❌ | ❌ | ❌ | ❌ | ✅ | ❌ (never, even if approved elsewhere) | ✅ | — |
 | `GET /attendance/summary/` | ❌ (404) | ✅ (own enrollment only) | ✅ (linked child only) | ✅ | ✅ | ✅ | ✅ | — |
-| `POST /assignments/` | ❌ | ❌ | ❌ | ❌ | ✅ | ✅ (own section+subject) | ✅ | — |
-| `POST /assignment-submissions/` (own row, edge-case only) | ❌ | ✅ (self only) | ❌ | — | — | — | — | — |
-| `PATCH /assignment-submissions/{id}/` (submit) | ❌ | ✅ (own row only) | ❌ | ❌ | ❌ | ❌ | ❌ | — |
-| `PATCH /assignment-submissions/{id}/` (grade) | ❌ | ❌ | ❌ | ❌ | ✅ (own section) | ✅ (own section+subject) | ✅ | — |
+| `POST /assigmentss/` | ❌ | ❌ | ❌ | ❌ | ✅ | ✅ (own section+subject) | ✅ | — |
+| `POST /assigments-submissions/` (own row, edge-case only) | ❌ | ✅ (self only) | ❌ | — | — | — | — | — |
+| `PATCH /assigments-submissions/{id}/` (submit) | ❌ | ✅ (own row only) | ❌ | ❌ | ❌ | ❌ | ❌ | — |
+| `PATCH /assigments-submissions/{id}/` (grade) | ❌ | ❌ | ❌ | ❌ | ✅ (own section) | ✅ (own section+subject) | ✅ | — |
 | `POST /syllabus-units/` | ❌ | ❌ | ❌ | ❌ | ✅ | ✅ (own section+subject) | ✅ | — |
 | `.../mark-covered/` | ❌ | ❌ | ❌ | ❌ | ✅ | ✅ (own section+subject) | ✅ | — |
 | `POST /results/` | ❌ | ❌ | ❌ | ❌ | ✅ | ✅ (own section+subject) | ✅ | — |
@@ -2207,14 +2207,14 @@ would be new work.
   / `DEFAULT_AUTHENTICATION_CLASSES` are set globally — nothing in `campus`
   overrides pagination, and `IsAuthenticated` is applied per-view here (not
   assumed to be a project-wide default).
-- **File storage**: `Assignment.attachment` uploads to
-  `campus/assignments/`, `AssignmentSubmission.file` to
+- **File storage**: `assigments.attachment` uploads to
+  `campus/assigmentss/`, `assigmentsSubmission.file` to
   `campus/submissions/` — both relative to whatever `MEDIA_ROOT`/default
   storage backend the project has configured (local disk, S3, etc.); nothing
   campus-specific is configured here.
 - **Celery**: `campus/tasks.py` degrades gracefully if Celery isn't
   installed at all, but for `check_low_attendance`,
-  `send_assignment_due_reminders`, and `refresh_analytics_snapshot` to
+  `send_assigments_due_reminders`, and `refresh_analytics_snapshot` to
   actually run on a schedule, the **project's** `CELERY_BEAT_SCHEDULE` needs
   entries for them — none exist inside `campus` itself. Suggested (not yet
   added anywhere) entries:
@@ -2224,8 +2224,8 @@ would be new work.
           "task": "campus.tasks.check_low_attendance",
           "schedule": crontab(hour=6, minute=0),   # once daily, before school hours
       },
-      "campus-assignment-due-reminders": {
-          "task": "campus.tasks.send_assignment_due_reminders",
+      "campus-assigments-due-reminders": {
+          "task": "campus.tasks.send_assigments_due_reminders",
           "schedule": crontab(hour=7, minute=0),
       },
       # refresh_analytics_snapshot takes (campus_id, session_id) args, so it
@@ -2284,8 +2284,8 @@ order (or a valid ordering within one big initial migration) is:
 6. Subject                        (FK: Campus, Department)
 7. Room                           (FK: Campus)
 8. StaffProfile                   (FK: Campus, login.User)
-9. ClassTeacherAssignment         (FK: Section [OneToOne], StaffProfile)
-10. SubjectTeacherAssignment      (FK: Section, Subject, StaffProfile ×2)
+9. ClassTeacherassigments         (FK: Section [OneToOne], StaffProfile)
+10. SubjectTeacherassigments      (FK: Section, Subject, StaffProfile ×2)
 11. StudentEnrollment             (FK: login.User, Section, AcademicSession)
 12. CampusParentLink              (FK: Campus, login.User ×2)
 13. Notice                        (FK: Campus, Department, SchoolClass, Section, AcademicSession, login.User)
@@ -2293,8 +2293,8 @@ order (or a valid ordering within one big initial migration) is:
 15. TimeSlot                      (FK: Campus)
 16. TimetableEntry                (FK: Section, Subject, StaffProfile, TimeSlot, Room, AcademicSession)
 17. Attendance                    (FK: StudentEnrollment, Subject, login.User)
-18. Assignment                    (FK: Section, Subject, StaffProfile, AcademicSession)
-19. AssignmentSubmission          (FK: Assignment, login.User)
+18. assigments                    (FK: Section, Subject, StaffProfile, AcademicSession)
+19. assigmentsSubmission          (FK: assigments, login.User)
 20. SyllabusUnit                  (FK: Subject, Section, AcademicSession)
 21. SyllabusProgress              (FK: SyllabusUnit [OneToOne], StaffProfile)
 22. ExamTerm                      (FK: AcademicSession)
@@ -2328,13 +2328,13 @@ already built:
    each imply a campus (e.g. `subject` + `section` both eventually point at
    a `Campus`), add a serializer `validate()` that checks they agree —
    every existing model with >1 such FK does this (`SchoolClass`, `Subject`,
-   `ClassTeacherAssignment`, `SubjectTeacherAssignment`, `Notice`,
+   `ClassTeacherassigments`, `SubjectTeacherassigments`, `Notice`,
    `CampusLiveSession`).
 4. **Permission class**: pick the closest existing fit —
    `IsCampusAdminOrPrincipal` (structural/admin-only),
    `IsSectionSubjectStaffOrReadOnly` (section+subject content),
    `IsAuthenticated`-only + a manual `is_any_active_staff`/role check inside
-   `perform_create` (like `Notice`/`SubjectTeacherAssignment`'s create path),
+   `perform_create` (like `Notice`/`SubjectTeacherassigments`'s create path),
    or a bespoke check (like the fee-module gate). Don't invent a new
    `BasePermission` subclass unless none of the two existing ones fit even
    with a custom `get_campus_id_for_permission_check`/
@@ -2351,7 +2351,7 @@ already built:
    import `core.models.Notification` directly.
 7. **DB-level duplicate/uniqueness guard**: if "one row per X" is a business
    rule, add the `UniqueConstraint` — don't rely on serializer-level checks
-   alone (see the `ClassTeacherAssignment`/`Attendance` gotchas in §19 for
+   alone (see the `ClassTeacherassigments`/`Attendance` gotchas in §19 for
    what happens when this is skipped: an ugly `500` instead of a clean `400`
    the one time it collides). If you can't add the DB constraint for some
    reason, at minimum add the serializer-level `validate()` check so it's a

@@ -1,10 +1,10 @@
 from django.apps import AppConfig
 
 
-class AssignmentConfig(AppConfig):
+class assigmentsConfig(AppConfig):
     default_auto_field = "django.db.models.BigAutoField"
-    name = "assignment"
-    verbose_name = "Assignments"
+    name = "assigments"
+    verbose_name = "assigmentss"
 
     def ready(self):
         # No signal wiring needed here — every pre_save/post_save/

@@ -3,7 +3,7 @@
 `testseries` app — implements testseries_app_design.md (v1) end to end:
 TestSeries, Question, QuestionResponse, TestSeriesPurchase, TestAttempt.
 
-Golden rule (same as `assignment`): this app NEVER imports `campus` or
+Golden rule (same as `assigments`): this app NEVER imports `campus` or
 `liveclass` models directly. Context is referenced opaquely via
 `context_type` (CharField) + `context_id` (UUID) — resolving that back to
 a `campus.Section` / `liveclass.Classroom` is the calling bridge's job
@@ -80,7 +80,7 @@ from common.question_grading import auto_grade as _shared_auto_grade
 
 # ---------------------------------------------------------------------
 # Attachment validation now LIVES in common/attachment_validators.py —
-# shared with `assignment` (Task 7) so both apps enforce identical
+# shared with `assigments` (Task 7) so both apps enforce identical
 # extension/size rules on their FileFields instead of duplicating them.
 # Still applied in the same three places for defence-in-depth:
 #   1. Question.attachment / QuestionResponse.answer_attachment
@@ -123,7 +123,7 @@ def _notify(*, recipient, notif_type: str, title: str, message: str = "", data: 
 
 
 class TestSeriesBaseModel(models.Model):
-    """UUID PK — same reasoning as `campus`/`assignment`: these rows get
+    """UUID PK — same reasoning as `campus`/`assigments`: these rows get
     referenced from outside this app (context_id-style opaque refs,
     cross-app notification `data` payloads) where a guessable sequential
     integer PK is undesirable."""
@@ -338,7 +338,7 @@ class Question(TestSeriesBaseModel):
 
     def auto_grade(self, answer_data: dict) -> tuple[bool | None, int | None]:
         """Thin wrapper around `common.question_grading.auto_grade()` —
-        actual grading logic now lives there (shared with `assignment`,
+        actual grading logic now lives there (shared with `assigments`,
         Task 7) so `TestAttempt.submit()` and any future caller here
         still share one implementation, and other apps share it too
         instead of duplicating it. Returns `(is_correct, marks_awarded)`;
@@ -579,7 +579,7 @@ class TestAttempt(TestSeriesBaseModel):
         User, on_delete=models.SET_NULL, null=True, blank=True, related_name="testseries_attempts_checked"
     )
 
-    # `assignment` app's snapshot pattern — campus/liveclass callers pass
+    # `assigments` app's snapshot pattern — campus/liveclass callers pass
     # these from the roster at submit-time rather than this app resolving
     # them itself (golden rule: no direct campus/liveclass imports).
     roll_number = models.CharField(max_length=30, blank=True)

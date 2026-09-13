@@ -3,14 +3,14 @@ from django.contrib import admin
 
 from .models import (
     AcademicSession,
-    Assignment,
-    AssignmentSubmission,
+    assigments,
+    assigmentsSubmission,
     Attendance,
     Campus,
     CampusAnalyticsSnapshot,
     CampusLiveSession,
     CampusParentLink,
-    ClassTeacherAssignment,
+    ClassTeacherassigments,
     Department,
     DigitalIDCard,
     ExamTerm,
@@ -25,7 +25,7 @@ from .models import (
     StaffProfile,
     StudentEnrollment,
     Subject,
-    SubjectTeacherAssignment,
+    SubjectTeacherassigments,
     SyllabusProgress,
     SyllabusUnit,
     TimeSlot,
@@ -111,13 +111,13 @@ class StaffProfileAdmin(admin.ModelAdmin):
     search_fields = ("user__username",)
 
 
-@admin.register(ClassTeacherAssignment)
-class ClassTeacherAssignmentAdmin(admin.ModelAdmin):
+@admin.register(ClassTeacherassigments)
+class ClassTeacherassigmentsAdmin(admin.ModelAdmin):
     list_display = ("section", "staff")
 
 
-@admin.register(SubjectTeacherAssignment)
-class SubjectTeacherAssignmentAdmin(admin.ModelAdmin):
+@admin.register(SubjectTeacherassigments)
+class SubjectTeacherassigmentsAdmin(admin.ModelAdmin):
     list_display = ("staff", "subject", "section", "status", "approved_by")
     list_filter = ("status",)
 
@@ -172,18 +172,18 @@ class AttendanceAdmin(admin.ModelAdmin):
     search_fields = ("enrollment__student__username",)
 
 
-@admin.register(Assignment)
-class AssignmentAdmin(admin.ModelAdmin):
+@admin.register(assigments)
+class assigmentsAdmin(admin.ModelAdmin):
     list_display = ("title", "section", "subject", "due_date", "posted_by")
     list_filter = ("section__school_class__campus", "due_date")
     search_fields = ("title",)
 
 
-@admin.register(AssignmentSubmission)
-class AssignmentSubmissionAdmin(admin.ModelAdmin):
-    list_display = ("assignment", "student", "status", "submitted_at", "grade")
+@admin.register(assigmentsSubmission)
+class assigmentsSubmissionAdmin(admin.ModelAdmin):
+    list_display = ("assigments", "student", "status", "submitted_at", "grade")
     list_filter = ("status",)
-    search_fields = ("student__username", "assignment__title")
+    search_fields = ("student__username", "assigments__title")
 
 
 @admin.register(SyllabusUnit)

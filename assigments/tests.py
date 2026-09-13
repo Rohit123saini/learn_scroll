@@ -1,4 +1,4 @@
-# assignment/tests.py
+# assigments/tests.py
 """
 Model-layer tests — deliberately not view/API tests. This app's actual
 complexity lives in the model methods (`submit_freeform`,
@@ -23,16 +23,16 @@ from django.utils import timezone
 
 from login.models import User
 
-from .models import Assignment, AssignmentQuestion, AssignmentSource, AssignmentSubmission
+from .models import assigments, assigmentsQuestion, assigmentsSource, assigmentsSubmission
 from .tasks import send_due_reminders
 
 # [FIX — Task 10] The mcq/msq fixtures below previously used
 # `options=["3", "4", "5"]` (plain strings) and `correct_answer="4"` (a
-# bare string) — neither shape `AssignmentQuestion.clean()` actually
+# bare string) — neither shape `assigmentsQuestion.clean()` actually
 # accepts (options must be a list of dicts with an `"id"` key;
 # correct_answer must be `{"option_id": <one of those ids>}` — see that
 # method's own MCQ/MSQ branch). `full_clean()` runs unconditionally from
-# `AssignmentQuestion.save()`, so every test below that created an mcq
+# `assigmentsQuestion.save()`, so every test below that created an mcq
 # question with the old shape would have raised `ValidationError` in
 # `setUp()` before a single test method ever ran. Fixed to the shape the
 # model actually validates.
@@ -54,37 +54,37 @@ def _make_user(username: str) -> User:
     return User.objects.create(username=username)
 
 
-def _make_assignment(**kwargs) -> Assignment:
+def _make_assigments(**kwargs) -> assigments:
     defaults = {
-        "source": AssignmentSource.PERSONAL,
-        "title": "Test assignment",
+        "source": assigmentsSource.PERSONAL,
+        "title": "Test assigments",
     }
     defaults.update(kwargs)
-    return Assignment.objects.create(**defaults)
+    return assigments.objects.create(**defaults)
 
 
 class FreeformSubmissionTests(TestCase):
     def setUp(self):
         self.student = _make_user("student1")
-        self.assignment = _make_assignment(due_date=timezone.now().date() + datetime.timedelta(days=1))
-        self.submission = AssignmentSubmission.objects.create(assignment=self.assignment, student=self.student)
+        self.assigments = _make_assigments(due_date=timezone.now().date() + datetime.timedelta(days=1))
+        self.submission = assigmentsSubmission.objects.create(assigments=self.assigments, student=self.student)
 
     def test_submit_on_time_is_submitted(self):
         self.submission.submit_freeform(written_content="my answer")
-        self.assertEqual(self.submission.status, AssignmentSubmission.SubmissionStatus.SUBMITTED)
+        self.assertEqual(self.submission.status, assigmentsSubmission.SubmissionStatus.SUBMITTED)
         self.assertEqual(self.submission.written_content, "my answer")
 
     def test_submit_after_due_date_is_late(self):
-        self.assignment.due_date = timezone.now().date() - datetime.timedelta(days=1)
-        self.assignment.save(update_fields=["due_date"])
+        self.assigments.due_date = timezone.now().date() - datetime.timedelta(days=1)
+        self.assigments.save(update_fields=["due_date"])
         self.submission.submit_freeform(written_content="late answer")
-        self.assertEqual(self.submission.status, AssignmentSubmission.SubmissionStatus.LATE)
+        self.assertEqual(self.submission.status, assigmentsSubmission.SubmissionStatus.LATE)
         self.assertTrue(self.submission.is_late())
 
     def test_grade_freeform_sets_checked(self):
         self.submission.submit_freeform(written_content="answer")
         self.submission.grade_freeform(grade="A", feedback="Nice work")
-        self.assertEqual(self.submission.status, AssignmentSubmission.SubmissionStatus.CHECKED)
+        self.assertEqual(self.submission.status, assigmentsSubmission.SubmissionStatus.CHECKED)
         self.assertIsNotNone(self.submission.checked_at)
         self.assertEqual(self.submission.grade, "A")
 
@@ -96,22 +96,22 @@ class StructuredSubmissionTests(TestCase):
         self.staff.is_staff = True
         self.staff.save(update_fields=["is_staff"])
 
-        self.assignment = _make_assignment(has_structured_questions=True)
-        self.mcq = AssignmentQuestion.objects.create(
-            assignment=self.assignment, order=1,
-            question_type=AssignmentQuestion.QuestionTypeChoices.MCQ,
+        self.assigments = _make_assigments(has_structured_questions=True)
+        self.mcq = assigmentsQuestion.objects.create(
+            assigments=self.assigments, order=1,
+            question_type=assigmentsQuestion.QuestionTypeChoices.MCQ,
             text="2+2?", marks=5, options=MCQ_OPTIONS, correct_answer=MCQ_CORRECT_ANSWER,
         )
-        self.text_q = AssignmentQuestion.objects.create(
-            assignment=self.assignment, order=2,
-            question_type=AssignmentQuestion.QuestionTypeChoices.TEXT,
+        self.text_q = assigmentsQuestion.objects.create(
+            assigments=self.assigments, order=2,
+            question_type=assigmentsQuestion.QuestionTypeChoices.TEXT,
             text="Explain your reasoning.", marks=10,
         )
-        self.submission = AssignmentSubmission.objects.create(assignment=self.assignment, student=self.student)
+        self.submission = assigmentsSubmission.objects.create(assigments=self.assigments, student=self.student)
 
     def test_total_marks_auto_summed_from_questions(self):
-        self.assignment.refresh_from_db()
-        self.assertEqual(self.assignment.total_marks, 15)  # 5 + 10
+        self.assigments.refresh_from_db()
+        self.assertEqual(self.assigments.total_marks, 15)  # 5 + 10
 
     def test_mcq_auto_graded_correctly(self):
         self.submission.submit_structured([
@@ -128,7 +128,7 @@ class StructuredSubmissionTests(TestCase):
             {"question_id": self.mcq.id, "answer_data": MCQ_ANSWER_CORRECT},
             {"question_id": self.text_q.id, "answer_data": "because math"},
         ])
-        self.assertEqual(self.submission.status, AssignmentSubmission.SubmissionStatus.PARTIALLY_CHECKED)
+        self.assertEqual(self.submission.status, assigmentsSubmission.SubmissionStatus.PARTIALLY_CHECKED)
         self.assertIsNone(self.submission.checked_at)
 
     def test_reviewing_last_pending_answer_finalizes_submission(self):
@@ -140,7 +140,7 @@ class StructuredSubmissionTests(TestCase):
             question=self.text_q, marks_awarded=8, feedback="Good", reviewed_by=self.staff,
         )
         self.submission.refresh_from_db()
-        self.assertEqual(self.submission.status, AssignmentSubmission.SubmissionStatus.CHECKED)
+        self.assertEqual(self.submission.status, assigmentsSubmission.SubmissionStatus.CHECKED)
         self.assertEqual(self.submission.total_marks_awarded, 13)  # 5 (mcq) + 8 (text)
         self.assertIsNotNone(self.submission.checked_at)
 
@@ -156,30 +156,30 @@ class StructuredSubmissionTests(TestCase):
 
 class QuestionModeImmutabilityTests(TestCase):
     def setUp(self):
-        self.assignment = _make_assignment(has_structured_questions=True)
+        self.assigments = _make_assigments(has_structured_questions=True)
         self.student = _make_user("student3")
 
     def test_can_change_mode_with_no_submissions(self):
-        self.assertTrue(self.assignment.can_change_question_mode())
+        self.assertTrue(self.assigments.can_change_question_mode())
 
     def test_cannot_change_mode_once_a_real_submission_exists(self):
-        submission = AssignmentSubmission.objects.create(assignment=self.assignment, student=self.student)
+        submission = assigmentsSubmission.objects.create(assigments=self.assigments, student=self.student)
         submission.submit_freeform(written_content="x")  # any non-MISSING status
-        self.assertFalse(self.assignment.can_change_question_mode())
+        self.assertFalse(self.assigments.can_change_question_mode())
 
     def test_missing_only_submissions_do_not_lock_mode(self):
         # A bridge-pre-created MISSING row (roster entry who hasn't
-        # touched the assignment yet) must NOT count as "a submission
+        # touched the assigments yet) must NOT count as "a submission
         # exists" for immutability purposes — only an actual attempt does.
-        AssignmentSubmission.objects.create(assignment=self.assignment, student=self.student)
-        self.assertTrue(self.assignment.can_change_question_mode())
+        assigmentsSubmission.objects.create(assigments=self.assigments, student=self.student)
+        self.assertTrue(self.assigments.can_change_question_mode())
 
 
 class PublicSlugLifecycleTests(TestCase):
     def setUp(self):
-        self.assignment = _make_assignment()
+        self.assigments = _make_assigments()
         self.student = _make_user("student4")
-        self.submission = AssignmentSubmission.objects.create(assignment=self.assignment, student=self.student)
+        self.submission = assigmentsSubmission.objects.create(assigments=self.assigments, student=self.student)
 
     def test_publish_sets_a_nonempty_slug(self):
         slug = self.submission.publish()
@@ -199,23 +199,23 @@ class PublicSlugLifecycleTests(TestCase):
 
 class RecomputeTotalMarksTests(TestCase):
     def setUp(self):
-        self.assignment = _make_assignment(has_structured_questions=True)
+        self.assigments = _make_assigments(has_structured_questions=True)
 
     def test_deleting_a_question_reduces_total_marks(self):
-        q1 = AssignmentQuestion.objects.create(
-            assignment=self.assignment, order=1,
-            question_type=AssignmentQuestion.QuestionTypeChoices.TEXT, text="Q1", marks=10,
+        q1 = assigmentsQuestion.objects.create(
+            assigments=self.assigments, order=1,
+            question_type=assigmentsQuestion.QuestionTypeChoices.TEXT, text="Q1", marks=10,
         )
-        AssignmentQuestion.objects.create(
-            assignment=self.assignment, order=2,
-            question_type=AssignmentQuestion.QuestionTypeChoices.TEXT, text="Q2", marks=15,
+        assigmentsQuestion.objects.create(
+            assigments=self.assigments, order=2,
+            question_type=assigmentsQuestion.QuestionTypeChoices.TEXT, text="Q2", marks=15,
         )
-        self.assignment.refresh_from_db()
-        self.assertEqual(self.assignment.total_marks, 25)
+        self.assigments.refresh_from_db()
+        self.assertEqual(self.assigments.total_marks, 25)
 
         q1.delete()
-        self.assignment.refresh_from_db()
-        self.assertEqual(self.assignment.total_marks, 15)
+        self.assigments.refresh_from_db()
+        self.assertEqual(self.assigments.total_marks, 15)
 
 
 class DueReminderIdempotencyTests(TestCase):
@@ -230,13 +230,13 @@ class DueReminderIdempotencyTests(TestCase):
     def setUp(self):
         cache.clear()
         self.student = _make_user("student5")
-        self.assignment = _make_assignment(due_date=timezone.now().date())
-        self.submission = AssignmentSubmission.objects.create(assignment=self.assignment, student=self.student)
+        self.assigments = _make_assigments(due_date=timezone.now().date())
+        self.submission = assigmentsSubmission.objects.create(assigments=self.assigments, student=self.student)
 
     def tearDown(self):
         cache.clear()
 
-    @patch("assignment.tasks.create_notification")
+    @patch("assigments.tasks.create_notification")
     def test_running_sweep_twice_sends_only_one_notification(self, mock_create_notification):
         first_count = send_due_reminders(lookahead_hours=24)
         second_count = send_due_reminders(lookahead_hours=24)
@@ -244,7 +244,7 @@ class DueReminderIdempotencyTests(TestCase):
         self.assertEqual(second_count, 0)
         self.assertEqual(mock_create_notification.call_count, 1)
 
-    @patch("assignment.tasks.create_notification", side_effect=Exception("boom"))
+    @patch("assigments.tasks.create_notification", side_effect=Exception("boom"))
     def test_failed_notification_is_retried_on_next_sweep(self, mock_create_notification):
         first_count = send_due_reminders(lookahead_hours=24)
         self.assertEqual(first_count, 0)  # failed send — not counted, and not marked as sent

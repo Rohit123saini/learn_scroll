@@ -2156,6 +2156,7 @@ import os
 import uuid
 import shutil
 from django.conf import settings
+from django.core.exceptions import ValidationError
 from django.db import transaction
 from django.db.models import F, Count
 from django.shortcuts import get_object_or_404
@@ -2284,19 +2285,44 @@ def chunked_upload_init(request):
         if not file_name or (not post_id and not parent_id) or total_chunks == 0:
             return Response({"error": "file_name, post_id, total_chunks required"}, status=400)
 
+        # FIX (post_app.md §14 issue #7): ChunkedUpload.post_id/parent_id
+        # are plain CharFields (no DB-level FK — see models.py's own note
+        # on why: validated in the view instead, kept deliberately loose
+        # at the model layer). Before this fix, `chunked_upload_init`
+        # never explicitly checked that the target actually existed — a
+        # stale/invalid post_id or parent_id would sail through init(),
+        # get stored as-is on the ChunkedUpload row, and only surface as
+        # a 404 in `chunked_upload_complete`'s own get_object_or_404
+        # calls, AFTER the client had already spent time/bandwidth
+        # pushing every chunk. This is a dedicated, explicit existence
+        # check — separate from (and running before) the §14 issue #10
+        # `is_comments_disabled` check below — with a field-specific
+        # error message so the client knows exactly which of
+        # `post_id`/`parent_id` was bad, rather than a generic 400 from
+        # letting Http404 fall through to the blanket `except Exception`
+        # at the bottom of this view.
+        if parent_id:
+            try:
+                parent_comment = PostComment.objects.get(id=parent_id, is_deleted=False)
+            except (PostComment.DoesNotExist, ValueError, ValidationError):
+                return Response({"error": "Invalid parent_id: comment not found"}, status=400)
+            target_post = parent_comment.post
+        else:
+            try:
+                target_post = Post.objects.get(id=post_id)
+            except (Post.DoesNotExist, ValueError, ValidationError):
+                return Response({"error": "Invalid post_id: post not found"}, status=400)
+
         # FIX (post_app.md §14 issue #10): the regular CommentCreateAPIView
         # already blocks new comments on a post with `is_comments_disabled`,
         # but this chunked-upload path (used for large video comments)
         # never checked it — someone could still start (and finish) a 4GB
         # video-comment upload on a post whose owner explicitly disabled
-        # comments. Checked here, at `init` time, so a blocked upload fails
+        # comments. Checked here, at `init` time (reusing the same
+        # target_post/parent_comment the existence check above already
+        # resolved — no second query), so a blocked upload fails
         # immediately instead of after the client has already spent time/
         # bandwidth pushing chunks.
-        if parent_id:
-            parent_comment = get_object_or_404(PostComment, id=parent_id, is_deleted=False)
-            target_post = parent_comment.post
-        else:
-            target_post = get_object_or_404(Post, id=post_id)
         if target_post.is_comments_disabled:
             return Response({"error": "Comments disabled"}, status=403)
 
@@ -2376,6 +2402,17 @@ def chunked_upload_complete(request):
         # of first paying the disk I/O to stitch together a multi-GB file
         # it's about to reject anyway. `post`/`parent` are reused below
         # instead of being re-queried a second time after assembly.
+        #
+        # FIX (post_app.md §14 issue #7): the get_object_or_404 calls
+        # below are now a defense-in-depth backstop, not the primary
+        # existence check — `chunked_upload_init` validates post_id/
+        # parent_id up front (see its own FIX comment), so a stale ID
+        # normally never gets this far. They stay here because the two
+        # calls are separated by however long the chunk-push phase takes
+        # — the target Post/Comment could still be deleted mid-upload —
+        # and because this view is reachable with any `upload_id` a
+        # caller has, independent of whether init's check already ran
+        # for it in this process.
         if upload.parent_id:
             parent = get_object_or_404(PostComment, id=upload.parent_id)
             post = parent.post
@@ -2597,6 +2634,20 @@ class CommentHideAPIView(APIView):
 ```
 
 ### comment_view.py notes
+- ✅ **§14 issue #7 (this pass)** — `chunked_upload_init()` now explicitly
+  resolves the target `Post`/`PostComment` from `post_id`/`parent_id`
+  and returns a field-specific 400 if it doesn't exist, instead of
+  letting an invalid id sail through to get stored on the
+  `ChunkedUpload` row and only surface later, as a 404, in
+  `chunked_upload_complete()`. Implemented as its own explicit
+  `try/except` (catching `DoesNotExist`/`ValueError`/`ValidationError`
+  directly) rather than relying on the view's outer blanket
+  `except Exception`, and reuses the same resolved `target_post`/
+  `parent_comment` for the existing `is_comments_disabled` check right
+  below it — no extra query added. `chunked_upload_complete()`'s own
+  `get_object_or_404` calls are unchanged and now serve purely as a
+  defense-in-depth backstop (the target could still be deleted during
+  the chunk-push window).
 - ✅ **TASK 24 CORRECTION** — an earlier draft of this doc (and, for a
   while, the actual code) assumed a `models.py` signal called
   `update_comments_count` recomputed `Post.comments_count` on every
@@ -2958,11 +3009,11 @@ way it auto-discovers `models.py`. Filename must be lowercase
 `signals.py` — `import post.signals` will not resolve a `Signals.py` on
 a case-sensitive filesystem (Linux/prod).
 
-## 10.1 `services.py` (full code — renamed from uploaded `Services.py`)
+## 10.1 `services.py` (full code — renamed from uploaded `services.py`)
 
 > Case-sensitivity rename (same reasoning as §10's `apps.py` note —
 > `import post.signals`/`.tasks`/`.services` are lowercase, so a
-> capitalized `Services.py` silently only worked on case-insensitive dev
+> capitalized `services.py` silently only worked on case-insensitive dev
 > filesystems). Also carries the TASK 11 notification-wiring fix (real
 > `core.services.create_notification` module + matching call signature)
 > and the storage-agnostic ffmpeg helpers (task 27). Full rationale for
@@ -2975,10 +3026,10 @@ a case-sensitive filesystem (Linux/prod).
 """
 post/services.py
 
-⚠️ RENAMED from the uploaded `Services.py` — apps.py does
+⚠️ RENAMED from the uploaded `services.py` — apps.py does
 `import post.signals` (lowercase), and this module gets imported the same
 way. On a case-sensitive filesystem (Linux/prod) a capitalized
-`Services.py` / `Signals.py` / `Tasks.py` is a DIFFERENT file to Python
+`services.py` / `Signals.py` / `Tasks.py` is a DIFFERENT file to Python
 than `services.py` / `signals.py` / `tasks.py` — the import would raise
 `ModuleNotFoundError` at runtime. It only "worked" by accident on
 case-insensitive dev filesystems (Windows/macOS default). Same rename
@@ -4145,10 +4196,19 @@ browser) vs. `attachment` for office docs/archives (forced download).
    `CommentLike` are now both registered in `admin.py`** — an earlier
    version of this doc's §9 said they weren't; that's since been fixed
    too (see §9).
-7. **`ChunkedUpload.post_id`/`parent_id` are plain `CharField`, not FKs**
-   — no DB-level referential integrity; a stale/invalid `post_id` passed
-   to `chunked_upload_complete` will only fail at `get_object_or_404`
-   time, not earlier.
+7. ✅ **RESOLVED (this pass)** — `ChunkedUpload.post_id`/`parent_id` are
+   still plain `CharField`s, not FKs (that part is unchanged — see
+   `models.py`'s Model notes for why: validated in the view, not at the
+   DB level). What changed: `chunked_upload_init` now explicitly
+   resolves the target `Post`/`PostComment` and returns a field-specific
+   400 (`"Invalid post_id: post not found"` / `"Invalid parent_id:
+   comment not found"`) if it doesn't exist, reusing that same lookup
+   for the existing §14 issue #10 `is_comments_disabled` check right
+   below it — no extra query. A stale/invalid id now fails at `init`
+   time, before any chunk is pushed, instead of only surfacing later at
+   `chunked_upload_complete`'s `get_object_or_404` calls (which stay in
+   place as a defense-in-depth backstop for the target being deleted
+   mid-upload — see that view's own updated comment).
 8. ✅ **RESOLVED** — the unused dead-code `PostSerializer` in
    `serializers.py` has been removed.
 9. **`ReactionRequestSerializer` is defined twice** — once in
@@ -4237,7 +4297,7 @@ close it.
 ### 16.1 What was actually missing
 
 Four files existed outside what §1's table originally listed
-(`services.py`/`Services.py`, `signals.py`/`Signals.py`,
+(`services.py`/`services.py`, `signals.py`/`Signals.py`,
 `tasks.py`/`Tasks.py`, and a much larger `tests.py`), but all four
 referenced models that don't exist in `models.py` as documented in §3:
 `Hashtag`, `PostHashtag`, `Like`, `SavedPost`, `Comment`, `Story`. Real
@@ -4245,7 +4305,7 @@ model names are `PostLike`, `PostSave`, `PostComment` — and `Story` /
 `StoryView` genuinely didn't exist anywhere at all, despite checklist
 items 54/55/57/60 asking for them.
 
-Separately, all three of `Services.py` / `Signals.py` / `Tasks.py` were
+Separately, all three of `services.py` / `Signals.py` / `Tasks.py` were
 capitalized. `apps.py` and `serializers.py` import them in lowercase
 (`import post.signals`, `from .services import ...`) — on a
 case-sensitive filesystem (any real Linux server) that import fails
@@ -4401,7 +4461,7 @@ All other numbered issues in §14 are unaffected by this addendum.
 ## 17. Addendum 2 — services/signals/tasks/admin/tests reconciled against separately-uploaded capitalized versions
 
 §16 described the first real versions of these five files. Afterwards,
-a *second* set was uploaded — `Services.py`, `Signals.py`, `Tasks.py`,
+a *second* set was uploaded — `services.py`, `Signals.py`, `Tasks.py`,
 `admin.py`, `tests.py` (capitalized on the first three, matching the
 exact case-sensitivity trap §16.1 already flagged). This section
 documents what was kept, what was fixed, and — for `services.py`
@@ -4410,7 +4470,7 @@ uploaded one had caught.
 
 ### 17.1 `services.py` — wrong core module/signature, now fixed
 
-The newly-uploaded `Services.py` called:
+The newly-uploaded `services.py` called:
 
 ```python
 from core.notifications import create_notification
@@ -4610,7 +4670,7 @@ Several earlier sections (§3's Model notes, §16.5's "still unwired",
 things that were promised but never actually written up: the real,
 final state of the notification hookup, and the still-open duplicate
 `PostLike` signal. This section is that write-up, against the latest
-uploaded `Services.py` (renamed `services.py` — same case-sensitivity
+uploaded `services.py` (renamed `services.py` — same case-sensitivity
 reasoning as §16.1/§17).
 
 ### 19.1 `services.py` — TASK 11: wired, single-notification path (batching dropped), unguarded-import crash fixed
@@ -4620,7 +4680,7 @@ reasoning as §16.1/§17).
 `core.notification_batching.create_batched_notification` (to avoid one
 notification per like in a burst) and `notify_post_commented` through
 `core.services.create_notification`, using placeholder `NotifType`
-constants pending `core`'s real enum. The latest uploaded `Services.py`
+constants pending `core`'s real enum. The latest uploaded `services.py`
 has moved past all three of those points, labeled in its own docstring
 as "TASK 11 FIX":
 

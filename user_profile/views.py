@@ -1,4 +1,8 @@
 # user_profile/views.py
+import hashlib
+import hmac
+
+from django.conf import settings
 from django.contrib.auth import get_user_model
 from django.db import IntegrityError, transaction
 from django.db.models import F, Q
@@ -9,7 +13,7 @@ from drf_spectacular.utils import OpenApiParameter, extend_schema
 from rest_framework import filters, status
 from rest_framework.generics import GenericAPIView, ListAPIView
 from rest_framework.parsers import FormParser, MultiPartParser
-from rest_framework.permissions import IsAuthenticated
+from rest_framework.permissions import AllowAny, IsAdminUser, IsAuthenticated
 from rest_framework.response import Response
 
 from . import fraud
@@ -948,6 +952,129 @@ class BuyCoinView(GenericAPIView):
         }, status=status.HTTP_201_CREATED if created else status.HTTP_200_OK)
 
 
+class GatewayWebhookSignatureError(Exception):
+    """
+    Raised by `_verify_gateway_webhook_signature()` below for any
+    signature failure — missing secret (misconfiguration), missing
+    header, or a mismatch. Callers turn this into an HTTP response;
+    kept as one exception type (not three) so the view's except-block
+    can't accidentally leak *which* of the three failed to the caller —
+    "invalid signature" is the only thing a webhook caller should ever
+    learn either way.
+    """
+
+    def __init__(self, message, *, is_misconfiguration=False):
+        super().__init__(message)
+        self.is_misconfiguration = is_misconfiguration
+
+
+def _verify_gateway_webhook_signature(request, gateway):
+    """
+    TASK (this pass) — user_profile_app_reference.md §11 item 10:
+    `BuyCoinConfirmView` had no real payment-gateway signature check,
+    only `IsAuthenticated` + "must be your own purchase" standing in for
+    one, since no gateway integration was part of any upload for this
+    app.
+
+    ⚠️ ASSUMPTION — `campus`/`liveclass`'s own gateway-verify code (the
+    reference the person doing this task pointed at) was NOT part of
+    this pass's upload either, so this isn't copied from an established
+    in-repo pattern — it's a generic, gateway-agnostic HMAC-SHA256
+    webhook-signature check, the same mechanism every major payment
+    gateway (Razorpay, Stripe, PayU, ...) uses for webhook auth, just
+    without any one gateway's specific header name/payload-canonicalization
+    quirks baked in (those differ per gateway and aren't confirmable from
+    here). If `campus`/`liveclass` turns out to already have gateway
+    client code with its own verification helper, prefer reusing that
+    over this — this exists so the endpoint isn't left unverified in the
+    meantime, not to duplicate a real gateway SDK's verification call.
+
+    How it works: HMAC-SHA256 over the raw request body, keyed by a
+    per-gateway secret, compared against a per-gateway signature header
+    — both looked up from two new settings this pass introduces (NOT
+    added to settings.py in this pass — out of scope for a views.py-only
+    change; see this function's docstring for the exact shape needed):
+
+        PAYMENT_GATEWAY_WEBHOOK_SECRETS = {
+            "razorpay": os.environ["RAZORPAY_WEBHOOK_SECRET"],
+            ...
+        }
+        PAYMENT_GATEWAY_WEBHOOK_SIGNATURE_HEADERS = {
+            "razorpay": "X-Razorpay-Signature",
+            ...
+        }
+        # Falls back to "X-Webhook-Signature" for any gateway not listed
+        # in the headers map above.
+
+    `gateway` is read from the ALREADY-PERSISTED `CoinPurchaseRequest.
+    gateway` (set back when `BuyCoinView.post()` created the pending
+    request), never from anything in this webhook call itself — a
+    request body can claim to be from any gateway it likes, but it can
+    only produce a signature that verifies against the secret this
+    server has on file for the gateway `start_purchase()` was actually
+    given.
+
+    Raises `GatewayWebhookSignatureError` for every failure case (no
+    secret configured, no signature header present, signature mismatch)
+    — see that class's own docstring for why these three collapse into
+    one exception/one message rather than three distinguishable ones.
+    Returns None (no exception) on success.
+    """
+    if not gateway:
+        # A blank `gateway` is a real, valid state (CoinPurchaseRequest.
+        # gateway's own field comment: "not every caller may have a
+        # gateway name handy (e.g. a manual admin-initiated top-up)")
+        # — but exactly BECAUSE it's blank, there is no gateway secret
+        # to verify a signature against, so a request with no gateway on
+        # file can never be confirmed through this now-webhook-only
+        # endpoint. See BuyCoinConfirmView's own docstring — this is a
+        # deliberate, flagged behavior change from before this pass
+        # (when IsAuthenticated + ownership let ANY caller, gateway-less
+        # purchases included, confirm their own request), not an
+        # oversight.
+        raise GatewayWebhookSignatureError(
+            "This purchase has no gateway on file — it cannot be confirmed "
+            "via a gateway webhook.",
+            is_misconfiguration=True,
+        )
+
+    secrets_by_gateway = getattr(settings, "PAYMENT_GATEWAY_WEBHOOK_SECRETS", {})
+    secret = secrets_by_gateway.get(gateway)
+    if not secret:
+        # Distinct from "signature didn't match" — this is OUR config
+        # missing an entry for a gateway we otherwise recognize, not the
+        # caller's fault. Surfaced as 503 by the view, not 401/403.
+        raise GatewayWebhookSignatureError(
+            f"No webhook secret configured for gateway {gateway!r}.",
+            is_misconfiguration=True,
+        )
+
+    headers_by_gateway = getattr(settings, "PAYMENT_GATEWAY_WEBHOOK_SIGNATURE_HEADERS", {})
+    header_name = headers_by_gateway.get(gateway, "X-Webhook-Signature")
+    provided_signature = request.headers.get(header_name, "")
+    if not provided_signature:
+        raise GatewayWebhookSignatureError(
+            f"Missing {header_name!r} header."
+        )
+
+    # `request.body` (raw bytes, pre-parsing) — the caller MUST have
+    # already forced Django to cache this (e.g. by reading `request.body`
+    # once) before ever touching `request.data`. Once DRF parses
+    # `request.data` first, the underlying stream is already consumed and
+    # Django raises `RawPostDataException` on a later `.body` access — see
+    # BuyCoinConfirmView.post()'s own comment on why it reads `.body`
+    # before `self.get_serializer(data=request.data)`, not after.
+    expected_signature = hmac.new(
+        secret.encode("utf-8"), request.body, hashlib.sha256,
+    ).hexdigest()
+
+    # `compare_digest`, not `==` — constant-time, so a caller can't use
+    # response-timing differences to guess the correct signature one
+    # byte at a time.
+    if not hmac.compare_digest(provided_signature, expected_signature):
+        raise GatewayWebhookSignatureError("Signature verification failed.")
+
+
 class BuyCoinConfirmView(GenericAPIView):
     """
     POST /profile/buy-coin/confirm/
@@ -960,24 +1087,52 @@ class BuyCoinConfirmView(GenericAPIView):
     confirm_success()`/`mark_failed()` (models.py) for exactly what
     happens on a repeat call.
 
-    🚧 NOT a real webhook endpoint as-is: no payment-gateway integration
-    was part of this upload, so there's no gateway signature to verify
-    here — `IsAuthenticated` + "must be your own purchase" stand in so
-    the flow is testable end-to-end. Before this goes live behind an
-    actual gateway callback, that verification should replace (or gate)
-    the checks below; a genuine webhook call isn't "acting as" any
-    particular authenticated user.
+    TASK (this pass) — user_profile_app_reference.md §11 item 10: this is
+    now a real (gateway-agnostic) webhook endpoint. `IsAuthenticated` +
+    "must be your own purchase" is GONE — a genuine webhook call isn't
+    "acting as" any particular authenticated user, so that check could
+    never be the real gate here; it only ever worked because nothing in
+    this upload could call this endpoint except a logged-in client
+    testing the flow end-to-end. `permission_classes = [AllowAny]` now,
+    gated instead by `_verify_gateway_webhook_signature()` above — see
+    that function's own docstring for exactly what it checks and its
+    ⚠️ ASSUMPTION about not having `campus`/`liveclass`'s own
+    gateway-verify code to copy from.
+
+    Behavior change worth flagging explicitly: a `CoinPurchaseRequest`
+    with a BLANK `gateway` (the "manual admin-initiated top-up" case
+    `CoinPurchaseRequest.gateway`'s own field comment names) could
+    previously be confirmed by its owning user calling this endpoint
+    themselves. It no longer can be — there's no gateway secret to
+    verify a webhook signature against a blank gateway, and this
+    endpoint's whole reason to exist now is verifying a real gateway
+    webhook, not accepting a client's say-so. That's a real, currently
+    open gap for the manual/admin top-up case this pass doesn't have a
+    replacement path for — flagging it rather than silently leaving it
+    unconfirmable with no way to notice. `BuyCoinView`, `CoinPurchaseRequest`,
+    `CoinPurchaseRequestManager` are all otherwise unchanged.
     """
-    permission_classes = [IsAuthenticated]
+    permission_classes = [AllowAny]
     serializer_class = CoinPurchaseConfirmSerializer
 
     @extend_schema(
         request=CoinPurchaseConfirmSerializer,
         responses={200: CoinPurchaseRequestSerializer, 404: OpenApiTypes.OBJECT},
-        description="Confirm a coin purchase as success or failed. Idempotent — safe to retry "
-        "(e.g. a duplicated webhook delivery).",
+        description="Gateway webhook: confirm a coin purchase as success or failed. "
+        "Signature-verified — not callable as a regular authenticated user "
+        "action. Idempotent — safe to retry (e.g. a duplicated webhook delivery).",
     )
     def post(self, request):
+        # MUST happen before `self.get_serializer(data=request.data)`
+        # below — see `_verify_gateway_webhook_signature()`'s own comment
+        # on why. Forces Django to cache the raw body now, while the
+        # stream hasn't been read yet, so DRF's later `request.data`
+        # parse reads from that cached copy instead of consuming the
+        # stream directly — without this ordering, the signature check
+        # further down would hit Django's `RawPostDataException` instead
+        # of a raw body to hash.
+        request.body
+
         serializer = self.get_serializer(data=request.data)
         if not serializer.is_valid():
             return Response({
@@ -998,10 +1153,29 @@ class BuyCoinConfirmView(GenericAPIView):
                 "message": "Coin purchase request not found.",
             }, status=status.HTTP_404_NOT_FOUND)
 
-        # See the class docstring above re: this check standing in for
-        # real webhook-signature verification.
-        if purchase.user_id != request.user.id:
-            raise Http404
+        # Replaces the old `purchase.user_id != request.user.id` ownership
+        # check — see class docstring. Keyed off `purchase.gateway` (this
+        # server's own record of which gateway the purchase was started
+        # against), never off anything the caller claims in this request.
+        try:
+            _verify_gateway_webhook_signature(request, purchase.gateway)
+        except GatewayWebhookSignatureError as exc:
+            if exc.is_misconfiguration:
+                # Our config's fault (no secret on file / no gateway to
+                # verify against at all), not the caller's — 503, not
+                # 401/403, and safe to say so explicitly since it's not a
+                # signature-guessing hint.
+                return Response({
+                    "status": False,
+                    "message": str(exc),
+                }, status=status.HTTP_503_SERVICE_UNAVAILABLE)
+            # Deliberately generic message for every other failure
+            # (missing header, bad signature) — never confirms/denies
+            # *which* part was wrong to an unauthenticated caller.
+            return Response({
+                "status": False,
+                "message": "Webhook signature verification failed.",
+            }, status=status.HTTP_401_UNAUTHORIZED)
 
         try:
             if outcome == "success":
@@ -1139,6 +1313,117 @@ class CoinWithdrawalRequestView(GenericAPIView):
             "message": "Withdrawal requested successfully.",
             "data": self.get_serializer(withdrawal).data,
         }, status=status.HTTP_201_CREATED)
+
+
+# 🔥 §11 item 12 — staff/ops endpoint for CoinWithdrawalRequestManager's
+# three lifecycle methods. Before this, mark_processing()/
+# confirm_success()/reject() (models.py) existed and were unit-tested,
+# but nothing in urls.py called them — a withdrawal could only ever
+# reach PENDING through the public API (CoinWithdrawalRequestView
+# above); moving it further required a Django shell. This view is the
+# "future admin action" that item 12 flagged as not existing yet — it
+# doesn't touch CoinWithdrawalRequestView itself (that view still only
+# lets a user see/create their OWN requests) and doesn't open any new
+# path to CoinLedger: it calls the exact same manager methods
+# CoinLedgerAdmin's own docstring (admin.py) points to as the
+# sanctioned way to move a withdrawal forward, just reachable over the
+# API instead of only from a shell.
+class CoinWithdrawalAdminActionView(GenericAPIView):
+    """
+    POST /profile/coin-withdrawals/<int:withdrawal_id>/action/
+    {"action": "processing"}                              -> mark_processing()
+    {"action": "success"}                                  -> confirm_success()
+    {"action": "reject", "reason": "optional explanation"} -> reject()
+
+    Staff-only (`IsAdminUser` — `request.user.is_staff`). This mirrors
+    the level Django admin itself already requires to reach these same
+    three methods; it does not add a new, looser way in. Ordinary
+    authenticated users keep using `CoinWithdrawalRequestView` above
+    for their own requests (GET to list, POST to create) — this view
+    has no GET and never filters by `request.user`, since ops needs to
+    act on *any* user's withdrawal, not just their own.
+
+    Response codes follow the same conventions the rest of this
+    module already uses for the underlying manager methods:
+      - 404 if `withdrawal_id` doesn't exist at all.
+      - 409 if the manager raises `ValueError` for an invalid state
+        transition (e.g. trying to reject an already-SUCCESS request)
+        — same "well-formed request, wrong current state" shape
+        `BuyCoinConfirmView` already uses above for its own 409s.
+      - 400 for a missing/unrecognized `action` value — a request-body
+        problem, not a state problem.
+
+    Not idempotency-guarded beyond what the manager methods themselves
+    already do (`confirm_success`/`reject` are idempotent per their own
+    docstrings in models.py; `mark_processing` is not, and calling it
+    twice on an already-PROCESSING row is intentionally left to raise
+    from a plain equality check there would need — out of scope here,
+    same as the other manager-level caveats §11 already tracks).
+    """
+
+    permission_classes = [IsAdminUser]
+    serializer_class = CoinWithdrawalRequestSerializer
+
+    ACTION_PROCESSING = "processing"
+    ACTION_SUCCESS = "success"
+    ACTION_REJECT = "reject"
+    VALID_ACTIONS = (ACTION_PROCESSING, ACTION_SUCCESS, ACTION_REJECT)
+
+    @extend_schema(
+        request=OpenApiTypes.OBJECT,
+        responses={
+            200: CoinWithdrawalRequestSerializer,
+            400: OpenApiTypes.OBJECT,
+            404: OpenApiTypes.OBJECT,
+            409: OpenApiTypes.OBJECT,
+        },
+        description="Staff-only. Advance a withdrawal request's lifecycle: "
+        "{'action': 'processing'|'success'|'reject', 'reason': '<reject only, optional>'}.",
+    )
+    def post(self, request, withdrawal_id):
+        action = request.data.get("action")
+        if action not in self.VALID_ACTIONS:
+            return Response({
+                "status": False,
+                "message": f"'action' must be one of {list(self.VALID_ACTIONS)}.",
+            }, status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            if action == self.ACTION_PROCESSING:
+                withdrawal = CoinWithdrawalRequest.objects.mark_processing(
+                    withdrawal_id=withdrawal_id
+                )
+                message = "Withdrawal moved to processing."
+            elif action == self.ACTION_SUCCESS:
+                withdrawal = CoinWithdrawalRequest.objects.confirm_success(
+                    withdrawal_id=withdrawal_id
+                )
+                message = "Withdrawal marked successful."
+            else:
+                withdrawal = CoinWithdrawalRequest.objects.reject(
+                    withdrawal_id=withdrawal_id,
+                    reason=request.data.get("reason", ""),
+                )
+                message = "Withdrawal rejected and coins refunded."
+        except CoinWithdrawalRequest.DoesNotExist:
+            return Response({
+                "status": False,
+                "message": f"No withdrawal request with id {withdrawal_id}.",
+            }, status=status.HTTP_404_NOT_FOUND)
+        except ValueError as exc:
+            # Invalid state transition (e.g. rejecting an already-
+            # SUCCESS request) — the manager methods raise ValueError
+            # for exactly this; see models.py for each one's own rules.
+            return Response({
+                "status": False,
+                "message": str(exc),
+            }, status=status.HTTP_409_CONFLICT)
+
+        return Response({
+            "status": True,
+            "message": message,
+            "data": self.get_serializer(withdrawal).data,
+        }, status=status.HTTP_200_OK)
 
 
 class UserPreferenceView(GenericAPIView):

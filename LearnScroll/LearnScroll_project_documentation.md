@@ -4,9 +4,9 @@
 >
 > **Is pass me `settings.py`, `asgi.py`, `__init__.py`, `celery.py`, `urls.py`, `ws_auth.py`, `wsgi.py` — saari project-root files ab upload ho chuki hain. Do pichle open items RESOLVE ho gaye, ek NAYA confirmed bug mila, ek abhi bhi khula hai** (neeche §7 "Cross-app config audit" me poora detail):
 > - ✅ **RESOLVED — §7.3 (`ws_auth.py` dead code):** `asgi.py` ab `from LearnScroll.ws_auth import JWTAuthMiddleware` use karta hai, `message.Middleware.JWTAuthMiddleware` nahi. `asgi.py`'s apna comment isi fix ko explicitly is doc ke §7.3 reference ke saath document karta hai. `liveclass/ws_auth.py`/`message/Middleware.py` ki duplicate copies abhi bhi delete nahi hui (flagged as still-open cleanup in `asgi.py`'s own comment) — dead code hain ab, kisi ne unhe import nahi kar raha, lekin delete karna baaki hai.
-> - ✅ **RESOLVED — §7.2 (campus F-3 streak-reward tasks):** `settings.py`'s `CELERY_BEAT_SCHEDULE` me ab `campus-check-attendance-streak-rewards` (19:00 daily) aur `campus-check-assignment-ontime-streak-rewards` (19:30 daily) dono registered hain, args-less/self-looping shape confirm karte hue apne comment me.
+> - ✅ **RESOLVED — §7.2 (campus F-3 streak-reward tasks):** `settings.py`'s `CELERY_BEAT_SCHEDULE` me ab `campus-check-attendance-streak-rewards` (19:00 daily) aur `campus-check-assigments-ontime-streak-rewards` (19:30 daily) dono registered hain, args-less/self-looping shape confirm karte hue apne comment me.
 > - 🔴 **NAYA CRITICAL BUG CONFIRMED — `LearnScroll/__init__.py` khaali hai (0 bytes).** `celery.py`'s apna wiring-requirement (`from .celery import app as celery_app` + `__all__ = ("celery_app",)`) is file me bilkul nahi hai — pehle ye sirf "unverified, upload nahi hua" tha (open item 4), ab directly confirm ho gaya ki file literally empty hai. Iska matlab Celery app Django startup pe register hi nahi ho raha standard tareeke se — poora detail §3.1/§8 me.
-> - 🟡 **STILL OPEN — §7.1 (`'assigments'` typo in `INSTALLED_APPS`):** koi change nahi. **Naya signal mila**: `urls.py` bhi ab `path('assigments/', include('assigments.urls'))` wire karta hai (pehle ye bilkul wired hi nahi tha) — matlab `settings.py` aur `urls.py` dono consistently `'assigments'` (typo spelling) use kar rahe hain project-level par. Isse `campus/bridge.py`/`core/views.py::SearchView` ke `assignment` (sahi spelling) import ke against mismatch ka sawaal jyon ka tyon khada hai — poora detail §7.1 me updated.
+> - 🟡 **STILL OPEN — §7.1 (`'assigments'` typo in `INSTALLED_APPS`):** koi change nahi. **Naya signal mila**: `urls.py` bhi ab `path('assigments/', include('assigments.urls'))` wire karta hai (pehle ye bilkul wired hi nahi tha) — matlab `settings.py` aur `urls.py` dono consistently `'assigments'` (typo spelling) use kar rahe hain project-level par. Isse `campus/bridge.py`/`core/views.py::SearchView` ke `assigments` (sahi spelling) import ke against mismatch ka sawaal jyon ka tyon khada hai — poora detail §7.1 me updated.
 
 >
 > Baaki poora `settings.py` (1141 lines), `asgi.py`, `celery.py`, `urls.py`, `wsgi.py` neeche as-built document kiya gaya hai.
@@ -30,7 +30,7 @@
 ## 1. `settings.py` — Security & environment
 
 - **`SECRET_KEY`/`DEBUG`/`ALLOWED_HOSTS`** — sab `.env`-driven (`load_dotenv(BASE_DIR / ".env")`). `DEBUG` default `"False"` (fail-safe). `ALLOWED_HOSTS` default hardcoded `["*"]` **[⚠️ see below]**, lekin agar `DEBUG=True` aur `.env` me `ALLOWED_HOSTS` na ho to explicitly `["*"]` set hota hai — ye ek narrow, DEBUG-gated local-dev convenience hai jo production me kabhi trigger nahi hoga jab tak `DEBUG=False` set hai.
-  - **⚠️ Flag (not necessarily a bug, verify in your `.env`):** module-level `ALLOWED_HOSTS = ["*"]` (line 22) **unconditionally** executes before the `if DEBUG` guard below it — ye guard sirf ek dusra assignment karta hai jab `DEBUG` True ho aur env-var na ho. Iska matlab: agar production `.env` me `ALLOWED_HOSTS` explicitly set NAHI hai, to yehi module-level `["*"]` hi effectively active rehta hai chahe `DEBUG=False` ho — code ka apna comment khud is exact CRITICAL bug (wildcard host in production) ko "reverted"/"fixed" bolta hai, lekin jo line abhi file me hai wildcard hi hai. **Verify karo `.env` me `ALLOWED_HOSTS` explicitly set hai production me** — is doc ne is line ko as-written report kiya hai, guess nahi kiya ki `.env` me kya hoga.
+  - **⚠️ Flag (not necessarily a bug, verify in your `.env`):** module-level `ALLOWED_HOSTS = ["*"]` (line 22) **unconditionally** executes before the `if DEBUG` guard below it — ye guard sirf ek dusra assigments karta hai jab `DEBUG` True ho aur env-var na ho. Iska matlab: agar production `.env` me `ALLOWED_HOSTS` explicitly set NAHI hai, to yehi module-level `["*"]` hi effectively active rehta hai chahe `DEBUG=False` ho — code ka apna comment khud is exact CRITICAL bug (wildcard host in production) ko "reverted"/"fixed" bolta hai, lekin jo line abhi file me hai wildcard hi hai. **Verify karo `.env` me `ALLOWED_HOSTS` explicitly set hai production me** — is doc ne is line ko as-written report kiya hai, guess nahi kiya ki `.env` me kya hoga.
 - **HTTPS hardening** (sab `not DEBUG` gated, local dev http:// pe unaffected): `SESSION_COOKIE_SECURE`, `CSRF_COOKIE_SECURE`, `SECURE_PROXY_SSL_HEADER` (`X-Forwarded-Proto`), `SECURE_HSTS_SECONDS` (30 din), `SECURE_HSTS_INCLUDE_SUBDOMAINS`, `SECURE_HSTS_PRELOAD`, `SECURE_CONTENT_TYPE_NOSNIFF`, `X_FRAME_OPTIONS = "DENY"`. `SECURE_SSL_REDIRECT` hardcoded `False` (redirect terminating proxy/CDN level pe hone ki assumption).
 - **`CSRF_TRUSTED_ORIGINS`** — `.env` ke comma-separated `CSRF_TRUSTED_ORIGINS` se banta hai; ye sirf session/cookie-authenticated unsafe requests (`/admin/`) ke liye matter karta hai, JWT Bearer flow (mobile/Flutter client) ke liye nahi.
 - **Sentry** — `SENTRY_DSN` set ho to `DjangoIntegration` + `CeleryIntegration` + `LoggingIntegration(event_level="ERROR")` wire hote hain, `send_default_pii=False` (coin balances/coupon codes/join notes jaisa PII capture nahi hota). Unset ho to poora block inert hai.
@@ -46,7 +46,7 @@ django.contrib.postgres, django_filters, rest_framework, drf_spectacular, corshe
 login, user_profile, post, message, liveclass, campus, testseries, assigments, core
 [+ 'storages' if USE_S3_STORAGE]
 ```
-**🟡 UPDATED THIS PASS, PARTIALLY FIXED** — `testseries` ab correctly registered hai. Lekin chautha naya entry `'assigments'` hai (typo — missing 'n'), `'assignment'` nahi, jabki `campus/bridge.py` aur `core/views.py::SearchView` dono `assignment.bridge`/`assignment.models` hi hard-import karte hain. Poora detail + impact **§7.1** me.
+**🟡 UPDATED THIS PASS, PARTIALLY FIXED** — `testseries` ab correctly registered hai. Lekin chautha naya entry `'assigments'` hai (typo — missing 'n'), `'assigments'` nahi, jabki `campus/bridge.py` aur `core/views.py::SearchView` dono `assigments.bridge`/`assigments.models` hi hard-import karte hain. Poora detail + impact **§7.1** me.
 
 ### Database
 `DATABASE_URL` env-var se driven — set ho to Postgres (`CONN_MAX_AGE=60`), na ho to SQLite fallback (`db.sqlite3`, WAL mode + `busy_timeout=30000` `connection_created` signal se activate hota hai). Postgres ka `psycopg2-binary`/`psycopg[binary]` install hona chahiye jab `DATABASE_URL` set karo.
@@ -107,7 +107,7 @@ app.config_from_object("django.conf:settings", namespace="CELERY")
 app.autodiscover_tasks()
 ```
 - `namespace="CELERY"` — har `CELERY_*` setting Celery ke apne naam pe map hoti hai (`CELERY_BROKER_URL` → `broker_url`).
-- `autodiscover_tasks()` — har `INSTALLED_APPS` app ka `tasks.py` auto-register hota hai, manual registration ki zaroorat nahi. **(Isi wajah se `assignment`/`testseries` INSTALLED_APPS me na hone ka asar sirf models/admin tak seemit nahi — agar in apps ka apna `tasks.py` hai, uska bhi auto-discovery nahi hoga — §7.1.)**
+- `autodiscover_tasks()` — har `INSTALLED_APPS` app ka `tasks.py` auto-register hota hai, manual registration ki zaroorat nahi. **(Isi wajah se `assigments`/`testseries` INSTALLED_APPS me na hone ka asar sirf models/admin tak seemit nahi — agar in apps ka apna `tasks.py` hai, uska bhi auto-discovery nahi hoga — §7.1.)**
 - **Wiring pre-requisite** (khud command ke docstring ke mutabik): `LearnScroll/__init__.py` me `from .celery import app as celery_app` + `__all__ = ("celery_app",)` — **🔴 CONFIRMED THIS PASS: `__init__.py` khaali hai (0 bytes), ye lines wahan nahi hain.** Pehle ye sirf unverified tha; ab directly confirm ho gaya — dekho §3.1.
 - Production me **worker aur beat dono alag long-lived processes** chalane zaroori hain (`celery -A LearnScroll worker`, `celery -A LearnScroll beat`) — sirf worker se koi periodic task khud kabhi nahi chalega; sirf beat se tasks queue hote rehte hain, kabhi execute nahi hote.
 
@@ -135,7 +135,7 @@ urlpatterns = [
 ```
 - **`core.urls` yahan wire ho chuka hai** — `core_app_documentation.md` §9's open item #4 ("root urlconf me `path("core/", include("core.urls"))` add karna hai") **ab RESOLVED hai**, is upload se confirm hua. Prefix `"core/"` hai, jaisa `core/urls.py`'s apne docstring me suggest kiya gaya tha.
 - **`campus.urls` bhi wired hai**, prefix `"campus/"`.
-- **✅ NEW THIS PASS — `testseries.urls`/`assigments.urls` (typo spelling) dono ab yahan wired hain**, prefixes `"testseries/"`/`"assigments/"` — pehle ye dono bilkul wired hi nahi the ("yahan KAHIN nahi hain" wala pichla finding, ab stale, replaced). **Naya signal §7.1 ke liye**: `urls.py` bhi `settings.py`'s `INSTALLED_APPS` jaisi hi `'assigments'` (typo) spelling consistently use karta hai — ye `campus/bridge.py`/`core/views.py::SearchView` ke `assignment` (sahi spelling) hard-import ke against ambiguity ko resolve nahi karta, bas ye confirm karta hai ki project-level files (`settings.py` + `urls.py` dono) apni (galat/sahi, abhi tak unconfirmed) spelling par ek-doosre se consistent hain — dekho §7.1 updated.
+- **✅ NEW THIS PASS — `testseries.urls`/`assigments.urls` (typo spelling) dono ab yahan wired hain**, prefixes `"testseries/"`/`"assigments/"` — pehle ye dono bilkul wired hi nahi the ("yahan KAHIN nahi hain" wala pichla finding, ab stale, replaced). **Naya signal §7.1 ke liye**: `urls.py` bhi `settings.py`'s `INSTALLED_APPS` jaisi hi `'assigments'` (typo) spelling consistently use karta hai — ye `campus/bridge.py`/`core/views.py::SearchView` ke `assigments` (sahi spelling) hard-import ke against ambiguity ko resolve nahi karta, bas ye confirm karta hai ki project-level files (`settings.py` + `urls.py` dono) apni (galat/sahi, abhi tak unconfirmed) spelling par ek-doosre se consistent hain — dekho §7.1 updated.
 - Do `settings`-import lines duplicate hain (`from django.conf import settings` do baar) — harmless, cosmetic.
 - File ke end me commented-out `if settings.DEBUG: urlpatterns += static(...)` aur ek `re_path` media fallback — dono inactive, kyunki `path("media/<path:path>", serve_media_with_range, ...)` upar already unconditionally wired hai (§2's `SERVE_MEDIA_VIA_DJANGO` flag view-level pe decide karta hai, url-level pe nahi).
 - **⚠️ Cleanup reminder** (`core_app_documentation.md` §9 se bhi): agar `liveclass/urls.py` me abhi bhi purana `notifications`/`notification-preferences/me/` router registered hai, to `core.urls` wire ho jaane ke baad wo hata dena hai — warna do endpoints ek hi `Notification` table serve karenge.
@@ -175,13 +175,13 @@ urlpatterns = [
 | `user-profile-reconcile-follow-counts` | `user_profile.tasks.reconcile_follow_counts` | every 6h @ :15 |
 | `campus-send-fee-due-reminders` | `campus.tasks.send_fee_due_reminders` | daily 8:00 |
 | `campus-check-low-attendance` | `campus.tasks.check_low_attendance` | daily 18:00 |
-| `campus-send-assignment-due-reminders` | `campus.tasks.send_assignment_due_reminders` | daily 8:30 |
+| `campus-send-assigments-due-reminders` | `campus.tasks.send_assigments_due_reminders` | daily 8:30 |
 | `campus-check-attendance-streak-rewards` | `campus.tasks.check_attendance_streak_rewards` | daily 19:00 |
-| `campus-check-assignment-ontime-streak-rewards` | `campus.tasks.check_assignment_ontime_streak_rewards` | daily 19:30 |
+| `campus-check-assigments-ontime-streak-rewards` | `campus.tasks.check_assigments_ontime_streak_rewards` | daily 19:30 |
 
 **Deliberately NOT scheduled** (per settings.py's own comments): `campus.tasks.rollover_session(campus_id, new_session_id)` — required positional args, only ever called on-demand from `AcademicSessionViewSet.rollover`, correctly left out. `campus.tasks.refresh_analytics_snapshot(campus_id, session_id)` — also required-args, flagged as needing a new "loop every active campus+session" wrapper task before it can be scheduled (wrapper doesn't exist yet).
 
-✅ **RESOLVED THIS PASS** — `campus.tasks.check_attendance_streak_rewards` aur `campus.tasks.check_assignment_ontime_streak_rewards` (F-3) ab `CELERY_BEAT_SCHEDULE` me registered hain (upar table me, 19:00/19:30 daily) — dono args-less, self-looping shape confirm karte hue apne khud ke comment me (`settings.py` lines ~1116-1137). Pura detail **§7.2** me updated.
+✅ **RESOLVED THIS PASS** — `campus.tasks.check_attendance_streak_rewards` aur `campus.tasks.check_assigments_ontime_streak_rewards` (F-3) ab `CELERY_BEAT_SCHEDULE` me registered hain (upar table me, 19:00/19:30 daily) — dono args-less, self-looping shape confirm karte hue apne khud ke comment me (`settings.py` lines ~1116-1137). Pura detail **§7.2** me updated.
 
 ---
 
@@ -189,22 +189,22 @@ urlpatterns = [
 
 Is section ka maksad: dono app-level docs ke "kya settings.py me hona chahiye" wale open items ko is asli `settings.py` ke against check karna — same reconciliation jo `campus`/`core` docs khud apne code ke liye karte hain.
 
-### 7.1 🟡 `assignment` — `INSTALLED_APPS` me galat spelling se add hua (`testseries` sahi hai)
+### 7.1 🟡 `assigments` — `INSTALLED_APPS` me galat spelling se add hua (`testseries` sahi hai)
 
 **✅ Is pass me updated:** `INSTALLED_APPS` me ab `'testseries'` aur `'assigments'` dono add ho chuke hain (§2 upar). `testseries` bilkul sahi hai — koi issue nahi.
 
-**🟡 Lekin `'assigments'` likha gaya hai, `'assignment'` nahi (typo — missing 'n'):**
-- `campus/bridge.py` (`campus_app_design.md` §10): `create_assignment()`/`get_assignment_submissions()` `assignment.bridge`/`assignment.models` import karte hain — module path `assignment`, `assigments` nahi.
-- `core/views.py::SearchView` (`core_app_documentation.md` §6.2/§7): `from assignment.models import Assignment, AssignmentSource` — yahan bhi `assignment`.
-- Dono docs consistently `assignment` (poora word, sahi spelling) ko hi "confirmed sibling app" label bolte hain — kahin bhi `assigments` nahi likha.
+**🟡 Lekin `'assigments'` likha gaya hai, `'assigments'` nahi (typo — missing 'n'):**
+- `campus/bridge.py` (`campus_app_design.md` §10): `create_assigments()`/`get_assigments_submissions()` `assigments.bridge`/`assigments.models` import karte hain — module path `assigments`, `assigments` nahi.
+- `core/views.py::SearchView` (`core_app_documentation.md` §6.2/§7): `from assigments.models import assigments, assigmentsSource` — yahan bhi `assigments`.
+- Dono docs consistently `assigments` (poora word, sahi spelling) ko hi "confirmed sibling app" label bolte hain — kahin bhi `assigments` nahi likha.
 
-**Impact agar actual app ka folder/`AppConfig.name` `assignment` hai (jaisa har jagah use hota hai):** `'assigments'` string se Django ek **naya, non-existent app** register karne ki koshish karega — agar `assigments/` naam ka koi folder/module hi nahi hai to Django startup pe hi `ModuleNotFoundError`/`ImproperlyConfigured` degi ("Cannot import 'assigments'"), poora project boot hi nahi hoga. Agar koi purana/dummy `assigments` folder kahin accidentally maujood hai to project boot to ho jayega, lekin asli `assignment` app (jise `campus/bridge.py`/`core/views.py` import karte hain) **ab bhi app-registry me registered NAHI hai** — wahi purana §7.1 impact (migrations/admin/`get_app_config("assignment")` sab fail) jyon ka tyon rehta hai, sirf ab ek extra bhoot-entry (`assigments`) ke saath. Dono cases me ye **still-critical** hai, sirf failure ka shape badla hai.
+**Impact agar actual app ka folder/`AppConfig.name` `assigments` hai (jaisa har jagah use hota hai):** `'assigments'` string se Django ek **naya, non-existent app** register karne ki koshish karega — agar `assigments/` naam ka koi folder/module hi nahi hai to Django startup pe hi `ModuleNotFoundError`/`ImproperlyConfigured` degi ("Cannot import 'assigments'"), poora project boot hi nahi hoga. Agar koi purana/dummy `assigments` folder kahin accidentally maujood hai to project boot to ho jayega, lekin asli `assigments` app (jise `campus/bridge.py`/`core/views.py` import karte hain) **ab bhi app-registry me registered NAHI hai** — wahi purana §7.1 impact (migrations/admin/`get_app_config("assigments")` sab fail) jyon ka tyon rehta hai, sirf ab ek extra bhoot-entry (`assigments`) ke saath. Dono cases me ye **still-critical** hai, sirf failure ka shape badla hai.
 
-**Fix:** `INSTALLED_APPS` me `'assigments'` ko `'assignment'` se replace karo (spelling fix, ek character). Confirm karo `assignment` app ka apna `AppConfig.name` isi label se match karta hai (jaisa is doc me pehle bhi flag kiya gaya tha — is app ka apna `apps.py`/models is upload me kabhi nahi aaya).
+**Fix:** `INSTALLED_APPS` me `'assigments'` ko `'assigments'` se replace karo (spelling fix, ek character). Confirm karo `assigments` app ka apna `AppConfig.name` isi label se match karta hai (jaisa is doc me pehle bhi flag kiya gaya tha — is app ka apna `apps.py`/models is upload me kabhi nahi aaya).
 
 ### 7.2 ✅ RESOLVED — Campus F-3 streak-reward tasks ab beat schedule me hain
 
-`campus_app_design.md` (§7a, §12) confirm karta hai: `check_attendance_streak_rewards`/`check_assignment_ontime_streak_rewards` dono ab **poore functional** hain (`services.py`'s streak functions ab exist karte hain, `bridge.NotifTypes.CAMPUS_REWARD_EARNED` bhi define hai) — pehle ye dono crash karte the, ab nahi. Dono `campus.tasks.rollover_session`/`refresh_analytics_snapshot` ki tarah "ek specific campus/session ke liye" nahi hain — `compute_attendance_streak(enrollment)`/`compute_assignment_ontime_streak(student, section)` (services.py) per-enrollment/per-student compute karte hain, isliye in do tasks ka apna khud ka "har relevant student/enrollment par loop karo" wrapper hona chahiye, `check_low_attendance`/`send_assignment_due_reminders` jaisa hi.
+`campus_app_design.md` (§7a, §12) confirm karta hai: `check_attendance_streak_rewards`/`check_assigments_ontime_streak_rewards` dono ab **poore functional** hain (`services.py`'s streak functions ab exist karte hain, `bridge.NotifTypes.CAMPUS_REWARD_EARNED` bhi define hai) — pehle ye dono crash karte the, ab nahi. Dono `campus.tasks.rollover_session`/`refresh_analytics_snapshot` ki tarah "ek specific campus/session ke liye" nahi hain — `compute_attendance_streak(enrollment)`/`compute_assigments_ontime_streak(student, section)` (services.py) per-enrollment/per-student compute karte hain, isliye in do tasks ka apna khud ka "har relevant student/enrollment par loop karo" wrapper hona chahiye, `check_low_attendance`/`send_assigments_due_reminders` jaisa hi.
 
 **✅ CONFIRMED FIXED — is pass ka `settings.py` upload:** `CELERY_BEAT_SCHEDULE` me ab dono registered hain, args-less/self-looping shape confirm karte hue apne khud ke comment me (settings.py lines ~1116-1137):
 ```python
@@ -212,8 +212,8 @@ Is section ka maksad: dono app-level docs ke "kya settings.py me hona chahiye" w
     "task": "campus.tasks.check_attendance_streak_rewards",
     "schedule": crontab(hour=19, minute=0),
 },
-"campus-check-assignment-ontime-streak-rewards": {
-    "task": "campus.tasks.check_assignment_ontime_streak_rewards",
+"campus-check-assigments-ontime-streak-rewards": {
+    "task": "campus.tasks.check_assigments_ontime_streak_rewards",
     "schedule": crontab(hour=19, minute=30),
 },
 ```
@@ -231,11 +231,11 @@ Is section ka maksad: dono app-level docs ke "kya settings.py me hona chahiye" w
 
 ## 8. Open items (agla kaam yahi se shuru hoga)
 
-1. **🟡 `INSTALLED_APPS` me `'assigments'` ko `'assignment'` se fix karna (spelling)** — §7.1. `testseries` already sahi hai. Ye ab ek one-character typo fix hai, lekin jab tak fix nahi hota tab tak impact utna hi critical hai jitna pehle "missing entirely" wala tha. **Is pass me naya signal**: `urls.py` bhi ab consistently `'assigments'` use karta hai (§5) — settings.py aur urls.py aapas me consistent hain, but `campus/bridge.py`/`core/views.py` ke against ambiguity abhi bhi unresolved hai.
+1. **🟡 `INSTALLED_APPS` me `'assigments'` ko `'assigments'` se fix karna (spelling)** — §7.1. `testseries` already sahi hai. Ye ab ek one-character typo fix hai, lekin jab tak fix nahi hota tab tak impact utna hi critical hai jitna pehle "missing entirely" wala tha. **Is pass me naya signal**: `urls.py` bhi ab consistently `'assigments'` use karta hai (§5) — settings.py aur urls.py aapas me consistent hain, but `campus/bridge.py`/`core/views.py` ke against ambiguity abhi bhi unresolved hai.
 2. ✅ ~~Campus streak-reward tasks ko `CELERY_BEAT_SCHEDULE` me add karna~~ — **RESOLVED is pass, §7.2.**
 3. ✅ ~~`ws_auth.py` ko `asgi.py` me actually wire karna~~ — **RESOLVED is pass, §3, §7.3.** Duplicate copies (`liveclass/ws_auth.py`/`message/Middleware.py`) delete karna abhi bhi baaki hai — chhota cleanup item, functional impact nahi.
 4. 🔴 **`LearnScroll/__init__.py` — CONFIRMED THIS PASS: file khaali hai (0 bytes).** `from .celery import app as celery_app` + `__all__ = ("celery_app",)` add karna hai (celery.py's apna wiring-requirement) — dekho §3.1.
-5. `core_app_documentation.md` §9 item 16 (`check_config_drift.py`'s `CONFIG_DRIFT_APPS` setting) — **confirmed MISSING** is pass me (`settings.py` me kahin `CONFIG_DRIFT_APPS` nahi hai) — command ab bhi apne hardcoded default (`["user_profile", "core"]`) par chalega, jo theek hai, lekin agar `assignment`/`testseries` add karne ke baad in apps ko bhi check karwana hai to explicit setting add karo.
+5. `core_app_documentation.md` §9 item 16 (`check_config_drift.py`'s `CONFIG_DRIFT_APPS` setting) — **confirmed MISSING** is pass me (`settings.py` me kahin `CONFIG_DRIFT_APPS` nahi hai) — command ab bhi apne hardcoded default (`["user_profile", "core"]`) par chalega, jo theek hai, lekin agar `assigments`/`testseries` add karne ke baad in apps ko bhi check karwana hai to explicit setting add karo.
 6. `ALLOWED_HOSTS` ka module-level `["*"]` default — §1 me flag kiya, verify karo production `.env` me explicit value set hai.
 7. `liveclass/urls.py` cleanup — agar `core.urls` wire hone se pehle ka purana `notifications`/`notification-preferences/me/` router abhi bhi wahan hai to hatao (§5, `core_app_documentation.md` §9 se carried over).
 

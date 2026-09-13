@@ -1,4 +1,5 @@
 # campus/views.py
+import logging
 import uuid
 from decimal import Decimal, InvalidOperation
 
@@ -20,23 +21,23 @@ from rest_framework.views import APIView
 # (same boundary user_profile/models.py's own CoinLedger docstring lays out).
 from user_profile.models import CoinLedger
 
-# [Task 11] `AssignmentViewSet`/`AssignmentSubmissionViewSet` below are now
-# thin proxies over the unified `assignment` app (see `campus.Assignment`'s
+# [Task 11] `assigmentsViewSet`/`assigmentsSubmissionViewSet` below are now
+# thin proxies over the unified `assigments` app (see `campus.assigments`'s
 # own [DEPRECATED] docstring in models.py) rather than campus's own
-# deprecated Assignment/AssignmentSubmission models — imported directly at
+# deprecated assigments/assigmentsSubmission models — imported directly at
 # module level, same reasoning as `campus.bridge`'s own Task 11 addition
-# docstring gives: `assignment` is a confirmed, fully-built sibling app,
+# docstring gives: `assigments` is a confirmed, fully-built sibling app,
 # not an unverified dependency that needs a lazy-import degrade. Aliased
 # ("Unified...") so a reader never confuses these with campus's own,
-# now-deprecated `Assignment`/`AssignmentSubmission` models — this file no
+# now-deprecated `assigments`/`assigmentsSubmission` models — this file no
 # longer imports those at all, since nothing here touches them any more;
 # the one remaining reader of the old rows is the one-time
-# `migrate_campus_assignments_to_unified` management command.
-from assignment.models import Assignment as UnifiedAssignment
-from assignment.models import AssignmentSource as UnifiedAssignmentSource
-from assignment.models import AssignmentSubmission as UnifiedAssignmentSubmission
+# `migrate_campus_assigmentss_to_unified` management command.
+from assigments.models import assigments as Unifiedassigments
+from assigments.models import assigmentsSource as UnifiedassigmentsSource
+from assigments.models import assigmentsSubmission as UnifiedassigmentsSubmission
 
-# [Task 13] Same posture as the `assignment` imports directly above:
+# [Task 13] Same posture as the `assigments` imports directly above:
 # `testseries` is a confirmed, fully-built sibling app for this task
 # (its own `testseries/bridge.py` module docstring documents this exact
 # `source="campus"` calling contract), not an unverified dependency —
@@ -63,7 +64,7 @@ from .models import (
     CampusAnalyticsSnapshot,
     CampusLiveSession,
     CampusParentLink,
-    ClassTeacherAssignment,
+    ClassTeacherassigments,
     Department,
     DigitalIDCard,
     ExamTerm,
@@ -78,7 +79,7 @@ from .models import (
     StaffProfile,
     StudentEnrollment,
     Subject,
-    SubjectTeacherAssignment,
+    SubjectTeacherassigments,
     SyllabusProgress,
     SyllabusUnit,
     TimeSlot,
@@ -103,7 +104,7 @@ from .serializers import (
     CampusLiveSessionSerializer,
     CampusParentLinkSerializer,
     CampusSerializer,
-    ClassTeacherAssignmentSerializer,
+    ClassTeacherassigmentsSerializer,
     DepartmentSerializer,
     DigitalIDCardSerializer,
     ExamTermSerializer,
@@ -122,8 +123,10 @@ from .serializers import (
     TimetableEntrySerializer,
     StudentEnrollmentSerializer,
     SubjectSerializer,
-    SubjectTeacherAssignmentSerializer,
+    SubjectTeacherassigmentsSerializer,
 )
+
+logger = logging.getLogger(__name__)
 
 
 def get_my_campus_ids(user):
@@ -319,11 +322,35 @@ class SectionViewSet(CampusMemberScopedMixin, viewsets.ModelViewSet):
     def perform_create(self, serializer):
         section = serializer.save()
         # TASK (design doc §3) — section-group auto-creation. Routed
-        # through `campus.bridge` (never a direct `message` import) —
-        # see that module's docstring for why this currently no-ops
-        # with a logged warning until `core.classroom_chat_bridge`
-        # actually exists.
-        bridge.create_section_group(section, actor=self.request.user)
+        # through `campus.bridge` (never a direct `message` import).
+        #
+        # `bridge.create_section_group()` is now hard-wired (design doc
+        # §10, Group A) straight through to
+        # `core.classroom_chat_bridge.create_section_group()`, which
+        # raises `ValueError` unless `actor` is already this section's
+        # assigned class-teacher. A section **just created in this same
+        # request never has one yet** — that's a separate step, done via
+        # `ClassTeacherassigmentsViewSet` afterward — so this call is
+        # *expected* to fail here on every normal creation, not just on
+        # some edge case. We deliberately don't let that block section
+        # creation (`serializer.save()` above has already committed the
+        # row): the real, correct trigger for group creation is
+        # `ClassTeacherassigmentsViewSet.perform_create()` below, once a
+        # class-teacher genuinely exists to be the group's creator/ADMIN.
+        # This call is kept here only as an idempotent no-op fast-path
+        # for the rare case a class-teacher was somehow already assigned
+        # before the section row existed (e.g. a fixture/migration
+        # ordering quirk) — `create_section_group()` itself is idempotent,
+        # so calling it twice (once here, once from the assigments
+        # viewset) is always safe.
+        try:
+            bridge.create_section_group(section, actor=self.request.user)
+        except ValueError:
+            logger.info(
+                "Skipped section-group creation for section %s: no class-teacher "
+                "assigned yet (expected — will be created when one is).",
+                section.pk,
+            )
 
 
 class SubjectViewSet(CampusMemberScopedMixin, viewsets.ModelViewSet):
@@ -369,12 +396,12 @@ class StaffProfileViewSet(CampusMemberScopedMixin, viewsets.ModelViewSet):
         serializer.save()
 
 
-class ClassTeacherAssignmentViewSet(CampusMemberScopedMixin, viewsets.ModelViewSet):
-    serializer_class = ClassTeacherAssignmentSerializer
+class ClassTeacherassigmentsViewSet(CampusMemberScopedMixin, viewsets.ModelViewSet):
+    serializer_class = ClassTeacherassigmentsSerializer
     campus_field_path = "section__school_class__campus"
 
     def get_queryset(self):
-        return self.filter_queryset_to_my_campuses(ClassTeacherAssignment.objects.all(), self.request)
+        return self.filter_queryset_to_my_campuses(ClassTeacherassigments.objects.all(), self.request)
 
     def get_campus_id_for_permission_check(self, request):
         section_id = request.data.get("section")
@@ -384,69 +411,95 @@ class ClassTeacherAssignmentViewSet(CampusMemberScopedMixin, viewsets.ModelViewS
                 return section.school_class.campus_id
         return super().get_campus_id_for_permission_check(request)
 
+    def perform_create(self, serializer):
+        assigments = serializer.save()
+        # This is the moment `bridge.create_section_group()`'s real
+        # precondition (design doc §10) first becomes true: the section
+        # now has an assigned class-teacher, who is the group's required
+        # creator/ADMIN. `actor` must be *this assigments's* staff user
+        # — not `self.request.user` — since an admin/principal (not the
+        # teacher themself) is typically the one who creates this row.
+        # `create_section_group()` is idempotent (returns the existing
+        # group unchanged if one was already created — e.g. by
+        # `SectionViewSet.perform_create()`'s own fast-path above), so
+        # this is always safe to call, never a duplicate-create risk.
+        try:
+            bridge.create_section_group(assigments.section, actor=assigments.staff.user)
+        except ValueError:
+            # Shouldn't normally happen (we just made `assigments.staff`
+            # this section's class-teacher), but kept as a defensive
+            # backstop rather than letting an unexpected mismatch 500 a
+            # class-teacher-assigments request — the section still gets
+            # its group the next time this endpoint (or a retry) runs.
+            logger.warning(
+                "create_section_group() unexpectedly rejected staff %s as "
+                "class-teacher for section %s right after assigning them.",
+                assigments.staff_id, assigments.section_id,
+            )
 
-class SubjectTeacherAssignmentViewSet(CampusMemberScopedMixin, viewsets.ModelViewSet):
+
+class SubjectTeacherassigmentsViewSet(CampusMemberScopedMixin, viewsets.ModelViewSet):
     """
     Create leaves `status=PENDING` (model default) — the class-teacher
     of that section approves/rejects via the two actions below (design
     doc §2's "class-teacher subject-teacher ko allow karega" flow).
     Anyone who can see the section can request; only that section's
-    `ClassTeacherAssignment` holder (or a campus admin/principal, as a
+    `ClassTeacherassigments` holder (or a campus admin/principal, as a
     fallback for when no class-teacher is assigned yet) can decide.
     """
-    serializer_class = SubjectTeacherAssignmentSerializer
+    serializer_class = SubjectTeacherassigmentsSerializer
     campus_field_path = "section__school_class__campus"
     # Overridden below: creating a request needs no special role (any
     # campus member can ask to teach a subject), only approve/reject do.
     permission_classes = [IsAuthenticated]
 
     def get_queryset(self):
-        return self.filter_queryset_to_my_campuses(SubjectTeacherAssignment.objects.all(), self.request)
+        return self.filter_queryset_to_my_campuses(SubjectTeacherassigments.objects.all(), self.request)
 
-    def _can_decide(self, user, assignment):
-        if is_class_teacher_of_section(user, assignment.section_id):
+    def _can_decide(self, user, assigments):
+        if is_class_teacher_of_section(user, assigments.section_id):
             return True
-        return is_campus_admin_or_principal(user, assignment.section.school_class.campus_id)
+        return is_campus_admin_or_principal(user, assigments.section.school_class.campus_id)
 
     @action(detail=True, methods=["post"])
     def approve(self, request, pk=None):
-        assignment = self.get_object()
-        if not self._can_decide(request.user, assignment):
+        assigments = self.get_object()
+        if not self._can_decide(request.user, assigments):
             return Response({"detail": "Not allowed."}, status=status.HTTP_403_FORBIDDEN)
         deciding_staff = StaffProfile.objects.filter(
-            campus_id=assignment.section.school_class.campus_id, user=request.user, is_active=True
+            campus_id=assigments.section.school_class.campus_id, user=request.user, is_active=True
         ).first()
-        assignment.status = SubjectTeacherAssignment.Status.APPROVED
-        assignment.approved_by = deciding_staff
-        assignment.responded_at = timezone.now()
-        assignment.save(update_fields=["status", "approved_by", "responded_at", "updated_at"])
+        assigments.status = SubjectTeacherassigments.Status.APPROVED
+        assigments.approved_by = deciding_staff
+        assigments.responded_at = timezone.now()
+        assigments.save(update_fields=["status", "approved_by", "responded_at", "updated_at"])
         bridge.notify(
-            users=[assignment.staff.user],
-            notif_type=NotifTypes.STAFF_ASSIGNMENT_APPROVED,
-            title="Subject assignment approved",
-            body=f"You're approved to teach {assignment.subject.name} for {assignment.section}.",
+            users=[assigments.staff.user],
+            notif_type=NotifTypes.STAFF_assigments_APPROVED,
+            title="Subject assigments approved",
+            body=f"You're approved to teach {assigments.subject.name} for {assigments.section}.",
         )
-        return Response(self.get_serializer(assignment).data)
+        return Response(self.get_serializer(assigments).data)
 
     @action(detail=True, methods=["post"])
     def reject(self, request, pk=None):
-        assignment = self.get_object()
-        if not self._can_decide(request.user, assignment):
+        assigments = self.get_object()
+        if not self._can_decide(request.user, assigments):
             return Response({"detail": "Not allowed."}, status=status.HTTP_403_FORBIDDEN)
         deciding_staff = StaffProfile.objects.filter(
-            campus_id=assignment.section.school_class.campus_id, user=request.user, is_active=True
+            campus_id=assigments.section.school_class.campus_id, user=request.user, is_active=True
         ).first()
-        assignment.status = SubjectTeacherAssignment.Status.REJECTED
-        assignment.approved_by = deciding_staff
-        assignment.responded_at = timezone.now()
-        assignment.save(update_fields=["status", "approved_by", "responded_at", "updated_at"])
+        assigments.status = SubjectTeacherassigments.Status.REJECTED
+        assigments.approved_by = deciding_staff
+        assigments.responded_at = timezone.now()
+        assigments.save(update_fields=["status", "approved_by", "responded_at", "updated_at"])
         bridge.notify(
-            users=[assignment.staff.user],
-            notif_type=NotifTypes.STAFF_ASSIGNMENT_REJECTED,
-            title="Subject assignment rejected",
-            body=f"Your request to teach {assignment.subject.name} for {assignment.section} was rejected.",
+            users=[assigments.staff.user],
+            notif_type=NotifTypes.STAFF_assigments_REJECTED,
+            title="Subject assigments rejected",
+            body=f"Your request to teach {assigments.subject.name} for {assigments.section} was rejected.",
         )
-        return Response(self.get_serializer(assignment).data)
+        return Response(self.get_serializer(assigments).data)
 
 
 class StudentEnrollmentViewSet(CampusMemberScopedMixin, viewsets.ModelViewSet):
@@ -700,19 +753,19 @@ class AttendanceViewSet(CampusMemberScopedMixin, viewsets.ModelViewSet):
 
 
 # ============================================================
-# Phase 6 — assignments & syllabus
+# Phase 6 — assigmentss & syllabus
 # ============================================================
 def _my_section_ids_and_campus_map(user):
     """[Task 11] Every `Section` id this user has some legitimate reason
-    to see campus assignments for (enrolled student, active staff, or
+    to see campus assigmentss for (enrolled student, active staff, or
     linked parent — via `get_my_campus_ids()`'s own membership
     reasoning), plus a `{section_id: campus_id}` lookup for permission
     checks. Deliberately campus-wide, not narrowed to the user's own
-    section(s) — this is a faithful port of the OLD `AssignmentViewSet.
+    section(s) — this is a faithful port of the OLD `assigmentsViewSet.
     get_queryset()`'s actual scoping (`campus_field_path =
     "section__school_class__campus"`, filtered only by
     `campus_id__in=get_my_campus_ids(user)`), which already showed a
-    student every section's assignments within their campus, not just
+    student every section's assigmentss within their campus, not just
     their own section's. Not a new, broader grant introduced by this
     proxy.
     """
@@ -724,36 +777,36 @@ def _my_section_ids_and_campus_map(user):
     )
 
 
-def _section_for_assignment(assignment):
-    """[Task 11] `assignment.context_id` IS a `Section.id` for every
-    `source="campus"` unified Assignment (see `campus.bridge.
-    create_assignment()`) — this app never stores a real FK back to
+def _section_for_assigments(assigments):
+    """[Task 11] `assigments.context_id` IS a `Section.id` for every
+    `source="campus"` unified assigments (see `campus.bridge.
+    create_assigments()`) — this app never stores a real FK back to
     `Section` (golden rule, §1), so this is the one place that opaque id
-    gets turned back into a real row, same posture `assignment.bridge`
+    gets turned back into a real row, same posture `assigments.bridge`
     itself takes toward never doing this resolution on its own side.
     """
-    return Section.objects.filter(pk=assignment.context_id).select_related("school_class").first()
+    return Section.objects.filter(pk=assigments.context_id).select_related("school_class").first()
 
 
-def _serialize_campus_assignment(assignment):
-    """[Task 11] Reconstructs the OLD `campus.Assignment` API shape
+def _serialize_campus_assigments(assigments):
+    """[Task 11] Reconstructs the OLD `campus.assigments` API shape
     (`id, section, subject, posted_by, title, description, attachment,
-    due_date, session`) from a NEW `assignment.models.Assignment`
-    instance, so `AssignmentViewSet`'s response keys stay
+    due_date, session`) from a NEW `assigments.models.assigments`
+    instance, so `assigmentsViewSet`'s response keys stay
     frontend-compatible even though the backing model changed entirely
     (Task 11 acceptance: same JSON keys).
 
-    - `section` = `assignment.context_id` directly.
-    - `subject` = `assignment.data.get("subject_id")` — see
-      `create_context_assignment()`'s `extra_data` parameter docstring
-      (assignment/bridge.py) for why this couldn't be a real FK on the
+    - `section` = `assigments.context_id` directly.
+    - `subject` = `assigments.data.get("subject_id")` — see
+      `create_context_assigments()`'s `extra_data` parameter docstring
+      (assigments/bridge.py) for why this couldn't be a real FK on the
       unified model.
     - `session` = derived fresh from the section's own
       `school_class.session_id` rather than stored anywhere on the
       unified model — a Section's session doesn't change after the
       fact, so this is always correct and avoids keeping a second,
       potentially-stale copy of a value `Section` already has.
-    - `posted_by` = the `StaffProfile.id` for `assignment.posted_by` at
+    - `posted_by` = the `StaffProfile.id` for `assigments.posted_by` at
       this campus, looked up fresh — the unified model only stores the
       underlying `login.User`, not the campus-scoped `StaffProfile` row
       the old API exposed. [FLAGGED, not a bug]: if that staff member's
@@ -762,32 +815,32 @@ def _serialize_campus_assignment(assignment):
       kept returning the same id — a real, deliberate behavior
       difference from before.
     """
-    section = _section_for_assignment(assignment)
+    section = _section_for_assigments(assigments)
     campus_id = section.school_class.campus_id if section else None
     posted_by_staff_id = None
-    if assignment.posted_by_id and campus_id:
+    if assigments.posted_by_id and campus_id:
         posted_by_staff_id = (
-            StaffProfile.objects.filter(user_id=assignment.posted_by_id, campus_id=campus_id, is_active=True)
+            StaffProfile.objects.filter(user_id=assigments.posted_by_id, campus_id=campus_id, is_active=True)
             .values_list("id", flat=True)
             .first()
         )
     return {
-        "id": assignment.id,
-        "section": assignment.context_id,
-        "subject": assignment.data.get("subject_id"),
+        "id": assigments.id,
+        "section": assigments.context_id,
+        "subject": assigments.data.get("subject_id"),
         "posted_by": posted_by_staff_id,
-        "title": assignment.title,
-        "description": assignment.description,
-        "attachment": assignment.attachment.url if assignment.attachment else None,
-        "due_date": assignment.due_date,
+        "title": assigments.title,
+        "description": assigments.description,
+        "attachment": assigments.attachment.url if assigments.attachment else None,
+        "due_date": assigments.due_date,
         "session": section.school_class.session_id if section else None,
     }
 
 
 def _serialize_campus_submission(submission):
-    """[Task 11] Reconstructs the OLD `campus.AssignmentSubmission` API
-    shape (`id, assignment, student, submitted_at, file, status, grade,
-    feedback`) from a NEW `assignment.models.AssignmentSubmission`
+    """[Task 11] Reconstructs the OLD `campus.assigmentsSubmission` API
+    shape (`id, assigments, student, submitted_at, file, status, grade,
+    feedback`) from a NEW `assigments.models.assigmentsSubmission`
     instance.
 
     `status` string values are used as-is — "submitted"/"late"/"missing"
@@ -803,7 +856,7 @@ def _serialize_campus_submission(submission):
     """
     return {
         "id": submission.id,
-        "assignment": submission.assignment_id,
+        "assigments": submission.assigments_id,
         "student": submission.student_id,
         "submitted_at": submission.submitted_at,
         "file": submission.file.url if submission.file else None,
@@ -813,11 +866,11 @@ def _serialize_campus_submission(submission):
     }
 
 
-class AssignmentViewSet(viewsets.ViewSet):
-    """[Task 11] Thin proxy over the unified `assignment` app —
-    `campus.Assignment` (this app's own model) is deprecated (see its
-    docstring in models.py); every assignment now actually lives on
-    `assignment.models.Assignment` with `source="campus"`,
+class assigmentsViewSet(viewsets.ViewSet):
+    """[Task 11] Thin proxy over the unified `assigments` app —
+    `campus.assigments` (this app's own model) is deprecated (see its
+    docstring in models.py); every assigments now actually lives on
+    `assigments.models.assigments` with `source="campus"`,
     `context_type="section"`, `context_id=<Section.id>`.
 
     Deliberately NOT a `ModelViewSet` (nor built on
@@ -828,15 +881,15 @@ class AssignmentViewSet(viewsets.ViewSet):
     implemented directly against the unified model instead, with the
     OLD response shape (`id, section, subject, posted_by, title,
     description, attachment, due_date, session`) reconstructed by
-    `_serialize_campus_assignment()` so existing frontend code keeps
+    `_serialize_campus_assigments()` so existing frontend code keeps
     working unchanged (Task 11 acceptance: same JSON keys).
 
     update/partial_update/destroy are NOT implemented in this pass —
     the old `ModelViewSet` allowed arbitrary field PATCHes on a posted
-    assignment, but the unified model's mutation surface is
+    assigments, but the unified model's mutation surface is
     explicit-method-based (e.g. `has_structured_questions` immutability
     once a submission exists) and no design doc input covered what
-    "edit a posted campus assignment" should mean against that surface.
+    "edit a posted campus assigments" should mean against that surface.
     Flagged as an open item rather than guessed at, same as this
     codebase's established convention for genuine gaps (see e.g.
     `campus/bridge.py`'s own STATUS section).
@@ -849,20 +902,20 @@ class AssignmentViewSet(viewsets.ViewSet):
 
     def list(self, request):
         section_ids, _ = _my_section_ids_and_campus_map(request.user)
-        qs = UnifiedAssignment.objects.filter(
-            source=UnifiedAssignmentSource.CAMPUS, context_type="section", context_id__in=section_ids
+        qs = Unifiedassigments.objects.filter(
+            source=UnifiedassigmentsSource.CAMPUS, context_type="section", context_id__in=section_ids
         ).order_by("-due_date")
         section_filter = request.query_params.get("section")
         if section_filter:
             qs = qs.filter(context_id=section_filter)
-        return Response([_serialize_campus_assignment(a) for a in qs])
+        return Response([_serialize_campus_assigments(a) for a in qs])
 
     def retrieve(self, request, pk=None):
-        assignment = get_object_or_404(UnifiedAssignment.objects.filter(source=UnifiedAssignmentSource.CAMPUS), pk=pk)
+        assigments = get_object_or_404(Unifiedassigments.objects.filter(source=UnifiedassigmentsSource.CAMPUS), pk=pk)
         section_ids, _ = _my_section_ids_and_campus_map(request.user)
-        if assignment.context_id not in section_ids:
-            raise PermissionDenied("You don't have access to this assignment.")
-        return Response(_serialize_campus_assignment(assignment))
+        if assigments.context_id not in section_ids:
+            raise PermissionDenied("You don't have access to this assigments.")
+        return Response(_serialize_campus_assigments(assigments))
 
     @transaction.atomic
     def create(self, request):
@@ -887,11 +940,11 @@ class AssignmentViewSet(viewsets.ViewSet):
         # this pass's upload) using the one already-available helper with
         # a matching name/shape — `can_manage_section_subject` is already
         # used for the equivalent grading-permission check further down
-        # in `AssignmentSubmissionViewSet`.
+        # in `assigmentsSubmissionViewSet`.
         if not can_manage_section_subject(request.user, campus_id, section.id, subject_id):
-            raise PermissionDenied("Only that section/subject's staff can post an assignment.")
+            raise PermissionDenied("Only that section/subject's staff can post an assigments.")
 
-        assignment = bridge.create_assignment(
+        assigments = bridge.create_assigments(
             section=section,
             subject=subject,
             posted_by=request.user,
@@ -906,32 +959,32 @@ class AssignmentViewSet(viewsets.ViewSet):
             section=section,
             session=section.school_class.session,
             posted_by=request.user,
-            title=f"New assignment: {assignment.title}",
-            body=f"Due {assignment.due_date}.",
+            title=f"New assigments: {assigments.title}",
+            body=f"Due {assigments.due_date}.",
         )
         bridge.notify(
             users=[e.student for e in recipients],
-            notif_type=NotifTypes.ASSIGNMENT_POSTED_CAMPUS,
-            title="New assignment posted",
-            body=assignment.title,
+            notif_type=NotifTypes.assigments_POSTED_CAMPUS,
+            title="New assigments posted",
+            body=assigments.title,
         )
-        return Response(_serialize_campus_assignment(assignment), status=status.HTTP_201_CREATED)
+        return Response(_serialize_campus_assigments(assigments), status=status.HTTP_201_CREATED)
 
 
-class AssignmentSubmissionViewSet(viewsets.ViewSet):
-    """[Task 11] Thin proxy over `assignment.models.AssignmentSubmission`
-    — see `AssignmentViewSet`'s own docstring above for why this isn't a
+class assigmentsSubmissionViewSet(viewsets.ViewSet):
+    """[Task 11] Thin proxy over `assigments.models.assigmentsSubmission`
+    — see `assigmentsViewSet`'s own docstring above for why this isn't a
     `ModelViewSet`/`CampusMemberScopedMixin` subclass any more, and why
     `_serialize_campus_submission()` exists (old JSON shape:
-    `id, assignment, student, submitted_at, file, status, grade,
+    `id, assigments, student, submitted_at, file, status, grade,
     feedback` — preserved even though `status` can now additionally be
     `"checked"`/`"partially_checked"`, values the old 3-state model never
     produced; see that function's own docstring).
 
     Roster pre-create (bulk `MISSING` rows) behavior is unchanged — it
-    still happens inside `assignment.bridge.create_context_assignment()`
-    itself (called via `campus.bridge.create_assignment()` from
-    `AssignmentViewSet.create()` above), not duplicated here.
+    still happens inside `assigments.bridge.create_context_assigments()`
+    itself (called via `campus.bridge.create_assigments()` from
+    `assigmentsViewSet.create()` above), not duplicated here.
     """
 
     permission_classes = [IsAuthenticated]
@@ -946,8 +999,8 @@ class AssignmentSubmissionViewSet(viewsets.ViewSet):
         "you can't do this") rather than a queryset-filtered 404 ("this
         doesn't exist") for someone with no relationship to the row at
         all."""
-        submission = get_object_or_404(UnifiedAssignmentSubmission.objects.select_related("assignment"), pk=pk)
-        section = _section_for_assignment(submission.assignment)
+        submission = get_object_or_404(UnifiedassigmentsSubmission.objects.select_related("assigments"), pk=pk)
+        section = _section_for_assigments(submission.assigments)
         campus_id = section.school_class.campus_id if section else None
         user = request.user
         if submission.student_id != user.id and not (campus_id and is_any_active_staff(user, campus_id)):
@@ -959,17 +1012,17 @@ class AssignmentSubmissionViewSet(viewsets.ViewSet):
         staff_campus_ids = set(
             StaffProfile.objects.filter(user=request.user, is_active=True).values_list("campus_id", flat=True)
         )
-        qs = UnifiedAssignmentSubmission.objects.filter(
-            assignment__source=UnifiedAssignmentSource.CAMPUS,
-            assignment__context_type="section",
-            assignment__context_id__in=section_ids,
-        ).select_related("assignment")
+        qs = UnifiedassigmentsSubmission.objects.filter(
+            assigments__source=UnifiedassigmentsSource.CAMPUS,
+            assigments__context_type="section",
+            assigments__context_id__in=section_ids,
+        ).select_related("assigments")
         # Same breadth the old campus-wide (not section-scoped) filter had:
         # a student sees only their own rows; staff at the relevant campus
         # see every student's row for any section in that campus.
         rows = [
             s for s in qs
-            if s.student_id == request.user.id or campus_by_section.get(s.assignment.context_id) in staff_campus_ids
+            if s.student_id == request.user.id or campus_by_section.get(s.assigments.context_id) in staff_campus_ids
         ]
         return Response([_serialize_campus_submission(s) for s in rows])
 
@@ -979,30 +1032,30 @@ class AssignmentSubmissionViewSet(viewsets.ViewSet):
 
     def create(self, request):
         """Edge case only — normal case is the bulk MISSING pre-create in
-        `AssignmentViewSet.create()`. Covers a student enrolled *after*
-        an assignment was already posted, who therefore has no
+        `assigmentsViewSet.create()`. Covers a student enrolled *after*
+        an assigments was already posted, who therefore has no
         pre-created row yet. Written directly against the unified model
-        (not through `assignment`'s own public-API serializer/viewset,
-        whose `validate_assignment()` rejects `create()` for any
-        non-personal-source assignment) — this is the same kind of
-        trusted, internal bridge-style write `assignment.bridge.
-        create_context_assignment()` itself already makes, not a way
+        (not through `assigments`'s own public-API serializer/viewset,
+        whose `validate_assigments()` rejects `create()` for any
+        non-personal-source assigments) — this is the same kind of
+        trusted, internal bridge-style write `assigments.bridge.
+        create_context_assigments()` itself already makes, not a way
         around that public-API restriction.
         """
-        assignment_id = request.data.get("assignment")
-        assignment = get_object_or_404(
-            UnifiedAssignment.objects.filter(source=UnifiedAssignmentSource.CAMPUS), pk=assignment_id
+        assigments_id = request.data.get("assigments")
+        assigments = get_object_or_404(
+            Unifiedassigments.objects.filter(source=UnifiedassigmentsSource.CAMPUS), pk=assigments_id
         )
-        section = _section_for_assignment(assignment)
+        section = _section_for_assigments(assigments)
         if section is None:
-            raise PermissionDenied("This assignment's section could not be resolved.")
+            raise PermissionDenied("This assigments's section could not be resolved.")
         enrollment = StudentEnrollment.objects.filter(
             student=request.user, section=section, status=StudentEnrollment.Status.ACTIVE
         ).first()
         if enrollment is None:
             raise PermissionDenied("You can only create your own submission, for a section you're enrolled in.")
-        submission, created = UnifiedAssignmentSubmission.objects.get_or_create(
-            assignment=assignment,
+        submission, created = UnifiedassigmentsSubmission.objects.get_or_create(
+            assigments=assigments,
             student=request.user,
             defaults={"roll_number": enrollment.roll_number, "enrollment_no": enrollment.enrollment_no},
         )
@@ -1018,7 +1071,7 @@ class AssignmentSubmissionViewSet(viewsets.ViewSet):
             return Response(_serialize_campus_submission(submission))
 
         campus_id = section.school_class.campus_id if section else None
-        subject_id = submission.assignment.data.get("subject_id")
+        subject_id = submission.assigments.data.get("subject_id")
         if campus_id is None or not can_manage_section_subject(request.user, campus_id, section.id, subject_id):
             raise PermissionDenied("Only the student or their subject teacher/admin can update this submission.")
         submission.grade_freeform(grade=request.data.get("grade", ""), feedback=request.data.get("feedback", ""))
@@ -1032,8 +1085,8 @@ def _section_for_testseries(series):
     """[Task 13] `series.context_id` IS a `Section.id` for every
     `source="campus"` `TestSeries` (see `campus.bridge.
     create_testseries()`) — the same opaque-id-to-real-row resolution
-    `_section_for_assignment()` above does, and for the same reason:
-    `testseries`, like `assignment`, never stores a real FK back to
+    `_section_for_assigments()` above does, and for the same reason:
+    `testseries`, like `assigments`, never stores a real FK back to
     `Section` (golden rule).
     """
     return Section.objects.filter(pk=series.context_id).select_related("school_class").first()
@@ -1041,7 +1094,7 @@ def _section_for_testseries(series):
 
 def _serialize_campus_testseries(series):
     """[Task 13] Serializes a campus-sourced `testseries.models.
-    TestSeries`. Unlike `_serialize_campus_assignment()` above, there's
+    TestSeries`. Unlike `_serialize_campus_assigments()` above, there's
     no OLD `campus.TestSeries` model/API shape to stay compatible with
     — this is a new feature, not a migration off a deprecated model —
     so this exposes the unified model's own fields directly instead of
@@ -1086,14 +1139,14 @@ class TestSeriesViewSet(viewsets.ViewSet):
     """[Task 13] Thin proxy over the unified `testseries` app for
     campus-sourced series — the same "opaque `context_id`, no real FK,
     campus resolves it back to a `Section` itself" posture
-    `AssignmentViewSet` above takes toward `assignment`, for the same
+    `assigmentsViewSet` above takes toward `assigments`, for the same
     golden-rule reason (`testseries/bridge.py`'s own module docstring).
     Not a `ModelViewSet`/`CampusMemberScopedMixin` subclass for the same
-    reason `AssignmentViewSet` isn't (see its own docstring).
+    reason `assigmentsViewSet` isn't (see its own docstring).
 
     Only list/retrieve/create for the series itself. Attempt listing and
     review/grading live on the sibling `TestAttemptViewSet` below, the
-    same split `AssignmentViewSet`/`AssignmentSubmissionViewSet` already
+    same split `assigmentsViewSet`/`assigmentsSubmissionViewSet` already
     use — now that `campus.bridge.can_review_testseries_attempt()` is
     wired up against the real `testseries/models.py` shape.
     """
@@ -1135,7 +1188,7 @@ class TestSeriesViewSet(viewsets.ViewSet):
         campus_id = section.school_class.campus_id
         # Task 13 checklist: "Staff permission check bridge call se
         # pehle hota hai, testseries khud trust karta hai caller ko" —
-        # the same golden rule `AssignmentViewSet.create()` follows
+        # the same golden rule `assigmentsViewSet.create()` follows
         # above. `subject_id` is used ONLY for this check — see
         # `campus.bridge.create_testseries()`'s docstring for why it
         # isn't (and can't be) passed through or persisted.
@@ -1228,11 +1281,11 @@ def _serialize_campus_attempt(attempt, *, include_responses=False):
 
 class TestAttemptViewSet(viewsets.ViewSet):
     """[Task 13] Thin proxy over `testseries.models.TestAttempt` for
-    campus-sourced series — the sibling `AssignmentSubmissionViewSet`
-    already establishes for `assignment` (see that class's own
+    campus-sourced series — the sibling `assigmentsSubmissionViewSet`
+    already establishes for `assigments` (see that class's own
     docstring for why this isn't a `ModelViewSet`/
     `CampusMemberScopedMixin` subclass: `TestSeries.context_id`, like
-    `Assignment.context_id`, is an opaque UUID field, not a real FK
+    `assigments.context_id`, is an opaque UUID field, not a real FK
     `CampusMemberScopedMixin`'s traversal could follow).
 
     No `create()` — CONFIRMED (this pass's `testseries/views.py` upload)
@@ -1261,8 +1314,8 @@ class TestAttemptViewSet(viewsets.ViewSet):
     `campus.bridge.can_review_testseries_attempt()` (`is_any_active_
     staff()` against the section's campus), then calling `TestAttempt.
     mark_answer_and_maybe_finalize()` directly — the same "trusted,
-    internal bridge-style write" posture `AssignmentSubmissionViewSet.
-    partial_update()` already takes toward `assignment`'s model layer
+    internal bridge-style write" posture `assigmentsSubmissionViewSet.
+    partial_update()` already takes toward `assigments`'s model layer
     above, not a way around `testseries`'s public API so much as a
     necessary one given that queryset gap.
     """
@@ -1274,7 +1327,7 @@ class TestAttemptViewSet(viewsets.ViewSet):
         return [permission() for permission in self.permission_classes]
 
     def _get_scoped_attempt(self, request, pk):
-        """Mirrors `AssignmentSubmissionViewSet._get_scoped_submission()`'s
+        """Mirrors `assigmentsSubmissionViewSet._get_scoped_submission()`'s
         own reasoning verbatim: looked up unrestricted, then gated by an
         explicit `PermissionDenied` (403) rather than a queryset-filtered
         404, for someone with no relationship to the row at all."""
@@ -1300,7 +1353,7 @@ class TestAttemptViewSet(viewsets.ViewSet):
         series_filter = request.query_params.get("series")
         if series_filter:
             qs = qs.filter(series_id=series_filter)
-        # Same breadth `AssignmentSubmissionViewSet.list()` uses above: a
+        # Same breadth `assigmentsSubmissionViewSet.list()` uses above: a
         # student sees only their own rows; staff at the relevant campus
         # see every student's row for any section in that campus.
         rows = [

@@ -34,7 +34,7 @@ from.serializers import (
     ReactionRequestSerializer,
 )
 from.signals import decrement_posts_count_on_soft_delete
-from.services import notify_post_liked
+from.Services import notify_post_liked
 from user_profile.models import Follow
 
 User = get_user_model()

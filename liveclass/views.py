@@ -9,7 +9,7 @@ Design notes:
       always taken from request.user in perform_create — never from the payload.
     - A few models need business logic beyond plain CRUD, exposed as @action
       endpoints: ClassSession.join, ClassJoinRequest.accept/reject/cancel,
-      LivePoll.vote, AssignmentSubmission.grade, SessionParticipant.leave.
+      LivePoll.vote, assigmentsSubmission.grade, SessionParticipant.leave.
     - Querysets are scoped where it matters for privacy (e.g. a student should
       not see another student's pass purchases or wallet ledger).
 """
@@ -38,7 +38,7 @@ from rest_framework.throttling import ScopedRateThrottle
 from rest_framework.views import APIView
 
 from .models import (
-    AssignmentSubmission,
+    assigmentsSubmission,
     BreakoutRoom,
     Certificate,
     ChatMessage,
@@ -90,16 +90,16 @@ from .models import (
 from core.classroom_chat_bridge import resolve_parent_from_token
 from core.models import Notification, NotificationPreference
 from core.services import create_notification, create_bulk_notifications
-# Task 12 — Assignment/AssignmentSubmission (create + list) now go through
-# the unified `assignment` app via `liveclass.bridge`, never through a
-# local liveclass.Assignment model. See the "10. ASSIGNMENT + SUBMISSION"
+# Task 12 — assigments/assigmentsSubmission (create + list) now go through
+# the unified `assigments` app via `liveclass.bridge`, never through a
+# local liveclass.assigments model. See the "10. assigments + SUBMISSION"
 # section below for why only these two viewsets need this.
 from django.utils.dateparse import parse_date, parse_datetime
 
 from . import bridge
-from assignment.serializers import (
-    AssignmentSerializer as UnifiedAssignmentSerializer,
-    AssignmentSubmissionSerializer as UnifiedAssignmentSubmissionSerializer,
+from assigments.serializers import (
+    assigmentsSerializer as UnifiedassigmentsSerializer,
+    assigmentsSubmissionSerializer as UnifiedassigmentsSubmissionSerializer,
 )
 from .livekit_utils import (
     LIVEKIT_URL,
@@ -555,7 +555,7 @@ class ClassroomViewSet(viewsets.ModelViewSet):
                                 access, INCLUDING entering a live session.
             "expired"       -> held a pass before, it lapsed. Full access to
                                 classroom content (materials, notices,
-                                doubts, assignments, reviews, etc.) but
+                                doubts, assigmentss, reviews, etc.) but
                                 CANNOT enter a live session — needs a fresh
                                 join request to renew.
             "pending"       -> not enrolled, but has a ClassJoinRequest
@@ -1247,14 +1247,14 @@ class ClassScheduleViewSet(viewsets.ModelViewSet):
             raise PermissionDenied("Only the classroom's teacher can add a schedule.")
         serializer.save()
 
-    # NOTE (fix — writable-classroom-FK reassignment sweep, item 5): this
+    # NOTE (fix — writable-classroom-FK reassigments sweep, item 5): this
     # checked permission against `serializer.instance.classroom` (the OLD
     # value) but ClassScheduleSerializer.classroom is writable, not
     # read_only — a caller who legitimately manages this schedule's
     # classroom could also reassign `classroom` to a DIFFERENT one in the
     # same PATCH, one they may have no rights on at all, since only the
     # old value's permission was ever verified. Same bug-class already
-    # fixed on Assignment/Notice/ClassHoliday/LivePoll/ClassQuery/
+    # fixed on assigments/Notice/ClassHoliday/LivePoll/ClassQuery/
     # PollTemplate/ClassroomStaff/ClassroomReview — schedules aren't
     # meant to move between classrooms after creation either, so blocked
     # outright rather than re-validated against a second classroom.
@@ -1370,7 +1370,7 @@ def _can_manage_classroom(classroom, user) -> bool:
 def _can_view_classroom_internals(classroom, user) -> bool:
     """Gate for everything that is NOT part of the public Explore/listing
     card: schedule timings, generated sessions, off-days, the notice board,
-    materials, doubts, assignments, etc. Before a join request is ever
+    materials, doubts, assigmentss, etc. Before a join request is ever
     accepted (see ClassJoinRequestViewSet), a non-participant only ever gets
     the classroom's public description and its reviews — nothing else.
 
@@ -1556,7 +1556,7 @@ class ClassSessionViewSet(viewsets.ModelViewSet):
     # NOTE (fix, CRITICAL): this viewset is a plain ModelViewSet with NO
     # perform_create/perform_update/perform_destroy override at all — every
     # other "classroom internals" viewset in this file (schedules,
-    # materials, assignments, notices, holidays...) locks writes behind
+    # materials, assigmentss, notices, holidays...) locks writes behind
     # _can_manage_classroom, but sessions never got that treatment. As
     # shipped, ANY authenticated user could:
     #   - POST a brand-new, immediately-joinable ClassSession onto ANY
@@ -1591,7 +1591,7 @@ class ClassSessionViewSet(viewsets.ModelViewSet):
             raise ValidationError("Can't create a session on an inactive or deleted classroom.")
         serializer.save()
 
-    # NOTE (fix — writable-classroom-FK reassignment sweep, item 5): both
+    # NOTE (fix — writable-classroom-FK reassigments sweep, item 5): both
     # `classroom` and `schedule` are writable on ClassSessionSerializer,
     # but permission here was only ever checked against the OLD
     # `serializer.instance.classroom` — a co-teacher/moderator on
@@ -2427,7 +2427,7 @@ class ClassSessionViewSet(viewsets.ModelViewSet):
         """Teacher/co-teacher/moderator: end the breakout. Deletes every
         BreakoutRoom row for this session — SessionParticipant.breakout_room
         is on_delete=SET_NULL, so this one delete also clears everyone's
-        room assignment in a single query, no per-participant loop needed.
+        room assigments in a single query, no per-participant loop needed.
         """
         session = self.get_object()
         if not _can_moderate_session(session, request.user):
@@ -2842,7 +2842,7 @@ class ClassPassViewSet(viewsets.ModelViewSet):
             raise PermissionDenied("Only the classroom's teacher can create a pass.")
         serializer.save()
 
-    # NOTE (fix — writable-classroom-FK reassignment sweep, item 5):
+    # NOTE (fix — writable-classroom-FK reassigments sweep, item 5):
     # ClassPassSerializer.classroom is writable, not read_only — permission
     # was only ever checked against the OLD `instance.classroom`, so a
     # teacher could reassign a pass they own to a different classroom in
@@ -3947,7 +3947,7 @@ class ClassMaterialViewSet(viewsets.ModelViewSet):
             )
         serializer.save(uploaded_by=self.request.user)
 
-    # NOTE (fix — writable-classroom-FK reassignment sweep, item 5): both
+    # NOTE (fix — writable-classroom-FK reassigments sweep, item 5): both
     # `classroom` and `session` are writable on ClassMaterialSerializer,
     # but permission was only ever checked against the OLD
     # `serializer.instance.classroom` — same bug-class as Schedule/
@@ -4501,9 +4501,9 @@ class LivePollViewSet(viewsets.ModelViewSet):
     def perform_update(self, serializer):
         if not _can_moderate_session(serializer.instance.session, self.request.user):
             raise PermissionDenied("Only the classroom's teacher, co-teacher, or moderator can edit this poll.")
-        # NOTE (fix — same class of gap as Assignment/Notice/ClassHoliday
+        # NOTE (fix — same class of gap as assigments/Notice/ClassHoliday
         # perform_update above, found in the same pass): `session` is
-        # writable on `LivePollSerializer` and — unlike Assignment/Query,
+        # writable on `LivePollSerializer` and — unlike assigments/Query,
         # which cross-validate `session.classroom_id == classroom.id` in
         # their serializer's `validate()` — nothing here stops a PATCH from
         # reassigning a poll to ANY session, including one in a classroom
@@ -4623,7 +4623,7 @@ class LivePollViewSet(viewsets.ModelViewSet):
 
 class PollTemplateViewSet(viewsets.ModelViewSet):
     """NEW (Pass 13) — see PollTemplate's docstring in models.py. Scoped to
-    ?classroom=<id>, same _can_manage_classroom boundary Assignment/
+    ?classroom=<id>, same _can_manage_classroom boundary assigments/
     Notice/ClassHoliday already use for their own classroom-scoped CRUD —
     a template is a teacher's own reusable shorthand for their classroom,
     not something students need to see or list.
@@ -4653,7 +4653,7 @@ class PollTemplateViewSet(viewsets.ModelViewSet):
         if not _can_manage_classroom(serializer.instance.classroom, self.request.user):
             raise PermissionDenied("Only the classroom's teacher, co-teacher, or moderator can edit this template.")
         # NOTE (fix — found during the Phase 3 audit sweep, same class of
-        # gap as Assignment/Notice/ClassHoliday/LivePoll/Submission/
+        # gap as assigments/Notice/ClassHoliday/LivePoll/Submission/
         # ClassQuery above): `PollTemplateSerializer.classroom` is
         # writable, so without this a manager of the CURRENT classroom
         # could reassign a template to a different one via the same PATCH,
@@ -4674,56 +4674,56 @@ class PollTemplateViewSet(viewsets.ModelViewSet):
 
 
 # ---------------------------------------------------------------------------
-# 10. ASSIGNMENT + SUBMISSION
+# 10. assigments + SUBMISSION
 #
-# Task 12 — thin proxy onto the unified `assignment` app via
+# Task 12 — thin proxy onto the unified `assigments` app via
 # `liveclass.bridge`. Only two things stay on liveclass's own URL
-# surface: posting a new assignment to a classroom, and listing a
-# classroom's assignments/submissions — because only those two need
+# surface: posting a new assigments to a classroom, and listing a
+# classroom's assigmentss/submissions — because only those two need
 # liveclass's own classroom-membership/manage-permission rules
 # (_can_manage_classroom / _can_view_classroom_internals), which
-# `assignment` has no way to check (it has no concept of a "classroom").
+# `assigments` has no way to check (it has no concept of a "classroom").
 #
-# Submitting an assignment, grading it, structured-question review,
-# publish/unpublish — NOT proxied here. `assignment.views.
-# AssignmentSubmissionViewSet`'s own queryset already grants access
+# Submitting an assigments, grading it, structured-question review,
+# publish/unpublish — NOT proxied here. `assigments.views.
+# assigmentsSubmissionViewSet`'s own queryset already grants access
 # correctly for a liveclass-sourced submission (`Q(student=user) |
-# Q(assignment__posted_by=user)` — `posted_by` is set to the classroom's
-# teacher at creation time by `bridge.create_assignment`, `student` is
+# Q(assigments__posted_by=user)` — `posted_by` is set to the classroom's
+# teacher at creation time by `bridge.create_assigments`, `student` is
 # the roster member), and its `grade`/`review_answer` actions are gated
-# by `IsAssignmentStaffOrOwner`, `submit_*`/`publish`/`unpublish` by
+# by `IsassigmentsStaffOrOwner`, `submit_*`/`publish`/`unpublish` by
 # `IsSubmissionStudent` — both already correct for a liveclass-sourced
 # row with no liveclass-side wrapping needed. Flutter hits
-# `/assignment/submissions/{id}/...` directly for those; the two
+# `/assigments/submissions/{id}/...` directly for those; the two
 # viewsets below only ever hand back that `id` (as part of the nested
-# `assignment`/each submission row) for the client to call next.
+# `assigments`/each submission row) for the client to call next.
 #
-# `liveclass.models.Assignment`/`AssignmentSubmission` (still defined in
+# `liveclass.models.assigments`/`assigmentsSubmission` (still defined in
 # models.py, untouched — no schema/`makemigrations` change here) are no
-# longer written to by these two viewsets. `AssignmentSubmission` is
+# longer written to by these two viewsets. `assigmentsSubmission` is
 # still imported at the top of this file because `StudentProgressView`
-# below still reads it for `assignments_submitted` — NOTE (flagged, not
+# below still reads it for `assigmentss_submitted` — NOTE (flagged, not
 # fixed, out of this task's scope): that count will only reflect
 # submissions made before this cutover, plus whatever
-# `migrate_liveclass_assignments_to_unified` backfilled, since new
-# submissions from here on land in `assignment.AssignmentSubmission`
+# `migrate_liveclass_assigmentss_to_unified` backfilled, since new
+# submissions from here on land in `assigments.assigmentsSubmission`
 # instead. Repointing that dashboard at `liveclass.bridge.
-# get_assignment_submissions()` (summed across the student's classrooms)
+# get_assigments_submissions()` (summed across the student's classrooms)
 # is a real follow-up, not done here since it wasn't part of Task 12's
 # file list.
 # ---------------------------------------------------------------------------
-class AssignmentViewSet(viewsets.ViewSet):
+class assigmentsViewSet(viewsets.ViewSet):
     """Thin proxy — `list` + `create` only.
 
     `retrieve`/`update`/`destroy` are NOT implemented: the unified
-    `assignment.views.AssignmentViewSet` is personal-source-only by its
-    own docstring ("Campus/liveclass assignments never reach this
+    `assigments.views.assigmentsViewSet` is personal-source-only by its
+    own docstring ("Campus/liveclass assigmentss never reach this
     viewset"), so there is currently no path anywhere for editing or
-    deleting an already-posted classroom assignment — not a liveclass
+    deleting an already-posted classroom assigments — not a liveclass
     gap specifically, a gap in the unified app for the context-sourced
     flow generally. Flagged rather than worked around by guessing at an
-    `assignment/bridge.py` function (`update_context_assignment()` /
-    `delete_context_assignment()`) that doesn't exist yet.
+    `assigments/bridge.py` function (`update_context_assigments()` /
+    `delete_context_assigments()`) that doesn't exist yet.
     """
 
     permission_classes = [IsAuthenticated]
@@ -4734,29 +4734,29 @@ class AssignmentViewSet(viewsets.ViewSet):
             raise ValidationError({"classroom": "This query parameter is required."})
         classroom = get_object_or_404(Classroom, pk=classroom_id)
         if not _can_view_classroom_internals(classroom, request.user):
-            raise PermissionDenied("A pass (active or expired) is required to view this classroom's assignments.")
+            raise PermissionDenied("A pass (active or expired) is required to view this classroom's assigmentss.")
 
-        submissions = bridge.get_assignment_submissions(classroom)
+        submissions = bridge.get_assigments_submissions(classroom)
         if not _can_manage_classroom(classroom, request.user):
             submissions = submissions.filter(student=request.user)
 
-        # bridge.create_assignment() bulk-pre-creates one
-        # AssignmentSubmission(status=MISSING) per roster member at
-        # posting time (see assignment.bridge.create_context_assignment)
-        # — so every assignment this user is entitled to see already has
+        # bridge.create_assigments() bulk-pre-creates one
+        # assigmentsSubmission(status=MISSING) per roster member at
+        # posting time (see assigments.bridge.create_context_assigments)
+        # — so every assigments this user is entitled to see already has
         # exactly one submission row per user in the queryset above.
-        # De-duplicating by assignment_id here is therefore a correct
-        # "every assignment this classroom has, this user can see" list,
-        # with no separate "list assignments" bridge call needed.
+        # De-duplicating by assigments_id here is therefore a correct
+        # "every assigments this classroom has, this user can see" list,
+        # with no separate "list assigmentss" bridge call needed.
         seen_ids = set()
-        assignments = []
-        for submission in submissions.select_related("assignment").order_by("assignment__due_date"):
-            if submission.assignment_id in seen_ids:
+        assigmentss = []
+        for submission in submissions.select_related("assigments").order_by("assigments__due_date"):
+            if submission.assigments_id in seen_ids:
                 continue
-            seen_ids.add(submission.assignment_id)
-            assignments.append(submission.assignment)
+            seen_ids.add(submission.assigments_id)
+            assigmentss.append(submission.assigments)
 
-        serializer = UnifiedAssignmentSerializer(assignments, many=True, context={"request": request})
+        serializer = UnifiedassigmentsSerializer(assigmentss, many=True, context={"request": request})
         return Response(serializer.data)
 
     def create(self, request):
@@ -4766,17 +4766,17 @@ class AssignmentViewSet(viewsets.ViewSet):
         classroom = get_object_or_404(Classroom, pk=classroom_id)
         if not _can_manage_classroom(classroom, request.user):
             raise PermissionDenied(
-                "Only the classroom's teacher, co-teacher, or moderator can create an assignment."
+                "Only the classroom's teacher, co-teacher, or moderator can create an assigments."
             )
 
         due_date = request.data.get("due_date")
         if due_date:
-            # Unified Assignment.due_date is a DateField (the old local
-            # liveclass.Assignment.due_date was a DateTimeField) — accept
+            # Unified assigments.due_date is a DateField (the old local
+            # liveclass.assigments.due_date was a DateTimeField) — accept
             # either an ISO date or datetime string from the client and
             # take just the date part here, at the one call site that
             # actually knows what the client sent, rather than inside
-            # bridge.create_assignment() (see that function's own
+            # bridge.create_assigments() (see that function's own
             # docstring for why it deliberately does NOT do this
             # coercion itself).
             parsed = parse_date(due_date) or parse_datetime(due_date)
@@ -4784,7 +4784,7 @@ class AssignmentViewSet(viewsets.ViewSet):
                 raise ValidationError({"due_date": "Enter a valid ISO date or datetime."})
             due_date = parsed.date() if hasattr(parsed, "date") and callable(parsed.date) else parsed
 
-        assignment = bridge.create_assignment(
+        assigments = bridge.create_assigments(
             classroom=classroom,
             posted_by=request.user,
             title=request.data.get("title", ""),
@@ -4793,11 +4793,11 @@ class AssignmentViewSet(viewsets.ViewSet):
             due_date=due_date,
         )
 
-        # NOTE (carried over from the old AssignmentViewSet.perform_create,
+        # NOTE (carried over from the old assigmentsViewSet.perform_create,
         # verified against real PassPurchase fields): posting an
-        # assignment fans out an in-app notification to every active pass
-        # holder. Kept here rather than folded into bridge.create_assignment()
-        # — that function's only job is "create the assignment in the
+        # assigments fans out an in-app notification to every active pass
+        # holder. Kept here rather than folded into bridge.create_assigments()
+        # — that function's only job is "create the assigments in the
         # unified app"; it has no reason to know liveclass's notification
         # system exists.
         student_ids = list(
@@ -4810,25 +4810,25 @@ class AssignmentViewSet(viewsets.ViewSet):
         )
         create_bulk_notifications(
             recipients=student_ids,
-            notif_type=Notification.NotifType.ASSIGNMENT_POSTED,
-            title="New assignment posted",
-            message=f"'{assignment.title}' was posted in '{classroom.title}'.",
+            notif_type=Notification.NotifType.assigments_POSTED,
+            title="New assigments posted",
+            message=f"'{assigments.title}' was posted in '{classroom.title}'.",
             classroom=classroom,
         )
-        from .tasks import notify_assignment_posted
+        from .tasks import notify_assigments_posted
 
-        _safe_delay(notify_assignment_posted, assignment.id, student_ids)
+        _safe_delay(notify_assigments_posted, assigments.id, student_ids)
 
-        serializer = UnifiedAssignmentSerializer(assignment, context={"request": request})
+        serializer = UnifiedassigmentsSerializer(assigments, context={"request": request})
         return Response(serializer.data, status=status.HTTP_201_CREATED)
 
 
-class AssignmentSubmissionViewSet(viewsets.ViewSet):
+class assigmentsSubmissionViewSet(viewsets.ViewSet):
     """Thin proxy — read-only `list` (a teacher's grading queue for a
     classroom, or a student's own submissions in it). See the module
-    note above `AssignmentViewSet` for why submit/grade/publish are
+    note above `assigmentsViewSet` for why submit/grade/publish are
     deliberately NOT here — those go straight to
-    `/assignment/submissions/{id}/...`.
+    `/assigments/submissions/{id}/...`.
     """
 
     permission_classes = [IsAuthenticated]
@@ -4841,18 +4841,18 @@ class AssignmentSubmissionViewSet(viewsets.ViewSet):
         if not _can_view_classroom_internals(classroom, request.user):
             raise PermissionDenied("A pass (active or expired) is required to view this classroom's submissions.")
 
-        submissions = bridge.get_assignment_submissions(classroom)
-        # Same manager/self split as the old AssignmentSubmissionViewSet.
+        submissions = bridge.get_assigments_submissions(classroom)
+        # Same manager/self split as the old assigmentsSubmissionViewSet.
         # get_queryset: full roster view for a classroom manager, own
         # rows only for everyone else.
         if not _can_manage_classroom(classroom, request.user):
             submissions = submissions.filter(student=request.user)
 
-        assignment_id = request.query_params.get("assignment")
-        if assignment_id:
-            submissions = submissions.filter(assignment_id=assignment_id)
+        assigments_id = request.query_params.get("assigments")
+        if assigments_id:
+            submissions = submissions.filter(assigments_id=assigments_id)
 
-        serializer = UnifiedAssignmentSubmissionSerializer(
+        serializer = UnifiedassigmentsSubmissionSerializer(
             submissions.prefetch_related("answers__question"), many=True, context={"request": request}
         )
         return Response(serializer.data)
@@ -4922,7 +4922,7 @@ class ClassroomReviewViewSet(viewsets.ModelViewSet):
     # (Dart) already existed — this pass just happened to be the one
     # auditing every perform_update/perform_destroy in this file for the
     # same bug class. Locked down to the review's own student, same shape
-    # as AssignmentSubmissionViewSet's ownership check above.
+    # as assigmentsSubmissionViewSet's ownership check above.
     def perform_update(self, serializer):
         instance = serializer.instance
         if instance.student_id != self.request.user.id:
@@ -5168,12 +5168,12 @@ class CoinWithdrawalViewSet(
             return base
         return base.filter(user=self.request.user)
 
-    @action(detail=False, methods=["post"])
     def create(self, request):
-        # NOTE: not a DRF CreateModelMixin.create — this is a plain
-        # @action so the route stays registered (old clients hitting
-        # POST .../coin-withdrawals/ get a clear redirect instead of a
-        # 404) without wiring a create path back onto this viewset.
+        # NOTE: not a DRF CreateModelMixin.create — this is a plain method
+        # (no @action; "create" is a reserved router route name and can't
+        # be used with @action) so POST .../coin-withdrawals/ stays
+        # registered and old clients get a clear redirect instead of a
+        # 404, without wiring CreateModelMixin back onto this viewset.
         return _deprecated_write_response("/api/user-profile/coin-withdrawals/")
 
     @action(detail=True, methods=["post"])
@@ -5544,7 +5544,7 @@ class TeacherEarningsView(APIView):
 # STUDENT PROGRESS DASHBOARD
 #
 # GAP THIS CLOSES: everything a student's activity produces
-# (SessionParticipant rows, AssignmentSubmission grades, Certificate
+# (SessionParticipant rows, assigmentsSubmission grades, Certificate
 # issuance) lived scattered per-classroom with nowhere pulling it together
 # into "how am I doing overall" — the retention-relevant view a student
 # actually wants to open regularly. This is a read-only aggregate, same
@@ -5554,7 +5554,7 @@ class TeacherEarningsView(APIView):
 class StudentProgressView(APIView):
     """GET /liveclass/my-progress/ — the calling user's own activity only;
     there's no "view another student's progress" concept here (a teacher
-    wanting per-student insight already has AssignmentSubmissionViewSet /
+    wanting per-student insight already has assigmentsSubmissionViewSet /
     CertificateViewSet scoped to their own classrooms for that)."""
 
     permission_classes = [IsAuthenticated]
@@ -5568,7 +5568,7 @@ class StudentProgressView(APIView):
         classrooms_enrolled = (
             PassPurchase.objects.filter(student=user).values("class_pass__classroom_id").distinct().count()
         )
-        assignments_submitted = AssignmentSubmission.objects.filter(student=user).count()
+        assigmentss_submitted = assigmentsSubmission.objects.filter(student=user).count()
         certificates_earned = Certificate.objects.filter(student=user).count()
 
         current_streak, longest_streak = self._attendance_streaks(user)
@@ -5576,7 +5576,7 @@ class StudentProgressView(APIView):
         data = {
             "classes_attended": classes_attended,
             "classrooms_enrolled": classrooms_enrolled,
-            "assignments_submitted": assignments_submitted,
+            "assigmentss_submitted": assigmentss_submitted,
             "certificates_earned": certificates_earned,
             "current_streak_days": current_streak,
             "longest_streak_days": longest_streak,
@@ -5959,7 +5959,7 @@ class ClassHolidayViewSet(viewsets.ModelViewSet):
 
     # NOTE (fix — Phase 3, Dart HolidayApi.update() prep): this viewset had
     # no perform_update override at all, unlike every sibling viewset in
-    # this file (Notice/Assignment/Poll all gate perform_update behind the
+    # this file (Notice/assigments/Poll all gate perform_update behind the
     # same manage-tier check their perform_destroy already uses). Left as a
     # plain ModelViewSet, update() would fall through to the default
     # serializer.save() with NO permission check. get_queryset() above only
@@ -5973,7 +5973,7 @@ class ClassHolidayViewSet(viewsets.ModelViewSet):
     def perform_update(self, serializer):
         if not _can_manage_classroom(serializer.instance.classroom, self.request.user):
             raise PermissionDenied("Only the classroom's teacher, co-teacher, or moderator can edit an off-day.")
-        # Same classroom-reassignment guard as AssignmentViewSet/
+        # Same classroom-reassigments guard as assigmentsViewSet/
         # NoticeViewSet.perform_update — `ClassHolidaySerializer.classroom`
         # is writable, so without this a manager of the CURRENT classroom
         # could reassign the holiday to a different one in the same PATCH,
@@ -6106,8 +6106,8 @@ class NoticeViewSet(viewsets.ModelViewSet):
 
             _safe_delay(notify_notice_posted, notice.id, student_ids)
 
-    # NOTE (fix — Phase 3 follow-up, same classroom-reassignment gap as
-    # AssignmentViewSet.perform_update above): `NoticeSerializer.classroom`
+    # NOTE (fix — Phase 3 follow-up, same classroom-reassigments gap as
+    # assigmentsViewSet.perform_update above): `NoticeSerializer.classroom`
     # is writable too — reachable now that NoticeApi.update() (Dart) sends
     # full `Notice.toJson()` (includes `classroom`) on PATCH. Blocked the
     # same way: permission is checked against the notice's current
@@ -6189,9 +6189,9 @@ class ClassQueryViewSet(viewsets.ModelViewSet):
     # all — bypassing perform_create's access check entirely, since it only
     # runs on create. Restricted to: only the original asker may edit, only
     # while still unanswered (same "frozen after the fact" pattern as
-    # AssignmentSubmissionViewSet.perform_update's graded_at check), and the
+    # assigmentsSubmissionViewSet.perform_update's graded_at check), and the
     # classroom can't be changed via update (mirrors the same guard on
-    # Assignment/Notice/ClassHoliday/LivePoll above). `QueryApi.update()`
+    # assigments/Notice/ClassHoliday/LivePoll above). `QueryApi.update()`
     # (Dart) only ever sends `question`, but the endpoint itself doesn't
     # rely on the client to keep behaving.
     def perform_update(self, serializer):

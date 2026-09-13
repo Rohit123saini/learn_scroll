@@ -1179,30 +1179,30 @@ def notify_join_request_rejected(join_request_id):
     )
 
 
-@shared_task(name="liveclass.notify_assignment_graded")
-def notify_assignment_graded(submission_id):
+@shared_task(name="liveclass.notify_assigments_graded")
+def notify_assigments_graded(submission_id):
     """Fired the instant a teacher grades a submission."""
-    from .models import AssignmentSubmission
+    from .models import assigmentsSubmission
     from .notifications import send_notification
 
     submission = (
-        AssignmentSubmission.objects.select_related("student", "assignment__classroom")
+        assigmentsSubmission.objects.select_related("student", "assigments__classroom")
         .filter(pk=submission_id)
         .first()
     )
     if not submission:
         return False
 
-    assignment = submission.assignment
-    title = "Assignment graded"
-    message = f"'{assignment.title}' was graded — score: {submission.score}."
+    assigments = submission.assigments
+    title = "assigments graded"
+    message = f"'{assigments.title}' was graded — score: {submission.score}."
     return send_notification(
         submission.student, title, message, channel="push",
         data={
-            "type": "assignment_graded",
+            "type": "assigments_graded",
             "submission_id": str(submission.id),
-            "assignment_id": str(assignment.id),
-            "classroom_id": str(assignment.classroom_id),
+            "assigments_id": str(assigments.id),
+            "classroom_id": str(assigments.classroom_id),
         },
     )
 
@@ -1369,24 +1369,24 @@ def notify_session_cancelled(classroom_id, classroom_title, session_id, schedule
     return sent_count
 
 
-@shared_task(name="liveclass.notify_assignment_posted")
-def notify_assignment_posted(assignment_id, student_ids):
-    """Fired when a teacher/co-teacher/moderator posts a new assignment —
+@shared_task(name="liveclass.notify_assigments_posted")
+def notify_assigments_posted(assigments_id, student_ids):
+    """Fired when a teacher/co-teacher/moderator posts a new assigments —
     same fan-out shape as notify_notice_posted. Students previously found
-    out about a new assignment only by happening to open the Assignments
+    out about a new assigments only by happening to open the assigmentss
     tab; a due-date-bearing task deserves an actual push, not just relying
     on the student to check."""
-    from .models import Assignment
+    from .models import assigments
     from .notifications import send_notification
 
-    assignment = Assignment.objects.select_related("classroom").filter(pk=assignment_id).first()
-    if not assignment:
+    assigments = assigments.objects.select_related("classroom").filter(pk=assigments_id).first()
+    if not assigments:
         return 0
 
-    classroom = assignment.classroom
-    title = "New assignment posted"
-    message = f"'{assignment.title}' was posted in '{classroom.title}'."
-    data = {"type": "assignment_posted", "assignment_id": str(assignment.id), "classroom_id": str(classroom.id)}
+    classroom = assigments.classroom
+    title = "New assigments posted"
+    message = f"'{assigments.title}' was posted in '{classroom.title}'."
+    data = {"type": "assigments_posted", "assigments_id": str(assigments.id), "classroom_id": str(classroom.id)}
 
     from django.contrib.auth import get_user_model
 
@@ -1397,38 +1397,38 @@ def notify_assignment_posted(assignment_id, student_ids):
             if send_notification(student, title, message, channel="push", data=data):
                 sent_count += 1
         except Exception:
-            logger.exception("Failed pushing assignment_posted %s to user %s", assignment_id, student.pk)
+            logger.exception("Failed pushing assigments_posted %s to user %s", assigments_id, student.pk)
     return sent_count
 
 
 @shared_task(name="liveclass.notify_submission_received")
 def notify_submission_received(submission_id):
-    """Fired the instant a student submits an assignment — the teacher-side
-    counterpart to notify_assignment_graded. Previously a teacher had no
+    """Fired the instant a student submits an assigments — the teacher-side
+    counterpart to notify_assigments_graded. Previously a teacher had no
     signal a submission had come in short of manually reopening the
-    grading queue for every assignment they'd posted."""
-    from .models import AssignmentSubmission
+    grading queue for every assigments they'd posted."""
+    from .models import assigmentsSubmission
     from .notifications import send_notification
 
     submission = (
-        AssignmentSubmission.objects.select_related("student", "assignment__classroom")
+        assigmentsSubmission.objects.select_related("student", "assigments__classroom")
         .filter(pk=submission_id)
         .first()
     )
     if not submission:
         return False
 
-    assignment = submission.assignment
-    classroom = assignment.classroom
+    assigments = submission.assigments
+    classroom = assigments.classroom
     student_name = submission.student.get_full_name() or submission.student.username
     title = "New submission to grade"
-    message = f"{student_name} submitted '{assignment.title}' in '{classroom.title}'."
+    message = f"{student_name} submitted '{assigments.title}' in '{classroom.title}'."
     return send_notification(
         classroom.teacher, title, message, channel="push",
         data={
             "type": "submission_received",
             "submission_id": str(submission.id),
-            "assignment_id": str(assignment.id),
+            "assigments_id": str(assigments.id),
             "classroom_id": str(classroom.id),
         },
     )

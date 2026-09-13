@@ -1,12 +1,14 @@
 # user_profile/tests.py
 from unittest import mock
 
+from django.contrib.admin.sites import AdminSite
 from django.contrib.auth import get_user_model
 from django.db import IntegrityError
 from django.urls import reverse
 from rest_framework import status
 from rest_framework.test import APITestCase
 
+from .admin import CoinLedgerAdmin
 from .models import BlockUser, CoinLedger, CoinWithdrawalRequest, Follow, RestrictUser
 
 User = get_user_model()
@@ -485,3 +487,122 @@ class CoinWithdrawalRequestAPITests(APITestCase):
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
         self.alice.refresh_from_db()
         self.assertEqual(self.alice.coin, 500)  # validation failed before any debit
+
+
+# ==========================================================================
+# TASK 5 -- carried-over test gaps named in user_profile_app_reference.md
+# §11 items 9/15: no test asserted `CoinLedgerAdmin` actually refuses
+# add/change/delete (B-8), and no test exercised `record_transaction()`
+# specifically with `transaction_type=CAMPUS_REWARD` (only the
+# EARN/CAMPUS_REWARD *grouping* inside the rate limiter was exercised, via
+# EARN, in tests_fraud.py's `EarnRateLimitTests`).
+# ==========================================================================
+
+class CoinLedgerAdminPermissionTests(APITestCase):
+    """
+    `CoinLedgerAdmin` is deliberately a read-only viewer (see admin.py's
+    module docstring, and the CAUTION note in `CoinLedger`'s own
+    docstring in models.py): letting admin add/edit/delete `CoinLedger`
+    rows directly would bypass `record_transaction()` entirely, which
+    can create a ledger row with no matching `User.coin` change, or edit/
+    delete an existing row without the balance it explains ever moving
+    to match -- silently breaking the "ledger and balance must always
+    agree" invariant this table exists to guarantee.
+
+    Instantiates `CoinLedgerAdmin` directly (rather than driving it
+    through the admin URLs with a logged-in superuser client) since the
+    three `has_*_permission` overrides and `readonly_fields` are exactly
+    what admin.py defines to enforce this, and unconditionally return
+    False regardless of the request/user passed in -- so `request=None`
+    exercises the real guard without needing admin-site URL wiring this
+    upload doesn't include.
+    """
+
+    def setUp(self):
+        self.alice = User.objects.create_user(username="alice", password="pass12345")
+        self.ledger_entry = CoinLedger.objects.record_transaction(
+            user=self.alice,
+            transaction_type=CoinLedger.TransactionType.EARN,
+            amount=100,
+            reference="admin-perm-test",
+        )
+        self.coin_ledger_admin = CoinLedgerAdmin(CoinLedger, AdminSite())
+
+    def test_add_permission_refused(self):
+        self.assertFalse(self.coin_ledger_admin.has_add_permission(request=None))
+
+    def test_change_permission_refused(self):
+        self.assertFalse(
+            self.coin_ledger_admin.has_change_permission(request=None, obj=self.ledger_entry)
+        )
+
+    def test_delete_permission_refused(self):
+        self.assertFalse(
+            self.coin_ledger_admin.has_delete_permission(request=None, obj=self.ledger_entry)
+        )
+
+    def test_every_field_is_readonly(self):
+        # admin.py deliberately lists every field (not a hand-picked
+        # subset) precisely so a future field added to CoinLedger
+        # doesn't silently become admin-editable by being left off this
+        # list -- assert against the model's actual field set, not a
+        # hardcoded name list, so this test would catch that regression.
+        expected_fields = {f.name for f in CoinLedger._meta.fields}
+        self.assertEqual(set(self.coin_ledger_admin.readonly_fields), expected_fields)
+
+
+class RecordTransactionCampusRewardTests(APITestCase):
+    """
+    `record_transaction()` with `transaction_type=CAMPUS_REWARD`
+    specifically. `tests_fraud.py`'s rate-limit tests already exercise
+    the EARN/CAMPUS_REWARD *grouping* the rate limiter treats alike, but
+    only ever by calling it with EARN -- this covers CAMPUS_REWARD's own
+    balance/ledger-row/eligibility-flag behavior, which nothing else
+    checks.
+    """
+
+    def setUp(self):
+        self.alice = User.objects.create_user(username="alice", password="pass12345")
+
+    def test_campus_reward_credits_balance_and_writes_ledger_row(self):
+        entry = CoinLedger.objects.record_transaction(
+            user=self.alice,
+            transaction_type=CoinLedger.TransactionType.CAMPUS_REWARD,
+            amount=25,
+            reference="campus-reward-1",
+            description="Attendance streak bonus",
+        )
+
+        self.alice.refresh_from_db()
+        self.assertEqual(self.alice.coin, 25)
+
+        self.assertEqual(entry.transaction_type, CoinLedger.TransactionType.CAMPUS_REWARD)
+        self.assertEqual(entry.amount, 25)
+        self.assertEqual(entry.balance_after, 25)
+
+        # CAMPUS_REWARD coins are earn-style (small in-app bonuses), not
+        # a real top-up or a gift -- record_transaction() must stamp
+        # them not-withdrawal-eligible, per its own withdrawal_eligible
+        # metadata rule (True only for PURCHASE/GIFT_RECEIVED).
+        self.assertFalse(entry.metadata["withdrawal_eligible"])
+
+    def test_campus_reward_reference_is_idempotent(self):
+        # Same (user, reference) called twice must not double-credit --
+        # a campus task retried after a dropped response shouldn't pay
+        # the same attendance-streak bonus twice.
+        first = CoinLedger.objects.record_transaction(
+            user=self.alice,
+            transaction_type=CoinLedger.TransactionType.CAMPUS_REWARD,
+            amount=25,
+            reference="campus-reward-retry",
+        )
+        second = CoinLedger.objects.record_transaction(
+            user=self.alice,
+            transaction_type=CoinLedger.TransactionType.CAMPUS_REWARD,
+            amount=25,
+            reference="campus-reward-retry",
+        )
+
+        self.assertEqual(first.pk, second.pk)
+        self.alice.refresh_from_db()
+        self.assertEqual(self.alice.coin, 25)  # not double-credited

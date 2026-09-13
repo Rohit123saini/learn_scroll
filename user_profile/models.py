@@ -441,7 +441,7 @@ class CoinLedger(models.Model):
 
     F-3 (this pass): added `TransactionType.CAMPUS_REWARD` for
     `campus`'s small engagement bonuses (attendance-streak,
-    assignment-on-time-streak) -- see that choice's own comment below for
+    assigments-on-time-streak) -- see that choice's own comment below for
     why it's kept distinct from `EARN` rather than reusing it.
 
     TASK 1 (this pass): added `TESTSERIES_PURCHASE`/`TESTSERIES_PAYOUT`/
@@ -493,7 +493,7 @@ class CoinLedger(models.Model):
         GIFT_RECEIVED = "gift_received", "Gift Received"
         ADMIN_ADJUSTMENT = "admin_adjustment", "Admin Adjustment"
         # F-3: campus engagement bonuses (attendance streak, on-time
-        # assignment streak) — deliberately its own type, not EARN.
+        # assigments streak) — deliberately its own type, not EARN.
         # Keeping tuition-fee payments (real money, via FeeInvoice/
         # FeePayment) and these small in-app coin bonuses on visibly
         # different transaction_type values matters here specifically

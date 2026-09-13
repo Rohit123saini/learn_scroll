@@ -4,14 +4,14 @@ from rest_framework.routers import DefaultRouter
 
 from .views import (
     AcademicSessionViewSet,
-    AssignmentSubmissionViewSet,
-    AssignmentViewSet,
+    assigmentsSubmissionViewSet,
+    assigmentsViewSet,
     AttendanceViewSet,
     CampusAnalyticsSnapshotViewSet,
     CampusLiveSessionViewSet,
     CampusParentLinkViewSet,
     CampusViewSet,
-    ClassTeacherAssignmentViewSet,
+    ClassTeacherassigmentsViewSet,
     DepartmentViewSet,
     DigitalIDCardViewSet,
     ExamTermViewSet,
@@ -26,7 +26,7 @@ from .views import (
     SectionViewSet,
     StaffProfileViewSet,
     StudentEnrollmentViewSet,
-    SubjectTeacherAssignmentViewSet,
+    SubjectTeacherassigmentsViewSet,
     SubjectViewSet,
     SyllabusProgressViewSet,
     SyllabusUnitViewSet,
@@ -48,9 +48,9 @@ router.register("subjects", SubjectViewSet, basename="subject")
 router.register("rooms", RoomViewSet, basename="room")
 router.register("staff", StaffProfileViewSet, basename="staff-profile")
 
-# Phase 2 — assignments & enrollment
-router.register("class-teacher-assignments", ClassTeacherAssignmentViewSet, basename="class-teacher-assignment")
-router.register("subject-teacher-assignments", SubjectTeacherAssignmentViewSet, basename="subject-teacher-assignment")
+# Phase 2 — assigmentss & enrollment
+router.register("class-teacher-assigmentss", ClassTeacherassigmentsViewSet, basename="class-teacher-assigments")
+router.register("subject-teacher-assigmentss", SubjectTeacherassigmentsViewSet, basename="subject-teacher-assigments")
 router.register("enrollments", StudentEnrollmentViewSet, basename="student-enrollment")
 router.register("parent-links", CampusParentLinkViewSet, basename="campus-parent-link")
 
@@ -65,9 +65,9 @@ router.register("time-slots", TimeSlotViewSet, basename="time-slot")
 router.register("timetable-entries", TimetableEntryViewSet, basename="timetable-entry")
 router.register("attendance", AttendanceViewSet, basename="attendance")
 
-# Phase 6 — assignments & syllabus
-router.register("assignments", AssignmentViewSet, basename="assignment")
-router.register("assignment-submissions", AssignmentSubmissionViewSet, basename="assignment-submission")
+# Phase 6 — assigmentss & syllabus
+router.register("assigmentss", assigmentsViewSet, basename="assigments")
+router.register("assigments-submissions", assigmentsSubmissionViewSet, basename="assigments-submission")
 router.register("syllabus-units", SyllabusUnitViewSet, basename="syllabus-unit")
 router.register("syllabus-progress", SyllabusProgressViewSet, basename="syllabus-progress")
 
@@ -76,8 +76,8 @@ router.register("exam-terms", ExamTermViewSet, basename="exam-term")
 router.register("results", ResultEntryViewSet, basename="result-entry")
 
 # Task 13 — test series (thin proxy over the unified `testseries` app,
-# same "campus" source posture `assignments`/`assignment-submissions`
-# above already take toward the unified `assignment` app)
+# same "campus" source posture `assigmentss`/`assigments-submissions`
+# above already take toward the unified `assigments` app)
 router.register("test-series", TestSeriesViewSet, basename="campus-test-series")
 router.register("test-attempts", TestAttemptViewSet, basename="campus-test-attempt")
 

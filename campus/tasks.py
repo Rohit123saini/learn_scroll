@@ -15,7 +15,7 @@ bare function has no `.delay`, so the `except Exception` in that
 try/except catches the `AttributeError` and calls it directly.
 
 F-3 (this pass): `check_attendance_streak_rewards`/
-`check_assignment_ontime_streak_rewards` import `user_profile.models.
+`check_assigments_ontime_streak_rewards` import `user_profile.models.
 CoinLedger` directly — NOT through a `bridge`-style indirection layer.
 This is deliberate, not an inconsistency with the `campus` -> `core`/
 `message` golden rule elsewhere in this app: `CoinLedger`'s own class
@@ -25,7 +25,7 @@ call through — it is meant to be imported directly, unlike
 `core.Notification`/`message` internals, which `campus` is deliberately
 walled off from via `core.classroom_chat_bridge`. Register both new
 tasks against the same daily beat schedule `check_low_attendance` and
-`send_assignment_due_reminders` already use.
+`send_assigments_due_reminders` already use.
 """
 import logging
 
@@ -174,7 +174,7 @@ def check_attendance_streak_rewards():
     separately-earned milestone rather than blocked forever.
 
     Safe to run more than once a day for the same reason
-    `send_assignment_due_reminders` is: no state of its own, only reads
+    `send_assigments_due_reminders` is: no state of its own, only reads
     `Attendance` rows.
     """
     from user_profile.models import CoinLedger
@@ -232,41 +232,41 @@ def check_attendance_streak_rewards():
 
 
 @shared_task
-def send_assignment_due_reminders():
+def send_assigments_due_reminders():
     """
-    `ASSIGNMENT_DUE_REMINDER` (design doc §6) — for every campus
-    `Assignment` whose `due_date` is today, notify every student whose
+    `assigments_DUE_REMINDER` (design doc §6) — for every campus
+    `assigments` whose `due_date` is today, notify every student whose
     submission is still `MISSING`.
 
-    [FIX — Task 11] QUERY REDIRECT: `campus.Assignment`/
-    `campus.AssignmentSubmission` are deprecated (see `campus.Assignment`'s
+    [FIX — Task 11] QUERY REDIRECT: `campus.assigments`/
+    `campus.assigmentsSubmission` are deprecated (see `campus.assigments`'s
     own docstring in models.py) — this now reads the unified
-    `assignment.models.Assignment`/`AssignmentSubmission` instead,
-    filtered to `source=AssignmentSource.CAMPUS`. `context_id` is an
+    `assigments.models.assigments`/`assigmentsSubmission` instead,
+    filtered to `source=assigmentsSource.CAMPUS`. `context_id` is an
     opaque `Section.id` on that model (never a real FK — golden rule,
-    §1), so `assignment.title`/`due_date` come straight off the unified
+    §1), so `assigments.title`/`due_date` come straight off the unified
     row; nothing here needs to resolve `context_id` back into a real
     `Section` at all, since the notification body only needs the
-    assignment's own title/due_date, not anything section-specific.
+    assigments's own title/due_date, not anything section-specific.
 
     ⚠️ NOT RESOLVED — DUPLICATE-NOTIFICATION RISK, flagged rather than
-    silently guessed around: `assignment.tasks.send_due_reminders()`
-    (Task 10) already sweeps EVERY `AssignmentSubmission` with no
+    silently guessed around: `assigments.tasks.send_due_reminders()`
+    (Task 10) already sweeps EVERY `assigmentsSubmission` with no
     `source` filter at all — i.e. it already covers campus-sourced
     submissions too. If both that task and this one are wired into the
     project's Celery beat schedule, a campus student due today gets TWO
     separate reminder notifications (one from each task, each creating
     its own `core.Notification` row via a different call path —
-    `assignment.tasks` calls `core.services.create_notification`
+    `assigments.tasks` calls `core.services.create_notification`
     directly, this one goes through `campus.bridge.notify()`). This
     wasn't something either task's own pass could resolve alone: it's a
     genuine cross-app scheduling decision (which of the two — or neither
-    — actually gets registered in beat for campus-sourced assignments)
+    — actually gets registered in beat for campus-sourced assigmentss)
     that needs an explicit answer from whoever owns the beat schedule,
     not a guess baked into either task. Options, none picked here:
-    (a) exclude `source=campus` rows from `assignment.tasks.
+    (a) exclude `source=campus` rows from `assigments.tasks.
     send_due_reminders()`'s own query, (b) never schedule THIS task and
-    accept the generic assignment-app reminder for campus students too,
+    accept the generic assigments-app reminder for campus students too,
     or (c) schedule both but only for disjoint day-of-week/hour windows
     (fragile, not recommended). campus_app_design.md §5.4 (referenced in
     this module's own docstring above) is the design doc that should
@@ -274,47 +274,47 @@ def send_assignment_due_reminders():
 
     Idempotency: this task's OWN re-runs are still safe more than once a
     day for the reason the module docstring gives (no state of its own,
-    reads `AssignmentSubmission.status` fresh each time) — a re-run just
+    reads `assigmentsSubmission.status` fresh each time) — a re-run just
     re-notifies students still missing, never double-notifies ones who've
     since submitted. This does NOT extend across the two different tasks
     described above; that's the unresolved risk flagged there, not this
     one.
     """
-    from assignment.models import Assignment, AssignmentSource, AssignmentSubmission
+    from assigments.models import assigments, assigmentsSource, assigmentsSubmission
 
     today = timezone.now().date()
     reminded = 0
-    campus_assignments = Assignment.objects.filter(source=AssignmentSource.CAMPUS, due_date=today)
-    for assignment in campus_assignments:
+    campus_assigmentss = assigments.objects.filter(source=assigmentsSource.CAMPUS, due_date=today)
+    for assigments in campus_assigmentss:
         missing_students = [
             sub.student
-            for sub in AssignmentSubmission.objects.filter(
-                assignment=assignment, status=AssignmentSubmission.SubmissionStatus.MISSING
+            for sub in assigmentsSubmission.objects.filter(
+                assigments=assigments, status=assigmentsSubmission.SubmissionStatus.MISSING
             ).select_related("student")
         ]
         if not missing_students:
             continue
         bridge.notify(
             users=missing_students,
-            notif_type=NotifTypes.ASSIGNMENT_DUE_REMINDER,
-            title="Assignment due today",
-            body=f"{assignment.title} is due today and you haven't submitted yet.",
+            notif_type=NotifTypes.assigments_DUE_REMINDER,
+            title="assigments due today",
+            body=f"{assigments.title} is due today and you haven't submitted yet.",
         )
         reminded += len(missing_students)
     return {"reminded": reminded}
 
 
 @shared_task
-def check_assignment_ontime_streak_rewards():
+def check_assigments_ontime_streak_rewards():
     """
-    F-3 — daily engagement bonus for on-time assignment submissions.
+    F-3 — daily engagement bonus for on-time assigments submissions.
     For every ACTIVE enrollment, recomputes the student's current
     on-time streak within their section
-    (`services.compute_assignment_ontime_streak`) and pays a
+    (`services.compute_assigments_ontime_streak`) and pays a
     `CoinLedger` bonus every time it crosses a fresh multiple of
-    `settings.CAMPUS_ASSIGNMENT_STREAK_COUNT` (default 5 — i.e. the
+    `settings.CAMPUS_assigments_STREAK_COUNT` (default 5 — i.e. the
     5th, 10th, 15th, ... consecutive on-time submission).
-    `settings.CAMPUS_ASSIGNMENT_STREAK_BONUS_COINS` (default 15) sets
+    `settings.CAMPUS_assigments_STREAK_BONUS_COINS` (default 15) sets
     the payout.
 
     Idempotency/race-condition posture: identical to
@@ -323,19 +323,19 @@ def check_assignment_ontime_streak_rewards():
     length, the due_date the streak reached that length)` instead of an
     attendance date, for the same "can only happen once, ever" reason.
 
-    ✅ RESOLVED (Task 14) — `services.compute_assignment_ontime_streak()`
+    ✅ RESOLVED (Task 14) — `services.compute_assigments_ontime_streak()`
     now exists (it did not before this pass — that was the `ImportError`
     both streak tasks hit on every run) and reads through `campus.
-    bridge.get_assignment_submissions()`, the same unified-`assignment`-
-    app redirect `send_assignment_due_reminders()` above already applies
-    — never the deprecated `campus.AssignmentSubmission` model. See that
+    bridge.get_assigments_submissions()`, the same unified-`assigments`-
+    app redirect `send_assigments_due_reminders()` above already applies
+    — never the deprecated `campus.assigmentsSubmission` model. See that
     function's own docstring in services.py for the two points it flags
     as assumed-not-confirmed (the on-time status string, and
-    `get_assignment_submissions()`'s return-type), which weren't
-    resolvable without `assignment/models.py`.
+    `get_assigments_submissions()`'s return-type), which weren't
+    resolvable without `assigments/models.py`.
 
     ✅ RESOLVED (this pass) — the `due_date=None` crash flagged in
-    `services.compute_assignment_ontime_streak()`'s own docstring
+    `services.compute_assigments_ontime_streak()`'s own docstring
     (design doc §16 item 5) is fixed: that function now also returns
     `last_submission_id`, the streak-extending submission's own `id`,
     which is always set whenever `streak > 0` regardless of whether
@@ -344,16 +344,16 @@ def check_assignment_ontime_streak_rewards():
     instead of calling `.isoformat()` on a possibly-`None` value —
     see that function's docstring for why the fallback is just as safe
     an idempotency key. This does not decide whether a due-date-less
-    campus assignment *should* count towards the streak at all — that
+    campus assigments *should* count towards the streak at all — that
     product-rule question is still open and unrelated to this fix.
     """
     from user_profile.models import CoinLedger
 
     from .models import CampusParentLink, StudentEnrollment
-    from .services import compute_assignment_ontime_streak
+    from .services import compute_assigments_ontime_streak
 
-    streak_count = settings.CAMPUS_ASSIGNMENT_STREAK_COUNT
-    bonus_coins = settings.CAMPUS_ASSIGNMENT_STREAK_BONUS_COINS
+    streak_count = settings.CAMPUS_assigments_STREAK_COUNT
+    bonus_coins = settings.CAMPUS_assigments_STREAK_BONUS_COINS
 
     rewarded = 0
     enrollments = StudentEnrollment.objects.filter(
@@ -361,13 +361,13 @@ def check_assignment_ontime_streak_rewards():
     ).select_related("student", "section__school_class__campus")
 
     for enrollment in enrollments:
-        streak, last_due_date, last_submission_id = compute_assignment_ontime_streak(
+        streak, last_due_date, last_submission_id = compute_assigments_ontime_streak(
             enrollment.student, enrollment.section
         )
         if streak == 0 or streak % streak_count != 0:
             continue
         reference_key = last_due_date.isoformat() if last_due_date is not None else f"sub{last_submission_id}"
-        reference = f"campus_assignment_streak:{enrollment.id}:{streak}:{reference_key}"
+        reference = f"campus_assigments_streak:{enrollment.id}:{streak}:{reference_key}"
         if CoinLedger.objects.filter(user=enrollment.student, reference=reference).exists():
             continue
 
@@ -379,7 +379,7 @@ def check_assignment_ontime_streak_rewards():
             transaction_type=CoinLedger.TransactionType.CAMPUS_REWARD,
             amount=bonus_coins,
             reference=reference,
-            description=f"{streak}-submission on-time assignment streak bonus",
+            description=f"{streak}-submission on-time assigments streak bonus",
         )
         campus = enrollment.section.school_class.campus
         recipients = [enrollment.student] + list(
@@ -391,7 +391,7 @@ def check_assignment_ontime_streak_rewards():
             users=recipients,
             notif_type=NotifTypes.CAMPUS_REWARD_EARNED,
             title="On-time streak bonus!",
-            body=f"{enrollment.student.username} earned {bonus_coins} coins for {streak} on-time assignments in a row.",
+            body=f"{enrollment.student.username} earned {bonus_coins} coins for {streak} on-time assigmentss in a row.",
         )
         rewarded += 1
     return {"rewarded": rewarded}
@@ -403,7 +403,7 @@ def send_fee_due_reminders():
     FEE-6: `FEE_DUE_REMINDER` — for every `FeeInvoice` whose status is
     still PENDING, PARTIAL, or OVERDUE and whose `FeeStructure.due_date`
     is today or already past, notify the student + any linked parents.
-    Same shape as `send_assignment_due_reminders` above and the same
+    Same shape as `send_assigments_due_reminders` above and the same
     re-run safety reasoning: this task carries no state of its own, it
     only reads `FeeInvoice.status`/`FeeStructure.due_date`, so running
     it more than once a day just re-notifies invoices that are still

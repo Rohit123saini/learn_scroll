@@ -161,6 +161,17 @@ INSTALLED_APPS = [
     'liveclass',
     'campus',
     'testseries',
+    # 🔧 GAP FIX — was 'assigments' (typo), which doesn't match this
+    # app's real label anywhere else in the codebase (assigments/
+    # models.py, assigments/bridge.py, assigments_APP_MASTER.md, etc. —
+    # all "assigments", never "assigments"). Django resolves app labels
+    # from the actual app directory/AppConfig, not from this string
+    # matching anything else, so a typo here means the real
+    # `assigments` app was never actually registered under this label —
+    # `django_apps.get_app_config("assigments")` (e.g. what
+    # `check_config_drift`'s admin-registration check calls) would have
+    # raised `LookupError` the moment `assigments` was added to
+    # `CONFIG_DRIFT_APPS` below, not just silently skipped it.
     'assigments',
 
     # NEW (task 42) — neutral notification + classroom<->chat bridge
@@ -780,7 +791,7 @@ SPECTACULAR_SETTINGS = {
 # size of non-file request data (regular form fields / JSON body) — Django
 # excludes actual uploaded file content from this check (that's bounded per
 # field instead by MaxFileSizeValidator in models.py: 100MB materials, 50MB
-# assignments/submissions, 10MB certificates, 5MB cover image). 500MB here
+# assigmentss/submissions, 10MB certificates, 5MB cover image). 500MB here
 # meant any endpoint taking a plain text/JSON field (a classroom
 # description, a chat message, a review comment) would accept a request
 # body up to 500MB of non-file data before Django even rejects it — cheap
@@ -827,8 +838,8 @@ CLASSROOM_REFERRAL_JOIN_BONUS_COINS = int(os.environ.get("CLASSROOM_REFERRAL_JOI
 
 # ---------------------------------------------------------------------------
 # F-3: campus engagement-reward bonuses (see campus/tasks.py's
-# check_attendance_streak_rewards / check_assignment_ontime_streak_rewards,
-# campus/services.py's compute_attendance_streak / compute_assignment_ontime_streak).
+# check_attendance_streak_rewards / check_assigments_ontime_streak_rewards,
+# campus/services.py's compute_attendance_streak / compute_assigments_ontime_streak).
 # Paid via user_profile.CoinLedger.record_transaction(transaction_type=
 # CAMPUS_REWARD, ...) -- distinct wallet/ledger from liveclass's
 # CoinTransaction above, but the same "flat, env-overridable settings
@@ -836,13 +847,13 @@ CLASSROOM_REFERRAL_JOIN_BONUS_COINS = int(os.environ.get("CLASSROOM_REFERRAL_JOI
 # either program the same way.
 # CAMPUS_ATTENDANCE_STREAK_DAYS -- how many consecutive PRESENT/LATE daily
 # attendance marks earn one bonus (paid again every further multiple).
-# CAMPUS_ASSIGNMENT_STREAK_COUNT -- same idea for consecutive on-time
-# (non-LATE, non-MISSING) assignment submissions within one section.
+# CAMPUS_assigments_STREAK_COUNT -- same idea for consecutive on-time
+# (non-LATE, non-MISSING) assigments submissions within one section.
 # ---------------------------------------------------------------------------
 CAMPUS_ATTENDANCE_STREAK_DAYS = int(os.environ.get("CAMPUS_ATTENDANCE_STREAK_DAYS", 7))
 CAMPUS_ATTENDANCE_STREAK_BONUS_COINS = int(os.environ.get("CAMPUS_ATTENDANCE_STREAK_BONUS_COINS", 10))
-CAMPUS_ASSIGNMENT_STREAK_COUNT = int(os.environ.get("CAMPUS_ASSIGNMENT_STREAK_COUNT", 5))
-CAMPUS_ASSIGNMENT_STREAK_BONUS_COINS = int(os.environ.get("CAMPUS_ASSIGNMENT_STREAK_BONUS_COINS", 15))
+CAMPUS_assigments_STREAK_COUNT = int(os.environ.get("CAMPUS_assigments_STREAK_COUNT", 5))
+CAMPUS_assigments_STREAK_BONUS_COINS = int(os.environ.get("CAMPUS_assigments_STREAK_BONUS_COINS", 15))
 
 # ---------------------------------------------------------------------------
 # Coin purchase gateway (see CoinPurchase in liveclass/models.py,
@@ -1054,6 +1065,52 @@ CELERY_BEAT_SCHEDULE = {
         "task": "message.purge_soft_deleted_conversations",
         "schedule": crontab(hour=3, minute=30),
     },
+    # 🔧 GAP FIX (this pass) — CHAT_APP_DOCUMENTATION.md §9.4 item 25:
+    # `management/commands/expire_stale_parent_access.py` (Parent Mode DB
+    # hygiene — see that file's own docstring) existed with ZERO
+    # registration anywhere: no CELERY_BEAT_SCHEDULE entry, no confirmed
+    # external cron. Low urgency (the command is explicitly DB hygiene
+    # only — `HasValidParentToken` already rejects expired tokens/codes
+    # live, on every request, regardless of whether this has ever run),
+    # but left unscheduled, stale `ParentToken`/`ParentAccessCode` rows
+    # just accumulate forever instead of ever getting cleaned up.
+    #
+    # ⚠️ ASSUMPTION — `message/tasks.py` wasn't part of this pass's
+    # upload, so it can't be confirmed here whether a Celery task wrapper
+    # for this command already exists. Unlike `send_scheduled_messages`/
+    # `cleanup_expired_messages` above (each of which has BOTH a
+    # management command AND a matching `@shared_task` in
+    # `message/tasks.py`), `expire_stale_parent_access` is currently a
+    # management command ONLY — a `CELERY_BEAT_SCHEDULE` "task" string
+    # only does anything if a task is actually registered under that
+    # exact name; it is not a management-command path Celery can invoke
+    # directly. This entry assumes a thin wrapper task named
+    # "message.expire_stale_parent_access" — same explicit "message.<name>"
+    # naming this file's other message entries already use (see
+    # message-send-scheduled-messages above) — e.g.:
+    #
+    #     @shared_task(name="message.expire_stale_parent_access")
+    #     def expire_stale_parent_access():
+    #         from django.core.management import call_command
+    #         call_command("expire_stale_parent_access")
+    #
+    # If `message/tasks.py` doesn't already have this wrapper (or an
+    # equivalent under a different name), add it there first and update
+    # the "task" string below to match — registering this entry alone
+    # with no task registered under that name means Celery Beat sends a
+    # tick nobody picks up (silently dropped, not even an error), not
+    # that the cleanup actually runs.
+    #
+    # Once that task exists, once-daily is plenty per this pass's own
+    # request — DB hygiene only, with an internal grace window measured
+    # in days (TOKEN_DELETE_GRACE_DAYS=14 / CODE_DEACTIVATE_GRACE_DAYS=30
+    # in the command itself), not minutes. Staggered 30 min after
+    # message-purge-soft-deleted-conversations (3:30) so the two
+    # message-app hygiene sweeps don't land in the same minute.
+    "message-expire-stale-parent-access": {
+        "task": "message.expire_stale_parent_access",
+        "schedule": crontab(hour=4, minute=0),
+    },
     # 🔧 TASK 28 — followers_count/following_count drift reconciliation.
     #
     # Both counters are updated atomically per-operation today
@@ -1087,7 +1144,7 @@ CELERY_BEAT_SCHEDULE = {
     # (those explicitly rename their tasks; campus/user_profile don't).
     # Once-a-day is enough — same reasoning as
     # liveclass-send-notification-digests and campus's own
-    # send_assignment_due_reminders (design doc §6): this task carries
+    # send_assigments_due_reminders (design doc §6): this task carries
     # no state of its own, so an occasional extra run is harmless.
     #
     "campus-send-fee-due-reminders": {
@@ -1105,9 +1162,9 @@ CELERY_BEAT_SCHEDULE = {
         # check.
         "schedule": crontab(hour=18, minute=0),
     },
-    "campus-send-assignment-due-reminders": {
-        "task": "campus.tasks.send_assignment_due_reminders",
-        # Also loops internally (every Assignment due today, across all
+    "campus-send-assigments-due-reminders": {
+        "task": "campus.tasks.send_assigments_due_reminders",
+        # Also loops internally (every assigments due today, across all
         # campuses) — no args needed. Staggered 30min after the
         # fee-reminder job above so both don't hit the DB in the same
         # minute.
@@ -1115,24 +1172,24 @@ CELERY_BEAT_SCHEDULE = {
     },
     # 🔧 FIX (this pass) — same "written but never registered" bug this
     # file already had to fix for check_low_attendance/
-    # send_assignment_due_reminders above: campus/tasks.py's F-3
+    # send_assigments_due_reminders above: campus/tasks.py's F-3
     # check_attendance_streak_rewards() and
-    # check_assignment_ontime_streak_rewards() both existed and (per the
+    # check_assigments_ontime_streak_rewards() both existed and (per the
     # previous pass) no longer crash on import, but neither was ever
     # added to this schedule — a Celery task that's never registered
     # here simply never fires on its own, no error, no log, nothing.
     # Both loop internally over every ACTIVE enrollment themselves (same
     # shape as check_low_attendance), so a single global crontab entry
     # each is correct as-is — no args needed. Once-daily, staggered
-    # after the existing 8:00/8:30 fee/assignment jobs and the 18:00
+    # after the existing 8:00/8:30 fee/assigments jobs and the 18:00
     # low-attendance check above so none of the five campus jobs land in
     # the same minute.
     "campus-check-attendance-streak-rewards": {
         "task": "campus.tasks.check_attendance_streak_rewards",
         "schedule": crontab(hour=19, minute=0),
     },
-    "campus-check-assignment-ontime-streak-rewards": {
-        "task": "campus.tasks.check_assignment_ontime_streak_rewards",
+    "campus-check-assigments-ontime-streak-rewards": {
+        "task": "campus.tasks.check_assigments_ontime_streak_rewards",
         "schedule": crontab(hour=19, minute=30),
     },
     # 🔴 REMOVED (this pass) — "campus-rollover-session" and
@@ -1141,7 +1198,7 @@ CELERY_BEAT_SCHEDULE = {
     # REQUIRED positional args:
     #   - rollover_session(campus_id, new_session_id)
     #   - refresh_analytics_snapshot(campus_id, session_id)
-    # Unlike check_low_attendance/send_assignment_due_reminders/
+    # Unlike check_low_attendance/send_assigments_due_reminders/
     # send_fee_due_reminders above (which loop over every active Campus
     # themselves), neither of these two tasks has a "for every
     # campus/session" wrapper — they operate on ONE specific
@@ -1175,3 +1232,40 @@ CELERY_BEAT_SCHEDULE = {
 # rehta hai, kam rakhoge to disk jaldi clear hota hai — 7 din WhatsApp
 # jaisi apps ke "recently deleted" window se milta-julta safe default hai.
 GROUP_SOFT_DELETE_GRACE_DAYS = int(os.getenv("GROUP_SOFT_DELETE_GRACE_DAYS", "7"))
+
+# ---------------------------------------------------------------------------
+# F-1 — `core/management/commands/check_config_drift.py`. That command's
+# own docstring expects this to be set here; it was never actually added
+# in a previous pass (core_app_documentation.md §9 item 17 / §11 flagged
+# this as "verify karo ye setting maujood hai" — it wasn't, until now).
+# Hardcoded fallback in the command itself is `["user_profile", "core"]`
+# if this setting is absent, so this isn't strictly required to avoid a
+# crash — but leaving it unset means every other app silently gets zero
+# drift coverage (throttle-scope, celery-beat, admin-registration,
+# urls-wiring checks) without that being an explicit, visible decision.
+#
+# 'assigments'/'testseries'/'campus' added this pass too — per §11's own
+# "Scope (deliberate, limitation nahi)" note, extending coverage is just
+# adding a label here, no other code changes needed, since all 4 checks
+# are fully generic (Django app-registry + AST/regex scans, no per-app
+# logic). They were left out originally only because they didn't exist
+# yet when this command was written. Doing this now surfaced a real bug
+# it would otherwise have hit immediately: 'assigments' was registered
+# under a typo'd label ('assigments') in INSTALLED_APPS above — fixed
+# there, required before this list could include it at all
+# (`django_apps.get_app_config("assigments")` would otherwise raise
+# `LookupError`, not just skip it quietly).
+#
+# 'liveclass'/'message'/'post'/'login' are NOT added here — no signal in
+# any doc reviewed so far that they were considered or excluded on
+# purpose; left out rather than guessed onto this list. Add them in a
+# future pass once that's an explicit decision, not a default.
+CONFIG_DRIFT_APPS = ["user_profile", "core", "assigments", "testseries", "campus"]
+
+# Escape hatches for the same command — intentionally left empty. Per
+# §11's own guidance, only add an entry here once a specific check has
+# actually flagged something that's genuinely deliberate (not a bug the
+# check is right to catch) — not preemptively for apps just added above.
+CONFIG_DRIFT_ADMIN_SKIP = set()        # {"app_label.ModelName", ...}
+CONFIG_DRIFT_ONDEMAND_TASKS = set()    # {"task_function_name", ...}
+CONFIG_DRIFT_URL_SKIP = set()          # {"app_label.ViewClassName", ...}
