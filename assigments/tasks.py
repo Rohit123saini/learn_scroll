@@ -14,14 +14,37 @@ this sweep — this function is written generically enough (no source/
 context filter) to cover personal assignments too, which neither campus
 nor liveclass ever will.
 
-[ASSUMPTION — NOT VERIFIED]: `core.services.create_notification`'s exact
-signature wasn't available in this pass (only core/models.py was
-provided, not core/services.py). The call below assumes keyword args
-matching `core.Notification`'s own fields (`recipient`, `notif_type`,
-`title`, `message`, `data`) — the same assumption `assignment/bridge.py`'s
-`notify_submission_received()` makes. Verify both call sites against the
-real `create_notification` signature before relying on this in
-production; update together if it differs.
+[VERIFIED] `core.services.create_notification`'s real signature is now
+confirmed: `(recipient, notif_type, title, message="", *, classroom=None,
+session=None, data=None, actor=None)`. The keyword args used below
+(`recipient`, `notif_type`, `title`, `message`, `data`) all match; the
+sweep intentionally omits `actor` (this is a system-triggered reminder,
+not something a user did, so the restrict-user check inside
+`create_notification` correctly doesn't apply here) and `classroom`/
+`session` (not applicable to a due-date reminder). Note that
+`create_notification` swallows and logs failures from its own
+`Notification.objects.create()` call and returns `None` rather than
+raising — but the lazy `is_restricted_between` import/call inside it is
+NOT covered by that try/except, so it can still raise past
+`create_notification` into this module's own per-row try/except below,
+which is why that try/except is kept regardless.
+`assignment/bridge.py`'s `notify_submission_received()` made the same
+assumption and should be checked against this same confirmed signature
+if it hasn't been already.
+
+[FIX — notif_type collision]: this module previously sent
+notif_type="assignment_due_reminder" as a raw string literal. That value
+is campus's own enum member (`Notification.NotifType.ASSIGNMENT_DUE_
+REMINDER`, listed under `CAMPUS_APP_TYPES` in core/models.py) — core
+deliberately defines a separate `ASSIGNMENT_DUE_SOON = "assignment_due_
+soon"` for this unified assignment app precisely so the two reminder
+events aren't aliases of each other. Sending the campus string here
+silently misrouted every platform-wide assignment reminder as a campus
+one downstream (clients pick deep-link/copy off notif_type). Fixed to
+reference `Notification.NotifType.ASSIGNMENT_DUE_SOON` directly — using
+the enum member, not another string literal, so a future rename in
+core/models.py breaks import-time/at call time instead of silently
+reintroducing this bug.
 
 [FIX — Task 10] IDEMPOTENCY: this module previously stated, in this
 docstring, that it deliberately did not de-duplicate — "add an explicit
@@ -60,6 +83,7 @@ from datetime import timedelta
 from django.core.cache import cache
 from django.utils import timezone
 
+from core.models import Notification
 from core.services import create_notification
 
 from .models import AssignmentSubmission
@@ -111,7 +135,7 @@ def send_due_reminders(*, lookahead_hours: int = 24) -> int:
         try:
             create_notification(
                 recipient=submission.student,
-                notif_type="assignment_due_reminder",
+                notif_type=Notification.NotifType.ASSIGNMENT_DUE_SOON,
                 title="Assignment Due Soon",
                 message=f'"{assignment.title}" is due on {assignment.due_date}.',
                 data={"context_type": assignment.context_type, "context_id": str(assignment.context_id or "")},

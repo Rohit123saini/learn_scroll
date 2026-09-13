@@ -5,22 +5,15 @@
 those apps' models directly, the same way `liveclass` already routes
 through `core` instead of touching `message` internals.
 
-This pass could not see `core/models.py` (for the `Notification` model
-and the `NotifType` enum design doc §10 wants extended) or any existing
-`core/classroom_chat_bridge.py` — neither was part of this upload. So
-both functions below import lazily and degrade to a logged no-op
-instead of a hard crash if that module/model isn't there yet — that
-way `campus` stays installable, migratable, and testable on its own
-before the rest of the bridge exists on the other side.
-
-STATUS (this pass):
+STATUS (this pass — all three gaps this file previously flagged as
+blocked are now resolved):
   - ✅ DONE — `core.models.NotifType` now has every value
     `campus_app_design.md` §10 asks for (verified against the real
-    `core/models.py` upload this pass). `NotifTypes` below is
-    deliberately KEPT as a plain-string mirror rather than switched to
-    a direct `core.models.NotifType` reference — that would reintroduce
-    the exact `campus` → `core.models` import this module exists to
-    avoid. Every value in `NotifTypes` below has been checked
+    `core/models.py` upload). `NotifTypes` below is deliberately KEPT
+    as a plain-string mirror rather than switched to a direct
+    `core.models.NotifType` reference — that would reintroduce the
+    exact `campus` → `core.models` import this module exists to avoid.
+    Every value in `NotifTypes` below has been checked
     character-for-character against `core.models.NotifType` and
     matches.
   - ✅ FIXED — `notify()`'s `Notification.objects.create(...)` call was
@@ -29,57 +22,88 @@ STATUS (this pass):
     `TypeError` on every single call once `core.models` became
     importable — i.e. this path was never exercised against the real
     model. Fixed below.
-  - ❌ STILL MISSING — `core.classroom_chat_bridge.create_section_group`
-    and `...provision_video_room` do not exist yet (confirmed against
-    this pass's `core/classroom_chat_bridge.py` upload — it has
-    `create_classroom_group` for `liveclass.Classroom`, nothing for
-    `campus.Section` or a video room). Writing these requires
-    `campus/models.py` (to know `Section`'s fields — does it have a
-    `chat_group_enabled`/`linked_conversation_id` pair mirroring
-    `Classroom`'s, or something else?) and whatever video-room
-    provider `liveclass`/`message` use — neither was in this upload,
-    so these two stay lazy-import no-ops for now rather than guessed at.
-  - ⚠️ SHAPE MISMATCH, NOT JUST MISSING — `core.classroom_chat_bridge.
-    resolve_parent_from_token` DOES already exist (Task 5, confirmed in
-    this pass's upload), but it returns a `ParentTokenResolution`
-    object (`.student`, `.parent_access_code`) — there is no
-    `parent_user` anywhere in that flow, because parents in this system
-    authenticate via token+access code, not a real `User` row. This
-    function's own docstring below promises a `(parent_user,
-    student_user)` tuple, which doesn't match what the underlying
-    system can actually produce. Wiring this straight through as
-    written would silently return `(None, None)` for a valid token
-    (a real regression, worse than today's no-op) — see the function
-    below for how this pass left it instead. Needs `campus/models.py`
-    (specifically `CampusParentLink`) to resolve properly: does campus
-    reuse `message`'s `ParentAccessCode`/`ParentToken` directly, or
-    does `CampusParentLink` wrap them with its own parent-side identity?
-  - Once `create_section_group`/`provision_video_room` exist and the
-    parent-token shape question above is settled, the `except
-    ImportError` branches below can be deleted — the `try` bodies for
-    `create_section_group`/`provision_video_room` are already the real
-    integration shape.
-
-NEEDED TO FINISH THIS FILE: `campus/models.py` (for `Section`,
-`CampusParentLink`) and `campus_app_design.md` §4 (video room) — please
-provide these if you want the two remaining gaps above closed rather
-than flagged.
+  - ✅ WIRED (this pass) — `core.classroom_chat_bridge.
+    create_section_group`/`...provision_video_room` now exist for real
+    (added this same pass — see that module's functions 10/11). Both
+    are confirmed, established dependencies now, the same position
+    `create_assignment()`/`get_assignment_submissions()` below are
+    already in re: `assignment` — so both import at module level, no
+    lazy import, no `except ImportError` degrade.
+    ⚠️ CORRECTION (this pass) — a prior revision of this file removed
+    the `except ImportError` wrapper but left the `from core.
+    classroom_chat_bridge import ...` / `from assignment.bridge import
+    ...` / `from testseries.bridge import ...` lines as LOCAL imports
+    inside each function body, contradicting this very docstring's
+    "import at module level" claim. Functionally the difference matters:
+    a local import only raises on the *first call* to that function, so
+    a broken/missing dependency would pass Django startup and any health
+    check, then 500 the first time a real user hits it. Moved to actual
+    module-level imports below (top of file) to match what this
+    docstring always claimed — a missing `core`/`assignment`/`testseries`
+    now fails at Django startup (import time), same as any other hard
+    dependency, not silently deferred to first request. Verified this
+    doesn't introduce a cycle: `core.classroom_chat_bridge`'s own
+    cross-app imports (`campus.models`, `message.models`) are
+    deliberately local/deferred on ITS end specifically so apps like this
+    one CAN import it at module level without a circular-import error —
+    see that module's own docstring, item 2. `assignment/bridge.py`'s
+    top-level imports don't reach back into `campus` either, so the same
+    holds there. `testseries.bridge`'s import graph wasn't part of this
+    pass (no `testseries/bridge.py` upload this time) — carried over the
+    same assumption since `create_testseries()`'s own docstring already
+    treats it as a confirmed, non-circular sibling dependency; re-verify
+    against that file if `testseries` ever gains a reason to import
+    `campus`.
+    `campus.models.Section` also gained the `chat_group_enabled`/
+    `linked_conversation_id` pair `create_section_group()` needs to
+    persist its result — a migration is required for that field (see
+    its own comment in models.py; run `manage.py makemigrations campus`,
+    this pass can't generate that migration file without the live
+    project state).
+  - ✅ RESOLVED (this pass) — `resolve_parent_from_token`'s shape
+    mismatch. `CampusParentLink.parent` is a real `login.User` FK, but
+    `core.classroom_chat_bridge.resolve_parent_from_token` (unchanged,
+    still correct for its own contract) returns a `ParentTokenResolution`
+    with no `parent_user` — that flow's parents never get a real login.
+    Decision taken: auto-create (and reuse) a lightweight, non-loginable
+    "shadow" `User` per `ParentAccessCode`, the first time that code is
+    ever verified — every device/session verifying the SAME code is the
+    same real-world parent sharing it (message/views_parent.py: one
+    `ParentAccessCode` per student+label, many `ParentToken` devices
+    under it), so keying the shadow user off `parent_access_code.id`
+    keeps this idempotent — re-verifying the same code never creates a
+    second shadow user. See `_get_or_create_shadow_parent_user()` below.
+    NOTE: this uses a `username` naming convention
+    (`parent_shadow_<access_code_id>`) to mark shadow rows rather than a
+    dedicated `is_shadow_parent` field on `login.User`, since
+    `login/models.py` wasn't part of this pass — flagging this as the
+    one open follow-up: add a real boolean field there and swap the
+    lookup below to use it once that file is available, instead of a
+    naming-convention check.
 
 TASK 11 ADDITION: `create_assignment()` / `get_assignment_submissions()`
-below are a DIFFERENT kind of bridge call than everything above them in
-this file. Every function above degrades to a lazy-import no-op because
-`core`/`message` were genuinely unverified dependencies when this module
-was first written. `assignment` is not in that position — it's a
-confirmed, fully-built sibling app (Tasks 6-10), the same kind of
-established dependency `assignment/bridge.py` itself treats
-`core.services` as (a top-level import, no degrade). So these two import
-`assignment.bridge`/`assignment.models` directly at module level, not
-lazily, and do not degrade to a no-op on `ImportError` — if `assignment`
-genuinely isn't installed, campus's own assignment feature has nothing
-to fall back to anyway, so a hard import error at startup is the honest
-failure mode, not a silently-neutered feature.
+below are a DIFFERENT kind of bridge call than `notify()`/`resolve_
+parent_from_token()`/`create_section_group()`/`provision_video_room()`
+above. `assignment` is a confirmed, fully-built sibling app (Tasks
+6-10), the same kind of established dependency `assignment/bridge.py`
+itself treats `core.services` as (a top-level import, no degrade) —
+same treatment the other four functions above now get too. So these two
+import `assignment.bridge`/`assignment.models` directly at module
+level, not lazily, and do not degrade to a no-op on `ImportError` — if
+`assignment` genuinely isn't installed, campus's own assignment feature
+has nothing to fall back to anyway, so a hard import error at startup
+is the honest failure mode, not a silently-neutered feature.
 """
 import logging
+
+from assignment.bridge import create_context_assignment, get_submissions_for_context
+from assignment.models import AssignmentSource
+from core.classroom_chat_bridge import create_section_group as _create_section_group
+from core.classroom_chat_bridge import provision_video_room as _provision_video_room
+from core.classroom_chat_bridge import resolve_parent_from_token as _resolve_parent_from_token
+from core.models import Notification
+from testseries.bridge import create_context_testseries, get_attempts_for_context
+from testseries.models import TestSeries
 
 logger = logging.getLogger(__name__)
 
@@ -129,20 +153,17 @@ def create_section_group(section, actor):
     for its own classrooms — via `core.classroom_chat_bridge`, never a
     direct `message` import from this app.
 
-    Returns whatever `core.classroom_chat_bridge.create_section_group`
-    returns (expected: the created `message.Group` instance), or `None`
-    if that bridge function isn't available yet.
+    `core.classroom_chat_bridge.create_section_group` is now a
+    confirmed, wired dependency (see module STATUS above) — no more
+    `except ImportError` degrade; a missing `core` here is a real
+    startup failure, same as `assignment` below, not a silently
+    neutered feature.
+
+    Returns the created (or, if one already exists for this section,
+    the existing) `message.Group` instance. Raises `ValueError` if
+    `actor` isn't this section's assigned class-teacher — see
+    `core.classroom_chat_bridge.create_section_group()`'s own docstring.
     """
-    try:
-        from core.classroom_chat_bridge import create_section_group as _create_section_group
-    except ImportError:
-        logger.warning(
-            "core.classroom_chat_bridge.create_section_group not available — "
-            "no message.Group was created for section %s. Wire up that "
-            "bridge function to enable section-group auto-creation.",
-            getattr(section, 'id', section),
-        )
-        return None
     return _create_section_group(section, actor)
 
 
@@ -150,24 +171,13 @@ def notify(*, users, notif_type, title, body='', data=None):
     """
     Single entry point for `campus` to push a `core.Notification`.
     `users` is an iterable of user instances/ids. `notif_type` should be
-    one of the `NotifType` values `campus_app_design.md` §10 lists —
-    those don't exist on `core.models.NotifType` yet in this upload, so
-    for now this just logs which type/recipients WOULD have fired.
+    one of the `NotifType` values `campus_app_design.md` §10 lists.
 
-    Returns the list of created `Notification` rows, or `[]` if
-    `core.models.Notification` isn't importable yet.
+    `core.models.Notification` is now a confirmed, wired dependency
+    (see module STATUS above) — no more `except ImportError` degrade.
+
+    Returns the list of created `Notification` rows.
     """
-    try:
-        from core.models import Notification
-    except ImportError:
-        logger.warning(
-            "core.models.Notification not available — notification "
-            "(type=%s, title=%r) was NOT sent to %s. Add core/models.py "
-            "to enable this.",
-            notif_type, title, list(users),
-        )
-        return []
-
     created = []
     for user in users:
         created.append(
@@ -195,23 +205,52 @@ def provision_video_room(live_session, actor):
     `core.classroom_chat_bridge.provision_video_room`, never a direct
     `liveclass`/`message` import from this app (design doc §4).
 
-    Returns the room id/token string that bridge function hands back,
-    or `None` if it isn't available yet — `CampusLiveSessionViewSet.
-    perform_create` treats `None` as "no room yet, blank room_id",
-    not as an error, so scheduling a session still succeeds even
-    before this integration exists.
+    `core.classroom_chat_bridge.provision_video_room` is now a
+    confirmed, wired dependency (see module STATUS above) — no more
+    `except ImportError` degrade.
+
+    Returns the room-name string that bridge function hands back
+    (stored directly into `CampusLiveSession.room_id`). See that
+    function's own docstring for why it returns a stable room name
+    rather than a LiveKit token — per-participant tokens are minted
+    separately, at actual join time, not here at scheduling time.
     """
-    try:
-        from core.classroom_chat_bridge import provision_video_room as _provision_video_room
-    except ImportError:
-        logger.warning(
-            "core.classroom_chat_bridge.provision_video_room not available — "
-            "no video room was provisioned for live session %s. Wire up that "
-            "bridge function to enable this.",
-            getattr(live_session, 'id', live_session),
-        )
-        return None
     return _provision_video_room(live_session, actor=actor)
+
+
+def _get_or_create_shadow_parent_user(parent_access_code):
+    """
+    `campus.CampusParentLink.parent` is a real `login.User` FK, but the
+    underlying `message.ParentAccessCode`/`ParentToken` flow has no
+    concept of a real parent `User` at all — parents there authenticate
+    by token+code, never a login (see module docstring STATUS).
+
+    Creates (once) and reuses a lightweight, non-loginable "shadow"
+    `User` row per `ParentAccessCode` — every device (`ParentToken`)
+    that verifies under the SAME code is the same real-world parent/
+    family sharing that one code (one `ParentAccessCode` per
+    student+label, many devices under it), so keying the shadow user
+    off `parent_access_code.id` keeps this idempotent: re-verifying the
+    same code, from any device, at any time, always resolves to the
+    same shadow user — never creates a duplicate.
+
+    Marked via a `username` naming convention
+    (`parent_shadow_<access_code_id>`) rather than a dedicated
+    `is_shadow_parent` field on `login.User`, since `login/models.py`
+    wasn't available to add one this pass (see module STATUS) — treat
+    this as the interim identification method, not the permanent one.
+
+    The shadow row is deliberately unusable for normal login
+    (`set_unusable_password()` — no password ever validates for it).
+    """
+    from login.models import User  # local import — cross-app, same reasoning as message.models below
+
+    username = f"parent_shadow_{parent_access_code.id}"
+    user, created = User.objects.get_or_create(username=username)
+    if created:
+        user.set_unusable_password()
+        user.save(update_fields=["password"])
+    return user
 
 
 def resolve_parent_from_token(token):
@@ -221,51 +260,27 @@ def resolve_parent_from_token(token):
     resolve_parent_from_token`, never a direct `message` import from
     this app (see `CampusParentLink`'s model docstring).
 
+    `core.classroom_chat_bridge.resolve_parent_from_token` is now a
+    confirmed, wired dependency (see module STATUS above) — no more
+    `except ImportError` degrade.
+
     Returns a `(parent_user, student_user)` tuple on success, or
-    `(None, None)` if the token is invalid/expired OR if that bridge
-    function isn't available/usable yet — `ParentLinkVerifyView` treats
-    both cases identically (a 400, "Invalid or expired token"), so this
-    degrades safely instead of crashing when `core` isn't installed.
+    `(None, None)` if the token is invalid/expired — `ParentLinkVerifyView`
+    treats this as a 400, "Invalid or expired token".
 
-    NOTE (found this pass, not fixed — see module docstring STATUS):
-    `core.classroom_chat_bridge.resolve_parent_from_token` DOES exist
-    now, but it returns a `ParentTokenResolution` object
-    (`.student`/`.parent_access_code`) — there is no `parent_user`
-    anywhere in that underlying flow, since that system's parents
-    authenticate via token+access code, not a real `User` row.
-    Forwarding that object where a `(parent_user, student_user)` tuple
-    is expected would silently misbehave (unpacking a non-tuple, or a
-    caller treating a truthy object as a valid parent_user when there
-    isn't one) rather than fail loudly — worse than today's degrade.
-    So this deliberately still returns `(None, None)` rather than guess
-    at the mapping. Needs `campus/models.py` (`CampusParentLink`) to
-    know whether campus has (or should have) its own parent-identity
-    concept, or whether `ParentLinkVerifyView`/`CampusParentLink` should
-    be redesigned around `ParentTokenResolution`'s actual shape instead.
+    `parent_user` is a shadow `User` (see
+    `_get_or_create_shadow_parent_user()` above), not a real login —
+    that's the resolved answer to this module's former SHAPE MISMATCH
+    note: the underlying token flow has no real parent identity to
+    hand back, so one is synthesized here, deterministically, per
+    `ParentAccessCode`.
     """
-    try:
-        from core.classroom_chat_bridge import resolve_parent_from_token as _resolve_parent_from_token
-    except ImportError:
-        logger.warning(
-            "core.classroom_chat_bridge.resolve_parent_from_token not "
-            "available — parent-link verification cannot succeed until "
-            "that bridge function is wired up."
-        )
-        return None, None
-
     resolution = _resolve_parent_from_token(token)
     if resolution is None:
         return None, None
 
-    logger.error(
-        "core.classroom_chat_bridge.resolve_parent_from_token returned a "
-        "ParentTokenResolution (student=%s) but campus.bridge."
-        "resolve_parent_from_token has no defined mapping from that shape "
-        "to (parent_user, student_user) yet — denying rather than "
-        "guessing. See this module's docstring STATUS section.",
-        getattr(resolution, "student", None),
-    )
-    return None, None
+    parent_user = _get_or_create_shadow_parent_user(resolution.parent_access_code)
+    return parent_user, resolution.student
 
 
 def create_assignment(*, section, subject, posted_by, title, description="", attachment=None, due_date=None):
@@ -297,9 +312,6 @@ def create_assignment(*, section, subject, posted_by, title, description="", att
 
     Returns the created `assignment.models.Assignment` instance.
     """
-    from assignment.bridge import create_context_assignment
-    from assignment.models import AssignmentSource
-
     from .models import StudentEnrollment
 
     roster = [
@@ -335,13 +347,11 @@ def get_assignment_submissions(section):
     `get_submissions_for_context()` itself documents: the caller (views.py)
     is responsible for any further staff/student-scoped narrowing.
     """
-    from assignment.bridge import get_submissions_for_context
-
     return get_submissions_for_context(context_type="section", context_id=section.id)
 
 
 def create_testseries(*, section, creator, title, description="", duration_minutes=None,
-                       attempts_allowed=1, questions):
+                       attempts_allowed=1, questions, is_paid=False, price_coins=0):
     """[Task 13] Creates a campus test series via the unified
     `testseries` app — the same "one function is the app boundary"
     pattern `create_assignment()` above already uses for `assignment`,
@@ -355,13 +365,30 @@ def create_testseries(*, section, creator, title, description="", duration_minut
     imports `testseries.bridge`/`testseries.models` as hard imports
     below, no lazy-import/`ImportError` degrade.
 
-    `is_paid=False` (and `price_coins=0`) are forced here
-    UNCONDITIONALLY — this function has no `is_paid`/`price_coins`
-    keyword arg at all, unlike whatever `liveclass`'s own
-    `create_testseries()` is expected to expose for its teacher-priced
-    series. This is deliberately redundant with `TestSeries.save()`'s
-    own golden-constraint enforcement (Task 13 checklist: "force-enforced
-    dono jagah") — defence in depth, not a substitute for it.
+    `is_paid`/`price_coins` — [Task 19 — ORG_VS_INDIVIDUAL_MATRIX] WIRED
+    this pass. Both default to `False`/`0`, so every existing caller
+    (positional-kwargs-only, so nothing breaks) keeps today's
+    always-free behavior unchanged. Gated on `Campus.
+    testseries_paid_allowed` (campus/models.py), resolved via `section.
+    school_class.campus` — the same relation `SectionViewSet.
+    get_campus_id_for_permission_check()` (views.py) already walks. If
+    that flag is `False` on this section's campus, `is_paid`/
+    `price_coins` are force-reset to `False`/`0` here regardless of what
+    the caller passed — this function does not trust the caller on this
+    point.
+
+    This is now THE enforcement point for "can this campus run paid test
+    series" — `TestSeries.save()` (testseries/models.py) no longer
+    re-checks `source == CAMPUS` at all, and can't: `testseries` never
+    imports `campus` models (golden rule), so it has no way to see this
+    flag. `campus.views.TestSeriesViewSet.create()` also gates on the
+    same flag before ever calling this function, so a caller asking for
+    a paid series against a `testseries_paid_allowed=False` campus gets
+    a clear 403 there rather than reaching this silent downgrade — but
+    this function re-checks unconditionally anyway rather than trusting
+    that the view already did, same "checked before the bridge call,
+    bridge doesn't blindly trust it either" posture `create_section_
+    group()`'s class-teacher check above takes.
 
     No `subject` parameter, unlike `create_assignment()` above.
     `create_context_testseries()`'s full kwarg list (confirmed against
@@ -403,10 +430,13 @@ def create_testseries(*, section, creator, title, description="", duration_minut
 
     Returns the created `testseries.models.TestSeries` instance.
     """
-    from testseries.bridge import create_context_testseries
-    from testseries.models import TestSeries
-
     from .models import StudentEnrollment
+
+    if not section.school_class.campus.testseries_paid_allowed:
+        is_paid = False
+        price_coins = 0
+    if not is_paid:
+        price_coins = 0
 
     roster = [
         enrollment.student
@@ -421,8 +451,8 @@ def create_testseries(*, section, creator, title, description="", duration_minut
         creator=creator,
         title=title,
         description=description,
-        is_paid=False,
-        price_coins=0,
+        is_paid=is_paid,
+        price_coins=price_coins,
         duration_minutes=duration_minutes,
         attempts_allowed=attempts_allowed,
         questions=questions,
@@ -504,6 +534,4 @@ def get_testseries_attempts(section):
     whole call on `is_any_active_staff()` for this section's campus)
     before showing anything back to a non-owning caller.
     """
-    from testseries.bridge import get_attempts_for_context
-
     return get_attempts_for_context(context_type="section", context_id=section.id)

@@ -7,7 +7,16 @@ serializers → comment_serializers → views → comment_view → services →
 signals → tasks → urls → admin → apps.py) yahin milega, saath me har piece
 kya kaam karta hai uski explanation bhi.
 
-> **Latest pass — Addendum 6 (§21):** full **byte-for-byte verification**
+> **Latest pass — Addendum 8 (§23):** `tasks.py`'s
+> `notify_followers_new_post` docstring was expanded to record a
+> mute-check that got added and then correctly reverted between passes
+> (`NotificationPreference.muted_types` was wrongly deleting muted
+> followers' in-app bell rows instead of just skipping a push/email/sms
+> send that doesn't exist for this notif type yet). No executable code
+> changed — §10.3's code block and §14 item 12 are updated to match.
+> See §23 for the full writeup.
+>
+> **Previous pass — Addendum 6 (§21):** full **byte-for-byte verification**
 > of every code section in this doc against the actual uploaded source
 > (Sep 2026 sync pass, same treatment as `login_app_reference.md`). One
 > real bug found and fixed: §5 (`comment_serializers.py`) had an old,
@@ -3794,7 +3803,10 @@ def notify_followers_new_post(post_id):
     """Notify every ACCEPTED follower of `post.user` that a new post went
     up. MVP version per the design doc: no per-follower "bell" opt-in
     yet — every accepted follower gets notified on every post. That's a
-    deliberate, documented noise trade-off for a later pass.
+    deliberate, documented noise trade-off for a later pass. (See the
+    correction note below re: `NotificationPreference.muted_types` —
+    it doesn't apply here yet either, for a confirmed reason, not an
+    oversight.)
 
     Uses `core.services.create_bulk_notifications` (one bulk INSERT)
     rather than looping `create_notification` once per follower — the
@@ -3803,6 +3815,43 @@ def notify_followers_new_post(post_id):
     fan-out that can be thousands of rows. The restrict exclusion below
     does the same thing `create_notification` would have per-recipient,
     but as a single bulk query up front instead.
+
+    🔧 CORRECTED (this pass, post_app.md §14 item 12) — a mute-check
+    was added here in an earlier pass, excluding any follower who had
+    `NEW_POST_FROM_FOLLOWED` in `NotificationPreference.muted_types`
+    from the bulk INSERT entirely. That was wrong and has been reverted,
+    now that `core/services.py` itself is available to confirm why:
+    `create_bulk_notifications()` — like `create_notification()` — is a
+    tested, documented choke point that ONLY ever writes the
+    `Notification` bell row; it never sends push/email/sms/whatsapp
+    (see that module's own docstring and its
+    `test_never_sends_a_push_itself` regression test). Every real
+    channel-send in this codebase happens as a SEPARATE call the
+    call-site makes alongside `create_notification`/
+    `create_bulk_notifications`, not inside either of them. `Notification
+    Preference.allowed_channels_for()`'s own docstring is explicit that
+    a muted type still gets its in-app bell row — only the
+    push/email/sms/whatsapp *send* is meant to be skipped. This
+    function never makes that second, channel-send call for
+    `NEW_POST_FROM_FOLLOWED` at all (unlike the two-call pattern the
+    `core/services.py` module docstring shows for other notif types) —
+    so there is currently no channel-dispatch step here for a mute to
+    gate. Filtering muted followers out of the bulk INSERT therefore
+    didn't skip an interruption they'd opted out of; it silently deleted
+    their in-app history for this type, which is the exact outcome the
+    model's own contract says muting must never cause.
+
+    ⚠️ STILL OPEN, FLAGGED NOT GUESSED AT: this means `muted_types` is
+    currently a no-op for `NEW_POST_FROM_FOLLOWED` specifically, since
+    nothing reads it on this path. If/when a real push-dispatch call is
+    added here (the `send_notification(...)`-style second call other
+    call-sites make), THAT is where `allowed_channels_for()` /
+    `muted_types` should be checked per-recipient before sending —
+    mirroring the existing pattern exactly, not a new one. Whether
+    `NEW_POST_FROM_FOLLOWED` even needs a push channel at all (versus
+    staying in-app-only, in which case there is nothing to mute here and
+    this whole line item resolves itself) is a product call for whoever
+    owns notification UX, not something this task can decide on its own.
     """
     from core.models import Notification
     from core.services import create_bulk_notifications
@@ -4123,11 +4172,24 @@ browser) vs. `attachment` for office docs/archives (forced download).
     after `PostCreateAPIView.post()` has already returned 201, so a
     missing enum member is silent from the API caller's point of view.
     See §22.
-12. **No unfollow/opt-out check on the new-post notification (NEW,
-    TASK 3)** — every `ACCEPTED` follower gets notified on every post,
-    same documented MVP trade-off as the home feed (§13.2) and the
-    reaction/comment notifications — no per-follower "bell" opt-in
-    exists yet anywhere in this app.
+12. ✅ **RESOLVED (this pass) — was previously mis-fixed, now correctly
+    reverted.** `notify_followers_new_post` briefly excluded followers
+    who had `NEW_POST_FROM_FOLLOWED` in `NotificationPreference.
+    muted_types` from the bulk-notify INSERT entirely. That was wrong:
+    `create_bulk_notifications()`/`create_notification()` only ever
+    write the in-app bell row (never push/email/sms/whatsapp — see
+    `core/services.py`'s own docstring + its
+    `test_never_sends_a_push_itself` test), and `NotificationPreference
+    .allowed_channels_for()`'s contract is that a muted type still gets
+    its bell row, only the actual push/email/etc *send* is meant to be
+    skipped. Excluding muted followers from the bulk INSERT was
+    silently deleting their in-app history for this notif type, not
+    respecting their mute preference. Reverted — every `ACCEPTED`
+    follower gets the bell row again, same MVP trade-off as the home
+    feed (§13.2) and the reaction/comment notifications. **Still open:**
+    `muted_types` is now a confirmed no-op for `NEW_POST_FROM_FOLLOWED`
+    specifically, since this task never makes a separate channel-send
+    call for a mute check to gate in the first place — see §23.
 
 ---
 
@@ -4825,5 +4887,39 @@ from §21's already-verified content.
 5. **No migration-shape change** — `signals.py`/`tasks.py` are pure
    Python (signal wiring + a Celery task); no model field was added or
    changed in this pass.
+
+---
+
+## 23. Addendum 8 — `tasks.py`: `notify_followers_new_post` mute-check reverted (doc-only sync)
+
+One file changed this pass: `tasks.py`. Diffed byte-for-byte against
+§10.3/§22 above — every line is identical except
+`notify_followers_new_post`'s docstring, which has been expanded.
+**No executable code changed** — there was no `muted_types` filter
+present in §10.3's code either before or after this pass; what changed
+is that the docstring now explains, in full, a mute-check that was
+added and then reverted in between passes, so the reasoning is on
+record instead of silently disappearing.
+
+- The reverted filter would have excluded any follower with
+  `NEW_POST_FROM_FOLLOWED` in `NotificationPreference.muted_types` from
+  the `create_bulk_notifications()` call entirely. Wrong, because that
+  function only ever writes the in-app bell row (never a push/email/
+  sms/whatsapp send — confirmed against `core/services.py`'s own
+  docstring and its `test_never_sends_a_push_itself` test), and a muted
+  type is only supposed to skip the actual channel *send*, not the bell
+  row itself (`NotificationPreference.allowed_channels_for()`'s
+  contract). Excluding muted followers from the bulk INSERT was
+  silently deleting their in-app history for this type.
+- Net effect, confirmed unchanged from §22: every `ACCEPTED` follower
+  still gets the bell row on every new post, same MVP trade-off as
+  elsewhere in this app (§13.2, §14 item 12).
+- `muted_types` is now explicitly flagged as a **confirmed no-op** for
+  `NEW_POST_FROM_FOLLOWED` — this task never makes the separate
+  channel-send call (the `send_notification(...)`-style second call
+  other notif types get) that a mute would actually gate. Updated:
+  §10.3 code block + §14 item 12 (resolved/reworded).
+- No `__init__.py` / `cleanup_stale_chunked_uploads.py` content this
+  pass either — both remain empty, as documented in §12 / §2.
 
 ---

@@ -73,6 +73,13 @@ from .views_parent import (
     ParentAccessCodeRevealView,
     ParentCodeTokenDetailView,
     ParentCodeTokensView,
+    # 🔧 GAP FIX (this session) — CHAT_APP_DOCUMENTATION.md §9.4 item 22:
+    # both views are fully implemented (own docstrings even document
+    # their intended routes) but were never imported/routed here, so a
+    # student had no reachable path to approve a pending parent-device
+    # request, or to see a cross-code list of pending requests, end-to-end.
+    ParentCodeTokenApproveView,
+    ParentPendingRequestsView,
     ParentDashboardView,
     ParentVerifyCodeView,
 )
@@ -239,6 +246,19 @@ urlpatterns = [
         ParentCodeTokenDetailView.as_view(),
         name='parent-code-token-detail',
     ),
+    # 🔧 GAP FIX — CHAT_APP_DOCUMENTATION.md §9.4 item 22: implemented but
+    # unrouted. Flips a single PENDING device to APPROVED (mutual-consent
+    # step) — see ParentCodeTokenApproveView's own docstring in
+    # views_parent.py for the exact intended route this mirrors.
+    path(
+        'parent/codes/<uuid:code_id>/tokens/<uuid:token_id>/approve/',
+        ParentCodeTokenApproveView.as_view(),
+        name='parent-code-token-approve',
+    ),
+    # 🔧 GAP FIX — same doc item as above. Cross-code list of every
+    # PENDING device request for the logged-in student, so the app can
+    # poll/badge without opening each code's own tokens list.
+    path('parent/pending-requests/', ParentPendingRequestsView.as_view(), name='parent-pending-requests'),
     # Parent-side (no login): redeem a code, then hit the dashboard with
     # the returned `parent_token` in an `X-Parent-Token` header.
     path('parent/verify/', ParentVerifyCodeView.as_view(), name='parent-verify'),

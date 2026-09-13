@@ -60,6 +60,8 @@ urlpatterns = [
     path("liveclass/", include("liveclass.urls")),
     path("core/", include("core.urls")),
     path('campus/', include('campus.urls')),
+    path('testseries/', include('testseries.urls')),
+    path('assigments/', include('assigments.urls')),
 ]
 
 # if settings.DEBUG:

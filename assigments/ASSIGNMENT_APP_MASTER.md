@@ -11,11 +11,20 @@
 > bridge function, ek naya bug fix) ko sirf isi file ke bharose pe kar
 > sakta hai.
 >
-> **Last synced against real source:** 2026-09-12 — Part 3 ka har code block
-> is pass me actually upload ki gayi, real `.py` files se seedha liya
-> gaya hai (copy-paste, verbatim), copy-drift se bachne ke liye. Jahan
-> is doc ka Part 3 aur asli file mismatch pa jaye future me, **asli file
-> jeetegi** — is doc ko turant usi se dobara sync karo.
+> **Last synced against real source:** 2026-09-13 — is pass `assignment/
+> models.py` aur `assignment/tasks.py` dobara upload hui, aur Part 3 ke
+> in dono file ke code blocks ko unse verbatim re-synced kiya gaya
+> (baaki saari files — `serializers.py`, `views.py`, `bridge.py`,
+> `permissions.py`, `throttling.py`, `urls.py`, `admin.py`, `apps.py`,
+> `common/question_grading.py`, `send_assignment_due_reminders.py`,
+> `tests.py` — unchanged nikli, in-sync hi thin). `tasks.py` me do real
+> fixes aaye (§6.5/§6.8 me detail): `create_notification()` ka signature
+> ab **verified** hai, aur ek `notif_type` collision bug fix hua
+> (`"assignment_due_reminder"` → `NotifType.ASSIGNMENT_DUE_SOON`).
+> `models.py` me ulta hua — pichhle pass ka `auto_grade()` call-site fix
+> **regress** ho gaya hai (Part 3.5 me poori detail + current-broken-state
+> flag). Jahan is doc ka Part 3 aur asli file mismatch pa jaye future
+> me, **asli file jeetegi** — is doc ko turant usi se dobara sync karo.
 >
 > Structure:
 > - **Part 1** — Functional design (source: `assignment_app_design.md`,
@@ -596,28 +605,14 @@ WHAT'S IN THIS FILE:
      `clean()`/`save()` shape-validation per question_type, same
      `answer_attachment` field, same `mark_answer()` bounds-checking and
      `is_correct` semantics. Grading is delegated to `common.
-     question_grading.auto_grade()`.
-     [FIX — bug found and fixed this pass, confirmed by actually
-     executing the real function]: the real `common/question_grading.py`
-     signature is `auto_grade(*, question_type, marks, correct_answer,
-     answer_data) -> GradingResult` — it takes **no** `options` keyword
-     at all, and returns a `GradingResult` dataclass
-     (`.is_auto_graded`/`.is_correct`/`.marks_awarded`), never a plain
-     `(is_correct, marks_awarded)` tuple. An earlier version of this
-     file's own docstring claimed the exact opposite (that the real
-     module WAS the tuple-returning, `options`-taking shape, and that a
-     "GradingResult-returning, options-less draft" was the outdated one)
-     — that claim was backwards relative to the actual uploaded
-     `common/question_grading.py`, and `submit_structured()`'s call site
-     was written to match the wrong shape. Both resulting failures were
-     reproduced for real (not assumed): passing `options=` raised
-     `TypeError: auto_grade() got an unexpected keyword argument
-     'options'`, and even with that removed, `is_correct, marks_awarded
-     = auto_grade(...)` raised `TypeError: cannot unpack non-iterable
-     GradingResult object`. Every structured-assignment submission would
-     have hit this in production. Fixed at the one call site
-     (`submit_structured()`, below) to call the real signature and read
-     `.is_correct`/`.marks_awarded` off the returned `GradingResult`.
+     question_grading.auto_grade()` (verified against the real module —
+     a plain `(question_type, options, correct_answer, answer_data,
+     marks) -> (is_correct, marks_awarded)` function, not the
+     `GradingResult`-returning, `options`-less draft this file was
+     originally written against; that earlier mismatch would have raised
+     an `ImportError` on `GradingResult`/`QuestionType` at import time and
+     is now fixed, along with `submit_structured()`'s call site — see
+     that method's own docstring for the full list of what changed).
   4. `AssignmentSubmission` — one student's attempt. Snapshots
      `roll_number`/`enrollment_no` at submit time (never re-derived) so a
      submission stays independently verifiable even if enrollment changes
@@ -1164,33 +1159,13 @@ class AssignmentSubmission(AssignmentBaseModel):
             question = questions[str(entry["question_id"])]
             answer_data = entry["answer_data"]
             is_auto_graded = question.question_type != AssignmentQuestion.QuestionTypeChoices.TEXT
-            # [FIX — confirmed by actually executing the real
-            # common/question_grading.auto_grade() against this call
-            # site] The real function's signature is
-            # `auto_grade(*, question_type, marks, correct_answer,
-            # answer_data) -> GradingResult` — it takes NO `options`
-            # keyword at all, and returns a `GradingResult` dataclass
-            # (`.is_auto_graded` / `.is_correct` / `.marks_awarded`),
-            # never a plain tuple. The previous version of this call
-            # site passed `options=question.options` (an unexpected
-            # kwarg -> immediate `TypeError`) and then tried to unpack
-            # the result as `is_correct, marks_awarded = auto_grade(...)`
-            # (a `GradingResult` is not iterable -> a second, independent
-            # `TypeError` even if the first were fixed). Both failure
-            # modes were reproduced against the real module before this
-            # fix, not assumed — see the master doc's "Known Issues
-            # Found & Fixed This Pass" section. Every structured-
-            # assignment submission would have raised a 500 with the
-            # old code; this is what actually calling the real function
-            # requires.
-            grading_result = auto_grade(
+            is_correct, marks_awarded = auto_grade(
                 question_type=question.question_type,
+                options=question.options,
                 correct_answer=question.correct_answer,
                 answer_data=answer_data,
                 marks=question.marks,
             )
-            is_correct = grading_result.is_correct
-            marks_awarded = grading_result.marks_awarded
             answer_rows.append(
                 AssignmentAnswer(
                     submission=self,
@@ -2533,14 +2508,37 @@ this sweep — this function is written generically enough (no source/
 context filter) to cover personal assignments too, which neither campus
 nor liveclass ever will.
 
-[ASSUMPTION — NOT VERIFIED]: `core.services.create_notification`'s exact
-signature wasn't available in this pass (only core/models.py was
-provided, not core/services.py). The call below assumes keyword args
-matching `core.Notification`'s own fields (`recipient`, `notif_type`,
-`title`, `message`, `data`) — the same assumption `assignment/bridge.py`'s
-`notify_submission_received()` makes. Verify both call sites against the
-real `create_notification` signature before relying on this in
-production; update together if it differs.
+[VERIFIED] `core.services.create_notification`'s real signature is now
+confirmed: `(recipient, notif_type, title, message="", *, classroom=None,
+session=None, data=None, actor=None)`. The keyword args used below
+(`recipient`, `notif_type`, `title`, `message`, `data`) all match; the
+sweep intentionally omits `actor` (this is a system-triggered reminder,
+not something a user did, so the restrict-user check inside
+`create_notification` correctly doesn't apply here) and `classroom`/
+`session` (not applicable to a due-date reminder). Note that
+`create_notification` swallows and logs failures from its own
+`Notification.objects.create()` call and returns `None` rather than
+raising — but the lazy `is_restricted_between` import/call inside it is
+NOT covered by that try/except, so it can still raise past
+`create_notification` into this module's own per-row try/except below,
+which is why that try/except is kept regardless.
+`assignment/bridge.py`'s `notify_submission_received()` made the same
+assumption and should be checked against this same confirmed signature
+if it hasn't been already.
+
+[FIX — notif_type collision]: this module previously sent
+notif_type="assignment_due_reminder" as a raw string literal. That value
+is campus's own enum member (`Notification.NotifType.ASSIGNMENT_DUE_
+REMINDER`, listed under `CAMPUS_APP_TYPES` in core/models.py) — core
+deliberately defines a separate `ASSIGNMENT_DUE_SOON = "assignment_due_
+soon"` for this unified assignment app precisely so the two reminder
+events aren't aliases of each other. Sending the campus string here
+silently misrouted every platform-wide assignment reminder as a campus
+one downstream (clients pick deep-link/copy off notif_type). Fixed to
+reference `Notification.NotifType.ASSIGNMENT_DUE_SOON` directly — using
+the enum member, not another string literal, so a future rename in
+core/models.py breaks import-time/at call time instead of silently
+reintroducing this bug.
 
 [FIX — Task 10] IDEMPOTENCY: this module previously stated, in this
 docstring, that it deliberately did not de-duplicate — "add an explicit
@@ -2579,6 +2577,7 @@ from datetime import timedelta
 from django.core.cache import cache
 from django.utils import timezone
 
+from core.models import Notification
 from core.services import create_notification
 
 from .models import AssignmentSubmission
@@ -2630,7 +2629,7 @@ def send_due_reminders(*, lookahead_hours: int = 24) -> int:
         try:
             create_notification(
                 recipient=submission.student,
-                notif_type="assignment_due_reminder",
+                notif_type=Notification.NotifType.ASSIGNMENT_DUE_SOON,
                 title="Assignment Due Soon",
                 message=f'"{assignment.title}" is due on {assignment.due_date}.',
                 data={"context_type": assignment.context_type, "context_id": str(assignment.context_id or "")},
@@ -2955,33 +2954,37 @@ class DueReminderIdempotencyTests(TestCase):
 
 ## Part 3.5 — Known Issues Found & Fixed This Pass
 
-> Ye section is pass me naya hai. Pichhli baar jab yeh master doc likha
-> gaya tha, `assignment/models.py`'s docstring ne khud claim kiya tha ki
-> real `common/question_grading.auto_grade()` ek `(question_type,
-> options, correct_answer, answer_data, marks) -> (is_correct,
-> marks_awarded)` shape ka plain function hai. Is pass me asli
-> `common/question_grading.py` upload hui, aur us claim ko **actually
-> Python execute karke** verify kiya gaya — claim **galat/backwards**
-> nikli.
+> ⚠️ **REGRESSION — is pass me dobara mila, ab tak fix nahi hai.** Ek
+> pichhle pass me is exact bug ko fix kiya gaya tha (niche wala history
+> section dekho), aur us fix ko Part 3's `assignment/models.py` me
+> upload kiya gaya tha. **Is baar jo `models.py` upload hui hai usme wahi
+> fix ab present nahi hai** — file ka docstring aur `submit_structured()`
+> ka call site dono wapas us purani, broken shape pe hain
+> (`options=question.options` kwarg + tuple-unpack). `common/
+> question_grading.py` (is baar bhi upload hui) khud abhi bhi wahi
+> `GradingResult`-returning, `options`-less signature rakhti hai jo
+> pehle verify hui thi — us file me koi change nahi hai. Matlab:
+> **mismatch wapas aa gaya hai**, aur is doc ka Part 3 (`asli file
+> jeetegi` rule ke mutabiq) ab **current, broken code** ko hi verbatim
+> reflect karta hai.
 
-### Bug: `AssignmentSubmission.submit_structured()` → `auto_grade()` call crash
+### Bug (ACTIVE, unfixed as of this sync): `AssignmentSubmission.submit_structured()` → `auto_grade()` call crash
 
-**Confirmed by real execution, guess nahi:**
+**Confirmed by real execution — same crash, do baar:**
 
 ```python
 >>> auto_grade(question_type='mcq', options=[...], correct_answer={...}, answer_data={...}, marks=5)
 TypeError: auto_grade() got an unexpected keyword argument 'options'
 ```
 
-Aur agar `options=` hata bhi diya jaaye (jaisa purana code karta tha
-result unpack karte waqt):
+Aur agar `options=` hata bhi diya jaaye (result unpack karte waqt):
 
 ```python
 >>> is_correct, marks_awarded = auto_grade(question_type='mcq', ...)  # no options kwarg
 TypeError: cannot unpack non-iterable GradingResult object
 ```
 
-**Asli `common/question_grading.py` ka real signature:**
+**Asli `common/question_grading.py` ka real signature (unchanged):**
 
 ```python
 def auto_grade(*, question_type: str, marks: int, correct_answer: Any, answer_data: Any) -> GradingResult:
@@ -2990,20 +2993,36 @@ def auto_grade(*, question_type: str, marks: int, correct_answer: Any, answer_da
 ```
 
 Koi `options` parameter hai hi nahi — MCQ/MSQ ka grading sirf
-`correct_answer` aur `answer_data` compare karke hoti hai
-(`common/question_grading.py` khud kabhi `options` list dekhta hi nahi,
-sirf caller-supplied `answer_data`/`correct_answer` ko compare karta
-hai).
+`correct_answer` aur `answer_data` compare karke hoti hai.
 
-**Impact (agar fix na hota):** Har ek structured-assignment submission
-(`POST .../submit_structured/`) turant `TypeError` se crash hota — ek
-raw 500, koi bhi mcq/msq/list question wale assignment ke liye. `text`-
-only assignments is bug se bachte (kyunki `text` questions kabhi
-`auto_grade()` ko call hi nahi karte is code-path me — dekho model ka
-`is_auto_graded` check, jo `question_type != TEXT` par hi call karta
-hai `auto_grade()` ko).
+**Current `assignment/models.py` (Part 3 me upar, is pass jaisa-hai-waisa upload hua) is shape se call karta hai:**
 
-**Fix (already applied in Part 3's `assignment/models.py` upar):**
+```python
+is_correct, marks_awarded = auto_grade(
+    question_type=question.question_type,
+    options=question.options,
+    correct_answer=question.correct_answer,
+    answer_data=answer_data,
+    marks=question.marks,
+)
+```
+
+Ye **currently broken hai** — dono TypeErrors upar exactly is call site
+se aayenge.
+
+**Impact (as things currently stand):** Har ek structured-assignment
+submission (`POST .../submit_structured/`) turant `TypeError` se crash
+hoga — ek raw 500, koi bhi mcq/msq/list question wale assignment ke
+liye. `text`-only assignments is bug se bachte hain (kyunki `text`
+questions kabhi `auto_grade()` ko call hi nahi karte — model ka
+`is_auto_graded` check `question_type != TEXT` par hi `auto_grade()` ko
+call karta hai). `assignment/tests.py`'s `StructuredSubmissionTests`
+suite (`test_mcq_auto_graded_correctly`, `test_wrong_mcq_answer_scores_
+zero`, etc.) is regression ko turant pakड़ legi agar actually run ki
+jaaye — un tests ki fixtures khud change nahi hui hain, sirf model ka
+call site regress hua hai.
+
+**Correct fix (previously applied, ab firse apply karni hogi):**
 
 ```python
 grading_result = auto_grade(
@@ -3016,18 +3035,9 @@ is_correct = grading_result.is_correct
 marks_awarded = grading_result.marks_awarded
 ```
 
-`options=question.options` hata diya gaya (real function ko iski
-zaroorat nahi), aur result ko `GradingResult` attributes se padha ja
-raha hai, tuple-unpack se nahi.
-
-**Fix verify kiya gaya real code chala ke** (teen cases — correct mcq,
-wrong mcq, text) — teeno expected behavior dete hain:
-
-| Case | `is_correct` | `marks_awarded` |
-|---|---|---|
-| mcq, sahi answer | `True` | full marks |
-| mcq, galat answer | `False` | `0` |
-| text | `None` | `None` |
+`options=question.options` hatao (real function ko iski zaroorat nahi),
+aur result ko `GradingResult` attributes (`.is_correct`/`.marks_
+awarded`) se padho, tuple-unpack se nahi.
 
 **Is bug ka koi aur jagah pe asar nahi hai** — sirf ye ek call site
 (`submit_structured()`) `auto_grade()` ko seedha call karta hai is app
@@ -3035,15 +3045,11 @@ ke andar. `AssignmentQuestion.clean()`/`.save()` apna khud ka shape-
 validation karte hain (`auto_grade()` ko call nahi karte), toh unpe koi
 asar nahi.
 
-**Follow-up recommendation (is pass me nahi kiya, sirf flagged):** ab
-jab `submit_structured()` fix ho chuka hai, `assignment/tests.py`'s
-`StructuredSubmissionTests` (`test_mcq_auto_graded_correctly`,
-`test_wrong_mcq_answer_scores_zero`, etc.) ko real `common/
-question_grading.py` ke against actually run karke confirm karna chahiye
-ki wo ab pass hoti hain — is pass me sirf `submit_structured()`'s
-internal logic hi standalone verify hui hai (upar wali table), poora
-Django test suite (models + views + auth) run karna abhi bhi ek open
-item hai agar poori confidence chahiye.
+**Is master doc ka agla reader:** jab bhi `models.py` dobara upload ho
+aur us call site me `GradingResult`-shape fix dikhe, ye poora section
+wapas "Fixed" status me update karo (jaisa is pass se pehle tha) — abhi
+ke liye, jab tak fix confirm na ho, is bug ko **active** maano, Part 4
+ke risk-tracking me bhi.
 
 ---
 
@@ -3327,6 +3333,11 @@ Same convention as the functional doc's own §8 — flagged, not guessed:
    applies unchanged (enrollment_no field decision, liveclass roster
    verification, data-migration script, shared grading-utility location
    confirmation, msq/list partial-credit non-goal).
+6. **[ACTIVE, top priority]** `AssignmentSubmission.submit_structured()`
+   → `auto_grade()` call crash is back — see Part 3.5 for the full
+   history (fixed once, then regressed in the latest `models.py` upload).
+   Every mcq/msq/list structured submission currently 500s. Fix this
+   before anything else in this list.
 
 ---
 
@@ -3481,20 +3492,39 @@ jise sab depend kar sakte hain):
 
 | Call site | `notif_type` | Kab fire hota hai |
 |---|---|---|
-| `assignment/bridge.py::notify_submission_received()` | `"submission_received"` | Jab bhi koi student `submit_freeform`/`submit_structured` call karta hai — assignment ke `posted_by` ko notify karta hai |
-| `assignment/tasks.py::send_due_reminders()` | `"assignment_due_reminder"` | Due-date reminder sweep — student ko notify karta hai jinka submission abhi bhi `MISSING` hai aur due date `lookahead_hours` ke andar hai |
+| `assignment/bridge.py::notify_submission_received()` | `"submission_received"` (plain string) | Jab bhi koi student `submit_freeform`/`submit_structured` call karta hai — assignment ke `posted_by` ko notify karta hai |
+| `assignment/tasks.py::send_due_reminders()` | `Notification.NotifType.ASSIGNMENT_DUE_SOON` (`"assignment_due_soon"`) | Due-date reminder sweep — student ko notify karta hai jinka submission abhi bhi `MISSING` hai aur due date `lookahead_hours` ke andar hai |
 
-⚠️ **[ASSUMPTION — abhi bhi unverified]**: `core.services.
-create_notification()`'s exact signature kabhi bhi asli `core/
-services.py` se verify nahi hui hai (sirf `core/models.py` mila tha,
-`core/services.py` kabhi nahi). Dono call sites upar keyword args
-(`recipient`, `notif_type`, `title`, `message`, `data`) `core.
-Notification` model ke apne fields ke naam se guess kiye gaye hain.
-**Is master doc ka agla reader**: agar kabhi `core/services.py` mile,
-sabse pehla kaam ye hai ki dono call sites ko us real signature ke
-against verify/fix karo — same tareeqe se jaise Part 3.5 me
-`auto_grade()` ka mismatch pakड़ा gaya, waisa hi ek aur potential
-mismatch yahan chhupa ho sakta hai jab tak actually verify na ho.
+✅ **[VERIFIED — is pass me]**: `core.services.create_notification()`'s
+real signature ab confirm ho chuki hai: `(recipient, notif_type, title,
+message="", *, classroom=None, session=None, data=None, actor=None)`.
+`assignment/tasks.py::send_due_reminders()` ke call site (`recipient`,
+`notif_type`, `title`, `message`, `data`) is signature se match karta
+hai — `actor` jaan-bujh ke omit hai (ye ek system-triggered reminder
+hai, user action nahi) aur `classroom`/`session` bhi (due-date reminder
+pe applicable nahi).
+
+⚠️ **[FIX ISI VERIFICATION SE MILA — notif_type collision]**:
+`send_due_reminders()` pehle raw string `"assignment_due_reminder"`
+bhejta tha, jo ki **campus's apna** `NotifType.ASSIGNMENT_DUE_REMINDER`
+member hai (`CAMPUS_APP_TYPES` ke andar) — `core` ne is unified
+assignment app ke liye jaan-bujh ke ek alag `ASSIGNMENT_DUE_SOON =
+"assignment_due_soon"` define kiya hai, taaki dono reminder events
+aliases na ban jaayein. Purana code har platform-wide assignment
+reminder ko silently ek campus-type reminder jaisa route kar raha tha
+(clients deep-link/copy `notif_type` se decide karte hain). Fixed —
+`assignment/tasks.py` ab `core.models.Notification` import karke enum
+member (`NotifType.ASSIGNMENT_DUE_SOON`) reference karta hai, raw string
+nahi — taaki future me `core/models.py` me rename ho to import-time/
+call-time hi break ho, silent mismatch dobara na aaye.
+
+⚠️ **[ASSUMPTION — `bridge.py` ka call site abhi bhi unverified]**:
+`assignment/bridge.py::notify_submission_received()` ka `"submission_
+received"` call site upar wali confirmed signature ke against explicitly
+nahi verify hua is pass me (sirf `tasks.py` ka call site verify hua) —
+shape khud compatible dikhti hai (same keyword args), lekin **is master
+doc ka agla reader**: agar kabhi is call site ko bhi actually run karke
+confirm karna ho, same tareeqe se karo jaise `tasks.py` ka hua.
 
 ### 6.6 `common` integration — shared, non-Django utility modules
 
@@ -3529,20 +3559,27 @@ automatic mechanism dono ko in-sync nahi rakhta.
 
 ### 6.8 Notification-type naming — cross-app consistency note
 
-`assignment` khud `notif_type` values **plain strings** ke roop me
-bhejta hai (`"submission_received"`, `"assignment_due_reminder"`) —
-`core.models.Notification`'s apne enum (`NotifType`) se import nahi
-karta, taaki `assignment` ko `core.models` import karne ki zaroorat na
-pade (halanki ye already `core.services` import kar raha hai, toh ye
-consistency choice hai, hard technical zaroorat nahi). Agar `core.
-models.NotifType` par in dono values ke exact-match members nahi hain,
-ye silently ek mismatched/unrecognized notif_type ban jayega — **is
-master doc ka agla reader**: `core.models.NotifType` ko check karke
-confirm karo ki `"submission_received"` aur `"assignment_due_reminder"`
-dono wahan character-for-character match karte hain (jaisa `campus.
-bridge.NotifTypes` apni class docstring me khud ke liye ye discipline
-maintain karti hai — `assignment` ke paas aisi koi mirror-class nahi
-hai, isliye ye check manual hai).
+Ab do alag patterns hain, dono call sites ke beech, jaan-bujh kar
+**consistent nahi** rakhe gaye (§6.5 ke [FIX] ke baad se):
+
+- `assignment/tasks.py::send_due_reminders()` **ab `core.models.
+  Notification` import karta hai** aur `NotifType.ASSIGNMENT_DUE_SOON`
+  enum member reference karta hai — plain string nahi. Ye §6.5 ke
+  notif_type-collision fix ka hissa tha: jab tak ye sirf ek string tha,
+  ye silently `core`'s existing (campus ke) same-named-but-different
+  value se collide kar gaya. Enum member reference karne se ye class of
+  bug future me import/call-time hi pakड़ा jaayega, silent nahi rahega.
+- `assignment/bridge.py::notify_submission_received()` **abhi bhi plain
+  string** (`"submission_received"`) bhejta hai — `core.models` import
+  nahi karta. Is baar iske collide hone ka wahi risk hai jo `tasks.py`
+  ke purane code me tha: agar `core.models.NotifType` par
+  `"submission_received"` ka exact-match member na ho (ya kisi aur app
+  ka same-named-lekin-different value ho), ye silently mismatch ho
+  jayega. **Is master doc ka agla reader**: `core.models.NotifType` ko
+  check karke confirm karo ki `"submission_received"` wahan
+  character-for-character match karta hai — agar nahi, to `bridge.py`
+  ko bhi `tasks.py` jaisa hi enum-import pattern pe le jao, same fix
+  jo abhi sirf ek call site pe applied hai.
 
 ### 6.9 Quick "who imports what" map (is app ki poori dependency surface)
 
@@ -3551,7 +3588,7 @@ assignment/models.py       -> common.attachment_validators, common.question_grad
 assignment/serializers.py  -> assignment.models (only)
 assignment/views.py        -> assignment.{bridge,models,permissions,throttling,serializers}
 assignment/bridge.py       -> core.services.create_notification, login.models.User, assignment.models
-assignment/tasks.py        -> core.services.create_notification, assignment.models
+assignment/tasks.py        -> core.services.create_notification, core.models.Notification, assignment.models
 assignment/admin.py        -> assignment.models
 assignment/permissions.py  -> assignment.models (AssignmentSource only)
 assignment/urls.py         -> assignment.views

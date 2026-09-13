@@ -12,6 +12,12 @@
 > **already implemented** hai, matlab naya kaam usi par extend hoga, usse
 > contradict nahi karega, jab tak koi explicit decision na ho.
 
+> **Reconciliation pass (newest — this update)**: `bridge.py`, `models.py`, aur `views.py` firse check kiye gaye — **§10 ka "PARTIALLY WIRED" title ab STALE hai, aur ek naya real bug mila hai** (guess nahi, code se confirmed):
+> - **Group A (`create_section_group`/`notify`/`provision_video_room`/`resolve_parent_from_token`) ab FULLY WIRED hai** — `bridge.py`'s apna module STATUS ab khud bolta hai "all three gaps this file previously flagged as blocked are now resolved". Sab 4 functions ab `core.classroom_chat_bridge`/`core.models` ko **module-level hard import** se call karte hain (pehle `except ImportError` degrade tha) — koi bhi missing `core` ab Django startup pe hi fail hoga, request-time silent no-op nahi. `resolve_parent_from_token`'s purana `[SHAPE MISMATCH]` (jo deliberately `(None, None)` return karta tha) bhi ab RESOLVED hai — `_get_or_create_shadow_parent_user()` naya helper har `ParentAccessCode` ke liye ek non-loginable "shadow" `login.User` bana/reuse karta hai (username convention `parent_shadow_<access_code_id>`, `set_unusable_password()`), taaki `(parent_user, student_user)` ek real tuple ho, `(None, None)` nahi. §0, §10 poora rewrite kiya.
+> - **🔴 NEW CRITICAL BUG mila (is pass ka sabse important finding):** `views.py::SectionViewSet.perform_create()` `bridge.create_section_group(section, actor=self.request.user)` ko **koi try/except ke bina** call karta hai — comment ab bhi stale hai ("no-ops with a logged warning until core.classroom_chat_bridge actually exists"). Ab jab ye hard-wired hai, real `core.classroom_chat_bridge.create_section_group()` `ValueError` raise karta hai agar `actor` section ka assigned class-teacher na ho — aur ek abhi-abhi bani section ke paas **koi `ClassTeacherAssignment` hota hi nahi** (wo alag endpoint se, baad me banta hai). Matlab: section creation ka **har normal real call ab 500 dega** — aur wo bhi partial-failure ke saath, kyunki `serializer.save()` bridge call se PEHLE ho chuka hota hai, isliye Section row DB me ban chuki hoti hai jab response 500 deta hai. `tests.py`'s locked-in `test_bridge_not_being_wired_up_yet_does_not_break_section_creation` (real bridge, no mock, `201` assert karta hai) ab is naye behavior ke against stale hai — uska apna docstring khud "core app not installed in this test project" maanta hai, jo test-project ki setup pe depend karta hai, real deployment (jahan `core` install hai) me ye test fail hoga. §1, §10, §16, §17 me flag kiya.
+> - **Task 19 (`Campus.testseries_paid_allowed`) ab ENFORCED hai — §5a ka "field only, NOT yet enforced" title STALE hai.** `campus.bridge.create_testseries()` me ab `is_paid`/`price_coins` kwargs hain (pehle exist hi nahi karte the), `section.school_class.campus.testseries_paid_allowed` ke against force-reset karte hain jab `False` ho. `TestSeriesViewSet.create()` bhi isi flag pe seedha gate karta hai (paid request `403` agar flag off hai) bridge call se pehle. `models.py`'s apna comment ye bhi claim karta hai ki `TestSeries.save()` (testseries/models.py) ab `source==CAMPUS` re-check nahi karta — **ye specific claim sirf `models.py`/`bridge.py` ke apne comments se hai, `testseries/models.py` khud is pass upload nahi hua, isliye independently verify nahi ho paaya** (same "flag, don't guess" posture jo baaki cross-app claims ke liye already hai). §0, §5a, §16 update kiye.
+> - `models.py` me `Section.chat_group_enabled`/`linked_conversation_id` aur `Campus.testseries_paid_allowed` dono fields confirmed maujood hain — bridge.py ki assumptions se match karte hain.
+
 > **Reconciliation pass (latest — this update)**: is baar sab 13 source
 > files firse upload huye (exception se — normally sirf ye doc chalta hai,
 > lekin real code drift ho chuka tha isliye ek baar phir se source-verify
@@ -166,7 +172,7 @@
 | `views.py` | Har model ka ViewSet + custom `@action`s — §14 |
 | `urls.py` | `DefaultRouter` registrations + 1 plain `path()` — §14 |
 | `throttles.py` | **B-4, new** — 4 `ScopedRateThrottle` subclasses, each with its own fixed `scope` (not `view.throttle_scope`, since several apply to different `@action`s on the SAME ViewSet): `CampusFeePaymentThrottle` (`FeePaymentViewSet.pay`/`.record`/`.refund`), `CampusLiveSessionJoinThrottle` (`CampusLiveSessionViewSet.start`), `CampusNoticePostThrottle` (`NoticeViewSet.create` only, via `get_throttles()`), `CampusParentLinkVerifyThrottle` (`ParentLinkVerifyView`, class-level). §12a |
-| `bridge.py` | `campus` → `core`/`message`/`liveclass`/`assignment`/`testseries` ka **ONLY** door — §10. `create_section_group`/`notify`/`provision_video_room`/`resolve_parent_from_token` `core`/`message` ki taraf (lazy-import, no-op degrade); `create_assignment`/`get_assignment_submissions` (Task 11) aur `create_testseries`/`can_review_testseries_attempt`/`get_testseries_attempts` (Task 13) `assignment`/`testseries` ki taraf — dono confirmed sibling apps hain isliye HARD import, koi degrade nahi. |
+| `bridge.py` | `campus` → `core`/`message`/`liveclass`/`assignment`/`testseries` ka **ONLY** door — §10. **Ab SAB functions hard-import/fully wired hain** — `create_section_group`/`notify`/`provision_video_room`/`resolve_parent_from_token` (`core`/`message` ki taraf) aur `create_assignment`/`get_assignment_submissions` (Task 11) aur `create_testseries`/`can_review_testseries_attempt`/`get_testseries_attempts` (Task 13, `is_paid`/`price_coins` ab wired — Task 19) — koi lazy-import/no-op degrade kahin nahi bacha. `resolve_parent_from_token` shadow-parent-user resolve karta hai (naya). ⚠️ **`create_section_group`'s caller (`SectionViewSet.perform_create`) me is wiring se ek real bug expose hua hai — §1/§10/§16 dekho.** |
 | `services.py` | `compute_attendance_summary`, `generate_report_card_data`, `compute_attendance_streak`, `compute_assignment_ontime_streak` (F-3, ab resolved) — §11 |
 | `tasks.py` | 7 Celery tasks (`rollover_session`, `check_low_attendance`, `check_attendance_streak_rewards`, `send_assignment_due_reminders`, `check_assignment_ontime_streak_rewards`, `send_fee_due_reminders`, `refresh_analytics_snapshot`) — §12. **F-3's two streak tasks (`check_attendance_streak_rewards`, `check_assignment_ontime_streak_rewards`) ab poore wired hain (see §7a resolution) — pehle crash karte the, ab nahi, lekin koi test coverage abhi bhi nahi hai.** |
 | `tests.py` | 54 tests covering most flows below — §17 lists what's locked-in, and what's still untested. **Task 11/13/19 ke liye abhi tak koi naya test nahi hai (count wahi 54 hai).** |
@@ -256,11 +262,18 @@ ANY pending campus, not just ones they're already a member of. Sets
 - **DB constraint**: `unique_section_per_class` on `(school_class, name)`
 - **Side effect on create** (`SectionViewSet.perform_create`): calls
   `bridge.create_section_group(section, actor=request.user)` — auto-creates the
-  `message.Group`+`Conversation` via `core.classroom_chat_bridge`. **[NOT YET
-  WIRED — degrades to a logged no-op until `core.classroom_chat_bridge.
-  create_section_group` exists; section creation itself never fails because of
-  this]**. Locked in by tests `test_creating_section_calls_bridge_with_the_new_section`
-  and `test_bridge_not_being_wired_up_yet_does_not_break_section_creation`.
+  `message.Group`+`Conversation` via `core.classroom_chat_bridge`. **`[NOW
+  HARD-WIRED — see §10]`, and this is where a real bug surfaced this pass**:
+  `create_section_group()` raises `ValueError` unless `actor` is already this
+  section's assigned class-teacher, which a just-created section never has
+  yet — so this call now raises on essentially every normal section-creation
+  request, **after** the `Section` row has already been saved. No
+  `try`/`except` catches it at the call site. `perform_create` needs a fix
+  (§10) — not done here, flagged. Tests `test_creating_section_calls_bridge_with_the_new_section`
+  (mocks the bridge call, still passes) and
+  `test_bridge_not_being_wired_up_yet_does_not_break_section_creation` (calls
+  the REAL bridge, asserts `201`) — the second one's name/premise is now
+  stale against real wiring; see §16/§17.
 
 ### `Subject`
 - `campus` FK → `Campus`, `related_name="subjects"`
@@ -347,9 +360,11 @@ ANY pending campus, not just ones they're already a member of. Sets
   "token": "<parent access token>"}`. Internally calls
   `bridge.resolve_parent_from_token(token)` — verification itself lives
   entirely in `message`'s existing `ParentAccessCode`/`ParentToken` flow,
-  never touched directly from here. `get_or_create`s the link on success. On
-  failure (bad/expired token, OR bridge not wired up yet — both cases treated
-  identically) → `400 {"detail": "Invalid or expired token."}`.
+  never touched directly from here. **`[NOW HARD-WIRED — §10]`**, and returns
+  a real `(parent_user, student_user)` tuple via a shadow parent `User` on
+  success. `get_or_create`s the link on success. On failure (bad/expired
+  token — the only remaining failure mode now that the bridge is wired) →
+  `400 {"detail": "Invalid or expired token."}`.
   `CampusParentLinkViewSet` itself is `ReadOnlyModelViewSet`.
 
 ---
@@ -414,9 +429,12 @@ or an APPROVED subject-teacher for that exact section+subject.
 
 **On create (`perform_create`, `@transaction.atomic`)**:
 1. `bridge.provision_video_room(live_session, actor=user)` — sets `room_id` if
-   a non-`None` value comes back. **[NOT YET WIRED — no-ops to `None`/blank
-   room_id if `core.classroom_chat_bridge.provision_video_room` doesn't exist
-   yet; scheduling still succeeds]**.
+   a non-`None` value comes back. **`[NOW HARD-WIRED — see §10]`** — no
+   `except ImportError` degrade anymore, and (unlike `create_section_group`,
+   §1/§10) no known bug at this call site: the real
+   `core.classroom_chat_bridge.provision_video_room` performs no permission
+   check of its own (it trusts the caller already gated this), so it can't
+   raise the way `create_section_group` does.
 2. Auto-creates a `Notice` (scoped to the section) titled `"Class scheduled:
    {subject.name}"`.
 3. `bridge.notify(...)` with `CAMPUS_SESSION_SCHEDULED` to every ACTIVE
@@ -608,7 +626,7 @@ writes at all any more.
 
 ---
 
-## 5a. Test series — campus thin proxy over `testseries` (Task 13, DONE) + `Campus.testseries_paid_allowed` (Task 19, field only, NOT yet enforced)
+## 5a. Test series — campus thin proxy over `testseries` (Task 13, DONE) + `Campus.testseries_paid_allowed` (Task 19, NOW ENFORCED this pass)
 
 New this pass, no prior version of this doc covered it — `campus` has no
 native test-series model at all (unlike Assignment, which started native
@@ -618,14 +636,17 @@ pattern `create_assignment()` established for `assignment`.
 
 ### `campus.bridge` functions (hard imports — `testseries` is a confirmed sibling app, no lazy-import/no-op degrade, same posture Task 11's `assignment` calls take)
 - **`create_testseries(*, section, creator, title, description="",
-  duration_minutes=None, attempts_allowed=1, questions)`** → delegates to
+  duration_minutes=None, attempts_allowed=1, questions, is_paid=False,
+  price_coins=0)`** → delegates to
   `testseries.bridge.create_context_testseries(source=CAMPUS,
-  context_type="section", context_id=section.id, ...)`. **No `is_paid`/
-  `price_coins` kwarg exists on this function at all** — always calls
-  through with `is_paid=False, price_coins=0`, unconditionally. This is
-  DELIBERATELY redundant with `TestSeries.save()`'s own force-unpaid
-  enforcement for `source="campus"` — defence in depth, not a substitute
-  (see Task 19 note below for why this matters right now). No `subject`
+  context_type="section", context_id=section.id, ...)`. **`is_paid`/
+  `price_coins` are NEW this pass (Task 19, WIRED)** — both default to
+  `False`/`0` so every existing positional/kwargs-only caller keeps today's
+  always-free behavior unchanged. Resolved via `section.school_class.campus.
+  testseries_paid_allowed`: if that flag is `False`, both are force-reset to
+  `False`/`0` regardless of what the caller passed — this is now **the real
+  enforcement point**, not defence-in-depth alongside `TestSeries.save()`
+  (see Task 19 note below for why that changed). No `subject`
   parameter either — `create_context_testseries()` has no `extra_data`-
   shaped slot the way `create_context_assignment()` does, so a campus test
   series is scoped to a `Section` only, not `Section`+`Subject`. Roster =
@@ -698,31 +719,43 @@ partial_update()`'s grading branch already takes toward `assignment`.
 question, negative marks, marks over question.marks) surfaces as a clean
 400, not a 500.
 
-### `Campus.testseries_paid_allowed` (Task 19) — **field exists, enforces NOTHING yet**
+### `Campus.testseries_paid_allowed` (Task 19) — **NOW ENFORCED end-to-end, this pass**
 `BooleanField(default=False)` on `Campus`, added via the ad-hoc
 `add_testseries_paid_allowed_field` management command (raw SQL, not a
 real migration — see §0/§23) rather than through `makemigrations`/
-`migrate`. **As of this pass, setting this to `True` changes NOTHING**:
-- `TestSeries.save()` (in `testseries/models.py`) still UNCONDITIONALLY
-  forces `is_paid=False`/`price_coins=0` for every `source="campus"`
-  series, regardless of the owning campus's `testseries_paid_allowed`
-  value.
-- `campus.bridge.create_testseries()` has no `is_paid`/`price_coins`
-  kwarg at all (see above) — there is no code path in `campus` that could
-  even attempt to pass a paid series through today.
-So this is currently just an admin-visible, defaulted-off record of
-future intent ("could this campus ever be allowed to run paid test
-series") — a future task would need to (a) relax `TestSeries.save()`'s
-campus-force-unpaid when the owning campus has this flag set, AND (b) add
-an `is_paid`/`price_coins` kwarg to `create_testseries()` gated on it.
-Neither is done here. See `docs/ORG_VS_INDIVIDUAL_MATRIX.md` (referenced
-in the field's own code comment, not part of this app) for the fuller
-paid/unpaid matrix across every `TestSeries.Source`.
+`migrate`. **As of this pass, setting this to `True` actually does
+something** — three enforcement points, per `models.py`'s own comment on
+the field and `bridge.py`'s own docstring:
+- `campus.bridge.create_testseries()` (above) now resolves this flag via
+  `section.school_class.campus.testseries_paid_allowed` and force-resets
+  `is_paid`/`price_coins` to `False`/`0` whenever it's `False` — the real,
+  only enforcement point, per that function's own docstring.
+- `campus.views.TestSeriesViewSet.create()` also gates on it directly,
+  before ever calling the bridge — a request for a paid series against a
+  `testseries_paid_allowed=False` campus gets a clear `403` there instead
+  of a silent downgrade to free.
+- `TestSeries.save()` (in `testseries/models.py`) — `models.py`'s own
+  comment claims this **no longer re-checks `source == CAMPUS` at all**
+  (the old defence-in-depth force-unpaid is gone, "by necessity, not
+  oversight", since `testseries` never imports `campus` models and so has
+  no way to see this flag). ⚠️ **This specific claim is per `campus`'s own
+  code comments — `testseries/models.py` itself was not part of this
+  upload, so it hasn't been independently verified against the real file,
+  same "flag it, don't guess" posture this doc takes for every other
+  cross-app claim it can't directly check.**
+
+Flipping this flag for a campus is now the only behavior change — every
+existing campus defaults to `False` and keeps today's always-free behavior
+unchanged. See `docs/ORG_VS_INDIVIDUAL_MATRIX.md` (referenced in the
+field's own code comment, not part of this app) for the fuller paid/unpaid
+matrix across every `TestSeries.Source`.
 
 ### Untested surface (Task 13/19) — **`[GAP]`**
 `tests.py` (still 54 tests) has ZERO tests for `TestSeriesViewSet`,
 `TestAttemptViewSet`, `can_review_testseries_attempt()`,
-`create_testseries()`, or `testseries_paid_allowed`. See §16/§17.
+`create_testseries()`, or the now-wired `testseries_paid_allowed`
+enforcement (bridge-level force-reset OR the view-level `403` gate). See
+§16/§17.
 
 ---
 
@@ -1085,26 +1118,57 @@ rewards`'s post-reward `bridge.notify(...)` calls no longer `AttributeError`.
 
 ---
 
-## 10. `bridge.py` — the golden-rule enforcement point `[PARTIALLY WIRED for core/message — FULLY WIRED for assignment/testseries]`
+## 10. `bridge.py` — the golden-rule enforcement point `[FULLY WIRED — Group A (core/message) resolved this pass, alongside the already-wired assignment/testseries group]`
 
 `campus/bridge.py` is `campus`'s **ONLY** door into `core`/`message`/
-`liveclass`/`assignment`/`testseries`. Two different postures live in this
-one file, by design (see the module docstring's own "TASK 11 ADDITION"
-note) — don't collapse them into one pattern:
+`liveclass`/`assignment`/`testseries`. Two groups used to have different
+postures (see the module docstring's own "TASK 11 ADDITION" note); **as of
+this pass both groups are hard-wired, no degrade anywhere** — the distinction
+below is now historical/organizational, not a behavior difference.
 
-**Group A — `core`/`message`/`liveclass` integration (genuinely unverified
-dependencies)**: every function lazy-imports the real target and degrades
-to a logged no-op instead of a hard crash if that target doesn't exist yet
-— so `campus` stays installable/migratable/testable standalone. **This
-degrade behaviour is intentional and tested — do not "fix" it into a hard
-failure without a product decision.**
+**Group A — `core`/`message`/`liveclass` integration — ✅ NOW FULLY WIRED
+(this pass)**: every function used to lazy-import the real target and
+degrade to a logged no-op if that target didn't exist yet. **That degrade
+behaviour is GONE.** `bridge.py`'s own module STATUS note says it plainly:
+"all three gaps this file previously flagged as blocked are now resolved."
+Every function below is now a thin pass-through to the real
+`core.classroom_chat_bridge`/`core.models` target, imported at **module
+level** (top of `bridge.py`) — a missing `core` now fails at Django startup,
+not silently at first request.
 
-| Function | Target (once wired) | Current status | Degrade behaviour |
+| Function | Target | Current status | Notes |
 |---|---|---|---|
-| `create_section_group(section, actor)` | `core.classroom_chat_bridge.create_section_group` | `[NOT YET WIRED]` | Logs a warning, returns `None`; section creation still succeeds |
-| `notify(*, users, notif_type, title, body='', data=None)` | `core.models.Notification` | `[NOT YET WIRED]` | Logs a warning per call, returns `[]` |
-| `provision_video_room(live_session, actor)` | `core.classroom_chat_bridge.provision_video_room` | `[NOT YET WIRED]` | Logs a warning, returns `None`; session scheduling still succeeds with blank `room_id` |
-| `resolve_parent_from_token(token)` | `core.classroom_chat_bridge.resolve_parent_from_token` | `[SHAPE MISMATCH]` | The underlying `core.classroom_chat_bridge.resolve_parent_from_token` DOES exist now (Task 5) but returns a `ParentTokenResolution` object (`.student`/`.parent_access_code`) — there is no `parent_user` concept in that flow at all (parents authenticate via token+access code, not a real `User` row). Forwarding it as-is would silently misbehave rather than fail loudly, so this still returns `(None, None)` deliberately, logging an error (not a warning) that names the shape mismatch. `ParentLinkVerifyView` turns this into the same 400 as an actually-invalid token either way. Needs a `CampusParentLink` redesign decision, not a guess. |
+| `create_section_group(section, actor)` | `core.classroom_chat_bridge.create_section_group` | `[WIRED]` | Idempotent (returns existing group if section already has one). Raises `ValueError` if `actor` isn't the section's assigned class-teacher — **⚠️ see the NEW BUG below, this now breaks `SectionViewSet.perform_create()`.** |
+| `notify(*, users, notif_type, title, body='', data=None)` | `core.models.Notification` | `[WIRED]` | Field-name bug (`user=`/`body=` vs. real `recipient=`/`message=`) already fixed a prior pass — unchanged this pass, re-confirmed still correct. |
+| `provision_video_room(live_session, actor)` | `core.classroom_chat_bridge.provision_video_room` | `[WIRED]` | No permission check inside (that function's own docstring: `actor` accepted but unused, gate is assumed already done by the caller). No known bug at this call site — `CampusLiveSessionViewSet` calling it isn't affected the way `SectionViewSet` is. |
+| `resolve_parent_from_token(token)` | `core.classroom_chat_bridge.resolve_parent_from_token` | `[WIRED, SHAPE MISMATCH RESOLVED]` | Previously returned `(None, None)` deliberately — the old model had no `parent_user` concept at all (token+code auth, no login). **Resolved this pass**: a new `_get_or_create_shadow_parent_user(parent_access_code)` helper creates (once) and reuses a non-loginable "shadow" `login.User` per `ParentAccessCode` (`username="parent_shadow_<access_code_id>"`, `set_unusable_password()`) — every device verifying the same code is the same real-world parent, so keying off `parent_access_code.id` keeps this idempotent. Returns a real `(parent_user, student_user)` tuple now. ⚠️ Uses a naming convention, not a dedicated `is_shadow_parent` field on `login.User` — flagged as the interim identification method (`login/models.py` wasn't part of this pass to add a real field). |
+
+### 🔴 NEW BUG (this pass) — `SectionViewSet.perform_create()` vs. the now-hard-wired `create_section_group()`
+
+`views.py::SectionViewSet.perform_create()` still reads (unchanged, stale):
+
+```python
+def perform_create(self, serializer):
+    section = serializer.save()
+    bridge.create_section_group(section, actor=self.request.user)
+```
+
+No `try`/`except` around the bridge call. When this was a no-op-degrading
+lazy import, that was safe. **It no longer is**: `create_section_group()`
+now calls straight through to the real
+`core.classroom_chat_bridge.create_section_group()`, which raises
+`ValueError` unless `actor` is already this section's assigned
+class-teacher (`ClassTeacherAssignment`) — and a section that was **just
+created this request** never has one yet (that's a separate endpoint,
+done afterward). So **every normal section-creation request now 500s**,
+and does so as a **partial failure**: `serializer.save()` already
+committed the `Section` row before the bridge call raises, so the row
+exists in the DB even though the client gets a 500. This is a real
+regression exposed by wiring Group A, not a hypothetical — flag before
+shipping. Fix belongs at the call site (wrap in `try`/`except ValueError`
+and log, or don't call `create_section_group` until a class-teacher is
+actually assigned) — not a guess this doc will make for you. See §1,
+§16, §17 for the related test/doc fallout.
 
 **Group B — `assignment`/`core.models.NotifType` fix (Task 11) and
 `testseries` (Task 13) — confirmed, fully-built sibling apps, HARD imports,
@@ -1117,25 +1181,26 @@ silently-neutered feature.
 |---|---|---|
 | `create_assignment(*, section, subject, posted_by, title, description="", attachment=None, due_date=None)` | `assignment.bridge.create_context_assignment()` | `[WIRED]` — Task 11, §5 |
 | `get_assignment_submissions(section)` | `assignment.bridge.get_submissions_for_context()` | `[WIRED]` — Task 11, §5 |
-| `create_testseries(*, section, creator, title, description="", duration_minutes=None, attempts_allowed=1, questions)` | `testseries.bridge.create_context_testseries()` | `[WIRED]` — Task 13, §5a. Always forces `is_paid=False`/`price_coins=0` |
+| `create_testseries(*, section, creator, title, description="", duration_minutes=None, attempts_allowed=1, questions, is_paid=False, price_coins=0)` | `testseries.bridge.create_context_testseries()` | `[WIRED]` — Task 13, §5a. **`is_paid`/`price_coins` NEW this pass (Task 19)** — gated on `section.school_class.campus.testseries_paid_allowed`, force-reset to `False`/`0` when that flag is off |
 | `can_review_testseries_attempt(*, user, context_type, context_id)` | `.models.Section` + `.permissions.is_any_active_staff` (local, no external app) | `[WIRED, SIGNATURE FIXED]` — Task 13, §5a. Real call site confirmed keyword-only `user`/`context_type`/`context_id`, not `(user, attempt)` — an earlier draft's guess was wrong and has been corrected, along with both call sites in `TestAttemptViewSet` |
 | `get_testseries_attempts(section)` | `testseries.bridge.get_attempts_for_context()` | `[WIRED]` — Task 13, §5a |
 
-**Also fixed this pass (Group A, `notify()`)**: the real
-`core.models.Notification` fields are `recipient=`/`message=`, not
-`user=`/`body=` — `notify()`'s `Notification.objects.create(...)` call now
-uses the correct field names. Left as `user=`/`body=` this would have
-raised `TypeError` on every single call the moment `core.models` became
-importable, meaning this path was never actually exercised against the
-real model before this fix.
+**Also fixed (carried over, unchanged this pass, re-confirmed): `notify()`**
+— the real `core.models.Notification` fields are `recipient=`/`message=`,
+not `user=`/`body=`.
 
-**When Group A's remaining functions DO get wired up** (i.e.
-`core/models.py` + `core/classroom_chat_bridge.py` fully land, and the
-`resolve_parent_from_token` shape question is resolved): every remaining
-`except ImportError` branch in `bridge.py` should be deleted, the `try`
-bodies are already the real, finished integration code — nothing else in
-`campus` needs to change, every call site already calls `bridge.X(...)`,
-never the target module directly.
+**Historical note — "when Group A gets wired up" is DONE.** A prior version
+of this doc had a paragraph here describing what would need to change once
+`core/models.py` + `core/classroom_chat_bridge.py` landed: delete the
+`except ImportError` branches, the `try` bodies were already the real,
+finished code. **That's exactly what happened this pass** — every
+`except ImportError` branch in Group A is gone, replaced by the plain
+module-level import + direct call shown in the table above. No call site in
+`campus` needed to change — every caller already went through `bridge.X(...)`,
+never the target module directly. The one thing that DID change behavior at
+a call site is the `create_section_group` bug flagged above — not because
+any caller code changed, but because the function it calls stopped
+degrading and started actually enforcing its real contract.
 
 ---
 
@@ -1398,11 +1463,14 @@ the router's own `parent-links/<pk>/` pattern would otherwise greedily match
    identically everywhere (`is_campus_admin_or_principal`). If they ever need
    different permissions, that function (and every call site) needs
    revisiting.
-3. **`bridge.py`'s 4 functions are all still unwired** (§10) — nothing in
-   `campus` breaks because of this today (everything degrades gracefully),
-   but no section-group chat, no real video rooms, no real notifications, and
-   no parent-token verification actually happen end-to-end until
-   `core/models.py` + `core/classroom_chat_bridge.py` exist and are wired in.
+3. **`[NEW, CRITICAL]` `SectionViewSet.perform_create()` doesn't handle
+   `create_section_group()`'s `ValueError`** — now that Group A (§10) is
+   hard-wired, a freshly-created section has no `ClassTeacherAssignment` yet,
+   so the real `core.classroom_chat_bridge.create_section_group()` raises on
+   essentially every normal section-creation request — **after** the
+   `Section` row is already saved. This is not a design question, it's a bug
+   to fix at the call site (§1/§10) — flagged here so it isn't missed before
+   shipping this wiring.
 4. **`confirm`'s old GOTCHA is now moot** — removed along with the action
    itself (FEE-2), not fixed. Noting this so nobody re-derives the "any
    campus member can confirm anyone's payment" gap this used to flag; it no
@@ -1429,20 +1497,23 @@ the router's own `parent-links/<pk>/` pattern would otherwise greedily match
    explicit-method-based (e.g. structured-question immutability once a
    submission exists) and no design input covers what "edit a posted
    campus assignment" should mean against that surface now. See §5.
-8. **`[NEW]` `Campus.testseries_paid_allowed` (Task 19) enforces nothing
-   yet** — the field exists (added via an ad-hoc management command, not a
-   real migration — see §23) but `TestSeries.save()` still unconditionally
-   forces every `source="campus"` series unpaid regardless of this flag,
-   and `campus.bridge.create_testseries()` has no `is_paid`/`price_coins`
-   kwarg to even attempt passing one through. A future task needs to
-   relax both. See §5a.
-9. **`[NEW]` No test coverage at all for Task 11 (unified-assignment
-   proxy), Task 13 (testseries campus bridge), or Task 19
-   (`testseries_paid_allowed`)** — `tests.py` is still exactly 54 tests
-   after all three landed. See §17.
+8. **`Campus.testseries_paid_allowed` (Task 19) — now RESOLVED, see
+   "Resolved this pass" below.**
+9. **No test coverage for Task 11, Task 13, or the now-wired Task 19
+   enforcement** — `tests.py` is still exactly 54 tests. Zero tests for the
+   unified-assignment proxy (Task 11), the testseries campus bridge
+   (Task 13), or (newly relevant now that it's enforced, not just present)
+   `testseries_paid_allowed`'s bridge-level force-reset and
+   `TestSeriesViewSet`'s view-level `403` gate (Task 19). See §17.
 
 **Resolved this pass** (kept here as a changelog, not as open items
-anymore): the old #2 "campus creation gate" question -> **G-2**, `Campus.
+anymore): **Group A of `bridge.py` (`create_section_group`/`notify`/
+`provision_video_room`/`resolve_parent_from_token`) is now fully wired,
+including the `resolve_parent_from_token` shape mismatch via a shadow-
+parent-user** (§10) — though this wiring also surfaced item 3 above, a new
+bug, not a clean resolution; `Campus.testseries_paid_allowed` (Task 19) is
+now actually enforced, not just a dead field (§5a); the old #2 "campus
+creation gate" question -> **G-2**, `Campus.
 VerificationStatus` (§1); the old #3 "`FEE_DUE_REMINDER` has no emitter"
 question -> **FEE-6**, `tasks.send_fee_due_reminders` (§12); the old #5
 "notice posting not role-scoped" question -> **G-1**, `permissions.
@@ -1467,8 +1538,13 @@ not an accidental regression:
 - **Structural scoping**: `SchoolClass` rejects a `session` from a different
   campus; accepts matching campus+session.
 - **Section-group bridge**: creating a section calls `bridge.create_section_group`
-  with the new section; the bridge not being wired up yet does NOT break
-  section creation.
+  with the new section; a second test asserts the REAL (unmocked) bridge call
+  doesn't break section creation — **`[STALE, see §10/§16]`**: that assertion
+  was written when the bridge lazy-imported and degraded to a no-op. Now that
+  `create_section_group()` is hard-wired, the real function raises `ValueError`
+  for a section with no class-teacher yet (every freshly-created section) —
+  this test's `201` assertion depends on `core` not being installed in the
+  test project, which won't hold in a real deployment where it is.
 - **Subject-teacher approval flow**: class-teacher can approve/reject; an
   unrelated subject-teacher cannot approve; campus admin can approve as a
   fallback.
@@ -1533,9 +1609,11 @@ submission()`), `migrate_campus_assignments_to_unified`'s backfill/rollback
 correctness, `TestSeriesViewSet`/`TestAttemptViewSet` (Task 13) end-to-end
 (create, list/retrieve scoping, the grading `partial_update` path,
 `can_review_testseries_attempt()`'s section-resolution/deny-on-missing-
-section behaviour), and `Campus.testseries_paid_allowed` (Task 19 — arguably
-moot right now since it enforces nothing, but the field itself and its
-admin visibility are untested too). `tests.py` is still exactly 54 tests.
+section behaviour), and `Campus.testseries_paid_allowed` (Task 19 — **now
+actually enforced, §5a/§10, so this gap is no longer "moot", it's a real
+untested enforcement path**: neither the bridge-level force-reset nor
+`TestSeriesViewSet.create()`'s view-level `403` gate has a test). `tests.py`
+is still exactly 54 tests.
 
 ---
 
@@ -1545,14 +1623,14 @@ admin visibility are untested too). `tests.py` is still exactly 54 tests.
 |---|---|---|
 | 1 | `Campus`, `AcademicSession`, `Department`, `SchoolClass`, `Section`, `Subject`, `Room`, `StaffProfile` | **DONE** |
 | 2 | `ClassTeacherAssignment`, `SubjectTeacherAssignment` (approval flow), `StudentEnrollment` | **DONE** |
-| 3 | Section-group auto-creation, `Notice` | **DONE (bridge call unwired, degrades gracefully; posting now role-scoped per G-1)** |
-| 4 | `CampusLiveSession` (coin-free) + notifications | **DONE (video provisioning + notify unwired, degrades gracefully)** |
+| 3 | Section-group auto-creation, `Notice` | **DONE (bridge call now HARD-WIRED — see §10 for a new bug this exposed in `SectionViewSet.perform_create`; posting now role-scoped per G-1)** |
+| 4 | `CampusLiveSession` (coin-free) + notifications | **DONE (video provisioning + notify now HARD-WIRED, §10 — no known bug at these call sites)** |
 | 5 | `TimeSlot`, `TimetableEntry` (clash-detection) | **DONE** |
-| 6 | `Attendance` + auto low-attendance alert task | **DONE (notify unwired, degrades gracefully)** |
-| 7 | `Assignment`, `AssignmentSubmission` + auto-reminder task | **DONE (notify unwired, degrades gracefully)** |
+| 6 | `Attendance` + auto low-attendance alert task | **DONE (`notify()` now HARD-WIRED — §10)** |
+| 7 | `Assignment`, `AssignmentSubmission` + auto-reminder task | **DONE (`notify()` now HARD-WIRED — §10)** |
 | 8 | `SyllabusUnit`, `SyllabusProgress` | **DONE** |
 | 9 | `ExamTerm`, `ResultEntry` | **DONE** |
-| 10 | `CampusParentLink` wiring (reuse `message.ParentAccessCode`) | **DONE at the `campus` end; `resolve_parent_from_token` itself unwired in `core`; write path now also gated on campus verification (G-2)** |
+| 10 | `CampusParentLink` wiring (reuse `message.ParentAccessCode`) | **DONE end-to-end — `resolve_parent_from_token` now HARD-WIRED in `core` too (§10), shadow-parent-user resolution; write path also gated on campus verification (G-2)** |
 | 11 | `CampusAnalyticsSnapshot` + admin/HOD dashboard endpoints | **DONE (minimal metric set — see §12 caveat)** |
 | 12 | `DigitalIDCard`, `FeeStructure`/`FeeInvoice`/`FeePayment` | **DONE — fee payment now wallet-based (FEE-2), not Razorpay** |
 | 13 | Session rollover automation (Celery task) | **DONE** |
@@ -2183,9 +2261,11 @@ would be new work.
   (Rates above are suggested, matching the tightness of the nearest existing
   `liveclass`/`message` scope each was modeled on in §12a — not yet actually
   added anywhere; tune to real traffic once this ships.)
-- `core.classroom_chat_bridge` and `core.models.Notification` must exist
-  with the exact signatures `bridge.py` expects (§10) before any of the 4
-  bridge functions do real work.
+- `core.classroom_chat_bridge` and `core.models.Notification` — **confirmed
+  to exist with the exact signatures `bridge.py` expects, and now wired in
+  (§10)**. The real remaining infra requirement is the `SectionViewSet`
+  bug §10/§16 flags — that's a code fix needed in `campus`, not a missing
+  external dependency anymore.
 
 ---
 

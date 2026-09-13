@@ -208,29 +208,45 @@ def compute_assignment_ontime_streak(student, section):
     function — would need to actually resolve (should a campus
     assignment ever have no due_date at all?).
 
-    Returns `(streak_length, last_due_date)` — `last_due_date` is the
-    `Assignment.due_date` of the most recent submission in the streak,
-    used by `tasks.check_assignment_ontime_streak_rewards()` the same
-    idempotency-reference way `compute_attendance_streak()`'s
-    `last_date` is used. Returns `(0, None)` if there's no current
-    streak (the most recent submission, if any, isn't on-time) or there
-    are no submissions for this student in this section at all.
+    Returns `(streak_length, last_due_date, last_submission_id)` —
+    `last_due_date` is the `Assignment.due_date` of the most recent
+    submission in the streak, used by `tasks.
+    check_assignment_ontime_streak_rewards()` the same idempotency-
+    reference way `compute_attendance_streak()`'s `last_date` is used.
+    `last_submission_id` is that same submission's own `id` — see the
+    `due_date=None` note below for why the caller needs it too. Returns
+    `(0, None, None)` if there's no current streak (the most recent
+    submission, if any, isn't on-time) or there are no submissions for
+    this student in this section at all.
 
-    ⚠️ EDGE CASE, FLAGGED NOT GUESSED AT: if the most-recent submission
-    counted into the streak belongs to an assignment with `due_date=
-    None` (allowed by the model), this returns `(streak, None)` with
-    `streak > 0` — `tasks.check_assignment_ontime_streak_rewards()`
-    then calls `last_due_date.isoformat()` unconditionally once
-    `streak != 0`, which would raise `AttributeError` on that `None`.
-    Not fixed here because it's a genuine product-rule gap, not a coding
-    guess: should a due-date-less campus assignment count towards an
-    "on-time" streak at all, and if so what should stand in for
-    `last_due_date` in the idempotency reference? Neither question is
-    this function's to answer alone. In practice this likely never
-    fires — every other campus task that touches `due_date` (e.g.
-    `send_assignment_due_reminders`) assumes it's always set for a
-    campus-sourced assignment — but the model itself does not enforce
-    that, so it's flagged rather than silently assumed away.
+    ✅ RESOLVED (this pass) — `due_date=None` no longer crashes the
+    caller. If the most-recent submission counted into the streak
+    belongs to an assignment with `due_date=None` (allowed by the
+    model), `last_due_date` comes back `None` alongside a real
+    `streak > 0`, exactly as before — but now `last_submission_id` is
+    always populated whenever `streak > 0`, `due_date` or not, because
+    it's read straight off the submission row itself rather than the
+    (possibly-null) assignment field. `tasks.
+    check_assignment_ontime_streak_rewards()` builds its idempotency
+    reference from `last_due_date` when present and falls back to
+    `last_submission_id` when it isn't, instead of calling
+    `.isoformat()` on `None`. A submission row's `id` is permanently
+    fixed to that one real submission, so the same "can only happen
+    once, ever" idempotency argument `last_due_date` relies on holds
+    for `last_submission_id` too: the streak can only re-reach the same
+    length off a *different* submission later (the old one can't
+    un-submit and re-submit into the same streak slot), so the
+    `(enrollment id, streak length, submission id)` triple can't repeat
+    for two genuinely different milestones.
+
+    This does NOT resolve the separate product-rule question flagged
+    before — should a due-date-less campus assignment count towards an
+    "on-time" streak at all — that's still a real call for whoever owns
+    that rule, not something fixed here. This pass only makes the
+    *crash* on that case go away regardless of which way that question
+    is eventually answered; if the answer turns out to be "no, exclude
+    them", that's a filter added to the `submissions` query below, not
+    a change to this return shape.
     """
     from .bridge import get_assignment_submissions
 
@@ -238,11 +254,13 @@ def compute_assignment_ontime_streak(student, section):
 
     streak = 0
     last_due_date = None
+    last_submission_id = None
     for submission in submissions:
         on_time = submission.submitted_at is not None and not submission.is_late()
         if not on_time:
             break
         streak += 1
-        if last_due_date is None:
+        if last_submission_id is None:
             last_due_date = submission.assignment.due_date
-    return streak, last_due_date
+            last_submission_id = submission.id
+    return streak, last_due_date, last_submission_id

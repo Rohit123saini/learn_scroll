@@ -1,28 +1,36 @@
 # `login` App — Complete Self-Contained Reference
 
-> **v5 — verified byte-for-byte against the uploaded source (Sep 2026
-> sync pass).** Ye ek hi file hai jisme poore **login** (auth) Django app
-> ka sara logic, code, connections, flows aur known issues cover hain.
-> Iske alawa kisi aur file ki zaroorat nahi — sab kuch (models →
-> serializers → views → urls → admin → apps.py → sms_service.py) yahin
-> milega, saath me har piece kya kaam karta hai uski explanation bhi.
+> **v6 — `GoogleAuthView` username-collision race condition fixed.**
+> Ye ek hi file hai jisme poore **login** (auth) Django app ka sara
+> logic, code, connections, flows aur known issues cover hain. Iske
+> alawa kisi aur file ki zaroorat nahi — sab kuch (models → serializers
+> → views → urls → admin → apps.py → sms_service.py) yahin milega,
+> saath me har piece kya kaam karta hai uski explanation bhi.
 >
-> **v4 se v5 me kya badla:** koi functional/behavioural change nahi —
-> pure sync/accuracy pass hai. Har ek `.py` file (`models.py`,
-> `serializers.py`, `views.py`, `sms_service.py`, `admin.py`, `apps.py`,
-> `tests.py`, `urls.py`) is doc ke embedded code-blocks ke against
-> programmatically diff kiya gaya. Ek hi real mismatch mila — §5
-> (`views.py`) ke andar do jagah comments doc me trim ho gaye the
-> (`VerifyOTPView`'s "(B-7) this is also NOT the forgot-password flow"
-> note, aur `ForgotPasswordView` se pehle wala poora FIX rationale
-> block) — dono ab restore kar diye gaye hain, so **§5 ab actual
-> `views.py` se character-for-character match karta hai.** Baaki saari
-> files (`models.py`, `serializers.py`, `sms_service.py`, `admin.py`,
-> `apps.py`, `tests.py`, `urls.py`) already exact match the, koi change
-> nahi. **Is file ko ab source of truth maan kar aage ka saara kaam
-> (naye features, bug-fixes, reviews) isi ke against karo** — jab bhi
-> code change ho, is doc ko wahi turant update karna, taaki dono kabhi
-> drift na karein.
+> **v5 se v6 me kya badla:** §11 item 3 ne jo theoretical race flag
+> kiya tha — `GoogleAuthView`'s `exists()`-check-then-`create()` username
+> collision handling under concurrent Google sign-ins — ab fix ho gaya
+> hai. `.create()` ab `transaction.atomic()` ke andar chalta hai, ek
+> bounded retry loop (`max_attempts = 5`) `IntegrityError` catch karta
+> hai, aur do alag races ko distinguish karta hai: same-email race (loser
+> winner ka row re-fetch karke login treat karta hai) vs. plain username
+> collision (suffix bump karke retry). Sab attempts exhaust hone par
+> `uuid4`-suffixed username pe fallback hota hai. `views.py`'s §5 code
+> block + `import uuid` / `from django.db import IntegrityError,
+> transaction` update hue; §11 item 3 ab ✅ RESOLVED hai. Baaki koi file
+> nahi badli.
+>
+> **v4 se v5 me kya badla (previous pass):** koi functional/behavioural
+> change nahi — pure sync/accuracy pass tha. Har ek `.py` file
+> (`models.py`, `serializers.py`, `views.py`, `sms_service.py`,
+> `admin.py`, `apps.py`, `tests.py`, `urls.py`) is doc ke embedded
+> code-blocks ke against programmatically diff kiya gaya tha — us pass
+> me §5 (`views.py`) ke andar do trimmed comments restore hue the.
+>
+> **Is file ko source of truth maan kar aage ka saara kaam (naye
+> features, bug-fixes, reviews) isi ke against karo** — jab bhi code
+> change ho, is doc ko wahi turant update karna, taaki dono kabhi drift
+> na karein.
 >
 > **v3 se v4 me kya badla:** section 0.2 (Changelog v3 → v4)
 > padho. Ek dedicated **forgot/reset password** flow (`ForgotPasswordView`/
@@ -925,6 +933,7 @@ class ResetPasswordSerializer(serializers.Serializer):
 ```python
 # login/view.py
 import logging
+import uuid
 
 from django.contrib.auth import authenticate
 from rest_framework.generics import GenericAPIView
@@ -938,6 +947,7 @@ from rest_framework_simplejwt.tokens import RefreshToken
 from rest_framework.permissions import IsAuthenticated
 from .serializers import ChangePasswordSerializer
 from .models import OTPVerification
+from django.db import IntegrityError, transaction
 from django.db.models import Q
 from drf_spectacular.utils import (
     extend_schema,
@@ -1131,8 +1141,34 @@ class GoogleAuthView(APIView):
             user = CustomUser.objects.get(email=email)
             created = False
         except CustomUser.DoesNotExist:
-            # ✅ avoid IntegrityError when two different emails share the
-            # same local part (e.g. raj@gmail.com and raj@yahoo.com)
+            # 🔧 FIX (this pass, login_app_reference.md §11 item 3) —
+            # the `exists()` pre-check below is a fast-path optimisation
+            # only, NOT the actual uniqueness guarantee: under
+            # concurrent Google sign-ins, two requests can both pass
+            # `exists()` for the same `username` (or even both pass
+            # `CustomUser.objects.get(email=email)` raising
+            # `DoesNotExist` for the same brand-new `email`) before
+            # either has called `.create()` — a classic
+            # check-then-act race. The DB's own unique constraint
+            # (username, and presumably email) is the only thing that
+            # can't be raced, so it's now the actual arbiter:
+            # `.create()` runs inside `transaction.atomic()` and a
+            # resulting `IntegrityError` is caught and resolved instead
+            # of propagating as a 500.
+            #
+            # Two distinct races can produce that `IntegrityError`:
+            #   1. Another concurrent Google sign-in for this SAME email
+            #      won the race and already inserted its row — re-fetch
+            #      by email; if found, that's the real user, this
+            #      request was never actually a signup.
+            #   2. A completely unrelated signup (any path, not just
+            #      Google) grabbed this exact `username` in the gap
+            #      between our `exists()` check and our `.create()` —
+            #      bump the suffix and retry.
+            # `exists()` pre-check is kept as-is (cheap, avoids paying
+            # for an `IntegrityError` + retry in the overwhelmingly
+            # common non-racy case); the retry loop below is the
+            # correctness backstop for when it's wrong.
             base_username = email.split("@")[0]
             username = base_username
             suffix = 1
@@ -1140,14 +1176,49 @@ class GoogleAuthView(APIView):
                 username = f"{base_username}{suffix}"
                 suffix += 1
 
-            user = CustomUser.objects.create(
-                email=email,
-                username=username,
-                first_name=first_name,
-                last_name=last_name,
-                is_verified=True,  # Google ne email verify kar di hai
-            )
-            created = True
+            user = None
+            created = False
+            max_attempts = 5
+            for _ in range(max_attempts):
+                try:
+                    with transaction.atomic():
+                        user = CustomUser.objects.create(
+                            email=email,
+                            username=username,
+                            first_name=first_name,
+                            last_name=last_name,
+                            is_verified=True,  # Google ne email verify kar di hai
+                        )
+                    created = True
+                    break
+                except IntegrityError:
+                    existing = CustomUser.objects.filter(email=email).first()
+                    if existing is not None:
+                        # Race #1 — someone else already created this
+                        # exact account between our DoesNotExist check
+                        # and now. Treat this request as a login, not a
+                        # signup.
+                        user = existing
+                        created = False
+                        break
+                    # Race #2 (or a plain non-unique username with no
+                    # email collision) — try the next suffix.
+                    username = f"{base_username}{suffix}"
+                    suffix += 1
+            else:
+                # Exhausted every attempt above — pathological, sustained
+                # contention on the exact same local-part. Fall back to
+                # a suffix that can't realistically collide rather than
+                # surfacing a 500 to the user.
+                username = f"{base_username}{uuid.uuid4().hex[:8]}"
+                user = CustomUser.objects.create(
+                    email=email,
+                    username=username,
+                    first_name=first_name,
+                    last_name=last_name,
+                    is_verified=True,
+                )
+                created = True
 
         if created:
             user.set_unusable_password()
@@ -2237,12 +2308,20 @@ serializer/view-level detail.
    `OTPVerification.is_verified` (set by `VerifyOTPView`) is a real,
    server-side, DB-backed fact that `SignupSerializer.validate()`
    requires before it will create an account — see §10.2.
-3. **`GoogleAuthView` username collision handling** is a `while` loop
-   incrementing a numeric suffix — fine at normal scale, but under very
-   high concurrent signup load with the same email local-part there's a
-   theoretical (small) race window between the `exists()` check and
-   `create()`. Consider `get_or_create` with `unique=True` + retry-on-
-   `IntegrityError` if this ever becomes a real bottleneck.
+3. ✅ **RESOLVED (v5)** — `GoogleAuthView`'s username collision handling
+   used to be a bare `while` loop incrementing a numeric suffix after an
+   `exists()` check — fine at normal scale, but under concurrent
+   Google sign-ins there was a real (if narrow) check-then-act race
+   between the `exists()`/`DoesNotExist` check and the `.create()` call.
+   Fixed: `.create()` now runs inside `transaction.atomic()`, wrapped in
+   a bounded retry loop (`max_attempts = 5`) that catches `IntegrityError`
+   — the DB's own unique constraint is the actual arbiter now, not the
+   pre-check. Two races are distinguished on conflict: the same email
+   losing the race re-fetches the winner's row and treats the request as
+   a login; a plain username collision bumps the suffix and retries. If
+   every attempt is exhausted (pathological sustained contention), falls
+   back to a `uuid4`-suffixed username that can't realistically collide.
+   See §5.
 4. ✅ **FIXED** — Profile-photo cleanup previously used local filesystem
    calls (`os.path.isfile`, `os.remove`) in `User.save()`/`delete()`,
    which would break on cloud storage and silently skip on bulk deletes.

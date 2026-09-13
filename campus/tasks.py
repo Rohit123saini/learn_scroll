@@ -333,6 +333,19 @@ def check_assignment_ontime_streak_rewards():
     as assumed-not-confirmed (the on-time status string, and
     `get_assignment_submissions()`'s return-type), which weren't
     resolvable without `assignment/models.py`.
+
+    ✅ RESOLVED (this pass) — the `due_date=None` crash flagged in
+    `services.compute_assignment_ontime_streak()`'s own docstring
+    (design doc §16 item 5) is fixed: that function now also returns
+    `last_submission_id`, the streak-extending submission's own `id`,
+    which is always set whenever `streak > 0` regardless of whether
+    `last_due_date` is. The reference below uses `last_due_date` when
+    it's set and falls back to `last_submission_id` when it isn't,
+    instead of calling `.isoformat()` on a possibly-`None` value —
+    see that function's docstring for why the fallback is just as safe
+    an idempotency key. This does not decide whether a due-date-less
+    campus assignment *should* count towards the streak at all — that
+    product-rule question is still open and unrelated to this fix.
     """
     from user_profile.models import CoinLedger
 
@@ -348,10 +361,13 @@ def check_assignment_ontime_streak_rewards():
     ).select_related("student", "section__school_class__campus")
 
     for enrollment in enrollments:
-        streak, last_due_date = compute_assignment_ontime_streak(enrollment.student, enrollment.section)
+        streak, last_due_date, last_submission_id = compute_assignment_ontime_streak(
+            enrollment.student, enrollment.section
+        )
         if streak == 0 or streak % streak_count != 0:
             continue
-        reference = f"campus_assignment_streak:{enrollment.id}:{streak}:{last_due_date.isoformat()}"
+        reference_key = last_due_date.isoformat() if last_due_date is not None else f"sub{last_submission_id}"
+        reference = f"campus_assignment_streak:{enrollment.id}:{streak}:{reference_key}"
         if CoinLedger.objects.filter(user=enrollment.student, reference=reference).exists():
             continue
 

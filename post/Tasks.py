@@ -184,7 +184,10 @@ def notify_followers_new_post(post_id):
     """Notify every ACCEPTED follower of `post.user` that a new post went
     up. MVP version per the design doc: no per-follower "bell" opt-in
     yet — every accepted follower gets notified on every post. That's a
-    deliberate, documented noise trade-off for a later pass.
+    deliberate, documented noise trade-off for a later pass. (See the
+    correction note below re: `NotificationPreference.muted_types` —
+    it doesn't apply here yet either, for a confirmed reason, not an
+    oversight.)
 
     Uses `core.services.create_bulk_notifications` (one bulk INSERT)
     rather than looping `create_notification` once per follower — the
@@ -193,6 +196,43 @@ def notify_followers_new_post(post_id):
     fan-out that can be thousands of rows. The restrict exclusion below
     does the same thing `create_notification` would have per-recipient,
     but as a single bulk query up front instead.
+
+    🔧 CORRECTED (this pass, post_app.md §14 item 12) — a mute-check
+    was added here in an earlier pass, excluding any follower who had
+    `NEW_POST_FROM_FOLLOWED` in `NotificationPreference.muted_types`
+    from the bulk INSERT entirely. That was wrong and has been reverted,
+    now that `core/services.py` itself is available to confirm why:
+    `create_bulk_notifications()` — like `create_notification()` — is a
+    tested, documented choke point that ONLY ever writes the
+    `Notification` bell row; it never sends push/email/sms/whatsapp
+    (see that module's own docstring and its
+    `test_never_sends_a_push_itself` regression test). Every real
+    channel-send in this codebase happens as a SEPARATE call the
+    call-site makes alongside `create_notification`/
+    `create_bulk_notifications`, not inside either of them. `Notification
+    Preference.allowed_channels_for()`'s own docstring is explicit that
+    a muted type still gets its in-app bell row — only the
+    push/email/sms/whatsapp *send* is meant to be skipped. This
+    function never makes that second, channel-send call for
+    `NEW_POST_FROM_FOLLOWED` at all (unlike the two-call pattern the
+    `core/services.py` module docstring shows for other notif types) —
+    so there is currently no channel-dispatch step here for a mute to
+    gate. Filtering muted followers out of the bulk INSERT therefore
+    didn't skip an interruption they'd opted out of; it silently deleted
+    their in-app history for this type, which is the exact outcome the
+    model's own contract says muting must never cause.
+
+    ⚠️ STILL OPEN, FLAGGED NOT GUESSED AT: this means `muted_types` is
+    currently a no-op for `NEW_POST_FROM_FOLLOWED` specifically, since
+    nothing reads it on this path. If/when a real push-dispatch call is
+    added here (the `send_notification(...)`-style second call other
+    call-sites make), THAT is where `allowed_channels_for()` /
+    `muted_types` should be checked per-recipient before sending —
+    mirroring the existing pattern exactly, not a new one. Whether
+    `NEW_POST_FROM_FOLLOWED` even needs a push channel at all (versus
+    staying in-app-only, in which case there is nothing to mute here and
+    this whole line item resolves itself) is a product call for whoever
+    owns notification UX, not something this task can decide on its own.
     """
     from core.models import Notification
     from core.services import create_bulk_notifications

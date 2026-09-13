@@ -186,22 +186,28 @@ class Campus(CampusBaseModel):
     # the service/view layer that creates FeeStructure/FeeInvoice rows.
     fee_module_enabled = models.BooleanField(default=False)
 
-    # [Task 19 — ORG_VS_INDIVIDUAL_MATRIX] Future-proofing toggle only —
-    # does NOT change any current behavior. `TestSeries.save()`
-    # (testseries/models.py) still unconditionally forces `is_paid=False`
-    # / `price_coins=0` for every `source="campus"` series regardless of
-    # this flag's value — that force-free enforcement is the real
-    # invariant today, same as `campus.bridge.create_testseries()` never
-    # accepting an `is_paid`/`price_coins` kwarg at all. This field is
-    # deliberately just an admin-visible, defaulted-off record of intent
-    # ("could this campus ever be allowed to run paid test series") for
-    # a future task to actually wire up — that future task would need to
-    # (a) relax `TestSeries.save()`'s force-False for campus-sourced
-    # series when the campus it belongs to has this set, and (b) add an
-    # `is_paid`/`price_coins` kwarg to `campus.bridge.create_testseries()`
-    # gated on it. Neither of those changes is made here. See
-    # `docs/ORG_VS_INDIVIDUAL_MATRIX.md` for the full current
-    # org-vs-individual paid/unpaid matrix across every source.
+    # [Task 19 — ORG_VS_INDIVIDUAL_MATRIX] WIRED (this pass) — previously
+    # a dead admin-visible toggle (`TestSeries.save()` force-freed every
+    # `source="campus"` series regardless of this flag, and `campus.
+    # bridge.create_testseries()` had no `is_paid`/`price_coins` kwarg to
+    # even pass a caller's intent through). Now actually enforced:
+    #   - `campus.bridge.create_testseries()` resolves this flag via
+    #     `section.school_class.campus.testseries_paid_allowed` and
+    #     force-resets `is_paid`/`price_coins` to `False`/`0` whenever
+    #     it's `False` — the real, only enforcement point now (see that
+    #     function's own docstring).
+    #   - `TestSeries.save()` (testseries/models.py) no longer re-checks
+    #     `source == CAMPUS` at all — `testseries` never imports `campus`
+    #     models (golden rule), so it has no way to see this flag; that
+    #     defence-in-depth layer is gone by necessity, not oversight (see
+    #     that method's own comment).
+    #   - `campus.views.TestSeriesViewSet.create()` also gates on it
+    #     directly, before ever calling the bridge, so a request for a
+    #     paid series against a campus with this `False` gets a clear
+    #     403 instead of a silent downgrade to free.
+    # Still defaults to `False` — flipping this for a campus is the only
+    # behavior change; every existing campus keeps today's always-free
+    # behavior unchanged. See `docs/ORG_VS_INDIVIDUAL_MATRIX.md`.
     testseries_paid_allowed = models.BooleanField(default=False)
 
     created_at = models.DateTimeField(auto_now_add=True)
@@ -296,6 +302,21 @@ class SchoolClass(CampusBaseModel):
 class Section(CampusBaseModel):
     school_class = models.ForeignKey(SchoolClass, on_delete=models.CASCADE, related_name="sections")
     name = models.CharField(max_length=20)  # "A", "B"
+
+    # [ADDED — section-group chat wiring] Mirrors liveclass.Classroom's
+    # own chat_group_enabled/linked_conversation_id pair exactly (see
+    # core/classroom_chat_bridge.py's module docstring, VERIFIED note on
+    # Classroom) — this is where core.classroom_chat_bridge.
+    # create_section_group() persists the message.Group/Conversation it
+    # creates for this section, so repeat calls are idempotent (return
+    # the existing group) instead of creating a duplicate every time.
+    # UUIDField (not a FK to message.Conversation) for the same reason
+    # Classroom uses one: campus must never import message models
+    # directly (golden rule, this file's own module docstring) — the
+    # actual Group/Conversation row is looked up by this id, lazily,
+    # only from inside core/classroom_chat_bridge.py.
+    chat_group_enabled = models.BooleanField(default=False)
+    linked_conversation_id = models.UUIDField(null=True, blank=True)
 
     class Meta:
         ordering = ["name"]

@@ -1,6 +1,8 @@
 # core/classroom_chat_bridge.py
 """
 Classroom (liveclass app) <-> chat Group (message app) bridge — task 28.
+🔧 GAP FIX (this pass) — also now the campus (campus app) <-> chat
+Group / video-room bridge, see functions 10/11 below.
 
 Ye module do already-separate apps ko jodta hai: `liveclass` (classrooms,
 sessions, join requests, staff, bans) aur `message` (Groups/chat). Koi bhi
@@ -9,20 +11,21 @@ cross-app coupling isi ek file se guzarta hai — `liveclass/signals.py`,
 call karte hain (pehle 8 the — Task 5 ne `resolve_parent_from_token()`
 add ki, neeche dekho).
 
-🔧 Docstring fix: is module ke total **10** public entry points hain, na
-ki 9 — upar wale "9 functions" count sirf un functions ka hai jinhe
-`liveclass` khud call karta hai (functions 1-9, neeche numbered). 10wa
-entry point `get_groups_for_classrooms()` (bulk helper — neeche dekho)
-hai, jise `liveclass` nahi balki `message/views_parent.py` seedha call
-karta hai — isliye wo upar wali "9 functions" ginti me shaamil nahi tha,
-lekin module-level doc pehle isko clarify nahi karta tha. Ab dono counts
-explicit hain: 9 liveclass-facing + 1 message-facing = 10 total.
+🔧 Docstring fix: is module ke total **12** public entry points hain —
+functions 1-9 `liveclass` khud call karta hai, 10wa (`get_groups_for_
+classrooms()`) `message/views_parent.py` seedha call karta hai, aur naye
+11wa/12wa (`create_section_group()`/`provision_video_room()`, is pass me
+add kiye — campus/bridge.py's own STATUS note dekho) `campus/bridge.py`
+call karta hai. `resolve_parent_from_token()` khud renumbered ho gaya hai
+(ab #12, pehle #9 tha) taaki campus-facing functions liveclass-facing
+group ke saath (10/11) rahein, na ki unke beech me insert ho jaayein.
 
 Module khud kabhi `message.models`/`message.services` ko seedha import
 nahi karta (sirf local imports, function ke andar). Isse:
-    1. `liveclass` app `message` app ke internal implementation details
-       (Group ka exact shape, GroupMember role enum, ...) se decoupled
-       rehta hai — sirf yahi ek jagah dono taraf ka contract jaanta hai.
+    1. `liveclass`/`campus` app `message` app ke internal implementation
+       details (Group ka exact shape, GroupMember role enum, ...) se
+       decoupled rehte hain — sirf yahi ek jagah dono taraf ka contract
+       jaanta hai.
     2. Kal ko chat-backend badle (naya Group model, alag app) to sirf ye
        ek file badalni padegi.
 
@@ -31,9 +34,10 @@ jo liveclass/signals.py already follow karta hai): agar classroom ke paas
 `chat_group_enabled=False` hai (teacher ne kabhi group banaya hi nahi),
 har sync function chup-chaap NO-OP ho jaata hai — kabhi exception nahi
 raise karta jo caller (koi bhi signal handler) ko todde. Sirf
-`create_classroom_group()` (jo khud ek explicit teacher action hai, signal
-nahi) real errors raise karta hai — us case me caller (the view) ko pata
-hona chahiye ki create fail hui.
+`create_classroom_group()`/`create_section_group()` (jo khud explicit
+teacher/class-teacher confirm actions hain, signal nahi) real errors
+raise karte hain — us case me caller (the view) ko pata hona chahiye ki
+create fail hui.
 
 ✅ VERIFIED (Task 2 gap-fix pass) against the real `liveclass/models.py`:
 `Classroom.chat_group_enabled` / `linked_conversation_id`,
@@ -43,13 +47,17 @@ hona chahiye ki create fail hui.
 exactly what this module originally assumed — no field-name changes were
 needed, the ASSUMPTION markers below have been resolved and removed.
 
-9. `resolve_parent_from_token(token)` — Task 5, parent-portal auth. Ye
-   function differs from functions 1-8 in error-handling philosophy: it's
-   a live-room access gate (audio/video room, report-card/query-thread
-   data), so "best-effort, fail open, log and move on" would be the wrong
-   pattern here. It NEVER raises, but it also never silently allows —
-   every unknown/expired/revoked/unexpected condition returns `None`
-   (deny). See its own docstring below for the full contract.
+✅ VERIFIED (this pass) against the real `campus/models.py`:
+`Section.chat_group_enabled`/`linked_conversation_id` (newly added this
+same pass, mirroring `Classroom`'s pair exactly — see that model's own
+comment), `ClassTeacherAssignment(section, staff)`,
+`SubjectTeacherAssignment(section, subject, staff, status)` with
+`Status.APPROVED`, `StudentEnrollment(student, section, status)` with
+`Status.ACTIVE`, and `CampusLiveSession.room_id` (plain `CharField`) all
+match what functions 10/11 below assume.
+
+9. `resolve_parent_from_token(token)` was here — see #12 below, same
+   function, renumbered only (module docstring reorg, no behavior change).
 """
 
 import logging
@@ -429,7 +437,158 @@ def post_session_live_announcement(session):
 
 
 # ---------------------------------------------------------------------------
-# 9. resolve_parent_from_token() — Task 5, parent-portal auth
+# 10/11. Campus (campus app) <-> chat Group / video-room bridge functions.
+#
+# ADDED this pass to close the gap `campus/bridge.py`'s own module
+# docstring flagged: `create_section_group`/`provision_video_room` were
+# referenced from campus but did not exist here yet. Both follow the
+# exact same "campus never imports message/liveclass models directly,
+# core.classroom_chat_bridge is the only door" pattern as functions 1-8
+# above — the only difference is the section/campus vocabulary
+# (StudentEnrollment/ClassTeacherAssignment/SubjectTeacherAssignment
+# instead of ClassJoinRequest/ClassroomStaff) and, for the video room,
+# no persistent-model integration at all (see that function's own
+# docstring for why).
+# ---------------------------------------------------------------------------
+def _get_group_for_section(section):
+    """`_get_group_for_classroom()`'s exact counterpart for
+    `campus.Section` — same contract: never raises, returns `None` if
+    no group is linked or if the linked Group has gone missing."""
+    if not getattr(section, "chat_group_enabled", False) or not section.linked_conversation_id:
+        return None
+    from message.models import Group  # local import — cross-app, avoid module-load-time coupling
+
+    try:
+        return Group.objects.select_related("conversation").get(
+            conversation_id=section.linked_conversation_id
+        )
+    except Group.DoesNotExist:
+        logger.warning(
+            "Section %s has chat_group_enabled=True but its linked Group is missing "
+            "(conversation_id=%s) — was it deleted directly?",
+            section.pk, section.linked_conversation_id,
+        )
+        return None
+
+
+def create_section_group(section, actor):
+    """
+    `create_classroom_group()`'s counterpart for `campus.Section` —
+    called from campus's own class-teacher "create chat group" confirm
+    action (campus/bridge.py::create_section_group, which is now a
+    direct top-level-import wrapper around this function — see that
+    file's STATUS note).
+
+    Idempotent — returns the existing group unchanged if `section`
+    already has one linked (`_get_group_for_section()` above).
+
+    Initial members: every ACTIVE `StudentEnrollment` for this section,
+    plus every APPROVED `SubjectTeacherAssignment` for it (promoted to
+    MODERATOR after creation, same as classroom co-teachers/moderators
+    above) — campus has no `ClassJoinRequest`/`ClassroomStaff` concept,
+    these are its equivalents. The section's own class-teacher
+    (`ClassTeacherAssignment`) is the group creator/ADMIN.
+
+    Raises `ValueError` if `actor` isn't this section's assigned
+    class-teacher (same "extra safety net, view should also check its
+    own permission" reasoning `create_classroom_group()` documents).
+    """
+    # Local imports — cross-app (campus), same "no hard import-time
+    # coupling" reasoning every other local import in this module gives.
+    from campus.models import ClassTeacherAssignment, StudentEnrollment, SubjectTeacherAssignment
+    from message.models import GroupMember
+    from message.services import create_group
+
+    class_teacher_assignment = (
+        ClassTeacherAssignment.objects.filter(section=section)
+        .select_related("staff__user")
+        .first()
+    )
+    if class_teacher_assignment is None or actor.id != class_teacher_assignment.staff.user_id:
+        raise ValueError("Sirf section ka class-teacher hi chat group bana sakta hai.")
+
+    existing = _get_group_for_section(section)
+    if existing is not None:
+        return existing
+
+    student_ids = list(
+        StudentEnrollment.objects.filter(
+            section=section, status=StudentEnrollment.Status.ACTIVE,
+        ).values_list("student_id", flat=True)
+    )
+    subject_teacher_user_ids = list(
+        SubjectTeacherAssignment.objects.filter(
+            section=section, status=SubjectTeacherAssignment.Status.APPROVED,
+        ).values_list("staff__user_id", flat=True)
+    )
+    member_ids = set(student_ids) | set(subject_teacher_user_ids)
+
+    with transaction.atomic():
+        group = create_group(
+            created_by=class_teacher_assignment.staff.user,
+            name=str(section),
+            description="",
+            # Section has no cover-image-equivalent field (confirmed
+            # against campus/models.py) — unlike Classroom, so no
+            # `_section_cover_image_url()` helper exists to mirror
+            # `_classroom_cover_image_url()` above; `photo_url=None` is
+            # the honest value here, not a gap.
+            photo_url=None,
+            is_private=True,
+            member_ids=member_ids,
+        )
+        if subject_teacher_user_ids:
+            GroupMember.objects.filter(
+                group=group, user_id__in=subject_teacher_user_ids,
+            ).update(role=GroupMember.Role.MODERATOR)
+
+        section.linked_conversation_id = group.conversation_id
+        section.chat_group_enabled = True
+        section.save(update_fields=["linked_conversation_id", "chat_group_enabled"])
+
+    return group
+
+
+def provision_video_room(live_session, actor):
+    """
+    Generates the LiveKit room identifier for a `campus.CampusLiveSession`
+    and returns it as a plain string — this is what campus/bridge.py's
+    wrapper hands back to `CampusLiveSessionViewSet.perform_create` to
+    store directly in `CampusLiveSession.room_id` (a `CharField`, per
+    campus/models.py).
+
+    Deliberately does NOT mint a LiveKit JWT here. [CONFIRMED, from
+    message/views.py's actual call sites — message/livekit_utils.py's own
+    source wasn't in this pass — `generate_livekit_token(room_name, user_id,
+    user_name)` is the real signature `CallInitiateView`/`StudyRoomJoinView`
+    call]: every one of those call sites mints a token PER PARTICIPANT, AT
+    JOIN TIME, using a room_name that already exists — never once up front
+    for a room that has no participants yet. A LiveKit token is
+    short-lived and viewer-specific; storing one now (for `actor`, the
+    person scheduling/starting the session) would go stale long before a
+    student actually joins, and would be the wrong identity for every
+    OTHER participant anyway. So this function's job stops at handing
+    back a stable, deterministic room name — whatever campus view later
+    handles "join this live session" is the right place to call
+    `message.livekit_utils.generate_livekit_token(room_name=<this
+    CampusLiveSession.room_id>, user_id=<joining user>.id,
+    user_name=<joining user>'s display name)` fresh, per participant —
+    that endpoint wasn't part of this pass (`campus/views.py` not
+    provided), so it isn't wired here; flagging rather than guessing at
+    its shape.
+
+    `actor` is accepted (kept in the signature campus/bridge.py already
+    calls this with) but unused below — no permission check is performed
+    here because `CampusLiveSessionViewSet.perform_create` is assumed to
+    already gate session-scheduling to the right staff (teacher/co-
+    teacher) before ever reaching this call; this function only names
+    the room.
+    """
+    return f"campus_live_session_{live_session.id}"
+
+
+# ---------------------------------------------------------------------------
+# 12. resolve_parent_from_token() — Task 5, parent-portal auth
 # ---------------------------------------------------------------------------
 class ParentTokenResolution:
     """Lightweight result object — `liveclass/permissions.py`'s

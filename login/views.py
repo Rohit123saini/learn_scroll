@@ -1,5 +1,6 @@
 # login/view.py
 import logging
+import uuid
 
 from django.contrib.auth import authenticate
 from rest_framework.generics import GenericAPIView
@@ -13,6 +14,7 @@ from rest_framework_simplejwt.tokens import RefreshToken
 from rest_framework.permissions import IsAuthenticated
 from .serializers import ChangePasswordSerializer
 from .models import OTPVerification
+from django.db import IntegrityError, transaction
 from django.db.models import Q
 from drf_spectacular.utils import (
     extend_schema,
@@ -206,8 +208,34 @@ class GoogleAuthView(APIView):
             user = CustomUser.objects.get(email=email)
             created = False
         except CustomUser.DoesNotExist:
-            # ✅ avoid IntegrityError when two different emails share the
-            # same local part (e.g. raj@gmail.com and raj@yahoo.com)
+            # 🔧 FIX (this pass, login_app_reference.md §11 item 3) —
+            # the `exists()` pre-check below is a fast-path optimisation
+            # only, NOT the actual uniqueness guarantee: under
+            # concurrent Google sign-ins, two requests can both pass
+            # `exists()` for the same `username` (or even both pass
+            # `CustomUser.objects.get(email=email)` raising
+            # `DoesNotExist` for the same brand-new `email`) before
+            # either has called `.create()` — a classic
+            # check-then-act race. The DB's own unique constraint
+            # (username, and presumably email) is the only thing that
+            # can't be raced, so it's now the actual arbiter:
+            # `.create()` runs inside `transaction.atomic()` and a
+            # resulting `IntegrityError` is caught and resolved instead
+            # of propagating as a 500.
+            #
+            # Two distinct races can produce that `IntegrityError`:
+            #   1. Another concurrent Google sign-in for this SAME email
+            #      won the race and already inserted its row — re-fetch
+            #      by email; if found, that's the real user, this
+            #      request was never actually a signup.
+            #   2. A completely unrelated signup (any path, not just
+            #      Google) grabbed this exact `username` in the gap
+            #      between our `exists()` check and our `.create()` —
+            #      bump the suffix and retry.
+            # `exists()` pre-check is kept as-is (cheap, avoids paying
+            # for an `IntegrityError` + retry in the overwhelmingly
+            # common non-racy case); the retry loop below is the
+            # correctness backstop for when it's wrong.
             base_username = email.split("@")[0]
             username = base_username
             suffix = 1
@@ -215,14 +243,49 @@ class GoogleAuthView(APIView):
                 username = f"{base_username}{suffix}"
                 suffix += 1
 
-            user = CustomUser.objects.create(
-                email=email,
-                username=username,
-                first_name=first_name,
-                last_name=last_name,
-                is_verified=True,  # Google ne email verify kar di hai
-            )
-            created = True
+            user = None
+            created = False
+            max_attempts = 5
+            for _ in range(max_attempts):
+                try:
+                    with transaction.atomic():
+                        user = CustomUser.objects.create(
+                            email=email,
+                            username=username,
+                            first_name=first_name,
+                            last_name=last_name,
+                            is_verified=True,  # Google ne email verify kar di hai
+                        )
+                    created = True
+                    break
+                except IntegrityError:
+                    existing = CustomUser.objects.filter(email=email).first()
+                    if existing is not None:
+                        # Race #1 — someone else already created this
+                        # exact account between our DoesNotExist check
+                        # and now. Treat this request as a login, not a
+                        # signup.
+                        user = existing
+                        created = False
+                        break
+                    # Race #2 (or a plain non-unique username with no
+                    # email collision) — try the next suffix.
+                    username = f"{base_username}{suffix}"
+                    suffix += 1
+            else:
+                # Exhausted every attempt above — pathological, sustained
+                # contention on the exact same local-part. Fall back to
+                # a suffix that can't realistically collide rather than
+                # surfacing a 500 to the user.
+                username = f"{base_username}{uuid.uuid4().hex[:8]}"
+                user = CustomUser.objects.create(
+                    email=email,
+                    username=username,
+                    first_name=first_name,
+                    last_name=last_name,
+                    is_verified=True,
+                )
+                created = True
 
         if created:
             user.set_unusable_password()

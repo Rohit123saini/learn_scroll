@@ -99,6 +99,12 @@ from .push_utils import (
 from .services import (
     add_or_reactivate_participant, create_group, add_members_to_group,
     remove_group_member, update_group_member_role,
+    # 🔧 REFACTOR (this pass) — DoubtQuestionViewSet.answer() below used to
+    # duplicate this function's set/save steps inline instead of calling
+    # it, the same anti-pattern already caught and fixed once before for
+    # `group_rules.is_group_admin_or_mod` (4 duplicated copies). See that
+    # method for the fix.
+    answer_doubt_question,
 )
 # 🔧 GAP FIX (task 49) — `flush_offline_queue` was fully implemented in
 # `offline_queue.py` but had no caller anywhere — no `@action`, no
@@ -2664,20 +2670,41 @@ class DoubtQuestionViewSet(mixins.ListModelMixin, viewsets.GenericViewSet):
     # 🔥 Teacher answers the (usually top-upvoted) doubt — admin/moderator
     # only, same "single source of truth" role-check as everywhere else in
     # this app (`is_group_admin_or_mod`, cached).
+    #
+    # 🔧 REFACTOR (this pass) — was duplicating services.answer_doubt_
+    # question()'s set/save steps inline instead of calling it (§9.4 item
+    # 23). Now delegates to the shared function — the same one testseries/
+    # bridge.py::answer_query_on_series() already calls for the
+    # context-pointer (non-group) doubt path — so there's one place, not
+    # two, that knows how to answer a DoubtQuestion. The explicit
+    # `self._require_teacher(group, request.user)` call this used to make
+    # is dropped: `answer_doubt_question()` already does the identical
+    # `require_group_admin_or_mod` check itself whenever `doubt.group_id`
+    # is set and `actor` is given (see that function's docstring) — doing
+    # it here too would just be the duplicated-permission-check version of
+    # the same bug. That function raises plain `PermissionError`/
+    # `ValueError` (never a DRF exception, by design — see services.py's
+    # own module docstring), so both are converted to their DRF/HTTP
+    # equivalents here, same convention `add_members`/`update_member`
+    # already use for `add_members_to_group`/`update_group_member_role`.
     @action(detail=True, methods=['post'], url_path='answer')
     def answer(self, request, pk=None, group_id=None):
         group = self.get_group()
-        self._require_teacher(group, request.user)
         doubt = get_object_or_404(DoubtQuestion, id=pk, group=group)
 
         serializer = DoubtAnswerSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
 
-        doubt.answer_text = serializer.validated_data['answer_text']
-        doubt.is_answered = True
-        doubt.answered_by = request.user
-        doubt.answered_at = timezone.now()
-        doubt.save(update_fields=['answer_text', 'is_answered', 'answered_by', 'answered_at'])
+        try:
+            doubt = answer_doubt_question(
+                doubt=doubt,
+                actor=request.user,
+                answer_text=serializer.validated_data['answer_text'],
+            )
+        except PermissionError as e:
+            raise PermissionDenied(str(e))
+        except ValueError as e:
+            return Response({'detail': str(e)}, status=status.HTTP_400_BAD_REQUEST)
 
         out = DoubtQuestionSerializer(doubt, context={'request': request}).data
         self._broadcast(group, 'doubt_answered', out)

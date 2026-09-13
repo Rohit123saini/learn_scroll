@@ -2,6 +2,13 @@
 
 > Ye document `core` Django app ke andar jo bhi kaam hua hai (tasks 28, 42-48, Task 18, F-1, F-4) uska single source of truth hai. Koi bhi is app pe kaam continue kare, sabse pehle ye file padhe — har file ka purpose, har function ka contract, aur sab `ASSUMPTION` markers ek jagah pe hain.
 
+> **Reconciliation pass (newest — this update):** `classroom_chat_bridge.py` firse check kiya gaya — **§6 ka "10 public/semi-public entry points" claim ab STALE hai.** File me ab campus (`campus` app) ↔ chat-Group/video-room bridge ke **2 naye functions** hain, jo is doc me pehle kahin mention nahi the:
+> - `create_section_group(section, actor)` — `create_classroom_group()`'s `campus.Section` counterpart (`campus/bridge.py::create_section_group` isko ab top-level import ke through seedha call karta hai). Members = ACTIVE `StudentEnrollment` + APPROVED `SubjectTeacherAssignment` (promoted to MODERATOR), creator/ADMIN = section ka `ClassTeacherAssignment`. Idempotent, `ValueError` agar `actor` class-teacher na ho — same contract-shape jo `create_classroom_group()` already follow karta hai.
+> - `provision_video_room(live_session, actor)` — `campus.CampusLiveSession.room_id` ke liye ek deterministic room-name string (`f"campus_live_session_{live_session.id}"`) banata hai. **LiveKit JWT yahan mint NAHI hoti** — har participant apna token join-time pe, apni identity ke saath, alag se banata hai (`message.livekit_utils.generate_livekit_token`, jo abhi tak `campus/views.py` na aane ki wajah se wire nahi hai — flagged, guess nahi kiya gaya).
+> - Module ka apna docstring ab khud ko **12 public entry points** bolta hai (pehle 10): 8 liveclass-facing sync functions (1-8) + `get_groups_for_classrooms()` (message-facing) + naye `create_section_group()`/`provision_video_room()` (campus-facing, functions 10/11) + `resolve_parent_from_token()` — jo iss pass me **#9 se #12 pe renumber ho gaya** hai, taaki campus-facing pair (10/11) module ke andar contiguous rahe, beech me insert na ho.
+> - Iske saath `campus.models` (`ClassTeacherAssignment`, `StudentEnrollment`, `SubjectTeacherAssignment`) is file ki dependency list me bhi add ho gaya hai — pehle sirf `message.models`/`message.services` documented tha.
+> §1, §2, §6, aur §8 (dependency graph) neeche update kar diye gaye hain.
+
 > **Reconciliation pass (latest — this update):** `models.py` aur nayi migration file (`0004_alter_notification_notif_type.py`) ke against check kiya — **`NotifType` enum ka documentation bahut peeche reh gaya tha**, fix kar diya:
 > - **§3's `NotifType` list sirf 31 values document karti thi ("28 original liveclass + 3 message-app types") — real enum me ab 55 values hain.** Missing the: task 11 ka `post` app block (`POST_LIKED`/`POST_COMMENTED`, 2), pura campus block (9), testseries/assignment/campus-gamification block (8), aur is pass (TASK 1) ke 5 naye `FOLLOW_*`/`*_FROM_FOLLOWED` values (`user_profile`'s Follow feature). §3 ab poori 55-value list, grouped by source app, ke saath update hai.
 > - **`CAMPUS_APP_TYPES`, `TESTSERIES_APP_TYPES`, aur naya `FOLLOW_APP_TYPES` — teeno frozensets is doc me pehle kabhi mention nahi hue the**, sirf `MESSAGE_APP_TYPES` document tha. `views.py`/`serializers.py` ke apne-apne app ka notification-routing in par depend karta hai (same "ek jagah se dono import karein" pattern jo `MESSAGE_APP_TYPES` ke liye already tha) — §3 me sab add kiye.
@@ -26,9 +33,9 @@
 Pehle notifications aur classroom↔chat coupling `liveclass` app ke andar bikhri hui thi. `core` app do cheezein centralize karta hai:
 
 1. **Notification system** (task 42-48) — `Notification` + `NotificationPreference` models, unko banane ka service (`create_notification`), burst events ke liye batching (`create_batched_notification`), aur inhe expose karne wale REST endpoints.
-2. **Classroom ↔ Chat bridge** (task 28) — `liveclass` app (classrooms) aur `message` app (chat groups) ke beech ka SAARA coupling isi ek file (`classroom_chat_bridge.py`) se guzarta hai, taaki dono apps ek dusre ke internal models seedhe import na karein.
+2. **Classroom ↔ Chat bridge** (task 28) — `liveclass` app (classrooms) aur `message` app (chat groups) ke beech ka SAARA coupling isi ek file (`classroom_chat_bridge.py`) se guzarta hai, taaki dono apps ek dusre ke internal models seedhe import na karein. **Naya (is pass) — ye ab `campus` app ↔ chat-Group/video-room bridge bhi hai**: `campus/bridge.py` isi file ke `create_section_group()`/`provision_video_room()` (§6) ke through campus ke section-level chat groups aur live-session video rooms banata hai, same "kisi ke internal model seedha import mat karo" pattern se.
 
-**Design principle jo har jagah repeat hoti hai:** `core` ek neutral, app-agnostic layer hai — `liveclass`, `message`, aur future Phase 5 (Posts/Follow/Like) sab isi se hokar guzarte hain, ye kisi ek app ka internal detail nahi jaanta.
+**Design principle jo har jagah repeat hoti hai:** `core` ek neutral, app-agnostic layer hai — `liveclass`, `message`, `campus`, aur future Phase 5 (Posts/Follow/Like) sab isi se hokar guzarte hain, ye kisi ek app ka internal detail nahi jaanta.
 
 ---
 
@@ -40,7 +47,7 @@ Pehle notifications aur classroom↔chat coupling `liveclass` app ke andar bikhr
 | `migrations/0004_alter_notification_notif_type.py` | **NEW row, is doc me pehle mention nahi thi.** State-only `AlterField` — `notif_type`'s `choices=` ko current 55-value list se sync karta hai, koi DB-level operation nahi (Postgres/SQLite pe zero SQL). Purpose sirf `makemigrations --check` (CI) ko drift-free rakhna hai. |
 | `services.py` | `create_notification()` + `create_bulk_notifications()` — sirf bell-row(s) banate hain, push kabhi nahi bhejte |
 | `notification_batching.py` | `create_batched_notification()` — burst events (5 likes ek saath) ko ek notification me collapse karta hai. ✅ **Real implementation ab uploaded hai — see §5** (pehle yahan broken-content warning thi). |
-| `classroom_chat_bridge.py` | `liveclass` ↔ `message` app ke beech ka pura coupling — 8 sync functions + `get_groups_for_classrooms()` (bulk helper) + `resolve_parent_from_token()` (Task 5, parent-portal auth) — **poora file ab uploaded hai, body-not-available warning resolved — see §6/§6.1** |
+| `classroom_chat_bridge.py` | `liveclass` ↔ `message` app ke beech ka pura coupling, **ab `campus` app ke saath bhi** — 8 liveclass sync functions + `get_groups_for_classrooms()` (bulk helper) + `create_section_group()`/`provision_video_room()` (**NEW is pass, campus ↔ chat/video bridge**) + `resolve_parent_from_token()` (Task 5, parent-portal auth, ab #12) — **12 total public entry points — see §6/§6.1** |
 | `search.py` | Unified cross-app "search everything" (Postgres FTS + trigram, `message/search_utils.py` ka extension). **4 sources ab WIRED hain**: `message`, `campus.Notice` (Task F-4), aur `assignment`/`testseries` (Task 18, is pass me confirm hue) — `post`/`liveclass.ClassMaterial` abhi bhi STUB hain (model uploads na hone ki wajah se). Pure ranking/merging layer hai — koi bhi permission-scoping khud nahi karta, caller (`core/views.py::SearchView`) ka pehle se scoped queryset leta hai. §6.2 dekho. |
 | `serializers.py` | Real DRF `ModelSerializer`s (`NotificationSerializer`, `NotificationPreferenceSerializer`), replacing this doc's own original `to_dict` suggestion — see §7 |
 | `views.py` | `NotificationViewSet` (list/retrieve/destroy + custom actions) + `NotificationPreferenceView` + **`SearchView`** (Task 18, unified search endpoint — is pass me "wired" confirm hua, see §6.2/§7) |
@@ -270,9 +277,11 @@ Is doc ka §5 pehle bolta tha ki `push_utils.py` kabhi upload nahi hua aur uske 
 
 **Golden rule:** `liveclass/signals.py`, `liveclass/views.py`, aur `notify_session_live` task — koi bhi seedha `message.models` / `message.services` import NAHI karta. Sab is ek file se guzarta hai.
 
-✅ **Poora `classroom_chat_bridge.py` ab uploaded hai** (pehle sirf indirect evidence se contract infer kiya gaya tha) — file me total **10 public/semi-public entry points** hain: 8 sync functions + `get_groups_for_classrooms()` (bulk helper) + `resolve_parent_from_token()` (Task 5).
+✅ **Poora `classroom_chat_bridge.py` ab uploaded hai** (pehle sirf indirect evidence se contract infer kiya gaya tha) — file me total **12 public/semi-public entry points** hain (pichli pass ne 10 document kiye the — is pass ke 2 naye campus-bridge functions neeche add kiye gaye): 8 liveclass sync functions + `get_groups_for_classrooms()` (bulk helper) + `create_section_group()`/`provision_video_room()` (**NEW, campus bridge — see naya subsection neeche**) + `resolve_parent_from_token()` (Task 5).
 
-✅ **FIXED (docstring bug):** module ka apna docstring pehle khud ko "9 functions" bolta tha bina clarify kiye ki `get_groups_for_classrooms()` us ginti me kyun nahi hai — koi functional bug nahi tha (code sahi kaam kar raha tha), sirf ambiguous/stale documentation thi jo naye reader ko confuse kar sakti thi. Ab docstring explicit hai: "9 functions" sirf un ko refer karta hai jinhe `liveclass` khud call karta hai (functions 1-9, neeche numbered); `get_groups_for_classrooms()` module ka **10wa** entry point hai — ek bulk/"GAP FIX" twin of `_get_group_for_classroom()`, parent dashboard ke liye add kiya gaya (neeche dekho), aur `liveclass` nahi balki `message/views_parent.py` seedha isko call karta hai, isliye wo "9 liveclass-facing functions" ki ginti se bahar tha. Dono counts (9 liveclass-facing + 1 message-facing = 10 total) ab module docstring me khud explicit hain.
+✅ **FIXED (docstring bug):** module ka apna docstring pehle khud ko "9 functions" bolta tha bina clarify kiye ki `get_groups_for_classrooms()` us ginti me kyun nahi hai — koi functional bug nahi tha (code sahi kaam kar raha tha), sirf ambiguous/stale documentation thi jo naye reader ko confuse kar sakti thi. Ab docstring explicit hai: "9 functions" sirf un ko refer karta hai jinhe `liveclass` khud call karta hai (functions 1-9, neeche numbered); `get_groups_for_classrooms()` module ka **10wa** entry point hai — ek bulk/"GAP FIX" twin of `_get_group_for_classroom()`, parent dashboard ke liye add kiya gaya (neeche dekho), aur `liveclass` nahi balki `message/views_parent.py` seedha isko call karta hai, isliye wo "9 liveclass-facing functions" ki ginti se bahar tha. Dono counts (9 liveclass-facing + 1 message-facing = 10 total) module docstring me khud explicit hain.
+
+⚠️ **NEW is pass — numbering firse shift hui:** upar wala "10 total" ab stale hai. Module me ab 2 naye campus-facing functions (`create_section_group()`, `provision_video_room()`) add hue hain, jinhe docstring khud "10/11" number deta hai — isliye `resolve_parent_from_token()` ko **#9 se #12 pe renumber** kar diya gaya, taaki campus-facing pair (10/11) contiguous rahe aur beech me insert na ho. Naya total: **12 public entry points**. Koi behavior change nahi — sirf docstring ki apni internal numbering hilii hai.
 
 ### `get_groups_for_classrooms(classrooms)` — **NEW, iss doc me pehle mention nahi tha**
 
@@ -306,6 +315,17 @@ Is doc ka §5 pehle bolta tha ki `push_utils.py` kabhi upload nahi hua aur uske 
 | 7 | `post_welcome_message(classroom)` | Group creation ke turant baad | "chat group ban gaya hai 🎉" wala system message |
 | 8 | `post_session_live_announcement(session)` | `notify_session_live` task se | "🔴 Live session shuru ho gaya hai" wala system message |
 
+### 10/11. Campus bridge functions — **NEW is pass, is doc me pehle bilkul mention nahi thi**
+
+`campus/bridge.py`'s own STATUS note flag karti thi ki `create_section_group`/`provision_video_room` campus se reference ho rahe the lekin yahan exist nahi karte the — is gap ko close karne ke liye add kiye gaye. Same "campus kabhi seedha `message`/`liveclass` models import nahi karta, `core.classroom_chat_bridge` hi ek darwaaza hai" pattern jo functions 1-8 already follow karte hain — sirf vocabulary campus ki hai (`StudentEnrollment`/`ClassTeacherAssignment`/`SubjectTeacherAssignment` instead of `ClassJoinRequest`/`ClassroomStaff`).
+
+| # | Function | Kab call hoti hai | Behavior |
+|---|---|---|---|
+| 10 | `create_section_group(section, actor)` | Class-teacher ka "create chat group" confirm action, `campus/bridge.py::create_section_group` se (ab us file ka ek direct top-level-import wrapper) | `create_classroom_group()`'s exact counterpart. **Idempotent** — section ke paas already group hai to wahi return (`_get_group_for_section()`, `_get_group_for_classroom()` ka apna counterpart). Members = ACTIVE `StudentEnrollment` + APPROVED `SubjectTeacherAssignment` (baad me `MODERATOR` pe promote), creator/ADMIN = section ka `ClassTeacherAssignment`. `actor` section ka assigned class-teacher na ho to `ValueError` (same "extra safety net" reasoning jo `create_classroom_group()` deta hai). Section ke paas Classroom jaisa koi cover-image field nahi hai (confirmed against `campus/models.py`) — isliye `photo_url=None` pass hota hai, koi `_section_cover_image_url()` helper nahi banaya gaya. |
+| 11 | `provision_video_room(live_session, actor)` | `campus.CampusLiveSession` schedule/create hone pe, `campus/bridge.py` se | LiveKit room-identifier banata hai aur plain string return karta hai (`f"campus_live_session_{live_session.id}"`), jo caller `CampusLiveSession.room_id` (`CharField`) me store karta hai. **Yahan koi LiveKit JWT mint NAHI hoti** — `message/views.py` ke real call-sites (`CallInitiateView`/`StudyRoomJoinView`) confirm karte hain ki `generate_livekit_token(room_name, user_id, user_name)` har participant ke liye JOIN-TIME pe, per-participant call hoti hai, ek baar upfront nahi — ek token short-lived aur viewer-specific hota hai, abhi banaya to student actual join karne se pehle hi stale ho jaata. `actor` signature me accepted hai (campus/bridge.py isi se call karta hai) par unused — permission check yahan nahi hai, `CampusLiveSessionViewSet.perform_create` se already gate maana gaya hai. **Open gap:** "join this live session" endpoint jo per-participant `generate_livekit_token()` call karega, wo `campus/views.py` iss pass me upload nahi hua, isliye wire nahi hai — flagged, guess nahi kiya gaya. |
+
+**Verified against `campus/models.py` (this pass):** `Section.chat_group_enabled`/`linked_conversation_id` (naya, `Classroom`'s pair ko exactly mirror karta hai), `ClassTeacherAssignment(section, staff)`, `SubjectTeacherAssignment(section, subject, staff, status)` with `Status.APPROVED`, `StudentEnrollment(student, section, status)` with `Status.ACTIVE`, aur `CampusLiveSession.room_id` (plain `CharField`) — sab functions 10/11 ki assumptions se match karte hain.
+
 ### ✅ ASSUMPTIONS — RESOLVED (pehle 4 the, ab sab verified)
 
 Ye doc pehle bolta tha `liveclass/models.py`/`liveclass/views.py` upload nahi hue the, isliye field-names best-guess hain. **Ab resolve ho chuka hai** — real `classroom_chat_bridge.py` ka apna module docstring confirm karta hai ("✅ VERIFIED, Task 2 gap-fix pass"):
@@ -325,6 +345,13 @@ Ye doc pehle bolta tha `liveclass/models.py`/`liveclass/views.py` upload nahi hu
 - **(§6.1, naya)** `message.models.ParentAccessCode`, `ParentToken`
 
 Ye sab functions/models `message` app me already exist maane gaye hain — agar signature mismatch ho to yahi jagah check karo.
+
+### `campus` app se dependency — **NEW is pass, pehle is doc me nahi thi**
+
+Functions 10/11 (upar) is cheez ko `campus` app se local-import karte hain:
+- `campus.models.ClassTeacherAssignment`, `StudentEnrollment`, `SubjectTeacherAssignment`
+
+`campus/models.py` ke against verify ho chuka hai (upar dekho) — koi assumption gap nahi.
 
 ---
 
@@ -487,6 +514,11 @@ liveclass  ──uses──▶  core.classroom_chat_bridge (8 sync functions)
 liveclass.permissions.HasValidParentSessionToken ──uses──▶ core.classroom_chat_bridge.resolve_parent_from_token
                             └──local-import──▶ message.models (ParentAccessCode, ParentToken)
 
+campus.bridge  ──uses──▶  core.classroom_chat_bridge.create_section_group / provision_video_room   [NEW]
+                            ├──local-import──▶ campus.models (ClassTeacherAssignment, StudentEnrollment,
+                            │                                  SubjectTeacherAssignment)
+                            └──local-import──▶ message.models (Group, GroupMember), message.services (create_group)
+
 message    ──(pending, task 44)──▶  core.services.create_notification   [bell-row for FCM pushes]
 
 message.views_parent.StudentReportCardList  ──uses──▶  core.classroom_chat_bridge.get_groups_for_classrooms  [NEW]
@@ -526,7 +558,8 @@ core.views.SearchView  ──uses──▶  core.search.search_everything   [Tas
 13. ✅ ~~`search.py` expose karne ke liye koi `views.py`/`urls.py` endpoint nahi tha~~ — **resolved, is pass me confirm hua.** `core/views.py::SearchView` + `core/urls.py`'s `path("search/", ...)` dono ab wired hain (§6.2, §7). `post`/`liveclass.ClassMaterial` sources abhi bhi stub hain (§6.2) un models ke upload hone tak — ye hissa khula hai.
 14. **NEW open item:** `SearchView`/`search_everything()` ke liye `tests.py` me **koi test nahi hai** — na success path (`?q=`, `?sources=`), na 400-on-short-query, na "assignment/testseries scoping sahi hai" wali regression. Sabse pehle iske liye tests likhna agla natural kaam hai.
 15. **NEW open item:** `SearchView` sirf `assignment`/`testseries` ke liye scoped queryset banata hai — `message`/`campus_notice` (`Notice`) `search.py`'s `SOURCES` me registered hain (§6.2) lekin `SearchView.get()` unke liye koi queryset nahi banata, isliye `?sources=message`/`?sources=campus_notice` aaj silently khaali result dete hain. Inke liye bhi scoped-queryset builder add karna hai (§7 me flag kiya) jab ye tasked ho.
-16. **NEW open item (F-1, `check_config_drift.py`):** command khud apne docstring me `settings.py` me `CONFIG_DRIFT_APPS = ["user_profile", "core"]` set karne ko kehta hai — ye setting is upload me confirm nahi ho saki (settings.py iss pass me nahi aaya). Verify karo ye setting maujood hai, aur command ko CI me (`--strict` flag ke saath) wire karna hai taaki drift automatically catch ho — abhi sirf manually `python manage.py check_config_drift` chalane se hi kaam karta hai.
+16. **NEW open item (this pass, `classroom_chat_bridge.py` §6 functions 10/11):** `provision_video_room()` sirf room-name banata hai — koi endpoint jo "join this campus live session" pe har participant ke liye `message.livekit_utils.generate_livekit_token()` fresh call kare, wo abhi wire nahi hai (`campus/views.py` iss pass upload nahi hua). Room-naming se lekar actual joinable-call tak ka path is pass me incomplete hai.
+17. **NEW open item (F-1, `check_config_drift.py`):** command khud apne docstring me `settings.py` me `CONFIG_DRIFT_APPS = ["user_profile", "core"]` set karne ko kehta hai — ye setting is upload me confirm nahi ho saki (settings.py iss pass me nahi aaya). Verify karo ye setting maujood hai, aur command ko CI me (`--strict` flag ke saath) wire karna hai taaki drift automatically catch ho — abhi sirf manually `python manage.py check_config_drift` chalane se hi kaam karta hai.
 
 ---
 

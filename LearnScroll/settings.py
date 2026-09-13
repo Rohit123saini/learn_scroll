@@ -546,6 +546,17 @@ REST_FRAMEWORK = {
         "ai_study": "20/min",
         "send_otp": "5/min",
         "verify_otp": "10/min",
+        # NOTE (fix — CRITICAL, same bug class as every other scope
+        # documented in this dict): login_app_reference.md confirms
+        # `ForgotPasswordView`/`ResetPasswordView` (login/views.py) are
+        # wired with ScopedRateThrottle to throttle_scope="forgot_password"
+        # / "reset_password" respectively, but neither scope had a rate
+        # here — ImproperlyConfigured (guaranteed 500) on the very first
+        # forgot-password or reset-password request. Rates match each
+        # view's own documented intended rate (same reasoning as
+        # send_otp/verify_otp above, which these mirror one-for-one).
+        "forgot_password": "5/min",
+        "reset_password": "10/min",
         # NOTE (fix — CRITICAL, would crash in production): views.py wires
         # ScopedRateThrottle onto four liveclass actions —
         # ClassSessionViewSet.join (throttle_scope="session_join"),
@@ -1101,6 +1112,28 @@ CELERY_BEAT_SCHEDULE = {
         # fee-reminder job above so both don't hit the DB in the same
         # minute.
         "schedule": crontab(hour=8, minute=30),
+    },
+    # 🔧 FIX (this pass) — same "written but never registered" bug this
+    # file already had to fix for check_low_attendance/
+    # send_assignment_due_reminders above: campus/tasks.py's F-3
+    # check_attendance_streak_rewards() and
+    # check_assignment_ontime_streak_rewards() both existed and (per the
+    # previous pass) no longer crash on import, but neither was ever
+    # added to this schedule — a Celery task that's never registered
+    # here simply never fires on its own, no error, no log, nothing.
+    # Both loop internally over every ACTIVE enrollment themselves (same
+    # shape as check_low_attendance), so a single global crontab entry
+    # each is correct as-is — no args needed. Once-daily, staggered
+    # after the existing 8:00/8:30 fee/assignment jobs and the 18:00
+    # low-attendance check above so none of the five campus jobs land in
+    # the same minute.
+    "campus-check-attendance-streak-rewards": {
+        "task": "campus.tasks.check_attendance_streak_rewards",
+        "schedule": crontab(hour=19, minute=0),
+    },
+    "campus-check-assignment-ontime-streak-rewards": {
+        "task": "campus.tasks.check_assignment_ontime_streak_rewards",
+        "schedule": crontab(hour=19, minute=30),
     },
     # 🔴 REMOVED (this pass) — "campus-rollover-session" and
     # "campus-refresh-analytics-snapshot" were both registered here with

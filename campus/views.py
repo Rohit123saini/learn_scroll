@@ -1056,6 +1056,14 @@ def _serialize_campus_testseries(series):
     Field` against this pass's `testseries/models.py` upload (previously
     flagged here as an unverified assumption, inferred only from
     `recompute_total_marks()`'s name).
+
+    `price_coins` — [Task 19 — ORG_VS_INDIVIDUAL_MATRIX] added this pass
+    alongside wiring up `Campus.testseries_paid_allowed`; was missing
+    before even though `series.is_paid` was already exposed, because
+    `is_paid` was always `False` and `price_coins` was therefore always
+    `0` for every campus series — nothing to show. Now that a campus can
+    opt in to paid series, `price_coins` is meaningful and belongs
+    alongside `is_paid`.
     """
     section = _section_for_testseries(series)
     return {
@@ -1065,6 +1073,7 @@ def _serialize_campus_testseries(series):
         "title": series.title,
         "description": series.description,
         "is_paid": series.is_paid,
+        "price_coins": series.price_coins,
         "duration_minutes": series.duration_minutes,
         "attempts_allowed": series.attempts_allowed,
         "status": series.status,
@@ -1133,6 +1142,27 @@ class TestSeriesViewSet(viewsets.ViewSet):
         if not can_manage_section_subject(request.user, campus_id, section.id, subject_id):
             raise PermissionDenied("Only that section/subject's staff can post a test series.")
 
+        # [Task 19 — ORG_VS_INDIVIDUAL_MATRIX] `is_paid`/`price_coins`
+        # now actually reach `bridge.create_testseries()` (previously
+        # dropped on the floor here — the request body was never even
+        # read for them, so a paid campus series could never be created
+        # regardless of `Campus.testseries_paid_allowed`). Checked here,
+        # BEFORE the bridge call, so a request for a paid series against
+        # a campus that hasn't opted in gets an explicit 403 instead of
+        # a silent downgrade to free — same "permission check before the
+        # bridge call" posture this method already uses for
+        # `can_manage_section_subject()` above. `bridge.
+        # create_testseries()` re-checks the same flag unconditionally
+        # regardless (see its own docstring) — this is belt, that's
+        # suspenders, neither is a substitute for the other.
+        is_paid = bool(request.data.get("is_paid", False))
+        try:
+            price_coins = int(request.data.get("price_coins", 0) or 0)
+        except (TypeError, ValueError):
+            return Response({"detail": "price_coins must be a whole number."}, status=status.HTTP_400_BAD_REQUEST)
+        if is_paid and not section.school_class.campus.testseries_paid_allowed:
+            raise PermissionDenied("This campus isn't enabled for paid test series.")
+
         series = bridge.create_testseries(
             section=section,
             creator=request.user,
@@ -1141,6 +1171,8 @@ class TestSeriesViewSet(viewsets.ViewSet):
             duration_minutes=request.data.get("duration_minutes"),
             attempts_allowed=request.data.get("attempts_allowed", 1),
             questions=questions,
+            is_paid=is_paid,
+            price_coins=price_coins,
         )
         return Response(_serialize_campus_testseries(series), status=status.HTTP_201_CREATED)
 

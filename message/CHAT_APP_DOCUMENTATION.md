@@ -12,7 +12,39 @@ Auth model: `AUTH_USER_MODEL` is a **custom `User`** (app `login`), primary key 
 **integer** (not UUID). Fields used across this app: `id`, `username`, `first_name`,
 `last_name`, `profile_photo` (ImageField), `is_active`.
 
-> **Reconciliation pass (latest — parent-mode G-6 + Task-16 cross-app batch)**: the
+> **Reconciliation pass (latest — `views.py`/`urls.py` re-upload, call-recording routing
+> gap)**: `push_utils.py`, `serializers.py`, `tasks.py`, `urls.py`, `views.py`,
+> `offline_queue.py`, `permissions.py`, `routing.py`, `scheduled_messages.py`,
+> `search_utils.py`, `services.py`, `tests.py`, `throttles.py`, `translation_service.py`,
+> `upload_view.py`, `user_display.py` were re-uploaded and re-checked against the previous
+> pass below. Three deltas found, all in `views.py`/`urls.py` specifically (every other
+> file in this batch matched the previous pass exactly, in the parts that matter):
+> 1. **Old §9.4 item 22 (parent-device approval routing gap) is now RESOLVED.** The
+>    previous pass's `urls.py` didn't import or route `ParentCodeTokenApproveView`/
+>    `ParentPendingRequestsView`; this `urls.py` now imports both from `views_parent` and
+>    registers `POST /message/parent/codes/<code_id>/tokens/<token_id>/approve/` and
+>    `GET /message/parent/pending-requests/` — `urls.py`'s own inline comment cites this
+>    exact doc item by number as the reason. A student can now actually approve a pending
+>    parent-device request end-to-end. See §6 Parent Dashboard, §9.4 item 22.
+> 2. **Old §9.4 item 23's routing half is now RESOLVED.** `DoubtQuestionViewSet.answer()`
+>    (`views.py`) previously hand-rolled the same set/save steps `services.
+>    answer_doubt_question()` already implements, instead of calling it. It now delegates
+>    to that shared function (its own inline comment cites §9.4 item 23 by number), so
+>    `message`'s own group-doubt path and `testseries/bridge.py::answer_query_on_series()`'s
+>    context-pointer path both go through one function. The other two sub-items under #23
+>    (no context-based create/list path in `message`'s own API surface; unconfirmed
+>    `core.models.Notification.NotifType.TESTSERIES_QUERY_ANSWERED`) are unchanged/still
+>    open. See §9.4 item 23.
+> 3. **New finding: `CallRecordingView` (TASK 21) is fully implemented in `views.py` but is
+>    not imported or routed anywhere in `urls.py`** — the call-recording feature (start/stop
+>    a LiveKit Egress recording) is completely unreachable (404) end-to-end today, despite
+>    the model fields, `livekit_utils.py` Egress calls, and the view itself all being
+>    correct and matching what this doc had already inferred. Same bug shape as the
+>    `VoiceTranscribeView`/`FocusSessionView` unrouted-endpoint gaps this doc already
+>    tracked and saw fixed — this one hasn't been fixed yet. See §6 Calls, §7.24, new
+>    §9.4 item 26.
+>
+> **Previous reconciliation pass (parent-mode G-6 + Task-16 cross-app batch)**: the
 > remaining large/core files were reviewed for the first time this pass —
 > `views.py`, `views_ai.py`, `views_parent.py`, `push_utils.py`, `serializers.py`,
 > `tasks.py`, `offline_queue.py`, `permissions.py`, `routing.py`, `scheduled_messages.py`,
@@ -739,19 +771,30 @@ being gone the instant someone taps delete.
   conversation members not yet in the call
 - `POST /calls/history/<call_id>/add-participant/` — `add_participant` — adds someone to
   an ongoing group call; sends `incoming_call` push+event with the SAME `call_id`
-- **`CallRecordingView` — call recording, TASK 21 *(NEW)*, see §2 `CallSession`/§7.24.**
-  Not in this file batch (`views.py` itself wasn't re-uploaded), so the exact route/
-  method/body shape below is inferred from `livekit_utils.py`'s own docstrings, not
-  independently confirmed — treat it as high-confidence, not as-built-verified the way
-  the rest of this table is. Start path calls `livekit_utils.start_room_recording
-  (room_name)`, stores the returned `(egress_id, output_filepath)` on `CallSession.
+- **`CallRecordingView` — call recording, TASK 21, now directly confirmed in `views.py`
+  (previously inferred only from `livekit_utils.py`'s docstrings — see §7.24).**
+  `POST /calls/<call_id>/recording/` body `{"action": "start"|"stop"}`. Host-only
+  (`call.caller_id == request.user.id`, 403 otherwise) — deliberately not
+  per-participant like `CallActionView`, since recording affects the whole room, same
+  "only the host can start/stop" convention as Zoom/Meet. 400 if the call isn't
+  `ONGOING`, or if `start` is called while already recording (returns the existing
+  `is_recording`/`recording_url` instead of erroring), or if `stop` is called with no
+  active recording. Start path calls `livekit_utils.start_room_recording(room_name)`,
+  stores the returned `(egress_id, output_filepath)` on `CallSession.
   recording_egress_id`/`recording_output_path`, flips `is_recording=True` and sets
   `recording_started_at`. Stop path calls `livekit_utils.stop_room_recording(egress_id,
   output_filepath)`, sets `recording_url` from its return value (may be `None` if
   `LIVEKIT_EGRESS_PUBLIC_BASE_URL` isn't configured or egress hasn't finished muxing
-  yet), flips `is_recording=False`. Should catch both `RuntimeError` (LiveKit not
-  configured → 503) and `EgressError` (LiveKit rejected/failed the call → 502) from
-  `livekit_utils.py` rather than letting either surface as a raw 500.
+  yet), flips `is_recording=False`. Catches both `RuntimeError` (LiveKit not configured
+  → 503) and `EgressError` (LiveKit rejected/failed the call → 502) — `EgressError`'s
+  `except` clause is placed before the plain `RuntimeError` one in the view's source
+  (it must be, since `EgressError` subclasses `RuntimeError` and a broader `except`
+  earlier would silently swallow it). Broadcasts `recording_started`/`recording_stopped`
+  as a `call_signal` to the `call_{id}` WS group either way.
+  **🔴 Confirmed bug — not wired into `urls.py`**: unlike every other view in this file,
+  `CallRecordingView` is never imported by `urls.py` and has no matching `path()` —
+  the entire feature is unreachable (404) end-to-end today despite being fully and
+  correctly implemented. See §9.4 item 26.
 
 ### Study Room (`StudyRoomJoinView`, `StudyRoomStateView`)
 - `POST /study-room/<conversation_id>/join/` — group: `study_room_permission` check.
@@ -867,8 +910,8 @@ Gap 2/Gap 3, supersedes the Group-primary shape described in earlier revisions o
   **🔧 GAP FIX (G-6, mutual consent)**: the minted `ParentToken` starts un-approved
   (`status=PENDING`) rather than immediately usable — see §2/§10/§12 `HasValidParentToken`
   for the enforcement side. Two student-side endpoints now drive the approval, both
-  **confirmed coded this batch (`views_parent.py`) but confirmed NOT routed
-  (`urls.py`, same batch)** — see §9.4 item 22 for the full status:
+  **confirmed coded (`views_parent.py`) and now confirmed routed in `urls.py`** —
+  see §9.4 item 22 (resolved):
   - `GET /message/parent/pending-requests/` (`ParentPendingRequestsView`) — every
     `PENDING` `ParentToken` across **all** of the student's active codes, newest first,
     so the app can show a single "N new parent device(s) want access" badge without
@@ -965,13 +1008,15 @@ Gap 2/Gap 3, supersedes the Group-primary shape described in earlier revisions o
   one-way flip of `is_revealed` (a no-op response, no re-broadcast, if already revealed
   or not anonymous) — the only way an anonymous asker's identity becomes visible to
   anyone else.
-- **Live delivery**: every action broadcasts over WS to the group's existing
-  `chat_{conversation_id}` room (reusing `ChatConsumer`'s existing connection, no new WS
-  group) — event `type: 'doubt_broadcast'`, with an inner `event` field distinguishing
-  `doubt_created`/`doubt_upvoted`/`doubt_answered`/`doubt_revealed`. **Not confirmed**:
-  whether `consumers.py` (not part of this file batch) actually has a `doubt_broadcast`
-  handler wired up to receive and forward this — same open question as `meta_update`/
-  `transcript_segment_ready` in §7.7/§7.19. Flagged in §9.4.
+- **Live delivery, now directly confirmed end-to-end via `consumers.py`**: `views.py`'s
+  `DoubtQuestionViewSet._broadcast()` sends `type: 'doubt_broadcast'` to the group's
+  existing `chat_{conversation_id}` room (reusing `ChatConsumer`'s existing connection,
+  no new WS group), and `ChatConsumer.doubt_broadcast()` receives and forwards it to the
+  client as `{"type": "doubt_event", "event": "doubt_created"|"doubt_upvoted"|
+  "doubt_answered"|"doubt_revealed", "doubt": {...}, "group_id": "..."}` — plain
+  passthrough, same pattern as `pin_event`/`study_room_broadcast`. The client never
+  sends a doubt-related event over the WS itself; it only listens for this REST-triggered
+  echo so every connected group member's "Doubts" tab updates without a refresh.
 
 ### Message Translation (`MessageViewSet.translate`) *(NEW — Feature 9, route now
 confirmed, see §7.21 for full detail and a **critical, confirmed-broken** config gap)*
@@ -1790,9 +1835,12 @@ board)*
   `LIVEKIT_WS_URL` (`ws://`→`http://`, `wss://`→`https://`) rather than requiring a
   second env var for every deployment — only set `LIVEKIT_URL` explicitly if egress
   genuinely sits behind a different ingress than the media server. See §13.
-- **Not independently confirmed this batch**: `CallRecordingView` itself (`views.py`
-  wasn't re-uploaded) — its route/method/body shape in §6 is inferred from
-  `livekit_utils.py`'s own docstrings, not directly read from the view. See §9.4.
+- **Now directly confirmed** (`views.py` reviewed): `CallRecordingView`'s route/method/
+  body shape in §6 matches exactly what this doc had already inferred from
+  `livekit_utils.py`'s docstrings — host-only, `EgressError`/`RuntimeError` mapped to
+  502/503, `is_recording` short-circuit on a redundant `start`. **However, the view
+  itself is not reachable** — it's never imported or routed in `urls.py`, so the whole
+  feature 404s end-to-end today. See §6 Calls, §9.4 item 26.
 
 ### 7.25 Chat / Media Export *(NEW this batch — TASK 29; moved out of §15 "Suggested Next
 Facilities" now that it's implemented)*
@@ -2159,8 +2207,9 @@ computes `duration_seconds` and marks the whole `CallSession` `ENDED`.
     (`recording_egress_id`/`recording_started_at`/`recording_output_path`) needed to
     actually drive a start→stop lifecycle across two separate HTTP requests. See §2
     `CallSession`, §6 Calls, §7.24, §10, §13. `CallRecordingView` itself (the view that
-    calls these) is not in this file batch, so its route/shape is inferred, not
-    independently confirmed — see §9.4.
+    calls these) is now directly confirmed in `views.py`, matching this doc's earlier
+    inference exactly — but it turns out to not be routed in `urls.py` at all. See new
+    §9.4 item 26.
 
 ### 9.1 Fixed in this review
 
@@ -2287,8 +2336,9 @@ computes `duration_seconds` and marks the whole `CallSession` `ENDED`.
    **Resolved.** `token` is confirmed gone (dropped in migration
    `0903_remove_callsession_legacy_agora_fields`, not coming back) and recording is now
    fully wired — TASK 21, see §2 `CallSession`, §6 Calls, §7.24, §9.0 item 21, §10, §13.
-   The only remaining unconfirmed piece is `CallRecordingView` itself, not in this file
-   batch — see the note at the end of this list.
+   `CallRecordingView` itself is now also directly confirmed in `views.py` and matches
+   this doc's inference exactly — but it's not routed in `urls.py`, so the feature is
+   unreachable end-to-end. That's now its own tracked gap — see item 26 below.
 3. ~~**`media_utils.py`'s `file_size`** is read from `message.meta.get("size")`...~~
    **Resolved this session** — `_resolve_file_size(message, file_url)` now falls back to
    asking the storage backend directly (`default_storage.size(relative_path)`, works for
@@ -2452,32 +2502,22 @@ computes `duration_seconds` and marks the whole `CallSession` `ENDED`.
     boundary). The module-level duplicate of `add_or_reactivate_participant` that used to
     live in `views.py` has been removed — `services.py` is now the single source, exactly
     as its own docstring always claimed. See §5/§7.22.
-22. **`ParentToken.status`/`Status`/`approved_at` (G-6 mutual-consent gap) — model-field
-    half now RESOLVED, routing half still open.** Previously flagged as a confirmed
-    missing model field (an `AttributeError`/500 waiting to happen). This batch's
-    `views_parent.py` review resolves that: `status`, `Status.PENDING`/`APPROVED`/
-    `REJECTED`, `approved_at`, and a `generate_token()` classmethod are all confirmed in
-    active use — `ParentVerifyCodeView` creates tokens `status=PENDING`,
-    `ParentCodeTokenApproveView` flips one to `APPROVED` + stamps `approved_at`,
-    `ParentCodeTokensView`'s per-device list returns both fields. `models.py` itself
-    still isn't part of any file batch, so the model source can't be read directly, but
-    three independent call-sites agreeing on the same field/method names is about as
-    confirmed as this doc can get without it. **What's still open**: `urls.py`, reviewed
-    in this exact same batch as `views_parent.py`, still only imports
-    `ParentAccessCodeView`, `ParentAccessCodeRenewView`, `ParentAccessCodeRevealView`,
-    `ParentCodeTokensView`, `ParentCodeTokenDetailView`, `ParentDashboardView`,
-    `ParentVerifyCodeView` — **not** `ParentCodeTokenApproveView` or
-    `ParentPendingRequestsView`, both of which are fully coded and ready. So today, a
-    student still has zero *reachable* way to approve a pending parent-device request —
-    the exact same end-user-facing outcome as before (every token effectively stuck
-    unusable), just for a different underlying reason now (missing route, not missing
-    model field). Two `path()` entries need adding to `urls.py`: something like
-    `POST /message/parent/codes/<id>/tokens/<token_id>/approve/` and
-    `GET /message/parent/pending-requests/` — see §6/§10 for the two views' confirmed
-    request/response shapes. **Also flagged in `ParentVerifyCodeView`'s own code (not
-    this doc's inference)**: no push/in-app notification tells the student a new pending
-    parent-device request exists at all — `ParentPendingRequestsView` (once routed)
-    would be the only way to discover one, and only if the student thinks to poll it.
+22. ~~**`ParentToken.status`/`Status`/`approved_at` (G-6 mutual-consent gap) — model-field
+    half resolved, routing half still open.**~~ **Fully RESOLVED.** Model-field half was
+    already confirmed (`status`, `Status.PENDING`/`APPROVED`/`REJECTED`, `approved_at`,
+    `generate_token()` all in active use — `ParentVerifyCodeView` creates tokens
+    `status=PENDING`, `ParentCodeTokenApproveView` flips one to `APPROVED` + stamps
+    `approved_at`, `ParentCodeTokensView`'s per-device list returns both fields). The
+    routing half is now resolved too: `urls.py` now imports `ParentCodeTokenApproveView`
+    and `ParentPendingRequestsView` from `views_parent` and registers
+    `POST /message/parent/codes/<code_id>/tokens/<token_id>/approve/` and
+    `GET /message/parent/pending-requests/` — `urls.py`'s own inline comment cites this
+    exact item number as the reason for the fix. A student can now actually approve a
+    pending parent-device request end-to-end. See §6 Parent Dashboard.
+    **Still open, unchanged**: no push/in-app notification tells the student a new
+    pending parent-device request exists at all (flagged in `ParentVerifyCodeView`'s own
+    code, not this doc's inference) — `ParentPendingRequestsView` is the only way to
+    discover one, and only if the student thinks to poll it.
 23. **`DoubtQuestion.context_type`/`context_id` (Task 16, see §2) — reader/writer now
     partially confirmed, and it's an EXTERNAL app, not `message` itself.**
     `management/commands/apply_doubtquestion_context_fields.py` makes `group`/
@@ -2496,22 +2536,27 @@ computes `duration_seconds` and marks the whole `CallSession` `ENDED`.
     cross-app dependency in the same family as the existing `liveclass`/`core` ones (§6
     Parent Dashboard, §7.16) — worth remembering that `message.DoubtQuestion` now has
     **two** independent consumers with different data shapes sharing one table.
-    **However — `message`'s own `DoubtQuestionViewSet.answer()` (views.py, §6/§7.20)
-    does NOT call `services.answer_doubt_question()` at all**: it hand-rolls the
-    identical set/save steps inline instead (`doubt.answer_text = ...`, `doubt.
-    is_answered = True`, etc., duplicated verbatim). That's the same
-    duplicate-logic-drifts-out-of-sync anti-pattern this codebase has already paid for
-    once (`group_rules.is_group_admin_or_mod`'s docstring: 4 independent copies of one
-    permission rule) and fixed for group actions via `services.py` (task 27, §9.4 item
-    21) — `answer_doubt_question` looks like it exists specifically to be that same fix
-    for doubt-answering, but the REST view was never switched over to call it. `message`'s
-    own REST route (`/message/groups/<group_id>/doubts/<id>/answer/`) still only ever
-    creates/reads group-scoped doubts — no context-based create/list path exists in
+    ~~**However — `message`'s own `DoubtQuestionViewSet.answer()` (views.py, §6/§7.20)
+    does NOT call `services.answer_doubt_question()` at all** — it hand-rolls the
+    identical set/save steps inline instead.~~ **RESOLVED** — `views.py` now directly
+    confirms `DoubtQuestionViewSet.answer()` delegates to `services.
+    answer_doubt_question()` (the view's own inline comment cites this exact item
+    number as the reason for the refactor, and explicitly drops its own redundant
+    `_require_teacher()` call since `answer_doubt_question()` already does the identical
+    `require_group_admin_or_mod` check whenever `doubt.group_id` is set). `message`'s
+    own group-doubt path and `testseries/bridge.py::answer_query_on_series()`'s
+    context-pointer path now both go through the one shared function — the
+    duplicate-logic-drifts-out-of-sync anti-pattern this codebase already paid for once
+    (`group_rules.is_group_admin_or_mod`, §9.4 item 21) is fixed here too.
+    **Still open, unchanged**: `message`'s own REST route
+    (`/message/groups/<group_id>/doubts/<id>/answer/`) still only ever creates/reads
+    group-scoped doubts — no context-based create/list path exists in
     `views.py`/`serializers.py` for the `message` app's own API surface; the
-    context-pointer shape is created/answered entirely from the `testseries` side via the
-    shared model + `services.answer_doubt_question`, not through any `message`-app
-    endpoint. **A second, smaller gap flagged inline in `services.py` itself (not this
-    doc's own inference)**: when `doubt.context_type == 'testseries_attempt'`,
+    context-pointer shape is still created/answered entirely from the `testseries` side
+    via the shared model + `services.answer_doubt_question`, not through any
+    `message`-app endpoint. **A second, smaller gap flagged inline in `services.py`
+    itself (not this doc's own inference), also still open**: when
+    `doubt.context_type == 'testseries_attempt'`,
     `answer_doubt_question` tries to fire a
     `core.models.Notification.NotifType.TESTSERIES_QUERY_ANSWERED` notification — that
     enum member is **not confirmed to exist** on `core.models.Notification` yet (`core`
@@ -2538,6 +2583,24 @@ computes `duration_seconds` and marks the whole `CallSession` `ENDED`.
     scheduled somewhere, stale `ParentToken`/`ParentAccessCode` rows simply accumulate
     indefinitely instead of being cleaned up. See §2 `ParentAccessCode`/`ParentToken`,
     §1 File Map.
+26. **🔴 `CallRecordingView` (TASK 21) is fully implemented in `views.py` but is not
+    imported or routed anywhere in `urls.py`** — confirmed directly from both files.
+    The view itself is correct end-to-end (host-only check, `CallSession` field
+    updates, `EgressError`/`RuntimeError` → 502/503, `call_signal` broadcast) and
+    matches what this doc had already inferred from `livekit_utils.py` alone (§7.24,
+    §9.0 item 21) — the only thing missing is a `path()` entry. `POST
+    /calls/<call_id>/recording/` (per the view's own docstring) 404s today, so nobody
+    can actually start or stop a call recording despite the feature being otherwise
+    finished. Same bug class as the `VoiceTranscribeView`/`FocusSessionView`/group-photo
+    -removal/scheduled-message-alias gaps this doc has already tracked and seen fixed
+    (§9.0 items covering those) — one `path()` entry the same shape as `calls/<uuid:call_
+    id>/action/` (already in `urls.py`, same pattern: `<uuid:call_id>` kwarg, `CallActionView`)
+    would close it, e.g.:
+    ```python
+    from .views import CallRecordingView
+    path('calls/<uuid:call_id>/recording/', CallRecordingView.as_view(), name='call-recording'),
+    ```
+    See §6 Calls, §7.24, §9.0 item 21.
 
 ---
 
