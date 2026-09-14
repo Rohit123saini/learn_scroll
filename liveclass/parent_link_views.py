@@ -28,8 +28,6 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from .models import (
-    assigments,
-    assigmentsSubmission,
     Classroom,
     StudentReportCard,
     compute_attendance_percent_bulk,
@@ -151,11 +149,15 @@ class ReportCardViewSet(viewsets.ModelViewSet):
     Manage-tier only (teacher/co-teacher/moderator) for create/update.
     attendance_percent is NEVER accepted from the request body — always
     computed server-side by compute_attendance_percent_bulk() (Gap 3 fix).
-    homework_completion_percent and average_marks are computed the same way
-    from this classroom's own liveclass assigments/assigmentsSubmission data
-    (category='homework'), so a teacher only ever supplies period_label and
-    teacher_remark — the numbers are never hand-typed and therefore can
-    never drift from what the classroom's own records say.
+    homework_completion_percent and average_marks are computed from this
+    classroom's assignment data via liveclass.bridge.
+    get_assigments_submissions() (Task 5 fix) — the unified `assigments`
+    app, same source assigmentsViewSet/assigmentsSubmissionViewSet already
+    use post-Task-12. There is no homework/other category distinction on
+    that model, so every assignment on the classroom counts. A teacher
+    only ever supplies period_label and teacher_remark — the numbers are
+    never hand-typed and therefore can never drift from what the
+    classroom's own records say.
     """
     serializer_class = StudentReportCardSerializer
     permission_classes = [IsAuthenticated]
@@ -208,12 +210,52 @@ class ReportCardViewSet(viewsets.ModelViewSet):
 
     @staticmethod
     def _homework_stats(classroom, student):
-        homework_qs = assigments.objects.filter(classroom=classroom, category=assigments.Category.HOMEWORK)
-        total = homework_qs.count()
-        submissions = assigmentsSubmission.objects.filter(assigments__in=homework_qs, student=student)
-        submitted = submissions.count()
+        # Task 5 fix (two bugs, one was hiding the other):
+        #   1. This used to filter the LOCAL, legacy `liveclass.assigments`
+        #      model on `category=assigments.Category.HOMEWORK` — that
+        #      model/field never existed here, so this crashed with an
+        #      AttributeError on the very first report-card POST for any
+        #      classroom.
+        #   2. Even with that filter removed, querying the legacy
+        #      liveclass.assigments/assigmentsSubmission tables directly is
+        #      stale data: since Task 12, new assignments are created
+        #      through the unified `assigments` app via
+        #      bridge.create_assigments(), and the legacy tables stop
+        #      receiving new rows entirely. A report card's homework
+        #      numbers would only be correct for pre-cutover assignments
+        #      and silently blind to everything after — looks complete, is
+        #      quietly wrong.
+        # Fixed by routing through liveclass.bridge.
+        # get_assigments_submissions(classroom), the same unified-app
+        # source assigmentsViewSet/assigmentsSubmissionViewSet already use
+        # post-Task-12. No category filter: the unified model has no
+        # homework/other distinction, so every assignment on this
+        # classroom counts.
+        from assigments.models import assigmentsSubmission as UnifiedSubmission
+
+        from .bridge import get_assigments_submissions
+
+        student_submissions = get_assigments_submissions(classroom).filter(student=student)
+
+        total = student_submissions.count()
+        # [ASSUMPTION — NOT VERIFIED] create_context_assigments() (Task 11)
+        # bulk-pre-creates one assigmentsSubmission(status=MISSING) row per
+        # roster entry at assignment-creation time, so "a submission row
+        # exists for this student" is no longer the same as "this student
+        # submitted" — every assignment has a row from day one regardless
+        # of whether the student ever turned it in. "Not MISSING" is used
+        # here as the submitted signal. assigments/models.py (which would
+        # define the full SubmissionStatus enum — e.g. whether there's a
+        # LATE status you'd want to exclude from "completed") wasn't part
+        # of this pass, only assigments/bridge.py's bulk_create call site
+        # was visible. Verify SubmissionStatus's full set of values before
+        # relying on this in production; if something like LATE exists and
+        # shouldn't count as completed, swap this for
+        # filter(status__in=[...]) instead of exclude(status=MISSING).
+        submitted = student_submissions.exclude(status=UnifiedSubmission.SubmissionStatus.MISSING).count()
+
         completion_percent = round((submitted / total) * 100, 2) if total else 0
-        average_marks = submissions.filter(score__isnull=False).aggregate(avg=Avg("score"))["avg"]
+        average_marks = student_submissions.filter(score__isnull=False).aggregate(avg=Avg("score"))["avg"]
         if average_marks is not None:
             average_marks = Decimal(average_marks).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
         return {"completion_percent": completion_percent, "average_marks": average_marks}

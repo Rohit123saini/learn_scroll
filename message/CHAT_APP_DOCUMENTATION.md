@@ -12,7 +12,55 @@ Auth model: `AUTH_USER_MODEL` is a **custom `User`** (app `login`), primary key 
 **integer** (not UUID). Fields used across this app: `id`, `username`, `first_name`,
 `last_name`, `profile_photo` (ImageField), `is_active`.
 
-> **Reconciliation pass (latest — `views.py`/`urls.py` re-upload, call-recording routing
+> **Reconciliation pass (latest — `settings.py` uploaded, production-readiness pass)**:
+> `settings.py` was reviewed for the first time in this exact batch, specifically to
+> close out every remaining `message`-app gap this doc had been tracking as
+> settings-dependent. Findings:
+> 1. **All four previously-open P0 throttle/config gaps are already resolved in
+>    `settings.py` as uploaded** — `DEFAULT_THROTTLE_RATES` has `"translate": "30/min"`,
+>    `"parent_code_reveal": "10/hour"`, and `"focus_session": "20/min"`, and
+>    `GOOGLE_TRANSLATE_API_KEY` is wired via `os.environ.get(...)`. See §9.4 items 15/16/20
+>    (resolved), §13, §14 (throttle table now shows 16/16 scopes present).
+> 2. **New gap found and FIXED this pass**: `settings.py`'s own `CELERY_BEAT_SCHEDULE`
+>    already registered a daily `"message-expire-stale-parent-access"` entry pointing at
+>    Celery task name `"message.expire_stale_parent_access"` — but no task by that name
+>    existed anywhere in `tasks.py` (confirmed from the earlier `tasks.py` upload), so the
+>    beat tick would fire and be silently dropped every day, forever. Added the missing
+>    `@shared_task(name="message.expire_stale_parent_access")` wrapper to `tasks.py`
+>    (thin `call_command("expire_stale_parent_access")` wrapper, per `settings.py`'s own
+>    proposed fix). See §9.4 item 25 (resolved), §1 File Map, §10 `tasks.py`.
+> 3. **Two project-wide (not `message`-specific) critical security bugs found and fixed
+>    directly in `settings.py`**, outside this doc's normal `message`-app scope but
+>    flagged here since they affect every request this app serves: (a) `ALLOWED_HOSTS`
+>    was hardcoded to the literal wildcard `["*"]`, directly contradicting the file's own
+>    surrounding comments (which claimed it was already env-driven/fail-safe) — Django's
+>    Host-header check was a no-op in every environment, including production. Now
+>    genuinely reads from `os.getenv("ALLOWED_HOSTS")`, comma-split, same pattern as
+>    `CSRF_TRUSTED_ORIGINS` just below it. (b) `SECURE_SSL_REDIRECT` was hardcoded
+>    `False`, contradicting its own comment block ("All gated on `not DEBUG`") that every
+>    other line in that block correctly followed — production never actually redirected
+>    plain HTTP to HTTPS. Now `not DEBUG`, matching its neighbors. Both were comment-vs-
+>    code mismatches (the fix was described in a comment but never applied to the actual
+>    line), not missing features.
+>
+> **Previous reconciliation pass (`urls.py` re-upload, call-recording routing gap
+> CLOSED)**: `push_utils.py`, `serializers.py`, `services.py`, `tasks.py`, `urls.py`,
+> `views.py`, `views_ai.py`, `views_parent.py`, `offline_queue.py`, `permissions.py`,
+> `routing.py`, `scheduled_messages.py`, `search_utils.py`, `tests.py`, `throttles.py`,
+> `translation_service.py`, `upload_view.py`, `user_display.py`, `views_focus.py` were
+> re-checked against the previous pass below. Everything matched exactly (including all
+> three deltas the previous pass already found and folded in) **except one**: the
+> previous pass's new finding #3 — `CallRecordingView` fully implemented but unrouted —
+> is now **RESOLVED**. `urls.py` imports `CallRecordingView` and registers
+> `path('calls/<uuid:call_id>/recording/', CallRecordingView.as_view(),
+> name='call-recording')`, exactly the fix this doc had proposed. See §6 Calls, §9.4
+> item 26 (now resolved), §2 `CallSession`. In the same pass, a stale leftover in §2
+> `ParentToken` was also corrected — it still said the routing half of the G-6
+> mutual-consent gap (old §9.4 item 22) was "open" even though item 22 itself had
+> already been marked resolved in an earlier pass; that paragraph now matches item 22.
+> No other corrections were needed this pass.
+>
+> **Previous reconciliation pass (`views.py`/`urls.py` re-upload, call-recording routing
 > gap)**: `push_utils.py`, `serializers.py`, `tasks.py`, `urls.py`, `views.py`,
 > `offline_queue.py`, `permissions.py`, `routing.py`, `scheduled_messages.py`,
 > `search_utils.py`, `services.py`, `tests.py`, `throttles.py`, `translation_service.py`,
@@ -154,7 +202,7 @@ Auth model: `AUTH_USER_MODEL` is a **custom `User`** (app `login`), primary key 
 | `tests.py` | Empty Django default stub — no tests written yet *(confirmed this batch)* |
 | `management/commands/send_scheduled_messages.py` *(NEW this batch)* | Manual/backup CLI trigger for "Send Later" delivery — **not** the production path; `tasks.send_scheduled_messages` (Celery beat, every minute) is canonical, see §10 `tasks.py`. Now uses the identical `select_for_update(skip_locked=True)` + 200/batch pattern as the Celery task specifically so the two are safe to run concurrently without double-sending. See §9.4 item 4, §10 |
 | `management/commands/cleanup_expired_messages.py` *(NEW this batch)* | Manual/backup CLI trigger for the disappearing-messages hard-delete sweep, with `--batch-size`/`--dry-run` flags. Duplicates (does not replace) `tasks.cleanup_expired_messages`'s already-scheduled Celery-beat sweep (every 15 min) — its own docstring assumed hard-delete was unimplemented, which this doc's §10/§9.1 item 3 shows is not the case. See §9.4 item 24, §10 |
-| `management/commands/expire_stale_parent_access.py` *(NEW this batch)* | Periodic DB-hygiene only (**not** security-load-bearing — `HasValidParentToken` already rejects expired tokens/codes live on every request regardless of this ever running). Hard-deletes `ParentToken`s stale past their rolling TTL + a grace period, and deactivates long-expired never-renewed `ParentAccessCode`s. **Not yet registered in `CELERY_BEAT_SCHEDULE` or any confirmed cron** — see §9.4 item 25, §2 `ParentAccessCode`/`ParentToken`, §10 |
+| `management/commands/expire_stale_parent_access.py` *(NEW this batch)* | Periodic DB-hygiene only (**not** security-load-bearing — `HasValidParentToken` already rejects expired tokens/codes live on every request regardless of this ever running). Hard-deletes `ParentToken`s stale past their rolling TTL + a grace period, and deactivates long-expired never-renewed `ParentAccessCode`s. **Now fully wired** — `settings.py`'s `CELERY_BEAT_SCHEDULE` has a daily entry, and `tasks.py` now has the matching `@shared_task(name="message.expire_stale_parent_access")` wrapper the beat entry needed (production readiness pass) — see §9.4 item 25 (resolved), §2 `ParentAccessCode`/`ParentToken`, §10 |
 | `management/commands/apply_doubtquestion_context_fields.py` *(NEW this batch — Task 16)* | One-off, idempotent raw-SQL schema command (Postgres-only) making `DoubtQuestion.group`/`.conversation` nullable and adding `context_type`/`context_id` + a supporting index + `CheckConstraint` (must have a `group` OR a full context pointer). Applied outside Django's migration history by design — `makemigrations` will still want to generate a matching no-op migration afterward to sync state. See §2 `DoubtQuestion`, §9.4 item 23, §10 |
 
 **Note on `urls.py`:** an earlier upload of this file was accidentally a duplicate of
@@ -358,10 +406,9 @@ note used to flag is resolved; kept only as a pointer to where the wiring lives.
   `egress_ended` webhook, not yet built, would be the more correct
   long-term source of truth — can stay null after stop if egress hasn't
   finished muxing yet). See migration
-  `0910_add_callsession_recording_fields`. `CallRecordingView` (`views.py`
-  — not in this file batch, so its exact request/response shape is
-  inferred from `livekit_utils.py`'s own docstrings, not independently
-  confirmed here) drives these fields via `livekit_utils.
+  `0910_add_callsession_recording_fields`. `CallRecordingView` (`views.py`,
+  directly confirmed, and now also confirmed **routed** in `urls.py` —
+  see §6 Calls, §9.4 item 26, resolved) drives these fields via `livekit_utils.
   start_room_recording`/`stop_room_recording`. Distinct from Class
   Transcript (§7.19) — this is one whole-room composite MP4 via LiveKit
   Egress, not per-participant searchable text; see that model's own
@@ -520,8 +567,9 @@ confirmed in `models.py`)*
   instant it crosses the line), and deactivates `ParentAccessCode`s that expired more
   than 30 days ago and were never renewed. Purely cosmetic/storage cleanup —
   `HasValidParentToken` already rejects expired codes/tokens live on every request
-  regardless of whether this command has ever run. **Not yet wired into
-  `CELERY_BEAT_SCHEDULE` or any confirmed cron** — see §9.4 item 25, §1 File Map.
+  regardless of whether this command has ever run. **Now fully wired** (production
+  readiness pass) — `CELERY_BEAT_SCHEDULE` entry plus the matching `tasks.py` task
+  wrapper it needed — see §9.4 item 25 (resolved), §1 File Map.
 - **Deliberately does not use `request.user`** — `HasValidParentToken` attaches
   `request.parent_access_code` and `request.parent_student` instead, specifically so no
   other permission/view could accidentally treat an authenticated parent as if they were
@@ -546,15 +594,13 @@ confirmed in `models.py`)*
   paragraph above), and two new views exist to drive them — `ParentCodeTokenApproveView`
   (student approves one PENDING device) and `ParentPendingRequestsView` (student sees
   every PENDING device across all their codes in one list). **The routing half of that
-  same gap is still open, though**: `urls.py`, reviewed in this exact same batch, still
-  only imports `ParentAccessCodeView`, `ParentAccessCodeRenewView`,
-  `ParentAccessCodeRevealView`, `ParentCodeTokensView`, `ParentCodeTokenDetailView`,
-  `ParentDashboardView`, `ParentVerifyCodeView` from `views_parent` — neither
-  `ParentCodeTokenApproveView` nor `ParentPendingRequestsView` is imported or routed
-  anywhere. So end-to-end, a student today still has **no reachable way** to ever approve
-  a pending parent-device request: the code exists, it's just not wired to a URL. See
-  §9.4 item 22 (updated) for the full current status, and §6 Parent Dashboard for the
-  request/response shapes of the two new views.
+  same gap is now RESOLVED too**: `urls.py` (re-checked this pass) now imports both
+  `ParentCodeTokenApproveView` and `ParentPendingRequestsView` from `views_parent` and
+  registers `POST /message/parent/codes/<code_id>/tokens/<token_id>/approve/` and
+  `GET /message/parent/pending-requests/`. A student today has a reachable, end-to-end
+  way to approve a pending parent-device request. See §9.4 item 22 (resolved) for the
+  full current status, and §6 Parent Dashboard for the request/response shapes of the
+  two new views.
 
 ### `assigments` / `assigmentsSubmission` (`message`'s own — distinct from
 `liveclass.assigments`)
@@ -791,10 +837,11 @@ being gone the instant someone taps delete.
   (it must be, since `EgressError` subclasses `RuntimeError` and a broader `except`
   earlier would silently swallow it). Broadcasts `recording_started`/`recording_stopped`
   as a `call_signal` to the `call_{id}` WS group either way.
-  **🔴 Confirmed bug — not wired into `urls.py`**: unlike every other view in this file,
-  `CallRecordingView` is never imported by `urls.py` and has no matching `path()` —
-  the entire feature is unreachable (404) end-to-end today despite being fully and
-  correctly implemented. See §9.4 item 26.
+  **✅ RESOLVED this batch — now wired into `urls.py`**: `urls.py` imports
+  `CallRecordingView` and registers `path('calls/<uuid:call_id>/recording/',
+  CallRecordingView.as_view(), name='call-recording')` — the exact fix this doc
+  previously proposed. The feature is reachable end-to-end today. See §9.4 item 26
+  (resolved).
 
 ### Study Room (`StudyRoomJoinView`, `StudyRoomStateView`)
 - `POST /study-room/<conversation_id>/join/` — group: `study_room_permission` check.
@@ -1626,23 +1673,15 @@ board)*
   4xx as previously guessed — confirmed `HTTP_502_BAD_GATEWAY`); `UnsupportedLanguageError`
   → `400` (caught defensively even though the explicit check above already covers the
   normal `target_lang` path).
-- **🔴 CRITICAL — CONFIRMED (not just "not yet checked") this batch: this endpoint will
-  crash on its very first real call, twice over:**
-  1. **`translate` has no `DEFAULT_THROTTLE_RATES` entry in `settings.py`.**
-     `TranslateThrottle` is a real `UserRateThrottle(scope='translate')` and IS
-     attached (via `views.py`'s import), but `settings.py`'s `DEFAULT_THROTTLE_RATES`
-     dict — reviewed in full this batch — has no `"translate"` key. Same failure mode
-     as every other entry in that dict's own extensive comment history:
-     `ImproperlyConfigured("No default throttle rate set for 'translate' scope")` on
-     the very first `POST .../translate/`, i.e. a guaranteed 500, not a rare edge case.
-  2. **`GOOGLE_TRANSLATE_API_KEY` is not set anywhere in `settings.py`.** Even past the
-     throttle crash, `translate_text` would immediately raise
-     `TranslationServiceUnavailable` (→ 503) for every single call, since
-     `translation_service.py`'s own `getattr(settings, 'GOOGLE_TRANSLATE_API_KEY',
-     None)` has nothing to find. The feature is fully coded end-to-end but
-     **completely non-functional as currently configured** — needs both a
-     `"translate": "30/min"` entry added to `DEFAULT_THROTTLE_RATES` and a real
-     `GOOGLE_TRANSLATE_API_KEY` value before it can work at all. See §9.4/§13/§14.
+- ~~**🔴 CRITICAL — this endpoint will crash on its very first real call, twice over**
+  (no `DEFAULT_THROTTLE_RATES["translate"]` entry, and no `GOOGLE_TRANSLATE_API_KEY`).~~
+  **RESOLVED — production readiness pass**: `settings.py` (now reviewed) has
+  `"translate": "30/min"` in `DEFAULT_THROTTLE_RATES`, and
+  `GOOGLE_TRANSLATE_API_KEY = os.environ.get("GOOGLE_TRANSLATE_API_KEY", "")` is wired
+  (its own comment cites this exact gap by name). The env var still needs a real value
+  set in `.env`/deployment secrets for the feature to actually reach Google's API rather
+  than hitting the `TranslationServiceUnavailable` "not configured" path — that's an
+  ops/secrets step, not a code gap. See §9.4/§13/§14 (all updated).
 
 ### 7.14 Classroom Copilot *(NEW this batch — Q&A over class context)*
 - `ai_service.generate_classroom_answer(question, context_text, conversation_id)` — a
@@ -1838,9 +1877,9 @@ board)*
 - **Now directly confirmed** (`views.py` reviewed): `CallRecordingView`'s route/method/
   body shape in §6 matches exactly what this doc had already inferred from
   `livekit_utils.py`'s docstrings — host-only, `EgressError`/`RuntimeError` mapped to
-  502/503, `is_recording` short-circuit on a redundant `start`. **However, the view
-  itself is not reachable** — it's never imported or routed in `urls.py`, so the whole
-  feature 404s end-to-end today. See §6 Calls, §9.4 item 26.
+  502/503, `is_recording` short-circuit on a redundant `start`. **The view is now also
+  confirmed reachable** — `urls.py` imports and routes it (§9.4 item 26, resolved). See
+  §6 Calls, §9.4 item 26.
 
 ### 7.25 Chat / Media Export *(NEW this batch — TASK 29; moved out of §15 "Suggested Next
 Facilities" now that it's implemented)*
@@ -2188,16 +2227,14 @@ computes `duration_seconds` and marks the whole `CallSession` `ENDED`.
       no new logic, both the old and new paths now work.
     - Group photo removal: `GroupViewSet.remove_photo` existed as an action but had no
       matching route; added `DELETE /message/groups/<id>/photo/`.
-20. **🔴 `ParentCodeRevealThrottle` added** (`throttles.py`, scope `parent_code_reveal`,
+20. **`ParentCodeRevealThrottle` added** (`throttles.py`, scope `parent_code_reveal`,
     for `ParentAccessCodeRevealView`, item 18 above) — bounds how often the full plaintext
     of a parent code can be re-revealed (10/hour suggested), so a compromised student
     session/device can't be used to bulk-scrape every active code's plaintext at will.
-    **Now confirmed missing** (upgraded from "not confirmed" — `settings.py` has been
-    reviewed in full this session and has no `parent_code_reveal` entry) — same bug class
-    as item 15: `ParentAccessCodeRevealView`'s first call will raise
-    `ImproperlyConfigured`. 30-second fix: add `"parent_code_reveal": "10/hour"` to
-    `DEFAULT_THROTTLE_RATES`. This is now the **only** remaining missing-rate gap of this
-    kind in the app. See §14's throttle-rates table.
+    ~~Confirmed missing from `DEFAULT_THROTTLE_RATES`.~~ **RESOLVED — production
+    readiness pass**: `settings.py` (now reviewed) has `"parent_code_reveal": "10/hour"`
+    in `DEFAULT_THROTTLE_RATES`. Every throttle scope wired to a real view now has a
+    matching rate. See §14's throttle-rates table (updated).
 21. **Call recording (TASK 21) wired up end-to-end** *(NEW this batch, CONFIRMED)* —
     closes old §9.4 item 2, which flagged `CallSession.is_recording`/`recording_url` as
     dead fields with no recording-trigger code anywhere. `livekit_utils.py` now has
@@ -2208,8 +2245,8 @@ computes `duration_seconds` and marks the whole `CallSession` `ENDED`.
     actually drive a start→stop lifecycle across two separate HTTP requests. See §2
     `CallSession`, §6 Calls, §7.24, §10, §13. `CallRecordingView` itself (the view that
     calls these) is now directly confirmed in `views.py`, matching this doc's earlier
-    inference exactly — but it turns out to not be routed in `urls.py` at all. See new
-    §9.4 item 26.
+    inference exactly, and is now also confirmed routed in `urls.py`. See §9.4 item 26
+    (resolved).
 
 ### 9.1 Fixed in this review
 
@@ -2337,8 +2374,8 @@ computes `duration_seconds` and marks the whole `CallSession` `ENDED`.
    `0903_remove_callsession_legacy_agora_fields`, not coming back) and recording is now
    fully wired — TASK 21, see §2 `CallSession`, §6 Calls, §7.24, §9.0 item 21, §10, §13.
    `CallRecordingView` itself is now also directly confirmed in `views.py` and matches
-   this doc's inference exactly — but it's not routed in `urls.py`, so the feature is
-   unreachable end-to-end. That's now its own tracked gap — see item 26 below.
+   this doc's inference exactly — and it is now also confirmed routed in `urls.py`, so
+   the feature is reachable end-to-end. See item 26 below (resolved).
 3. ~~**`media_utils.py`'s `file_size`** is read from `message.meta.get("size")`...~~
    **Resolved this session** — `_resolve_file_size(message, file_url)` now falls back to
    asking the storage backend directly (`default_storage.size(relative_path)`, works for
@@ -2576,31 +2613,32 @@ computes `duration_seconds` and marks the whole `CallSession` `ENDED`.
     matching the same filter), and (b) reconciling the batch-size default mismatch (this
     command: 1000/batch; the Celery task: 500/batch) if both are meant to be
     interchangeable.
-25. **`management/commands/expire_stale_parent_access.py` (NEW this batch) is not
-    registered anywhere** — no `CELERY_BEAT_SCHEDULE` entry in `settings.py`, no
-    confirmed external cron. Low urgency (explicitly DB hygiene only, per its own
-    docstring — `HasValidParentToken` enforces expiry live regardless), but until it's
-    scheduled somewhere, stale `ParentToken`/`ParentAccessCode` rows simply accumulate
-    indefinitely instead of being cleaned up. See §2 `ParentAccessCode`/`ParentToken`,
-    §1 File Map.
-26. **🔴 `CallRecordingView` (TASK 21) is fully implemented in `views.py` but is not
-    imported or routed anywhere in `urls.py`** — confirmed directly from both files.
-    The view itself is correct end-to-end (host-only check, `CallSession` field
-    updates, `EgressError`/`RuntimeError` → 502/503, `call_signal` broadcast) and
-    matches what this doc had already inferred from `livekit_utils.py` alone (§7.24,
-    §9.0 item 21) — the only thing missing is a `path()` entry. `POST
-    /calls/<call_id>/recording/` (per the view's own docstring) 404s today, so nobody
-    can actually start or stop a call recording despite the feature being otherwise
-    finished. Same bug class as the `VoiceTranscribeView`/`FocusSessionView`/group-photo
-    -removal/scheduled-message-alias gaps this doc has already tracked and seen fixed
-    (§9.0 items covering those) — one `path()` entry the same shape as `calls/<uuid:call_
-    id>/action/` (already in `urls.py`, same pattern: `<uuid:call_id>` kwarg, `CallActionView`)
-    would close it, e.g.:
-    ```python
-    from .views import CallRecordingView
-    path('calls/<uuid:call_id>/recording/', CallRecordingView.as_view(), name='call-recording'),
-    ```
-    See §6 Calls, §7.24, §9.0 item 21.
+25. ~~**`management/commands/expire_stale_parent_access.py` is not registered
+    anywhere** — no `CELERY_BEAT_SCHEDULE` entry, no confirmed external cron.~~
+    **PARTIALLY then FULLY resolved — production readiness pass.** `settings.py` (now
+    reviewed) already had a `"message-expire-stale-parent-access"` beat entry pointing
+    at Celery task name `"message.expire_stale_parent_access"`, scheduled daily at
+    04:00 — but `settings.py`'s own comment on that entry flagged a real remaining gap:
+    no task was actually registered under that exact name in `message/tasks.py`, so the
+    beat tick would fire and be silently dropped (no task to pick it up, not even an
+    error) — the command still would never have run. **Fixed this pass**: added a thin
+    `@shared_task(name="message.expire_stale_parent_access")` wrapper to `tasks.py`
+    (calls the existing management command via `call_command`, same pattern
+    `settings.py`'s comment proposed). The sweep is now genuinely wired end-to-end.
+    Still DB hygiene only, not security-load-bearing — `HasValidParentToken` enforces
+    expiry live regardless. See §2 `ParentAccessCode`/`ParentToken`, §1 File Map, §10
+    `tasks.py`.
+26. ~~**🔴 `CallRecordingView` (TASK 21) is fully implemented in `views.py` but is not
+    imported or routed anywhere in `urls.py`.**~~ **RESOLVED this batch** — `urls.py`
+    (re-checked this pass) now imports `CallRecordingView` and registers
+    `path('calls/<uuid:call_id>/recording/', CallRecordingView.as_view(),
+    name='call-recording')`, the exact `path()` entry this doc previously proposed
+    (same shape as `calls/<uuid:call_id>/action/` → `CallActionView`). The view itself
+    was already correct end-to-end (host-only check, `CallSession` field updates,
+    `EgressError`/`RuntimeError` → 502/503, `call_signal` broadcast) and matches what
+    this doc had inferred from `livekit_utils.py` alone (§7.24, §9.0 item 21) — the
+    routing was the only gap, and it's now closed. `POST /calls/<call_id>/recording/`
+    is reachable today. See §6 Calls, §7.24, §9.0 item 21.
 
 ---
 
@@ -3162,8 +3200,9 @@ files reviewed for the first time, none previously part of any file batch)*
   logic. (2) deactivates (`is_active=False`, not deleted) `ParentAccessCode`s that
   expired more than 30 days ago (`CODE_DEACTIVATE_GRACE_DAYS`) and were never renewed —
   keeps the student's "Manage parent access" list from accumulating ancient dead codes
-  forever. **Not yet registered in `CELERY_BEAT_SCHEDULE` or confirmed via external
-  cron** — see §9.4 item 25, §2 `ParentAccessCode`/`ParentToken`.
+  forever. **Now fully wired** (production readiness pass) — `CELERY_BEAT_SCHEDULE`
+  entry plus the matching `tasks.py` task wrapper — see §9.4 item 25 (resolved), §2
+  `ParentAccessCode`/`ParentToken`.
 - **`apply_doubtquestion_context_fields.py`** *(Task 16)* — one-off, idempotent,
   Postgres-only raw-SQL schema command: `python manage.py
   apply_doubtquestion_context_fields`, no arguments. Makes `DoubtQuestion.group_id`/
@@ -3326,12 +3365,13 @@ This app doesn't ship its own settings — everything below lives in the project
     disappearing-message sweep follows.
 
 ### REST throttle rates (`REST_FRAMEWORK["DEFAULT_THROTTLE_RATES"]`)
-`settings.py` re-reviewed in full this session. 15 of the 16 `message`-relevant custom
-throttle scopes are **confirmed present**, including all 6 that were confirmed missing in
-the previous review (`translate`, `parent_code_verify_ip`, `ai_class_transcript_chunk`,
-`ai_class_transcript_search`, `ai_classroom_copilot`, `ai_revision_deck`) plus
-`focus_session` — see §9.4 items 15/16 (resolved). **Exactly 1 scope wired to a real view
-is still confirmed MISSING**: `parent_code_reveal` — see §9.0 item 20.
+`settings.py` re-reviewed in full this pass (production readiness pass). **All 16 of the
+16 `message`-relevant custom throttle scopes are now confirmed present**, including all
+6 confirmed missing in an earlier review (`translate`, `parent_code_verify_ip`,
+`ai_class_transcript_chunk`, `ai_class_transcript_search`, `ai_classroom_copilot`,
+`ai_revision_deck`), `focus_session`, and — resolved this pass — `parent_code_reveal`
+(§9.4 items 15/16/20, all resolved). No scope wired to a real view is missing a rate
+anymore.
 
 | Scope | Rate | Throttle class | Guards | Status |
 |---|---|---|---|---|
@@ -3351,7 +3391,7 @@ is still confirmed MISSING**: `parent_code_reveal` — see §9.0 item 20.
 | `ai_classroom_copilot` | 15/min | `ClassroomCopilotThrottle` | `ClassroomCopilotView` | ✅ present *(fixed this session)* |
 | `ai_revision_deck` | 10/min | `RevisionDeckThrottle` | `RevisionDeckView` | ✅ present *(fixed this session)* |
 | `focus_session` | 20/min | `FocusSessionThrottle` | `FocusSessionView` | ✅ present |
-| `parent_code_reveal` | 10/hour (intended) | `ParentCodeRevealThrottle` | `ParentAccessCodeRevealView` | 🔴 **MISSING** — confirmed this session; see §9.0 item 20 |
+| `parent_code_reveal` | 10/hour | `ParentCodeRevealThrottle` | `ParentAccessCodeRevealView` | ✅ present *(confirmed — production readiness pass, §9.4 item 20 resolved)* |
 
 Project-wide floor (applies to `message`'s views too, on top of the above where set):
 `DEFAULT_THROTTLE_CLASSES = [UserRateThrottle, AnonRateThrottle]`, rates `user: 100/min`,
@@ -3419,8 +3459,8 @@ from `models_focus.py`, `permissions.py`, `push_utils.py`, `tasks.py`, `serializ
 confirmed end-to-end: model, service/push layer, and route (`POST
 /message/messages/<id>/translate/` for Translation — see §6/§9.1 item — plus the matching
 `DEFAULT_THROTTLE_RATES` entries, §9.4 items 15/16, and `GOOGLE_TRANSLATE_API_KEY`, §13).
-The one remaining gap in this group is unrelated to routing: `parent_code_reveal`'s
-throttle rate is still missing from `settings.py` — see §9.0 item 20.)*
+`parent_code_reveal`'s throttle rate — the one remaining gap in this group — is now also
+confirmed present in `settings.py` (production readiness pass, §9.4 item 20 resolved).)*
 
 *(The Group Management Service Layer, Bell-Row Notifications, and Offline Message Queue
 were also not previously tracked in this doc — added as §5/§7.22–§7.23/§10, from

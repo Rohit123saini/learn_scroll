@@ -12,17 +12,28 @@ Nothing here ever resolves `context_id` into a real `campus.Section` or
 plain, already-resolved data (title, roster, etc.). This module's whole
 job is "store/track what I'm given", never "go find out more about it".
 
-[ASSUMPTION — NOT VERIFIED]: `core.services.create_notification`'s exact
-signature wasn't available in this pass (only core/models.py was
-provided, not core/services.py itself). The call in
-`notify_submission_received()` below assumes keyword args matching
-`core.Notification`'s own fields. Verify against the real function
-signature before relying on this in production.
+[VERIFIED] `core.services.create_notification`'s real signature is
+confirmed (see `assigments/tasks.py`'s module docstring for the full
+signature and the reasoning behind the keyword args used). The call in
+`notify_submission_received()` below matches it.
+
+[FIX — Task 12 / notif_type collision]: `notify_submission_received()`
+previously sent notif_type="submission_received" as a raw string
+literal — the same bug class fixed in `tasks.py` for the due-reminder
+notif_type (see that module's docstring). Even though
+`Notification.NotifType.SUBMISSION_RECEIVED`'s value happens to be the
+identical string today, sending the literal instead of the enum member
+left this call site silently exposed to the same drift risk: nothing
+here would catch a future rename of that member in core/models.py.
+Fixed to reference `Notification.NotifType.SUBMISSION_RECEIVED`
+directly, for the same reason `tasks.py` now does the same for
+`assigments_DUE_SOON`.
 """
 import logging
 
 from django.db import transaction
 
+from core.models import Notification
 from core.services import create_notification
 from login.models import User
 
@@ -75,6 +86,17 @@ def create_context_assigments(
     bridge — see `assigmentsSubmissionViewSet.perform_create`'s
     docstring) elsewhere in this app. Enforced here now, at the one
     other place an `assigments` can come into existence.
+
+    [VERIFIED — Task 26] Roster-shape mismatch between callers confirmed
+    safe: `campus.bridge.create_assigments()` sends
+    `{"user_id","roll_number","enrollment_no"}` per entry while
+    `liveclass.bridge.create_assigments()` sends only `{"user_id"}`. The
+    `bulk_create` below reads `entry["user_id"]` (required — matches
+    both callers) but `entry.get("roll_number", "")` and
+    `entry.get("enrollment_no", "")` (optional, default `""`), so
+    liveclass's narrower roster entries do not raise `KeyError`. No code
+    change was needed here; this note just records the check so it
+    isn't re-litigated later.
 
     [ADDED — Task 11] `extra_data`: an optional dict merged into `data`
     alongside `context_type`/`context_id`, additive-only (defaults to
@@ -154,13 +176,16 @@ def notify_submission_received(submission: assigmentsSubmission) -> None:
     `data` carries the assigments's own `context_type`/`context_id` so
     the client can deep-link back into whichever context page is
     relevant.
+
+    `notif_type` is `Notification.NotifType.SUBMISSION_RECEIVED`, not a
+    raw string — see [FIX — Task 12] in this module's docstring.
     """
     assigments = submission.assigments
     if not assigments.posted_by_id:
         return
     create_notification(
         recipient=assigments.posted_by,
-        notif_type="submission_received",
+        notif_type=Notification.NotifType.SUBMISSION_RECEIVED,
         title="New Submission",
         message=f"{submission.student} submitted \"{assigments.title}\".",
         data={"context_type": assigments.context_type, "context_id": str(assigments.context_id or "")},

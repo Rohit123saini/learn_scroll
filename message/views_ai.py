@@ -3,7 +3,7 @@ import hashlib
 import logging
 from datetime import timedelta
 
-from django.db import models
+from django.db import models, transaction, IntegrityError
 from django.utils import timezone
 from rest_framework.views import APIView
 from rest_framework.permissions import IsAuthenticated
@@ -559,6 +559,16 @@ class RevisionDeckView(APIView):
     itself is deliberately NOT persisted (same reasoning `ai_service.py`
     already applies to its own cache key), just its hash.
 
+    🔧 GAP FIX (G-7 follow-up — race condition) — the `existing` check
+    above is SELECT-then-INSERT, so two "Generate" taps close enough
+    together could both miss it and both `create()`, i.e. the exact
+    duplicate this feature exists to prevent, just squeezed into a race
+    window. `RevisionDeck.Meta` now has a DB-level `UniqueConstraint` on
+    (`conversation`, `session_id`, `content_hash`) — condition-limited to
+    non-blank hashes so it doesn't break on pre-existing blank-hash rows
+    — and `create()` below is wrapped to catch the resulting
+    `IntegrityError` and return the winning row instead of 500ing.
+
     DELETE /message/study-room/<conversation_id>/revision-deck/?deck_id=<id>
     🔧 GAP FIX (this session) — no way to remove a deck existed at all
     (e.g. one generated too early, before enough of the class had
@@ -733,14 +743,48 @@ class RevisionDeckView(APIView):
             logger.exception(f"Revision deck failed user={request.user.id} conv={conversation_id} err={e}")
             return Response({"error": "AI temporarily unavailable, try again"}, status=500)
 
-        saved = RevisionDeck.objects.create(
-            conversation_id=conversation_id,
-            session_id=session_id,
-            content_hash=content_hash,
-            flashcards=deck["flashcards"],
-            quiz=deck["quiz"],
-            generated_by=request.user,
-        )
+        # 🔧 GAP FIX (G-7 follow-up) — the `existing` check above is a
+        # SELECT-then-INSERT and can race: two "Generate" taps close
+        # enough together can both miss the SELECT and both reach this
+        # `create()`. The DB-level unique constraint on
+        # (conversation, session_id, content_hash) — see RevisionDeck.Meta
+        # in models.py — is what actually closes that race; catching its
+        # `IntegrityError` here just means the loser of the race gets the
+        # winner's row back (200) instead of a 500. Wrapped in its own
+        # `atomic()` savepoint so the IntegrityError doesn't poison the
+        # outer request transaction (needed under ATOMIC_REQUESTS, and
+        # harmless without it).
+        try:
+            with transaction.atomic():
+                saved = RevisionDeck.objects.create(
+                    conversation_id=conversation_id,
+                    session_id=session_id,
+                    content_hash=content_hash,
+                    flashcards=deck["flashcards"],
+                    quiz=deck["quiz"],
+                    generated_by=request.user,
+                )
+        except IntegrityError:
+            winner = (
+                RevisionDeck.objects.filter(
+                    conversation_id=conversation_id,
+                    session_id=session_id,
+                    content_hash=content_hash,
+                )
+                .order_by('-created_at')
+                .first()
+            )
+            if not winner:
+                # Constraint fired but the row is gone by the time we
+                # re-query (e.g. deleted in between) — surface as a
+                # normal failure rather than a confusing 500.
+                return Response({"error": "AI temporarily unavailable, try again"}, status=500)
+            return Response({
+                "id": str(winner.id),
+                "flashcards": winner.flashcards,
+                "quiz": winner.quiz,
+                "created_at": winner.created_at.isoformat(),
+            }, status=200)
 
         return Response({
             "id": str(saved.id),

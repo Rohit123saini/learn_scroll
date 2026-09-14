@@ -29,6 +29,7 @@ from datetime import timedelta
 from celery import shared_task
 from django.conf import settings
 from django.db import transaction
+from django.db.models import Q
 from django.utils import timezone
 
 from asgiref.sync import async_to_sync
@@ -164,45 +165,173 @@ def purge_soft_deleted_conversations():
     return {"deleted": deleted}
 
 
-@shared_task(name="message.cleanup_expired_messages")
-def cleanup_expired_messages():
+def hard_delete_expired_messages(batch_size=500, dry_run=False):
     """
-    Disappearing-messages hard-delete sweep. `views.py`'s message-list GET
-    already defensively hides `expires_at <= now` rows (in case this sweep
-    runs late), but that's UI-level only — the DB row stays forever unless
-    something actually deletes it. This is that something.
+    Disappearing-messages hard-delete sweep — the actual delete logic,
+    factored out so the Celery beat task below AND the
+    `cleanup_expired_messages` management command (an ops-facing manual/
+    ad-hoc entry point — one-off runs, `--dry-run` inspection, a stuck
+    worker needing a manual catch-up sweep) share exactly one
+    implementation instead of two that can silently drift apart.
 
-    Suggested schedule: every 15 min (expiry is minute-precision at best —
-    the coarsest disappearing-duration option is "1 month" — so a 15 min
-    sweep lag is invisible to users, same lookback-vs-cadence reasoning
-    `liveclass`'s beat entries already use).
+    [TASK 40] This used to be duplicated: the management command had its
+    own copy of this loop, querying `Message.objects` (the default,
+    NOT-soft-deleted manager) instead of `Message.all_objects` (every
+    row, soft-deleted included) used here, and defaulting to a batch
+    size of 1000 instead of 500. That manager mismatch meant the
+    management command — if anyone actually ran it — would silently
+    skip any message that was soft-deleted AND expired, leaving it
+    stuck in the DB forever. Both discrepancies are gone now that there
+    is only one code path.
 
-    Bounded batch per run (same reasoning as `send_scheduled_messages`) so
-    one huge backlog (e.g. sweep was off for a while) can't hold the DB
-    connection / worker for an unbounded amount of time — it just clears
-    itself over a few ticks instead of one giant transaction.
+    `views.py`'s message-list GET already defensively hides
+    `expires_at <= now` rows (in case this sweep runs late), but that's
+    UI-level only — the DB row stays forever unless something actually
+    deletes it. This is that something.
+
+    Bounded batch per run so one huge backlog (e.g. sweep was off for a
+    while, or an operator is running this by hand after downtime) can't
+    hold the DB connection / worker for an unbounded amount of time —
+    it clears itself over a few iterations instead of one giant
+    transaction.
     """
     from .models import Message
 
     now = timezone.now()
-    deleted_total = 0
+    base_qs = Message.all_objects.filter(expires_at__isnull=False, expires_at__lte=now)
 
+    if dry_run:
+        return {"deleted": 0, "would_delete": base_qs.count(), "dry_run": True}
+
+    deleted_total = 0
     while True:
-        expired_ids = list(
-            Message.all_objects.filter(expires_at__isnull=False, expires_at__lte=now)
-            .values_list('id', flat=True)[:500]
-        )
+        expired_ids = list(base_qs.values_list('id', flat=True)[:batch_size])
         if not expired_ids:
             break
-        count, _ = Message.all_objects.filter(id__in=expired_ids).delete()
+        with transaction.atomic():
+            Message.all_objects.filter(id__in=expired_ids).delete()
         deleted_total += len(expired_ids)
-        if len(expired_ids) < 500:
+        if len(expired_ids) < batch_size:
             break
 
-    if deleted_total:
-        logger.info("cleanup_expired_messages: hard-deleted %s expired message(s)", deleted_total)
+    return {"deleted": deleted_total, "dry_run": False}
 
-    return {"deleted": deleted_total}
+
+@shared_task(name="message.cleanup_expired_messages")
+def cleanup_expired_messages():
+    """
+    Celery beat entry point — see `hard_delete_expired_messages()` above
+    for the actual sweep logic.
+
+    Suggested/registered schedule: every 15 min (expiry is minute-
+    precision at best — the coarsest disappearing-duration option is
+    "1 month" — so a 15 min sweep lag is invisible to users, same
+    lookback-vs-cadence reasoning `liveclass`'s beat entries already
+    use). Registered in `settings.CELERY_BEAT_SCHEDULE` as
+    "message-cleanup-expired-messages" — this IS already running
+    periodically; the management command is a manual/ad-hoc
+    supplement, not a second schedule (see that file — TASK 40).
+    """
+    result = hard_delete_expired_messages(batch_size=500)
+    if result["deleted"]:
+        logger.info("cleanup_expired_messages: hard-deleted %s expired message(s)", result["deleted"])
+    return result
+
+
+# 🔧 GAP FIX (TASK 24) — `CHAT_APP_DOCUMENTATION.md` (item 25) had already
+# claimed this wrapper was added "this pass"; it wasn't — verified
+# directly against this file, which had no `expire_stale_parent_access`
+# task (or anything `parent_access`/`ParentToken`/`ParentAccessCode`-
+# related) at all. `LearnScroll_project_documentation.md` (item 8) was
+# the accurate one, flagging exactly this as unconfirmed. If a
+# `settings.CELERY_BEAT_SCHEDULE` entry already points at
+# `"message.expire_stale_parent_access"` (per that same doc claim), it
+# was a silent `NotRegistered` no-op until now — added for real below.
+#
+# Two independent sweeps, same run, same "bounded batch per run, rest
+# picked up next tick" reasoning every other sweep in this file uses:
+#
+#   1. `ParentAccessCode` rows past their own absolute `expires_at` but
+#      still `is_active=True` — `ParentAccessCode.is_expired` (models.py)
+#      and every access-time check (`ParentVerifyCodeView`,
+#      `HasValidParentToken`) already treat these as dead the moment
+#      `expires_at` passes, regardless of the stored `is_active` value —
+#      so this sweep changes no *behavior*, it only brings the stored
+#      flag in line with what's already true at read time (matters for
+#      anything that queries `is_active=True` directly without
+#      re-deriving `is_expired`, e.g. an admin/"how many active parent
+#      links" count).
+#   2. `ParentToken` rows past their own rolling `INACTIVITY_TTL_DAYS`
+#      inactivity window (`ParentToken.is_expired`, models.py — measured
+#      from `last_seen_at`, or `created_at` if the token was verified but
+#      never actually used). Unlike `ParentAccessCode`, `ParentToken` has
+#      no `is_active` flag of its own to flip — a token's only expiry
+#      signal IS that rolling-inactivity check — so there's nothing to
+#      "deactivate" here, only stale rows to reclaim; hard-deleted, same
+#      storage-hygiene posture `cleanup_expired_messages` above already
+#      takes for messages past their own `expires_at`. `HasValidParentToken`
+#      already denies these before this sweep ever runs — deleting them
+#      is cleanup, not what makes them stop working.
+#
+# Suggested schedule: once daily (both windows here are day-granularity —
+# `expires_at`/`INACTIVITY_TTL_DAYS=30` — unlike the minute/15-min
+# cadence the message-delivery/disappearing-message sweeps above need).
+@shared_task(name="message.expire_stale_parent_access")
+def expire_stale_parent_access():
+    """
+    Sweeps two independent "stale" states on the parent-portal auth
+    chain (see `models.py`'s `ParentAccessCode`/`ParentToken` — this
+    task's own module-level comment above has the full reasoning for
+    why each is handled the way it is):
+
+      - `ParentAccessCode.is_active=True` rows whose `expires_at` has
+        passed -> flipped to `is_active=False` (bounded batch — a large
+        backlog clears over a few ticks, same as every other sweep in
+        this file).
+      - `ParentToken` rows past `INACTIVITY_TTL_DAYS` of inactivity
+        (`last_seen_at`, falling back to `created_at` for a token that
+        was verified but never subsequently used) -> hard-deleted
+        (bounded batch, same reasoning).
+
+    Both checks are re-derived here via direct queryset filters (not by
+    loading every row and checking the `.is_expired` property in Python)
+    so the sweep stays a couple of cheap indexed queries regardless of
+    table size — `ParentAccessCode` already has an
+    `Index(fields=['is_active', 'expires_at'])` (models.py) matching
+    exactly this filter shape.
+    """
+    from .models import ParentAccessCode, ParentToken
+
+    now = timezone.now()
+
+    expired_code_ids = list(
+        ParentAccessCode.objects.filter(
+            is_active=True, expires_at__isnull=False, expires_at__lte=now,
+        ).values_list('id', flat=True)[:200]
+    )
+    deactivated = 0
+    if expired_code_ids:
+        deactivated = ParentAccessCode.objects.filter(id__in=expired_code_ids).update(
+            is_active=False, updated_at=now,
+        )
+
+    cutoff = now - timedelta(days=ParentToken.INACTIVITY_TTL_DAYS)
+    stale_token_ids = list(
+        ParentToken.objects.filter(
+            Q(last_seen_at__lte=cutoff) | Q(last_seen_at__isnull=True, created_at__lte=cutoff)
+        ).values_list('id', flat=True)[:200]
+    )
+    deleted_tokens = 0
+    if stale_token_ids:
+        deleted_tokens, _ = ParentToken.objects.filter(id__in=stale_token_ids).delete()
+
+    if deactivated or deleted_tokens:
+        logger.info(
+            "expire_stale_parent_access: deactivated_codes=%s deleted_tokens=%s",
+            deactivated, deleted_tokens,
+        )
+
+    return {"deactivated_codes": deactivated, "deleted_tokens": deleted_tokens}
 
 
 # ======================================================================

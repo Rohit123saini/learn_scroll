@@ -25,13 +25,16 @@ def user_can_review_attempt(user, attempt) -> bool:
     context — resolved by campus itself, never by this app directly
     (golden rule: no `campus.Section`/staff imports here).
 
-    ⚠️ GAP (same shape as the CoinLedger/NotifType gaps flagged in
-    models.py — explicitly called out rather than guessed at):
-    `campus.bridge.can_review_testseries_attempt(user, context_type,
-    context_id) -> bool` does not exist yet. Until `campus` adds it,
-    a campus subject-teacher will get `False` here — a safe default
-    (denies access) rather than silently granting a review permission
-    this app can't actually verify.
+    RESOLVED (TASK 19) — `campus.bridge.can_review_testseries_attempt(
+    user, context_type, context_id) -> bool` now exists (confirmed
+    directly against the real `campus/bridge.py`, keyword-only
+    `user`/`context_type`/`context_id`, exactly matching the call
+    below), so the `try/except ImportError` path is effectively dead
+    code today — kept in place as a defensive fallback (still a safe
+    `False`/deny, not a crash, if that ever changes) rather than
+    removed outright, since removing it buys nothing and a bare
+    `campus.bridge` import here would be the one `testseries -> campus`
+    coupling this app otherwise has none of.
     """
     series = attempt.series
     if series.creator_id == user.id:

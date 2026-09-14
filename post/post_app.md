@@ -7,7 +7,18 @@ serializers → comment_serializers → views → comment_view → services →
 signals → tasks → urls → admin → apps.py) yahin milega, saath me har piece
 kya kaam karta hai uski explanation bhi.
 
-> **Latest pass — Addendum 8 (§23):** `tasks.py`'s
+> **Latest pass — Addendum 9 (§24):** full 15-file line-by-line resync
+> against the actual uploaded code. Every file's logic still matches
+> §3–§10.3 exactly (trivial trailing-newline diffs only) — **except one
+> real regression**: `Services.py`/`Tasks.py` are capitalized again
+> (§16.1's/§17's rename didn't stick), which now produces genuine
+> `ModuleNotFoundError`s on a case-sensitive filesystem via
+> `signals.py`'s and `tests.py`'s `from .tasks import ...` and
+> `Tasks.py`'s own `from .services import ...`. New: §14 issue #13, a
+> §15 checklist item, and §24 itself. No manual/hand-written migration
+> exists anywhere in this doc to remove. See §24 for the full writeup.
+>
+> **Previous pass — Addendum 8 (§23):** `tasks.py`'s
 > `notify_followers_new_post` docstring was expanded to record a
 > mute-check that got added and then correctly reverted between passes
 > (`NotificationPreference.muted_types` was wrongly deleting muted
@@ -4250,6 +4261,47 @@ browser) vs. `attachment` for office docs/archives (forced download).
     `muted_types` is now a confirmed no-op for `NEW_POST_FROM_FOLLOWED`
     specifically, since this task never makes a separate channel-send
     call for a mute check to gate in the first place — see §23.
+13. ⚠️ **REGRESSED (this pass, NEW) — `Services.py`/`Tasks.py` are
+    capitalized again, and it now breaks real cross-imports, not just a
+    theoretical one.** §17's rename (`Services.py` → `services.py`,
+    `Tasks.py` → `tasks.py`, matching `signals.py`) was undone somewhere
+    between passes: the files uploaded this pass are once again named
+    `Services.py` and `Tasks.py` (capital first letter), while
+    `signals.py` correctly stayed lowercase. Every file's *content*
+    still assumes the lowercase names, which is what makes this a live
+    bug rather than a cosmetic one:
+    - `signals.py` does `from .tasks import notify_followers_new_post`
+      / `generate_video_thumbnail` (both lowercase) — on a
+      case-sensitive filesystem (Linux/prod) this raises
+      `ModuleNotFoundError` against a file actually named `Tasks.py`.
+    - `Tasks.py` itself does `from .services import
+      download_storage_file_to_temp, generate_video_thumbnail_file`
+      (lowercase) — same failure, against `Services.py`.
+    - `tests.py` does `from .tasks import expire_old_stories,
+      hard_delete_ancient_stories` (lowercase) — same failure.
+    - `views.py`/`comment_view.py` are the one place that's internally
+      *consistent* with the current filenames — both do
+      `from .Services import notify_post_liked` /
+      `notify_post_commented` (capitalized) — but that only works by
+      accident of matching this pass's (wrong) filename, and it's the
+      odd one out against every other cross-import in the app, which
+      assumes lowercase.
+    Net effect: `post.apps.PostConfig.ready()` itself still imports
+    fine (`import post.signals`, lowercase, matches the actual
+    `signals.py`), so the app doesn't fail at Django startup the way
+    earlier passes' `admin.py`/`serializers.py` bugs did — but the very
+    first `post_save` on a `Post` or `PostMedia` row (i.e. the first
+    real post-create request in production) hits
+    `queue_new_post_notification_fanout`/
+    `queue_video_thumbnail_on_create`, both of which do the broken
+    `from .tasks import ...` inside `signals.py`, and crashes there
+    instead. **Fix:** rename the two files back to lowercase
+    (`Services.py` → `services.py`, `Tasks.py` → `tasks.py`) to match
+    every other cross-reference in the app, and change
+    `views.py`/`comment_view.py`'s `from .Services import ...` to
+    lowercase `from .services import ...` at the same time so nothing
+    is left depending on the filename staying capitalized. See §24 for
+    the full pass-by-pass history of this specific bug recurring.
 
 ---
 
@@ -4281,6 +4333,13 @@ browser) vs. `attachment` for office docs/archives (forced download).
       `generate_video_thumbnail`) only ever executes if something is
       consuming the queue; without a worker it just enqueues and never
       runs, same caveat §2 already gives for video thumbnails.
+- [ ] **File names are lowercase on disk**: `services.py`, `signals.py`,
+      `tasks.py` (NOT `Services.py`/`Tasks.py`) — verify this on every
+      deploy, not just once. See §14 issue #13 / §24: this exact
+      regression has now recurred across multiple passes on a
+      case-insensitive dev machine (Windows/macOS) where it silently
+      keeps working, only to break the moment it ships to a
+      case-sensitive Linux/prod filesystem.
 
 With the above satisfied, everything in this single document — models,
 serializers, comment_serializers, views, comment_view, urls, admin — is
@@ -4981,5 +5040,59 @@ record instead of silently disappearing.
   §10.3 code block + §14 item 12 (resolved/reworded).
 - No `__init__.py` / `cleanup_stale_chunked_uploads.py` content this
   pass either — both remain empty, as documented in §12 / §2.
+
+---
+
+## 24. Addendum 9 — this pass: full 15-file doc-vs-code resync;
+`Services.py`/`Tasks.py` casing bug has recurred (§14 issue #13)
+
+Every one of this pass's 15 uploaded files (`models.py`, `serializers.py`,
+`comment_serializers.py`, `views.py`, `comment_view.py`, `urls.py`,
+`admin.py`, `apps.py`, `Services.py`, `signals.py`, `Tasks.py`,
+`tests.py`, `__init__.py`, `cleanup_stale_chunked_uploads.py`,
+`post_app.md` itself) was diffed line-by-line against this doc's own
+embedded "full code" blocks (§3–§10.3). Result: every file's actual
+*content* is unchanged from what §3–§10.3 already documented (only
+trivial trailing-newline/blank-line differences, not worth calling
+out individually) — **except one real, recurring regression**:
+
+**`Services.py` and `Tasks.py` are capitalized again**, exactly the
+case-sensitivity trap §16.1/§17 already found and fixed once before.
+`signals.py` correctly stayed lowercase this time, which is actually
+what makes this pass's regression worse than a simple "forgot to
+rename" — it produces a genuine cross-import mismatch rather than a
+uniform one:
+
+| File (actual name this pass) | What it imports | Resolves? |
+|---|---|---|
+| `signals.py` (lowercase ✅) | `from .tasks import ...` (lowercase) | ❌ — no file named `tasks.py` exists, only `Tasks.py` |
+| `Tasks.py` (capitalized ⚠️) | `from .services import ...` (lowercase) | ❌ — no file named `services.py` exists, only `Services.py` |
+| `tests.py` | `from .tasks import ...` (lowercase) | ❌ — same reason as `signals.py` |
+| `views.py` / `comment_view.py` | `from .Services import ...` (capitalized) | ✅ — matches `Services.py`'s actual current name, but is the only cross-import in the app written this way |
+
+Full detail and the required fix are now in **§14 issue #13** (new)
+and the setup checklist (§15) — not repeated here. The short version:
+rename both files back to lowercase and make
+`views.py`/`comment_view.py` match, so every cross-import in the app
+agrees on lowercase `services`/`tasks`, the same way `signals.py`
+already does.
+
+**Not a doc problem to "fix" by editing around it** — the embedded
+code blocks in §10.1/§10.3 already show the lowercase-assuming content
+correctly (that hasn't changed), and §10's own `apps.py` note already
+warns about this exact class of bug for `signals.py`. This addendum
+exists so the *recurrence* is on record: this is the second time this
+exact bug has shipped in a re-upload (see §16.1 → fixed at §17 →
+regressed here), which is worth flagging to whoever owns the
+build/deploy pipeline for this app, since a dev-machine
+case-insensitive filesystem (Windows/macOS) will keep hiding it locally
+every time.
+
+No other behavioral drift found this pass — models/serializers/views/
+comment_view/urls/admin/apps/signals/services/tasks logic itself
+matches §3–§10.3 exactly, and no manual/hand-written migration file
+exists anywhere in this doc to remove (§15's checklist already only
+says `makemigrations`/`migrate`, same as `testseries_app_reference.md`'s
+equivalent line).
 
 ---

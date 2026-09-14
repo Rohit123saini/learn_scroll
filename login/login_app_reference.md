@@ -1,11 +1,36 @@
 # `login` App — Complete Self-Contained Reference
 
-> **v6 — `GoogleAuthView` username-collision race condition fixed.**
-> Ye ek hi file hai jisme poore **login** (auth) Django app ka sara
-> logic, code, connections, flows aur known issues cover hain. Iske
-> alawa kisi aur file ki zaroorat nahi — sab kuch (models → serializers
-> → views → urls → admin → apps.py → sms_service.py) yahin milega,
-> saath me har piece kya kaam karta hai uski explanation bhi.
+> **v8 — full 10-file resync pass, no functional drift found.** Ye ek
+> hi file hai jisme poore **login** (auth) Django app ka sara logic,
+> code, connections, flows aur known issues cover hain. Iske alawa
+> kisi aur file ki zaroorat nahi — sab kuch (models → serializers →
+> views → urls → admin → apps.py → sms_service.py) yahin milega, saath
+> me har piece kya kaam karta hai uski explanation bhi.
+>
+> **v7 se v8 me kya badla:** har ek uploaded `.py` file (`models.py`,
+> `serializers.py`, `views.py`, `sms_service.py`, `admin.py`, `apps.py`,
+> `tests.py`, `urls.py`) is doc ke embedded code-blocks ke against
+> programmatically byte-diff kiya gaya (fresh 10-file upload). Result:
+> **zero functional/behavioural change** — har file exactly wahi hai
+> jo §3–§9 already document karte hain. `views.py` me sirf line-ending
+> (CRLF) aur trailing-newline jaisa purely cosmetic farak tha, content
+> byte-for-byte same. Interconnection points (models ↔ serializers ↔
+> views ↔ urls ↔ admin) sab already consistent hain, kahin update nahi
+> karna pada. Manual/hand-written migration ka is baar bhi koi sawaal
+> nahi tha — koi aisi file upload hi nahi hui, aur §12 checklist pehle
+> se hi sirf `makemigrations`/`migrate` bolta hai, kisi manual migration
+> ka zikar kabhi nahi tha is doc me.
+>
+> **v6 se v7 me kya badla:** har ek uploaded `.py` file (`models.py`,
+> `serializers.py`, `views.py`, `sms_service.py`, `admin.py`, `apps.py`,
+> `tests.py`, `urls.py`) is doc ke embedded code-blocks ke against
+> programmatically byte-diff kiya gaya — koi functional/behavioural
+> change nahi mila, har file exactly wahi hai jo §3–§9 already document
+> karte hain (sirf trailing-newline jaisa cosmetic farak, jo skip kiya
+> gaya). Ek chhota doc-only fix: §4 (`serializers.py`) ke code block me
+> `# login/serializers.py` file-path comment line missing thi, add kar
+> di gayi. Koi manual/hand-written migration file kahin nahi mili — §12
+> checklist already sirf `makemigrations`/`migrate` bolta hai.
 >
 > **v5 se v6 me kya badla:** §11 item 3 ne jo theoretical race flag
 > kiya tha — `GoogleAuthView`'s `exists()`-check-then-`create()` username
@@ -559,6 +584,7 @@ class OTPVerification(models.Model):
 ## 4. `serializers.py` (full code)
 
 ```python
+# login/serializers.py
 from rest_framework import serializers
 from .models import User, OTPVerification, phone_validator
 from django.core.exceptions import ValidationError as DjangoValidationError

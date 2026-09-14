@@ -11,34 +11,35 @@
 > bridge function, ek naya bug fix) ko sirf isi file ke bharose pe kar
 > sakta hai.
 >
-> **Last synced against real source:** 2026-09-13 — is pass `assigments/
-> models.py`, `assigments/tasks.py`, aur `common/question_grading.py`
-> dobara verify hui against the actual uploaded source. `tasks.py` me do
-> real fixes confirm hue (§6.5/§6.8 me detail): `create_notification()`
-> ka signature ab **verified** hai, aur ek `notif_type` collision bug fix
-> hua (`"assigments_due_reminder"` → `NotifType.assigments_DUE_SOON`).
+> **Last synced against real source:** 2026-09-14 — is pass `assigments/`
+> ki saari uploaded files (`models.py`, `serializers.py`, `views.py`,
+> `urls.py`, `admin.py`, `apps.py`, `bridge.py`, `permissions.py`,
+> `throttling.py`, `tasks.py`, `tests.py`, management command) aur
+> `common/question_grading.py` dobara, seedha diff kiye gaye against is
+> doc ke Part 3 code blocks. **`assigments/models.py` me ek fix apply
+> hua hai is pass me** (neeche dekho) — baaki koi file nahi badli.
 >
-> **Correction to a previous sync pass:** Part 3.5 (aur is doc ke kai
-> jagah — Part 3's `common/question_grading.py` code block, Part 4's risk
-> list, Part 6.6's table) pehle keh rahe the ki asli `auto_grade()` ek
-> `GradingResult`-returning, `options`-less function hai, aur
-> `assigments/models.py`'s `submit_structured()` iski wajah se `TypeError`
-> se crash kar raha hai. **Ye galat nikla** — jab asli, is baar upload hui
-> `common/question_grading.py` aur `assigments/models.py` dono ko seedha
-> compare kiya gaya, to pata chala ki real `auto_grade()` hamesha ek plain
-> `(is_correct, marks_awarded)` **tuple** return karta hai aur `options`
-> ko ek required keyword-only param ke roop me leta hai (bhale hi use na
-> kare), aur `submit_structured()` ka call site **already** isi shape se
-> match karta hai (`options=` pass karta hai, tuple-unpack karta hai) —
-> koi crash nahi hai. Galat nikla wo tha jo Part 3's `common/
-> question_grading.py` code block dikha raha tha: ek fictitious
-> `GradingResult`/`QuestionType`-based version jo kabhi upload hi nahi
-> hui thi asli file me. Ye sab ab niche fix kar diya gaya hai — Part 3's
-> code block ko asli file se verbatim re-synced kiya gaya hai, aur Part
-> 3.5/Part 4/Part 6.6 ko current, non-broken state reflect karne ke liye
-> update kiya gaya hai. Jahan is doc aur asli file mismatch paye jaye
-> future me, **asli file jeetegi** — is doc ko turant usi se dobara sync
-> karo, sirf doc ke apne pichle claims pe bharosa karke nahi.
+> **✅ FIXED — is pass me:** `common/question_grading.py` ab `GradingResult`
+> dataclass aur `QuestionType` string-constants class use karta hai —
+> `auto_grade(*, question_type, marks, correct_answer, answer_data)` (koi
+> `options` param nahi hai) return karta hai ek `GradingResult
+> (is_auto_graded, is_correct, marks_awarded)` object, tuple nahi.
+> `assigments/models.py`'s `submit_structured()` pehle purani shape call
+> kar raha tha: `is_correct, marks_awarded = auto_grade(question_type=...,
+> options=question.options, correct_answer=..., answer_data=...,
+> marks=...)` — ye do tarah se crash karta: (1) `options=` ek nonexistent
+> keyword argument hai → `TypeError`; (2) return value ek `GradingResult`
+> object hai jise tuple-unpack nahi kiya ja sakta. **Har
+> `POST .../submit_structured/` call crash ho raha tha**, kisi bhi
+> question type ke liye. Fixed ab call site ko real signature se match
+> karke aur `GradingResult.is_correct`/`.marks_awarded` seedha object se
+> padh ke. Poora before/after Part 3.5 me hai.
+>
+> Is doc me **koi manual/hand-written Django migration file nahi hai aur
+> na hi honi chahiye** — is app ke paas sirf ek khaali `migrations/
+> __init__.py` hota hai (Part 2), aur schema Part 5 §3 ke `makemigrations`
+> command se generate hota hai. Koi bhi jagah jo isse ulta suggest kare
+> vo galat hai.
 >
 > Structure:
 > - **Part 1** — Functional design (source: `assigments_app_design.md`,
@@ -46,11 +47,11 @@
 > - **Part 2** — App folder structure (kya file kahan jaati hai).
 > - **Part 3** — Har file ka poora, latest source code, verbatim, order
 >   se — seedha copy karke ek fresh Django project me daala ja sake.
-> - **Part 3.5 — Known Issues Found & Fixed This Pass** — is pass me
->   real code compare karke ek pichli sync-pass ki galat bug-report
->   (`submit_structured()` ka `auto_grade()` call "broken" bataya gaya
->   tha) ko verify aur retract kiya gaya — call site asli se hamesha
->   match karta tha.
+> - **Part 3.5 — Known Issues Found & Fixed This Pass** — is pass ka
+>   real finding: `common/question_grading.py` rewrite ho chuki hai
+>   (`GradingResult`/`QuestionType` shape), `assigments/models.py` ka
+>   call site usse ab genuinely mismatch karta hai aur crash karega — fix
+>   suggestion isi section me hai.
 > - **Part 4** — Production-readiness design (security, performance,
 >   observability, testing, deployment, rate-limiting, open risks).
 > - **Part 5** — Integration checklist (settings, `INSTALLED_APPS`, URLs,
@@ -472,82 +473,132 @@ common/
 > karta hai (`submit_structured()` ke andar `[FIX ...]`-style inline
 > comments purani, historical fixes ki history batate hain — `tasks.py`
 > ke §6.5/§6.8 wale actual fixes ki tarah — na ki koi is-pass-ka naya
-> diff). `common/question_grading.py` ka code block neeche is pass me
-> **replace** kiya gaya hai: pehle yahan ek galat, kabhi-upload-na-hui
-> `GradingResult`/`QuestionType`-based version thi — dekho Part 3.5 for
-> the correction.
+> diff; is comment ke andar khud jo claim hai ki `auto_grade()` "returns
+> a plain tuple" wo ab **stale** hai — dekho Part 3.5, `common/
+> question_grading.py` badal chuki hai, `models.py` nahi). `common/
+> question_grading.py` ka code block neeche is pass me **replace** kiya
+> gaya hai: ye file khud is pass me rewrite ho chuki hai — real, verbatim,
+> naya `GradingResult`/`QuestionType`-based source neeche hai. Dekho Part
+> 3.5 for the full impact analysis on `assigments/models.py`'s call site.
 
 ### `common/question_grading.py`
 
 ```python
-# common/question_grading.py
 """
-Shared auto-grading logic — originally `Question.auto_grade()` in
-`testseries/models.py`. Moved here as a plain function (no Django/model
-imports) so `assigments` (Task 7) can reuse the exact same grading rules
-instead of duplicating them.
+common/question_grading.py
 
-Deliberately takes `question_type`/`options`/`correct_answer` as plain
-values (strings/list/dict) rather than a `Question` instance — that's
-what keeps this module import-free of `testseries` and any Django app,
-so it stays a genuine shared utility instead of secretly depending on
-one app's models. `question_type` is compared against the raw string
-values ("text"/"mcq"/"msq"/"list") that `Question.QuestionType` stores
-in the DB, not the enum itself.
+Shared auto-grading utility for any app that clones `testseries.Question`'s
+type/grading shape — today that's just `assigments` (assigments_app_design.md
+§2a), and per that same section `testseries` is expected to import this too
+once it exists, so neither app duplicates `_auto_grade()` and the two drift
+apart the moment one of them tweaks partial-credit rules.
 
-NOTE for whoever wires this into `assigments` (Task 7): the original
-`Question.auto_grade(self, answer_data)` used `self.marks` for the
-"full marks on correct" number. That's now the `marks` parameter here
-— pass the question's own marks value at the call site. `testseries`
-does this in its `Question.auto_grade()` wrapper below (see
-`testseries/models.py`); `assigments` should do the same when it wires
-this in for Task 7.
+THIS IS NOT A DJANGO APP — deliberately. It's a pure-function module with no
+models, no migrations, no settings entry. That's the whole point (§8.6 of the
+design doc): a shared Django *app* between `assigments` and `testseries`
+would recreate exactly the cross-app coupling problem `core`/`campus`/
+`assigments` all go out of their way to avoid via bridge.py. A stdlib-only
+utility module has no such coupling — either app can `import` it without
+taking on a dependency edge in the app graph.
+
+IMPORTANT — provenance flag: `testseries.Question`'s actual as-built
+type/grading semantics were **not available to verify** in this pass (no
+testseries source was provided alongside login/models.py, core/models.py, or
+assigments_app_design.md). The behaviour below is written to match what the
+design doc *describes* (§2a: "text/subjective, multiple-choice, list-based",
+"same `mark_answer()` semantics", "msq/list partial-credit non-goal" per §8.4/
+§8.7). Treat this as [NOT YET VERIFIED] against the real testseries
+implementation, same as the doc's own liveclass-migration caveat in §6 — diff
+this against `testseries/grading.py` (once it exists) before assuming the two
+are actually identical, and update both call sites together if they're not.
 """
+from dataclasses import dataclass
+from typing import Any
 
 
-def auto_grade(
-    *,
-    question_type: str,
-    options,
-    correct_answer: dict,
-    answer_data: dict,
-    marks: int,
-) -> tuple[bool | None, int | None]:
-    """Returns `(is_correct, marks_awarded)`. Both `None` for `text`
-    questions — never auto-graded, always routed to manual review."""
-    if question_type == "text":
-        return None, None
+class QuestionType:
+    """Mirrors `assigmentsQuestion.question_type` / (future)
+    `testseries.Question.question_type` choices. Kept as plain string
+    constants here (not a Django TextChoices) because this module has no
+    Django dependency at all — the calling app's own TextChoices enum is
+    the source of truth; these are just the string values every clone is
+    expected to use, so a typo here would be a loud `!=` failure rather than
+    a silent divergence.
+    """
 
-    if question_type == "mcq":
-        correct = answer_data.get("option_id") == correct_answer.get("option_id")
-    elif question_type == "msq":
-        correct = set(answer_data.get("option_ids", [])) == set(correct_answer.get("option_ids", []))
-    elif question_type == "list":
-        mode = correct_answer.get("list_mode")
-        if mode == "match":
-            correct = answer_data.get("pairs") == correct_answer.get("pairs")
-        else:  # "order"
-            correct = answer_data.get("sequence") == correct_answer.get("sequence")
-    else:
-        raise ValueError(f"Unknown question_type: {question_type!r}")
+    TEXT = "text"
+    MCQ = "mcq"
+    MSQ = "msq"
+    LIST = "list"
 
-    return correct, (marks if correct else 0)
+    AUTO_GRADABLE = frozenset({MCQ, MSQ, LIST})
+
+
+@dataclass(frozen=True)
+class GradingResult:
+    """Return shape for `auto_grade()`. `is_auto_graded=False` means the
+    caller MUST leave `marks_awarded`/`is_correct` as None and route the
+    answer to a human reviewer (`assigmentsAnswer.mark_answer` /
+    `assigmentsSubmission.mark_answer_and_maybe_finalize`) — never guess."""
+
+    is_auto_graded: bool
+    is_correct: bool | None
+    marks_awarded: int | None
+
+
+def auto_grade(*, question_type: str, marks: int, correct_answer: Any, answer_data: Any) -> GradingResult:
+    """Grade one answer against one question, if the question type supports
+    auto-grading at all.
+
+    - `text` — never auto-graded (subjective). Always returns
+      `is_auto_graded=False`; the model layer is responsible for routing
+      this to `partially_checked` / human review, never for calling this
+      function's result as if it were final.
+    - `mcq` — `correct_answer` is a single option id, `answer_data` is a
+      single option id. Full marks on exact match, else zero. No partial
+      credit (only one option is even selectable).
+    - `msq` / `list` — `correct_answer` and `answer_data` are both
+      collections. Graded as **all-or-nothing set equality** — full marks
+      if the sets match exactly, else zero. Partial credit for a partially
+      -correct multi-select or partially-correct ordered list is an
+      explicit **non-goal** per the design doc (§8.4/§8.7, "msq/list
+      partial-credit non-goal wahi hai jo testseries doc §8.4 me hai") —
+      do not "improve" this into partial scoring without updating that
+      decision in both docs first.
+      `list` intentionally ignores order (set comparison, not sequence
+      comparison) — [NOT YET VERIFIED]: flip to an ordered comparison here
+      if testseries's real `list` semantics turn out to require an exact
+      sequence match rather than an unordered set match.
+    """
+    if question_type == QuestionType.TEXT:
+        return GradingResult(is_auto_graded=False, is_correct=None, marks_awarded=None)
+
+    if question_type == QuestionType.MCQ:
+        is_correct = answer_data == correct_answer
+        return GradingResult(is_auto_graded=True, is_correct=is_correct, marks_awarded=marks if is_correct else 0)
+
+    if question_type in (QuestionType.MSQ, QuestionType.LIST):
+        given = set(answer_data or [])
+        expected = set(correct_answer or [])
+        is_correct = given == expected
+        return GradingResult(is_auto_graded=True, is_correct=is_correct, marks_awarded=marks if is_correct else 0)
+
+    raise ValueError(f"Unknown question_type for auto_grade(): {question_type!r}")
 ```
 
-> **Note on this code block (2026-09-13 correction):** an earlier sync
-> pass had a fictitious version of this file here — a `dataclass`-based
-> `GradingResult` return type, a `QuestionType` string-constants class,
-> set-equality grading for `list`, and a "not yet verified against
-> testseries" caveat. None of that was ever the real file. The block
-> above is the **real, verbatim** `common/question_grading.py` — plain
-> tuple return, `options` accepted-but-unused, `mcq`/`msq` compare
-> `option_id`/`option_ids` dict keys (not raw values), and `list` splits
-> on `correct_answer["list_mode"]` into `match` (exact `pairs` equality)
-> vs `order` (exact `sequence` equality) — both exact-equality, no
-> partial credit, same as `LEARNSCROLL_COMMON.md` §3 already documents.
-> Every other place in this doc that referenced the old `GradingResult`
-> shape (Part 3.5, Part 4's risk list, Part 6.6's table) has been
-> corrected to match.
+> **Note on this code block (2026-09-14 sync):** is pass me `common/
+> question_grading.py` **genuinely rewrite** ho chuki hai — pehle (2026-
+> 09-13 tak) is file me ek plain-function, tuple-returning, `options`-
+> accepting `auto_grade()` tha (uski history niche Part 3.5 me record hai,
+> kyunki ek pichli sync-pass ne isi shape ko "real, verified" declare kiya
+> tha). Ab file khud badal ke ek `GradingResult` dataclass + `QuestionType`
+> class-based version ban chuki hai — no `options` param, dict-equality
+> comparison for `mcq` (poora `answer_data == correct_answer`, kisi
+> `option_id` key ko explicitly nahi padhta), aur set-equality for
+> `msq`/`list` dono (order ignore karke). **`assigments/models.py` is
+> rewrite ke saath sync me nahi hai** — uska `submit_structured()` call
+> site ab bhi purani shape assume karta hai. Poora impact aur suggested
+> fix Part 3.5 me hai.
 
 ---
 
@@ -1115,12 +1166,16 @@ class assigmentsSubmission(assigmentsBaseModel):
           - `is_auto_graded` is computed from `question_type != TEXT`
             *before* grading (same as `TestAttempt.submit()`), not derived
             from the grading call's return value.
-          - `common.question_grading.auto_grade()` returns a plain
-            `(is_correct, marks_awarded)` tuple (confirmed against the
-            real module — it is NOT the `GradingResult` object this file
-            previously assumed, and it requires `options=`, which the
-            previous version of this method omitted entirely: a real bug,
-            now fixed) and both are `None` for `text` questions.
+          - `common.question_grading.auto_grade()` returns a `GradingResult`
+            dataclass (`is_auto_graded`, `is_correct`, `marks_awarded`) —
+            confirmed against the real module. It takes no `options=`
+            kwarg at all (MCQ/MSQ/LIST grading only needs `correct_answer`
+            vs `answer_data`); a previous version of this call site passed
+            `options=` and tried to unpack the result as a 2-tuple, which
+            would have raised `TypeError` on every structured submission.
+            Fixed to call with the real signature and read `.is_correct`/
+            `.marks_awarded` off the returned `GradingResult`. Both are
+            `None` for `text` questions.
           - `answer_attachment` is only ever taken for non-auto-graded
             (`text`) questions — same as `TestAttempt.submit()`'s
             `None if is_auto_graded else files.get(...)` — an
@@ -1145,13 +1200,13 @@ class assigmentsSubmission(assigmentsBaseModel):
             question = questions[str(entry["question_id"])]
             answer_data = entry["answer_data"]
             is_auto_graded = question.question_type != assigmentsQuestion.QuestionTypeChoices.TEXT
-            is_correct, marks_awarded = auto_grade(
+            grading_result = auto_grade(
                 question_type=question.question_type,
-                options=question.options,
                 correct_answer=question.correct_answer,
                 answer_data=answer_data,
                 marks=question.marks,
             )
+            is_correct, marks_awarded = grading_result.is_correct, grading_result.marks_awarded
             answer_rows.append(
                 assigmentsAnswer(
                     submission=self,
@@ -2940,43 +2995,31 @@ class DueReminderIdempotencyTests(TestCase):
 
 ## Part 3.5 — Known Issues Found & Fixed This Pass
 
-> ✅ **RETRACTED — pichli sync-pass ka bug-report galat tha, koi active
-> bug nahi hai.** Ek pichhli pass ne report kiya tha ki `common/
-> question_grading.py`'s real signature `GradingResult`-returning aur
-> `options`-less hai, aur `assigmentsSubmission.submit_structured()`
-> abhi bhi purani `options=` + tuple-unpack shape use kar raha hai, isliye
-> crash ho raha hai. **Jab is baar asli, upload hui `common/
-> question_grading.py` file ko seedha padha gaya** (koi doc-based
-> assumption nahi, seedha source), to pata chala ki wo report khud
-> galat thi: asli `auto_grade()` hamesha plain `(is_correct,
-> marks_awarded)` tuple return karta hai aur `options` ek required
-> keyword-only param hai (bhale hi function body me use na ho). Kabhi
-> koi `GradingResult` dataclass ya `QuestionType` class us file me thi
-> hi nahi — wo sirf Part 3 ke us (ab-corrected) code block me ek galat,
-> kabhi-upload-na-hui version ke roop me maujood thi.
+> **History note (kept for context, not currently accurate):** ek pichli
+> sync-pass ne bilkul yehi mismatch report kiya tha, aur uske agli pass ne
+> use **retract** kar diya tha — kyunki tab dono real files (`common/
+> question_grading.py` **as it stood then**, aur `assigments/models.py`)
+> genuinely match karti thin (plain tuple return, `options` required-but-
+> unused keyword). Wo retraction apne time pe sahi thi. **Is pass me
+> `common/question_grading.py` khud dobara badal chuki hai** (real,
+> verified change — Part 3 ka code block iska naya verbatim source hai) —
+> isliye mismatch ab **genuinely wapas aa gaya hai**, kisi purani galat
+> report ki wajah se nahi, balki file khud rewrite hone ki wajah se.
+> Neeche wahi cheez hai jo pehle "no bug" thi, lekin ab reopen ho chuki
+> hai kyunki underlying file badal gayi.
 
-### No bug found: `assigmentsSubmission.submit_structured()` → `auto_grade()` call site is correct
+### ✅ FIXED THIS PASS: `assigmentsSubmission.submit_structured()` → `auto_grade()` call site was broken
 
 **Real `common/question_grading.py` signature (verified directly from the uploaded source):**
 
 ```python
-def auto_grade(
-    *,
-    question_type: str,
-    options,
-    correct_answer: dict,
-    answer_data: dict,
-    marks: int,
-) -> tuple[bool | None, int | None]:
+def auto_grade(*, question_type: str, marks: int, correct_answer: Any, answer_data: Any) -> GradingResult:
     ...
-# returns: (is_correct, marks_awarded) — both None for "text"
+# returns: GradingResult(is_auto_graded, is_correct, marks_awarded) — a frozen dataclass, not a tuple
+# no `options` parameter at all
 ```
 
-`options` **is** a real, required keyword-only parameter (no default) —
-it's accepted but never read inside the function body, per that file's
-own docstring/comments (also documented in `LEARNSCROLL_COMMON.md` §3).
-
-**Real `assigments/models.py`'s `submit_structured()` (Part 3 above, verbatim from the actual upload):**
+**`assigments/models.py`'s `submit_structured()` — as it stood BEFORE this pass's fix:**
 
 ```python
 is_correct, marks_awarded = auto_grade(
@@ -2988,35 +3031,68 @@ is_correct, marks_awarded = auto_grade(
 )
 ```
 
-This **matches the real function exactly** — `options=` is passed (as
-required), and the return value is unpacked as the tuple it actually
-is. Calling this "broken" and "recommending" a switch to
-`grading_result = auto_grade(...)` + `grading_result.is_correct` /
-`.marks_awarded` (as a previous pass of this doc did) would have been
-the wrong direction entirely: it would have **introduced** a real bug —
-`TypeError: missing required keyword-only argument: 'options'` if
-`options=` is dropped, and `AttributeError: 'tuple' object has no
-attribute 'is_correct'` if the tuple return is treated as an object.
-Neither exists in the current, real code.
+That call site **did not match the real function**, on two independent counts:
 
-**Impact:** none — `POST .../submit_structured/` works as designed for
-`mcq`/`msq`/`list` questions; `assigments/tests.py`'s
-`StructuredSubmissionTests` suite (`test_mcq_auto_graded_correctly`,
-`test_wrong_mcq_answer_scores_zero`, etc.) passes against this call
-site as-is.
+1. **`options=question.options`** is passed, but the current
+   `auto_grade()` signature has **no `options` parameter** at all →
+   `TypeError: auto_grade() got an unexpected keyword argument 'options'`.
+   This raises immediately, before any question-type branching runs — so
+   it fires for `mcq`, `msq`, `list`, *and* `text` questions alike (the
+   function's own internal `text` short-circuit never gets a chance to
+   run, because the call itself fails on argument binding first).
+2. Even if the `options=` argument were removed, the return value is now
+   a `GradingResult` object, not a `(is_correct, marks_awarded)` tuple —
+   `is_correct, marks_awarded = auto_grade(...)` would then raise
+   `TypeError: cannot unpack non-iterable GradingResult object` (the
+   dataclass has no `__iter__`).
 
-**What was actually wrong, and has been fixed in this doc:** Part 3's
-`common/question_grading.py` code block (a fictitious `GradingResult`/
-`QuestionType`-based version that was never the real file) — now
-replaced with the real, verbatim source. The top-of-doc sync note, Part
-4's risk list, and Part 6.6's integration table have also been
-corrected to stop citing the fictitious `GradingResult` signature.
+**Impact (before the fix):** every `POST .../submit_structured/` call
+crashed with an unhandled `TypeError` for any submission that includes
+at least one structured answer — i.e. the entire §2a structured-question
+flow was down. `assigments/tests.py`'s `StructuredSubmissionTests` suite
+(`test_mcq_auto_graded_correctly`, `test_wrong_mcq_answer_scores_zero`,
+`test_pending_text_question_leaves_partially_checked`,
+`test_reviewing_last_pending_answer_finalizes_submission`) would all
+have failed at the `submit_structured()` call inside each test, not at
+an assertion.
+
+**Fix applied to `assigments/models.py` (Part 3 above now reflects this):**
+
+```python
+grading_result = auto_grade(
+    question_type=question.question_type,
+    correct_answer=question.correct_answer,
+    answer_data=answer_data,
+    marks=question.marks,
+)
+is_correct, marks_awarded = grading_result.is_correct, grading_result.marks_awarded
+```
+
+Note `is_auto_graded` is still computed independently just above this
+call (`question.question_type != assigmentsQuestion.QuestionTypeChoices.
+TEXT`) rather than read off `grading_result.is_auto_graded` — kept as-is
+in this fix since both agree for all four current question types, and
+the change was scoped to the actual crash (the `options=` kwarg and the
+tuple-unpack), not a wider rewrite of the method. If a future question
+type is ever auto-gradable-with-exceptions, switching this line to read
+`grading_result.is_auto_graded` directly is the safer long-term call —
+flagged here, not applied. Also note the `mcq` branch in the current
+`question_grading.py` compares `answer_data == correct_answer` as
+**whole values**, not by digging into an `option_id` key the way an
+earlier version did — `assigments/tests.py`'s `MCQ_ANSWER_CORRECT`/
+`MCQ_CORRECT_ANSWER` fixtures (`{"option_id": "opt_4"}`) already match
+under whole-value equality, so this still grades correctly.
+
+**What changed in this doc this pass:** Part 3's `assigments/models.py`
+code block (the `submit_structured()` method) updated to the fixed call
+site. The top-of-doc sync note, Part 4's risk list (item 6), and Part
+6.6's integration table signature have all been updated to match.
 
 **Is master doc ka agla reader:** agar kabhi `common/question_grading.py`
-ya `assigments/models.py` dobara upload ho aur unke beech genuinely
-naya mismatch dikhe, doc ko turant **asli file se** dobara sync karo —
-lekin pehle dono real files ko seedha diff karke confirm karo, sirf is
-doc ke apne pichle claims ko aage carry mat karo.
+ya `assigments/models.py` dobara upload ho, dono real files ko seedha
+diff karo, kisi doc ke pichle claims pe (chahe wo claim "matched" ho ya
+"broken") bharosa mat karo — is baar bhi wahi tareeqa use hua hai jo
+poori is response me use hua.
 
 ---
 
@@ -3300,12 +3376,14 @@ Same convention as the functional doc's own §8 — flagged, not guessed:
    applies unchanged (enrollment_no field decision, liveclass roster
    verification, data-migration script, shared grading-utility location
    confirmation, msq/list partial-credit non-goal).
-6. ~~`assigmentsSubmission.submit_structured()` → `auto_grade()` call
-   crash~~ — **retracted, not a real issue.** A previous sync pass
-   reported this as active; direct comparison of the real
-   `common/question_grading.py` against the real `assigments/models.py`
-   (Part 3.5) shows the call site already matches the real function's
-   signature. No action needed here.
+6. **`assigmentsSubmission.submit_structured()` → `auto_grade()` call
+   crash — FIXED this pass.** `common/question_grading.py` had been
+   rewritten (`GradingResult`/`QuestionType` shape, no `options` param)
+   and `assigments/models.py`'s call site had not been updated to match
+   — every `POST .../submit_structured/` call raised `TypeError`. Fixed
+   to call `auto_grade()` with the real signature and read
+   `.is_correct`/`.marks_awarded` off the returned `GradingResult` — see
+   Part 3.5 for the full before/after.
 
 ---
 
@@ -3501,7 +3579,7 @@ nahi — koi models/migrations/settings entry nahi) se import karta hai:
 
 | Module | Used by | Exports used |
 |---|---|---|
-| `common/question_grading.py` | `assigments/models.py` (`assigmentsSubmission.submit_structured()`) | `auto_grade(*, question_type, options, correct_answer, answer_data, marks) -> tuple[bool | None, int | None]` |
+| `common/question_grading.py` | `assigments/models.py` (`assigmentsSubmission.submit_structured()`) | `auto_grade(*, question_type, marks, correct_answer, answer_data) -> GradingResult` (✅ call site fixed this pass to match — see Part 3.5) |
 | `common/attachment_validators.py` | `assigments/models.py` (har FileField) | `attachment_extension_validator`, `validate_attachment_size` |
 
 `common/question_grading.py` **explicitly** `testseries` app se bhi

@@ -856,6 +856,27 @@ CAMPUS_assigments_STREAK_COUNT = int(os.environ.get("CAMPUS_assigments_STREAK_CO
 CAMPUS_assigments_STREAK_BONUS_COINS = int(os.environ.get("CAMPUS_assigments_STREAK_BONUS_COINS", 15))
 
 # ---------------------------------------------------------------------------
+# TASK 37 — user_profile/fraud.py earn-rate-limit knobs (burst-farm guard on
+# EARN/CAMPUS_REWARD coin credits — see check_earn_rate_limit() there for the
+# two-cap logic). These used to be hardcoded directly inside fraud.py; moved
+# here so ops can retune them without a deploy, same env-overridable-constant
+# shape as REFERRAL_BONUS_COINS / CAMPUS_ATTENDANCE_STREAK_BONUS_COINS above.
+# fraud.py reads these at import time (module-level, not per-call), so all
+# three MUST exist here or importing fraud.py raises AttributeError.
+#
+# EARN_RATE_LIMIT_WINDOW_MINUTES -- rolling window length.
+# EARN_RATE_LIMIT_MAX_TRANSACTIONS -- max EARN/CAMPUS_REWARD credits allowed
+#   within that window, regardless of size (catches many small credits).
+# EARN_RATE_LIMIT_MAX_COINS -- max total coins credited within that window,
+#   regardless of transaction count (catches a few large credits instead).
+# Either cap tripping blocks the next credit. Defaults below are a
+# conservative starting point, not measured production signal.
+# ---------------------------------------------------------------------------
+EARN_RATE_LIMIT_WINDOW_MINUTES = int(os.environ.get("EARN_RATE_LIMIT_WINDOW_MINUTES", 60))
+EARN_RATE_LIMIT_MAX_TRANSACTIONS = int(os.environ.get("EARN_RATE_LIMIT_MAX_TRANSACTIONS", 20))
+EARN_RATE_LIMIT_MAX_COINS = int(os.environ.get("EARN_RATE_LIMIT_MAX_COINS", 500))
+
+# ---------------------------------------------------------------------------
 # Coin purchase gateway (see CoinPurchase in liveclass/models.py,
 # CoinPurchaseViewSet + _verify_gateway_signature in views.py). Written
 # against Razorpay's order-create + HMAC-signature-verify shape. Both
@@ -865,6 +886,34 @@ CAMPUS_assigments_STREAK_BONUS_COINS = int(os.environ.get("CAMPUS_assigments_STR
 # ---------------------------------------------------------------------------
 RAZORPAY_KEY_ID = os.environ.get("RAZORPAY_KEY_ID", "")
 RAZORPAY_KEY_SECRET = os.environ.get("RAZORPAY_KEY_SECRET", "")
+
+# ---------------------------------------------------------------------------
+# ADD (task 10 — confirmed missing, not just "not confirmed present" like the
+# other three items in this audit): user_profile's coin-purchase webhook
+# confirmation verifies the gateway's callback signature before crediting
+# coins — that verification needs the gateway's webhook secret and the
+# header name it signs the payload in. Neither existed anywhere in this file,
+# so every webhook call currently 503s (fails closed, no secret to check
+# against) instead of ever confirming a purchase.
+#
+# Keyed by gateway name (dict, not a single value) since RAZORPAY_KEY_ID/
+# SECRET above already anticipates more than one gateway eventually — same
+# shape, so adding a second gateway later is one more key, not a schema
+# change. Razorpay is the only wired gateway today (see CoinPurchaseViewSet
+# above), so it's the only key populated now.
+#
+# NOTE: key names here are a best guess based on the Razorpay integration
+# already in this file — verify these match whatever user_profile's actual
+# webhook view reads (e.g. `settings.PAYMENT_GATEWAY_WEBHOOK_SECRETS["razorpay"]`)
+# before relying on this in production; that view wasn't available to check
+# against when this was added.
+# ---------------------------------------------------------------------------
+PAYMENT_GATEWAY_WEBHOOK_SECRETS = {
+    "razorpay": os.environ.get("RAZORPAY_WEBHOOK_SECRET", ""),
+}
+PAYMENT_GATEWAY_WEBHOOK_SIGNATURE_HEADERS = {
+    "razorpay": "X-Razorpay-Signature",
+}
 
 # ---------------------------------------------------------------------------
 # MSG91 (see liveclass/notifications.py _send_sms / _send_whatsapp).

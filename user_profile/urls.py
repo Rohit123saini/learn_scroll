@@ -3,6 +3,7 @@ from django.urls import path
 
 from .views import (
     AcceptFollowRequestView,
+    AdminCoinPurchaseConfirmView,
     BlockedUsersView,
     BuyCoinConfirmView,
     BuyCoinView,
@@ -47,11 +48,19 @@ urlpatterns = [
     # TASK 19 — read-only coin transaction history.
     path("coin-ledger/", CoinLedgerListView.as_view(), name="coin-ledger"),
     # TASK 3 — buy-coin flow: start a purchase, then confirm it
-    # (success/failed). See BuyCoinConfirmView's docstring for the
-    # caveat that this confirm route stands in for a real payment-
-    # gateway webhook and isn't signature-verified yet.
+    # (success/failed). buy-coin/confirm/ is a signature-verified
+    # gateway webhook (§11 item 10) — see BuyCoinConfirmView's own
+    # docstring, and buy-coin/admin-confirm/ below for the separate
+    # staff-only path manual/admin-initiated (gateway-less) top-ups use.
     path("buy-coin/", BuyCoinView.as_view(), name="buy-coin"),
     path("buy-coin/confirm/", BuyCoinConfirmView.as_view(), name="buy-coin-confirm"),
+    # TASK 16 — staff-only replacement confirm path for manual/admin-
+    # initiated top-ups (blank-`gateway` CoinPurchaseRequests), which
+    # buy-coin/confirm/ above can no longer serve now that it's a
+    # signature-verified gateway webhook only. See AdminCoinPurchaseConfirmView's
+    # own docstring (views.py) for why this is a separate endpoint
+    # rather than a permission branch on that one.
+    path("buy-coin/admin-confirm/", AdminCoinPurchaseConfirmView.as_view(), name="buy-coin-admin-confirm"),
     # TASK 4 — withdraw-coin flow: request a withdrawal (debits
     # immediately) / list your own withdrawal requests. Same
     # /profile/... URL-shape consistency RestrictUser's docstring

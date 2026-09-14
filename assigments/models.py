@@ -559,12 +559,16 @@ class assigmentsSubmission(assigmentsBaseModel):
           - `is_auto_graded` is computed from `question_type != TEXT`
             *before* grading (same as `TestAttempt.submit()`), not derived
             from the grading call's return value.
-          - `common.question_grading.auto_grade()` returns a plain
-            `(is_correct, marks_awarded)` tuple (confirmed against the
-            real module — it is NOT the `GradingResult` object this file
-            previously assumed, and it requires `options=`, which the
-            previous version of this method omitted entirely: a real bug,
-            now fixed) and both are `None` for `text` questions.
+          - `common.question_grading.auto_grade()` returns a `GradingResult`
+            dataclass (`is_auto_graded`, `is_correct`, `marks_awarded`) —
+            confirmed against the real module. It takes no `options=`
+            kwarg at all (MCQ/MSQ/LIST grading only needs `correct_answer`
+            vs `answer_data`); a previous version of this call site passed
+            `options=` and tried to unpack the result as a 2-tuple, which
+            would have raised `TypeError` on every structured submission.
+            Fixed to call with the real signature and read `.is_correct`/
+            `.marks_awarded` off the returned `GradingResult`. Both are
+            `None` for `text` questions.
           - `answer_attachment` is only ever taken for non-auto-graded
             (`text`) questions — same as `TestAttempt.submit()`'s
             `None if is_auto_graded else files.get(...)` — an
@@ -589,13 +593,13 @@ class assigmentsSubmission(assigmentsBaseModel):
             question = questions[str(entry["question_id"])]
             answer_data = entry["answer_data"]
             is_auto_graded = question.question_type != assigmentsQuestion.QuestionTypeChoices.TEXT
-            is_correct, marks_awarded = auto_grade(
+            grading_result = auto_grade(
                 question_type=question.question_type,
-                options=question.options,
                 correct_answer=question.correct_answer,
                 answer_data=answer_data,
                 marks=question.marks,
             )
+            is_correct, marks_awarded = grading_result.is_correct, grading_result.marks_awarded
             answer_rows.append(
                 assigmentsAnswer(
                     submission=self,

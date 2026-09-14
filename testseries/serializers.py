@@ -167,6 +167,49 @@ class TestAttemptSerializer(serializers.ModelSerializer):
         ]
 
 
+class TestAttemptStartSerializer(serializers.Serializer):
+    """Task 28. Used by `TestAttemptViewSet.start()` (views.py) —
+    NOT a `ModelSerializer`: the row itself is still created via
+    `TestSeriesPurchase.purchase_and_start_attempt()` (paid) or
+    `TestAttempt.objects.create()` (free) in the view, exactly as
+    before this task. This serializer has two narrower jobs:
+
+    1. Normalize the `roll_number`/`enrollment_no` snapshot the view
+       used to build by hand off `request.data` (same clip-to-30-chars
+       behavior as before, just declared as real fields instead of
+       inline dict-building).
+    2. Enforce the `attempts_allowed` cap (`TestSeries`) as a clean 400
+       *before* either creation path runs, instead of only surfacing
+       it later as a raw `IntegrityError` off the (series, student,
+       attempt_number) constraint — which wouldn't even catch it
+       correctly, since exceeding the cap with a fresh attempt_number
+       doesn't collide with anything.
+
+    `series`/`student` are passed in via context (never client input)
+    — same "provenance resolved server-side" pattern
+    `TestSeriesReviewSerializer.validate()` below already uses for
+    `series`. The count check here is a good-faith pre-check, not the
+    sole guarantee against a same-student double-submit race — the
+    view still recomputes `attempt_number` right before creating the
+    row (and, for the paid path, `purchase_and_start_attempt()`
+    recomputes it again under a row lock), so a genuine race loses to
+    the unique constraint and is handled there, not here.
+    """
+
+    roll_number = serializers.CharField(max_length=30, required=False, allow_blank=True, default="")
+    enrollment_no = serializers.CharField(max_length=30, required=False, allow_blank=True, default="")
+
+    def validate(self, attrs):
+        series = self.context["series"]
+        student = self.context["student"]
+        used = TestAttempt.objects.filter(series=series, student=student).count()
+        if used >= series.attempts_allowed:
+            raise serializers.ValidationError(
+                f"You have already used all {series.attempts_allowed} attempt(s) allowed for this test series."
+            )
+        return attrs
+
+
 class TestSeriesReviewSerializer(serializers.ModelSerializer):
     """Task 15. `series`/`student`/`attempt` are all resolved server-side
     in `validate()` below (never client-writable — a student sends only

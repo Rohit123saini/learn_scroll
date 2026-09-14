@@ -2,14 +2,16 @@
 
 > Ye document `LearnScroll/` folder (Django project root — `settings.py`, `asgi.py`, `wsgi.py`, `celery.py`, `urls.py`, `ws_auth.py`) ka single source of truth hai — wahi tarika jo `campus_app_design.md` aur `core_app_documentation.md` already follow karte hain. Ye teeno docs ab ek doosre ko complete karte hain: `campus`/`core` apps *kya* karte hain wo un docs me hai; ye project *kaise wire hota hai* (INSTALLED_APPS, throttle rates, celery beat, auth, deployment) yahan hai. Koi bhi is project pe kaam continue kare, teeno docs ek saath padhe.
 >
-> **Is pass me `settings.py`, `asgi.py`, `__init__.py`, `celery.py`, `urls.py`, `ws_auth.py`, `wsgi.py` — saari project-root files ab upload ho chuki hain. Do pichle open items RESOLVE ho gaye, ek NAYA confirmed bug mila, ek abhi bhi khula hai** (neeche §7 "Cross-app config audit" me poora detail):
-> - ✅ **RESOLVED — §7.3 (`ws_auth.py` dead code):** `asgi.py` ab `from LearnScroll.ws_auth import JWTAuthMiddleware` use karta hai, `message.Middleware.JWTAuthMiddleware` nahi. `asgi.py`'s apna comment isi fix ko explicitly is doc ke §7.3 reference ke saath document karta hai. `liveclass/ws_auth.py`/`message/Middleware.py` ki duplicate copies abhi bhi delete nahi hui (flagged as still-open cleanup in `asgi.py`'s own comment) — dead code hain ab, kisi ne unhe import nahi kar raha, lekin delete karna baaki hai.
-> - ✅ **RESOLVED — §7.2 (campus F-3 streak-reward tasks):** `settings.py`'s `CELERY_BEAT_SCHEDULE` me ab `campus-check-attendance-streak-rewards` (19:00 daily) aur `campus-check-assigments-ontime-streak-rewards` (19:30 daily) dono registered hain, args-less/self-looping shape confirm karte hue apne comment me.
-> - 🔴 **NAYA CRITICAL BUG CONFIRMED — `LearnScroll/__init__.py` khaali hai (0 bytes).** `celery.py`'s apna wiring-requirement (`from .celery import app as celery_app` + `__all__ = ("celery_app",)`) is file me bilkul nahi hai — pehle ye sirf "unverified, upload nahi hua" tha (open item 4), ab directly confirm ho gaya ki file literally empty hai. Iska matlab Celery app Django startup pe register hi nahi ho raha standard tareeke se — poora detail §3.1/§8 me.
-> - 🟡 **STILL OPEN — §7.1 (`'assigments'` typo in `INSTALLED_APPS`):** koi change nahi. **Naya signal mila**: `urls.py` bhi ab `path('assigments/', include('assigments.urls'))` wire karta hai (pehle ye bilkul wired hi nahi tha) — matlab `settings.py` aur `urls.py` dono consistently `'assigments'` (typo spelling) use kar rahe hain project-level par. Isse `campus/bridge.py`/`core/views.py::SearchView` ke `assigments` (sahi spelling) import ke against mismatch ka sawaal jyon ka tyon khada hai — poora detail §7.1 me updated.
+> **Is pass me saari 8 project-root files (`settings.py`, `asgi.py`, `__init__.py`, `celery.py`, `urls.py`, `ws_auth.py`, `wsgi.py`) dobara diff ki gayi. Pichle saare items same state me hain, ek NAYA undocumented `CELERY_BEAT_SCHEDULE` entry mila** (neeche §6/§7 me poora detail):
+> - ✅ **STILL RESOLVED — §7.3 (`ws_auth.py` dead code):** `asgi.py` ab bhi `from LearnScroll.ws_auth import JWTAuthMiddleware` use karta hai, `message.Middleware.JWTAuthMiddleware` nahi — no change is pass me. `liveclass/ws_auth.py`/`message/Middleware.py` ki duplicate copies abhi bhi delete nahi hui (still-open cleanup, unchanged).
+> - ✅ **STILL RESOLVED — §7.2 (campus F-3 streak-reward tasks):** `campus-check-attendance-streak-rewards`/`campus-check-assigments-ontime-streak-rewards` dono ab bhi registered hain — unchanged, sirf line numbers shift hue hain (neeche note).
+> - 🔴 **STILL OPEN — `LearnScroll/__init__.py` ab bhi khaali hai (0 bytes).** Koi change nahi is pass me — §3.1/§8 me detail wahi hai.
+> - 🟡 **STILL OPEN — §7.1 (`'assigments'` typo in `INSTALLED_APPS`/`urls.py`):** koi change nahi.
+> - 🆕 **NAYA — `settings.py`'s `CELERY_BEAT_SCHEDULE` me ek 20vi entry mil gayi jo is doc me kabhi document nahi hui thi: `message-expire-stale-parent-access` (daily 4:00 AM).** Ye `message/management/commands/expire_stale_parent_access.py` (Parent Mode DB hygiene — `ParentToken`/`ParentAccessCode` cleanup) ko wire karti hai, lekin `settings.py`'s apna comment khud flag karta hai ki iska Celery task-wrapper (`message.tasks.expire_stale_parent_access`) confirm nahi hai kyunki `message/tasks.py` is pass ke upload me nahi aaya — agar wrapper exist nahi karta to ye beat entry silently kuch nahi karega (tick drop ho jayegi, koi error nahi). Poora detail §6/§8 me naya.
+> - `settings.py` ab **1270 lines** hai (pehle is doc me "1141 lines" likha tha — stale, ab fix kiya). Isi wajah se neeche ke kuch line-number references (jaise campus streak tasks) shift hue hain — updated.
 
 >
-> Baaki poora `settings.py` (1141 lines), `asgi.py`, `celery.py`, `urls.py`, `wsgi.py` neeche as-built document kiya gaya hai.
+> Baaki poora `settings.py` (1270 lines), `asgi.py`, `celery.py`, `urls.py`, `wsgi.py` neeche as-built document kiya gaya hai.
 
 ---
 
@@ -172,12 +174,15 @@ urlpatterns = [
 | `message-send-scheduled-messages` | `message.send_scheduled_messages` | every min |
 | `message-cleanup-expired-messages` | `message.cleanup_expired_messages` | `*/15` min |
 | `message-purge-soft-deleted-conversations` | `message.purge_soft_deleted_conversations` | daily 3:30 |
+| `message-expire-stale-parent-access` 🆕 | `message.expire_stale_parent_access` | daily 4:00 |
 | `user-profile-reconcile-follow-counts` | `user_profile.tasks.reconcile_follow_counts` | every 6h @ :15 |
 | `campus-send-fee-due-reminders` | `campus.tasks.send_fee_due_reminders` | daily 8:00 |
 | `campus-check-low-attendance` | `campus.tasks.check_low_attendance` | daily 18:00 |
 | `campus-send-assigments-due-reminders` | `campus.tasks.send_assigments_due_reminders` | daily 8:30 |
 | `campus-check-attendance-streak-rewards` | `campus.tasks.check_attendance_streak_rewards` | daily 19:00 |
 | `campus-check-assigments-ontime-streak-rewards` | `campus.tasks.check_assigments_ontime_streak_rewards` | daily 19:30 |
+
+**🆕 `message-expire-stale-parent-access` — NAYA, is pass me pehli baar document hua** (settings.py, staggered 30min after `message-purge-soft-deleted-conversations` so both message-app hygiene sweeps don't land in the same minute). Wires `message`'s `expire_stale_parent_access` management command (Parent Mode DB hygiene — stale `ParentToken`/`ParentAccessCode` cleanup, grace windows `TOKEN_DELETE_GRACE_DAYS=14`/`CODE_DEACTIVATE_GRACE_DAYS=30` inside the command itself) into Celery Beat. Low urgency functionally — `HasValidParentToken` already rejects expired tokens/codes live on every request regardless of this sweep — pure DB hygiene. **⚠️ Unconfirmed assumption (settings.py's own comment flags this):** unlike `message-send-scheduled-messages`/`message-cleanup-expired-messages` above (each has both a management command AND a matching `@shared_task` in `message/tasks.py`), this one is currently a management command ONLY as far as this doc can verify — `message/tasks.py` hasn't been part of any upload yet. A `CELERY_BEAT_SCHEDULE` `"task"` string only fires if something is registered under that exact name (`@shared_task(name="message.expire_stale_parent_access")`); if that wrapper doesn't exist in `message/tasks.py`, this entry sends a tick nobody picks up — silently dropped, no error, not that the cleanup runs. Verify `message/tasks.py` has this wrapper before relying on this entry.
 
 **Deliberately NOT scheduled** (per settings.py's own comments): `campus.tasks.rollover_session(campus_id, new_session_id)` — required positional args, only ever called on-demand from `AcademicSessionViewSet.rollover`, correctly left out. `campus.tasks.refresh_analytics_snapshot(campus_id, session_id)` — also required-args, flagged as needing a new "loop every active campus+session" wrapper task before it can be scheduled (wrapper doesn't exist yet).
 
@@ -206,7 +211,7 @@ Is section ka maksad: dono app-level docs ke "kya settings.py me hona chahiye" w
 
 `campus_app_design.md` (§7a, §12) confirm karta hai: `check_attendance_streak_rewards`/`check_assigments_ontime_streak_rewards` dono ab **poore functional** hain (`services.py`'s streak functions ab exist karte hain, `bridge.NotifTypes.CAMPUS_REWARD_EARNED` bhi define hai) — pehle ye dono crash karte the, ab nahi. Dono `campus.tasks.rollover_session`/`refresh_analytics_snapshot` ki tarah "ek specific campus/session ke liye" nahi hain — `compute_attendance_streak(enrollment)`/`compute_assigments_ontime_streak(student, section)` (services.py) per-enrollment/per-student compute karte hain, isliye in do tasks ka apna khud ka "har relevant student/enrollment par loop karo" wrapper hona chahiye, `check_low_attendance`/`send_assigments_due_reminders` jaisa hi.
 
-**✅ CONFIRMED FIXED — is pass ka `settings.py` upload:** `CELERY_BEAT_SCHEDULE` me ab dono registered hain, args-less/self-looping shape confirm karte hue apne khud ke comment me (settings.py lines ~1116-1137):
+**✅ CONFIRMED FIXED, still true this pass:** `CELERY_BEAT_SCHEDULE` me ab dono registered hain, args-less/self-looping shape confirm karte hue apne khud ke comment me (settings.py lines ~1187-1194 — shifted from the previously-documented ~1116-1137 kyunki file 1141 se 1270 lines ho gayi hai, naye `message-expire-stale-parent-access` entry ke comment block ki wajah se, §6 dekho):
 ```python
 "campus-check-attendance-streak-rewards": {
     "task": "campus.tasks.check_attendance_streak_rewards",
@@ -238,5 +243,6 @@ Is section ka maksad: dono app-level docs ke "kya settings.py me hona chahiye" w
 5. `core_app_documentation.md` §9 item 16 (`check_config_drift.py`'s `CONFIG_DRIFT_APPS` setting) — **confirmed MISSING** is pass me (`settings.py` me kahin `CONFIG_DRIFT_APPS` nahi hai) — command ab bhi apne hardcoded default (`["user_profile", "core"]`) par chalega, jo theek hai, lekin agar `assigments`/`testseries` add karne ke baad in apps ko bhi check karwana hai to explicit setting add karo.
 6. `ALLOWED_HOSTS` ka module-level `["*"]` default — §1 me flag kiya, verify karo production `.env` me explicit value set hai.
 7. `liveclass/urls.py` cleanup — agar `core.urls` wire hone se pehle ka purana `notifications`/`notification-preferences/me/` router abhi bhi wahan hai to hatao (§5, `core_app_documentation.md` §9 se carried over).
+8. 🆕 **Verify `message/tasks.py` has an `@shared_task(name="message.expire_stale_parent_access")` wrapper** for the newly-documented `message-expire-stale-parent-access` beat entry (§6) — `message/tasks.py` hasn't been uploaded yet, so this can't be confirmed from this doc alone. Without that wrapper, the beat entry is a silent no-op (dropped tick, no error, no cleanup).
 
 ---

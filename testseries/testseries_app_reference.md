@@ -1,4 +1,4 @@
-# `testseries` App — Implementation Reference (v3 — Task 5 follower fan-out synced)
+# `testseries` App — Implementation Reference (v4 — full 12-file resync, `TestSeriesPurchaseSerializer` gap closed)
 
 > Ye woh single doc hai jisse **sara kaam ho sakta hai** — settings wiring,
 > prerequisite migrations/gaps, API integration (campus/liveclass/message
@@ -18,6 +18,17 @@
 > hain — Task 5, "creator ke followers ko naye published individual
 > series ka notify", is pass me add hua hai (§7.1, §11, §13, §16, §17,
 > §18).
+>
+> **v4 update (this pass):** saari 12 files dobara file-by-file diff ki
+> gayi hain against is doc ke against — koi behavior change nahi mila,
+> sirf ek documentation gap close hua: `serializers.py`'s
+> `TestSeriesPurchaseSerializer` (fully read-only, currently unused/
+> unwired — no `views.py`/`urls.py` route references it) pehle is doc me
+> missing tha, ab §8 me add kiya gaya hai. Confirm bhi kiya gaya ki **koi
+> manual/hand-written migration file is doc me kahin nahi thi** — `#0.`
+> file tree aur `§18` checklist dono already sirf `manage.py
+> makemigrations testseries` (auto-generate) bolte hain, to us baare me
+> hatane ko kuch nahi tha.
 
 ---
 
@@ -153,7 +164,7 @@ nahi. Jo already resolved ho chuke hain unko bhi list me rakha hai
 | 3.2 | `Notification.NotifType.TESTSERIES_POSTED` / `TESTSERIES_CHECKED` / `TESTSERIES_PAYOUT_RELEASED` | `core` | ✅ **RESOLVED** — same, direct reference, koi shim nahi |
 | 3.3 | `Notification.NotifType.TESTSERIES_REVIEW_RECEIVED` | `core` | ❌ **OPEN (NEW, Task 15)** — `TestSeriesReview.create_review()` (`models.py`) is enum member ko reference karta hai; jab tak `core` isse add nahi karta, review-create khud kaam karega (row + uniqueness + checked-status guard sab real hain) lekin notify-the-creator step pe `AttributeError` aayega. Add karo: `TESTSERIES_REVIEW_RECEIVED = "testseries_review_received", "New Test Series Review"` |
 | 3.4 | `campus.bridge.can_review_testseries_attempt(user, context_type, context_id) -> bool` | `campus` | ❌ **STILL OPEN** — `permissions.py::user_can_review_attempt()` ImportError par safe-default `False` deta hai (deny). Campus subject-teacher tab tak review nahi kar payega |
-| 3.5 | `campus.bridge.create_testseries(...)` + campus proxy endpoint | `campus` | ❌ **STILL OPEN** per this doc's own records — calls `testseries.bridge.create_context_testseries(source="campus", is_paid=False, ...)`. ⚠️ **Flagging a conflict, not resolving it**: `campus_app_design.md` (that app's own reference) describes this function as already `[WIRED]` (Task 13/19), with a full signature (`is_paid`/`price_coins` kwargs, `testseries_paid_allowed` force-reset) and calls it out as done. The real `campus/bridge.py` source wasn't part of this pass to verify directly — until it is, don't trust either doc's status for §3.5 over the other; diff the real file next time it's uploaded. |
+| 3.5 | `campus.bridge.create_testseries(...)` + campus proxy endpoint | `campus` | ✅ **RESOLVED (TASK 18)** — the real `campus/bridge.py` was diffed against this doc and against `testseries/bridge.py` directly this pass, resolving the conflict the previous row flagged. `create_testseries(*, section, creator, title, description="", duration_minutes=None, attempts_allowed=1, questions, is_paid=False, price_coins=0)` is implemented and calls `create_context_testseries(source=TestSeries.Source.CAMPUS, context_type="section", context_id=section.id, creator=..., title=..., description=..., is_paid=..., price_coins=..., duration_minutes=..., attempts_allowed=..., questions=..., roster=<active StudentEnrollment students for the section>)` — the full kwarg list this file's own `create_context_testseries()` signature expects, not the `is_paid=False`-only stub this row previously described. `is_paid`/`price_coins` are force-reset to `False`/`0` when `section.school_class.campus.testseries_paid_allowed` is off (Task 19), and `campus/views.py::TestSeriesViewSet.create()` (the campus proxy endpoint) gates the same flag before ever calling this, rejecting a paid request with `403` pre-bridge rather than relying on the silent downgrade alone. `campus_app_design.md`'s §5a status (`[WIRED]`, Task 13/19) was the correct one; this doc's prior §3.5 status was the stale one — updated. |
 | 3.6 | `liveclass.bridge.create_testseries(...)` | `liveclass` | ✅ **RESOLVED** (this pass) — `liveclass/bridge.py` now has `create_testseries(*, classroom, creator, title, description="", is_paid=False, price_coins=0, duration_minutes=None, attempts_allowed=1, questions)`, calling `testseries.bridge.create_context_testseries(source=TestSeries.Source.LIVECLASS, context_type="classroom", context_id=classroom.id, ..., is_paid=<teacher's choice>, roster=<resolved `login.User` list>)`. Roster source: `PassPurchase(status=SUCCESS, is_active=True, expires_at__gt=now)` for the classroom, same query `create_assigments()` in the same file already uses — resolved into actual `User` rows (not `{"user_id": ...}` dicts, see below) since `create_context_testseries()`'s `roster` param wants real user instances, unlike `create_context_assigments()`'s dict-shaped one. No `is_paid` force-reset (unlike campus) — confirmed no `liveclass`-side equivalent of `Campus.testseries_paid_allowed` exists to gate against. |
 | 3.7 | `message.models.DoubtQuestion.context_type` / `.context_id` (generic opaque pointer fields) | `message` | ⚠️ **ASSUMED ADDED this pass** — `bridge.py`'s Task 16 comment says these were added to `DoubtQuestion` this pass so `testseries` can attach queries without a new Q&A model. `message/models.py`'s own source wasn't shared to `testseries` for direct verification — confirm the migration actually landed in `message` before relying on `ask_query_on_series()` in production. |
 | 3.8 | `message.services.answer_doubt_question(doubt, actor, answer_text, answered_by=...)` — `answered_by` param | `message` | ⚠️ **ASSUMED ADDED this pass** — same Task 16 pass per `bridge.py`'s comment; `actor=None` skips `message`'s own group-admin/mod check (a testseries doubt has no group). Confirm signature in `message/services.py` before deploy. |
@@ -562,6 +573,18 @@ questions):
   — defence-in-depth: no create/update action is wired to this
   serializer today, but if one ever is, these stay set only via
   `start()`'s own snapshot.
+- `TestSeriesPurchaseSerializer` — **fully read-only**
+  (`read_only_fields = fields`, all of `id`/`series`/`buyer`/
+  `coins_spent`/`status`/`attempt`/`created_at`/`released_at`/
+  `refunded_at`) — same "state only changes via model methods, never a
+  raw field write" reasoning `TestSeriesPurchaseAdmin` already uses
+  (§10). ⚠️ **Currently unused/unwired** — grep confirms no `views.py`
+  import or route references this serializer at all; `TestSeriesPurchase`
+  rows are only ever surfaced today via Django admin (read-only) or
+  indirectly nested inside `TestAttemptSerializer.responses`/the
+  attempt itself (which does **not** include a `purchase` field either).
+  Not a bug — just flagging it as dead code / a placeholder for a future
+  "my purchases" or "my payouts" endpoint that doesn't exist yet.
 - `TestSeriesReviewSerializer` (Task 15, NEW) — `student`/`series` are
   `PrimaryKeyRelatedField(read_only=True)`; `rating` is declared
   explicitly as `IntegerField(min_value=1, max_value=5)` so an
@@ -595,7 +618,7 @@ questions):
 | Action | Who's allowed |
 |---|---|
 | Create individual series | any authenticated user |
-| Create campus series | **not via this app's API** — only `campus`'s own staff/teacher-checked proxy endpoint, via `bridge.create_context_testseries()` (§3.5, still open) |
+| Create campus series | **not via this app's API** — only `campus`'s own staff/teacher-checked proxy endpoint, via `bridge.create_context_testseries()` (§3.5, ✅ resolved — TASK 18) |
 | Create liveclass series | **not via this app's API** — only `liveclass`'s own teacher-checked proxy endpoint, via `bridge.create_context_testseries()` (§3.6, ✅ resolved this pass — `liveclass/bridge.create_testseries()` now implemented) |
 | Edit/delete a series | `series.creator` only |
 | Add/edit/delete questions | `series.creator` only, and only while `series.status="draft"` |
@@ -889,6 +912,14 @@ sections above and in the code itself.
    answer. Fixed: `answered_by=teacher` now passed explicitly (§5.4,
    §3.8).
 
+**This pass's own fix (v4 doc resync — no code change, docs-only):**
+
+9. **`TestSeriesPurchaseSerializer` was missing from §8 entirely**,
+   even though it's real code in `serializers.py`. Fixed: documented in
+   §8, including the fact that it's currently unused/unwired (no
+   `views.py` import, no route in `urls.py`) — `TestSeriesPurchase` rows
+   are only ever exposed today via the read-only Django admin (§10).
+
 **This pass's own addition (Task 5), added to the changelog:**
 
 8. **New "creator's followers get notified on publish" feature.**
@@ -969,7 +1000,7 @@ sections above and in the code itself.
 - [x] §3.2 — `Notification.NotifType` (`TESTSERIES_POSTED`/`_CHECKED`/`_PAYOUT_RELEASED`) landed, shim removed
 - [ ] §3.3 — `Notification.NotifType.TESTSERIES_REVIEW_RECEIVED` — **still open**
 - [ ] §3.4 — `campus.bridge.can_review_testseries_attempt()` implemented — **still open**
-- [ ] §3.5 — `campus.bridge.create_testseries()` + campus proxy endpoint implemented — **still open**
+- [x] §3.5 — `campus.bridge.create_testseries()` + campus proxy endpoint implemented — **resolved (TASK 18) — confirmed against the real `campus/bridge.py`**
 - [x] §3.6 — `liveclass.bridge.create_testseries()` implemented — **resolved this pass**
 - [ ] §3.7 — confirm `message.DoubtQuestion.context_type`/`context_id` fields actually exist/migrated — **verify, assumed only**
 - [ ] §3.8 — confirm `message.services.answer_doubt_question()` accepts `answered_by=` — **verify, assumed only**

@@ -448,29 +448,44 @@ urlpatterns = [
     path("livekit-webhook/", LiveKitWebhookView.as_view(), name="livekit-webhook"),
     # 🔥 NAYA (tasks 29/30) — Classroom <-> chat-group bridge. See
     # classroom_chat_views.py for both views' full docstrings.
+    #
+    # 🔧 FIX (TASK 15) — `classroom_id` was `<uuid:...>` on all four
+    # `classrooms/<...>/` paths below, but `Classroom`'s pk is a plain
+    # integer `AutoField`, not a UUID. Django's `uuid` path converter
+    # only matches a hyphenated-hex UUID string — a real (integer)
+    # classroom id never matches that pattern at all, so the URL simply
+    # fails to resolve (404 before `ClassroomCreateGroupView` etc. ever
+    # run), for every single request these four routes were meant to
+    # serve. Changed to `<int:classroom_id>`, matching every other
+    # `classrooms/{id}/...` route in this file (the router-registered
+    # ones above use DRF's default pk lookup, which for an integer
+    # `AutoField` pk resolves the same way). If `Classroom.id` was ever
+    # actually meant to become a UUID, that's a model migration this
+    # urls.py change doesn't make on its own — flagging rather than
+    # assuming.
     path(
-        "classrooms/<uuid:classroom_id>/create_group/",
+        "classrooms/<int:classroom_id>/create_group/",
         ClassroomCreateGroupView.as_view(),
         name="classroom-create-group",
     ),
     path(
-        "classrooms/<uuid:classroom_id>/group/",
+        "classrooms/<int:classroom_id>/group/",
         ClassroomGroupStatusView.as_view(),
         name="classroom-group-status",
     ),
     # NEW (Task 10 fix) — Phase 2: teacher generates a parent-access code
-    # for one participant. classroom_id matches the uuid convention every
-    # other classrooms/<...>/ path in this file already uses; user_id is
-    # the target student's login.User pk.
+    # for one participant. classroom_id matches the int convention every
+    # other classrooms/<...>/ path in this file uses (see TASK 15 fix
+    # above); user_id is the target student's login.User pk.
     path(
-        "classrooms/<uuid:classroom_id>/participants/<int:user_id>/parent-code/",
+        "classrooms/<int:classroom_id>/participants/<int:user_id>/parent-code/",
         ClassroomParentCodeGenerateView.as_view(),
         name="classroom-parent-code-generate",
     ),
     # NEW (Task 10 fix) — Phase 5: teacher's list of parent-mode query
     # threads for one classroom (?status= optional — see the view).
     path(
-        "classrooms/<uuid:classroom_id>/parent-queries/",
+        "classrooms/<int:classroom_id>/parent-queries/",
         ClassroomParentQueryListView.as_view(),
         name="classroom-parent-query-list",
     ),

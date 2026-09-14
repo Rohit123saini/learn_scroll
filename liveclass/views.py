@@ -1450,7 +1450,8 @@ def _accessible_classroom_ids(user):
 # ---------------------------------------------------------------------------
 # 🔧 CONSOLIDATION FIX (post-Task-9/11 gap-fix pass) — parent-join used to
 # authenticate a parent via a bespoke, stateless *signed* token
-# (`django.core.signing`, salt=PARENT_JOIN_TOKEN_SALT below) that had
+# (`django.core.signing`, previously salted via a now-deleted
+# `PARENT_JOIN_TOKEN_SALT` — see TASK 20 note below) that had
 # nothing to do with the `ParentAccessCode`/`ParentToken` DB rows the rest
 # of the parent-portal feature set (teacher-generated codes, report
 # cards, parent-mode query threads — see `parent_link_views.py`) already
@@ -1479,37 +1480,18 @@ def _accessible_classroom_ids(user):
 # count) the failed attempt — quietly defeating the one thing that
 # throttle exists for (rate-limiting brute-forced/replayed token
 # guesses). Keeping `permission_classes=[AllowAny]` on the action and
-# resolving the token inside the body — same structural position the old
-# `ParentJoinSerializer.is_valid()` call used to occupy — keeps
-# "throttle counts every attempt, valid or not" true exactly as it was
-# before this change.
+# resolving the token inside the body keeps "throttle counts every
+# attempt, valid or not" true.
 #
-# `PARENT_JOIN_TOKEN_SALT`/`generate_parent_join_token()` below are now
-# DEAD CODE as far as `parent_join()` is concerned — nothing in this file
-# calls either any more. Left in place (not deleted) only because
-# `generate_parent_join_token` was never wired to any API in the first
-# place ("not exposed via any API in this task" — its own docstring) and
-# something outside this task's file set may already import it; deleting
-# blind risked an ImportError this pass couldn't see. Recommended
-# follow-up: grep the rest of the codebase for both names and delete them
-# once confirmed unused, so a future reader doesn't mistake this for a
-# second, still-live parent-auth path.
+# TASK 20 (this pass) — the old stateless signed-token scheme this
+# section used to also define (`PARENT_JOIN_TOKEN_SALT`,
+# `generate_parent_join_token()`, and `serializers.ParentJoinSerializer`)
+# has been deleted. A project-wide grep for all three names turned up no
+# remaining callers/importers beyond their own now-removed definitions —
+# `parent_join()` has resolved tokens via `resolve_parent_from_token()`
+# exclusively since the CONSOLIDATION FIX above, and nothing else in the
+# codebase ever referenced the old signed-token helpers.
 # ---------------------------------------------------------------------------
-PARENT_JOIN_TOKEN_SALT = "liveclass.parent_join"  # DEPRECATED — see note above; parent_join() no longer uses this.
-
-
-def generate_parent_join_token(student) -> str:
-    """DEPRECATED — parent_join() no longer accepts this token shape (see
-    the CONSOLIDATION FIX note above); it now resolves a `parent_token`
-    against `ParentAccessCode`/`ParentToken` via
-    `core.classroom_chat_bridge.resolve_parent_from_token()` instead, same
-    as every other parent-facing endpoint. Kept only because nothing in
-    this task's visibility confirmed it's unused elsewhere — do not wire
-    this into any new code; use `ParentAccessCode.generate_for()` /
-    `ClassroomParentCodeGenerateView` to issue a parent a working token."""
-    from django.core import signing
-
-    return signing.dumps({"student_id": student.id}, salt=PARENT_JOIN_TOKEN_SALT)
 
 
 class ClassSessionViewSet(viewsets.ModelViewSet):
@@ -1825,8 +1807,8 @@ class ClassSessionViewSet(viewsets.ModelViewSet):
         self-generate flow in the `message` app) — resolved via
         `core.classroom_chat_bridge.resolve_parent_from_token()`, the
         same call every other parent-facing endpoint uses (see the
-        CONSOLIDATION FIX module note above `PARENT_JOIN_TOKEN_SALT` for
-        why this replaced the old bespoke signed-token scheme). Only if
+        CONSOLIDATION FIX module note above for why this replaced the
+        old bespoke signed-token scheme). Only if
         it resolves to a student who currently has valid access to THIS
         classroom does the parent get an observer-role LiveKit token for
         this session. Never creates a SessionParticipant row: a watching
@@ -1848,7 +1830,7 @@ class ClassSessionViewSet(viewsets.ModelViewSet):
         # Resolved here in the body (NOT via HasValidParentSessionToken as
         # a permission_class) so ParentJoinIPThrottle above still counts
         # every attempt, valid or not — see the CONSOLIDATION FIX module
-        # note above PARENT_JOIN_TOKEN_SALT for the full reasoning
+        # note above for the full reasoning
         # (permission_classes run before check_throttles in DRF, so
         # gating here via a permission class would let a bad-token guess
         # skip the throttle counter entirely).
@@ -1872,18 +1854,26 @@ class ClassSessionViewSet(viewsets.ModelViewSet):
         # Distinct LiveKit identity from the student's own — a parent
         # watching alongside their (possibly also-connected) child must
         # never collide with the child's own room identity.
+        # NOTE (Task 4 fix) — `ParticipantRole` (livekit_utils.py) only
+        # defines HOST/CO_HOST/STUDENT/PARENT_OBSERVER; there is no
+        # `.OBSERVER` member, so this used to raise `AttributeError` on
+        # every real call. `PARENT_OBSERVER` is the actual role
+        # `_grants_for_role` already has a branch for (subscribe-only,
+        # hidden=True) — matches this method's own "observer-role" and
+        # "never a room participant in the normal sense" docstring intent
+        # exactly.
         livekit_token = generate_livekit_token(
             room_name=room_name,
             user_id=f"parent-{student.id}",
             user_name=f"{student.get_full_name() or student.username} (Parent)",
-            role=ParticipantRole.OBSERVER,
+            role=ParticipantRole.PARENT_OBSERVER,
         )
 
         return Response(
             {
                 "room_id": room_name,
                 "role": "observer",
-                "livekit_role": ParticipantRole.OBSERVER,
+                "livekit_role": ParticipantRole.PARENT_OBSERVER,
                 "livekit_url": LIVEKIT_URL,
                 "livekit_token": livekit_token,
                 "student_id": student.id,

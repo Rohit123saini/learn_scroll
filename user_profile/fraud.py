@@ -26,9 +26,19 @@ bypass them by going around a particular view:
 Both functions take a plain `user` object (not a user id) and never
 mutate anything — this module reads the ledger, it never writes to
 it. The only writer stays `CoinLedgerManager.record_transaction()`.
+
+[TASK 37 — RESOLVED] The three earn-rate-limit constants below
+(`EARN_RATE_LIMIT_WINDOW` / `_MAX_TRANSACTIONS` / `_MAX_COINS`) used
+to be hardcoded directly in this file. Now sourced from Django
+settings (`LearnScroll/settings.py`, env-overridable, same shape as
+`REFERRAL_BONUS_COINS` etc.) so ops can retune them without a deploy
+— see that block in settings.py and the comment just above these
+three lines. Values are unchanged; this was a relocation, not a
+retune.
 """
 from datetime import timedelta
 
+from django.conf import settings
 from django.db.models import Sum
 from django.utils import timezone
 
@@ -194,14 +204,23 @@ def is_withdrawal_eligible(user, coins=None):
 
 # --- Earn-rate limiting -----------------------------------------------------
 
-# Deliberately conservative constants, not config-driven — same
-# "cheap moment, no live traffic depends on the exact number yet" call
-# this file's sibling models already make for other first-pass
-# choices. Tighten/loosen these (or move them to Django settings) once
-# there's real farming-attempt data to calibrate against.
-EARN_RATE_LIMIT_WINDOW = timedelta(hours=1)
-EARN_RATE_LIMIT_MAX_TRANSACTIONS = 20
-EARN_RATE_LIMIT_MAX_COINS = 500
+# [MOVED — Task 37] Was hardcoded here directly, with a comment saying
+# to move these to Django settings "once there's real production signal
+# to tune against" — moved now (LearnScroll/settings.py, TASK 37 block),
+# same env-overridable-constant shape every other coin-economy number in
+# that file already uses (REFERRAL_BONUS_COINS,
+# CAMPUS_ATTENDANCE_STREAK_BONUS_COINS, ...). Read from `settings` at
+# import time here (not inside `check_earn_rate_limit()` per call) —
+# same "module-level constant, not settings.X re-read on every call"
+# shape this module already had before this pass; ops retuning these now
+# still only needs an env var change + restart, not a code deploy,
+# which was the actual point of moving them.
+#
+# Values themselves are UNCHANGED from the previous hardcoded ones — see
+# settings.py's TASK 37 comment for why (relocation, not a retune).
+EARN_RATE_LIMIT_WINDOW = timedelta(minutes=settings.EARN_RATE_LIMIT_WINDOW_MINUTES)
+EARN_RATE_LIMIT_MAX_TRANSACTIONS = settings.EARN_RATE_LIMIT_MAX_TRANSACTIONS
+EARN_RATE_LIMIT_MAX_COINS = settings.EARN_RATE_LIMIT_MAX_COINS
 
 
 def check_earn_rate_limit(user, transaction_type):

@@ -22,7 +22,8 @@ from .permissions import (
     user_can_review_attempt,
 )
 from .serializers import (
-    QuestionSerializer, TestAttemptSerializer, TestSeriesReviewSerializer, TestSeriesSerializer,
+    QuestionSerializer, TestAttemptSerializer, TestAttemptStartSerializer,
+    TestSeriesReviewSerializer, TestSeriesSerializer,
 )
 
 
@@ -193,44 +194,65 @@ class TestAttemptViewSet(mixins.RetrieveModelMixin, mixins.ListModelMixin, views
 
     @action(detail=False, methods=["post"], url_path=r"start/(?P<series_id>[^/.]+)")
     def start(self, request, series_id=None):
-        """Idempotent: an existing attempt (including an already-paid,
-        in-progress retry) is returned as-is rather than re-charging or
-        erroring — §5's "existing purchase = continue, don't re-charge"
-        rule. `TestAttempt` is unique per (series, student) regardless of
-        `is_paid` (MVP, attempts_allowed=1), so this one lookup covers both
-        the paid and unpaid idempotency cases — no separate purchase-status
-        lookup is needed."""
+        """[FIX — Task 28] Idempotent for an IN-PROGRESS attempt
+        (including an already-paid retry): returned as-is rather than
+        re-charging or erroring — §5's "existing purchase = continue,
+        don't re-charge" rule. Previously this looked up ANY existing
+        attempt regardless of status, which meant a student whose one
+        allowed attempt was already SUBMITTED/CHECKED just got that
+        same finished attempt handed back forever — multi-attempt could
+        never actually start attempt #2 even once `attempts_allowed`
+        was raised. Now only an IN_PROGRESS attempt short-circuits;
+        anything else falls through to starting the next attempt_number,
+        gated by `TestAttemptStartSerializer`'s `attempts_allowed`
+        cap-check."""
         series = get_object_or_404(TestSeries, pk=series_id, status=TestSeries.Status.PUBLISHED)
 
-        existing = TestAttempt.objects.filter(series=series, student=request.user).first()
-        if existing:
-            return Response(TestAttemptSerializer(existing, context={"request": request}).data)
+        existing_in_progress = TestAttempt.objects.filter(
+            series=series, student=request.user, status=TestAttempt.Status.IN_PROGRESS
+        ).first()
+        if existing_in_progress:
+            return Response(TestAttemptSerializer(existing_in_progress, context={"request": request}).data)
 
-        # Coerced to str + truncated to the model's max_length (30): these
-        # come straight from request.data, and an unexpected type (list,
-        # int, an over-length string) would otherwise surface as a raw
-        # 500 from the model layer instead of just being safely clipped.
-        snapshot = {
-            "roll_number": str(request.data.get("roll_number", ""))[:30],
-            "enrollment_no": str(request.data.get("enrollment_no", ""))[:30],
-        }
+        serializer = TestAttemptStartSerializer(
+            data=request.data, context={"series": series, "student": request.user}
+        )
+        serializer.is_valid(raise_exception=True)
+        snapshot = serializer.validated_data
+
+        # Recomputed here (not just inside TestAttemptStartSerializer)
+        # right before use, same defensive spirit as
+        # purchase_and_start_attempt() recomputing it again under its
+        # own row lock for the paid path below.
+        attempt_number = TestAttempt.objects.filter(series=series, student=request.user).count() + 1
 
         try:
             if series.is_paid:
+                # attempt_number intentionally NOT passed here —
+                # purchase_and_start_attempt() recomputes it itself
+                # under the buyer row lock (see [FIX — Task 28] on that
+                # method), so a value computed outside that lock would
+                # only be a false sense of safety.
                 purchase = TestSeriesPurchase.purchase_and_start_attempt(series=series, buyer=request.user, **snapshot)
                 attempt = purchase.attempt
             else:
-                attempt = TestAttempt.objects.create(series=series, student=request.user, **snapshot)
+                attempt = TestAttempt.objects.create(
+                    series=series, student=request.user, attempt_number=attempt_number, **snapshot
+                )
         except ValueError as exc:
             # Insufficient coin balance, per CoinLedger.record_transaction — §5/§6.
             return Response({"detail": str(exc)}, status=status.HTTP_402_PAYMENT_REQUIRED)
         except IntegrityError:
             # Lost a race with a concurrent start() call for the same
-            # (series, student) — unique_attempt_per_student_per_series
-            # caught it. purchase_and_start_attempt() is @transaction.atomic,
-            # so a losing paid attempt's coin debit was already rolled back;
-            # return the winner's attempt instead of surfacing a 500.
-            existing = TestAttempt.objects.filter(series=series, student=request.user).first()
+            # (series, student, attempt_number) —
+            # unique_attempt_per_student_series_number caught it.
+            # purchase_and_start_attempt() is @transaction.atomic, so a
+            # losing paid attempt's coin debit was already rolled back;
+            # return the winner's (now in-progress) attempt instead of
+            # surfacing a 500.
+            existing = TestAttempt.objects.filter(
+                series=series, student=request.user, status=TestAttempt.Status.IN_PROGRESS
+            ).first()
             if existing:
                 return Response(TestAttemptSerializer(existing, context={"request": request}).data)
             raise

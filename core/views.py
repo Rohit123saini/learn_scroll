@@ -9,11 +9,11 @@ SearchView (Task 18) is the unified "search everything" endpoint. It is
 the ONLY place that builds each source's permission-scoped queryset —
 `core.search` itself never queries a model directly (golden rule, see
 that module's own docstring). Every scoped queryset built below either
-mirrors an existing viewset's own scoping exactly (assigments) or reuses
-the same underlying entitlement table a bridge module already treats as
-the source of truth (testseries' campus roster), so this endpoint can
-never surface a row a user couldn't already reach through the normal UI
-for that source.
+mirrors an existing viewset's own scoping exactly (assigments, message,
+campus_notice) or reuses the same underlying entitlement table a bridge
+module already treats as the source of truth (testseries' campus
+roster), so this endpoint can never surface a row a user couldn't
+already reach through the normal UI for that source.
 
 Endpoints (wired in core/urls.py, mounted under whatever prefix the root
 urlconf gives `core.urls` — see that file):
@@ -61,7 +61,7 @@ class NotificationPagination(pagination.LimitOffsetPagination):
     max_limit = 100
 
     def get_paginated_response(self, data):
-        unread_count = Notification.objects.filter(recipient=self.request.user, is_read=False).count()
+        unread_count = Notification.objects.for_user(self.request.user).unread().count()
         return Response(
             {
                 "count": self.count,
@@ -84,7 +84,7 @@ class NotificationViewSet(
     pagination_class = NotificationPagination
 
     def get_queryset(self):
-        qs = Notification.objects.filter(recipient=self.request.user).select_related("classroom", "session")
+        qs = Notification.objects.for_user(self.request.user).select_related("classroom", "session")
 
         is_read = self.request.query_params.get("is_read")
         if is_read is not None:
@@ -105,7 +105,7 @@ class NotificationViewSet(
     def unread_count(self, request):
         # task 45 — single badge count for everyone, regardless of which
         # app produced the notification, since it's one shared table now.
-        count = Notification.objects.filter(recipient=request.user, is_read=False).count()
+        count = Notification.objects.for_user(request.user).unread().count()
         return Response({"unread_count": count})
 
     @action(detail=True, methods=["post"], url_path="mark-read")
@@ -119,7 +119,7 @@ class NotificationViewSet(
         # Bulk UPDATE instead of looping + calling .mark_read() per row —
         # a user with hundreds of unread notifications shouldn't cost
         # hundreds of UPDATE statements for one "clear my badge" tap.
-        updated = Notification.objects.filter(recipient=request.user, is_read=False).update(
+        updated = Notification.objects.for_user(request.user).unread().update(
             is_read=True, read_at=timezone.now()
         )
         return Response({"marked_read": updated})
@@ -185,14 +185,44 @@ class SearchView(APIView):
         has assigments functions as of this pass). Those rows are
         simply absent from search results, never leaked; add a branch
         here once that resolver exists.
-      - ⏳ message / campus_notice — NOT wired in this pass (out of
-        Task 18's scope, which is assigments + testseries only). Their
-        own scoped-queryset builders belong here too once that's
-        tasked — `core.search.SOURCES` already has both registered,
-        this view just doesn't build a queryset for them yet, so
-        passing `?sources=message` today returns no message results
-        rather than an error (see `search_everything()`'s own "silently
-        skipped, not an error" contract).
+      - ✅ message [Task 13] — mirrors `ConversationViewSet.search_all()`
+        (message/views.py) exactly, minus the actual FTS/trigram call
+        (that part is `MESSAGE_SOURCE.run()`'s job in `core/search.py`,
+        which already calls `message_search_utils.search_messages(qs,
+        query)` on whatever queryset we hand it here — same contract
+        `search_all()` itself uses). Scoped to: conversations the user
+        is a CURRENT (`left_at__isnull=True`) member of, non-expired
+        disappearing messages, and excludes `deleted_for_everyone`,
+        this user's own `deleted_for_users` ("delete for me"), and
+        `is_scheduled` (send-later messages not yet delivered — visible
+        only to their sender via a different endpoint until they're
+        actually sent). `BlockedUser` is deliberately NOT filtered here
+        — per that model's own docstring it's a websocket-delivery-time
+        check only, never a stored-message visibility rule, so adding
+        a block filter here would be inventing a new access rule this
+        endpoint has no business inventing (see this class's own intro
+        paragraph).
+      - ✅ campus_notice [Task 13] — mirrors `NoticeViewSet.get_queryset()`
+        (campus/views.py) exactly: `Notice.objects.filter(campus_id__in=
+        get_my_campus_ids(user))`. Reuses `campus.views.get_my_campus_ids`
+        directly rather than re-deriving the staff/student/parent-link
+        union here — that function's own docstring says it's
+        centralized specifically so every campus-visibility check stays
+        in sync as new membership routes get added, and reimplementing
+        that union here would be exactly the kind of second,
+        independently-maintained copy this view's intro paragraph warns
+        against. (The `?campus=` narrowing `NoticeViewSet` itself
+        supports is that endpoint's own query param, not something this
+        view mirrors — `SearchView` has no equivalent scoping param.)
+      - ❌ post — NOT wired in this pass (out of Task 18/13's scope,
+        which covers assigments/testseries/message/campus_notice only).
+        `core.search.SOURCES` doesn't register it yet either (see that
+        module's own STATUS docstring) — `post/models.py` was never
+        part of any upload, so `Post`'s searchable field(s) and
+        visibility rule (likely via `user_profile.BlockUser`/
+        `RestrictUser`) are still unconfirmed. Add a scoped-queryset
+        builder here once that's tasked and `core.search.SOURCES` has
+        a `POST_SOURCE` entry to match.
     """
 
     permission_classes = [IsAuthenticated]
@@ -236,6 +266,39 @@ class SearchView(APIView):
             | Q(source=TestSeries.Source.CAMPUS, context_type="section", context_id__in=active_section_ids)
         ).distinct()
         scoped_querysets["testseries"] = testseries_qs
+
+        # --- message [Task 13] -------------------------------------------
+        # Exact mirror of ConversationViewSet.search_all()'s own scoped
+        # queryset (message/views.py), minus the search_messages() call
+        # itself — core.search.MESSAGE_SOURCE.run() does that part. See
+        # class docstring above for why BlockedUser isn't filtered here.
+        from message.models import Message
+
+        message_qs = Message.objects.filter(
+            conversation__memberships__user=user,
+            conversation__memberships__left_at__isnull=True,
+        ).filter(
+            Q(expires_at__isnull=True) | Q(expires_at__gt=timezone.now())
+        ).exclude(
+            deleted_for_everyone=True,
+        ).exclude(
+            deleted_for_users=user,
+        ).exclude(
+            is_scheduled=True,
+        ).distinct()
+        scoped_querysets["message"] = message_qs
+
+        # --- campus_notice [Task 13] ---------------------------------------
+        # Exact mirror of NoticeViewSet.get_queryset() (campus/views.py):
+        # filter_queryset_to_my_campuses() with the default
+        # campus_field_path="campus", i.e. campus_id__in=my campus ids.
+        # get_my_campus_ids() is imported directly rather than
+        # re-derived — see class docstring above for why.
+        from campus.models import Notice
+        from campus.views import get_my_campus_ids
+
+        notice_qs = Notice.objects.filter(campus_id__in=get_my_campus_ids(user))
+        scoped_querysets["campus_notice"] = notice_qs
 
         try:
             results = search_everything(scoped_querysets, query, sources=requested_sources)

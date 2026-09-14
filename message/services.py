@@ -324,8 +324,29 @@ def create_bell_rows_for_push(*, recipient_ids: Iterable, notif_type: str, title
     created = []
     for recipient in recipients:
         try:
+            # [FIX — Task 36] Was calling create_notification(recipient,
+            # notif_type, title, message, data) — positional. Switched to
+            # keyword args to match the one call site in this same file
+            # that's confirmed working (answer_doubt_question() below)
+            # and the [VERIFIED] signature assigments/bridge.py already
+            # checked directly against core/services.py — every other
+            # confirmed call site in this codebase always calls this
+            # function with keywords, never positionally. If the real
+            # signature is keyword-only, a positional call here raised
+            # TypeError at the call site itself, before this try/except
+            # (or create_notification's own internal exception-handling)
+            # ever got a chance to swallow it — silently breaking the
+            # "one bad recipient never stops the batch" guarantee this
+            # function's own docstring promises, for every recipient, not
+            # just a bad one.
             created.append(
-                create_notification(recipient, notif_type, title, message, data)
+                create_notification(
+                    recipient=recipient,
+                    notif_type=notif_type,
+                    title=title,
+                    message=message,
+                    data=data,
+                )
             )
         except Exception:
             continue

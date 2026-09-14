@@ -194,13 +194,38 @@ class SectionGroupBridgeTests(APITestCase):
         self.assertEqual(mocked.call_args.kwargs["actor"], self.alice)
 
     def test_bridge_not_being_wired_up_yet_does_not_break_section_creation(self):
-        # No mock here — exercises the REAL `campus.bridge.create_section_
-        # group`, which should degrade to a logged no-op (core app not
-        # installed in this test project) rather than raising.
-        response = self.client.post(
-            reverse("section-list"), {"school_class": str(self.school_class.id), "name": "B"}
-        )
+        # Mocked to raise the exact `ValueError` `core.classroom_chat_
+        # bridge.create_section_group()` raises on every normal section
+        # creation (a freshly created Section has no ClassTeacherAssignment
+        # yet — that's a separate step via ClassTeacherassigmentsViewSet).
+        # Previously this test relied on the REAL `campus.bridge.create_
+        # section_group` degrading to a no-op only because `core` wasn't
+        # installed in this test project — so it proved nothing about the
+        # `try/except ValueError` guard in `SectionViewSet.perform_create`
+        # and would have failed (500) in any deployment where `core` IS
+        # installed. Mocking the exact failure mode makes this test
+        # exercise the guard directly, independent of whether `core`
+        # happens to be installed.
+        with self.assertLogs("campus.views", level="INFO") as logs:
+            with mock.patch(
+                "campus.bridge.create_section_group",
+                side_effect=ValueError("no class-teacher yet"),
+            ):
+                response = self.client.post(
+                    reverse("section-list"), {"school_class": str(self.school_class.id), "name": "B"}
+                )
         self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        # The Section row itself must still be committed even though the
+        # bridge call failed — `serializer.save()` runs before the bridge
+        # call, so this is a partial-failure risk if the ValueError isn't
+        # caught (a 500 after the row is already saved), not a clean
+        # all-or-nothing rejection.
+        self.assertTrue(
+            Section.objects.filter(school_class=self.school_class, name="B").exists()
+        )
+        self.assertTrue(
+            any("no class-teacher" in message.lower() for message in logs.output)
+        )
 
 
 class SubjectTeacherApprovalFlowTests(APITestCase):
@@ -1196,24 +1221,26 @@ class TestSeriesBridgeForceResetTests(APITestCase):
     than exercising the real `testseries` app, for the same
     schema-uncertainty reason as `TestSeriesViewSetTests` above.
 
-    ⚠️ Patch-target assumption, flagged rather than guessed past: this
-    assumes `campus/bridge.py` calls the delegate via a module-qualified
-    reference (e.g. `testseries_bridge.create_context_testseries(...)`
-    after `from testseries import bridge as testseries_bridge`, or
-    `testseries.bridge.create_context_testseries(...)`) rather than
-    `from testseries.bridge import create_context_testseries` (a
-    name-imported local copy, which this patch target would NOT
-    intercept). `campus/bridge.py` itself wasn't part of this upload,
-    so this couldn't be confirmed directly — if these tests fail with
-    the mock never being called, that import style is the first thing
-    to check, and the patch target should become
-    `\"campus.bridge.create_context_testseries\"` instead.
+    ✅ CONFIRMED (this pass, `campus/bridge.py` now uploaded) — the
+    patch-target concern this docstring used to flag as an unconfirmed
+    assumption is real: `campus/bridge.py` imports the delegate as
+    `from testseries.bridge import create_context_testseries` — a
+    name-imported local copy bound into `campus.bridge`'s own module
+    namespace at import time. `mock.patch(\"testseries.bridge.
+    create_context_testseries\")` only replaces the attribute on the
+    `testseries.bridge` module itself; it never reaches the separate
+    name `campus.bridge.create_testseries()` actually calls, so the
+    mock was never invoked and these three tests were silently
+    exercising the real (unmocked) `create_context_testseries` instead
+    of the fake. Fixed: all three `@mock.patch(...)` targets below now
+    patch `\"campus.bridge.create_context_testseries\"` — the name as
+    it's actually bound and called from inside `campus/bridge.py`.
     """
 
     def setUp(self):
         make_full_fixture(self)
 
-    @mock.patch("testseries.bridge.create_context_testseries")
+    @mock.patch("campus.bridge.create_context_testseries")
     def test_force_resets_paid_fields_when_campus_not_allowed(self, mock_create):
         self.campus.testseries_paid_allowed = False
         self.campus.save()
@@ -1232,7 +1259,7 @@ class TestSeriesBridgeForceResetTests(APITestCase):
         self.assertFalse(kwargs["is_paid"])
         self.assertEqual(kwargs["price_coins"], 0)
 
-    @mock.patch("testseries.bridge.create_context_testseries")
+    @mock.patch("campus.bridge.create_context_testseries")
     def test_keeps_paid_fields_when_campus_allowed(self, mock_create):
         self.campus.testseries_paid_allowed = True
         self.campus.save()
@@ -1251,7 +1278,7 @@ class TestSeriesBridgeForceResetTests(APITestCase):
         self.assertTrue(kwargs["is_paid"])
         self.assertEqual(kwargs["price_coins"], 50)
 
-    @mock.patch("testseries.bridge.create_context_testseries")
+    @mock.patch("campus.bridge.create_context_testseries")
     def test_free_series_unaffected_regardless_of_flag(self, mock_create):
         self.campus.testseries_paid_allowed = False
         self.campus.save()

@@ -154,8 +154,8 @@ class CreateNotificationTests(CoreTestBase):
             Notification.NotifType.NOTICE_POSTED,
             "New notice",
         )
-        self.assertEqual(Notification.objects.filter(recipient=self.student).count(), 1)
-        self.assertEqual(Notification.objects.filter(recipient=self.other_student).count(), 1)
+        self.assertEqual(Notification.objects.for_user(self.student).count(), 1)
+        self.assertEqual(Notification.objects.for_user(self.other_student).count(), 1)
 
     def test_create_bulk_notifications_skips_empty_recipients(self):
         create_bulk_notifications([], Notification.NotifType.NOTICE_POSTED, "New notice")
@@ -229,7 +229,7 @@ class NotificationViewSetTests(CoreTestBase):
         response = self.client.post("/core/notifications/mark-all-read/")
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertEqual(response.data["marked_read"], 2)
-        self.assertEqual(Notification.objects.filter(recipient=self.student, is_read=False).count(), 0)
+        self.assertEqual(Notification.objects.for_user(self.student).unread().count(), 0)
 
     def test_cannot_delete_someone_elses_notification(self):
         notification = Notification.objects.create(
@@ -361,12 +361,17 @@ class SearchViewTests(CoreTestBase):
         # per search_everything()'s own contract.
         self.assertIsNone(call_kwargs.get("sources"))
 
-    def test_success_path_scoped_querysets_include_assigments_and_testseries(self):
+    def test_success_path_scoped_querysets_include_all_wired_sources(self):
+        # [Task 13 regression] `SearchView.get()` must build a scoped
+        # queryset for every source it wires up — assigments/testseries
+        # (Task 18) AND message/campus_notice (Task 13). Losing any one
+        # of these silently drops that source from every search — the
+        # exact bug this task closes for message/campus_notice.
         captured, side_effect = self._capture_scoped_querysets()
         with patch("core.views.search_everything", side_effect=side_effect):
             response = self.client.get("/core/search/?q=algebra")
         self.assertEqual(response.status_code, status.HTTP_200_OK)
-        self.assertEqual(set(captured.keys()), {"assigments", "testseries"})
+        self.assertEqual(set(captured.keys()), {"assigments", "testseries", "message", "campus_notice"})
 
     def test_sources_param_is_parsed_into_a_list(self):
         with patch("core.views.search_everything", return_value=[]) as mock_search:
@@ -381,16 +386,28 @@ class SearchViewTests(CoreTestBase):
         _, call_kwargs = mock_search.call_args
         self.assertEqual(call_kwargs["sources"], ["assigments", "testseries"])
 
+    def test_message_and_campus_notice_sources_are_wired_not_skipped(self):
+        # [Task 13 regression] `message`/`campus_notice` are registered
+        # in search.py's SOURCES AND now get a real scoped queryset from
+        # SearchView.get() — requesting them must no longer be silently
+        # skipped (the old bug: `search_everything()`'s "unregistered
+        # source" skip path masking a scoping gap, not an actually
+        # unregistered source). Verified by capturing scoped_querysets
+        # rather than by asserting non-empty `results`, since this test
+        # has no real Message/Notice fixture data — the previous bug was
+        # that these keys were ABSENT from scoped_querysets at all, which
+        # this asserts is no longer the case.
+        captured, side_effect = self._capture_scoped_querysets()
+        with patch("core.views.search_everything", side_effect=side_effect):
+            response = self.client.get("/core/search/?q=algebra&sources=message,campus_notice")
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(set(captured.keys()), {"message", "campus_notice"})
+
     def test_unregistered_sources_return_empty_not_error(self):
-        # [§9 item 15 regression] `message`/`campus_notice` ARE
-        # registered in search.py's SOURCES, but SearchView.get() builds
-        # no scoped queryset for either yet — search_everything()'s own
-        # "silently skipped, not an error" contract means this must stay
-        # a clean 200/[] today, not a 400/500, until item 15 is tasked.
-        # Real (unmocked) search_everything() — this needs no
-        # assigments/testseries data since neither key is present in
-        # scoped_querysets for this request.
-        response = self.client.get("/core/search/?q=algebra&sources=message,campus_notice")
+        # A genuinely unregistered source (not in core.search.SOURCES at
+        # all, e.g. "post" — still a stub per that module's docstring)
+        # must still degrade to a clean 200/[], not a 400/500.
+        response = self.client.get("/core/search/?q=algebra&sources=post")
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertEqual(response.data["results"], [])
 
@@ -439,3 +456,36 @@ class SearchViewTests(CoreTestBase):
         # string representation, which wasn't confirmed for this
         # project's Django/enum setup (see class docstring).
         self.assertIn("select", sql.split("context_id", 1)[-1][:200])
+
+    # --- message/campus_notice scoping regression [Task 13] --------------
+
+    def test_message_scoping_matches_conversation_search_all(self):
+        """Regression for `SearchView.get()`'s `message` queryset —
+        must carry every narrowing `ConversationViewSet.search_all()`
+        applies (current membership, non-expired disappearing messages,
+        excludes deleted-for-everyone/deleted-for-me/scheduled), not
+        just some of them. Checked structurally via `str(queryset.query)`
+        — same approach already used for assigments/testseries above —
+        since no `Message`/`Conversation` fixture data is needed to
+        prove the WHERE-clause shape."""
+        captured, side_effect = self._capture_scoped_querysets()
+        with patch("core.views.search_everything", side_effect=side_effect):
+            self.client.get("/core/search/?q=algebra")
+        sql = str(captured["message"].query).lower()
+        self.assertIn("memberships", sql)  # conversation__memberships__user
+        self.assertIn("left_at", sql)  # current-membership-only narrowing
+        self.assertIn("expires_at", sql)  # non-expired disappearing messages
+        self.assertIn("deleted_for_everyone", sql)
+        self.assertIn("deleted_for_users", sql)  # this user's own "delete for me"
+        self.assertIn("is_scheduled", sql)
+
+    def test_campus_notice_scoping_filters_by_my_campus_ids(self):
+        """Regression for `SearchView.get()`'s `campus_notice` queryset
+        — must filter to `get_my_campus_ids(user)` rather than returning
+        every campus's notices, mirroring `NoticeViewSet.get_queryset()`.
+        """
+        captured, side_effect = self._capture_scoped_querysets()
+        with patch("core.views.search_everything", side_effect=side_effect):
+            self.client.get("/core/search/?q=algebra")
+        sql = str(captured["campus_notice"].query).lower()
+        self.assertIn("campus_id", sql)

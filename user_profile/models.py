@@ -112,10 +112,45 @@ WHAT CHANGED in this pass, and why:
    `CoinWithdrawalRequest`'s class docstring below for the full
    lifecycle and what's deliberately left out of this pass (no
    `reviewed_by`, no `MIN_WITHDRAWAL_COINS` floor, no INR snapshot).
+
+8. TASK 30 (this pass) — `CoinPurchaseRequest` diffed directly against
+   `liveclass.CoinPurchase`, closing the gap an earlier pass had to
+   leave as an inference (that pass's upload didn't include
+   `liveclass/models.py`). Result: `liveclass.CoinPurchase` turned out
+   to already be deprecated (its own Task 6 disabled
+   `mark_success()`/`mark_failed()`), so full parity wasn't the goal —
+   but it surfaced one real gap, not just a shape difference: this
+   model had nowhere to persist a gateway webhook's payment id/
+   signature for later verification. Added `gateway_payment_id` /
+   `gateway_signature` to `CoinPurchaseRequest` and wired them through
+   `confirm_success()`. See that model's class docstring for the full
+   diff (money precision, `gateway` field, `retry_of` — each kept or
+   skipped deliberately, not guessed).
+
+9. TASK 31 (this pass) — `UserPreference.for_user()` diffed directly
+   against `core.NotificationPreference.for_user()`, same "close the
+   inference gap" situation as Task 30 (that earlier pass's upload
+   didn't include `core/models.py` either). Unlike Task 30, this one
+   turned out to be a clean confirmation, not a fix: classmethod name,
+   get-or-create keying (`user=user` only), and default-population
+   behavior (no `defaults=` dict on either — both just rely on model
+   field defaults) all already matched. No code change needed — see
+   `UserPreference`'s class docstring for the full point-by-point diff.
+
+10. TASK 38 (this pass) — `CoinWithdrawalRequest` diffed directly
+    against `liveclass.CoinWithdrawal` now that `liveclass/models.py`
+    has actually been reviewed (Task 4's docstring above deferred this
+    with "no reviewed_by, no MIN_WITHDRAWAL_COINS floor, no INR
+    snapshot ... add them if/when an admin-facing withdrawal review UI
+    is built" — that's now). See `CoinWithdrawalRequest`'s own
+    docstring for the full diff and what each added field means for
+    this model's PENDING -> PROCESSING -> SUCCESS/REJECTED lifecycle,
+    which is NOT the same status set `liveclass.CoinWithdrawal` uses.
 """
 from django.conf import settings
 from django.db import IntegrityError, models, transaction
 from django.db.models import CheckConstraint, F, Q, UniqueConstraint
+from django.utils import timezone
 
 
 class Follow(models.Model):
@@ -624,11 +659,19 @@ class CoinPurchaseRequestManager(models.Manager):
             created = False
         return obj, created
 
-    def confirm_success(self, *, gateway_reference):
+    def confirm_success(self, *, gateway_reference, gateway_payment_id="", gateway_signature=""):
         """
         Mark a request SUCCESS and credit `coins` via
         `CoinLedger.objects.record_transaction()` — never a direct
         `User.coin` write — atomically, exactly once.
+
+        [ADDED — Task 30] `gateway_payment_id`/`gateway_signature` are
+        optional — a caller that already has them (the normal case: a
+        verified gateway webhook) passes them through to be persisted
+        on the row; a caller that doesn't (e.g. a manual admin confirm)
+        can omit them and this stays exactly as safe as before this
+        pass. Neither participates in the idempotency check below —
+        that's still `gateway_reference` alone, same as before.
 
         Idempotent at two layers: if this request is already SUCCESS,
         it's returned as-is with no second credit (checked under
@@ -672,7 +715,14 @@ class CoinPurchaseRequestManager(models.Manager):
 
             purchase.status = self.model.Status.SUCCESS
             purchase.ledger_entry = ledger_entry
-            purchase.save(update_fields=["status", "ledger_entry", "updated_at"])
+            update_fields = ["status", "ledger_entry", "updated_at"]
+            if gateway_payment_id:
+                purchase.gateway_payment_id = gateway_payment_id
+                update_fields.append("gateway_payment_id")
+            if gateway_signature:
+                purchase.gateway_signature = gateway_signature
+                update_fields.append("gateway_signature")
+            purchase.save(update_fields=update_fields)
             return purchase
 
     def mark_failed(self, *, gateway_reference, reason=""):
@@ -713,16 +763,41 @@ class CoinPurchaseRequest(models.Model):
     `CoinLedger` is the one shared ledger every coin-changing action
     writes to.
 
-    NOTE: `liveclass/models.py` wasn't included in this pass's upload
-    (only `user_profile`'s own four files were), so the field shape below
-    is inferred from this app's own established patterns — `CoinLedger`'s
-    `reference`/idempotency shape and the pending/success/failed
-    lifecycle the task description asks for — rather than copied
-    field-for-field from `CoinPurchase`. If `CoinPurchase`'s actual shape
-    differs in a way that matters (e.g. its gateway list, its money
-    field's precision), reconcile the two before relying on this as
-    final — ideally by rerunning this task with `liveclass/models.py`
-    included so the two don't silently diverge.
+    [TASK 30 — RESOLVED] Diffed directly against `liveclass.CoinPurchase`
+    now that `liveclass/models.py` has actually been reviewed (previously
+    inferred, see git history of this docstring for the old caveat).
+    Findings:
+
+      - `liveclass.CoinPurchase` is itself already deprecated as of that
+        app's own Task 6: `mark_success()`/`mark_failed()` there raise
+        `RuntimeError`, and its own docstring says coin top-ups now go
+        through THIS model instead. So field-for-field parity with a
+        disabled legacy model was never really the goal — but two real
+        gaps below were worth closing regardless of the legacy shape.
+      - Money precision: `CoinPurchase.amount_inr` is
+        `DecimalField(max_digits=8, decimal_places=2)` (max ~999,999.99).
+        This model's `amount` is `max_digits=10` (max ~99,999,999.99) —
+        strictly more headroom, not a gap, so left as-is rather than
+        narrowed to match a deprecated model.
+      - Gateway identity: `CoinPurchase` has no field naming WHICH
+        gateway a row went through at all (a Razorpay-shaped design per
+        its own module comment, not gateway-agnostic). `gateway` here is
+        a deliberate improvement over that, not a divergence to fix.
+      - `retry_of` (self-FK linking a retried purchase back to the
+        failed one it retries): `CoinPurchase` has it, this model
+        doesn't. Deliberately not added — `gateway_reference`'s
+        uniqueness already makes a retry just a new row with a new
+        reference, and nothing anywhere reads a retry chain today. Flag,
+        don't build unread state.
+      - [FIX] `gateway_payment_id` / `gateway_signature`: `CoinPurchase`
+        has both — the gateway-posted payment id and signature, filled
+        in once a webhook confirms payment — and this model had NEITHER
+        before this pass. Not a naming difference: without a signature
+        field there was nowhere to persist what a gateway webhook
+        actually signed, so a `confirm_success()` caller had no way to
+        keep proof of verification for later audit/dispute. Added both
+        below (blank-ok — optional, so a caller without them yet isn't
+        broken), and `confirm_success()` now accepts and stores them.
 
     Lifecycle: PENDING (created by `start_purchase`, wallet untouched) ->
     SUCCESS (via `confirm_success`, credits `coins` through
@@ -764,6 +839,18 @@ class CoinPurchaseRequest(models.Model):
     # `confirm_success`/`mark_failed` key off of instead of an internal
     # id the gateway doesn't know about.
     gateway_reference = models.CharField(max_length=150, unique=True, db_index=True)
+
+    # [ADDED — Task 30] Mirrors liveclass.CoinPurchase.gateway_payment_id
+    # / .gateway_signature — filled in by confirm_success() once a
+    # gateway webhook actually confirms payment. Both blank-ok at
+    # creation time (start_purchase() runs before the gateway has
+    # confirmed anything, so neither is known yet); this is the
+    # persisted proof of what the gateway signed, for later
+    # verification/audit — a real gap this model had before this pass,
+    # not just a naming difference from the liveclass model (see class
+    # docstring's Task 30 diff for the full comparison).
+    gateway_payment_id = models.CharField(max_length=100, blank=True)
+    gateway_signature = models.CharField(max_length=255, blank=True)
 
     # Real money paid, in the product's billing currency. Decimal (not
     # Integer) because money — same reasoning that keeps `CoinLedger`
@@ -842,6 +929,17 @@ class CoinWithdrawalRequestManager(models.Manager):
         amount=-coins, ...)` and create a PENDING CoinWithdrawalRequest,
         in the same DB transaction.
 
+        [ADDED — Task 38] Enforces `CoinWithdrawalRequest.
+        MIN_WITHDRAWAL_COINS` before anything else runs — a request for
+        fewer coins than the floor is rejected with `ValueError` before
+        the row is created or the ledger is touched, same as the
+        existing `coins <= 0` guard just below it. Also snapshots
+        `amount_inr = coins * COIN_TO_INR_RATE` onto the request at
+        creation time, so a later change to `COIN_TO_INR_RATE` never
+        silently rewrites what a past request was actually worth —
+        mirrors `liveclass.CoinWithdrawal.amount_inr`'s own snapshot
+        comment exactly.
+
         `record_transaction` raises `ValueError` for insufficient
         balance (see `CoinLedgerManager.record_transaction` above) —
         that propagates straight out of here uncaught. Because the row
@@ -854,10 +952,17 @@ class CoinWithdrawalRequestManager(models.Manager):
         if coins <= 0:
             raise ValueError("Withdrawal coins must be positive.")
 
+        if coins < self.model.MIN_WITHDRAWAL_COINS:
+            raise ValueError(
+                f"Withdrawal of {coins} coins is below the minimum of "
+                f"{self.model.MIN_WITHDRAWAL_COINS} coins."
+            )
+
         with transaction.atomic():
             withdrawal = self.create(
                 user=user,
                 coins=coins,
+                amount_inr=coins * self.model.COIN_TO_INR_RATE,
                 payout_method=payout_method,
                 payout_details=payout_details or {},
                 status=self.model.Status.PENDING,
@@ -874,11 +979,21 @@ class CoinWithdrawalRequestManager(models.Manager):
             withdrawal.save(update_fields=["debit_ledger_entry"])
             return withdrawal
 
-    def mark_processing(self, *, withdrawal_id):
+    def mark_processing(self, *, withdrawal_id, reviewed_by=None):
         """
         Admin/ops moves a PENDING request into PROCESSING (payout
         initiated externally, e.g. a bank transfer submitted). No coin
         movement — the coins already left the wallet at request time.
+
+        [ADDED — Task 38] `reviewed_by` is the admin/ops user making
+        this call — the natural point to stamp `reviewed_by`/
+        `reviewed_at`, since this is this model's "an admin has looked
+        at this" step, the same role `liveclass.CoinWithdrawal.
+        approve(admin_user)` plays there. Optional and only applied
+        when not already set, so an existing caller that doesn't pass
+        it yet keeps working exactly as before, and a request that was
+        already reviewed (e.g. re-queued from PROCESSING) doesn't get
+        its original reviewer overwritten.
 
         Raises `ValueError` if the request is already SUCCESS or
         REJECTED (both terminal).
@@ -890,7 +1005,12 @@ class CoinWithdrawalRequestManager(models.Manager):
                     f"Withdrawal {withdrawal_id} is already {wr.status} — cannot move to processing."
                 )
             wr.status = self.model.Status.PROCESSING
-            wr.save(update_fields=["status", "updated_at"])
+            update_fields = ["status", "updated_at"]
+            if reviewed_by is not None and wr.reviewed_by_id is None:
+                wr.reviewed_by = reviewed_by
+                wr.reviewed_at = timezone.now()
+                update_fields += ["reviewed_by", "reviewed_at"]
+            wr.save(update_fields=update_fields)
             return wr
 
     def confirm_success(self, *, withdrawal_id):
@@ -921,11 +1041,18 @@ class CoinWithdrawalRequestManager(models.Manager):
             wr.save(update_fields=["status", "updated_at"])
             return wr
 
-    def reject(self, *, withdrawal_id, reason=""):
+    def reject(self, *, withdrawal_id, reason="", reviewed_by=None):
         """
         Reject a PENDING/PROCESSING withdrawal and credit the coins
         back via `CoinLedger.objects.record_transaction(
         transaction_type=WITHDRAWAL_REJECTED, amount=+coins, ...)`.
+
+        [ADDED — Task 38] `reviewed_by` is stamped the same way
+        `mark_processing()` stamps it — optional, and only applied when
+        `reviewed_by` isn't already set on the row, so a request
+        rejected straight from PENDING (skipping `mark_processing`
+        entirely) still records who made the call, without overwriting
+        an earlier reviewer if one was already recorded.
 
         Idempotent the same way `CoinPurchaseRequestManager.
         confirm_success` is: the refund is keyed on this request's own
@@ -962,7 +1089,12 @@ class CoinWithdrawalRequestManager(models.Manager):
             wr.status = self.model.Status.REJECTED
             wr.failure_reason = reason
             wr.refund_ledger_entry = refund_entry
-            wr.save(update_fields=["status", "failure_reason", "refund_ledger_entry", "updated_at"])
+            update_fields = ["status", "failure_reason", "refund_ledger_entry", "updated_at"]
+            if reviewed_by is not None and wr.reviewed_by_id is None:
+                wr.reviewed_by = reviewed_by
+                wr.reviewed_at = timezone.now()
+                update_fields += ["reviewed_by", "reviewed_at"]
+            wr.save(update_fields=update_fields)
             return wr
 
 
@@ -985,51 +1117,88 @@ class CoinWithdrawalRequest(models.Model):
         PROCESSING -> SUCCESS, or -> REJECTED from PENDING/PROCESSING.
         PROCESSING plays the same "payout initiated, not yet confirmed"
         role `liveclass.CoinWithdrawal`'s APPROVED does.
-      - No `reviewed_by`/admin-user tracking, no `MIN_WITHDRAWAL_COINS`
-        floor, no INR conversion snapshot — out of scope for this pass;
-        add them if/when an admin-facing withdrawal review UI is built,
-        the same way `RestrictUser`'s docstring above scopes out
-        consumer-app integration work it doesn't own.
+      - No CANCELLED status — `liveclass.CoinWithdrawal` lets a user
+        cancel their own PENDING request; here that's just `reject()`
+        called while still PENDING (see that manager method's own
+        `liveclass` cross-reference in its Task 6 stub docstring on the
+        `liveclass` side). Not revisited by Task 38 — out of scope for
+        a fields-only pass.
       - `payout_method`/`payout_details` are still modeled as a
         choices field + JSONField, same shape as `liveclass.
         CoinWithdrawal` uses, since there's no separate saved-bank-
         detail model in this app to reference by id instead.
 
-8. TASK 5 (this pass) — fraud/anti-abuse layer. New `user_profile/
-   fraud.py` module with two checks, both wired into
-   `CoinLedgerManager.record_transaction()` (not the view layer) so
-   they apply no matter which app/call site triggers a coin change:
-     - `fraud.is_withdrawal_eligible(user, coins)` — only coins from
-       `PURCHASE`/`GIFT_RECEIVED` (real money or a gift) may be
-       withdrawn; `EARN`/`CAMPUS_REWARD` coins can be spent but never
-       cashed out. Called by `CoinWithdrawalRequestView` (views.py)
-       before `request_withdrawal()`, so an ineligible request never
-       touches the balance. See `fraud.get_withdrawal_eligible_balance`
-       for how a mixed balance's eligible portion is derived.
-     - `fraud.check_earn_rate_limit(user, transaction_type)` — caps
-       EARN/CAMPUS_REWARD credits per user within a rolling window to
-       block burst-farming. Enforced inside `record_transaction()`
-       itself (raises `fraud.EarnRateLimitExceeded`), not in a view, so
-       campus tasks / referral bonuses / anything else that credits
-       EARN or CAMPUS_REWARD coins is covered automatically.
-   `record_transaction()` also now always sets
-   `metadata["withdrawal_eligible"]` (derived purely from
-   `transaction_type`) on every row it writes, for `admin.py`'s
-   read-only ops filter — see that method's own docstring below for
-   why this lives in `metadata` instead of a new column.
+    [TASK 38 — RESOLVED] Diffed directly against `liveclass.
+    CoinWithdrawal` now that `liveclass/models.py` has actually been
+    reviewed (Task 4's docstring above deferred all three of these with
+    "add them if/when an admin-facing withdrawal review UI is built").
+    Findings, each mapped onto THIS model's own shape rather than
+    copied field-for-field:
+
+      - [ADDED] `MIN_WITHDRAWAL_COINS = 100` — copied as a plain class
+        constant, same value and same reasoning `liveclass.
+        CoinWithdrawal.MIN_WITHDRAWAL_COINS` already documents ("below
+        this, a bank/UPI transfer typically costs more in fees than the
+        payout itself"). Enforced in
+        `CoinWithdrawalRequestManager.request_withdrawal()` — the same
+        single choke point that already enforces `coins <= 0` and
+        sufficient balance, so a caller can't route around the floor by
+        skipping a view-level check.
+      - [ADDED] `COIN_TO_INR_RATE = 1` and `amount_inr` — also copied
+        from `liveclass.CoinWithdrawal` as-is (same rate, same
+        "snapshotted at request time so a later rate change never
+        rewrites history" reasoning, same `DecimalField(max_digits=10,
+        decimal_places=2)` shape). `request_withdrawal()` computes and
+        stores it once, at creation; nothing later recomputes it.
+        NOTE: this app has its own separate `COIN_TO_INR_RATE` rather
+        than importing `liveclass.CoinWithdrawal`'s — importing a model
+        constant across apps for one integer is more coupling than the
+        value is worth, and `CoinPurchaseRequest` above already sets
+        the precedent of this app keeping its own parallel definitions
+        (money precision, gateway field) rather than reaching into
+        `liveclass`. If the two rates should always move together in
+        practice, that's an ops/config concern (keep both settings in
+        sync when pricing changes) rather than a code-coupling one.
+      - [ADDED] `reviewed_by` / `reviewed_at` — `liveclass.
+        CoinWithdrawal.reviewed_by` is a single FK stamped once, at
+        `approve()`/`reject()`, whichever comes first (its lifecycle has
+        no separate "PROCESSING" stage in between). This model's
+        lifecycle does have that extra stage, so `reviewed_by`/
+        `reviewed_at` are stamped at whichever of `mark_processing()` /
+        `reject()` runs FIRST for a given request (both check `if
+        wr.reviewed_by_id is None` before writing) — a request rejected
+        straight from PENDING still gets a reviewer recorded, and one
+        that goes PENDING -> PROCESSING -> REJECTED keeps the reviewer
+        from the PROCESSING step rather than being overwritten by
+        whoever calls `reject()` later. `confirm_success()` does NOT
+        stamp these — by the time a request reaches SUCCESS it must
+        already have passed through `mark_processing()` in the normal
+        flow, and if it didn't, that's a process gap for ops to fix, not
+        something for this model to paper over with a second reviewer.
+        Both fields nullable/blank, same as `liveclass.CoinWithdrawal`'s
+        (`on_delete=SET_NULL` so a deleted admin account doesn't cascade
+        into deleting withdrawal history).
 
     Lifecycle: PENDING (created by `request_withdrawal`, debits `coins`
-    immediately via a WITHDRAWAL_REQUESTED CoinLedger entry) ->
-    PROCESSING (via `mark_processing`, no coin movement) -> SUCCESS (via
-    `confirm_success`, no coin movement — the debit already happened) OR
-    REJECTED (via `reject`, from PENDING or PROCESSING, credits `coins`
-    back via a WITHDRAWAL_REJECTED entry). SUCCESS and REJECTED are both
-    terminal.
+    immediately via a WITHDRAWAL_REQUESTED CoinLedger entry, and now
+    also snapshots `amount_inr`) -> PROCESSING (via `mark_processing`,
+    no coin movement, now also stamps `reviewed_by`/`reviewed_at` if not
+    already set) -> SUCCESS (via `confirm_success`, no coin movement —
+    the debit already happened) OR REJECTED (via `reject`, from PENDING
+    or PROCESSING, credits `coins` back via a WITHDRAWAL_REJECTED entry,
+    and stamps `reviewed_by`/`reviewed_at` if not already set). SUCCESS
+    and REJECTED are both terminal.
 
     Nothing here writes to `User.coin` directly — same boundary
     `CoinPurchaseRequest` draws: the only sanctioned path to a balance
     change is `CoinLedger.objects.record_transaction()`.
     """
+
+    # [ADDED — Task 38] Copied from `liveclass.CoinWithdrawal` — see the
+    # class docstring's Task 38 section for why this app keeps its own
+    # copy rather than importing the liveclass one.
+    COIN_TO_INR_RATE = 1  # 1 coin == this many INR; adjust to match the actual coin pricing used when passes are priced
+    MIN_WITHDRAWAL_COINS = 100  # below this, a bank/UPI transfer typically costs more in fees than the payout itself
 
     class Status(models.TextChoices):
         PENDING = "pending", "Pending"
@@ -1049,6 +1218,10 @@ class CoinWithdrawalRequest(models.Model):
 
     coins = models.PositiveIntegerField()
 
+    # [ADDED — Task 38] coins * COIN_TO_INR_RATE, snapshotted once by
+    # `request_withdrawal()` at request time — see class docstring.
+    amount_inr = models.DecimalField(max_digits=10, decimal_places=2)
+
     payout_method = models.CharField(max_length=20, choices=PayoutMethod.choices, blank=True)
 
     # Bank: {"account_holder", "account_number", "ifsc"}. UPI: {"upi_id"}.
@@ -1062,6 +1235,22 @@ class CoinWithdrawalRequest(models.Model):
 
     # Populated by reject() — why the withdrawal was turned down.
     failure_reason = models.CharField(max_length=255, blank=True)
+
+    # [ADDED — Task 38] The admin/ops user who first reviewed this
+    # request (via mark_processing() or reject(), whichever ran first).
+    # SET_NULL so a deleted admin account doesn't cascade into deleting
+    # withdrawal history — same reasoning debit_ledger_entry/
+    # refund_ledger_entry already use SET_NULL for.
+    reviewed_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="coin_withdrawal_requests_reviewed",
+    )
+
+    # [ADDED — Task 38] Set alongside reviewed_by, same call site(s).
+    reviewed_at = models.DateTimeField(null=True, blank=True)
 
     # The debit written by request_withdrawal(). SET_NULL for the same
     # reason CoinPurchaseRequest.ledger_entry is SET_NULL: an
@@ -1104,6 +1293,10 @@ class CoinWithdrawalRequest(models.Model):
         ]
         constraints = [
             CheckConstraint(condition=Q(coins__gt=0), name="coinwithdrawalrequest_coins_positive"),
+            # [ADDED — Task 38] Mirrors coinpurchaserequest_amount_positive
+            # above — amount_inr is derived from coins so it should never
+            # be able to reach zero or negative either.
+            CheckConstraint(condition=Q(amount_inr__gt=0), name="coinwithdrawalrequest_amount_inr_positive"),
         ]
 
     def __str__(self):
@@ -1116,16 +1309,33 @@ class UserPreference(models.Model):
     `language`. Deliberately the same OneToOne + get-or-create shape as
     `core.NotificationPreference`.
 
-    ⚠️ ASSUMPTION — `core/models.py` wasn't part of this upload, so
-    `NotificationPreference`'s actual field names/`for_user()` body
-    aren't visible here. This reproduces the pattern as described
-    (OneToOne to the user, a classmethod that get-or-creates, an
-    `updated_at`) rather than copying real code. If
-    `core.NotificationPreference` turns out to differ (e.g. it names its
-    classmethod something other than `for_user`, or keys the get-or-
-    create differently), prefer matching that file exactly over this
-    one, and adjust `for_user()`/the `/preferences/me/` view below to
-    match.
+    [TASK 31 — RESOLVED] Diffed directly against `core.NotificationPreference`
+    now that `core/models.py` has actually been reviewed (previously an
+    unconfirmed guess — see git history of this docstring for the old
+    caveat). Confirmed matching on every point that was in question:
+
+      - Classmethod name: `for_user()` on both — the guess was right,
+        no rename needed.
+      - get-or-create keying: both do `cls.objects.get_or_create(user=
+        user)`, keyed on `user` alone, no other lookup fields.
+      - Default-population behavior: neither passes a `defaults=` dict
+        to `get_or_create` — both just let the model field defaults
+        (`push_enabled=True` etc. there; `Theme.SYSTEM`/`language="en"`
+        here) apply on first creation. Same pattern exactly.
+      - Shape: `OneToOneField` to the user + an `updated_at =
+        DateTimeField(auto_now=True)` on both.
+
+    Two harmless, non-functional differences, left as-is (nothing to
+    reconcile):
+      - `NotificationPreference.Meta.db_table` pins it to
+        `"liveclass_notificationpreference"` — a legacy-table artifact
+        from that model's own history, not something this model has or
+        needs (this is a fresh table with no prior name to preserve).
+      - `NotificationPreference` declares no `Meta.ordering`;
+        `UserPreference` orders by `-updated_at`. Irrelevant in
+        practice — both are OneToOne (one row per user via
+        `for_user()`), so ordering only matters for a hypothetical
+        "list every user's preference row" view, which neither app has.
 
     Row is NOT created at signup — it's get-or-created lazily the first
     time anything calls `for_user()` (same lazy-row idea `CoinLedger`

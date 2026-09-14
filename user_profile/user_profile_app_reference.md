@@ -1,30 +1,150 @@
 # `user_profile` App — Complete Self-Contained Reference
 
-> **v5 — v4 ke upar TASK 1 (naya `UserPreference` model — theme/language) aur
-> TASK 2 (`services.py` — Follow notification helper) merged.**
+> **v6 — v5 ke upar §11 item 10 (Buy-Coin webhook signature verification)
+> aur §11 item 12 (Coin-Withdrawal admin/ops lifecycle actions) resolve
+> hue hain, plus donon ke liye test coverage add hui hai.**
 > Ye ek hi file hai jisme poore **user_profile** Django app ka sara logic,
 > code, connections, flows, fraud rules, aur known issues cover hain. Iske
 > alawa kisi aur file ki zaroorat nahi — sab kuch (models → serializers →
 > views → urls → admin → fraud → services → tasks → tests) yahin milega,
 > current code ke saath.
 >
-> **v4 se kya badla, sabse pehle:** section 0.4 (Changelog v4 → v5) padho.
-> Short version — is baar coin-economy me kuch nahi bada, ye do chhote,
-> independent additions hain:
-> - **TASK 1** — naya `UserPreference` model (`theme` + `language`,
->   `OneToOne` + get-or-create — `core.NotificationPreference` jaisa hi
->   pattern) + `GET/PATCH /user-profile/preferences/me/` endpoint.
-> - **TASK 2** — naya `services.py` module: `_notify(...)`, ek thin
->   lazy-import wrapper `core.services.create_notification` ke upar,
->   Follow events ke liye banaya gaya hai — **⚠️ is pass me sirf module
->   add hua hai, `FollowAPIView`/`AcceptFollowRequestView` (views.py) me
->   abhi kahin se call nahi hota** (see §11 item 16).
+> **v5 se kya badla, sabse pehle:** section 0.5 (Changelog v5 → v6) padho.
+> Short version — do open items §11 me se close hue is pass me:
+> - **§11 item 10** — `BuyCoinConfirmView` ab ek real, gateway-agnostic
+>   HMAC-SHA256 webhook-signature check (`_verify_gateway_webhook_signature`,
+>   `views.py`) ke peeche hai, `IsAuthenticated` + ownership check ki jagah
+>   `AllowAny` + signature verification. **Behavior change:** ab ek blank
+>   `gateway` wali (manual/admin top-up) `CoinPurchaseRequest` is route se
+>   confirm nahi ho sakti — see §6 view notes.
+> - **§11 item 12** — naya `CoinWithdrawalAdminActionView` (staff-only,
+>   `POST /profile/coin-withdrawals/<id>/action/`) + naya
+>   `CoinWithdrawalRequestAdmin` (Django admin bulk actions) — donon
+>   `mark_processing()`/`confirm_success()`/`reject()` (models.py) ko ab
+>   ek Django shell ke bina reach karne ke do sanctioned tareeke hain.
+> - Test gaps jo §11 item 9/15 me carried-over the — `CoinLedgerAdmin`
+>   ka add/change/delete refusal, aur `record_transaction()` ka
+>   `CAMPUS_REWARD` path — dono ab covered hain (`tests.py`, naya
+>   `CoinLedgerAdminPermissionTests` + `RecordTransactionCampusRewardTests`).
 >
-> Naya migration bhi is round me aaya: `migrations/
-> 0002_add_userpreference.py` (TASK 1's `UserPreference` table). Poora
+> **Migration housekeeping (v6):** is app ke liye ab koi hand-written
+> migration file track nahi ki jaati is doc me — pichla `0002_
+> add_userpreference.py` (v5) hand-likha gaya tha kyunki us pass me Django
+> install available nahi tha; woh ab superseded hai. Project ki saari
+> migrations (is app samet) ek clean `makemigrations`/`migrate` se fresh
+> generate hui hain current `models.py` ke against — §3a ab sirf itna
+> documents karta hai, koi specific migration file content nahi. Poora
 > document is round ke baad, fully updated code ke saath, dubara organize
-> kiya gaya hai; purane version-history (v1→v2→v3→v3.1→v4) sections §0 me
-> neeche traceable hain, delete nahi kiye gaye.
+> kiya gaya hai; purane version-history (v1→v2→v3→v3.1→v4→v5) sections §0
+> me neeche traceable hain, delete nahi kiye gaye.
+
+---
+
+## 0.5 Changelog — v5 → v6 (§11 item 10 — webhook verification; §11 item 12 — withdrawal admin actions)
+
+Do independent gaps close is round me, dono `user_profile_app_reference.md`
+ke apne §11 me hi flagged the — koi naya model/field nahi, sirf `views.py`,
+`urls.py`, `admin.py` me additions plus `tests.py` me do naye test classes.
+`models.py`, `serializers.py`, `fraud.py`, `services.py`, `tasks.py`,
+`tests_fraud.py` — sab **unchanged** is pass me.
+
+### 🔐 §11 item 10 — `BuyCoinConfirmView` ab real webhook-signature-verified hai
+
+Pehle (v4/v5) `IsAuthenticated` + "must be your own purchase" stand-in tha,
+kyunki koi gateway integration kisi upload ka hissa nahi thi. Ab:
+
+- `views.py` me naya `_verify_gateway_webhook_signature(request, gateway)`
+  helper + `GatewayWebhookSignatureError` exception — generic, gateway-
+  agnostic HMAC-SHA256 check (Razorpay/Stripe/PayU jaisa koi bhi major
+  gateway isi mechanism ka variant use karta hai), do naye settings
+  (**settings.py me is pass me add NAHI hui, external dependency hai — see
+  §2**) ke against:
+  - `PAYMENT_GATEWAY_WEBHOOK_SECRETS = {"razorpay": "...", ...}`
+  - `PAYMENT_GATEWAY_WEBHOOK_SIGNATURE_HEADERS = {"razorpay": "X-Razorpay-Signature", ...}`
+    (fallback: `"X-Webhook-Signature"`)
+- `gateway` hamesha **already-persisted `CoinPurchaseRequest.gateway`** se
+  read hota hai (jo `BuyCoinView.post()` ne set kiya tha), request body me
+  caller jo claim kare usse nahi — isliye ek fake caller apna signature
+  produce nahi kar sakta bina us gateway ke actual secret ke.
+- `BuyCoinConfirmView.permission_classes` ab `[AllowAny]` hai (pehle
+  `IsAuthenticated`) — signature check hi ab real gate hai. `request.body`
+  **signature-check se pehle** access hoti hai (before
+  `self.get_serializer(data=request.data)`), warna DRF ka `request.data`
+  parse hone ke baad `request.body` `RawPostDataException` deta hai.
+- Failure codes: **503** agar humara apna config galat hai (koi secret
+  file par nahi, ya `gateway` blank hai — ye caller ki galti nahi);
+  **401** har doosre case me (missing header, signature mismatch) — generic
+  message, taaki ek unauthenticated caller ko ye pata na chale *kya*
+  specifically galat tha.
+- ⚠️ **Behavior change, flagged explicitly (not silent):** ek blank
+  `gateway` wali `CoinPurchaseRequest` (manual/admin top-up case —
+  `CoinPurchaseRequest.gateway`'s field comment) pehle uske apne owner
+  user khud confirm kar sakte the. Ab nahi ho sakti — koi gateway secret
+  hi nahi hai jiske against signature verify ho. Ye ek naya, currently
+  **open gap** hai us case ke liye — no replacement path is pass me;
+  flag kiya gaya hai taaki silently unconfirmable na reh jaaye (see §11).
+- ⚠️ **ASSUMPTION** (is helper ke docstring me bhi noted): `campus`/
+  `liveclass` apps ka apna gateway-verify code (agar exist karta hai)
+  is pass ke upload ka hissa nahi tha, isliye ye ek generic mechanism hai,
+  kisi existing in-repo pattern se copy nahi kiya gaya. Agar
+  `campus`/`liveclass` me pehle se gateway-client verification helper
+  hai, usko prefer karo is generic version ke upar.
+
+### 🛠️ §11 item 12 — Coin-Withdrawal admin/ops lifecycle actions
+
+Pehle `CoinWithdrawalRequestManager.mark_processing()`/`confirm_success()`/
+`reject()` (models.py) exist karte the aur unit-tested the, lekin koi view
+ya admin action unhe reach nahi karta tha — sirf Django shell se hi call ho
+sakte the. Do sanctioned entry points ab add hue hain, dono **hi** sirf inhi
+teen manager methods ko call karte hain (koi field directly nahi chhuta) —
+`CoinLedgerAdmin`'s apna docstring pehle se in teeno ko "sanctioned way in"
+bata chuka tha:
+
+- **`CoinWithdrawalAdminActionView`** (`views.py`, new) — staff-only
+  (`IsAdminUser`), `POST /profile/coin-withdrawals/<withdrawal_id>/action/`
+  `{"action": "processing"|"success"|"reject", "reason": "<reject only>"}`.
+  404 agar id nahi milta, 409 agar manager `ValueError` raise kare (invalid
+  state transition — jaise ek already-SUCCESS request ko reject karna), 400
+  agar `action` missing/unrecognized ho. Route `urls.py` me naya
+  `coin-withdrawals/<int:withdrawal_id>/action/` — deliberately
+  `CoinWithdrawalRequestView` (jo sirf apni requests dikhata/banata hai) se
+  alag path, kyunki ye kisi *bhi* user ki request par act karta hai aur
+  alag permission class chahiye.
+- **`CoinWithdrawalRequestAdmin`** (`admin.py`, new) — same read-only
+  lockdown reasoning `CoinLedgerAdmin` jaisa (add/change/delete sab
+  `False`, `readonly_fields` = har field), lekin **inert nahi** — teen bulk
+  actions (`mark_processing_action`/`confirm_success_action`/
+  `reject_action`) ek shared `_run_bulk_action()` runner ke through, jo har
+  selected row ke `ValueError` ko catch karke ek `messages.WARNING` deta
+  hai (ek bad row selection ke baaki ko block nahi karta) aur naya
+  `WithdrawalEligibleFilter`-jaisa hi list filter/display setup.
+
+### 🧪 Test coverage added this pass (closes carried-over gaps from §11 item 9/15)
+
+- `CoinLedgerAdminPermissionTests` (`tests.py`, new) — `CoinLedgerAdmin`
+  instantiate karke seedha `has_add_permission`/`has_change_permission`/
+  `has_delete_permission` sab `False` assert karta hai (request=None se,
+  kyunki teeno unconditionally False return karte hain), plus
+  `readonly_fields` == model ke har field ka set (hardcoded list nahi,
+  taaki future field-addition regression bhi catch ho).
+- `RecordTransactionCampusRewardTests` (`tests.py`, new) —
+  `record_transaction(transaction_type=CAMPUS_REWARD)` ka apna balance/
+  ledger-row/`withdrawal_eligible=False` metadata behavior specifically
+  (pehle sirf EARN/CAMPUS_REWARD ki rate-limiter *grouping* EARN ke through
+  cover hoti thi, `tests_fraud.py` me), plus idempotent-reference double-
+  credit-nahi-hota check.
+
+### Status as of v6
+
+- §11 items 10 aur 12 ab **resolved** — see §11 for the struck-through
+  entries and the one still-open sub-gap (blank-`gateway` manual top-up
+  confirmation) item 10 introduces.
+- §11 item 9/15's admin-permission-test aur CAMPUS_REWARD-test gaps —
+  **resolved**.
+- `PAYMENT_GATEWAY_WEBHOOK_SECRETS` / `PAYMENT_GATEWAY_WEBHOOK_SIGNATURE_
+  HEADERS` — naya **external dependency** (settings.py me add karna hoga
+  production me jaane se pehle) — see §2.
+- Koi manual/hand-written migration ab is doc me track nahi hoti — §3a.
 
 ---
 
@@ -532,13 +652,13 @@ OpenAPI docs via `@extend_schema`).
 | `serializers.py` | All request/response serializers (incl. `UserPreferenceSerializer`, **v5**) + `accepted_connection_ids()` / `bulk_accepted_connection_ids()` helpers |
 | `views.py` | All API endpoint logic (class-based views) + `is_blocked_between()` / `is_restricted_between()` helpers |
 | `urls.py` | URL routing |
-| `admin.py` | Django admin registration (proper `ModelAdmin` configs) |
+| `admin.py` | Django admin registration (proper `ModelAdmin` configs) — `CoinLedgerAdmin`, `CoinWithdrawalRequestAdmin` (**v6**), `UserPreferenceAdmin` |
 | `apps.py` | App config (`name = 'user_profile'`) |
 | `fraud.py` | Withdrawal-eligibility + earn-rate-limiting checks, enforced inside `CoinLedgerManager.record_transaction()` |
 | `services.py` | **New, v5, TASK 2** — `_notify()`, a lazy-import wrapper around `core.services.create_notification` for Follow events. **Not yet called from any view** — see §8c / §11 item 16 |
 | `tasks.py` | Celery task `reconcile_follow_counts` — periodic followers/following counter drift correction |
-| `migrations/` | `0001_initial.py` (`Follow`/`BlockUser`/`CoinLedger`/`RestrictUser`), `0002_add_userpreference.py` (**new, v5** — `UserPreference`) |
-| `tests.py` | `FollowModelTests`, `FollowAPITests`, `PrivateAccountFollowRequestFlowTests`, `BlockUnblockEdgeCaseTests`, `RestrictUserModelTests`, `UserSearchExclusionTests`, `FollowRaceConditionTests`, `CoinWithdrawalRequestManagerTests`, `CoinWithdrawalRequestAPITests` |
+| `migrations/` | Not tracked in this doc as of **v6** — regenerated fresh via `makemigrations`/`migrate` against current `models.py`; see §3a |
+| `tests.py` | `FollowModelTests`, `FollowAPITests`, `PrivateAccountFollowRequestFlowTests`, `BlockUnblockEdgeCaseTests`, `RestrictUserModelTests`, `UserSearchExclusionTests`, `FollowRaceConditionTests`, `CoinWithdrawalRequestManagerTests`, `CoinWithdrawalRequestAPITests`, `CoinLedgerAdminPermissionTests` (**v6**), `RecordTransactionCampusRewardTests` (**v6**) |
 | `tests_fraud.py` | `WithdrawalEligibilityTests`, `EarnRateLimitTests` |
 
 ---
@@ -596,8 +716,25 @@ INSTALLED_APPS = [
 list above, `UserPreference` (TASK 1, §4) is its own table with a
 `OneToOne` pointing *at* `settings.AUTH_USER_MODEL` (`related_name=
 "preferences"`) — nothing needs to be added to your custom `User` model
-for it to work, only the migration (`0002_add_userpreference.py`) needs
-to run.
+for it to work, only its migration needs to run (see §3a — no specific
+filename tracked here anymore as of v6).
+
+**v6 note — `BuyCoinConfirmView`'s webhook signature check needs two new
+`settings.py` entries, NOT added in this pass.** `_verify_gateway_
+webhook_signature()` (views.py, §0.5) reads these via `getattr(settings,
+..., {})`, so their absence doesn't crash the app — it just means every
+webhook call gets a 503 "no webhook secret configured" until they're
+added:
+```python
+PAYMENT_GATEWAY_WEBHOOK_SECRETS = {
+    "razorpay": os.environ["RAZORPAY_WEBHOOK_SECRET"],
+    # one entry per gateway CoinPurchaseRequest.gateway can hold
+}
+PAYMENT_GATEWAY_WEBHOOK_SIGNATURE_HEADERS = {
+    "razorpay": "X-Razorpay-Signature",
+    # falls back to "X-Webhook-Signature" for any gateway not listed here
+}
+```
 
 **v5 note — `services.py` needs a `core` app with `core.services.
 create_notification` importable.** This is the same dependency
@@ -624,48 +761,39 @@ Nothing special — standard app config, unchanged from v1.
 
 ---
 
-## 3a. `migrations/` (new subsection, v5)
+## 3a. `migrations/` (v6 — no hand-written migration tracked anymore)
 
-Two migration files exist for this app as of v5:
+Up to v5 this section hand-wrote and tracked `0002_add_userpreference.py`
+verbatim, because the pass that added `UserPreference` had no Django
+install available to run `makemigrations` against. **As of v6 that's no
+longer the case** — the project's migrations (across every app, not just
+this one) were regenerated fresh with `manage.py makemigrations` /
+`manage.py migrate` against current `models.py`, so:
 
-| File | What it creates |
-|---|---|
-| `0001_initial.py` | `BlockUser`, `CoinLedger`, `Follow`, `RestrictUser` (the four models that existed at the time this app's first migration was generated — `CoinPurchaseRequest`/`CoinWithdrawalRequest` from TASK 3/4 would need their own follow-up migration, not shown in any upload for this app; this doc doesn't assume one exists — see §11 item 5 for the related `CoinLedger` shape-change migration caution). |
-| `0002_add_userpreference.py` | **New, v5, TASK 1** — `UserPreference` (`theme`, `language`, `updated_at`, `user` OneToOne to `settings.AUTH_USER_MODEL`). Depends on `0001_initial` + `migrations.swappable_dependency(settings.AUTH_USER_MODEL)`. Written by hand (no Django install available in this pass to run `makemigrations` against) — field defs match `UserPreference` in §4 exactly; regenerate with `manage.py makemigrations user_profile` and diff against this file if you want Django's own migration writer to confirm it.
-
-```python
-# user_profile/migrations/0002_add_userpreference.py
-import django.db.models.deletion
-from django.conf import settings
-from django.db import migrations, models
-
-
-class Migration(migrations.Migration):
-
-    dependencies = [
-        migrations.swappable_dependency(settings.AUTH_USER_MODEL),
-        ('user_profile', '0001_initial'),
-    ]
-
-    operations = [
-        migrations.CreateModel(
-            name='UserPreference',
-            fields=[
-                ('id', models.BigAutoField(auto_created=True, primary_key=True, serialize=False, verbose_name='ID')),
-                ('theme', models.CharField(choices=[('light', 'Light'), ('dark', 'Dark'), ('system', 'System')], default='system', max_length=10)),
-                ('language', models.CharField(default='en', max_length=10)),
-                ('updated_at', models.DateTimeField(auto_now=True)),
-                ('user', models.OneToOneField(on_delete=django.db.models.deletion.CASCADE, related_name='preferences', to=settings.AUTH_USER_MODEL)),
-            ],
-            options={
-                'ordering': ['-updated_at'],
-            },
-        ),
-    ]
-```
-
-Run `python manage.py migrate user_profile` after pulling this in — no
-data migration needed (a brand-new table, zero existing rows).
+- This doc does **not** pin a specific migration filename or hand-written
+  operations list for `user_profile` anymore — whatever
+  `manage.py makemigrations user_profile` produces against the current
+  `models.py` in §4 **is** the source of truth, not a copy kept here.
+- Every model in §4 — `BlockUser`, `CoinLedger`, `Follow`, `RestrictUser`,
+  `CoinPurchaseRequest`, `CoinWithdrawalRequest`, `UserPreference` — is
+  covered by that regenerated migration state; there's no longer a gap
+  where `CoinPurchaseRequest`/`CoinWithdrawalRequest` "would need their
+  own follow-up migration, not shown in any upload" (that was the v5
+  caveat for this table — superseded).
+- §11 item 5's old `CoinLedger` migration-risk caution (renaming from an
+  older `coins`/`credit`/`debit` shape) is **moot post-reset** — a fresh
+  `makemigrations` against the current `CoinLedger` shape has no older
+  shape to reconcile against; that caution only ever applied to a
+  project that already had migration history predating the redesign.
+- No new migration is needed specifically for this v6 pass — `views.py`,
+  `urls.py`, `admin.py`, `tests.py` changed, but no model/field changed
+  (see §0.5), so `makemigrations user_profile` should report "No changes
+  detected" against a project whose migration state is already current.
+- Run `python manage.py migrate user_profile` (or a project-wide
+  `python manage.py migrate`) after pulling in model changes — no data
+  migration is needed for anything in this app today (every table here
+  is either brand-new-table-zero-rows at creation, or already reconciled
+  by the reset above).
 
 ---
 
@@ -2415,6 +2543,10 @@ class UserPreferenceSerializer(serializers.ModelSerializer):
 
 ```python
 # user_profile/views.py
+import hashlib
+import hmac
+
+from django.conf import settings
 from django.contrib.auth import get_user_model
 from django.db import IntegrityError, transaction
 from django.db.models import F, Q
@@ -2425,7 +2557,7 @@ from drf_spectacular.utils import OpenApiParameter, extend_schema
 from rest_framework import filters, status
 from rest_framework.generics import GenericAPIView, ListAPIView
 from rest_framework.parsers import FormParser, MultiPartParser
-from rest_framework.permissions import IsAuthenticated
+from rest_framework.permissions import AllowAny, IsAdminUser, IsAuthenticated
 from rest_framework.response import Response
 
 from . import fraud
@@ -3364,6 +3496,129 @@ class BuyCoinView(GenericAPIView):
         }, status=status.HTTP_201_CREATED if created else status.HTTP_200_OK)
 
 
+class GatewayWebhookSignatureError(Exception):
+    """
+    Raised by `_verify_gateway_webhook_signature()` below for any
+    signature failure — missing secret (misconfiguration), missing
+    header, or a mismatch. Callers turn this into an HTTP response;
+    kept as one exception type (not three) so the view's except-block
+    can't accidentally leak *which* of the three failed to the caller —
+    "invalid signature" is the only thing a webhook caller should ever
+    learn either way.
+    """
+
+    def __init__(self, message, *, is_misconfiguration=False):
+        super().__init__(message)
+        self.is_misconfiguration = is_misconfiguration
+
+
+def _verify_gateway_webhook_signature(request, gateway):
+    """
+    TASK (this pass) — user_profile_app_reference.md §11 item 10:
+    `BuyCoinConfirmView` had no real payment-gateway signature check,
+    only `IsAuthenticated` + "must be your own purchase" standing in for
+    one, since no gateway integration was part of any upload for this
+    app.
+
+    ⚠️ ASSUMPTION — `campus`/`liveclass`'s own gateway-verify code (the
+    reference the person doing this task pointed at) was NOT part of
+    this pass's upload either, so this isn't copied from an established
+    in-repo pattern — it's a generic, gateway-agnostic HMAC-SHA256
+    webhook-signature check, the same mechanism every major payment
+    gateway (Razorpay, Stripe, PayU, ...) uses for webhook auth, just
+    without any one gateway's specific header name/payload-canonicalization
+    quirks baked in (those differ per gateway and aren't confirmable from
+    here). If `campus`/`liveclass` turns out to already have gateway
+    client code with its own verification helper, prefer reusing that
+    over this — this exists so the endpoint isn't left unverified in the
+    meantime, not to duplicate a real gateway SDK's verification call.
+
+    How it works: HMAC-SHA256 over the raw request body, keyed by a
+    per-gateway secret, compared against a per-gateway signature header
+    — both looked up from two new settings this pass introduces (NOT
+    added to settings.py in this pass — out of scope for a views.py-only
+    change; see this function's docstring for the exact shape needed):
+
+        PAYMENT_GATEWAY_WEBHOOK_SECRETS = {
+            "razorpay": os.environ["RAZORPAY_WEBHOOK_SECRET"],
+            ...
+        }
+        PAYMENT_GATEWAY_WEBHOOK_SIGNATURE_HEADERS = {
+            "razorpay": "X-Razorpay-Signature",
+            ...
+        }
+        # Falls back to "X-Webhook-Signature" for any gateway not listed
+        # in the headers map above.
+
+    `gateway` is read from the ALREADY-PERSISTED `CoinPurchaseRequest.
+    gateway` (set back when `BuyCoinView.post()` created the pending
+    request), never from anything in this webhook call itself — a
+    request body can claim to be from any gateway it likes, but it can
+    only produce a signature that verifies against the secret this
+    server has on file for the gateway `start_purchase()` was actually
+    given.
+
+    Raises `GatewayWebhookSignatureError` for every failure case (no
+    secret configured, no signature header present, signature mismatch)
+    — see that class's own docstring for why these three collapse into
+    one exception/one message rather than three distinguishable ones.
+    Returns None (no exception) on success.
+    """
+    if not gateway:
+        # A blank `gateway` is a real, valid state (CoinPurchaseRequest.
+        # gateway's own field comment: "not every caller may have a
+        # gateway name handy (e.g. a manual admin-initiated top-up)")
+        # — but exactly BECAUSE it's blank, there is no gateway secret
+        # to verify a signature against, so a request with no gateway on
+        # file can never be confirmed through this now-webhook-only
+        # endpoint. See BuyCoinConfirmView's own docstring — this is a
+        # deliberate, flagged behavior change from before this pass
+        # (when IsAuthenticated + ownership let ANY caller, gateway-less
+        # purchases included, confirm their own request), not an
+        # oversight.
+        raise GatewayWebhookSignatureError(
+            "This purchase has no gateway on file — it cannot be confirmed "
+            "via a gateway webhook.",
+            is_misconfiguration=True,
+        )
+
+    secrets_by_gateway = getattr(settings, "PAYMENT_GATEWAY_WEBHOOK_SECRETS", {})
+    secret = secrets_by_gateway.get(gateway)
+    if not secret:
+        # Distinct from "signature didn't match" — this is OUR config
+        # missing an entry for a gateway we otherwise recognize, not the
+        # caller's fault. Surfaced as 503 by the view, not 401/403.
+        raise GatewayWebhookSignatureError(
+            f"No webhook secret configured for gateway {gateway!r}.",
+            is_misconfiguration=True,
+        )
+
+    headers_by_gateway = getattr(settings, "PAYMENT_GATEWAY_WEBHOOK_SIGNATURE_HEADERS", {})
+    header_name = headers_by_gateway.get(gateway, "X-Webhook-Signature")
+    provided_signature = request.headers.get(header_name, "")
+    if not provided_signature:
+        raise GatewayWebhookSignatureError(
+            f"Missing {header_name!r} header."
+        )
+
+    # `request.body` (raw bytes, pre-parsing) — the caller MUST have
+    # already forced Django to cache this (e.g. by reading `request.body`
+    # once) before ever touching `request.data`. Once DRF parses
+    # `request.data` first, the underlying stream is already consumed and
+    # Django raises `RawPostDataException` on a later `.body` access — see
+    # BuyCoinConfirmView.post()'s own comment on why it reads `.body`
+    # before `self.get_serializer(data=request.data)`, not after.
+    expected_signature = hmac.new(
+        secret.encode("utf-8"), request.body, hashlib.sha256,
+    ).hexdigest()
+
+    # `compare_digest`, not `==` — constant-time, so a caller can't use
+    # response-timing differences to guess the correct signature one
+    # byte at a time.
+    if not hmac.compare_digest(provided_signature, expected_signature):
+        raise GatewayWebhookSignatureError("Signature verification failed.")
+
+
 class BuyCoinConfirmView(GenericAPIView):
     """
     POST /profile/buy-coin/confirm/
@@ -3376,24 +3631,52 @@ class BuyCoinConfirmView(GenericAPIView):
     confirm_success()`/`mark_failed()` (models.py) for exactly what
     happens on a repeat call.
 
-    🚧 NOT a real webhook endpoint as-is: no payment-gateway integration
-    was part of this upload, so there's no gateway signature to verify
-    here — `IsAuthenticated` + "must be your own purchase" stand in so
-    the flow is testable end-to-end. Before this goes live behind an
-    actual gateway callback, that verification should replace (or gate)
-    the checks below; a genuine webhook call isn't "acting as" any
-    particular authenticated user.
+    TASK (this pass) — user_profile_app_reference.md §11 item 10: this is
+    now a real (gateway-agnostic) webhook endpoint. `IsAuthenticated` +
+    "must be your own purchase" is GONE — a genuine webhook call isn't
+    "acting as" any particular authenticated user, so that check could
+    never be the real gate here; it only ever worked because nothing in
+    this upload could call this endpoint except a logged-in client
+    testing the flow end-to-end. `permission_classes = [AllowAny]` now,
+    gated instead by `_verify_gateway_webhook_signature()` above — see
+    that function's own docstring for exactly what it checks and its
+    ⚠️ ASSUMPTION about not having `campus`/`liveclass`'s own
+    gateway-verify code to copy from.
+
+    Behavior change worth flagging explicitly: a `CoinPurchaseRequest`
+    with a BLANK `gateway` (the "manual admin-initiated top-up" case
+    `CoinPurchaseRequest.gateway`'s own field comment names) could
+    previously be confirmed by its owning user calling this endpoint
+    themselves. It no longer can be — there's no gateway secret to
+    verify a webhook signature against a blank gateway, and this
+    endpoint's whole reason to exist now is verifying a real gateway
+    webhook, not accepting a client's say-so. That's a real, currently
+    open gap for the manual/admin top-up case this pass doesn't have a
+    replacement path for — flagging it rather than silently leaving it
+    unconfirmable with no way to notice. `BuyCoinView`, `CoinPurchaseRequest`,
+    `CoinPurchaseRequestManager` are all otherwise unchanged.
     """
-    permission_classes = [IsAuthenticated]
+    permission_classes = [AllowAny]
     serializer_class = CoinPurchaseConfirmSerializer
 
     @extend_schema(
         request=CoinPurchaseConfirmSerializer,
         responses={200: CoinPurchaseRequestSerializer, 404: OpenApiTypes.OBJECT},
-        description="Confirm a coin purchase as success or failed. Idempotent — safe to retry "
-        "(e.g. a duplicated webhook delivery).",
+        description="Gateway webhook: confirm a coin purchase as success or failed. "
+        "Signature-verified — not callable as a regular authenticated user "
+        "action. Idempotent — safe to retry (e.g. a duplicated webhook delivery).",
     )
     def post(self, request):
+        # MUST happen before `self.get_serializer(data=request.data)`
+        # below — see `_verify_gateway_webhook_signature()`'s own comment
+        # on why. Forces Django to cache the raw body now, while the
+        # stream hasn't been read yet, so DRF's later `request.data`
+        # parse reads from that cached copy instead of consuming the
+        # stream directly — without this ordering, the signature check
+        # further down would hit Django's `RawPostDataException` instead
+        # of a raw body to hash.
+        request.body
+
         serializer = self.get_serializer(data=request.data)
         if not serializer.is_valid():
             return Response({
@@ -3414,10 +3697,29 @@ class BuyCoinConfirmView(GenericAPIView):
                 "message": "Coin purchase request not found.",
             }, status=status.HTTP_404_NOT_FOUND)
 
-        # See the class docstring above re: this check standing in for
-        # real webhook-signature verification.
-        if purchase.user_id != request.user.id:
-            raise Http404
+        # Replaces the old `purchase.user_id != request.user.id` ownership
+        # check — see class docstring. Keyed off `purchase.gateway` (this
+        # server's own record of which gateway the purchase was started
+        # against), never off anything the caller claims in this request.
+        try:
+            _verify_gateway_webhook_signature(request, purchase.gateway)
+        except GatewayWebhookSignatureError as exc:
+            if exc.is_misconfiguration:
+                # Our config's fault (no secret on file / no gateway to
+                # verify against at all), not the caller's — 503, not
+                # 401/403, and safe to say so explicitly since it's not a
+                # signature-guessing hint.
+                return Response({
+                    "status": False,
+                    "message": str(exc),
+                }, status=status.HTTP_503_SERVICE_UNAVAILABLE)
+            # Deliberately generic message for every other failure
+            # (missing header, bad signature) — never confirms/denies
+            # *which* part was wrong to an unauthenticated caller.
+            return Response({
+                "status": False,
+                "message": "Webhook signature verification failed.",
+            }, status=status.HTTP_401_UNAUTHORIZED)
 
         try:
             if outcome == "success":
@@ -3557,6 +3859,117 @@ class CoinWithdrawalRequestView(GenericAPIView):
         }, status=status.HTTP_201_CREATED)
 
 
+# 🔥 §11 item 12 — staff/ops endpoint for CoinWithdrawalRequestManager's
+# three lifecycle methods. Before this, mark_processing()/
+# confirm_success()/reject() (models.py) existed and were unit-tested,
+# but nothing in urls.py called them — a withdrawal could only ever
+# reach PENDING through the public API (CoinWithdrawalRequestView
+# above); moving it further required a Django shell. This view is the
+# "future admin action" that item 12 flagged as not existing yet — it
+# doesn't touch CoinWithdrawalRequestView itself (that view still only
+# lets a user see/create their OWN requests) and doesn't open any new
+# path to CoinLedger: it calls the exact same manager methods
+# CoinLedgerAdmin's own docstring (admin.py) points to as the
+# sanctioned way to move a withdrawal forward, just reachable over the
+# API instead of only from a shell.
+class CoinWithdrawalAdminActionView(GenericAPIView):
+    """
+    POST /profile/coin-withdrawals/<int:withdrawal_id>/action/
+    {"action": "processing"}                              -> mark_processing()
+    {"action": "success"}                                  -> confirm_success()
+    {"action": "reject", "reason": "optional explanation"} -> reject()
+
+    Staff-only (`IsAdminUser` — `request.user.is_staff`). This mirrors
+    the level Django admin itself already requires to reach these same
+    three methods; it does not add a new, looser way in. Ordinary
+    authenticated users keep using `CoinWithdrawalRequestView` above
+    for their own requests (GET to list, POST to create) — this view
+    has no GET and never filters by `request.user`, since ops needs to
+    act on *any* user's withdrawal, not just their own.
+
+    Response codes follow the same conventions the rest of this
+    module already uses for the underlying manager methods:
+      - 404 if `withdrawal_id` doesn't exist at all.
+      - 409 if the manager raises `ValueError` for an invalid state
+        transition (e.g. trying to reject an already-SUCCESS request)
+        — same "well-formed request, wrong current state" shape
+        `BuyCoinConfirmView` already uses above for its own 409s.
+      - 400 for a missing/unrecognized `action` value — a request-body
+        problem, not a state problem.
+
+    Not idempotency-guarded beyond what the manager methods themselves
+    already do (`confirm_success`/`reject` are idempotent per their own
+    docstrings in models.py; `mark_processing` is not, and calling it
+    twice on an already-PROCESSING row is intentionally left to raise
+    from a plain equality check there would need — out of scope here,
+    same as the other manager-level caveats §11 already tracks).
+    """
+
+    permission_classes = [IsAdminUser]
+    serializer_class = CoinWithdrawalRequestSerializer
+
+    ACTION_PROCESSING = "processing"
+    ACTION_SUCCESS = "success"
+    ACTION_REJECT = "reject"
+    VALID_ACTIONS = (ACTION_PROCESSING, ACTION_SUCCESS, ACTION_REJECT)
+
+    @extend_schema(
+        request=OpenApiTypes.OBJECT,
+        responses={
+            200: CoinWithdrawalRequestSerializer,
+            400: OpenApiTypes.OBJECT,
+            404: OpenApiTypes.OBJECT,
+            409: OpenApiTypes.OBJECT,
+        },
+        description="Staff-only. Advance a withdrawal request's lifecycle: "
+        "{'action': 'processing'|'success'|'reject', 'reason': '<reject only, optional>'}.",
+    )
+    def post(self, request, withdrawal_id):
+        action = request.data.get("action")
+        if action not in self.VALID_ACTIONS:
+            return Response({
+                "status": False,
+                "message": f"'action' must be one of {list(self.VALID_ACTIONS)}.",
+            }, status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            if action == self.ACTION_PROCESSING:
+                withdrawal = CoinWithdrawalRequest.objects.mark_processing(
+                    withdrawal_id=withdrawal_id
+                )
+                message = "Withdrawal moved to processing."
+            elif action == self.ACTION_SUCCESS:
+                withdrawal = CoinWithdrawalRequest.objects.confirm_success(
+                    withdrawal_id=withdrawal_id
+                )
+                message = "Withdrawal marked successful."
+            else:
+                withdrawal = CoinWithdrawalRequest.objects.reject(
+                    withdrawal_id=withdrawal_id,
+                    reason=request.data.get("reason", ""),
+                )
+                message = "Withdrawal rejected and coins refunded."
+        except CoinWithdrawalRequest.DoesNotExist:
+            return Response({
+                "status": False,
+                "message": f"No withdrawal request with id {withdrawal_id}.",
+            }, status=status.HTTP_404_NOT_FOUND)
+        except ValueError as exc:
+            # Invalid state transition (e.g. rejecting an already-
+            # SUCCESS request) — the manager methods raise ValueError
+            # for exactly this; see models.py for each one's own rules.
+            return Response({
+                "status": False,
+                "message": str(exc),
+            }, status=status.HTTP_409_CONFLICT)
+
+        return Response({
+            "status": True,
+            "message": message,
+            "data": self.get_serializer(withdrawal).data,
+        }, status=status.HTTP_200_OK)
+
+
 class UserPreferenceView(GenericAPIView):
     """
     TASK 1 — GET/PATCH /user-profile/preferences/me/, same shape as
@@ -3604,24 +4017,47 @@ class UserPreferenceView(GenericAPIView):
             "status": False,
             "message": "Validation failed.",
             "errors": serializer.errors,
-        }, status=status.HTTP_400_BAD_REQUEST)```
+        }, status=status.HTTP_400_BAD_REQUEST)
+```
 
-### View notes / what changed vs v3.1
+### View notes / what changed vs v5
 
-- **`BuyCoinView` / `BuyCoinConfirmView`** (TASK 3, new) — two-step:
+- **`BuyCoinView` / `BuyCoinConfirmView`** (TASK 3) — two-step:
   `BuyCoinView` only ever creates/returns a `PENDING` request (never
   touches `User.coin`); `BuyCoinConfirmView` is the only place that calls
-  `confirm_success()`/`mark_failed()`. ⚠️ **Not gateway-verified as
-  shipped** — `IsAuthenticated` + "must be your own purchase" stand in
-  for a real payment-gateway signature check, since no gateway
-  integration was part of this upload. Don't expose this confirm route
-  to the public internet unauthenticated until that's added (see §11).
-- **`CoinWithdrawalRequestView`** (TASK 4, new) — one view, not two
-  (unlike buy-coin): `request_withdrawal()` debits at request time, so
-  there's no separate confirm step from the user's side.
-  `mark_processing`/`confirm_success`/`reject` (models.py) are **not**
-  wired to any endpoint yet — that's an ops/admin surface for a later
-  pass.
+  `confirm_success()`/`mark_failed()`. ✅ **Resolved in v6 (§11 item 10)**
+  — `BuyCoinConfirmView` is now a real, gateway-agnostic HMAC-SHA256
+  webhook-signature-verified endpoint (`_verify_gateway_webhook_signature()`
+  above it in this file), `permission_classes = [AllowAny]` instead of
+  `IsAuthenticated` + ownership. `gateway` is read from the already-
+  persisted `CoinPurchaseRequest.gateway`, never from the request body.
+  503 for our-own-config failures (no secret on file, or the purchase has
+  a blank `gateway`), 401 for everything else (missing header, bad
+  signature) — deliberately the same generic message either way, so an
+  unauthenticated caller can't learn *which* part failed. See §0.5 for
+  the two new settings this needs and the flagged behavior change (a
+  blank-`gateway` "manual admin top-up" `CoinPurchaseRequest` can no
+  longer be self-confirmed by its owner — no replacement path exists yet
+  for that case, see §11).
+- **`CoinWithdrawalRequestView`** (TASK 4) — one view, not two (unlike
+  buy-coin): `request_withdrawal()` debits at request time, so there's no
+  separate confirm step from the user's side. `mark_processing`/
+  `confirm_success`/`reject` (models.py) are reachable from **this same
+  file** as of v6 — see `CoinWithdrawalAdminActionView` below — this view
+  itself is unchanged and still only lets a user see/create their own
+  requests.
+- **`CoinWithdrawalAdminActionView`** (§11 item 12, new, v6) — staff-only
+  (`IsAdminUser`), `POST /profile/coin-withdrawals/<withdrawal_id>/action/`
+  with `{"action": "processing"|"success"|"reject", "reason": "<reject
+  only, optional>"}`. Calls the exact same three
+  `CoinWithdrawalRequest.objects.*` manager methods `CoinLedgerAdmin`'s
+  own docstring (admin.py) already names as the sanctioned way to move a
+  withdrawal forward — this is just an API-reachable front end for them
+  instead of only a Django shell. 404 for an unknown `withdrawal_id`, 409
+  for an invalid state transition (manager raises `ValueError` — e.g.
+  rejecting an already-`SUCCESS` request), 400 for a missing/unrecognized
+  `action`. Doesn't filter by `request.user` — deliberately, since ops
+  needs to act on *any* user's withdrawal, not just their own.
 - **TASK 5 fraud check placement** — `fraud.is_withdrawal_eligible()` is
   called in `CoinWithdrawalRequestView.post()` **before**
   `request_withdrawal()` is ever invoked, and returns its own `403`,
@@ -3664,6 +4100,7 @@ from .views import (
     BuyCoinConfirmView,
     BuyCoinView,
     CoinLedgerListView,
+    CoinWithdrawalAdminActionView,
     CoinWithdrawalRequestView,
     FollowAPIView,
     FollowersListView,
@@ -3713,12 +4150,24 @@ urlpatterns = [
     # /profile/... URL-shape consistency RestrictUser's docstring
     # (models.py) calls out for restricted-users/ vs blocked-users/.
     path("coin-withdrawals/", CoinWithdrawalRequestView.as_view(), name="coin-withdrawal-requests"),
+    # §11 item 12 — staff-only lifecycle actions (processing/success/
+    # reject) on someone else's withdrawal request. Deliberately a
+    # separate path/view from coin-withdrawals/ above rather than a
+    # PATCH on the same route: that route is scoped to "my own
+    # requests" (filters by request.user); this one acts on any
+    # user's request and needs a different permission class entirely.
+    path(
+        "coin-withdrawals/<int:withdrawal_id>/action/",
+        CoinWithdrawalAdminActionView.as_view(),
+        name="coin-withdrawal-admin-action",
+    ),
     # TASK 1 — theme/language preferences, same URL shape as core's
     # notification-preferences/me/.
     path("preferences/me/", UserPreferenceView.as_view(), name="user-preferences"),
-]```
+]
+```
 
-### Full endpoint table (as of v5)
+### Full endpoint table (as of v6)
 
 | Method | Path | View | Auth | Notes |
 |---|---|---|---|---|
@@ -3738,11 +4187,12 @@ urlpatterns = [
 | DELETE | `/profile/restricted-users/<int:id>/` | `UnrestrictUserView` | ✅ | TASK 18 |
 | GET | `/profile/coin-ledger/` | `CoinLedgerListView` | ✅ | TASK 19, read-only |
 | POST | `/profile/buy-coin/` | `BuyCoinView` | ✅ | TASK 3 — start a pending purchase |
-| POST | `/profile/buy-coin/confirm/` | `BuyCoinConfirmView` | ✅ | TASK 3 — confirm success/failed; not gateway-verified yet |
+| POST | `/profile/buy-coin/confirm/` | `BuyCoinConfirmView` | ❌ (`AllowAny`, webhook-signature-gated) | TASK 3, **v6 (§11 item 10)** — real gateway-agnostic webhook now; see §0.5 |
 | GET/POST | `/profile/coin-withdrawals/` | `CoinWithdrawalRequestView` | ✅ | TASK 4 — POST runs the TASK 5 eligibility check (403) before debiting (402 on shortfall) |
-| GET/PATCH | `/profile/preferences/me/` | `UserPreferenceView` | ✅ | **TASK 1, new (v5)** — theme/language; GET always 200 (get-or-creates) |
+| POST | `/profile/coin-withdrawals/<int:withdrawal_id>/action/` | `CoinWithdrawalAdminActionView` | ✅ staff-only (`IsAdminUser`) | **§11 item 12, new (v6)** — processing/success/reject lifecycle actions on any user's withdrawal |
+| GET/PATCH | `/profile/preferences/me/` | `UserPreferenceView` | ✅ | TASK 1 — theme/language; GET always 200 (get-or-creates) |
 
-⚠️ **Path note:** the task that requested this endpoint asked for
+⚠️ **Path note:** the task that requested `UserPreferenceView` asked for
 `/user-profile/preferences/me/`, but this app's routes are mounted at
 `path('profile/', include('user_profile.urls'))` (see §2) — same prefix
 every other route in this table sits under, e.g. `coin-ledger/` resolves
@@ -3756,16 +4206,21 @@ what §2 documents), update either the root `urls.py` include or treat
 this as a separate mount point — don't assume the two prefixes are
 interchangeable.
 
-Nothing new in `urls.py` itself beyond the one new path — `admin.py`,
-`fraud.py`, `services.py`, and `tasks.py` have no URL surface of their
-own (admin is reached via Django's own `/admin/` site; `fraud.py`/
-`services.py` are called from inside views/models, not routed directly;
-`tasks.py`'s `reconcile_follow_counts` runs on Celery Beat's schedule,
-not an HTTP endpoint).
+`urls.py` itself gained exactly one new path in v6 —
+`coin-withdrawals/<int:withdrawal_id>/action/` for
+`CoinWithdrawalAdminActionView` (§11 item 12) — deliberately a separate
+path/view from `coin-withdrawals/` above rather than a `PATCH` on the
+same route, since that route is scoped to "my own requests" and this one
+acts on any user's request under a different permission class. `admin.py`,
+`fraud.py`, `services.py`, and `tasks.py` still have no URL surface of
+their own beyond that (admin is reached via Django's own `/admin/` site;
+`fraud.py`/`services.py` are called from inside views/models, not routed
+directly; `tasks.py`'s `reconcile_follow_counts` runs on Celery Beat's
+schedule, not an HTTP endpoint).
 
 ---
 
-## 8. `admin.py` (full current code — B-8, + TASK 1 `UserPreferenceAdmin`, v5)
+## 8. `admin.py` (full current code — B-8, TASK 1 `UserPreferenceAdmin`, + §11 item 12 `CoinWithdrawalRequestAdmin`, v6)
 
 ```python
 # user_profile/admin.py
@@ -3799,9 +4254,9 @@ than letting this overwrite them — this file only defines
 `CoinLedger`'s registration; it doesn't know about or touch the
 others.
 """
-from django.contrib import admin
+from django.contrib import admin, messages
 
-from .models import CoinLedger, UserPreference
+from .models import CoinLedger, CoinWithdrawalRequest, UserPreference
 
 
 class WithdrawalEligibleFilter(admin.SimpleListFilter):
@@ -3867,6 +4322,107 @@ class CoinLedgerAdmin(admin.ModelAdmin):
         # same reason.
         return False
 
+@admin.register(CoinWithdrawalRequest)
+class CoinWithdrawalRequestAdmin(admin.ModelAdmin):
+    """
+    §11 item 12 — the Django-admin half of the same gap
+    `CoinWithdrawalAdminActionView` (views.py) fills over the API:
+    `CoinWithdrawalRequestManager.mark_processing()`/`confirm_success()`/
+    `reject()` existed and were unit-tested, but nothing (view or admin)
+    could reach them without a Django shell.
+
+    Same read-only reasoning as `CoinLedgerAdmin` above applies to the
+    fields themselves — letting admin hand-edit `status`/`coins`/
+    `debit_ledger_entry` etc. directly would let a withdrawal's status
+    change without going through the manager methods that keep it in
+    sync with `CoinLedger` (a REJECTED row with no refund entry, or a
+    SUCCESS row that never actually got debited). So add/change/delete
+    stay blocked here exactly like `CoinLedgerAdmin`. Unlike
+    `CoinLedgerAdmin` though, this table isn't meant to be *inert* in
+    admin — ops needs a way to actually move a request forward — so the
+    three actions below are the sanctioned way in: each calls the
+    matching manager method (never touches a field directly), so admin
+    becomes a safe front end for that method instead of a second write
+    path around it.
+    """
+
+    list_display = (
+        "id",
+        "user",
+        "coins",
+        "payout_method",
+        "status",
+        "failure_reason",
+        "created_at",
+        "updated_at",
+    )
+    list_filter = ("status", "payout_method")
+    search_fields = ("user__username", "failure_reason")
+    date_hierarchy = "created_at"
+
+    # Every field, for the same "don't let a future field addition
+    # sneak in editable" reason CoinLedgerAdmin's readonly_fields lists
+    # every field rather than a hand-picked subset.
+    readonly_fields = [f.name for f in CoinWithdrawalRequest._meta.fields]
+
+    actions = ["mark_processing_action", "confirm_success_action", "reject_action"]
+
+    def has_add_permission(self, request):
+        return False
+
+    def has_change_permission(self, request, obj=None):
+        return False
+
+    def has_delete_permission(self, request, obj=None):
+        # Same reasoning as CoinLedgerAdmin.has_delete_permission: a
+        # deleted request row would make an already-applied debit (or
+        # refund) vanish from the audit trail while the coin movement
+        # itself stands, which is exactly the drift this table's
+        # ForeignKeys to CoinLedger exist to prevent.
+        return False
+
+    def _run_bulk_action(self, request, queryset, method_name, ok_message, **kwargs):
+        """
+        Shared runner for the three actions below: calls
+        `CoinWithdrawalRequest.objects.<method_name>(withdrawal_id=...,
+        **kwargs)` per selected row, catching the `ValueError` each
+        manager method raises for an invalid state transition (e.g.
+        rejecting an already-SUCCESS request) so one bad row in a bulk
+        selection doesn't stop the rest — same "well-formed action,
+        wrong current state" case `CoinWithdrawalAdminActionView`
+        (views.py) turns into a 409 for the single-row API equivalent.
+        """
+        succeeded = 0
+        for withdrawal in queryset:
+            try:
+                getattr(CoinWithdrawalRequest.objects, method_name)(
+                    withdrawal_id=withdrawal.pk, **kwargs
+                )
+                succeeded += 1
+            except ValueError as exc:
+                self.message_user(request, f"Withdrawal {withdrawal.pk}: {exc}", level=messages.WARNING)
+        if succeeded:
+            self.message_user(request, f"{ok_message} ({succeeded} request(s)).")
+
+    @admin.action(description="Mark selected withdrawals as processing")
+    def mark_processing_action(self, request, queryset):
+        self._run_bulk_action(request, queryset, "mark_processing", "Moved to processing")
+
+    @admin.action(description="Mark selected withdrawals as successful")
+    def confirm_success_action(self, request, queryset):
+        self._run_bulk_action(request, queryset, "confirm_success", "Marked successful")
+
+    @admin.action(description="Reject selected withdrawals (refunds coins)")
+    def reject_action(self, request, queryset):
+        self._run_bulk_action(
+            request,
+            queryset,
+            "reject",
+            "Rejected and refunded",
+            reason="Rejected via admin bulk action",
+        )
+
+
 @admin.register(UserPreference)
 class UserPreferenceAdmin(admin.ModelAdmin):
     """
@@ -3878,7 +4434,8 @@ class UserPreferenceAdmin(admin.ModelAdmin):
     """
     list_display = ("id", "user", "theme", "language", "updated_at")
     list_filter = ("theme", "language")
-    search_fields = ("user__username",)```
+    search_fields = ("user__username",)
+```
 
 ### admin.py notes
 
@@ -3901,16 +4458,35 @@ class UserPreferenceAdmin(admin.ModelAdmin):
   `record_transaction()` now stamps on every row) rather than
   re-deriving eligibility from `transaction_type` here — so this filter
   and `fraud.py` can never quietly disagree about what "eligible" means.
-- **`UserPreferenceAdmin`** (TASK 1, new, v5) — the opposite lockdown
-  from `CoinLedgerAdmin` right above, deliberately: `UserPreference` has
-  no audit-trail invariant to protect (a theme/language row has nothing
+- **`UserPreferenceAdmin`** (TASK 1) — the opposite lockdown from
+  `CoinLedgerAdmin` right above, deliberately: `UserPreference` has no
+  audit-trail invariant to protect (a theme/language row has nothing
   else in the system it needs to stay consistent with the way
   `CoinLedger`/`User.coin` do), so ordinary add/change/delete is left
   enabled. Useful for support to fix a stuck value for a user directly,
   without going through the API.
-- ⚠️ **This file defines `CoinLedger`'s and (as of v5) `UserPreference`'s
-  registrations only.** If `Follow`, `BlockUser`, `RestrictUser`,
-  `CoinPurchaseRequest`, or `CoinWithdrawalRequest` are already
+- **`CoinWithdrawalRequestAdmin`** (§11 item 12, new, v6) — same
+  read-only reasoning as `CoinLedgerAdmin` for the fields themselves
+  (`has_add_permission`/`has_change_permission`/`has_delete_permission`
+  all `False`, `readonly_fields` lists every field) — a hand-edited
+  `status`/`coins`/`debit_ledger_entry` could desync a withdrawal from
+  `CoinLedger` (a `REJECTED` row with no refund entry, or a `SUCCESS`
+  row that never actually got debited). Unlike `CoinLedgerAdmin` though,
+  this table isn't meant to be *inert* in admin — ops needs a way to move
+  a request forward — so three `admin.action`s
+  (`mark_processing_action`/`confirm_success_action`/`reject_action`)
+  are the sanctioned way in, each routed through a shared
+  `_run_bulk_action()` runner that calls the matching
+  `CoinWithdrawalRequest.objects.<method>()` per selected row and turns
+  a per-row `ValueError` (invalid state transition) into a
+  `messages.WARNING` instead of aborting the whole bulk selection — same
+  "well-formed action, wrong current state" case
+  `CoinWithdrawalAdminActionView` (views.py) turns into a 409 for the
+  single-row API equivalent. This is the Django-admin half of the same
+  gap `CoinWithdrawalAdminActionView` fills over the API — see §0.5 / §6.
+- ⚠️ **This file defines `CoinLedger`'s, `UserPreference`'s, and (as of
+  v6) `CoinWithdrawalRequest`'s registrations only.** If `Follow`,
+  `BlockUser`, `RestrictUser`, or `CoinPurchaseRequest` are already
   registered in a version of `admin.py` elsewhere in the actual
   codebase, **merge** those registrations into this file rather than
   letting this overwrite them — no earlier upload of this app ever
@@ -4503,12 +5079,14 @@ def _notify(recipient, notif_type, title, message="", *, actor=None, data=None):
 # user_profile/tests.py
 from unittest import mock
 
+from django.contrib.admin.sites import AdminSite
 from django.contrib.auth import get_user_model
 from django.db import IntegrityError
 from django.urls import reverse
 from rest_framework import status
 from rest_framework.test import APITestCase
 
+from .admin import CoinLedgerAdmin
 from .models import BlockUser, CoinLedger, CoinWithdrawalRequest, Follow, RestrictUser
 
 User = get_user_model()
@@ -4986,9 +5564,129 @@ class CoinWithdrawalRequestAPITests(APITestCase):
         )
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
         self.alice.refresh_from_db()
-        self.assertEqual(self.alice.coin, 500)  # validation failed before any debit```
+        self.assertEqual(self.alice.coin, 500)  # validation failed before any debit
 
-### tests.py coverage summary (as of v4)
+
+# ==========================================================================
+# TASK 5 -- carried-over test gaps named in user_profile_app_reference.md
+# §11 items 9/15: no test asserted `CoinLedgerAdmin` actually refuses
+# add/change/delete (B-8), and no test exercised `record_transaction()`
+# specifically with `transaction_type=CAMPUS_REWARD` (only the
+# EARN/CAMPUS_REWARD *grouping* inside the rate limiter was exercised, via
+# EARN, in tests_fraud.py's `EarnRateLimitTests`).
+# ==========================================================================
+
+class CoinLedgerAdminPermissionTests(APITestCase):
+    """
+    `CoinLedgerAdmin` is deliberately a read-only viewer (see admin.py's
+    module docstring, and the CAUTION note in `CoinLedger`'s own
+    docstring in models.py): letting admin add/edit/delete `CoinLedger`
+    rows directly would bypass `record_transaction()` entirely, which
+    can create a ledger row with no matching `User.coin` change, or edit/
+    delete an existing row without the balance it explains ever moving
+    to match -- silently breaking the "ledger and balance must always
+    agree" invariant this table exists to guarantee.
+
+    Instantiates `CoinLedgerAdmin` directly (rather than driving it
+    through the admin URLs with a logged-in superuser client) since the
+    three `has_*_permission` overrides and `readonly_fields` are exactly
+    what admin.py defines to enforce this, and unconditionally return
+    False regardless of the request/user passed in -- so `request=None`
+    exercises the real guard without needing admin-site URL wiring this
+    upload doesn't include.
+    """
+
+    def setUp(self):
+        self.alice = User.objects.create_user(username="alice", password="pass12345")
+        self.ledger_entry = CoinLedger.objects.record_transaction(
+            user=self.alice,
+            transaction_type=CoinLedger.TransactionType.EARN,
+            amount=100,
+            reference="admin-perm-test",
+        )
+        self.coin_ledger_admin = CoinLedgerAdmin(CoinLedger, AdminSite())
+
+    def test_add_permission_refused(self):
+        self.assertFalse(self.coin_ledger_admin.has_add_permission(request=None))
+
+    def test_change_permission_refused(self):
+        self.assertFalse(
+            self.coin_ledger_admin.has_change_permission(request=None, obj=self.ledger_entry)
+        )
+
+    def test_delete_permission_refused(self):
+        self.assertFalse(
+            self.coin_ledger_admin.has_delete_permission(request=None, obj=self.ledger_entry)
+        )
+
+    def test_every_field_is_readonly(self):
+        # admin.py deliberately lists every field (not a hand-picked
+        # subset) precisely so a future field added to CoinLedger
+        # doesn't silently become admin-editable by being left off this
+        # list -- assert against the model's actual field set, not a
+        # hardcoded name list, so this test would catch that regression.
+        expected_fields = {f.name for f in CoinLedger._meta.fields}
+        self.assertEqual(set(self.coin_ledger_admin.readonly_fields), expected_fields)
+
+
+class RecordTransactionCampusRewardTests(APITestCase):
+    """
+    `record_transaction()` with `transaction_type=CAMPUS_REWARD`
+    specifically. `tests_fraud.py`'s rate-limit tests already exercise
+    the EARN/CAMPUS_REWARD *grouping* the rate limiter treats alike, but
+    only ever by calling it with EARN -- this covers CAMPUS_REWARD's own
+    balance/ledger-row/eligibility-flag behavior, which nothing else
+    checks.
+    """
+
+    def setUp(self):
+        self.alice = User.objects.create_user(username="alice", password="pass12345")
+
+    def test_campus_reward_credits_balance_and_writes_ledger_row(self):
+        entry = CoinLedger.objects.record_transaction(
+            user=self.alice,
+            transaction_type=CoinLedger.TransactionType.CAMPUS_REWARD,
+            amount=25,
+            reference="campus-reward-1",
+            description="Attendance streak bonus",
+        )
+
+        self.alice.refresh_from_db()
+        self.assertEqual(self.alice.coin, 25)
+
+        self.assertEqual(entry.transaction_type, CoinLedger.TransactionType.CAMPUS_REWARD)
+        self.assertEqual(entry.amount, 25)
+        self.assertEqual(entry.balance_after, 25)
+
+        # CAMPUS_REWARD coins are earn-style (small in-app bonuses), not
+        # a real top-up or a gift -- record_transaction() must stamp
+        # them not-withdrawal-eligible, per its own withdrawal_eligible
+        # metadata rule (True only for PURCHASE/GIFT_RECEIVED).
+        self.assertFalse(entry.metadata["withdrawal_eligible"])
+
+    def test_campus_reward_reference_is_idempotent(self):
+        # Same (user, reference) called twice must not double-credit --
+        # a campus task retried after a dropped response shouldn't pay
+        # the same attendance-streak bonus twice.
+        first = CoinLedger.objects.record_transaction(
+            user=self.alice,
+            transaction_type=CoinLedger.TransactionType.CAMPUS_REWARD,
+            amount=25,
+            reference="campus-reward-retry",
+        )
+        second = CoinLedger.objects.record_transaction(
+            user=self.alice,
+            transaction_type=CoinLedger.TransactionType.CAMPUS_REWARD,
+            amount=25,
+            reference="campus-reward-retry",
+        )
+
+        self.assertEqual(first.pk, second.pk)
+        self.alice.refresh_from_db()
+        self.assertEqual(self.alice.coin, 25)  # not double-credited
+```
+
+### tests.py coverage summary (as of v6)
 
 Test classes present, in file order:
 - `FollowModelTests`, `FollowAPITests` — self-follow, follow/unfollow
@@ -5007,9 +5705,30 @@ Test classes present, in file order:
 - `FollowRaceConditionTests` — concurrent double-follow doesn't 500
   (v3, TASK 30).
 - `CoinWithdrawalRequestManagerTests`, `CoinWithdrawalRequestAPITests`
-  — **new this pass (TASK 4)**: exact-amount debit, rejected withdrawal
-  credits back, 402 on insufficient balance via the API, pending row
-  created via the API, missing payout_details rejected.
+  — (v4, TASK 4): exact-amount debit, rejected withdrawal credits back,
+  402 on insufficient balance via the API, pending row created via the
+  API, missing payout_details rejected.
+- `CoinLedgerAdminPermissionTests` (**new, v6 — closes §11 item 9/15**)
+  — instantiates `CoinLedgerAdmin` directly and asserts
+  `has_add_permission`/`has_change_permission`/`has_delete_permission`
+  all return `False` (with `request=None`, since all three ignore the
+  request/obj passed in), plus `readonly_fields` equals the model's
+  actual field set (not a hardcoded name list, so a future field
+  addition to `CoinLedger` left off `readonly_fields` would fail this
+  test too).
+- `RecordTransactionCampusRewardTests` (**new, v6 — closes §11 item
+  9/15**) — `record_transaction(transaction_type=CAMPUS_REWARD)`
+  specifically: credits balance and writes a ledger row with
+  `metadata["withdrawal_eligible"] == False`, and the same
+  `(user, reference)` called twice doesn't double-credit (idempotency).
+  Previously only the EARN/CAMPUS_REWARD rate-limiter *grouping* was
+  exercised, via EARN, in `tests_fraud.py`.
+
+⚠️ **No test coverage yet for the v6 webhook-signature path itself**
+(`_verify_gateway_webhook_signature()` / `BuyCoinConfirmView`'s new
+`AllowAny` + signature-gated behavior, or `CoinWithdrawalAdminActionView`)
+— `tests.py` didn't change beyond the two classes above in this pass. See
+§11 item 18.
 
 Fraud-specific coverage (withdrawal eligibility, earn-rate limiting)
 lives in the separate `tests_fraud.py` file — see §9a — not in this one.
@@ -5475,7 +6194,7 @@ gift, live in other apps not covered by this upload).
 > `metadata["withdrawal_eligible"]` before creating the row. See §8b for
 > the full rule.
 
-### 10.10 Buy coins (`POST /profile/buy-coin/` → `POST /profile/buy-coin/confirm/`) — v4, TASK 3, new
+### 10.10 Buy coins (`POST /profile/buy-coin/` → `POST /profile/buy-coin/confirm/`) — v4 TASK 3, webhook-verified as of v6
 
 ```
 POST /profile/buy-coin/ {gateway_reference, amount, coins, gateway}
@@ -5487,10 +6206,22 @@ CoinPurchaseRequest.objects.start_purchase(...)
         ▼
 201 (new) or 200 (already existed) — never touches User.coin
 
-... later, once the payment gateway confirms ...
+... later, the payment gateway calls back as a webhook ...
 
 POST /profile/buy-coin/confirm/ {gateway_reference, status: success|failed}
+  [AllowAny — no IsAuthenticated check anymore, see below]
         │
+        ▼
+request.body read FIRST (caches raw bytes before DRF parses request.data)
+        │
+        ▼
+_verify_gateway_webhook_signature(request, purchase.gateway)   ◀── v6
+  purchase.gateway blank?            → 503 (no gateway to verify against)
+  no secret configured for gateway?  → 503 (our config, not caller's fault)
+  missing/blank signature header?    → 401 (generic message either way)
+  HMAC-SHA256(secret, request.body) via hmac.compare_digest
+    mismatch?                        → 401
+        │ verified
         ▼
 status == "success"?
   ├─ yes → CoinPurchaseRequest.objects.confirm_success(gateway_reference)
@@ -5506,11 +6237,16 @@ status == "success"?
             already SUCCESS? → raise ValueError → 409 (can't un-credit this way)
             else → request.status = FAILED; save — wallet untouched
 ```
-⚠️ As shipped, `BuyCoinConfirmView` is **not** verified against a real
-payment-gateway signature — see §11. Don't expose `/buy-coin/confirm/`
-to an untrusted caller in production without adding that check first.
+✅ **Resolved as of v6** (§11 item 10) — `BuyCoinConfirmView` is now a
+real, signature-verified webhook endpoint; see §0.5 for the two new
+settings this needs (`PAYMENT_GATEWAY_WEBHOOK_SECRETS`/
+`PAYMENT_GATEWAY_WEBHOOK_SIGNATURE_HEADERS`, not yet in `settings.py` —
+§11 item 20) and §6 for the class's full docstring reasoning. ⚠️ **New
+open gap this introduces:** a blank-`gateway` "manual admin top-up"
+`CoinPurchaseRequest` can no longer be confirmed by its owner — see §11
+item 18.
 
-### 10.11 Withdraw coins (`POST /profile/coin-withdrawals/`) — v4, TASK 4 + TASK 5, new
+### 10.11 Withdraw coins (`POST /profile/coin-withdrawals/`) — v4 TASK 4 + TASK 5, admin actions added v6
 
 ```
 POST /profile/coin-withdrawals/ {coins, payout_method, payout_details}
@@ -5541,18 +6277,30 @@ CoinWithdrawalRequest.objects.request_withdrawal(user, coins, ...)
         ▼
 201 — coins already left the wallet (escrow pattern)
 
-... later, ops/admin side (no endpoint yet, see §11) ...
+... later, ops/admin side — TWO sanctioned paths as of v6 (§11 item 12
+resolved), both calling only the same three manager methods below ...
+
+  (a) POST /profile/coin-withdrawals/<id>/action/ {"action": "..."}
+      — staff-only (IsAdminUser), CoinWithdrawalAdminActionView (views.py)
+  (b) Django admin bulk actions on CoinWithdrawalRequestAdmin (admin.py)
+      — "Mark selected as processing/successful", "Reject selected"
+
 mark_processing() → PROCESSING (no coin movement)
 confirm_success() → SUCCESS (no coin movement — debit already happened)
 reject(reason)     → REJECTED, credits coins back via
                      CoinLedger.objects.record_transaction(
                        transaction_type=WITHDRAWAL_REJECTED, amount=+coins,
                        reference=f"coin_withdrawal_request_refund:{pk}")
+
+Either path (a)/(b) surfaces an invalid state transition (e.g. rejecting
+an already-SUCCESS request) as the manager's own ValueError — 409 via
+the API view, a per-row messages.WARNING (not an abort) via the admin
+bulk action.
 ```
-Note the two distinct rejection codes: **403** means "you have enough
-coins overall, but not enough *withdrawal-eligible* ones" (policy);
-**402** means "you don't have enough coins, period" (balance). A client
-should show different messaging for each.
+Note the two distinct rejection codes on the initial POST: **403** means
+"you have enough coins overall, but not enough *withdrawal-eligible*
+ones" (policy); **402** means "you don't have enough coins, period"
+(balance). A client should show different messaging for each.
 
 ### 10.12 Earn-rate limiting (`fraud.check_earn_rate_limit`) — v4, TASK 5, new
 
@@ -5641,8 +6389,10 @@ other notification logic — see §11 item 16.
 
 Items 1–4 below are **resolved as of v3** (kept here, struck through, so
 the history is traceable) — see §0.1 for what changed. Item 2's admin
-caveat is further **resolved as of this pass (B-8)** — see below.
-Items 5–7 are still open.
+caveat is further **resolved as of v3.1 (B-8)**. Item 5 is **moot as of
+v6** (migration reset — see §3a). Items 10, 12, and 15 (and half of item
+9) are **resolved as of v6** — see §0.5. Items 6, 8, 9 (partially), 11,
+13, 14, and 16–20 are still open.
 
 1. ~~`RestrictUser` model is unused~~ — **resolved in v3**: wired via
    `RestrictedUsersView` / `UnrestrictUserView` / `RestrictUserSerializer`
@@ -5676,18 +6426,20 @@ Items 5–7 are still open.
    structurally impossible instead of periodically corrected. Also
    requires Celery + Celery Beat to actually be running for the
    scheduled task to fire — see updated §12 checklist.
-5. **`CoinLedger` migration risk** — two separate things to check before
-   running `makemigrations`: (a) if a migration already exists against
-   the old `coins` model name, Django will try to rename/recreate the
-   table — write a `db_table`-preserving migration by hand, or pin
-   `Meta.db_table = "user_profile_coins"` first; (b) if a migration
-   already exists against the *older* `credit`/`debit` field shape,
-   write a real migration (RemoveField credit,debit + AddField amount,
-   transaction_type,reference,balance_after,description,metadata) rather
-   than letting `makemigrations` guess. Per the original comment
-   ("nothing writes to this yet" — no longer true as of v3, but true at
-   the time the shape was redesigned) there should be zero rows to
-   migrate either way (see §4).
+5. ~~**`CoinLedger` migration risk**~~ — **moot as of v6**: this app's
+   migrations were reset and regenerated fresh (see §3a) — a clean
+   `makemigrations` against the current `CoinLedger` shape has no older
+   `coins`/`credit`/`debit` shape to reconcile against, so the
+   rename/recreate risk this item originally warned about no longer
+   applies to this project's actual migration history. (Original note,
+   kept for context: this only ever mattered for a project whose
+   migration history predated the redesign — two things to check before
+   running `makemigrations` in *that* situation: (a) a migration already
+   against the old `coins` model name — Django tries to rename/recreate
+   the table, so pin `Meta.db_table` or write a `db_table`-preserving
+   migration by hand first; (b) a migration already against the *older*
+   `credit`/`debit` field shape — write a real migration rather than
+   letting `makemigrations` guess.)
 6. **`autocomplete_fields` in `admin.py`** requires the target model's
    own admin (your custom `User` model's `ModelAdmin`) to declare
    `search_fields` — verify this exists on your `User` admin, or Django
@@ -5714,13 +6466,19 @@ Items 5–7 are still open.
    their notifications, or suppress read-receipts/online-status. That
    integration is out of scope for `user_profile` itself.
 9. **No test coverage yet for `record_transaction()` or the new v3
-   endpoints** (`RestrictedUsersView`, `UnrestrictUserView`,
-   `CoinLedgerListView`) — see §9's "not yet covered" note. **v3.1
-   adds two more untested gaps to this same list:** no test asserts that
-   `CoinLedgerAdmin` actually refuses add/change/delete (B-8), and no
-   test exercises `record_transaction()` with `transaction_type=
-   CoinLedger.TransactionType.CAMPUS_REWARD` (F-3). `tests.py` itself
-   didn't change in this pass.
+   endpoints** — **partially resolved, updated as of v6**:
+   `record_transaction()` itself is now well covered (`CoinWithdrawalRequestManagerTests`/
+   `CoinWithdrawalRequestAPITests`, v4; `RecordTransactionCampusRewardTests`,
+   v6) and `RestrictedUsersView`'s POST path is exercised via
+   `RestrictUserModelTests.test_restrict_does_not_touch_follow_or_counts`
+   (v3) — but `UnrestrictUserView` (DELETE) and `CoinLedgerListView`
+   (GET) still have no dedicated endpoint test as of v6; only the
+   models/managers behind them are tested. ~~**v3.1's two untested gaps
+   (no test for `CoinLedgerAdmin` refusing add/change/delete; no test
+   for `record_transaction()` with `CAMPUS_REWARD`)**~~ — **resolved in
+   v6**: `CoinLedgerAdminPermissionTests` and
+   `RecordTransactionCampusRewardTests` (`tests.py`, see §0.5/§9) close
+   both.
 
 ---
 
@@ -5729,27 +6487,32 @@ Items 5–7 are still open.
 > unchanged from v3.1; item 9 there already listed the two test gaps
 > B-8/F-3 introduced. TASK 1/3/4/5 add the following, still-open items.
 
-10. **`BuyCoinConfirmView` is not gateway-signature-verified.** As shipped,
-    `IsAuthenticated` + "must be your own purchase" stand in for real
-    payment-gateway webhook verification (no gateway integration was
-    part of this upload). Before this endpoint is exposed to a real
-    payment provider's callback, that verification needs to replace or
-    gate the current ownership check — a genuine webhook call isn't
-    "acting as" any particular authenticated user, so the current shape
-    can't be the final one.
+10. ~~**`BuyCoinConfirmView` is not gateway-signature-verified.**~~ —
+    **resolved in v6 (§11 item 10 → §0.5):** `BuyCoinConfirmView` now
+    verifies a real HMAC-SHA256 webhook signature
+    (`_verify_gateway_webhook_signature()`, views.py) against
+    `CoinPurchaseRequest.gateway`, gated by two new settings
+    (`PAYMENT_GATEWAY_WEBHOOK_SECRETS`/`PAYMENT_GATEWAY_WEBHOOK_
+    SIGNATURE_HEADERS` — see §2, not yet added to `settings.py`, tracked
+    separately as item 20 below). `permission_classes` is now
+    `[AllowAny]`, since a genuine webhook call isn't "acting as" any
+    authenticated user. **New sub-gap this introduces, still open** — see
+    item 18 below.
 11. **`CoinPurchaseRequest`'s shape is inferred, not confirmed against
     `liveclass.CoinPurchase`.** `liveclass/models.py` wasn't part of any
     upload for this app. If `liveclass.CoinPurchase`'s actual field
     shape (gateway list, money precision, etc.) differs in a way that
     matters, reconcile the two — ideally by rerunning TASK 3 with
     `liveclass/models.py` included so they don't silently diverge.
-12. **No admin/ops endpoint for `CoinWithdrawalRequest.objects.
-    mark_processing()` / `.confirm_success()` / `.reject()`.** All three
-    manager methods exist and are unit-tested, but nothing in `urls.py`
-    calls them — a withdrawal can currently only ever reach `PENDING`
-    through the public API; moving it to `PROCESSING`/`SUCCESS`/
-    `REJECTED` requires a Django shell, a management command, or a
-    future admin action, none of which exist yet.
+12. ~~**No admin/ops endpoint for `CoinWithdrawalRequest.objects.
+    mark_processing()` / `.confirm_success()` / `.reject()`.**~~ —
+    **resolved in v6 (§11 item 12 → §0.5):** two new sanctioned entry
+    points, both calling only these same three manager methods —
+    `CoinWithdrawalAdminActionView` (staff-only API endpoint, `POST
+    /profile/coin-withdrawals/<id>/action/`, see §6) and
+    `CoinWithdrawalRequestAdmin` (Django-admin bulk actions, see §8). A
+    Django shell is no longer the only way to move a withdrawal past
+    `PENDING`.
 13. **`CoinWithdrawalRequest` has no `MIN_WITHDRAWAL_COINS` floor, no
     `reviewed_by` tracking, and no INR conversion snapshot** — all three
     exist on the `liveclass.CoinWithdrawal` this was modeled after but
@@ -5762,13 +6525,12 @@ Items 5–7 are still open.
     editing `fraud.py` directly rather than a settings/ops change — move
     them to Django settings once there's production signal to tune
     against.
-15. **`fraud.py`'s two rules have partial test coverage, not full.**
-    `tests_fraud.py` covers the withdrawal-eligibility math and both
-    rate-limit caps, but (carried over from item 9) there's still no
-    test asserting `CoinLedgerAdmin` actually refuses add/change/delete,
-    and no test exercises `record_transaction()` specifically with
-    `transaction_type=CAMPUS_REWARD` (only the EARN/CAMPUS_REWARD
-    grouping inside the rate limiter is exercised, via EARN).
+15. ~~**`fraud.py`'s two rules have partial test coverage, not full.**~~
+    — **resolved in v6, same fix as item 9's carried-over gap**:
+    `CoinLedgerAdminPermissionTests` and `RecordTransactionCampusRewardTests`
+    (`tests.py`) close both remaining gaps this item tracked. `fraud.py`
+    itself (withdrawal-eligibility math, both rate-limit caps) remains
+    covered by `tests_fraud.py`, unchanged since v4.
 
 ---
 
@@ -5806,6 +6568,52 @@ Items 5–7 are still open.
 
 ---
 
+> **v6 additions below (items 18–20)** — everything above this line is
+> unchanged from v5 except the resolved/moot markers noted inline on
+> items 5, 9, 10, 12, 15. §11 items 10/12 add the following, still-open
+> items.
+
+18. **Blank-`gateway` `CoinPurchaseRequest` (manual/admin top-up) can no
+    longer be self-confirmed.** A real, flagged **behavior change**
+    introduced by resolving item 10 (§0.5): before v6, a
+    `CoinPurchaseRequest` with no `gateway` on file (the "manual
+    admin-initiated top-up" case `CoinPurchaseRequest.gateway`'s own
+    field comment names) could be confirmed by its owning user calling
+    `BuyCoinConfirmView` themselves, since `IsAuthenticated` + ownership
+    was the only gate. As of v6 that gate is gone — the endpoint is
+    `AllowAny`, gated purely by webhook-signature verification, and
+    there's no gateway secret to verify a signature against a blank
+    `gateway` (`_verify_gateway_webhook_signature()` raises
+    `GatewayWebhookSignatureError(is_misconfiguration=True)` for exactly
+    this case, surfaced as a 503). **This is a currently open gap with
+    no replacement path** — if manual/admin top-ups are still a real
+    product need, a separate admin-only confirm path (distinct from the
+    public webhook endpoint) needs to be added; this pass doesn't
+    include one.
+19. **No test coverage yet for the v6 webhook-signature path or
+    `CoinWithdrawalAdminActionView`.** `tests.py` gained
+    `CoinLedgerAdminPermissionTests` and
+    `RecordTransactionCampusRewardTests` this pass (closing items 9/15's
+    carried-over gaps), but nothing exercises
+    `_verify_gateway_webhook_signature()` itself (valid signature,
+    missing header, bad signature, unconfigured secret, blank-gateway
+    503 case) or `CoinWithdrawalAdminActionView`'s three actions
+    (processing/success/reject, including the 404/409/400 branches) —
+    all of it is new, executable code with zero direct test coverage as
+    of v6.
+20. **`PAYMENT_GATEWAY_WEBHOOK_SECRETS` / `PAYMENT_GATEWAY_WEBHOOK_
+    SIGNATURE_HEADERS` are not in `settings.py`.** `_verify_gateway_
+    webhook_signature()` reads both via `getattr(settings, ..., {})`, so
+    their absence doesn't crash the app at import time — but it does
+    mean **every** webhook confirmation currently 503s ("no webhook
+    secret configured") until these are added to `settings.py` for each
+    real gateway in use (see §2 for the exact shape needed). This is an
+    external-dependency gap, the same category as item 6's
+    `autocomplete_fields`/`search_fields` requirement, not a code bug in
+    this app.
+
+---
+
 ## 12. Quick Setup Checklist (to run this app standalone)
 
 - [ ] Custom `User` model has: `profile_photo`, `bio`, `is_private`,
@@ -5819,8 +6627,9 @@ Items 5–7 are still open.
       via `MultiPartParser`).
 - [ ] Your `User` model's own `ModelAdmin` declares `search_fields` (for
       `autocomplete_fields` in this app's `admin.py` to work).
-- [ ] If a `coins` table/migration already exists in prod, handle the
-      `CoinLedger` rename migration by hand (see §4, §11 item 5).
+- [x] **v6:** No hand migration needed for a pre-existing `coins` table —
+      this app's migrations were reset and regenerated fresh against
+      current `models.py` (see §3a, §11 item 5, now moot).
 - [ ] Run `python manage.py makemigrations user_profile && python manage.py migrate`.
 - [ ] (Optional) Add `REST_FRAMEWORK` / `SPECTACULAR_SETTINGS` in
       `settings.py` if not already global for the project.
@@ -5843,18 +6652,27 @@ Items 5–7 are still open.
 With the above satisfied, everything in this single document — models,
 serializers, views, urls, admin, tasks, tests — is enough to run the
 
-- [ ] **v4:** If/when `BuyCoinConfirmView` is wired to a real payment
-      gateway, replace/gate its current "must be your own purchase"
-      check with actual gateway-signature verification (see §11 item
-      10) — do not expose it to the public internet unauthenticated
-      before that.
+- [ ] **v6 — REQUIRED before `/buy-coin/confirm/` can succeed for any
+      real gateway:** add `PAYMENT_GATEWAY_WEBHOOK_SECRETS` and
+      `PAYMENT_GATEWAY_WEBHOOK_SIGNATURE_HEADERS` to `settings.py` (see
+      §2, §11 item 20) — without these, every webhook call 503s with
+      "no webhook secret configured", by design (fails closed, not
+      open).
+- [x] **v6:** `BuyCoinConfirmView` is already gateway-signature-verified
+      in code (`_verify_gateway_webhook_signature()`, §11 item 10
+      resolved) — nothing left to wire up here beyond the settings entry
+      above. Be aware of the flagged behavior change for blank-`gateway`
+      manual top-ups (§11 item 18) if your product still needs that
+      flow.
 - [ ] **v4:** If `liveclass/models.py` exists in your actual codebase,
       diff `CoinPurchaseRequest`'s shape against `liveclass.CoinPurchase`
       before relying on this as final (§11 item 11).
-- [ ] **v4:** Decide who/what will eventually call
-      `CoinWithdrawalRequest.objects.mark_processing()` /
-      `.confirm_success()` / `.reject()` — no endpoint calls them yet
-      (§11 item 12).
+- [x] **v6:** `CoinWithdrawalRequest.objects.mark_processing()` /
+      `.confirm_success()` / `.reject()` are already reachable in code —
+      via `CoinWithdrawalAdminActionView` (staff-only API endpoint) and
+      `CoinWithdrawalRequestAdmin`'s bulk actions (Django admin). Nothing
+      left to wire up (§11 item 12 resolved) — just confirm your staff
+      users actually have `is_staff=True` for the API path.
 - [x] **v4:** `fraud.py`'s two rules (withdrawal eligibility, earn-rate
       limiting) are already wired into
       `CoinLedgerManager.record_transaction()` in code — nothing to
@@ -5882,7 +6700,7 @@ any upload for this app — everything below is inferred from how
 | **`login`** | `settings.AUTH_USER_MODEL` (`login.User`) is the target of every FK in this app (`Follow`, `BlockUser`, `RestrictUser`, `CoinLedger`, `CoinPurchaseRequest`, `CoinWithdrawalRequest`). `user_profile` never imports `login.User` directly — always via `settings.AUTH_USER_MODEL` or `type(user)` — to stay decoupled. | The custom fields §2 lists (`profile_photo`, `bio`, `is_private`, `is_verified`, `is_active`, `followers_count`, `following_count`, `posts_count`, `coin`) must exist on `login.User`. Its own `ModelAdmin` must declare `search_fields` for `autocomplete_fields` elsewhere in this app's `admin.py` to work (§11 item 6). |
 | **`testseries`** | `TestSeriesPurchase.purchase_and_start_attempt()` / `.release()` reference `CoinLedger.TransactionType.TESTSERIES_PURCHASE` / `TESTSERIES_PAYOUT` directly (TASK 1) — those values existing in this app's enum is a hard dependency; they were missing before TASK 1 and it was a live `AttributeError`. | Nothing — `testseries` is purely a consumer of this app's `TransactionType` enum and (presumably) calls `CoinLedger.objects.record_transaction()` itself for its own purchase/payout flow. |
 | **`campus`** | `campus/tasks.py` (FEE-3/FEE-6) reads a student's `User.coin` balance to decide whether it covers an upcoming fee. `FEE-2` routes real tuition-fee payments through this same `CoinLedger`. Small engagement bonuses (attendance-streak, on-time-assigments-streak) credit coins via `TransactionType.CAMPUS_REWARD` (F-3) — and are therefore automatically subject to TASK 5's earn-rate limiter, the same as any other `EARN`/`CAMPUS_REWARD` credit. | Nothing structural — `campus` just needs `CAMPUS_REWARD` to exist (it does, as of F-3) and to call `record_transaction()` rather than writing `User.coin` directly, or its credits would silently escape both the audit trail and the rate limiter. |
-| **`liveclass`** | Nothing currently — not a consumer of this app. | `liveclass.CoinPurchase` and `liveclass.CoinWithdrawal`/`CoinTransaction` were used as **reference reads** (not code dependencies) when designing `CoinPurchaseRequest` (TASK 3) and `CoinWithdrawalRequest` (TASK 4) respectively — both reproduce `liveclass`'s escrow/lifecycle patterns on top of `CoinLedger` instead of `liveclass.CoinTransaction`, since `CoinLedger` is this codebase's one shared ledger. `liveclass/models.py` itself was never uploaded, so these two models' exact field shapes are inferred, not verified against it (§11 items 10–11) — worth reconciling if the two ever need to match exactly.
+| **`liveclass`** | Nothing currently — not a consumer of this app. | `liveclass.CoinPurchase` and `liveclass.CoinWithdrawal`/`CoinTransaction` were used as **reference reads** (not code dependencies) when designing `CoinPurchaseRequest` (TASK 3) and `CoinWithdrawalRequest` (TASK 4) respectively — both reproduce `liveclass`'s escrow/lifecycle patterns on top of `CoinLedger` instead of `liveclass.CoinTransaction`, since `CoinLedger` is this codebase's one shared ledger. `liveclass/models.py` itself was never uploaded, so these two models' exact field shapes are inferred, not verified against it (§11 item 11; `CoinWithdrawalRequest`'s specific missing fields vs. `liveclass.CoinWithdrawal` are §11 item 13) — worth reconciling if the two ever need to match exactly.
 | **`post`** | Nothing currently — not a consumer. | `post/models.py`'s `update_shares_count`/`update_saves_count`/`update_story_views_count` signal pattern is the reference design `tasks.py`'s module docstring points to as the *real* fix for follow-count drift (a `Follow` `post_save`/`post_delete` signal, instead of `reconcile_follow_counts`'s periodic detect-and-correct). Not implemented here — out of scope for this pass, noted for a future one. `post.views.TrendingHashtagsAPIView`'s "bounded recompute now, revisit at scale" trade-off is the same one `reconcile_follow_counts` makes. |
 | **`message`** | Consumes `is_blocked_between()` for chat/contact-search filtering (block) and is expected to eventually consume `is_restricted_between()` to suppress read-receipts/online-status/notifications from a restricted user (not implemented yet — §11 item 8). Gifting flows in `message` are expected to call `CoinLedger.objects.record_transaction(transaction_type=GIFT_SENT / GIFT_RECEIVED)` — not verified against actual `message` code since it wasn't uploaded. | `MessageContactSearchView`/`MessageContactSearchSerializer` exist specifically to serve `message`'s "add members" flow. |
 
@@ -5905,3 +6723,12 @@ any upload for this app — everything below is inferred from how
   to import the other app back, keeping this app's own import graph
   free of circular references to `testseries`/`campus`/`liveclass`/
   `post`/`message`.
+- **v6 addition:** `_verify_gateway_webhook_signature()` (views.py,
+  §0.5) is a **generic**, gateway-agnostic HMAC check, not copied from
+  `campus`/`liveclass` gateway-client code — neither app's actual
+  gateway-integration code was part of any upload for `user_profile`,
+  so this isn't confirmed to match whatever verification (if any)
+  those apps already do for their own payment flows. If either already
+  has an established verification helper, prefer reusing that over
+  this generic one rather than running two different webhook-auth
+  mechanisms side by side in the same codebase.

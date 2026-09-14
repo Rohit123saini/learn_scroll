@@ -1581,62 +1581,18 @@ class ParentTeacherMessageReplySerializer(serializers.ModelSerializer):
 
 
 # ---------------------------------------------------------------------------
-# 20b. PARENT-JOIN (task 9) — DEPRECATED, no longer used by
-# ClassSessionViewSet.parent_join.
-#
-# This serializer validated a stateless, signed `parent_token`
-# (django.core.signing encoding a student id) because, at the time it was
-# written, this task's file list didn't include models.py and it wasn't
-# known that a DB-backed parent-token model (`ParentAccessCode`/
-# `ParentToken`, in the `message` app) already existed. It does — and the
-# rest of the parent-portal feature set (teacher-generated codes, report
-# cards, parent-mode query threads) was already built against it. That
-# left two unreconciled parent-auth mechanisms issuing two different
-# kinds of "parent token" for what is, from a parent's point of view, one
-# feature — a `ParentAccessCode` code couldn't join a live session, and a
-# signed join-link couldn't do anything else, and the signed link had no
-# way to be revoked.
-#
-# `parent_join()` in views.py now resolves `parent_token` via
-# `core.classroom_chat_bridge.resolve_parent_from_token()` directly (the
-# same ParentAccessCode/ParentToken lookup `HasValidParentSessionToken`
-# uses) instead of through this class. Left defined here, unused, rather
-# than deleted — this task's visibility couldn't confirm nothing else in
-# the codebase imports it; recommended follow-up is to grep for
-# `ParentJoinSerializer` project-wide and delete both this class and
-# `PARENT_JOIN_TOKEN_SALT`/`generate_parent_join_token` in views.py once
-# that's confirmed clean, so a future reader doesn't mistake this for a
-# second, still-live parent-auth path.
+# 20b. PARENT-JOIN (task 9) — the old stateless signed-`parent_token`
+# scheme this section used to hold (`ParentJoinSerializer`,
+# `PARENT_JOIN_TOKEN_SALT`/`generate_parent_join_token()` in views.py)
+# has been deleted (TASK 20, this pass). `ClassSessionViewSet.
+# parent_join()` in views.py now resolves `parent_token` via
+# `core.classroom_chat_bridge.resolve_parent_from_token()` — the same
+# `ParentAccessCode`/`ParentToken` lookup every other parent-facing
+# endpoint already uses — so there is only ever one parent-auth
+# mechanism now, not two. Confirmed unused project-wide (no remaining
+# import of `ParentJoinSerializer`/`PARENT_JOIN_TOKEN_SALT`/
+# `generate_parent_join_token` anywhere) before deletion.
 # ---------------------------------------------------------------------------
-class ParentJoinSerializer(serializers.Serializer):
-    """DEPRECATED — see module note above. Not used by parent_join() any more."""
-
-    parent_token = serializers.CharField(write_only=True, trim_whitespace=True)
-
-    def validate_parent_token(self, value):
-        from django.core import signing
-
-        from .views import PARENT_JOIN_TOKEN_SALT  # single source for the salt string
-
-        try:
-            payload = signing.loads(value, salt=PARENT_JOIN_TOKEN_SALT, max_age=60 * 60 * 24 * 30)
-        except signing.SignatureExpired:
-            raise serializers.ValidationError("Ye parent link expire ho chuka hai.")
-        except signing.BadSignature:
-            raise serializers.ValidationError("Ye parent link invalid hai.")
-
-        student_id = payload.get("student_id")
-        if not student_id:
-            raise serializers.ValidationError("Ye parent link invalid hai.")
-
-        User = get_user_model()
-        try:
-            student = User.objects.get(pk=student_id)
-        except User.DoesNotExist:
-            raise serializers.ValidationError("Ye parent link invalid hai.")
-
-        self.context["student"] = student
-        return value
 
 
 # ---------------------------------------------------------------------------

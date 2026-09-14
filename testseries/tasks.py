@@ -99,6 +99,25 @@ def refund_unchecked_paid_attempts():
 # already used by the equivalent `post`/`liveclass` follower-fan-out
 # tasks, so a follower who has restricted the creator still doesn't get
 # notified even though this path skips the single-recipient helper.
+#
+# TASK 33 — CONFIRMED (this pass, direct diff against the real
+# `core/services.py` upload): `create_bulk_notifications()`'s real
+# signature is `(recipients, notif_type, title, message="", *,
+# classroom=None, session=None, data=None)`. The call below passes
+# `recipient_ids`/`notif_type`/title/message positionally in that exact
+# order, then `data=` as the keyword-only arg it actually is — a clean
+# match, no signature drift from the `post`/`liveclass` fan-outs this
+# was copied from. Confirmed correct, not just reused on faith.
+#
+# Still NOT verified by this pass (out of scope for Task 33, which was
+# only the function signature): whether `core.models.Notification.
+# NotifType.TESTSERIES_CREATED_BY_FOLLOWED` actually exists as an enum
+# member — `core/models.py` wasn't part of this upload. If it's missing,
+# this task fails with `AttributeError` on that line, before ever
+# calling `create_bulk_notifications()`. Worth a follow-up confirmation
+# pass once `core/models.py` is available, same as the `NotifType` gaps
+# already flagged in `testseries/bridge.py` (Task 32) and `message/
+# services.py`.
 # ---------------------------------------------------------------------------
 @shared_task
 def notify_followers_new_testseries(series_id):

@@ -43,6 +43,19 @@ list `TestAttempt` rows for a `(context_type, context_id)` pair without
 importing `TestAttempt` directly — the `testseries` analogue of
 `assigments.bridge.get_submissions_for_context()`, which `campus.
 bridge.get_assigments_submissions()` already calls the same way.
+
+TASK 32 — cross-app assumptions this file makes about `message`
+confirmed this pass against the real `message/models.py` and
+`message/services.py` uploads (see the CONFIRMED notes on
+`ask_query_on_series()`/`answer_query_on_series()` below for detail):
+  - `DoubtQuestion.context_type`/`context_id` exist as assumed. TRUE.
+  - `answer_doubt_question()` accepts `answered_by=`. TRUE.
+One new gap surfaced in the process (not a `testseries`-side bug, but
+this file's `answer_query_on_series()` is the one exposed to it) —
+`answer_doubt_question()`'s own testseries-notify branch depends on
+`core.models.Notification.NotifType.TESTSERIES_QUERY_ANSWERED`, which
+is NOT confirmed to exist. See the ⚠️ note on `answer_query_on_series()`
+below.
 """
 from django.db import transaction
 
@@ -166,6 +179,13 @@ def ask_query_on_series(*, attempt: "TestAttempt", student, text: str, is_anonym
     None` (a testseries query has neither) and `context_type=
     "testseries_attempt"`, `context_id=<attempt.id>`.
 
+    TASK 32 — CONFIRMED (this pass, against the real `message/models.py`
+    upload): `context_type`/`context_id` exist exactly as assumed here —
+    nullable `CharField`/`UUIDField` on `DoubtQuestion`, backed by an
+    `Index(fields=['context_type', 'context_id'])` and a
+    `CheckConstraint` requiring either `group` or this pair to be set.
+    No longer an unverified assumption.
+
     Raises plain `ValueError` (not a DRF exception — same "services stay
     HTTP-decoupled" convention `message/services.py`'s own module
     docstring states) for both "not your attempt" and "not checked yet";
@@ -218,6 +238,31 @@ def answer_query_on_series(*, doubt_id, teacher, answer_text: str):
     Raises `ValueError` if the doubt doesn't exist / isn't a testseries
     query; `PermissionError` if `teacher` isn't that series' creator —
     `views.py` maps these to a 400 / 403 respectively.
+
+    TASK 32 — CONFIRMED (this pass, against the real `message/
+    services.py` upload): `answer_doubt_question()` really does accept
+    `answered_by=` as its own separate parameter (defaults to `actor`
+    when omitted), and its own docstring names this exact call site by
+    name as the reason that parameter exists. No longer an unverified
+    assumption.
+
+    ⚠️ NEW GAP surfaced by this confirmation pass (not previously
+    flagged here) — `answer_doubt_question()` unconditionally notifies
+    the student when `doubt.context_type == 'testseries_attempt'`, via
+    `core.models.Notification.NotifType.TESTSERIES_QUERY_ANSWERED`.
+    That enum member is flagged as NOT CONFIRMED to exist yet in
+    `message/services.py`'s own comment. If it's still missing, the call
+    below raises a plain `AttributeError` — *after* the doubt row has
+    already been saved as answered (fields commit first, notify is the
+    last step) — meaning this function can raise an undocumented,
+    unhandled `AttributeError` up to `views.py` even though the answer
+    itself succeeded. Deliberately NOT papered over with a try/except
+    here (same "flag the gap, don't guess" convention `models.py` uses
+    for its own unconfirmed `NotifType` members) — the real fix is
+    `core` adding `TESTSERIES_QUERY_ANSWERED`, not swallowing the error.
+    `views.py::TestAttemptViewSet.answer_query` should catch
+    `AttributeError` alongside `ValueError`/`PermissionError` until
+    that's confirmed, or callers will see an opaque 500.
     """
     from message.models import DoubtQuestion
     from message.services import answer_doubt_question

@@ -24,6 +24,22 @@ lazily (function/method-local) at each use site for the same
 import-cycle reason `_record_coin_transaction`/`_notify` already import
 `CoinLedger`/`create_notification` lazily rather than at module level.
 
+✅ Task 28 — RESOLVED. Multi-attempt (`attempts_allowed > 1`) is now
+implemented: `TestAttempt`'s uniqueness constraint is scoped to
+`(series, student, attempt_number)` (was `(series, student)` — the
+actual blocker), `TestSeriesPurchase.purchase_and_start_attempt()` now
+actually passes the computed attempt number through to
+`TestAttempt.objects.create()` (previously computed but silently
+unused, so every paid attempt landed on the default `attempt_number=1`
+regardless), and the `attempts_allowed` cap is enforced as a clean 400
+in `TestAttemptStartSerializer.validate()` (serializers.py) before
+`TestAttemptViewSet.start()` (views.py) creates a row through either
+the paid or free path. `TestSeriesReview` staying "one per series
+ever, not one per attempt" was re-confirmed as intended — see that
+model's docstring for the one open question this pass left flagged
+(which attempt's checked-status gates review eligibility once a
+student has more than one).
+
 ⚠️ NEW GAP (Task 15, this pass) — `TestSeriesReview.create_review()`
 below references `core.models.Notification.NotifType.
 TESTSERIES_REVIEW_RECEIVED`, same lazy-import pattern as every other
@@ -173,9 +189,13 @@ class TestSeries(TestSeriesBaseModel):
 
     status = models.CharField(max_length=10, choices=Status.choices, default=Status.DRAFT, db_index=True)
 
-    # MVP is attempts_allowed=1. Multi-attempt (attempt_number-scoped
-    # uniqueness) is an explicit follow-up — see §8 open item 3 and the
-    # `TestAttempt` unique constraint comment below.
+    # [Task 28 — RESOLVED] Multi-attempt is now real: uniqueness on
+    # `TestAttempt` is scoped to (series, student, attempt_number) —
+    # see that model's constraint — and this field is the cap on how
+    # many attempt_numbers a student can ever create, enforced as a
+    # clean 400 in `TestAttemptStartSerializer.validate()`
+    # (serializers.py) before `TestAttemptViewSet.start()` (views.py)
+    # creates a row through either the paid or free path.
     attempts_allowed = models.PositiveIntegerField(default=1)
 
     created_at = models.DateTimeField(auto_now_add=True)
@@ -466,7 +486,20 @@ class TestSeriesPurchase(TestSeriesBaseModel):
         creates the escrow row, and starts the linked `TestAttempt` in
         one atomic step. Insufficient balance bubbles up as a
         `ValueError` from `record_transaction()` — caller (view) maps
-        that to a 402, same as the campus fee module."""
+        that to a 402, same as the campus fee module.
+
+        [FIX — Task 28] `attempt_no` was previously computed here but
+        never actually passed to `TestAttempt.objects.create()` below —
+        every paid attempt silently landed on the model's
+        `attempt_number` default (1), so a second paid attempt for the
+        same (series, student) always collided with the first one under
+        the (then series+student-only) unique constraint instead of
+        becoming attempt #2. Now passed through explicitly. Computed
+        under the `select_for_update()` lock above (not trusted from a
+        caller-supplied value) so a concurrent `start()` call for the
+        same student can't race past this count check — the same
+        protection `CoinLedger.record_transaction`'s own row lock
+        already relies on."""
         from user_profile.models import CoinLedger
 
         locked_buyer = User.objects.select_for_update().get(pk=buyer.pk)
@@ -485,7 +518,9 @@ class TestSeriesPurchase(TestSeriesBaseModel):
             coins_spent=series.price_coins,
             status=cls.Status.ESCROWED,
         )
-        attempt = TestAttempt.objects.create(series=series, student=locked_buyer, **attempt_snapshot_kwargs)
+        attempt = TestAttempt.objects.create(
+            series=series, student=locked_buyer, attempt_number=attempt_no, **attempt_snapshot_kwargs
+        )
         purchase.attempt = attempt
         purchase.save(update_fields=["attempt"])
         return purchase
@@ -552,10 +587,17 @@ class TestAttempt(TestSeriesBaseModel):
     series = models.ForeignKey(TestSeries, on_delete=models.CASCADE, related_name="attempts")
     student = models.ForeignKey(User, on_delete=models.CASCADE, related_name="testseries_attempts")
 
-    # attempts_allowed > 1 groundwork only — MVP (attempts_allowed=1) is
-    # fully implemented via the unique constraint below; a real
-    # multi-attempt uniqueness shape on (series, student, attempt_number)
-    # is an explicit follow-up, not guessed at here (§8 open item 3).
+    # [Task 28 — RESOLVED] Multi-attempt is real: uniqueness is scoped
+    # to (series, student, attempt_number) via the constraint below,
+    # set from `TestAttempt.objects.filter(series=..., student=...)
+    # .count() + 1` at creation time (see `TestSeriesPurchase.
+    # purchase_and_start_attempt()` for the paid path and
+    # `TestAttemptViewSet.start()` for the free path). The
+    # `attempts_allowed` cap (TestSeries) on how many numbers a student
+    # can create is enforced in `TestAttemptStartSerializer.validate()`
+    # (serializers.py), not here — same "serializer owns the
+    # client-facing 400" split this file already uses elsewhere (e.g.
+    # `TestSeriesReviewSerializer.validate()`).
     attempt_number = models.PositiveIntegerField(default=1)
 
     # Sum of already-graded QuestionResponse.marks_awarded at submit-time
@@ -591,9 +633,18 @@ class TestAttempt(TestSeriesBaseModel):
 
     class Meta:
         constraints = [
+            # [FIX — Task 28] Was `fields=["series", "student"]`, which
+            # made a second attempt for the same (series, student)
+            # impossible at the DB level regardless of `attempt_number`
+            # — the real blocker behind multi-attempt never actually
+            # working even once the application code tried to create
+            # attempt #2. `attempt_number` now part of the key, so each
+            # numbered attempt gets its own row; the `attempts_allowed`
+            # cap itself is a business rule, not a DB constraint — see
+            # `TestAttemptStartSerializer.validate()` (serializers.py).
             models.UniqueConstraint(
-                fields=["series", "student"],
-                name="unique_attempt_per_student_per_series",
+                fields=["series", "student", "attempt_number"],
+                name="unique_attempt_per_student_series_number",
             ),
         ]
 
@@ -706,13 +757,24 @@ class TestSeriesReview(TestSeriesBaseModel):
     — reviewing is about having seen a real result, not merely having
     attempted the series (design doc's exact requirement for this
     task). One review per (series, student) ever — not one per
-    attempt — via the `UniqueConstraint` below; even once `attempts_
-    allowed` > 1 becomes real (§8 open item 3 elsewhere in this file),
-    a student still only gets one say on a series overall, not one per
-    retry. `attempt` is still stored (as a `OneToOneField`, not a plain
-    FK) so a review is traceable back to exactly which checked attempt
-    earned it, and so `clean()` below can verify status/ownership
-    directly off that FK without a second query.
+    attempt — via the `UniqueConstraint` below; now that `attempts_
+    allowed` > 1 is real (Task 28), this was re-confirmed rather than
+    silently kept as-is: a student still only gets one say on a series
+    overall, not one per retry. `attempt` is still stored (as a
+    `OneToOneField`, not a plain FK) so a review is traceable back to
+    exactly which checked attempt earned it, and so `clean()` below can
+    verify status/ownership directly off that FK without a second
+    query.
+
+    [Task 28 — FLAGGED, not changed] `TestSeriesReviewSerializer.
+    validate()` (serializers.py) looks at the student's LATEST attempt
+    only (`order_by("-attempt_number").first()`). With multi-attempt
+    now real: a student CHECKED on attempt #1 but mid-way through an
+    IN_PROGRESS attempt #2 cannot review yet under this rule, even
+    though they do have a checked result. "Latest attempt only" vs
+    "any checked attempt is enough" is a genuine product call this
+    pass has no confirmed answer for — left as the existing
+    latest-only behavior, not silently changed either way.
 
     Primary validation (attempt-not-checked -> clean 400, already-
     reviewed -> clean 400) lives in `TestSeriesReviewSerializer.

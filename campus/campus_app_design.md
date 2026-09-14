@@ -133,6 +133,59 @@
 >   caveat likha hai: `makemigrations` inhe abhi bhi unapplied model
 >   change ki tarah detect karega). Naya **§0** row aur **§23** note.
 >
+> **Reconciliation pass (newest — this update)**: is baar 16 source files
+> firse upload huye (same set jaisi pichli pass — koi naya file nahi) aur
+> code me do real, confirmable changes mile is baar. Koi manual/real Django
+> migration kahin bhi nahi hai is upload me (`migrations/` ka koi file
+> upload nahi hua) — `testseries_paid_allowed`/`chat_group_enabled`/
+> `linked_conversation_id` teeno abhi bhi sirf `models.py` field-definitions
+> hain, DB me `add_testseries_paid_allowed_field`-jaisi ad-hoc raw-SQL ya
+> future `makemigrations` se hi aati hain, koi real migration file doc me
+> kahin claim nahi ki gayi — isliye is pass me koi "manual migration"
+> reference hatane ki zaroorat nahi thi (doc pehle se hi sahi tha).
+> - **🟢 `SectionViewSet.perform_create()` ka `[NEW CRITICAL BUG]` (pichli
+>   pass) ab FIXED hai** — `views.py` me ab `bridge.create_section_group(...)`
+>   ek `try`/`except ValueError` ke andar hai, aur `ValueError` case me
+>   (jab freshly-created section ka abhi tak koi `ClassTeacherassigments`
+>   nahi hai) ek `logger.info(...)` call hoti hai "expected — will be
+>   created when one is" comment ke saath, koi 500 nahi. Section creation
+>   ab normal, non-partial-failure `201` deta hai. §1, §10, §16.3, §17,
+>   §18, §22 update kiye is fix ko reflect karne ke liye.
+> - **🟢 CONFIRMED test bug — ab FIXED is pass:** `tests.py` me
+>   `assigmentsProxyViewSetTests` (8 tests), `TestSeriesViewSetTests`
+>   (5 tests), aur `TestSeriesBridgeForceResetTests` (3 tests) — 54 se 70
+>   tests, jo §16.9's "Task 11/13/19 proxy untested" gap ka bada hissa
+>   close karte hain. `TestSeriesBridgeForceResetTests` khud apne
+>   docstring me jo risk flag karta tha wahi is pass confirm hua tha:
+>   `bridge.py` (is pass upload hua) `create_context_testseries` ko
+>   **name-import** karta hai (`from testseries.bridge import
+>   create_context_testseries`), `testseries.bridge.create_context_testseries`
+>   ko module-qualified access se nahi call karta. Iska matlab
+>   `mock.patch("testseries.bridge.create_context_testseries")` (jo teeno
+>   tests use kar rahe the) `campus.bridge.create_testseries()` ke andar
+>   wali call ko **intercept nahi karta tha** — patch sirf `testseries.
+>   bridge` module ka apna attribute badalta, `campus.bridge`'s
+>   already-bound global reference nahi. Teeno tests asal me REAL
+>   `create_context_testseries()` ko call kar rahe the, mocked nahi.
+>   **Fixed**: teeno `@mock.patch(...)` targets ab
+>   `"campus.bridge.create_context_testseries"` hain (test ke apne
+>   docstring ne hi ye exact alternative suggest kiya tha) — docstring
+>   bhi CONFIRMED+FIXED reflect karne ke liye update ki gayi. §16.9,
+>   §16.10, §17 me update kiya.
+> - **Abhi bhi genuinely untested (no change is pass)**: dono streak-reward
+>   Celery tasks (F-3), G-1/G-2 role-scoping ke specific denial-path tests,
+>   `TestAttemptViewSet`/`can_review_testseries_attempt()`'s section-
+>   resolution, aur `migrate_campus_assigmentss_to_unified`/
+>   `add_testseries_paid_allowed_field` management commands ki backfill/
+>   rollback/idempotency correctness — in me se kisi ke liye bhi is pass
+>   koi naya test nahi mila. §16.6/§17 me as-is rakha.
+> - **§18 ka stale Phase-15/closing-paragraph fix**: §18 ki Phase 15 row
+>   abhi bhi purani "PARTIALLY BUILT — tasks crash" wording rakhe hue thi
+>   jabki §7a khud kayi pass se "F-3 RESOLVED" bol chuka hai (services.py
+>   functions + `CAMPUS_REWARD_EARNED` dono maujood hain) — sirf tests
+>   missing hain, functionality nahi. Row aur closing paragraph dono ab
+>   sync kar diye is doc ke apne §7a ke saath.
+
 > **Age se sach me sirf ye doc hi chalega** — koi bhi naya kaam isi doc ko
 > padhkar shuru karo aur isi doc ko update karke khatam karo; source files
 > dobara upload karne ki zaroorat nahi hai jab tak koi naya structural
@@ -172,10 +225,10 @@
 | `views.py` | Har model ka ViewSet + custom `@action`s — §14 |
 | `urls.py` | `DefaultRouter` registrations + 1 plain `path()` — §14 |
 | `throttles.py` | **B-4, new** — 4 `ScopedRateThrottle` subclasses, each with its own fixed `scope` (not `view.throttle_scope`, since several apply to different `@action`s on the SAME ViewSet): `CampusFeePaymentThrottle` (`FeePaymentViewSet.pay`/`.record`/`.refund`), `CampusLiveSessionJoinThrottle` (`CampusLiveSessionViewSet.start`), `CampusNoticePostThrottle` (`NoticeViewSet.create` only, via `get_throttles()`), `CampusParentLinkVerifyThrottle` (`ParentLinkVerifyView`, class-level). §12a |
-| `bridge.py` | `campus` → `core`/`message`/`liveclass`/`assigments`/`testseries` ka **ONLY** door — §10. **Ab SAB functions hard-import/fully wired hain** — `create_section_group`/`notify`/`provision_video_room`/`resolve_parent_from_token` (`core`/`message` ki taraf) aur `create_assigments`/`get_assigments_submissions` (Task 11) aur `create_testseries`/`can_review_testseries_attempt`/`get_testseries_attempts` (Task 13, `is_paid`/`price_coins` ab wired — Task 19) — koi lazy-import/no-op degrade kahin nahi bacha. `resolve_parent_from_token` shadow-parent-user resolve karta hai (naya). ⚠️ **`create_section_group`'s caller (`SectionViewSet.perform_create`) me is wiring se ek real bug expose hua hai — §1/§10/§16 dekho.** |
+| `bridge.py` | `campus` → `core`/`message`/`liveclass`/`assigments`/`testseries` ka **ONLY** door — §10. **Ab SAB functions hard-import/fully wired hain** — `create_section_group`/`notify`/`provision_video_room`/`resolve_parent_from_token` (`core`/`message` ki taraf) aur `create_assigments`/`get_assigments_submissions` (Task 11) aur `create_testseries`/`can_review_testseries_attempt`/`get_testseries_attempts` (Task 13, `is_paid`/`price_coins` ab wired — Task 19) — koi lazy-import/no-op degrade kahin nahi bacha. `resolve_parent_from_token` shadow-parent-user resolve karta hai (naya). `create_section_group`'s caller (`SectionViewSet.perform_create`) me is wiring se pichli pass jo real bug expose hua tha, wo **is pass FIXED hai** — §1/§10/§16 dekho. |
 | `services.py` | `compute_attendance_summary`, `generate_report_card_data`, `compute_attendance_streak`, `compute_assigments_ontime_streak` (F-3, ab resolved) — §11 |
 | `tasks.py` | 7 Celery tasks (`rollover_session`, `check_low_attendance`, `check_attendance_streak_rewards`, `send_assigments_due_reminders`, `check_assigments_ontime_streak_rewards`, `send_fee_due_reminders`, `refresh_analytics_snapshot`) — §12. **F-3's two streak tasks (`check_attendance_streak_rewards`, `check_assigments_ontime_streak_rewards`) ab poore wired hain (see §7a resolution) — pehle crash karte the, ab nahi, lekin koi test coverage abhi bhi nahi hai.** |
-| `tests.py` | 54 tests covering most flows below — §17 lists what's locked-in, and what's still untested. **Task 11/13/19 ke liye abhi tak koi naya test nahi hai (count wahi 54 hai).** |
+| `tests.py` | 70 tests covering most flows below — §17 lists what's locked-in, and what's still untested. **Task 11/13/19 ke liye is pass 16 naye tests aaye hain (54→70) — Task 11 proxy aur Task 19 view-level gate ab covered hain, aur `TestSeriesBridgeForceResetTests`'s mock-target bug bhi is pass FIXED ho gaya (§16.10) — bridge-level force-reset ab genuinely tested hai. `TestAttemptViewSet`/`can_review_testseries_attempt()`/`migrate_campus_assigmentss_to_unified` abhi bhi zero-coverage hain.** |
 | `apps.py`, `__init__.py` | Standard Django boilerplate, nothing app-specific |
 | `management/commands/migrate_campus_assigmentss_to_unified.py` | **[Task 11]** One-time, idempotent historical backfill: purane `campus.assigments`/`assigmentsSubmission` rows ko unified `assigments` app me copy karta hai. Rollback-log (`--log-dir`, default `campus_migration_logs/`) + `--rollback <log-file>` + `--dry-run` support karta hai. Purane rows ko kabhi touch/delete nahi karta — §5, §23 |
 | `management/commands/add_testseries_paid_allowed_field.py` | **[Task 19]** Ad-hoc raw-SQL command jo `Campus.testseries_paid_allowed` column seedha DB me add karta hai, migration ke bajaye — apna khud ka module docstring hi isse "not the recommended path" bolta hai. Idempotent (`--dry-run` support), postgresql/sqlite/mysql teeno backends ke liye SQL hai — §5a, §23 |
@@ -263,17 +316,24 @@ ANY pending campus, not just ones they're already a member of. Sets
 - **Side effect on create** (`SectionViewSet.perform_create`): calls
   `bridge.create_section_group(section, actor=request.user)` — auto-creates the
   `message.Group`+`Conversation` via `core.classroom_chat_bridge`. **`[NOW
-  HARD-WIRED — see §10]`, and this is where a real bug surfaced this pass**:
-  `create_section_group()` raises `ValueError` unless `actor` is already this
-  section's assigned class-teacher, which a just-created section never has
-  yet — so this call now raises on essentially every normal section-creation
-  request, **after** the `Section` row has already been saved. No
-  `try`/`except` catches it at the call site. `perform_create` needs a fix
-  (§10) — not done here, flagged. Tests `test_creating_section_calls_bridge_with_the_new_section`
-  (mocks the bridge call, still passes) and
+  HARD-WIRED — see §10]`.** A bug surfaced a prior pass when this was first
+  wired (`create_section_group()` raises `ValueError` unless `actor` is
+  already this section's assigned class-teacher, which a just-created
+  section never has yet) and **is now FIXED this pass**: the call is wrapped
+  in `try`/`except ValueError`, logging an info-level "expected — will be
+  created when one is" message instead of letting the request 500. The real
+  group-creation trigger stays `ClassTeacherassigmentsViewSet.perform_create`
+  (once a class-teacher genuinely exists) — this call site is just an
+  idempotent fast-path for the rare case a class-teacher already existed
+  before the section row did. Tests
+  `test_creating_section_calls_bridge_with_the_new_section` (mocks the
+  bridge call) and
   `test_bridge_not_being_wired_up_yet_does_not_break_section_creation` (calls
-  the REAL bridge, asserts `201`) — the second one's name/premise is now
-  stale against real wiring; see §16/§17.
+  the REAL bridge, asserts `201`) both pass now — the second test's
+  docstring/name is still stale (still claims it passes because "core app
+  not installed in this test project"; it actually now passes because of
+  the `try`/`except ValueError` regardless of whether `core` is installed);
+  see §16/§17.
 
 ### `Subject`
 - `campus` FK → `Campus`, `related_name="subjects"`
@@ -602,11 +662,18 @@ writes at all any more.
   created (never rows a run merely re-touched).
 - Old lock-in tests (`test_posting_assigments_precreates_submissions_and_notifies`,
   `test_student_can_submit_own_assigments`) still exist in `tests.py` and
-  still pass — **`[GAP]`** neither was updated to assert against the new
+  still pass — neither was updated to assert against the new
   unified-model-backed shape specifically (e.g. `assigments.data["subject_id"]`,
-  or a `"checked"`/`"partially_checked"` submission status); no new test
-  exists for `assigmentsViewSet`/`assigmentsSubmissionViewSet`'s Task 11
-  behaviour, or for the migration command. See §16/§17.
+  or a `"checked"`/`"partially_checked"` submission status), so that
+  specific gap remains. **New this pass**: `assigmentsProxyViewSetTests`
+  (8 tests, real end-to-end against the unified `assigments` app, only
+  `bridge.notify` mocked) now covers `assigmentsViewSet`/
+  `assigmentsSubmissionViewSet`'s Task 11 behaviour directly — old-shape
+  response keys, the notice side-effect, missing-submission pre-creation,
+  campus-scoped list/retrieve, outsider denial on retrieve/submission
+  access, and the student-submits/teacher-grades flow. **Still no test**
+  for `migrate_campus_assigmentss_to_unified` itself (backfill/rollback/
+  idempotency correctness). See §16/§17.
 
 ### `SyllabusUnit` / `SyllabusProgress` — unchanged, still native `campus` models
 - `SyllabusUnit`: `subject`, `section`, `session` FK (all CASCADE),
@@ -750,12 +817,19 @@ unchanged. See `docs/ORG_VS_INDIVIDUAL_MATRIX.md` (referenced in the
 field's own code comment, not part of this app) for the fuller paid/unpaid
 matrix across every `TestSeries.Source`.
 
-### Untested surface (Task 13/19) — **`[GAP]`**
-`tests.py` (still 54 tests) has ZERO tests for `TestSeriesViewSet`,
-`TestAttemptViewSet`, `can_review_testseries_attempt()`,
-`create_testseries()`, or the now-wired `testseries_paid_allowed`
-enforcement (bridge-level force-reset OR the view-level `403` gate). See
-§16/§17.
+### Untested surface (Task 13/19) — **`[GAP], CLOSED this pass**
+`tests.py` (70 tests, up from 54) now covers `TestSeriesViewSet.create()`
+(`TestSeriesViewSetTests` — permission gate and the view-level Task 19
+`403`) and `create_testseries()`'s bridge-level force-reset
+(`TestSeriesBridgeForceResetTests`) — that second class's
+`mock.patch(...)` target has been fixed to
+`"campus.bridge.create_context_testseries"` (was
+`"testseries.bridge.create_context_testseries"`, which didn't actually
+intercept the call given `bridge.py`'s confirmed `from testseries.
+bridge import create_context_testseries` name-import — see §16.10), so
+the bridge-level force-reset is now genuinely verified in isolation.
+Still zero tests for `TestAttemptViewSet` and
+`can_review_testseries_attempt()`. See §16/§17.
 
 ---
 
@@ -1138,37 +1212,48 @@ not silently at first request.
 
 | Function | Target | Current status | Notes |
 |---|---|---|---|
-| `create_section_group(section, actor)` | `core.classroom_chat_bridge.create_section_group` | `[WIRED]` | Idempotent (returns existing group if section already has one). Raises `ValueError` if `actor` isn't the section's assigned class-teacher — **⚠️ see the NEW BUG below, this now breaks `SectionViewSet.perform_create()`.** |
+| `create_section_group(section, actor)` | `core.classroom_chat_bridge.create_section_group` | `[WIRED]` | Idempotent (returns existing group if section already has one). Raises `ValueError` if `actor` isn't the section's assigned class-teacher — **`SectionViewSet.perform_create()` now catches this (see below, FIXED this pass).** |
 | `notify(*, users, notif_type, title, body='', data=None)` | `core.models.Notification` | `[WIRED]` | Field-name bug (`user=`/`body=` vs. real `recipient=`/`message=`) already fixed a prior pass — unchanged this pass, re-confirmed still correct. |
 | `provision_video_room(live_session, actor)` | `core.classroom_chat_bridge.provision_video_room` | `[WIRED]` | No permission check inside (that function's own docstring: `actor` accepted but unused, gate is assumed already done by the caller). No known bug at this call site — `CampusLiveSessionViewSet` calling it isn't affected the way `SectionViewSet` is. |
 | `resolve_parent_from_token(token)` | `core.classroom_chat_bridge.resolve_parent_from_token` | `[WIRED, SHAPE MISMATCH RESOLVED]` | Previously returned `(None, None)` deliberately — the old model had no `parent_user` concept at all (token+code auth, no login). **Resolved this pass**: a new `_get_or_create_shadow_parent_user(parent_access_code)` helper creates (once) and reuses a non-loginable "shadow" `login.User` per `ParentAccessCode` (`username="parent_shadow_<access_code_id>"`, `set_unusable_password()`) — every device verifying the same code is the same real-world parent, so keying off `parent_access_code.id` keeps this idempotent. Returns a real `(parent_user, student_user)` tuple now. ⚠️ Uses a naming convention, not a dedicated `is_shadow_parent` field on `login.User` — flagged as the interim identification method (`login/models.py` wasn't part of this pass to add a real field). |
 
-### 🔴 NEW BUG (this pass) — `SectionViewSet.perform_create()` vs. the now-hard-wired `create_section_group()`
+### ✅ FIXED this pass — `SectionViewSet.perform_create()` vs. the hard-wired `create_section_group()`
 
-`views.py::SectionViewSet.perform_create()` still reads (unchanged, stale):
+A prior pass flagged this as a critical bug: `create_section_group()` calls
+straight through to the real
+`core.classroom_chat_bridge.create_section_group()`, which raises
+`ValueError` unless `actor` is already this section's assigned
+class-teacher (`ClassTeacherassigments`) — and a section that was just
+created has none yet (that's a separate endpoint, done afterward). Without
+a `try`/`except`, that used to 500 every normal section-creation request as
+a partial failure (`serializer.save()` already committed the `Section` row
+before the bridge call raised).
+
+`views.py::SectionViewSet.perform_create()` now reads:
 
 ```python
 def perform_create(self, serializer):
     section = serializer.save()
-    bridge.create_section_group(section, actor=self.request.user)
+    try:
+        bridge.create_section_group(section, actor=self.request.user)
+    except ValueError:
+        logger.info(
+            "Skipped section-group creation for section %s: no class-teacher "
+            "assigned yet (expected — will be created when one is).",
+            section.pk,
+        )
 ```
 
-No `try`/`except` around the bridge call. When this was a no-op-degrading
-lazy import, that was safe. **It no longer is**: `create_section_group()`
-now calls straight through to the real
-`core.classroom_chat_bridge.create_section_group()`, which raises
-`ValueError` unless `actor` is already this section's assigned
-class-teacher (`ClassTeacherassigments`) — and a section that was **just
-created this request** never has one yet (that's a separate endpoint,
-done afterward). So **every normal section-creation request now 500s**,
-and does so as a **partial failure**: `serializer.save()` already
-committed the `Section` row before the bridge call raises, so the row
-exists in the DB even though the client gets a 500. This is a real
-regression exposed by wiring Group A, not a hypothetical — flag before
-shipping. Fix belongs at the call site (wrap in `try`/`except ValueError`
-and log, or don't call `create_section_group` until a class-teacher is
-actually assigned) — not a guess this doc will make for you. See §1,
-§16, §17 for the related test/doc fallout.
+The `ValueError` is caught and logged at `info` level (explicitly "expected",
+not a warning) — section creation now always returns a clean `201`. The
+real group-creation trigger is still `ClassTeacherassigmentsViewSet.
+perform_create()` (§1, once a class-teacher is actually assigned, itself
+wrapped in its own `try`/`except ValueError` as a defensive backstop, logged
+at `warning` level since that case is NOT expected); this call site is kept
+only as an idempotent fast-path for the rare case a class-teacher already
+existed before the section row did. See §1, §16, §17, §18 for the related
+doc/test fallout — the test that used to be "stale but coincidentally still
+passing" now passes for the documented reason, not by test-project accident.
 
 **Group B — `assigments`/`core.models.NotifType` fix (Task 11) and
 `testseries` (Task 13) — confirmed, fully-built sibling apps, HARD imports,
@@ -1463,14 +1548,10 @@ the router's own `parent-links/<pk>/` pattern would otherwise greedily match
    identically everywhere (`is_campus_admin_or_principal`). If they ever need
    different permissions, that function (and every call site) needs
    revisiting.
-3. **`[NEW, CRITICAL]` `SectionViewSet.perform_create()` doesn't handle
-   `create_section_group()`'s `ValueError`** — now that Group A (§10) is
-   hard-wired, a freshly-created section has no `ClassTeacherassigments` yet,
-   so the real `core.classroom_chat_bridge.create_section_group()` raises on
-   essentially every normal section-creation request — **after** the
-   `Section` row is already saved. This is not a design question, it's a bug
-   to fix at the call site (§1/§10) — flagged here so it isn't missed before
-   shipping this wiring.
+3. **`SectionViewSet.perform_create()`'s unhandled `ValueError` — now
+   RESOLVED, see "Resolved this pass" below.** (Was previously `[NEW,
+   CRITICAL]` here; kept as a numbered placeholder so the list numbering
+   doesn't shift and break other cross-references in this doc.)
 4. **`confirm`'s old GOTCHA is now moot** — removed along with the action
    itself (FEE-2), not fixed. Noting this so nobody re-derives the "any
    campus member can confirm anyone's payment" gap this used to flag; it no
@@ -1482,15 +1563,15 @@ the router's own `parent-links/<pk>/` pattern would otherwise greedily match
    `.isoformat()` on the resulting `None`. Whether a due-date-less
    assigments should count toward the streak at all is a product-rule
    decision, not something this doc will guess at.
-6. **No test coverage for G-1, G-2, or F-3** — `tests.py` (54 tests) still
-   only exercises the pre-existing flows plus the fee-wallet/refund paths.
-   Nothing tests: a class-teacher being denied a campus-wide notice or
-   allowed their own section (G-1); a `PENDING` campus blocking
-   staff-invite/enrollment/parent-link-verify, or `IsPlatformAdmin` gating
-   `approve`/`reject` (G-2); or either streak-reward task, now that both
-   are actually runnable (F-3 — no longer "arguably moot", genuinely
-   testable and genuinely untested). Flagged so this isn't mistaken for
-   "tested, therefore safe to build on."
+6. **No test coverage for G-1, G-2, or F-3** — `tests.py` (now 70 tests,
+   up from 54; the new tests are all Task 11/13/19 proxy coverage, see
+   item 9 below) still has nothing for: a class-teacher being denied a
+   campus-wide notice or allowed their own section (G-1); a `PENDING`
+   campus blocking staff-invite/enrollment/parent-link-verify, or
+   `IsPlatformAdmin` gating `approve`/`reject` (G-2); or either
+   streak-reward task, now that both are actually runnable (F-3 — no
+   longer "arguably moot", genuinely testable and genuinely untested).
+   Flagged so this isn't mistaken for "tested, therefore safe to build on."
 7. **`[NEW]` `assigmentsViewSet` has no update/partial_update/destroy
    (Task 11)** — the old `ModelViewSet` allowed arbitrary PATCHes on a
    posted campus assigments; the unified model's mutation surface is
@@ -1499,33 +1580,61 @@ the router's own `parent-links/<pk>/` pattern would otherwise greedily match
    campus assigments" should mean against that surface now. See §5.
 8. **`Campus.testseries_paid_allowed` (Task 19) — now RESOLVED, see
    "Resolved this pass" below.**
-9. **No test coverage for Task 11, Task 13, or the now-wired Task 19
-   enforcement** — `tests.py` is still exactly 54 tests. Zero tests for the
-   unified-assigments proxy (Task 11), the testseries campus bridge
-   (Task 13), or (newly relevant now that it's enforced, not just present)
-   `testseries_paid_allowed`'s bridge-level force-reset and
-   `TestSeriesViewSet`'s view-level `403` gate (Task 19). See §17.
+9. **Partial test coverage for Task 11/Task 13/Task 19 — this gap is now
+   CLOSED for the bridge-level corner too.** `tests.py` grew from 54
+   to 70 tests this pass: `assigmentsProxyViewSetTests` (8 tests, real
+   end-to-end coverage of the unified-assigments proxy, Task 11),
+   `TestSeriesViewSetTests` (5 tests, `TestSeriesViewSet.create()`'s
+   permission gate and Task 19's view-level `403`), and
+   `TestSeriesBridgeForceResetTests` (3 tests, now genuinely exercising
+   `bridge.create_testseries()`'s own force-reset logic — see item 10
+   below for the mock-target fix that made this real). Still genuinely
+   untested: `TestAttemptViewSet` end-to-end (list/retrieve scoping, the
+   grading `partial_update` path), `can_review_testseries_attempt()`'s
+   section-resolution/deny-on-missing-section behaviour, and
+   `migrate_campus_assigmentss_to_unified`'s backfill/rollback correctness.
+   See §17.
+10. **`[FIXED THIS PASS]` `TestSeriesBridgeForceResetTests`'s mock target
+    didn't intercept the real call.** `bridge.py` (now uploaded) does
+    `from testseries.bridge import create_context_testseries` — a
+    name-imported local copy in `campus.bridge`'s own module namespace.
+    `mock.patch("testseries.bridge.create_context_testseries")` (what all
+    three tests in that class used) only replaces the attribute on the
+    `testseries.bridge` module; it does not touch `campus.bridge`'s
+    already-bound global, so `bridge.create_testseries()` was calling the
+    REAL `create_context_testseries()` inside these "tests" — they never
+    actually exercised the force-reset logic in isolation, and their
+    pass/fail depended on `testseries`'s real behaviour (not verified
+    here). **Fixed**: all three tests now patch
+    `"campus.bridge.create_context_testseries"` instead — the test file's
+    own docstring already named this as the fallback, now confirmed and
+    applied. See §17.
 
 **Resolved this pass** (kept here as a changelog, not as open items
-anymore): **Group A of `bridge.py` (`create_section_group`/`notify`/
-`provision_video_room`/`resolve_parent_from_token`) is now fully wired,
-including the `resolve_parent_from_token` shape mismatch via a shadow-
-parent-user** (§10) — though this wiring also surfaced item 3 above, a new
-bug, not a clean resolution; `Campus.testseries_paid_allowed` (Task 19) is
-now actually enforced, not just a dead field (§5a); the old #2 "campus
-creation gate" question -> **G-2**, `Campus.
-VerificationStatus` (§1); the old #3 "`FEE_DUE_REMINDER` has no emitter"
-question -> **FEE-6**, `tasks.send_fee_due_reminders` (§12); the old #5
-"notice posting not role-scoped" question -> **G-1**, `permissions.
+anymore): **`SectionViewSet.perform_create()` now catches
+`create_section_group()`'s `ValueError`** (§1/§10) — section creation is a
+clean `201` again, no partial-failure 500; most of the Task 11/13/19 test
+gap is closed (item 9 above, though not entirely).
+
+**Resolved a prior pass** (carried over): Group A of `bridge.py`
+(`create_section_group`/`notify`/`provision_video_room`/
+`resolve_parent_from_token`) is fully wired, including the
+`resolve_parent_from_token` shape mismatch via a shadow-parent-user (§10);
+`Campus.testseries_paid_allowed` (Task 19) is actually enforced, not just a
+dead field (§5a); the old #2 "campus creation gate" question -> **G-2**,
+`Campus.VerificationStatus` (§1); the old #3 "`FEE_DUE_REMINDER` has no
+emitter" question -> **FEE-6**, `tasks.send_fee_due_reminders` (§12); the
+old #5 "notice posting not role-scoped" question -> **G-1**, `permissions.
 can_post_notice` (§2, §13); the old #6 "admin registrations incomplete"
-question -> **all 28 models now registered** (§0); the previous pass's #5
+question -> **all 28 models now registered** (§0); an earlier pass's #5
 "streak-reward tasks are broken as uploaded" (missing `services.py`
 functions + missing `NotifTypes.CAMPUS_REWARD_EARNED`) -> **F-3, both
-gaps fixed** (§7a, §9, §11).
+gaps fixed** (§7a, §9, §11) — F-3's tasks themselves remain untested
+(item 6 above).
 
 ---
 
-## 17. Test coverage map (`tests.py`, 54 tests) — treat these as LOCKED-IN behaviour
+## 17. Test coverage map (`tests.py`, 70 tests) — treat these as LOCKED-IN behaviour
 
 Any future change that would break one of these needs a deliberate decision,
 not an accidental regression:
@@ -1539,12 +1648,13 @@ not an accidental regression:
   campus; accepts matching campus+session.
 - **Section-group bridge**: creating a section calls `bridge.create_section_group`
   with the new section; a second test asserts the REAL (unmocked) bridge call
-  doesn't break section creation — **`[STALE, see §10/§16]`**: that assertion
-  was written when the bridge lazy-imported and degraded to a no-op. Now that
-  `create_section_group()` is hard-wired, the real function raises `ValueError`
-  for a section with no class-teacher yet (every freshly-created section) —
-  this test's `201` assertion depends on `core` not being installed in the
-  test project, which won't hold in a real deployment where it is.
+  doesn't break section creation — both pass. The second test's docstring is
+  **`[STALE, see §10/§16]`**: it still claims the `201` only holds because
+  `core` isn't installed in the test project. That's no longer why it
+  passes — `SectionViewSet.perform_create()` now catches `create_section_
+  group()`'s `ValueError` with a `try`/`except` (§1/§10, fixed this pass),
+  so the `201` holds in a real deployment with `core` installed too. Worth
+  renaming/re-documenting the test, not worth re-writing its assertion.
 - **Subject-teacher approval flow**: class-teacher can approve/reject; an
   unrelated subject-teacher cannot approve; campus admin can approve as a
   fallback.
@@ -1562,10 +1672,16 @@ not an accidental regression:
   rejected.
 - **Attendance**: subject-teacher can mark; an outsider cannot; summary %-age
   reflects marked records.
-- **assigmentss** (pre-Task-11 tests, still passing but NOT updated to
-  assert against the new unified-model-backed shape — see §5/§16.9):
-  posting pre-creates submissions + notifies; a student can submit their
-  own; a teacher can grade; an unrelated user cannot grade.
+- **assigmentss**: two pre-Task-11 tests still exist and pass, still NOT
+  updated to assert against the new unified-model-backed shape specifically
+  (posting pre-creates submissions + notifies; a student can submit their
+  own). **New this pass — `assigmentsProxyViewSetTests`** (8 tests, real
+  end-to-end against the unified `assigments` app): old-response-shape keys
+  round-trip; unrelated user denied create; notice side-effect fires;
+  missing-submission pre-created for an enrolled student; list/retrieve
+  scoped to campus membership, denied for an outsider; a student submits
+  their own and a teacher grades it; an unrelated user cannot access a
+  submission. See §5/§16.9.
 - **Syllabus**: creating a unit auto-creates its progress row; subject-teacher
   can mark covered.
 - **Results**: `marks_obtained` can't exceed `max_marks`; publishing notifies
@@ -1594,6 +1710,17 @@ not an accidental regression:
   on this endpoint either.
 - **Rollover regression**: a plain ORM `.create(is_current=True)` does not
   violate the one-current-session-per-campus constraint.
+- **Test series (Task 13/19), new this pass**: `TestSeriesViewSetTests` (5
+  tests, `campus.bridge.create_testseries` mocked) — unrelated user denied
+  create; authorized staff's create delegates to the bridge; a paid-series
+  request is rejected with `403` when `testseries_paid_allowed=False` and
+  allowed when `True`; a free series is allowed regardless of the flag.
+  `TestSeriesBridgeForceResetTests` (3 tests, aimed at `bridge.
+  create_testseries()`'s own force-reset) — **`[FIXED — see §16.10]`** its
+  `mock.patch` target now correctly intercepts the real call (fixed to
+  `"campus.bridge.create_context_testseries"`, matching how `bridge.py`
+  actually name-imports the function), so these 3 genuinely verify the
+  force-reset logic.
 
 **`[GAP — see §16.6]`** entirely untested: `CampusViewSet.approve`/`.reject`
 (`IsPlatformAdmin` gating, `verification_status` transitions), and both
@@ -1601,19 +1728,37 @@ streak-reward Celery tasks (`check_attendance_streak_rewards`,
 `check_assigments_ontime_streak_rewards` — now fully wired per §7a, so this
 is a real, meaningful gap, not "can't test it yet anyway").
 
-**`[GAP — see §16.9]`** entirely untested, new this pass: `assigmentsViewSet`/
-`assigmentsSubmissionViewSet`'s Task 11 unified-app proxy behaviour (e.g.
-`assigments.data["subject_id"]` round-tripping, a `"checked"`/
-`"partially_checked"` submission status reaching `_serialize_campus_
-submission()`), `migrate_campus_assigmentss_to_unified`'s backfill/rollback
-correctness, `TestSeriesViewSet`/`TestAttemptViewSet` (Task 13) end-to-end
-(create, list/retrieve scoping, the grading `partial_update` path,
-`can_review_testseries_attempt()`'s section-resolution/deny-on-missing-
-section behaviour), and `Campus.testseries_paid_allowed` (Task 19 — **now
-actually enforced, §5a/§10, so this gap is no longer "moot", it's a real
-untested enforcement path**: neither the bridge-level force-reset nor
-`TestSeriesViewSet.create()`'s view-level `403` gate has a test). `tests.py`
-is still exactly 54 tests.
+**`[GAP — see §16.9]`, CLOSED this pass**: `assigmentsProxyViewSetTests`
+(8 tests, real end-to-end against the unified `assigments` app, not mocked)
+now covers `assigmentsViewSet`/`assigmentsSubmissionViewSet`'s Task 11
+proxy behaviour — old-shape response keys, notice side-effect, missing-
+submission pre-creation, campus-scoped list/retrieve, submit/grade flow,
+outsider denial. `TestSeriesViewSetTests` (5 tests) covers
+`TestSeriesViewSet.create()`'s permission gate and Task 19's view-level
+`403` (bridge mocked correctly here — `views.py` accesses it as
+`bridge.create_testseries(...)` via `from . import bridge`, a genuine
+attribute lookup at call time, so the mock target fires), and
+`TestSeriesBridgeForceResetTests` (3 tests) now genuinely covers the
+bridge-level force-reset too — see §16.10. Still genuinely
+untested: `migrate_campus_assigmentss_to_unified`'s backfill/rollback
+correctness, and `TestAttemptViewSet`/`can_review_testseries_attempt()`'s
+section-resolution/deny-on-missing-section behaviour (Task 13) — no test
+class touches either.
+
+**`[FIXED — see §16.10]`**: `TestSeriesBridgeForceResetTests` (3 tests,
+aimed at Task 19's bridge-level force-reset) closes the remaining
+untested-enforcement corner. Its `mock.patch(...)` target was previously
+`"testseries.bridge.create_context_testseries"`, which didn't actually
+intercept
+`bridge.create_testseries()`'s call — `campus/bridge.py` name-imports that
+function (`from testseries.bridge import create_context_testseries`), so
+these three tests were calling the real `testseries` function, not a
+mock. **Fixed**: the patch target is now
+`"campus.bridge.create_context_testseries"` — the name as it's actually
+bound and called from inside `campus/bridge.py`. The force-reset logic
+these tests lock in (`is_paid`/`price_coins` forced to `False`/`0` when
+`testseries_paid_allowed=False`) is now genuinely verified in isolation.
+`tests.py` is now 70 tests, up from 54.
 
 ---
 
@@ -1623,7 +1768,7 @@ is still exactly 54 tests.
 |---|---|---|
 | 1 | `Campus`, `AcademicSession`, `Department`, `SchoolClass`, `Section`, `Subject`, `Room`, `StaffProfile` | **DONE** |
 | 2 | `ClassTeacherassigments`, `SubjectTeacherassigments` (approval flow), `StudentEnrollment` | **DONE** |
-| 3 | Section-group auto-creation, `Notice` | **DONE (bridge call now HARD-WIRED — see §10 for a new bug this exposed in `SectionViewSet.perform_create`; posting now role-scoped per G-1)** |
+| 3 | Section-group auto-creation, `Notice` | **DONE (bridge call HARD-WIRED — the bug this exposed in `SectionViewSet.perform_create` is now FIXED, §10; posting role-scoped per G-1)** |
 | 4 | `CampusLiveSession` (coin-free) + notifications | **DONE (video provisioning + notify now HARD-WIRED, §10 — no known bug at these call sites)** |
 | 5 | `TimeSlot`, `TimetableEntry` (clash-detection) | **DONE** |
 | 6 | `Attendance` + auto low-attendance alert task | **DONE (`notify()` now HARD-WIRED — §10)** |
@@ -1635,11 +1780,17 @@ is still exactly 54 tests.
 | 12 | `DigitalIDCard`, `FeeStructure`/`FeeInvoice`/`FeePayment` | **DONE — fee payment now wallet-based (FEE-2), not Razorpay** |
 | 13 | Session rollover automation (Celery task) | **DONE** |
 | 14 | Campus platform-verification gate (G-2) | **DONE** |
-| 15 | Gamification / streak rewards (F-3) | **PARTIALLY BUILT — tasks exist but crash on missing `services.py` functions + missing `NotifType`, see §7a** |
+| 15 | Gamification / streak rewards (F-3) | **DONE, functionally — `services.py` computations + `NotifTypes.CAMPUS_REWARD_EARNED` both exist and are wired (§7a); UNTESTED — see §16.6** |
 
-**Everything above is implemented and tested except the four `bridge.py`
-integration points (§10/§16.3), and Phase 15 (F-3), which is neither
-functional nor tested yet — see §7a/§16.5/§16.6.**
+**Everything above is implemented; the four `bridge.py` integration points
+(§10) are now all fully wired with no known open bug at any call site. What
+remains genuinely untested rather than unbuilt: Phase 15 / F-3's two
+streak-reward tasks (§7a/§16.6), G-1/G-2's role-scoping denial paths
+(§16.6), and `TestAttemptViewSet`/`can_review_testseries_attempt()` and the
+`migrate_campus_assigmentss_to_unified` command (§16.9).
+`TestSeriesBridgeForceResetTests`'s mock-target bug (Task 19's
+bridge-level force-reset) is FIXED this pass — see §16.10 — see
+§17 for the full map.**
 **Any future work should build ON this as-built shape — extend models with
 new fields/migrations, add new viewset actions, or wire up `core`'s side of
 `bridge.py` — rather than re-deriving anything documented above from
@@ -2263,9 +2414,17 @@ would be new work.
   added anywhere; tune to real traffic once this ships.)
 - `core.classroom_chat_bridge` and `core.models.Notification` — **confirmed
   to exist with the exact signatures `bridge.py` expects, and now wired in
-  (§10)**. The real remaining infra requirement is the `SectionViewSet`
-  bug §10/§16 flags — that's a code fix needed in `campus`, not a missing
-  external dependency anymore.
+  (§10)**. The `SectionViewSet.perform_create()` bug §10/§16 previously
+  flagged here is **fixed this pass** (`try`/`except ValueError` around the
+  bridge call) — no known remaining code-fix requirement at this call site.
+  A real migration for `Section.chat_group_enabled`/`linked_conversation_id`
+  and `Campus.testseries_paid_allowed` is still outstanding (`bridge.py`'s
+  own comment: "a migration is required for that field... this pass can't
+  generate that migration file without the live project state") — no
+  `migrations/0xxx_....py` file has been part of any upload so far; the
+  fields exist in `models.py` and (for `testseries_paid_allowed`) via the
+  ad-hoc `add_testseries_paid_allowed_field` raw-SQL command only, not a
+  real migration (§0, §5a, §23).
 
 ---
 

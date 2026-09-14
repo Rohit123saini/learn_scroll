@@ -536,14 +536,30 @@ class ParentVerifyCodeView(APIView):
         # pass — no existing value fit "a new parent device wants
         # access". `create_notification()` swallows its own exceptions
         # and never raises (see core/services.py's fail-safe contract),
-        # so a notification-write hiccup here can never fail this verify
-        # call or leave `token` uncreated.
+        # so a notification-write hiccup INSIDE that function can never
+        # fail this verify call or leave `token` uncreated.
+        #
+        # [FIX — Task 36] Called with keyword args, not positional —
+        # matches the one call site in this same file that's actually
+        # confirmed working (`answer_doubt_question()` in services.py,
+        # a few lines below) and the `[VERIFIED]` signature
+        # `assigments/bridge.py` already checked directly. A positional
+        # call here would be the ONE call in this codebase not doing
+        # that, and if the real signature turns out to be keyword-only
+        # (plausible given every other confirmed site always calls it
+        # that way), a positional call raises `TypeError` at the call
+        # site itself — BEFORE `create_notification()`'s own body (and
+        # its exception-swallowing) ever runs. That would make this
+        # `POST /parent/verify/` call fail 500 on a notification hiccup,
+        # exactly the failure mode this comment claims can't happen.
         create_notification(
-            access_code.student,
-            Notification.NotifType.PARENT_DEVICE_PENDING,
-            "New parent device wants access",
-            f"A new device is requesting parent access using your "
-            f"\"{access_code.label}\" code.",
+            recipient=access_code.student,
+            notif_type=Notification.NotifType.PARENT_DEVICE_PENDING,
+            title="New parent device wants access",
+            message=(
+                f"A new device is requesting parent access using your "
+                f"\"{access_code.label}\" code."
+            ),
             data={
                 "parent_access_code_id": str(access_code.id),
                 "parent_token_id": str(token.id),

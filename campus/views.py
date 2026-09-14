@@ -605,6 +605,19 @@ class CampusLiveSessionViewSet(CampusMemberScopedMixin, viewsets.ModelViewSet):
                 return section.school_class.campus_id, section.id, subject_id
         return None, None, None
 
+    # TASK 14 — `join` (below) is a POST action a plain enrolled student
+    # must be able to call, but the class-level `IsSectionSubjectStaffOrReadOnly`
+    # only allows writes from that section/subject's staff (that's correct
+    # for `start`/`end`/`cancel`/create, which stay on the default here).
+    # `join` does its own, more specific authorization inline instead
+    # (enrolled student OR that section/subject's staff OR campus admin —
+    # see its own docstring), so it only needs `IsAuthenticated` at the
+    # DRF-permission layer.
+    def get_permissions(self):
+        if self.action == "join":
+            return [IsAuthenticated()]
+        return super().get_permissions()
+
     @transaction.atomic
     def perform_create(self, serializer):
         live_session = serializer.save()
@@ -652,6 +665,102 @@ class CampusLiveSessionViewSet(CampusMemberScopedMixin, viewsets.ModelViewSet):
             body=f"{live_session.subject.name} is live now.",
         )
         return Response(self.get_serializer(live_session).data)
+
+    # TASK 14 — closes the gap `core.classroom_chat_bridge.provision_video_room()`'s
+    # own docstring flags: that function only names the room at scheduling
+    # time (`perform_create` above), it deliberately never mints a token.
+    # This is the actual "join this live session" endpoint — mints a
+    # fresh, per-participant LiveKit token via
+    # `core.classroom_chat_bridge.generate_campus_session_token()`
+    # (added this same pass, see that function's own docstring).
+    #
+    # Called directly, NOT through `campus.bridge` — unlike every other
+    # cross-app call in this file (`bridge.provision_video_room`,
+    # `bridge.create_section_group`, ...). `core.classroom_chat_bridge`'s
+    # own module docstring flags why: `campus/bridge.py`'s current
+    # contents weren't available in the TASK 14 pass that added
+    # `generate_campus_session_token()`, so no wrapper for it could be
+    # verified there either. If `campus/bridge.py` later grows a thin
+    # `generate_session_token()` wrapper for consistency with the other
+    # bridge calls in this file, swap this one call over to it — nothing
+    # else here would need to change.
+    #
+    # Reuses `CampusLiveSessionJoinThrottle` (already imported above) —
+    # its own docstring in throttles.py explains it was scoped to `start`
+    # only because this app had no separate join endpoint yet; now that
+    # one exists, it belongs here too, in addition to `start` (kept there
+    # for the notification-fan-out reason that throttle's docstring
+    # separately documents).
+    @action(detail=True, methods=["post"], throttle_classes=[CampusLiveSessionJoinThrottle])
+    def join(self, request, pk=None):
+        """
+        `POST /campus-live-sessions/{id}/join/` -> `{"room_name": ..., "token": ...}`.
+
+        Only once the session is actually `LIVE` (a student hitting this
+        before the teacher's `start` call has nothing to join — LiveKit
+        would accept the token but the room itself may not exist yet on
+        the media server, since `provision_video_room()` only ever names
+        it, never creates it server-side).
+
+        Authorization (checked here, not by a permission class — see
+        `get_permissions()` above): the requesting user must be either
+        an ACTIVE `StudentEnrollment` in this session's section, or able
+        to manage that section/subject (`can_manage_section_subject` —
+        assigned subject-teacher, class-teacher, or campus admin/
+        principal, the same staff check `IsSectionSubjectStaffOrReadOnly`
+        itself is built on, per this file's other usages of that
+        helper). Minting a token is not itself that check —
+        `generate_campus_session_token()`'s own docstring is explicit
+        that the caller owns this, so it happens here.
+        """
+        live_session = self.get_object()
+
+        if live_session.status != CampusLiveSession.Status.LIVE:
+            return Response(
+                {"detail": "This session isn't live yet."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        if not live_session.room_id:
+            # Shouldn't normally happen (perform_create provisions it),
+            # but provisioning is itself best-effort (see
+            # provision_video_room()/bridge's own handling) — surface a
+            # clean 503 rather than minting a token for a room that was
+            # never named.
+            return Response(
+                {"detail": "This session has no video room provisioned."},
+                status=status.HTTP_503_SERVICE_UNAVAILABLE,
+            )
+
+        section = live_session.section
+        campus_id = section.school_class.campus_id
+        is_enrolled_student = StudentEnrollment.objects.filter(
+            section=section,
+            student=request.user,
+            status=StudentEnrollment.Status.ACTIVE,
+        ).exists()
+        if not is_enrolled_student and not can_manage_section_subject(
+            request.user, campus_id, section.id, live_session.subject_id
+        ):
+            raise PermissionDenied("You aren't enrolled in this section or assigned to teach it.")
+
+        # Local import — campus never imports `core`/`message` directly
+        # except through a single door; see this action's own docstring
+        # above for why that door is `core.classroom_chat_bridge`
+        # directly here rather than `campus.bridge`.
+        from core.classroom_chat_bridge import generate_campus_session_token
+
+        try:
+            token = generate_campus_session_token(live_session.room_id, request.user)
+        except RuntimeError:
+            logger.exception(
+                "LiveKit not configured — cannot mint join token for session %s", live_session.pk,
+            )
+            return Response(
+                {"detail": "Live video isn't configured on this deployment."},
+                status=status.HTTP_503_SERVICE_UNAVAILABLE,
+            )
+
+        return Response({"room_name": live_session.room_id, "token": token})
 
     @action(detail=True, methods=["post"])
     def end(self, request, pk=None):

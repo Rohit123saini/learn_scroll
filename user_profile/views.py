@@ -1106,10 +1106,13 @@ class BuyCoinConfirmView(GenericAPIView):
     themselves. It no longer can be — there's no gateway secret to
     verify a webhook signature against a blank gateway, and this
     endpoint's whole reason to exist now is verifying a real gateway
-    webhook, not accepting a client's say-so. That's a real, currently
-    open gap for the manual/admin top-up case this pass doesn't have a
-    replacement path for — flagging it rather than silently leaving it
-    unconfirmable with no way to notice. `BuyCoinView`, `CoinPurchaseRequest`,
+    webhook, not accepting a client's say-so.
+
+    TASK 16 — that gap now has a replacement path: `AdminCoinPurchaseConfirmView`
+    below is a separate, `IsAdminUser`-gated endpoint for exactly the
+    blank-`gateway` case this view can no longer serve. See that view's
+    own docstring for why it's a new endpoint rather than a permission
+    branch inside this one. `BuyCoinView`, `CoinPurchaseRequest`,
     `CoinPurchaseRequestManager` are all otherwise unchanged.
     """
     permission_classes = [AllowAny]
@@ -1204,6 +1207,128 @@ class BuyCoinConfirmView(GenericAPIView):
             "message": message,
             "data": CoinPurchaseRequestSerializer(purchase).data,
         }, status=status.HTTP_200_OK)
+
+
+# 🔥 TASK 16 — manual/admin-initiated top-up confirm path.
+# BuyCoinConfirmView above went webhook-only for §11 item 10's signature
+# hardening, which closed a real hole (any authenticated caller could
+# confirm their own purchase with no proof money ever moved) but also
+# closed off the one legitimate no-gateway case CoinPurchaseRequest.
+# gateway's own field comment names: a manual/admin-initiated top-up,
+# where there was never going to be a gateway webhook to verify in the
+# first place. This view is that case's replacement confirm path —
+# staff-only, separate from the webhook endpoint, not a loosening of it.
+class AdminCoinPurchaseConfirmView(GenericAPIView):
+    """
+    POST /profile/buy-coin/admin-confirm/
+    {"gateway_reference": "<manual/internal reference>", "status": "success", "failure_reason": ""}
+
+    Confirms a manual/admin-initiated top-up (a `CoinPurchaseRequest`
+    with a BLANK `gateway`) as successful or failed. Staff-only
+    (`IsAdminUser`) — same "give ops an API instead of a Django shell"
+    pattern `CoinWithdrawalAdminActionView` above already uses.
+
+    Deliberately a SEPARATE endpoint from `BuyCoinConfirmView`, not a
+    permission-class change on it. `BuyCoinConfirmView`'s entire reason
+    to exist post-item-10 is verifying a real gateway webhook signature
+    (`AllowAny` + HMAC — see `_verify_gateway_webhook_signature()`); an
+    admin escape hatch folded into that same view would blur "verified
+    gateway webhook" and "trusted staff override" into one code path,
+    undoing the point of that hardening. Keeping them separate also
+    means a compromised/misused staff account can't be used to forge a
+    gateway webhook signature — it can only ever touch gateway-less
+    purchases (see the scope restriction below), never one a real
+    gateway is expected to confirm.
+
+    Scope restriction: ONLY confirms purchases with a BLANK `gateway`
+    on file. A `CoinPurchaseRequest` that DOES have a gateway must
+    still go through the real webhook (`BuyCoinConfirmView`) — letting
+    staff manually confirm a gateway-backed purchase here would let
+    anyone with staff access credit coins without the gateway ever
+    having actually taken payment, which is exactly the risk item 10's
+    signature check exists to prevent. A gateway-backed purchase gets a
+    409, not a silent success, if pointed at this endpoint.
+
+    Otherwise mirrors `BuyCoinConfirmView`'s own contract: idempotent
+    and safe to retry (`confirm_success()`/`mark_failed()`, models.py),
+    404 if `gateway_reference` doesn't match any request, 409 for an
+    invalid state transition (e.g. failing an already-succeeded
+    purchase).
+    """
+    permission_classes = [IsAdminUser]
+    serializer_class = CoinPurchaseConfirmSerializer
+
+    @extend_schema(
+        request=CoinPurchaseConfirmSerializer,
+        responses={
+            200: CoinPurchaseRequestSerializer,
+            400: OpenApiTypes.OBJECT,
+            404: OpenApiTypes.OBJECT,
+            409: OpenApiTypes.OBJECT,
+        },
+        description="Staff-only. Confirm a manual/admin-initiated top-up "
+        "(a CoinPurchaseRequest with no gateway on file) as success or failed. "
+        "Gateway-backed purchases are rejected here (409) — they must go "
+        "through the gateway webhook (/buy-coin/confirm/) instead.",
+    )
+    def post(self, request):
+        serializer = self.get_serializer(data=request.data)
+        if not serializer.is_valid():
+            return Response({
+                "status": False,
+                "message": "Validation failed.",
+                "errors": serializer.errors,
+            }, status=status.HTTP_400_BAD_REQUEST)
+
+        gateway_reference = serializer.validated_data["gateway_reference"]
+        outcome = serializer.validated_data["status"]
+
+        purchase = CoinPurchaseRequest.objects.filter(
+            gateway_reference=gateway_reference
+        ).first()
+        if purchase is None:
+            return Response({
+                "status": False,
+                "message": "Coin purchase request not found.",
+            }, status=status.HTTP_404_NOT_FOUND)
+
+        if purchase.gateway:
+            # See class docstring's scope restriction — a gateway-backed
+            # purchase must be confirmed by that gateway's own webhook,
+            # never by a staff member's say-so.
+            return Response({
+                "status": False,
+                "message": "This purchase has a gateway on file and must be "
+                "confirmed via the gateway webhook (/buy-coin/confirm/), not "
+                "the admin manual-confirm endpoint.",
+            }, status=status.HTTP_409_CONFLICT)
+
+        try:
+            if outcome == "success":
+                purchase = CoinPurchaseRequest.objects.confirm_success(
+                    gateway_reference=gateway_reference
+                )
+                message = "Coin purchase confirmed and wallet credited (manual admin action)."
+            else:
+                purchase = CoinPurchaseRequest.objects.mark_failed(
+                    gateway_reference=gateway_reference,
+                    reason=serializer.validated_data.get("failure_reason", ""),
+                )
+                message = "Coin purchase marked as failed (manual admin action)."
+        except ValueError as exc:
+            # Invalid state transition (e.g. failing an already-succeeded
+            # purchase) — same 409 shape BuyCoinConfirmView uses above.
+            return Response({
+                "status": False,
+                "message": str(exc),
+            }, status=status.HTTP_409_CONFLICT)
+
+        return Response({
+            "status": True,
+            "message": message,
+            "data": CoinPurchaseRequestSerializer(purchase).data,
+        }, status=status.HTTP_200_OK)
+
 
 # 🔥 TASK 4 — Withdraw-Coin flow
 # Mirror image of BuyCoinView/BuyCoinConfirmView above (money direction

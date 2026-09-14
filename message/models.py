@@ -949,6 +949,39 @@ class RevisionDeck(BaseModel):
             # stays an index hit instead of a table scan as decks grow.
             models.Index(fields=['conversation', 'session_id', 'content_hash', '-created_at']),
         ]
+        # 🔧 GAP FIX (G-7 follow-up) — `post()`'s "return the existing row
+        # instead of inserting a duplicate" check is a plain SELECT-then-
+        # INSERT: two "Generate" taps close enough together (double-tap,
+        # or two tabs) can both SELECT before either INSERT commits, and
+        # both find nothing, so both proceed to create — the exact
+        # duplicate-row bug this feature was built to prevent, just
+        # squeezed into a race window instead of the always-duplicate
+        # case. A DB-level constraint is the only thing that closes a
+        # SELECT-then-INSERT race for good — the app-level check above
+        # stays too (it saves the Gemini call on the common, non-racing
+        # path; the constraint is purely the last-line backstop for the
+        # concurrent case, enforced in `views_ai.py` via `IntegrityError`
+        # handling around the `create()` call).
+        #
+        # `condition=Q(content_hash__gt='')` — NOT a plain
+        # `unique_together` on the three fields — because every
+        # `RevisionDeck` row that predates the `content_hash` field
+        # defaults to `''`, and a conversation/session can legitimately
+        # already have several such blank-hash rows (one per old-style
+        # "Generate" tap, back when every tap always inserted). A
+        # non-conditional constraint would fail to migrate against that
+        # existing data, and would keep failing for any session with more
+        # than one blank-hash deck. Restricting the constraint to
+        # non-blank hashes exempts that legacy data entirely while still
+        # fully closing the race for every deck created after this field
+        # existed (which always have a real hash).
+        constraints = [
+            models.UniqueConstraint(
+                fields=['conversation', 'session_id', 'content_hash'],
+                condition=models.Q(content_hash__gt=''),
+                name='uniq_revisiondeck_conv_session_hash_nonblank',
+            ),
+        ]
 
     def __str__(self):
         return f"RevisionDeck({self.conversation_id}, {len(self.flashcards)} cards)"

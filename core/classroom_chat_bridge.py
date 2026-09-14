@@ -11,14 +11,21 @@ cross-app coupling isi ek file se guzarta hai — `liveclass/signals.py`,
 call karte hain (pehle 8 the — Task 5 ne `resolve_parent_from_token()`
 add ki, neeche dekho).
 
-🔧 Docstring fix: is module ke total **12** public entry points hain —
+🔧 Docstring fix: is module ke total **14** public entry points hain —
 functions 1-9 `liveclass` khud call karta hai, 10wa (`get_groups_for_
-classrooms()`) `message/views_parent.py` seedha call karta hai, aur naye
-11wa/12wa (`create_section_group()`/`provision_video_room()`, is pass me
-add kiye — campus/bridge.py's own STATUS note dekho) `campus/bridge.py`
-call karta hai. `resolve_parent_from_token()` khud renumbered ho gaya hai
-(ab #12, pehle #9 tha) taaki campus-facing functions liveclass-facing
-group ke saath (10/11) rahein, na ki unke beech me insert ho jaayein.
+classrooms()`) `message/views_parent.py` seedha call karta hai, aur
+11wa/12wa (`create_section_group()`/`provision_video_room()`, pehli pass
+me add kiye — campus/bridge.py's own STATUS note dekho) `campus/bridge.py`
+call karta hai. `resolve_parent_from_token()` ab **#14** hai (pehle #9,
+phir #12 tha).
+
+🔧 GAP FIX (TASK 14) — 13wa (`generate_campus_session_token()`) is pass
+me add hua: `provision_video_room()` sirf room ka naam deta tha, actual
+join-time token mint karne wala function missing tha (us function ka
+apna docstring yahi flag karta tha). `campus/views.py`'s naya `join`
+action ise seedha call karta hai — `campus/bridge.py` ke through nahi
+(us file ke current contents is pass me available nahi the, aur ye
+TASK 14 ke file list me bhi nahi thi).
 
 Module khud kabhi `message.models`/`message.services` ko seedha import
 nahi karta (sirf local imports, function ke andar). Isse:
@@ -588,7 +595,77 @@ def provision_video_room(live_session, actor):
 
 
 # ---------------------------------------------------------------------------
-# 12. resolve_parent_from_token() — Task 5, parent-portal auth
+# 13. generate_campus_session_token() — TASK 14
+#
+# Closes the exact gap `provision_video_room()`'s own docstring above
+# flagged: that function only *names* a room and deliberately never
+# mints a token (wrong identity, would go stale before anyone actually
+# joins — see its docstring for the full reasoning). This is the
+# "join this live session" counterpart, called fresh, per participant,
+# at actual join time, by campus/views.py's new `join` action.
+#
+# Kept here (not pushed onto `campus/bridge.py`) for the same "campus
+# never imports message/liveclass directly, this module is the only
+# door" reasoning every function above documents — `campus/views.py`
+# imports this function directly, same as `message/views_parent.py`
+# already imports `get_groups_for_classrooms()` directly rather than
+# through a per-caller wrapper (see that function's own comment above).
+# `campus/bridge.py` wasn't touched in this pass (not in TASK 14's file
+# list, and its current contents weren't available to check) — if a
+# later pass adds a thin `campus/bridge.py::generate_session_token()`
+# wrapper for consistency with `provision_video_room()`/
+# `create_section_group()`'s call style, this is what it should forward
+# to; nothing here needs to change for that.
+# ---------------------------------------------------------------------------
+def _display_name_for_token(user) -> str:
+    """Best-effort human-readable LiveKit participant name. This module
+    never assumes the real User model's exact shape (custom user models
+    vary — `get_full_name()` may not exist, `username` may not exist on
+    an email-as-username-field setup) — degrades through the friendliest
+    available option rather than raising or guessing a field name."""
+    full_name = user.get_full_name() if hasattr(user, "get_full_name") else ""
+    if full_name:
+        return full_name
+    return getattr(user, "username", None) or getattr(user, "email", None) or str(user.id)
+
+
+def generate_campus_session_token(room_name: str, user) -> str:
+    """
+    Mints a single-participant LiveKit join token for a campus live
+    session's room.
+
+    `room_name` — the `CampusLiveSession.room_id` that
+    `provision_video_room()` already generated and the caller already
+    has saved on the session; this function does no model I/O itself
+    and doesn't look it up — same "just names/tokens things, caller
+    owns persistence" posture `provision_video_room()` documents.
+
+    `user` — the participant actually joining (NOT necessarily the
+    session's teacher/scheduler) — the caller is responsible for
+    confirming `user` is allowed into this room (enrolled student,
+    assigned subject-teacher, class-teacher, or campus admin) *before*
+    calling this; minting a token is not itself an authorization check.
+
+    Raises `RuntimeError` if `LIVEKIT_API_KEY`/`LIVEKIT_API_SECRET`
+    aren't configured on this deployment — the same lazy check
+    `message.livekit_utils.generate_livekit_token()` itself performs.
+    Deliberately not caught here, so the caller (campus/views.py's
+    `join` action) can turn it into a clean 503 rather than a raw 500 —
+    same "let RuntimeError surface as-is" convention
+    `create_classroom_group()`/`create_section_group()` above already
+    follow for their own explicit-action (non-signal) callers.
+    """
+    from message.livekit_utils import generate_livekit_token  # local import — cross-app, same avoidance as every other import in this module
+
+    return generate_livekit_token(
+        room_name=room_name,
+        user_id=user.id,
+        user_name=_display_name_for_token(user),
+    )
+
+
+# ---------------------------------------------------------------------------
+# 14. resolve_parent_from_token() — Task 5, parent-portal auth
 # ---------------------------------------------------------------------------
 class ParentTokenResolution:
     """Lightweight result object — `liveclass/permissions.py`'s
