@@ -186,6 +186,47 @@
 >   missing hain, functionality nahi. Row aur closing paragraph dono ab
 >   sync kar diye is doc ke apne §7a ke saath.
 
+> **Reconciliation pass (newest — this update)**: sab 16 source files
+> (13 core `campus` files + 2 ad-hoc management commands + ye doc khud)
+> firse upload/verify huye. **Is baar koi naya structural drift nahi
+> mila** — har cheez jo pichli pass ne "FIXED"/"RESOLVED" mark ki thi,
+> wahi state code me confirmed maujood hai:
+> - `views.py::SectionViewSet.perform_create()` abhi bhi `bridge.
+>   create_section_group(...)` ko `try`/`except ValueError` ke andar
+>   call karta hai (pichli pass ka fix intact hai — koi regression
+>   nahi, section creation `201` deta rehta hai).
+> - `bridge.py` abhi bhi sab functions module-level hard-import ke
+>   saath fully wired hain (`create_section_group`/`notify`/
+>   `provision_video_room`/`resolve_parent_from_token`/
+>   `create_assigments`/`get_assigments_submissions`/`create_testseries`/
+>   `can_review_testseries_attempt`/`get_testseries_attempts`), `NotifTypes.
+>   CAMPUS_REWARD_EARNED` maujood hai.
+> - `services.py` me `compute_attendance_streak`/`compute_assigments_
+>   ontime_streak` dono real definitions ke saath maujood hain — F-3
+>   abhi bhi RESOLVED hai, dono streak Celery tasks crash nahi karte.
+> - `models.py` me `assigments`/`assigmentsSubmission` dono `[DEPRECATED —
+>   Task 11]` hain, `save()` `migration_write=True` ke bina `RuntimeError`
+>   deta hai — unchanged. `Campus.testseries_paid_allowed` field
+>   unchanged (§5a).
+> - `tests.py` me abhi bhi **70 tests** hain (same 20 test classes), aur
+>   `TestSeriesBridgeForceResetTests`'s teeno `@mock.patch(...)` targets
+>   abhi bhi `"campus.bridge.create_context_testseries"` hain (pichli
+>   pass ka mock-target fix intact) — dono management commands
+>   (`migrate_campus_assigmentss_to_unified`, `add_testseries_paid_
+>   allowed_field`) abhi bhi zero test coverage rakhte hain, jaisa §16/§17
+>   already flag karte hain.
+> - `tasks.py` (7 tasks), `views.py` (31 ViewSets/APIViews), `serializers.py`
+>   (30 serializers), aur `models.py` (28 models, `CampusBaseModel` ke
+>   alawa) ke class-level inventories doc ke §0/§23 se exact match karte
+>   hain — koi naya/hata hua model, view, ya serializer nahi mila.
+>
+> **Isliye is pass me koi content-section (§1-24) update nahi hui** —
+> sirf ye confirmation note add ki gayi hai ki doc abhi bhi code ke
+> against accurate hai. Agla real code change hote hi jis section me
+> wo change ho, wahi section (aur §0/§17/§23 jahan relevant ho) usi
+> commit me update honi chahiye — is doc ko stale hone se bachane ka
+> yehi tarika hai (§24, checklist item 9).
+
 > **Age se sach me sirf ye doc hi chalega** — koi bhi naya kaam isi doc ko
 > padhkar shuru karo aur isi doc ko update karke khatam karo; source files
 > dobara upload karne ki zaroorat nahi hai jab tak koi naya structural

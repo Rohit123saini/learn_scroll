@@ -1,6 +1,7 @@
 #post/views.py
 import os
 import re
+import uuid
 import logging
 import mimetypes
 from collections import Counter
@@ -9,20 +10,23 @@ from datetime import timedelta
 from django.db import transaction
 from django.db.models import Q, F, Case, When, IntegerField, FloatField, ExpressionWrapper
 from django.utils import timezone
+from django.utils.text import slugify
 from django.http import StreamingHttpResponse, Http404
 from django.conf import settings
 from django.contrib.auth import get_user_model
+from django.shortcuts import get_object_or_404
 
 from rest_framework import status, parsers, generics, filters
 from rest_framework.response import Response
 from rest_framework.views import APIView
+from rest_framework.decorators import api_view, permission_classes, parser_classes
 from rest_framework.permissions import IsAuthenticated, AllowAny
 from rest_framework.pagination import PageNumberPagination
 
 from drf_spectacular.utils import extend_schema, OpenApiParameter, OpenApiExample
 from drf_spectacular.types import OpenApiTypes
 
-from.models import Post, PostMedia, PostView, PostLike, PostSave, PostComment, Story, StoryView
+from.models import Post, PostMedia, PostView, PostLike, PostSave, PostComment, Story, StoryView, PostChunkedUpload
 from.serializers import (
     PostCreateSerializer,
     PostListSerializer,
@@ -34,8 +38,18 @@ from.serializers import (
     ReactionRequestSerializer,
 )
 from.signals import decrement_posts_count_on_soft_delete
-from.Services import notify_post_liked
+from.Services import notify_post_liked, save_uploaded_chunk, assemble_chunks, list_received_chunks, CHUNK_UPLOAD_MAX_SIZE
 from user_profile.models import Follow
+
+# TASK 4 — freesound_music_search's HTTP client. Guarded the same way
+# Services.py guards its `core` app import: if `requests` genuinely isn't
+# installed in some environment, the music-search endpoint degrades to a
+# clean 503 instead of an ImportError crashing this whole module (and
+# every other view in it) at import time.
+try:
+    import requests
+except ImportError:  # pragma: no cover - requests should be a real dependency
+    requests = None
 
 User = get_user_model()
 logger = logging.getLogger(__name__)
@@ -125,6 +139,150 @@ class PostCreateAPIView(APIView):
                 logger.error(f'Post creation failed: {e}', exc_info=True)
                 return Response({"success": False, "message": "Failed to create post"}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
         return Response({"success": False, "message": "Validation failed","errors": serializer.errors}, status=status.HTTP_400_BAD_REQUEST)
+
+# ===================== CATEGORY TAXONOMY (TASK 4) =====================
+# GET /post/categories/ — ApiService.getCategoryTaxonomy() (api_service.dart)
+# was already calling this exact path and reading response['data']; nothing
+# backing it existed, so both composers' category pickers 404'd on load.
+@api_view(['GET'])
+@permission_classes([AllowAny])
+@extend_schema(summary="Category / subcategory taxonomy", tags=["Post"])
+def category_taxonomy(request):
+    """Returns `Post.CATEGORY_CHOICES` (models.py) as JSON — the only
+    category taxonomy that actually exists in this app today, so this is
+    a straight passthrough, not a new source of truth.
+
+    ⚠️ Subcategories: the Flutter client (createPost / initPostChunkedUpload
+    in api_service.dart, and this function's own name) already sends and
+    expects a `subcategory` value plus a category→subcategory map, but
+    there is NO subcategory model, choices constant, or fixture anywhere
+    in this app — `Post` has no `subcategory` field at all (models.py).
+    This endpoint can't hand back a taxonomy that doesn't exist
+    server-side, so `subcategories` below is an empty-per-category stub,
+    shaped the way the client expects so it doesn't crash, not real data
+    — every category picker's subcategory dropdown will just show no
+    options until product decides the actual subcategory list and a real
+    `Post.subcategory` field (+ choices) gets added. That's the same gap
+    already flagged in models.py's PostChunkedUpload docstring and
+    serializers.py's PostCreateSerializer — one missing feature, not
+    three separate bugs — so wire all three up together.
+    """
+    categories = [{"value": value, "label": label} for value, label in Post.CATEGORY_CHOICES]
+    subcategories = {value: [] for value, _ in Post.CATEGORY_CHOICES}
+    return Response({
+        "success": True,
+        "data": {
+            "categories": categories,
+            "subcategories": subcategories,
+        },
+    })
+
+
+# ===================== FREESOUND MUSIC SEARCH (TASK 4) =====================
+# GET /post/music/search/?q=&page= — ApiService.searchFreesoundMusic()
+# (api_service.dart) was already calling this exact path; nothing backing
+# it existed, so the Music tab in media_edit_screen.dart/auto_edit_screen.dart
+# couldn't search. Thin server-side proxy so settings.FREESOUND_API_KEY
+# (already configured via the FREESOUND_API_KEY env var — settings.py)
+# never has to ship inside the app.
+FREESOUND_SEARCH_URL = "https://freesound.org/apiv2/search/text/"
+
+
+@api_view(['GET'])
+@permission_classes([AllowAny])
+@extend_schema(
+    summary="Search Freesound for CC0 music",
+    parameters=[
+        OpenApiParameter(name="q", type=OpenApiTypes.STR, required=True),
+        OpenApiParameter(name="page", type=OpenApiTypes.INT, required=False),
+    ],
+    tags=["Post"],
+)
+def freesound_music_search(request):
+    """Matches searchFreesoundMusic()'s contract exactly:
+    {"success", "data": {"results": [...]}}, each result
+    {id, name, artist, duration, preview_url, license, tags}.
+
+    Only CC0 ("Creative Commons 0" / public-domain) results are requested
+    from Freesound — per that Dart method's own comment ("sirf
+    CC0-licensed (copyright-free) results deta hai"). CC0 needs no
+    attribution, so it's the only license this app's Music tab can safely
+    let someone attach to a post without a credit-line feature to go
+    with it — anything else (CC-BY etc.) would need attribution UI this
+    app doesn't have yet.
+    """
+    if requests is None:
+        logger.error("Freesound search unavailable: the 'requests' package isn't installed")
+        return Response({"success": False, "message": "Music search unavailable"}, status=503)
+
+    api_key = getattr(settings, 'FREESOUND_API_KEY', None)
+    if not api_key:
+        return Response({"success": False, "message": "Music search is not configured"}, status=503)
+
+    query = (request.query_params.get('q') or '').strip()
+    if not query:
+        return Response({"success": False, "message": "q is required"}, status=400)
+
+    try:
+        page = int(request.query_params.get('page', 1))
+    except (TypeError, ValueError):
+        page = 1
+    page = max(page, 1)
+
+    try:
+        resp = requests.get(
+            FREESOUND_SEARCH_URL,
+            params={
+                'query': query,
+                'token': api_key,
+                'page': page,
+                # CC0 only — see docstring above for why.
+                'filter': 'license:"Creative Commons 0"',
+                'fields': 'id,name,username,duration,previews,license,tags',
+            },
+            timeout=8,
+        )
+    except requests.RequestException as e:
+        logger.error(f'Freesound search request failed: {e}')
+        return Response({"success": False, "message": "Music search unavailable"}, status=503)
+
+    if resp.status_code != 200:
+        logger.error(f'Freesound returned {resp.status_code}: {resp.text[:300]}')
+        return Response({"success": False, "message": "Music search failed"}, status=502)
+
+    try:
+        payload = resp.json()
+    except ValueError:
+        logger.error('Freesound returned non-JSON response')
+        return Response({"success": False, "message": "Music search failed"}, status=502)
+
+    results = []
+    for item in payload.get('results', []):
+        previews = item.get('previews') or {}
+        preview_url = previews.get('preview-hq-mp3') or previews.get('preview-lq-mp3')
+        results.append({
+            "id": item.get('id'),
+            "name": item.get('name'),
+            "artist": item.get('username'),
+            "duration": item.get('duration'),
+            "preview_url": preview_url,
+            "license": "CC0",
+            "tags": item.get('tags') or [],
+        })
+
+    return Response({
+        "success": True,
+        "data": {
+            "results": results,
+            "count": payload.get('count', len(results)),
+            # Freesound's own `next` is a full API URL (with the token in
+            # it) — never pass that through to the client. Just tell it
+            # whether another page exists; it already knows how to ask
+            # for `page + 1` itself (searchFreesoundMusic's `page` param).
+            "next_page": (page + 1) if payload.get('next') else None,
+        },
+    })
+
 
 # ===================== HOME FEED =====================
 class HomeFeedView(generics.ListAPIView):
@@ -249,6 +407,190 @@ class PostDeleteAPIView(APIView):
         decrement_posts_count_on_soft_delete(post)
 
         return Response({"success": True, "message": "Post deleted"}, status=status.HTTP_204_NO_CONTENT)
+
+
+# ===================== CHUNKED UPLOAD — POST (TASK 3 / TASK 4) =====================
+# Fixes the 404: api_service.dart's initPostChunkedUpload/
+# completePostChunkedUpload hit /post/chunked/init/ and /post/chunked/
+# complete/, and getChunkedUploadStatus hits /post/chunked/status/<id>/ —
+# none of these routes existed before this (see urls.py). This is Option B
+# from the task: dedicated post routes/views, backed by their own
+# `PostChunkedUpload` model (models.py) rather than overloading the
+# comment-shaped `ChunkedUpload`, sharing the actual chunk-storage
+# mechanics with the comment flow via Services.save_uploaded_chunk /
+# assemble_chunks / list_received_chunks / CHUNK_UPLOAD_MAX_SIZE.
+#
+# The chunk-upload step itself is NOT duplicated here on purpose:
+# api_service.dart's uploadPostChunk() deliberately posts to the existing
+# /post/comment/chunked/chunk/ route (comment_view.py's
+# chunked_upload_chunk, now updated to look up either ChunkedUpload or
+# PostChunkedUpload by upload_id) — see that file's own comment on why.
+# Only init/complete/status are post-specific, because only they touch
+# post-creation fields.
+
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+@parser_classes([parsers.JSONParser, parsers.MultiPartParser, parsers.FormParser])
+def post_chunked_upload_init(request):
+    """Start a chunked (large-video) post upload. Stores the post-creation
+    payload (title/content/category/... — same fields api_service.dart's
+    non-chunked createPost() sends) on a PostChunkedUpload row, to be
+    applied once the chunks are assembled in post_chunked_upload_complete.
+    """
+    try:
+        file_name = request.data.get('file_name')
+        total_chunks = int(request.data.get('total_chunks', 0))
+        total_size = int(request.data.get('total_size', 0))
+
+        if not file_name or total_chunks == 0 or total_size == 0:
+            return Response({"error": "file_name, total_chunks, total_size required"}, status=400)
+
+        if total_size > CHUNK_UPLOAD_MAX_SIZE:
+            return Response({"error": "File too large. Max 4GB allowed"}, status=400)
+
+        hashtags = request.data.get('hashtags')
+        if not isinstance(hashtags, list):
+            hashtags = []
+        location = request.data.get('location')
+        if not isinstance(location, dict):
+            location = {}
+
+        upload_id = str(uuid.uuid4())
+        PostChunkedUpload.objects.create(
+            upload_id=upload_id,
+            file_name=file_name,
+            total_chunks=total_chunks,
+            total_size=total_size,
+            user=request.user,
+            title=request.data.get('title') or '',
+            content=request.data.get('content') or '',
+            category=request.data.get('category') or 'general',
+            post_type=request.data.get('post_type') or 'video',
+            visibility=request.data.get('visibility') or 'public',
+            hashtags=hashtags,
+            location=location,
+            media_caption=request.data.get('media_caption') or '',
+            media_type=request.data.get('media_type') or '',
+        )
+        os.makedirs(os.path.join(settings.MEDIA_ROOT, 'temp_chunks', upload_id), exist_ok=True)
+        return Response({"upload_id": upload_id, "message": "Ready for chunks"}, status=200)
+    except Exception as e:
+        logger.error(f'post_chunked_upload_init failed: {e}', exc_info=True)
+        return Response({"error": str(e)}, status=400)
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def post_chunked_upload_status(request, upload_id):
+    """TASK 4 — tells the client which chunks the server already has, so
+    ApiService.createPostWithChunkedUpload can resume an interrupted
+    upload by only re-sending the missing ones instead of starting over.
+    """
+    upload = get_object_or_404(PostChunkedUpload, upload_id=upload_id, user=request.user)
+    return Response({
+        "upload_id": upload.upload_id,
+        "is_completed": upload.is_completed,
+        "total_chunks": upload.total_chunks,
+        "received_chunks": list_received_chunks(upload.upload_id),
+    })
+
+
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+@parser_classes([parsers.JSONParser, parsers.MultiPartParser, parsers.FormParser])
+@transaction.atomic
+def post_chunked_upload_complete(request):
+    """Assemble the uploaded chunks into the final video file and create
+    the Post + its single PostMedia row from the payload captured at
+    init() time. Response shape matches PostCreateAPIView.post()
+    ({"success", "message", "data"}, 201) since
+    ApiService.completePostChunkedUpload reads `data['message']` on
+    failure the same way the non-chunked create path's error does.
+    """
+    try:
+        upload_id = request.data.get('upload_id')
+        if not upload_id:
+            return Response({"success": False, "message": "upload_id required"}, status=400)
+
+        upload = get_object_or_404(PostChunkedUpload, upload_id=upload_id, user=request.user)
+        if upload.is_completed:
+            # Guards against a double-tap/retry re-creating a second Post
+            # for the same upload — the client's own resume logic checks
+            # is_completed via the status endpoint first, but that's a
+            # separate request/race, not a guarantee.
+            return Response({"success": False, "message": "Upload already completed"}, status=400)
+
+        final_dir = os.path.join(
+            settings.MEDIA_ROOT, 'posts',
+            str(timezone.now().year), f"{timezone.now().month:02d}", f"{timezone.now().day:02d}",
+        )
+        final_file_name = f"{uuid.uuid4()}_{upload.file_name}"
+        try:
+            final_path = assemble_chunks(upload.upload_id, upload.total_chunks, final_dir, final_file_name)
+        except FileNotFoundError as e:
+            return Response({"success": False, "message": str(e)}, status=400)
+
+        relative_path = os.path.relpath(final_path, settings.MEDIA_ROOT)
+
+        # Same hashtag extraction + normalization PostCreateSerializer.create()
+        # does for the non-chunked path (serializers.py) — kept identical so
+        # a chunked video post's tags are searchable the same way a regular
+        # post's are (HashtagPostsAPIView / TrendingHashtagsAPIView both
+        # match on normalized, lowercase, no-'#' tags).
+        hashtags = upload.hashtags or []
+        if not hashtags and upload.content:
+            hashtags = re.findall(r"#(\w+)", upload.content)
+        seen = []
+        for tag in hashtags:
+            normalized = tag.strip().lstrip('#').lower()
+            if normalized and normalized not in seen:
+                seen.append(normalized)
+        hashtags = seen
+
+        base_text = upload.title or (upload.content[:50] if upload.content else '') or str(uuid.uuid4())[:8]
+        slug = slugify(base_text)[:200] or uuid.uuid4().hex[:8]
+        if Post.objects.filter(slug=slug).exists():
+            slug = f"{slug}-{uuid.uuid4().hex[:6]}"
+
+        post = Post.objects.create(
+            user=request.user,
+            title=upload.title or None,
+            content=upload.content,
+            category=upload.category or 'general',
+            post_type=upload.post_type or 'video',
+            visibility=upload.visibility or 'public',
+            hashtags=hashtags,
+            location=upload.location or {},
+            slug=slug,
+        )
+
+        media_type = upload.media_type or 'video'
+        if media_type not in dict(PostMedia.MEDIA_TYPE_CHOICES):
+            media_type = 'video'
+        mime_type = 'video/mp4' if media_type == 'video' else 'application/octet-stream'
+
+        PostMedia.objects.create(
+            post=post,
+            media_type=media_type,
+            file=relative_path,
+            file_name=upload.file_name,
+            file_size_bytes=upload.total_size,
+            mime_type=mime_type,
+            display_order=0,
+        )
+
+        upload.is_completed = True
+        upload.save(update_fields=['is_completed'])
+
+        logger.info(f'Post created via chunked upload: {post.id} by {request.user.id}')
+        output_serializer = PostCreateSerializer(post, context={'request': request})
+        return Response(
+            {"success": True, "message": "Post created successfully", "data": output_serializer.data},
+            status=status.HTTP_201_CREATED,
+        )
+    except Exception as e:
+        logger.error(f'post_chunked_upload_complete failed: {e}', exc_info=True)
+        return Response({"success": False, "message": "Failed to create post"}, status=500)
 
 
 # ===================== STORIES =====================
@@ -474,7 +816,86 @@ class PostReactionAPIView(APIView):
 
 from django.shortcuts import get_object_or_404
 
-# ===================== POST SAVE / UNSAVE TOGGLE =====================
+# ===================== BULK POST COUNTS (polling) =====================
+# NEW — SujhaavFayda1 item 2 ("feed zinda feel"). PostReactionAPIView's GET
+# above returns counts for ONE post; the Flutter feed polls this instead so
+# a screenful of ~10-20 visible posts costs one request, not one-per-post.
+#
+# NOTE: if this project's `message` app already has Django Channels set up
+# (asgi.py routing + consumers.py), a WebSocket push would be strictly
+# better than polling here — this was built as REST polling because no
+# Channels routing was present in the files reviewed for this pass. Share
+# the message app's consumers.py/routing.py and this can be swapped for a
+# real subscription instead.
+class PostCountsAPIView(APIView):
+    permission_classes = [AllowAny]
+
+    @extend_schema(
+        summary="Bulk post reaction/comment counts (polling)",
+        description="Comma-separated `ids` query param — returns just the "
+                     "reaction + comment counts for those posts, capped at "
+                     "100 ids per call.",
+        parameters=[OpenApiParameter(name="ids", type=OpenApiTypes.STR, required=True)],
+        responses={200: OpenApiTypes.OBJECT},
+        tags=["Post Reactions"],
+    )
+    def get(self, request):
+        raw_ids = request.query_params.get('ids', '')
+        ids = [i.strip() for i in raw_ids.split(',') if i.strip()]
+        if not ids:
+            return Response({"results": []})
+        # This is a lightweight polling endpoint, not a feed replacement —
+        # cap it so a misbehaving client can't turn it into one.
+        ids = ids[:100]
+        posts = Post.objects.filter(id__in=ids).values(
+            'id', 'comments_count', 'likes_count',
+            'like_count', 'confuse_count', 'wrong_count', 'imp_count', 'explain_count',
+        )
+        results = [
+            {
+                "id": str(p['id']),
+                "comments_count": p['comments_count'],
+                "counts": {
+                    "like": p['like_count'],
+                    "confuse": p['confuse_count'],
+                    "wrong": p['wrong_count'],
+                    "imp": p['imp_count'],
+                    "explain": p['explain_count'],
+                    "total": p['likes_count'],
+                },
+            }
+            for p in posts
+        ]
+        return Response({"results": results})
+
+
+# ===================== FEED AD/INTERSTITIAL CONFIG =====================
+# NEW — SujhaavFayda1 item 3. kAdEveryPosts / kInterstitialEveryPosts used
+# to be hardcoded Dart consts — changing the cadence meant an app release.
+# The client now fetches this once per session and falls back to its own
+# hardcoded defaults if the call fails.
+#
+# Reads from settings for now (override per-environment via env vars,
+# still needs a process restart to change — NOT true hot A/B testing). For
+# real without-a-release A/B testing, swap the body of get() for a lookup
+# against an admin-editable model, django-waffle, or whatever feature-flag
+# service this project standardizes on — no such model was in the files
+# reviewed for this pass, so it wasn't guessed at here.
+class FeedAdConfigAPIView(APIView):
+    permission_classes = [AllowAny]
+
+    @extend_schema(
+        summary="Feed ad/interstitial cadence config",
+        responses={200: OpenApiTypes.OBJECT},
+        tags=["Post Feed"],
+    )
+    def get(self, request):
+        return Response({
+            "ad_every_posts": getattr(settings, "FEED_AD_EVERY_POSTS", 5),
+            "interstitial_every_posts": getattr(settings, "FEED_INTERSTITIAL_EVERY_POSTS", 18),
+        })
+
+
 class PostSaveToggleAPIView(APIView):
     permission_classes = [IsAuthenticated]
 

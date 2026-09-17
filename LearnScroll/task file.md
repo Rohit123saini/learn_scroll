@@ -1,59 +1,24 @@
 
 
-### TASK 31 — Reconcile `user_profile.UserPreference.for_user()` vs `core.NotificationPreference`
-**Problem:** Built as a "reasonable guess" at matching `core.NotificationPreference`'s pattern, never confirmed since `core/models.py` wasn't in that app's upload.
-**Fix:** Diff both directly; align classmethod name / get-or-create keying / default-population behavior if they differ.
-**Files:** `user_profile/models.py`, `core/models.py` (verify)
 
 
-
-### TASK 33 — Confirm `core.services.create_bulk_notifications()` signature matches all callers
-**Problem:** `testseries/tasks.py::notify_followers_new_testseries()` assumes a specific signature (`recipient_ids, notif_type, title, message, data=...`), reused from `post`/`liveclass`'s equivalent fan-outs but not independently re-verified for `testseries` specifically.
-**Fix:** Direct diff against `core/services.py`.
-**Files:** `testseries/tasks.py`, `core/services.py` (verify)
-
-### TASK 34 — Reconcile duplicate `comments_count`/`replies_count` bookkeeping (post)
-**Problem:** `CommentDeleteAPIView` and the `update_comments_count` signal both adjust the count on delete — harmless but doubled work. Separately, `CommentHideAPIView`'s manual adjustment is load-bearing (the signal doesn't know about `is_hidden`) — do not remove it without updating the signal too.
-**Fix:** Remove the redundant adjustment in `CommentDeleteAPIView` OR the signal (pick one owner), leave `CommentHideAPIView`'s manual adjustment untouched.
-**Files:** `post/views.py` (or `comment_view.py`), `post/signals.py`
-
-### TASK 35 — Add `TestSeriesReviewAdmin`
-**Problem:** Reviews aren't editable/inspectable from Django admin yet.
-**Files:** `testseries/admin.py`
-
-### TASK 36 — Notify student when a new pending parent-device request exists (message)
-**Problem:** `ParentPendingRequestsView` is the only way to discover a pending parent-device-approval request — no push/in-app notification tells the student one exists; they'd have to think to poll it.
-**Files:** `message/views_parent.py`, `message/services.py`
 
 ---
 
 ## ⚪ PHASE 3 — Low priority: polish, ops tuning, product decisions
 
-### TASK 37 — Move `user_profile.fraud` rate-limit constants to Django settings
-Currently hardcoded (`EARN_RATE_LIMIT_WINDOW`/`_MAX_TRANSACTIONS`/`_MAX_COINS`) in `fraud.py`. Move to settings once there's real production signal to tune against.
-**Files:** `user_profile/fraud.py`, `LearnScroll/settings.py`
 
 ### TASK 38 — Add `MIN_WITHDRAWAL_COINS` floor, `reviewed_by`, INR-conversion snapshot to `CoinWithdrawalRequest`
 Deliberately deferred; `liveclass.CoinWithdrawal` already has all three. Add once an admin-facing withdrawal review UI is built.
 **Files:** `user_profile/models.py`, migration
 
-### TASK 39 — Use Django's `UserAdmin` for the custom `User` model (login)
-Optional UX improvement — current registration doesn't use the built-in nicer admin.
-**Files:** `login/admin.py`
 
-### TASK 40 — Reconcile `message/cleanup_expired_messages.py` vs the Celery beat task
-Both do the same hard-delete sweep (1000/batch vs 500/batch) — confirm the management command isn't also cron-scheduled (redundant with Celery beat), and align batch sizes if they're meant to be interchangeable.
-**Files:** `message/management/commands/cleanup_expired_messages.py`, `message/tasks.py`
 
-### TASK 41 — Decide on `generate_revision_deck`'s cache-hit-still-inserts-a-row behavior (message)
-A 24h content-hash cache hit still creates a fresh `RevisionDeck` row — saves the Gemini API call but not the duplicate-row creation. Confirm this is intended vs. should return the existing recent row instead.
-**Files:** `message/views_ai.py`
 
-### TASK 42 — Product decision: platform fee/commission on `testseries` sales
-Currently 100% of `price_coins` goes to the creator, no cut. Separate pricing/business decision, not a bug.
 
-### TASK 43 — Product decision: per-follower notification opt-out for fan-out notifications
-`post`, `liveclass`, and `testseries`'s "new content from someone you follow" fan-outs all notify every follower unconditionally (no per-follower mute/opt-in yet). Consistent MVP trade-off across three apps — worth revisiting together if/when a real notification-preferences feature ships.
+
+
+
 
 ### TASK 44 — Adopt `NotificationQuerySet.for_user()`/`.unread()` convenience methods (core)
 Available but unused — `views.py`/`tests.py` still use manual `.filter(...)`. Cosmetic, not a bug.

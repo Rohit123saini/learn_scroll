@@ -30,8 +30,10 @@ from .comment_view import (
 )
 from .views import (
     ExploreFeedAPIView,
+    FeedAdConfigAPIView,
     HashtagPostsAPIView,
     HomeFeedView,
+    PostCountsAPIView,
     PostCreateAPIView,
     PostDeleteAPIView,
     PostDetailAPIView,
@@ -44,19 +46,54 @@ from .views import (
     StoryViewAPIView,
     TrendingHashtagsAPIView,
     serve_media_with_range,
+    # TASK 3/4 — dedicated post chunked-upload routes (see views.py's own
+    # comment on why these are separate from the comment chunked-upload
+    # functions, and why the chunk-upload step itself is NOT among these).
+    post_chunked_upload_init,
+    post_chunked_upload_complete,
+    post_chunked_upload_status,
+    # TASK 4 — category taxonomy + Freesound music search proxy.
+    category_taxonomy,
+    freesound_music_search,
 )
 
 urlpatterns = [
     path("create/", PostCreateAPIView.as_view(), name="post-create"),
     path("list/", PostListAPIView.as_view(), name="post-list"),
     path("details/<uuid:id>/", PostDetailAPIView.as_view(), name="post-detail"),
+    # TASK 4 — composer category/subcategory pickers were calling this
+    # already; nothing existed to answer it. See category_taxonomy's own
+    # docstring (views.py) for the subcategory-data caveat.
+    path("categories/", category_taxonomy, name="post-categories"),
+    # TASK 4 — Music tab (media_edit_screen.dart / auto_edit_screen.dart)
+    # search, proxied server-side so FREESOUND_API_KEY never ships in the app.
+    path("music/search/", freesound_music_search, name="post-music-search"),
     # NEW — checklist item 57 ("create/list/delete Post") had no delete
     # route anywhere before this; soft-delete, author-or-staff.
     path("<uuid:id>/delete/", PostDeleteAPIView.as_view(), name="post-delete"),
     path("feed/", HomeFeedView.as_view(), name="home-feed"),
     path("like/<uuid:post_id>/reaction/", PostReactionAPIView.as_view(), name="post-reaction"),
+    # NEW — SujhaavFayda1 item 2: bulk counts polling for currently-loaded
+    # feed posts (see PostCountsAPIView docstring for the WebSocket note).
+    path("counts/", PostCountsAPIView.as_view(), name="post-counts"),
     path("<uuid:post_id>/save/", PostSaveToggleAPIView.as_view(), name="post-save-toggle"),
     path("saved/", SavedPostsListAPIView.as_view(), name="saved-posts-list"),
+
+    # TASK 3 — chunked (large-video) post upload. Fixes api_service.dart's
+    # initPostChunkedUpload/completePostChunkedUpload hitting these exact
+    # paths and 404ing because they never existed before. Chunk upload
+    # itself intentionally stays on the comment/chunked/chunk/ route below
+    # (see views.py's post_chunked_upload_init comment) — only init/
+    # complete/status are post-specific.
+    path("chunked/init/", post_chunked_upload_init, name="post-chunked-init"),
+    path("chunked/complete/", post_chunked_upload_complete, name="post-chunked-complete"),
+    # TASK 4 — resume-status endpoint api_service.dart's
+    # getChunkedUploadStatus() already calls; previously missing entirely.
+    path("chunked/status/<str:upload_id>/", post_chunked_upload_status, name="post-chunked-status"),
+
+    # NEW — SujhaavFayda1 item 3: feed ad/interstitial cadence, backend-driven
+    # instead of hardcoded Dart consts.
+    path("feed/ad-config/", FeedAdConfigAPIView.as_view(), name="feed-ad-config"),
 
     # NEW — hashtag discovery + explore/discover surface. Overview
     # table lists "Hashtag" and "Explore-content" as core responsibilities

@@ -302,6 +302,37 @@ class ClassSessionSerializer(serializers.ModelSerializer):
 
 
 # ---------------------------------------------------------------------------
+# NEW (Home Module Task 3 — "Live Now" row). Deliberately NOT
+# ClassSessionSerializer: this is a cross-classroom card feed
+# (ClassSessionViewSet.live_now(), see views.py) shown on the home screen
+# for classrooms the caller isn't necessarily currently viewing, so it
+# carries none of the internal-detail fields (whiteboard_snapshot,
+# spotlight_identity, recording_url, is_recording) ClassSessionSerializer
+# exposes for someone already inside one specific classroom's screens —
+# same "lightweight nested summary vs full serializer" reasoning as
+# ClassroomMiniSerializer's own docstring above.
+#
+# classroom -> ClassroomMiniSerializer (id/title/subject/cover_image/
+# teacher) is already exactly the "card" shape this needs — reused as-is
+# instead of hand-picking the same four fields a second time.
+#
+# participant_count reads off `live_participant_count`, which
+# ClassSessionViewSet.live_now() annotates onto the queryset as
+# `session.participants.filter(left_at__isnull=True).count()` — the same
+# "currently in the room" definition every join/leave/kick capacity check
+# in views.py already uses (see e.g. _perform_join's current_count), not
+# a fresh definition invented for this card.
+# ---------------------------------------------------------------------------
+class LiveNowSessionSerializer(serializers.ModelSerializer):
+    classroom = ClassroomMiniSerializer(read_only=True)
+    participant_count = serializers.IntegerField(source="live_participant_count", read_only=True)
+
+    class Meta:
+        model = ClassSession
+        fields = ["id", "classroom", "room_id", "actual_start", "participant_count"]
+
+
+# ---------------------------------------------------------------------------
 # NEW (Pass 14 — post-session engagement report, audit priority #1). Read-
 # only shape of the dict ClassSession.compute_engagement_report() returns /
 # that gets persisted onto ClassSession.engagement_report (see models.py).

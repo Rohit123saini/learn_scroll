@@ -2945,6 +2945,43 @@ class StudentReportCard(models.Model):
     classroom = models.ForeignKey(Classroom, on_delete=models.CASCADE, related_name="report_cards")
     student = models.ForeignKey(User, on_delete=models.CASCADE, related_name="report_cards")
 
+    # [FIX] StudentReportCardSerializer (liveclass/serializers.py) has
+    # always listed `created_by` in both `fields` and `read_only_fields`
+    # — its own comment there says it's server-set, same as
+    # LivePoll.created_by / Coupon.created_by / ClassHoliday.created_by
+    # elsewhere in this file — but this model never actually had the
+    # column, which is what crashed drf-spectacular's schema generation
+    # (`ImproperlyConfigured: Field name 'created_by' is not valid for
+    # model 'StudentReportCard'`). Not a serializer bug to work around;
+    # this field was simply missed when the model itself was added late
+    # (see this model's own GAP FIX comment above — it was added only to
+    # unblock message/views_parent.py's import).
+    #
+    # NOT copied verbatim from LivePoll/Coupon/ClassHoliday's
+    # `created_by` (those are `on_delete=CASCADE`, required) — this
+    # table already has existing rows (confirmed by `makemigrations`
+    # refusing a non-nullable AddField without a default), and there's
+    # no way to know who actually created any of them after the fact.
+    # Backfilling with a fake default (e.g. some placeholder admin user)
+    # would be worse than null — it would silently attribute old report
+    # cards to the wrong person. So this is nullable + SET_NULL, same
+    # reasoning `reviewed_by`/`banned_by`-style fields elsewhere use for
+    # "optional, and a deleted user shouldn't cascade-delete history"
+    # rather than a hard requirement from day one. New rows going
+    # forward should still always get this set —
+    # `parent_link_views.ReportCardViewSet.perform_create()` is expected
+    # to pass `created_by=self.request.user`, same as
+    # `ClassHolidayViewSet.perform_create()` already does for
+    # `ClassHoliday.created_by` — null here is a backfill accommodation
+    # for old rows, not a green light to skip setting it on new ones.
+    created_by = models.ForeignKey(
+        User,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="report_cards_created",
+    )
+
     # e.g. "October 2026", "Term 1", "Week 12" — teacher-defined free text,
     # not a structured date range, since reporting cadence varies per
     # classroom/subject.

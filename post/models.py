@@ -57,6 +57,15 @@ class Post(models.Model):
     title = models.CharField(max_length=300, blank=True, null=True)
     category = models.CharField(max_length=100, choices=CATEGORY_CHOICES, default='general',
                                 db_index=True)  # 🔥 Category field
+    # TASK 5 — subcategory the composer (new_post.dart) picks from the
+    # dynamic `category_subcategory_map` served by the taxonomy endpoint
+    # (see api_service.dart's getCategoryTaxonomy()). Deliberately a plain
+    # CharField, NOT `choices=` — the valid (category -> [subcategory,...])
+    # set lives in that taxonomy source and can grow without a migration;
+    # hardcoding a choices list here would fight that and go stale. Cross-
+    # field validation ("is this subcategory actually valid for this
+    # category") belongs in PostCreateSerializer.validate(), not the model.
+    subcategory = models.CharField(max_length=100, blank=True, null=True, db_index=True)
 
     # Post Type
     post_type = models.CharField(max_length=20, choices=POST_TYPE_CHOICES, default='text', db_index=True)
@@ -98,7 +107,18 @@ class Post(models.Model):
     created_at = models.DateTimeField(auto_now_add=True, db_index=True)
     updated_at = models.DateTimeField(auto_now=True)
     deleted_at = models.DateTimeField(blank=True, null=True)
-    published_at = models.DateTimeField(blank=True, null=True)  # For scheduled posts
+    # TASK 5 — this field already existed ("For scheduled posts") but
+    # nothing ever set it; new_post.dart's `scheduledAt` now maps straight
+    # onto it (PostCreateSerializer's `scheduled_at` field has
+    # `source='published_at'`), so no new datetime column was needed.
+    published_at = models.DateTimeField(blank=True, null=True, db_index=True)
+    # 🔥 NEW — explicit flag rather than inferring "scheduled" from
+    # `published_at > now()` at query time. A boolean + index lets the
+    # publish sweep (Celery beat task, see PostCreateSerializer's
+    # docstring note) do `filter(is_scheduled=True, published_at__lte=now)`
+    # directly, and lets feed queries do `exclude(is_scheduled=True)`
+    # without recomputing "is this in the future" per row.
+    is_scheduled = models.BooleanField(default=False, db_index=True)
 
     class Meta:
         db_table = 'posts'
@@ -107,11 +127,39 @@ class Post(models.Model):
             models.Index(fields=['-created_at', 'is_deleted']),
             models.Index(fields=['user', '-created_at']),
             models.Index(fields=['category', '-created_at']),
+            models.Index(fields=['category', 'subcategory', '-created_at']),
             models.Index(fields=['-likes_count', '-created_at']),  # For trending
+            models.Index(fields=['is_scheduled', 'published_at']),  # For the publish sweep
         ]
 
     def __str__(self):
         return f"{self.user.username} - {self.category} - {self.created_at}"
+
+    @property
+    def is_due_for_publish(self):
+        """True once a scheduled post's time has arrived. Used by the
+        publish sweep task and can double as a defensive check anywhere a
+        scheduled Post might otherwise leak into a feed query that forgot
+        to filter on `is_scheduled`."""
+        return self.is_scheduled and bool(self.published_at) and self.published_at <= timezone.now()
+
+    # ⚠️ FOLLOW-UP REQUIRED OUTSIDE THIS FILE (not in scope of the files
+    # provided for this task, flagging so it isn't silently forgotten):
+    #   1. Every feed/listing queryset in views.py (home feed, category
+    #      feed, profile feed, hashtag feed, trending, ...) needs
+    #      `.exclude(is_scheduled=True)` — or, equivalently,
+    #      `.filter(Q(is_scheduled=False) | Q(published_at__lte=now()))` —
+    #      or a scheduled post is publicly visible the instant it's
+    #      created, which defeats the whole feature. The post's own
+    #      author should still be able to see/edit it before publish
+    #      (e.g. a "scheduled" tab), so this is a feed-level exclusion,
+    #      not a moderation_status-style global one.
+    #   2. A periodic task (Celery beat, same pattern as
+    #      `post.tasks.generate_video_thumbnail`) should run
+    #      `Post.objects.filter(is_scheduled=True, published_at__lte=now())
+    #      .update(is_scheduled=False)` on a short interval (e.g. every
+    #      minute) so posts actually go live at their scheduled time
+    #      instead of just being *eligible* to per (1) forever.
 
 
 class PostMedia(models.Model):
@@ -137,6 +185,12 @@ class PostMedia(models.Model):
         )]
     )
     thumbnail = models.ImageField(upload_to='posts/thumbnails/%Y/%m/%d/', blank=True, null=True)
+    # TASK 5 — per-attachment caption. new_post.dart collects one caption
+    # per attachment (`attachment.caption`) and api_service.dart sends the
+    # whole list as `media_captions` (JSON-encoded, same order/index as
+    # `media_files`) — this is where PostCreateSerializer.create() now
+    # writes caption[i] onto media row i.
+    caption = models.CharField(max_length=500, blank=True, default='')
     file_name = models.CharField(max_length=500)
     file_size_bytes = models.BigIntegerField()
     mime_type = models.CharField(max_length=100)
@@ -168,6 +222,100 @@ class PostMedia(models.Model):
 
     def __str__(self):
         return f"{self.media_type} - {self.file_name}"
+
+
+# ---------------------------------------------------------------------------
+# TASK 5 — real poll support.
+#
+# new_post.dart already has full poll-composer UI (2-4 options, dedupe/
+# empty checks) and sends it as `poll_options`: a JSON list of
+# `{"text": ..., "votes": 0}` dicts. `Post.metadata` (a bare JSONField)
+# could technically hold this, but that would mean no per-option vote
+# counting, no "did this user already vote" enforcement, and no way to
+# query/aggregate polls — all real requirements once voting is wired up,
+# not just storage for what the composer submits once at create time. A
+# proper one-poll-per-post + many-options + many-votes shape, same
+# id/FK/db_table conventions as the rest of this file, gets us all three
+# without a follow-up migration the first time voting is built.
+# ---------------------------------------------------------------------------
+class PostPoll(models.Model):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    post = models.OneToOneField(Post, on_delete=models.CASCADE, related_name='poll')
+    # Not currently sent by the client (new_post.dart has no expiry UI
+    # yet) — nullable/optional so it's ready without blocking on that.
+    expires_at = models.DateTimeField(blank=True, null=True)
+    # Denormalized sum of all options' votes_count, same pattern as
+    # Post.shares_count/saves_count above — kept in sync by
+    # sync_poll_vote_counts() below rather than aggregated on every read.
+    total_votes_count = models.PositiveIntegerField(default=0)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = 'post_polls'
+
+    def __str__(self):
+        return f"Poll on {self.post_id}"
+
+    @property
+    def is_expired(self):
+        return bool(self.expires_at) and timezone.now() >= self.expires_at
+
+
+class PostPollOption(models.Model):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    poll = models.ForeignKey(PostPoll, on_delete=models.CASCADE, related_name='options')
+    text = models.CharField(max_length=200)
+    votes_count = models.PositiveIntegerField(default=0)
+    display_order = models.PositiveIntegerField(default=0)
+
+    class Meta:
+        db_table = 'post_poll_options'
+        ordering = ['display_order']
+        indexes = [
+            models.Index(fields=['poll', 'display_order']),
+        ]
+
+    def __str__(self):
+        return self.text
+
+
+class PostPollVote(models.Model):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    poll = models.ForeignKey(PostPoll, on_delete=models.CASCADE, related_name='votes')
+    option = models.ForeignKey(PostPollOption, on_delete=models.CASCADE, related_name='votes')
+    user = models.ForeignKey(User, on_delete=models.CASCADE, related_name='poll_votes')
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = 'post_poll_votes'
+        # One vote per user per poll — standard single-choice poll
+        # behavior (matches new_post.dart's UI, which is single-select).
+        # Re-voting means changing `option` on the existing row, not
+        # inserting a second one; the voting endpoint (not in scope of
+        # this task's files) should do get-or-update, not get_or_create.
+        unique_together = ['poll', 'user']
+        indexes = [
+            models.Index(fields=['option']),
+        ]
+
+
+@receiver(post_save, sender=PostPollVote)
+@receiver(post_delete, sender=PostPollVote)
+def sync_poll_vote_counts(sender, instance, **kwargs):
+    """Same shape as update_shares_count/update_saves_count further down:
+    recompute the denormalized counters from the real rows on every
+    vote/unvote/re-vote, rather than trying to +1/-1 in the view (which
+    would double-count on a changed vote unless done very carefully)."""
+    option_ids = list(
+        PostPollOption.objects.filter(poll_id=instance.poll_id).values_list('id', flat=True)
+    )
+    for option_id in option_ids:
+        PostPollOption.objects.filter(id=option_id).update(
+            votes_count=PostPollVote.objects.filter(option_id=option_id).count()
+        )
+    PostPoll.objects.filter(id=instance.poll_id).update(
+        total_votes_count=PostPollVote.objects.filter(poll_id=instance.poll_id).count()
+    )
 
 
 class PostLike(models.Model):
@@ -405,6 +553,68 @@ class ChunkedUpload(models.Model):
     content = models.TextField(blank=True)
     # FIX: Yaha kabhi bhi 'authapp.User' mat likho, ye use karo
     user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE)
+    created_at = models.DateTimeField(auto_now_add=True)
+    is_completed = models.BooleanField(default=False)
+
+    def __str__(self):
+        return f"{self.upload_id} - {self.file_name}"
+
+
+# TASK 3 — dedicated model backing the new /post/chunked/* routes
+# (views.py's post_chunked_upload_init/_chunk/_complete/_status).
+#
+# `ChunkedUpload` above can't be reused as-is for this: it's shaped
+# specifically for a comment attachment (`post_id`/`parent_id` pick the
+# PostComment's target, `content` is the comment body) and has nowhere to
+# park the post-creation fields (title, category, post_type, visibility,
+# hashtags, location, ...) a chunked *post* upload needs to hold onto
+# between `init` (when the client sends them once) and `complete` (when
+# the Post row actually gets created — see PostCreateSerializer.create()
+# in serializers.py for the equivalent non-chunked field set this
+# mirrors).
+#
+# TASK 5 UPDATE: `subcategory`, `poll_options`, `is_scheduled`,
+# `scheduled_at`, `media_caption` were previously left out here on
+# purpose, because `Post` and `PostCreateSerializer` didn't persist them
+# either — adding them here without a matching `Post` column would have
+# silently dropped them a step later. Now that Task 5 added those as real
+# columns (`Post.subcategory`, `Post.is_scheduled`, `Post.published_at`,
+# the `PostPoll`/`PostPollOption` models, `PostMedia.caption`), this model
+# is updated to match so the chunked path holds the same payload shape as
+# the non-chunked one all the way through `complete()`. `media_caption` is
+# singular here (one file per chunked upload) where the non-chunked path's
+# `media_captions` is a list — matches the existing `media_type` (singular)
+# vs. the non-chunked `media_types` (list) split already in this model.
+class PostChunkedUpload(models.Model):
+    upload_id = models.CharField(max_length=100, unique=True)
+    file_name = models.CharField(max_length=500)
+    total_chunks = models.IntegerField()
+    total_size = models.BigIntegerField()
+    user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE)
+
+    # Post-creation payload, captured once at init() and applied unchanged
+    # at complete() — see PostCreateSerializer's Meta.fields for the
+    # non-chunked equivalent of this set.
+    title = models.CharField(max_length=300, blank=True, default='')
+    content = models.TextField(blank=True, default='')
+    category = models.CharField(max_length=100, default='general')
+    subcategory = models.CharField(max_length=100, blank=True, null=True)
+    post_type = models.CharField(max_length=20, default='video')
+    visibility = models.CharField(max_length=20, default='public')
+    hashtags = models.JSONField(default=list, blank=True)
+    location = models.JSONField(default=dict, blank=True)
+    media_caption = models.CharField(max_length=500, blank=True, default='')
+    media_type = models.CharField(max_length=20, blank=True, default='')
+    # Same shape client sends non-chunked: [{"text": ..., "votes": 0}, ...].
+    # Applied at complete() the same way PostCreateSerializer.create()
+    # applies it — see that method for the validation rules (2-4 options,
+    # no duplicates) which run once, at init(), via
+    # PostChunkedUploadInitSerializer reusing PostCreateSerializer's poll
+    # validators rather than duplicating them.
+    poll_options = models.JSONField(default=list, blank=True)
+    is_scheduled = models.BooleanField(default=False)
+    scheduled_at = models.DateTimeField(blank=True, null=True)
+
     created_at = models.DateTimeField(auto_now_add=True)
     is_completed = models.BooleanField(default=False)
 

@@ -25,10 +25,18 @@ Auth model: `AUTH_USER_MODEL` is a **custom `User`** (app `login`), primary key 
 >    already registered a daily `"message-expire-stale-parent-access"` entry pointing at
 >    Celery task name `"message.expire_stale_parent_access"` — but no task by that name
 >    existed anywhere in `tasks.py` (confirmed from the earlier `tasks.py` upload), so the
->    beat tick would fire and be silently dropped every day, forever. Added the missing
->    `@shared_task(name="message.expire_stale_parent_access")` wrapper to `tasks.py`
->    (thin `call_command("expire_stale_parent_access")` wrapper, per `settings.py`'s own
->    proposed fix). See §9.4 item 25 (resolved), §1 File Map, §10 `tasks.py`.
+>    beat tick would fire and be silently dropped every day, forever. This entry originally
+>    assumed the fix would be a thin `call_command("expire_stale_parent_access")` wrapper
+>    (reusing the management command's logic) — **correction, `tasks.py` now directly
+>    reviewed**: the `@shared_task(name="message.expire_stale_parent_access")` that
+>    actually exists is **not** that thin wrapper. It's an independent re-implementation
+>    of the same two sweeps, querying `ParentAccessCode`/`ParentToken` directly rather than
+>    calling the command — and critically, it uses **different cutoffs**: no grace period
+>    beyond each item's own expiry, whereas the management command adds `TOKEN_DELETE_
+>    GRACE_DAYS=14`/`CODE_DEACTIVATE_GRACE_DAYS=30` on top. The beat tick is no longer a
+>    silent no-op (the original bug is genuinely fixed), but the task and the command are
+>    now two implementations of "the same" sweep that don't agree on when a row is stale
+>    enough to act on — see §9.4 item 25 (corrected, not fully resolved), §10 `tasks.py`.
 > 3. **Two project-wide (not `message`-specific) critical security bugs found and fixed
 >    directly in `settings.py`**, outside this doc's normal `message`-app scope but
 >    flagged here since they affect every request this app serves: (a) `ALLOWED_HOSTS`
@@ -201,8 +209,8 @@ Auth model: `AUTH_USER_MODEL` is a **custom `User`** (app `login`), primary key 
 | `apps.py` | App config (`name = 'message'`) |
 | `tests.py` | Empty Django default stub — no tests written yet *(confirmed this batch)* |
 | `management/commands/send_scheduled_messages.py` *(NEW this batch)* | Manual/backup CLI trigger for "Send Later" delivery — **not** the production path; `tasks.send_scheduled_messages` (Celery beat, every minute) is canonical, see §10 `tasks.py`. Now uses the identical `select_for_update(skip_locked=True)` + 200/batch pattern as the Celery task specifically so the two are safe to run concurrently without double-sending. See §9.4 item 4, §10 |
-| `management/commands/cleanup_expired_messages.py` *(NEW this batch)* | Manual/backup CLI trigger for the disappearing-messages hard-delete sweep, with `--batch-size`/`--dry-run` flags. Duplicates (does not replace) `tasks.cleanup_expired_messages`'s already-scheduled Celery-beat sweep (every 15 min) — its own docstring assumed hard-delete was unimplemented, which this doc's §10/§9.1 item 3 shows is not the case. See §9.4 item 24, §10 |
-| `management/commands/expire_stale_parent_access.py` *(NEW this batch)* | Periodic DB-hygiene only (**not** security-load-bearing — `HasValidParentToken` already rejects expired tokens/codes live on every request regardless of this ever running). Hard-deletes `ParentToken`s stale past their rolling TTL + a grace period, and deactivates long-expired never-renewed `ParentAccessCode`s. **Now fully wired** — `settings.py`'s `CELERY_BEAT_SCHEDULE` has a daily entry, and `tasks.py` now has the matching `@shared_task(name="message.expire_stale_parent_access")` wrapper the beat entry needed (production readiness pass) — see §9.4 item 25 (resolved), §2 `ParentAccessCode`/`ParentToken`, §10 |
+| `management/commands/cleanup_expired_messages.py` *(reconciled against `tasks.py` this batch — see §9.4 item 24, resolved)* | Manual/backup CLI trigger for the disappearing-messages hard-delete sweep, with `--batch-size`/`--dry-run` flags (default batch size now 500, matching the Celery task). **No longer carries its own delete loop** — the second, drifted implementation this doc previously flagged (1000/batch, `Message.objects` instead of `Message.all_objects` — silently skipping soft-deleted-and-expired rows) has been deleted entirely; the command now calls `message.tasks.hard_delete_expired_messages()`, the same function the Celery-beat sweep (`message.cleanup_expired_messages`, every 15 min) itself calls, so the two entry points can never again disagree on batch size or which rows count as "expired". See §9.4 item 24, §10 |
+| `management/commands/expire_stale_parent_access.py` *(NEW this batch)* | Periodic DB-hygiene only (**not** security-load-bearing — `HasValidParentToken` already rejects expired tokens/codes live on every request regardless of this ever running). Hard-deletes `ParentToken`s stale past their rolling TTL + a 14-day grace period, and deactivates `ParentAccessCode`s expired + 30-day-grace, never renewed. **Now wired but not reconciled** — `settings.py`'s `CELERY_BEAT_SCHEDULE` has a daily entry, and `tasks.py` now has a matching `@shared_task(name="message.expire_stale_parent_access")` — but that task is an independent re-implementation with **no grace period** (deactivates/deletes immediately at expiry/TTL), not a call into this command's logic. See §9.4 item 25 (corrected, not fully resolved), §2 `ParentAccessCode`/`ParentToken`, §10 |
 | `management/commands/apply_doubtquestion_context_fields.py` *(NEW this batch — Task 16)* | One-off, idempotent raw-SQL schema command (Postgres-only) making `DoubtQuestion.group`/`.conversation` nullable and adding `context_type`/`context_id` + a supporting index + `CheckConstraint` (must have a `group` OR a full context pointer). Applied outside Django's migration history by design — `makemigrations` will still want to generate a matching no-op migration afterward to sync state. See §2 `DoubtQuestion`, §9.4 item 23, §10 |
 
 **Note on `urls.py`:** an earlier upload of this file was accidentally a duplicate of
@@ -462,7 +470,34 @@ note used to flag is resolved; kept only as a pointer to where the wiring lives.
   deliberately — an older, smaller-content deck can still be useful) rather than
   overwriting a single row per conversation. Default ordering (`BaseModel.Meta`,
   `-created_at`) means "give me the latest deck" is just the first row.
-- Index on `(conversation, -created_at)` for that latest-deck lookup.
+- `content_hash` (`CharField(max_length=64)`, blank-ok, `db_index=True`) *(NEW —
+  gap fix G-7, resolves §9.4 item 12)* — `sha256` of the exact `content` string fed to
+  Gemini for this deck (`views_ai.RevisionDeckView.post()`); the raw `content` itself is
+  deliberately **not** persisted, same reasoning `ai_service.py` already applies to its
+  own 24h cache key. Lets `post()` look up "is there already a row for this exact
+  content, in this conversation+session" and return it instead of inserting a duplicate
+  — closing the gap this doc previously flagged, where a cache hit on
+  `generate_revision_deck` still produced a fresh persisted row every time. Blank
+  (`''`) for deck rows that predate this field.
+- Index on `(conversation, -created_at)` for the latest-deck lookup, plus a second index
+  on `(conversation, session_id, content_hash, -created_at)` matching the dedup lookup
+  above exactly, so it stays an index hit rather than a table scan as decks grow.
+- `UniqueConstraint(fields=['conversation', 'session_id', 'content_hash'],
+  condition=Q(content_hash__gt=''), name='uniq_revisiondeck_conv_session_hash_nonblank')`
+  *(NEW — migration `0002_revisiondeck_uniq_revisiondeck_conv_session_hash_nonblank`)* —
+  DB-level backstop for the same dedup check: `post()`'s "return the existing row"
+  logic is a plain SELECT-then-INSERT, so two "Generate" taps close enough together
+  (double-tap, or two tabs) could both SELECT before either INSERT commits and both
+  proceed to create the exact duplicate row the app-level check exists to prevent —
+  `views_ai.py` is expected to catch the resulting `IntegrityError` around the `create()`
+  call and return the now-existing row instead. **Conditional, not a plain
+  `unique_together` on the three fields**, specifically to exempt legacy data: every
+  `RevisionDeck` row that predates `content_hash` defaults to `''`, and a
+  conversation/session can legitimately already have several such blank-hash rows (one
+  per old-style "Generate" tap, back when every tap always inserted) — a non-conditional
+  constraint would fail to migrate against that existing data. Restricting the
+  constraint to non-blank hashes fully closes the race for every deck created after this
+  field existed, while leaving old blank-hash rows untouched.
 - Built from `ai_service.generate_revision_deck(content)` — see §7.15/§10.
 
 ### `FocusSession` *(NEW — Feature 12: Smart DND during focus/exam windows, shipped in
@@ -516,9 +551,11 @@ per-classroom question board; now directly confirmed in `models.py`)*
   answer both shapes, and its own docstring names the real caller —
   **`testseries/bridge.py::answer_query_on_series()`**, a different app entirely,
   reusing `DoubtQuestion` as shared infrastructure for test-series Q&A rather than
-  chat-group doubts. See §9.4 item 23 for the full detail, including a confirmed
-  duplication gap (`message`'s own `DoubtQuestionViewSet.answer()` doesn't call this
-  shared function) and an inline-flagged notification-enum gap
+  chat-group doubts. **Now also confirmed used by `message`'s own
+  `DoubtQuestionViewSet.answer()`**, not just `testseries` — that view was refactored to
+  delegate to `answer_doubt_question()` instead of duplicating its set/save steps inline
+  (the duplication gap this doc previously flagged here is closed, see §9.4 item 23). An
+  inline-flagged notification-enum gap remains open
   (`core.models.Notification.NotifType.TESTSERIES_QUERY_ANSWERED`, unconfirmed to
   exist). Applied via
   raw SQL directly against Postgres (`ALTER TABLE ... ADD COLUMN IF NOT EXISTS`, guarded
@@ -567,9 +604,11 @@ confirmed in `models.py`)*
   instant it crosses the line), and deactivates `ParentAccessCode`s that expired more
   than 30 days ago and were never renewed. Purely cosmetic/storage cleanup —
   `HasValidParentToken` already rejects expired codes/tokens live on every request
-  regardless of whether this command has ever run. **Now fully wired** (production
-  readiness pass) — `CELERY_BEAT_SCHEDULE` entry plus the matching `tasks.py` task
-  wrapper it needed — see §9.4 item 25 (resolved), §1 File Map.
+  regardless of whether this command has ever run. **Now wired, but not reconciled with
+  it** (production readiness pass, corrected this batch) — `CELERY_BEAT_SCHEDULE` has the
+  entry and `tasks.py` now has a matching task, but that task is an independent
+  re-implementation with no grace period, not a call into this command — see §9.4 item 25
+  (corrected, not fully resolved), §1 File Map.
 - **Deliberately does not use `request.user`** — `HasValidParentToken` attaches
   `request.parent_access_code` and `request.parent_student` instead, specifically so no
   other permission/view could accidentally treat an authenticated parent as if they were
@@ -1047,10 +1086,13 @@ Gap 2/Gap 3, supersedes the Group-primary shape described in earlier revisions o
   (`get_or_create`/`filter().delete()` against `DoubtUpvote`'s `unique_together`), keeps
   a denormalized `upvotes_count` in sync via `F()` updates rather than counting on every
   read.
-- `POST /message/groups/<group_id>/doubts/<id>/answer/` — teacher/admin/mod only
-  (`is_group_admin_or_mod`, the same single-source-of-truth check as everywhere else in
-  this app), body `{"answer_text"}` (`DoubtAnswerSerializer`), sets `is_answered`,
-  `answered_by`, `answered_at`.
+- `POST /message/groups/<group_id>/doubts/<id>/answer/` — teacher/admin/mod only.
+  Delegates to `services.answer_doubt_question()` (§10) rather than setting
+  `is_answered`/`answered_by`/`answered_at` inline — the same shared function
+  `testseries/bridge.py::answer_query_on_series()` uses for its own context-pointer
+  doubts (§2 `DoubtQuestion`, §9.4 item 23). Body `{"answer_text"}`
+  (`DoubtAnswerSerializer`); that function's `PermissionError`/`ValueError` are converted
+  to `403`/`400` here.
 - `POST /message/groups/<group_id>/doubts/<id>/reveal/` — teacher/admin/mod only,
   one-way flip of `is_revealed` (a no-op response, no re-broadcast, if already revealed
   or not anonymous) — the only way an anonymous asker's identity becomes visible to
@@ -1760,8 +1802,9 @@ board)*
   here.
 
 ### 7.22 Group Management Service Layer *(tasks 27; NOW CONFIRMED WIRED this batch — see
-§5/§9.4 item 21)* + Bell-Row Notifications *(task 44; now confirmed to live in
-`push_utils.py`, not `services.py` — see §9.4 items 19/22)*
+§5/§9.4 item 21)* + Bell-Row Notifications *(task 44; lives in BOTH `push_utils.py`
+(inline, per chat/call/mention event) AND, again, `services.py` (restored, task 11 —
+see §9.4 item 19)*
 - `services.py` pulls `GroupViewSet.create`/`add_members`/`update_member`'s logic out into
   plain functions (`create_group`, `add_members_to_group`, `remove_group_member`,
   `update_group_member_role`), decoupled from DRF (raises `ValueError`/`PermissionError`,
@@ -1780,17 +1823,31 @@ board)*
   left+rejoined while their device was offline).
 - `generate_group_invite_code()` — also moved here from wherever it previously lived,
   generates a unique `secrets.token_urlsafe` code, retrying on collision.
-- **Bell-row notifications** *(task 44)* — **do NOT live in `services.py`.** A
-  `create_bell_rows_for_push(recipient_ids, notif_type, title, message, data=None)`
-  function used to be documented here, but it has since been **removed from `services.py`
-  entirely** (confirmed via that file's own "REMOVED — was dead code" comment this
-  batch): it had zero callers anywhere, because `push_utils.py` was already doing the
-  same job a different way — calling `core.services.create_notification()` directly,
-  inline, at each of its three push call-sites (`send_chat_message_push`,
-  `send_incoming_call_push`, `send_mention_push`), one `Notification` row per recipient
-  per event, rather than through a shared batch helper. **Bell-row notifications are
-  fully wired and working** — see §10 `push_utils.py` for the confirmed details. This
-  item is resolved, not open — see §9.4 items 19/22.
+- **Bell-row notifications** *(task 44, then task 11)* — two independent mechanisms now
+  coexist, and both are confirmed live:
+  1. `push_utils.py` still calls `core.services.create_notification()` directly, inline,
+     at each of its own three push call-sites (`send_chat_message_push`,
+     `send_incoming_call_push`, `send_mention_push`) — one `Notification` row per
+     recipient per event, same as before. Unchanged.
+  2. `services.create_bell_rows_for_push(recipient_ids, notif_type, title, message,
+     data=None)` **has been RESTORED this batch (Task 11)**, after this doc previously
+     recorded it as removed/dead code. The file's own updated comment explains why: it
+     was accurate that nothing called it *at the time* — but
+     `liveclass/parent_link_views.py::ClassroomParentCodeGenerateView.post()` (a
+     different app, Task 11's "notify the student a parent code was created" gap-fix)
+     now calls it directly, and needed exactly what plain `create_notification()`
+     doesn't offer — fan-out over a **list** of `recipient_ids` (`create_notification`
+     only takes one `recipient`). So this is a thin fan-out wrapper around the same real
+     `create_notification()` implementation, not a second/competing notification path;
+     best-effort per recipient (one bad id, or `core` not installed, never stops the
+     rest of the batch — same discipline as `answer_doubt_question` above it in the same
+     file). Also carries its own fix (Task 36, same batch as the restoration): the
+     internal `create_notification(...)` call now uses keyword arguments — a prior
+     positional call would have raised `TypeError` at the call site itself, before this
+     function's own `try/except` ever got a chance to catch it, silently breaking the
+     "one bad recipient never stops the batch" guarantee for every recipient, not just a
+     bad one.
+  See §9.4 item 19 (re-opened/corrected this batch), §10 `services.py`/`push_utils.py`.
 
 ### 7.23 Offline Message Queue *(NEW this batch — task 49, delivery half)*
 - `offline_queue.flush_offline_queue(conversation, sender, queued_messages)` — the backend
@@ -2460,12 +2517,20 @@ computes `duration_seconds` and marks the whole `CallSession` `ENDED`.
     specific deck's full content), and `delete` (`?deck_id=<id>`, restricted to whoever
     generated that specific deck). See §6/§7.15 for full shapes. The product gap this
     item used to flag (students needing to browse older decks before an exam) is closed.
-12. **`generate_revision_deck`'s 24h content-hash cache sits a bit awkwardly against the
-    model's "always create a new persisted row" design** — a cache hit still means the
-    caller creates a fresh `RevisionDeck` row from the cached data, so the cache saves a
-    Gemini call on a duplicate/retry tap but doesn't prevent duplicate rows from being
-    created. Worth confirming this is the intended behavior (vs., say, returning the
-    existing recent `RevisionDeck` row instead of both hitting cache *and* inserting).
+12. ~~**`generate_revision_deck`'s 24h content-hash cache sits a bit awkwardly against
+    the model's "always create a new persisted row" design** — a cache hit still means
+    the caller creates a fresh `RevisionDeck` row from the cached data, so the cache
+    saves a Gemini call on a duplicate/retry tap but doesn't prevent duplicate rows from
+    being created.~~ **Resolved this batch (gap fix G-7).** `RevisionDeck` now has a
+    `content_hash` field (§2) plus a matching lookup index, and `views_ai.
+    RevisionDeckView.post()` is expected to check for an existing row with the same
+    `(conversation, session_id, content_hash)` and return it instead of always inserting
+    — the Gemini-call cache and the row-dedup are no longer two independent, unsynced
+    mechanisms. A DB-level `UniqueConstraint` (`uniq_revisiondeck_conv_session_hash_
+    nonblank`, condition `content_hash__gt=''` to exempt legacy blank-hash rows) backs
+    this up as a race-condition backstop for two near-simultaneous "Generate" taps,
+    closing the SELECT-then-INSERT race the app-level check alone can't. See §2
+    `RevisionDeck`.
 13. **`transcribe_audio`'s cache key is a hash of `file_url`, not of the audio bytes
     themselves** — called out in the file's own comment as an intentional, accepted
     trade-off (a content-based key would require downloading the audio before the
@@ -2601,33 +2666,49 @@ computes `duration_seconds` and marks the whole `CallSession` `ENDED`.
     `AttributeError` at the notify step specifically (the answer itself — `is_answered`,
     `answer_text`, `answered_by`, `answered_at` — still saves successfully first, since
     the notify call comes after `doubt.save()`).
-24. **`management/commands/cleanup_expired_messages.py` (NEW this batch) duplicates
+24. ~~**`management/commands/cleanup_expired_messages.py` (NEW this batch) duplicates
     logic `tasks.cleanup_expired_messages` (Celery beat, every 15 min, §10) already
-    covers in production** — not a gap it fills. The command's own docstring assumes
-    hard-delete was never implemented ("disappearing messages ka sirf half implement
-    tha"); this doc's §9.1 item 3 / §10 `tasks.py` entry confirms otherwise — the Celery
-    task already hard-deletes via `Message.all_objects` on a schedule. Not a bug — a
-    `--dry-run`-capable manual CLI trigger for the same sweep is a reasonable ops tool —
-    but worth (a) confirming this command isn't *also* cron-scheduled alongside the
-    Celery beat entry (redundant, though harmless either way since both just delete rows
-    matching the same filter), and (b) reconciling the batch-size default mismatch (this
-    command: 1000/batch; the Celery task: 500/batch) if both are meant to be
-    interchangeable.
+    covers in production** — not a gap it fills.~~ **Resolved this batch.** The command
+    has been reconciled against `tasks.py`: its own second copy of the delete loop (which
+    had drifted — 1000/batch vs the task's 500/batch, and `Message.objects` vs the task's
+    `Message.all_objects`, meaning any soft-deleted-and-expired message would silently
+    never be hard-deleted by this command) has been deleted entirely. The command now
+    calls `message.tasks.hard_delete_expired_messages()` — the same function the Celery
+    task itself calls — so there is exactly one implementation and the two entry points
+    can no longer disagree on batch size or which rows count as "expired". Also confirmed
+    (via the command's own updated docstring) that it is **not** separately cron-scheduled
+    anywhere in the project, so the two were never actually a redundant double-sweep in
+    production, just a latent drift risk if either one were ever edited alone — which this
+    fix now closes. See §1 File Map, §10 (`management commands`).
 25. ~~**`management/commands/expire_stale_parent_access.py` is not registered
     anywhere** — no `CELERY_BEAT_SCHEDULE` entry, no confirmed external cron.~~
-    **PARTIALLY then FULLY resolved — production readiness pass.** `settings.py` (now
-    reviewed) already had a `"message-expire-stale-parent-access"` beat entry pointing
-    at Celery task name `"message.expire_stale_parent_access"`, scheduled daily at
-    04:00 — but `settings.py`'s own comment on that entry flagged a real remaining gap:
-    no task was actually registered under that exact name in `message/tasks.py`, so the
-    beat tick would fire and be silently dropped (no task to pick it up, not even an
-    error) — the command still would never have run. **Fixed this pass**: added a thin
-    `@shared_task(name="message.expire_stale_parent_access")` wrapper to `tasks.py`
-    (calls the existing management command via `call_command`, same pattern
-    `settings.py`'s comment proposed). The sweep is now genuinely wired end-to-end.
-    Still DB hygiene only, not security-load-bearing — `HasValidParentToken` enforces
-    expiry live regardless. See §2 `ParentAccessCode`/`ParentToken`, §1 File Map, §10
-    `tasks.py`.
+    **PARTIALLY resolved, then corrected on direct review of `tasks.py` this batch.**
+    `settings.py` already had a `"message-expire-stale-parent-access"` beat entry
+    pointing at Celery task name `"message.expire_stale_parent_access"`, scheduled daily
+    — and `tasks.py`'s own inline comment confirms no task by that exact name existed
+    anywhere in the file until this batch, so the beat tick genuinely was firing into a
+    silent `NotRegistered` no-op the whole time (this doc's own prior claim that this had
+    already been fixed "in a previous pass" was itself wrong — flagging that here since
+    it's a doc-accuracy issue, not just a code one). **Fixed for real this batch**: a
+    `@shared_task(name="message.expire_stale_parent_access")` now exists in `tasks.py`,
+    so the beat tick is no longer a no-op. **But it is not the thin `call_command(...)`
+    wrapper this doc previously assumed** — it's an independent re-implementation of the
+    same two sweeps (deactivate expired `ParentAccessCode`s, hard-delete stale
+    `ParentToken`s), querying the models directly. The two implementations use
+    **different cutoffs**: the management command adds a grace period beyond each item's
+    raw expiry (`TOKEN_DELETE_GRACE_DAYS=14`, `CODE_DEACTIVATE_GRACE_DAYS=30`,
+    specifically so a just-expired device/code doesn't vanish from a list the instant it
+    crosses the line); the Celery task has no such grace period and acts the moment
+    `expires_at`/`INACTIVITY_TTL_DAYS` is crossed. **Remaining open gap**: if the beat
+    schedule is genuinely the production path (as it now is), the grace-period UX the
+    management command's own docstring describes never actually happens in production —
+    rows are gone before the "still visible for a couple more weeks" window the command
+    was designed to provide. Worth either giving the task the same grace constants or
+    having one call the other, same reconciliation `cleanup_expired_messages`/
+    `hard_delete_expired_messages` (§9.4 item 24) already went through. Still DB hygiene
+    only either way, not security-load-bearing — `HasValidParentToken` enforces expiry
+    live regardless of either sweep. See §2 `ParentAccessCode`/`ParentToken`, §1 File
+    Map, §10 `tasks.py`.
 26. ~~**🔴 `CallRecordingView` (TASK 21) is fully implemented in `views.py` but is not
     imported or routed anywhere in `urls.py`.**~~ **RESOLVED this batch** — `urls.py`
     (re-checked this pass) now imports `CallRecordingView` and registers
@@ -2652,8 +2733,8 @@ computes `duration_seconds` and marks the whole `CallSession` `ENDED`.
   exempt; simple day-boundary `Message.count()` query (no extra table)
 
 ### `services.py` *(NEW — task 27, confirmed wired into `GroupViewSet` this batch, see
-§5/§7.22; the task-44 bell-row helper that used to be documented here has been removed —
-see §10 `push_utils.py`)*
+§5/§7.22; `create_bell_rows_for_push` — see below — was briefly documented as removed
+dead code in an earlier pass, then genuinely restored, see §7.22/§10 `push_utils.py`)*
 - `create_group(created_by, name, description='', photo_url=None, is_private=False,
   member_ids=()) -> Group` — creates the `Conversation` + `Group` in one transaction,
   creator as `ADMIN`, given `member_ids` as plain `MEMBER` (creator auto-excluded from
@@ -2674,9 +2755,23 @@ see §10 `push_utils.py`)*
   `offline_queue.py` (§7.23)
 - `generate_group_invite_code() -> str` — unique `secrets.token_urlsafe` code, retries on
   collision
-- ~~`create_bell_rows_for_push(...)`~~ — **removed from this file** (confirmed dead code,
-  zero callers — `push_utils.py` already writes bell rows inline at each push call-site
-  via `core.services.create_notification()`, see §10 `push_utils.py` and §7.22).
+- `create_bell_rows_for_push(*, recipient_ids, notif_type, title, message=None,
+  data=None) -> list` *(RESTORED — Task 11, then fixed — Task 36)* — **this doc previously
+  (incorrectly, on an earlier pass) recorded this as removed/dead code**; it genuinely was
+  dead at that point, but is not anymore. A thin fan-out wrapper around `core.services.
+  create_notification()` for callers that need to notify a **list** of `recipient_ids` in
+  one call, which bare `create_notification()` (single `recipient` only) doesn't support.
+  **Confirmed caller**: `liveclass/parent_link_views.py::ClassroomParentCodeGenerateView.
+  post()` (a different app — Task 11's "notify the student a parent code was created"
+  gap-fix). Best-effort per recipient — one bad id, or `core` not installed
+  (`create_notification` degrades to a no-op), never stops the rest of the batch. **Task
+  36 fix, same batch as the restoration**: the internal `create_notification(...)` call
+  now uses keyword arguments — it used to call positionally, which would have raised
+  `TypeError` at the call site itself, before this function's own `try/except` ever got a
+  chance to catch it, silently breaking the "one bad recipient never stops the batch"
+  guarantee for every recipient, not just a bad one. `push_utils.py` (§10) still writes
+  its own bell rows inline, per-event, at its own three call-sites — this is a separate,
+  genuinely-used helper for multi-recipient fan-out, not a duplicate of those. See §7.22.
 - **Now confirmed actually used by `GroupViewSet`** (§5) — `create_group`,
   `add_members_to_group`, `remove_group_member`, `update_group_member_role`, and
   `add_or_reactivate_participant` are all called from `views.py`, not parallel/dead code.
@@ -2691,12 +2786,17 @@ see §10 `push_utils.py`)*
   already answered, or if neither `actor` nor `answered_by` is given. **Confirmed caller:
   `testseries/bridge.py::answer_query_on_series()`** — a different app, not `message`
   itself — which passes `actor=None` (having already verified `teacher ==
-  series.creator` on its own side) and its own verified `teacher` as `answered_by`. **Not
-  called by `message`'s own `DoubtQuestionViewSet.answer()`** (views.py) — that action
-  still duplicates the same set/save steps inline rather than calling this function; see
-  §9.4 item 23 for why that's worth fixing. Also contains an inline-flagged, not-yet-
-  confirmed dependency: fires a `core.models.Notification.NotifType.
-  TESTSERIES_QUERY_ANSWERED` notification when `doubt.context_type ==
+  series.creator` on its own side) and its own verified `teacher` as `answered_by`.
+  **Now also called by `message`'s own `DoubtQuestionViewSet.answer()`** (views.py) —
+  this doc previously said that action still duplicated the same set/save steps inline;
+  it's since been refactored to delegate to this shared function instead (its own inline
+  comment cites this exact gap by number), dropping its own now-redundant
+  `_require_teacher()` call since `answer_doubt_question()` already performs the
+  identical `require_group_admin_or_mod` check whenever `doubt.group_id` is set. `message`'s
+  own group-doubt path and `testseries`'s context-pointer path now both go through the
+  one function; see §9.4 item 23 (resolved on this sub-point). Also contains an
+  inline-flagged, not-yet-confirmed dependency: fires a `core.models.Notification.
+  NotifType.TESTSERIES_QUERY_ANSWERED` notification when `doubt.context_type ==
   'testseries_attempt'`, an enum member not confirmed to exist on `core.models.
   Notification` (that app isn't in any file batch so far) — the answer itself still
   saves fine either way, only that one notify call is at risk of `AttributeError`.
@@ -2825,13 +2925,28 @@ see §10 `push_utils.py`)*
   - `send_mention_push` — one `NotifType.MENTION` row per recipient, kept as its own
     `notif_type` distinct from `CHAT_MESSAGE` so a mention reads as "X mentioned you" in
     the notification list, not a generic "new message".
-  - This **supersedes** `services.py`'s own `create_bell_rows_for_push` — that function
-    has since been **removed from `services.py` entirely** as dead code once `push_utils.
-    py`'s real content was available to check: it had zero callers anywhere, and this
-    file was already doing the same job a different way (calling `core.services.
-    create_notification()` inline, per event, rather than through a shared batch
-    helper). Bell-row notifications are **not** an open gap — see §7.22/§9.4 items
-    19/22 (resolved).
+  - **Correction to this doc's own earlier claim**: this doc previously said this
+    "supersedes" `services.py`'s `create_bell_rows_for_push` and that the latter had been
+    "removed from `services.py` entirely" as dead code. That was accurate for the pass it
+    was written in, but is **no longer current** — `create_bell_rows_for_push` has since
+    been genuinely restored in `services.py` (Task 11, see §10 `services.py`) because a
+    different app (`liveclass/parent_link_views.py::ClassroomParentCodeGenerateView`)
+    needed exactly what it offers and `push_utils.py`'s own inline-per-event calls don't:
+    fan-out over a **list** of `recipient_ids` in one call. The two are not competing —
+    this file's three call-sites still write their own bell rows inline, per-event,
+    exactly as described above; `create_bell_rows_for_push` is a separate helper for a
+    different (multi-recipient, cross-app) calling shape. See §7.22/§9.4 items 19/22.
+- `send_parent_push(*, fcm_token, title, body, data=None)` *(NEW — gap fix)* — every push
+  function above resolves FCM tokens from a `recipient_ids` list via `_tokens_for_users()`
+  (`DeviceToken.objects.filter(user_id__in=...)`), which only works for actual `User`
+  rows — a parent has none (Parent Mode, §2, is deliberately loginless). This function
+  instead sends straight to a single, already-known FCM token (`ParentToken.token`,
+  captured at verify-time) — the caller (`liveclass/parent_link_views.py`:
+  `ClassroomParentCodeGenerateView`, `ParentQueryReplyView`, a different app) already has
+  it in hand, no user lookup needed. Unlike the data-only chat pushes above, this sends a
+  real `notification` block (not data-only) — the parent-side surface has no separate
+  local-notification-building logic the main chat client has, so a plain FCM notification
+  is simplest and sufficient here.
 
 ### `livekit_utils.py` (env: `LIVEKIT_API_KEY`, `LIVEKIT_API_SECRET`, plus egress env
 vars below — TASK 21)
@@ -3075,7 +3190,13 @@ vars below — TASK 21)
   `.objects`) — since `BaseModel`'s default `objects = SoftDeleteManager()` filters
   `is_deleted=True` out of every model including `Message`, this sweep deliberately opts
   into the unfiltered manager so it can still hard-delete an already-soft-deleted-and-
-  expired message.
+  expired message. **Now directly confirmed (this batch) to be a thin wrapper**: the
+  actual delete loop lives in a separate module-level function,
+  `hard_delete_expired_messages(batch_size=500, dry_run=False)`, which this task calls
+  with `batch_size=500` — and which `management/commands/cleanup_expired_messages.py`
+  (§1 File Map/§10) now also calls directly, so the Celery task and the manual command
+  are provably the same code path, not two implementations that can drift (see §9.4 item
+  24, resolved).
 - `purge_soft_deleted_conversations` — **now directly confirmed in `tasks.py` +
   `settings.py`**: beat-scheduled daily at 03:30 (`"message-purge-soft-deleted-
   conversations"` in `CELERY_BEAT_SCHEDULE`). Queries `Conversation.all_objects.filter(
@@ -3086,7 +3207,38 @@ vars below — TASK 21)
   stale read. This is the other half of `GroupViewSet.destroy()`'s soft-delete (§5): the
   soft-delete makes a group-delete recoverable for the grace window, this sweep actually
   reclaims storage (CASCADE hard-delete of the `Conversation`) once that window passes.
-- `generate_link_preview_task` / `transcribe_voice_message_task` — one-shot,
+- **`expire_stale_parent_access`** *(NEW — now directly confirmed in `tasks.py`, TASK 24
+  this batch)* — beat-scheduled (suggested daily; day-granularity windows, unlike the
+  minute/15-min message sweeps above). **Correction to this doc's own earlier claim**:
+  §9.4 item 25 previously said this wrapper had "already been added" in a prior pass —
+  that was **wrong**, per `tasks.py`'s own inline comment (confirmed via direct review
+  this batch, not inferred): the file had no `expire_stale_parent_access` task, or
+  anything `ParentToken`/`ParentAccessCode`-related, at all until now. If
+  `CELERY_BEAT_SCHEDULE` already had a `"message.expire_stale_parent_access"` entry
+  pointing at this name, it was a silent `NotRegistered` no-op the whole time — genuinely
+  fixed only as of this batch. Sweeps two independent stale-states, both bounded to
+  200/run: (1) `ParentAccessCode.is_active=True` rows whose `expires_at` has passed ->
+  flipped to `is_active=False`; (2) `ParentToken` rows past `INACTIVITY_TTL_DAYS` of
+  inactivity (`last_seen_at`, falling back to `created_at`) -> hard-deleted. Neither
+  changes live *behavior* — `HasValidParentToken`/`ParentVerifyCodeView` already treat
+  these as dead the moment their own expiry passes, independent of this sweep ever
+  running — this is DB hygiene only, same posture as `cleanup_expired_messages` above.
+  **⚠️ Newly-noticed drift vs. `management/commands/expire_stale_parent_access.py`
+  (§1/§10)**: unlike the `cleanup_expired_messages`/`hard_delete_expired_messages`
+  relationship directly above, this task does **not** call into the management command's
+  logic (or vice versa) — the two are two separate, independent implementations of "the
+  same" sweep, and they don't actually delete/deactivate the same rows. The management
+  command adds its own grace period on top of each item's expiry (`TOKEN_DELETE_GRACE_
+  DAYS=14` beyond `INACTIVITY_TTL_DAYS`, `CODE_DEACTIVATE_GRACE_DAYS=30` beyond
+  `expires_at`) specifically so a just-expired token/code doesn't vanish from a
+  "devices"/"manage access" list the instant it crosses the line. This Celery task has
+  **no such grace period** — it deactivates/deletes the moment `expires_at`/
+  `INACTIVITY_TTL_DAYS` is crossed. If both are ever scheduled (the task via
+  `CELERY_BEAT_SCHEDULE`, the command via a separate cron/manual run), the task's
+  every-day tick will already have deactivated/deleted rows before the command's own
+  grace window would have — the command's grace period is effectively neutered by
+  whichever one runs first. Worth reconciling (either give the task the same grace
+  constants, or make one call the other) rather than assuming both are safe to run as-is.
   `.delay(message_id)`-triggered right after a message is created (REST/WS/scheduled),
   not beat-scheduled. See §7.5/§7.6. Share `_broadcast_meta_update()` to push their
   result live over WS once done.
@@ -3176,17 +3328,28 @@ files reviewed for the first time, none previously part of any file batch)*
   beat tick, the two can no longer pick up and double-process the same due message
   (double-send, double unread-count increment, double push). Whichever process gets the
   row lock first wins; the other skips it via `skip_locked=True`. See §9.4 item 4.
-- **`cleanup_expired_messages.py`** — manual/backup CLI trigger:
+- **`cleanup_expired_messages.py`** *(fixed this batch — reconciled against `message/tasks.py`,
+  see §9.4 item 24, resolved)* — manual/backup CLI trigger:
   `python manage.py cleanup_expired_messages [--batch-size N] [--dry-run]` (default
-  batch size 1000). Deletes `Message` rows where `expires_at` is set and in the past, in
-  bounded batches (fetch a page of ids, delete that page, repeat) to avoid holding a
-  long-running lock on a potentially huge table in one shot. `--dry-run` reports the
-  count without deleting anything. **Duplicates, does not introduce**, the hard-delete
-  behavior `tasks.cleanup_expired_messages` (Celery beat, every 15 min, batch size 500)
-  already provides in production — the command's own docstring assumed this sweep had
-  never been implemented, which §9.1 item 3 / this file's own `tasks.py` entry above
-  shows is incorrect. Safe to have as an extra manual/dry-run-capable ops tool; not safe
-  to assume it's the *only* thing doing this cleanup. See §9.4 item 24.
+  batch size now **500**, matching the Celery task — was 1000). Confirmed **not**
+  separately cron-scheduled anywhere in the project (no crontab entry, no other
+  `call_command("cleanup_expired_messages", ...)` call site), so it and the Celery-beat
+  sweep are not a redundant double-sweep in production; this command is purely a manual/
+  ad-hoc entry point (an operator running a one-off catch-up sweep, or inspecting the
+  pending count with `--dry-run`, from a shell).
+  **Fix baked into this version**: the command's own second copy of the delete loop —
+  which had drifted from the Celery task in two ways, batch size (1000 vs 500) and,
+  more importantly, querying `Message.objects` (default manager) instead of
+  `Message.all_objects` (the Celery task's manager, which also includes soft-deleted
+  rows) — has been **deleted entirely**. That drift was a real, silent bug: any message
+  that was soft-deleted *and* expired would never have been hard-deleted by this
+  command. The command now calls `message.tasks.hard_delete_expired_messages()` — the
+  same function the Celery task itself now calls — so there is exactly one
+  implementation, and the two entry points (manual command, Celery beat) can never again
+  disagree on batch size or which rows count as "expired". *(Note: `hard_delete_expired_
+  messages()` itself lives in `tasks.py`, which is not part of this file batch — its
+  existence/behavior here is inferred from this command's own docstring/comments, not
+  from a direct review of `tasks.py` in this pass.)*
 - **`expire_stale_parent_access.py`** — periodic DB-hygiene command (intended to be run
   via cron/celery-beat, e.g. daily — `python manage.py expire_stale_parent_access`, no
   arguments). Explicitly **not load-bearing for security**: `HasValidParentToken`

@@ -158,6 +158,7 @@ from .serializers import (
     CoinTransactionSerializer,
     CoinWithdrawalSerializer,
     CouponSerializer,
+    LiveNowSessionSerializer,
     LivePollSerializer,
     MyReferralCodeSerializer,
     NoticeSerializer,
@@ -1534,6 +1535,51 @@ class ClassSessionViewSet(viewsets.ModelViewSet):
                 return qs.none()
             return qs.filter(classroom_id=classroom_id)
         return qs.filter(classroom_id__in=_accessible_classroom_ids(user))
+
+    # -----------------------------------------------------------------
+    # NEW (Home Module Task 3 — "Live Now" row). CONFIRMED: neither
+    # candidate the frontend task doc flagged already existed — plain
+    # `GET sessions/` (get_queryset() above) DOES already return every
+    # classroom the caller can access when called with no ?classroom=
+    # filter, but it reads no status filter at all (client would have to
+    # fetch a full, unbounded, non-live-only page and filter/paginate
+    # client-side), and ClassSessionSerializer carries several internal-
+    # detail fields (whiteboard/spotlight/recording) that are unnecessary
+    # weight — and arguably over-exposure — for a home-screen strip
+    # showing OTHER classrooms' sessions the caller may not even be
+    # inside right now. So: a real, purpose-built action, Option-A style
+    # (per the task doc), not a client-side loop over Option B.
+    #
+    # Scope: same `_accessible_classroom_ids(user)` get_queryset() already
+    # uses for the no-?classroom= case — classrooms the caller teaches/
+    # staffs, or holds/held a successful pass for. No separate
+    # has_access()-per-classroom loop needed since that's exactly what
+    # this helper already computes in one query.
+    #
+    # No pagination (LiveClassPagination is for unbounded history lists;
+    # a home strip only ever renders a handful of cards) — capped by
+    # ?limit=, same clamped-int pattern as ClassroomViewSet.recommended()
+    # above, just a tighter ceiling since this is a horizontal card row,
+    # not a scrollable list.
+    # -----------------------------------------------------------------
+    @action(detail=False, methods=["get"], url_path="live-now")
+    def live_now(self, request):
+        limit = min(int(request.query_params.get("limit", 10) or 10), 20)
+        sessions = (
+            ClassSession.objects.filter(
+                classroom_id__in=_accessible_classroom_ids(request.user),
+                status=ClassSession.Status.LIVE,
+            )
+            .select_related("classroom", "classroom__teacher")
+            .annotate(
+                live_participant_count=Count(
+                    "participants", filter=Q(participants__left_at__isnull=True)
+                )
+            )
+            .order_by("-actual_start")[:limit]
+        )
+        serializer = LiveNowSessionSerializer(sessions, many=True, context={"request": request})
+        return Response(serializer.data)
 
     # NOTE (fix, CRITICAL): this viewset is a plain ModelViewSet with NO
     # perform_create/perform_update/perform_destroy override at all — every

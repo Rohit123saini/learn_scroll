@@ -12,7 +12,6 @@
 # code below is untouched and behaves identically to before.
 import os
 import uuid
-import shutil
 from django.conf import settings
 from django.core.exceptions import ValidationError
 from django.db import transaction
@@ -27,9 +26,9 @@ from rest_framework.response import Response
 from rest_framework.parsers import MultiPartParser, FormParser, JSONParser
 from drf_spectacular.utils import extend_schema
 
-from.models import Post, PostComment, CommentMedia, ChunkedUpload, CommentLike
+from.models import Post, PostComment, CommentMedia, ChunkedUpload, PostChunkedUpload, CommentLike
 from.comment_serializers import CreateCommentSerializer, PostCommentSerializer
-from.Services import notify_post_commented
+from.Services import notify_post_commented, save_uploaded_chunk, assemble_chunks
 
 def get_media_type(file):
     content_type = getattr(file, 'content_type', '') or ''
@@ -202,6 +201,21 @@ def chunked_upload_init(request):
         traceback.print_exc()
         return Response({"error": str(e)}, status=400)
 
+# TASK 3 — this endpoint is deliberately shared by BOTH the comment
+# chunked-upload flow AND the new post chunked-upload flow. Chunk upload
+# genuinely doesn't care which kind of thing the finished file will
+# become — it only needs an upload_id + chunk_index + the bytes — so
+# api_service.dart's uploadPostChunk() posts here (/post/comment/chunked/
+# chunk/) on purpose instead of a separate /post/chunked/chunk/ route (see
+# that file's own comment). What's new below is the lookup: an upload_id
+# now might belong to `ChunkedUpload` (comment) or `PostChunkedUpload`
+# (post) — previously this only ever checked `ChunkedUpload`, so every
+# post-initiated chunk 404'd the moment views.py's post_chunked_upload_init
+# started creating `PostChunkedUpload` rows instead. Also now verifies the
+# optional `chunk_hash` (MD5) field api_service.dart's post flow sends with
+# every chunk — previously accepted and silently ignored, so a corrupted
+# chunk in transit would get baked straight into the final assembled file
+# with no way to catch it before the whole 4GB stitch-together happened.
 @api_view(['POST'])
 @permission_classes([IsAuthenticated])
 @parser_classes([MultiPartParser])
@@ -210,24 +224,24 @@ def chunked_upload_chunk(request):
         upload_id = request.data.get('upload_id')
         chunk_index = request.data.get('chunk_index')
         chunk_file = request.FILES.get('chunk')
+        chunk_hash = request.data.get('chunk_hash') or None
 
         if not upload_id or chunk_file is None:
             return Response({"error": "upload_id and chunk file required"}, status=400)
 
         try:
             chunk_index = int(chunk_index)
-        except:
+        except (TypeError, ValueError):
             return Response({"error": "chunk_index must be int"}, status=400)
 
-        upload = get_object_or_404(ChunkedUpload, upload_id=upload_id, user=request.user)
+        upload = ChunkedUpload.objects.filter(upload_id=upload_id, user=request.user).first()
+        if upload is None:
+            upload = get_object_or_404(PostChunkedUpload, upload_id=upload_id, user=request.user)
 
-        chunk_dir = os.path.join(settings.MEDIA_ROOT, 'temp_chunks', upload_id)
-        os.makedirs(chunk_dir, exist_ok=True)
-        chunk_path = os.path.join(chunk_dir, f'chunk_{chunk_index}')
-
-        with open(chunk_path, 'wb') as f:
-            for c in chunk_file.chunks():
-                f.write(c)
+        try:
+            save_uploaded_chunk(upload_id, chunk_index, chunk_file, expected_hash=chunk_hash)
+        except ValueError:
+            return Response({"error": f"Chunk {chunk_index} hash mismatch"}, status=400)
 
         progress = int(((chunk_index + 1) / upload.total_chunks) * 100)
         return Response({"received": chunk_index, "progress": progress}, status=200)
@@ -280,28 +294,17 @@ def chunked_upload_complete(request):
         if post.is_comments_disabled:
             return Response({"error": "Comments disabled"}, status=403)
 
-        temp_dir = os.path.join(settings.MEDIA_ROOT, 'temp_chunks', upload_id)
+        # TASK 3 — assembly itself (verify every chunk present, stitch
+        # them together, clean up temp_chunks/<upload_id>/) is now shared
+        # with the post chunked-upload flow via Services.assemble_chunks;
+        # everything below (building the PostComment/CommentMedia rows)
+        # stays comment-specific and unchanged.
         final_dir = os.path.join(settings.MEDIA_ROOT, 'comment_media', str(timezone.now().year), f"{timezone.now().month:02d}", f"{timezone.now().day:02d}")
-        os.makedirs(final_dir, exist_ok=True)
-
         final_file_name = f"{uuid.uuid4()}_{upload.file_name}"
-        final_path = os.path.join(final_dir, final_file_name)
-
-        for i in range(upload.total_chunks):
-            if not os.path.exists(os.path.join(temp_dir, f'chunk_{i}')):
-                return Response({"error": f"Missing chunk {i}"}, status=400)
-
-        with open(final_path, 'wb') as final_file:
-            for i in range(upload.total_chunks):
-                chunk_path = os.path.join(temp_dir, f'chunk_{i}')
-                with open(chunk_path, 'rb') as cf:
-                    shutil.copyfileobj(cf, final_file, length=1024*1024)
-                os.remove(chunk_path)
-
         try:
-            os.rmdir(temp_dir)
-        except:
-            pass
+            final_path = assemble_chunks(upload_id, upload.total_chunks, final_dir, final_file_name)
+        except FileNotFoundError as e:
+            return Response({"error": str(e)}, status=400)
 
         comment = PostComment.objects.create(
             post=post, user=request.user, parent=parent, content=upload.content or ""

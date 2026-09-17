@@ -81,6 +81,7 @@ already provide:
   `/share/` route exists). Add one once the `message` app's real
   send-function path is confirmed.
 """
+import hashlib
 import logging
 import os
 import shutil
@@ -88,6 +89,108 @@ import subprocess
 import tempfile
 
 logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# TASK 3 — shared chunk-storage helpers.
+#
+# Both the comment chunked-upload flow (comment_view.py's
+# chunked_upload_init/_chunk/_complete, backed by `ChunkedUpload`) and the
+# new post chunked-upload flow (views.py's post_chunked_upload_*, backed by
+# `PostChunkedUpload`) write chunks to, and assemble them from, the exact
+# same on-disk layout: `MEDIA_ROOT/temp_chunks/<upload_id>/chunk_<index>`.
+# That disk logic — write one chunk, list which chunks exist, stitch them
+# into a final file — doesn't care whether the upload_id belongs to a
+# comment or a post, so it lives here once instead of being copy-pasted a
+# second time into views.py. comment_view.py's three functions still own
+# everything that DOES differ per-kind (which model to look up, which
+# target Post/PostComment to validate against, is_comments_disabled
+# checks, building the PostComment/Post row at the end).
+# ---------------------------------------------------------------------------
+
+# Same ceiling both chunked_upload_init (comment) and post_chunked_upload_init
+# (post) enforce — kept in one place so the two can't quietly drift apart.
+CHUNK_UPLOAD_MAX_SIZE = 4 * 1024 * 1024 * 1024  # 4GB
+
+
+def _chunk_dir(upload_id):
+    from django.conf import settings
+    return os.path.join(settings.MEDIA_ROOT, 'temp_chunks', upload_id)
+
+
+def save_uploaded_chunk(upload_id, chunk_index, chunk_file, expected_hash=None):
+    """Write one chunk to MEDIA_ROOT/temp_chunks/<upload_id>/chunk_<index>.
+
+    If `expected_hash` is given (the post flow's api_service.dart sends an
+    MD5 `chunk_hash` field with every chunk; the comment flow's
+    comment_service.dart doesn't send one), the chunk is hashed before
+    being written and a ValueError is raised on mismatch — callers turn
+    that into a 400 so a corrupted chunk gets rejected and re-sent instead
+    of silently baked into the final file.
+    """
+    chunk_dir = _chunk_dir(upload_id)
+    os.makedirs(chunk_dir, exist_ok=True)
+    chunk_path = os.path.join(chunk_dir, f'chunk_{chunk_index}')
+
+    if expected_hash:
+        data = chunk_file.read()
+        actual_hash = hashlib.md5(data).hexdigest()
+        if actual_hash != expected_hash:
+            raise ValueError("Chunk hash mismatch")
+        with open(chunk_path, 'wb') as f:
+            f.write(data)
+    else:
+        with open(chunk_path, 'wb') as f:
+            for c in chunk_file.chunks():
+                f.write(c)
+
+
+def list_received_chunks(upload_id):
+    """Sorted list of chunk indices already on disk for this upload_id.
+
+    Used by post_chunked_upload_status (TASK 4) and, client-side, by
+    ApiService.createPostWithChunkedUpload's resume logic
+    (getChunkedUploadStatus -> received_chunks).
+    """
+    chunk_dir = _chunk_dir(upload_id)
+    if not os.path.isdir(chunk_dir):
+        return []
+    indices = []
+    for name in os.listdir(chunk_dir):
+        if name.startswith('chunk_'):
+            try:
+                indices.append(int(name.split('_', 1)[1]))
+            except ValueError:
+                continue
+    return sorted(indices)
+
+
+def assemble_chunks(upload_id, total_chunks, dest_dir, dest_filename):
+    """Stitch the numbered chunk files for `upload_id` into one final file
+    at `dest_dir/dest_filename`, verifying every chunk is present first.
+    Returns the final absolute path. Raises FileNotFoundError (with the
+    missing index in the message) if any chunk is missing — callers turn
+    that into a 400, same wording chunked_upload_complete (comment) used
+    inline before this was factored out.
+    """
+    temp_dir = _chunk_dir(upload_id)
+    for i in range(total_chunks):
+        if not os.path.exists(os.path.join(temp_dir, f'chunk_{i}')):
+            raise FileNotFoundError(f"Missing chunk {i}")
+
+    os.makedirs(dest_dir, exist_ok=True)
+    final_path = os.path.join(dest_dir, dest_filename)
+    with open(final_path, 'wb') as final_file:
+        for i in range(total_chunks):
+            chunk_path = os.path.join(temp_dir, f'chunk_{i}')
+            with open(chunk_path, 'rb') as cf:
+                shutil.copyfileobj(cf, final_file, length=1024 * 1024)
+            os.remove(chunk_path)
+    try:
+        os.rmdir(temp_dir)
+    except OSError:
+        pass
+    return final_path
 
 
 # ---------------------------------------------------------------------------

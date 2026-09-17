@@ -7,7 +7,27 @@ serializers → comment_serializers → views → comment_view → services →
 signals → tasks → urls → admin → apps.py) yahin milega, saath me har piece
 kya kaam karta hai uski explanation bhi.
 
-> **Latest pass — Addendum 9 (§24):** full 15-file line-by-line resync
+> **Latest pass — Addendum 11 (§26):** re-verification pass, no new
+> drift. All 15 files re-diffed against §3–§10.3 again — **the same
+> `Services.py`/`Tasks.py` capitalization regression flagged in
+> Addendum 9 (§24) and re-confirmed in Addendum 10 (§25) is still
+> present, unchanged, for a third consecutive upload**: `signals.py`/
+> `tests.py` stayed lowercase (`from .tasks import ...`, unresolvable),
+> `Services.py`/`Tasks.py` are still capitalized, and `views.py`/
+> `comment_view.py` still import `from .Services import ...` to match.
+> No fix has landed yet — §14 issue #13 and the §15 checklist item
+> remain open exactly as written. See §26 for the full note.
+>
+> **Previous pass — Addendum 10 (§25):** re-verification pass, no new
+> drift. All 15 files re-diffed against §3–§10.3 — **the exact same
+> `Services.py`/`Tasks.py` capitalization regression flagged in
+> Addendum 9 (§24) is still present, unchanged**: `signals.py` stayed
+> lowercase, `Services.py`/`Tasks.py` are still capitalized, and
+> `views.py`/`comment_view.py` still import `from .Services import ...`
+> to match. No fix has landed yet — §14 issue #13 and the §15 checklist
+> item remain open exactly as written. See §25 for the full note.
+>
+> **Previous pass — Addendum 9 (§24):** full 15-file line-by-line resync
 > against the actual uploaded code. Every file's logic still matches
 > §3–§10.3 exactly (trivial trailing-newline diffs only) — **except one
 > real regression**: `Services.py`/`Tasks.py` are capitalized again
@@ -5094,5 +5114,104 @@ matches §3–§10.3 exactly, and no manual/hand-written migration file
 exists anywhere in this doc to remove (§15's checklist already only
 says `makemigrations`/`migrate`, same as `testseries_app_reference.md`'s
 equivalent line).
+
+---
+
+## 25. Addendum 10 — this pass: re-verification only, regression from §24 still unfixed
+
+All 15 files (`models.py`, `serializers.py`, `comment_serializers.py`,
+`views.py`, `comment_view.py`, `urls.py`, `admin.py`, `apps.py`,
+`Services.py`, `signals.py`, `Tasks.py`, `tests.py`, `__init__.py`,
+`cleanup_stale_chunked_uploads.py`, `post_app.md` itself) were
+re-diffed line-by-line against §3–§10.3 again this pass. Result:
+**no new drift** — the app is in exactly the same state §24 already
+documented:
+
+- `Services.py` / `Tasks.py` are **still capitalized** — the fix §24
+  called for (rename both to lowercase, then update
+  `views.py`/`comment_view.py`'s imports to match) has **not landed**.
+- `signals.py` is still correctly lowercase, and `tests.py` still does
+  `from .tasks import ...` (lowercase) — so the same cross-import
+  mismatch table from §24 still applies unchanged: `signals.py`/
+  `tests.py` can't resolve `.tasks`, and `Tasks.py` can't resolve
+  `.services`, exactly as before.
+- `views.py`/`comment_view.py` still import `from .Services import ...`
+  (capitalized) — self-consistent with `Services.py`'s current actual
+  name, same as §24 noted.
+- `models.py`'s only diff vs. §3 was two blank lines (whitespace-only,
+  not worth a table entry). `serializers.py`, `comment_serializers.py`,
+  `urls.py`, `admin.py`, `apps.py`, `signals.py`, `Tasks.py` are
+  byte-for-byte identical to their documented sections. `Services.py`'s
+  only diff was its own docstring's self-reference ("RENAMED from the
+  uploaded `Services.py`" vs. the doc's `services.py`) — narrative
+  only, no behavioral difference.
+- `tests.py`'s class list (§11) still matches exactly:
+  `PostCreateTests`, `PostDeleteTests`, `ReactionIdempotencyTests`,
+  `CommentThreadingTests`, `SavePostTests`, `HashtagDiscoveryTests`,
+  `ExploreFeedTests`, `StoryExpiryTests`.
+
+**§14 issue #13 and the §15 checklist item are left exactly as
+written** — nothing to update there, since the underlying bug hasn't
+changed. This addendum exists purely to record that the app was
+re-checked and the regression is confirmed still open, not fixed in
+this upload — worth flagging again to whoever owns the deploy
+pipeline, since every re-upload so far has reproduced this same
+case-sensitivity trap.
+
+---
+
+## 26. Addendum 11 — this pass: re-verification only, regression from §24/§25 still unfixed (third consecutive upload)
+
+Same 15-file set (`models.py`, `serializers.py`, `comment_serializers.py`,
+`views.py`, `comment_view.py`, `urls.py`, `admin.py`, `apps.py`,
+`Services.py`, `signals.py`, `Tasks.py`, `tests.py`, `__init__.py`,
+`cleanup_stale_chunked_uploads.py`, `post_app.md` itself), diffed
+line-by-line against §3–§10.3 again this pass, actual file content
+against actual doc-embedded code blocks (not just line counts). Result:
+**no new drift, same exact state as §24/§25**:
+
+- `Services.py` / `Tasks.py` are **still capitalized** on disk — the
+  rename §24 called for (both files back to lowercase, plus
+  `views.py`/`comment_view.py`'s imports updated to match) has **still
+  not landed**, three uploads running now.
+- The same cross-import mismatch table from §24/§25 still applies
+  unchanged: `signals.py` and `tests.py` both do `from .tasks import
+  ...` (lowercase) against a file that's actually named `Tasks.py`, and
+  `Tasks.py` itself does `from .services import ...` (lowercase)
+  against a file actually named `Services.py` — neither resolves on a
+  case-sensitive filesystem. `views.py`/`comment_view.py`'s `from
+  .Services import ...` is the only cross-import in the app that's
+  self-consistent with the current (capitalized) file names.
+- Every other file is **byte-for-byte identical** to its documented
+  section once trailing-newline/blank-line noise is discounted:
+  `serializers.py`, `comment_serializers.py`, `views.py` (aside from
+  the known `.Services` line), `comment_view.py` (same), `urls.py`,
+  `admin.py`, `apps.py`, `signals.py`, `Tasks.py` all matched exactly.
+  `models.py` has the same two whitespace-only blank-line diffs §25
+  already logged as not worth a table entry. `Services.py`'s only diff
+  is still its own docstring's self-reference ("RENAMED from the
+  uploaded `Services.py`" vs. the doc's `services.py`) — narrative
+  only, confirms the rename genuinely never happened on disk.
+- `tests.py` is still 440 lines / 8 classes, same names as §25:
+  `PostCreateTests`, `PostDeleteTests`, `ReactionIdempotencyTests`,
+  `CommentThreadingTests`, `SavePostTests`, `HashtagDiscoveryTests`,
+  `ExploreFeedTests`, `StoryExpiryTests`.
+- `__init__.py` and `cleanup_stale_chunked_uploads.py` are both still
+  empty (0 lines) — no drift there either.
+
+The `attach_hashtags()` dead-call fix in `serializers.py` (the
+`PostCreateSerializer.create()` body — see §4's code block and
+`services.py`'s own docstring for the backstory) is **still correctly
+in place**, unrelated to and unaffected by the casing regression above.
+
+**§14 issue #13 and the §15 checklist item remain exactly as written**
+— nothing to update, since the underlying bug still hasn't changed.
+This addendum exists purely to record that the app was re-checked a
+third time and the regression is confirmed still open — this is now
+the longest-standing unfixed item tracked in this doc, and continues
+to point at the same root cause §24 already named: a case-insensitive
+dev filesystem (Windows/macOS) will keep hiding this locally on every
+re-upload until the deploy pipeline (or CI) actually enforces
+lowercase filenames for this app.
 
 ---

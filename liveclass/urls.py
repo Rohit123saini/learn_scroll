@@ -52,7 +52,14 @@ router — list/retrieve/create/update/delete on each, plus the custom
     coin-purchases/{id}/retry/           POST              (re-attempt a FAILED purchase)
     schedules/                           GET, POST
     schedules/{id}/                      GET, PUT, PATCH, DELETE
-    sessions/                            GET, POST
+    sessions/                            GET, POST         (?classroom= scopes to one classroom's sessions;
+                                                          no ?classroom= returns every session across every
+                                                          classroom the caller can access)
+    sessions/live-now/                   GET               (NEW, Home Module Task 3 — lightweight cross-
+                                                          classroom feed of every currently-LIVE session in
+                                                          a classroom the caller can access; ?limit= default
+                                                          10, max 20. See ClassSessionViewSet.live_now() /
+                                                          LiveNowSessionSerializer.)
     sessions/{id}/                       GET, PUT, PATCH, DELETE
     sessions/{id}/join/                  POST
     sessions/{id}/token/                  POST             (fresh token, no participant row — reconnect/testing)

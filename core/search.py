@@ -59,6 +59,25 @@ STATUS (this pass):
       entitlement resolver exists for testseries on the liveclass side
       yet, so those rows are simply absent from search results, never
       leaked.
+  - ✅ users, for "add friend" (`AUTH_USER_MODEL`, `username`/
+    `first_name`/`last_name`) — fully wired via `_search_generic_model`
+    below, same as `NOTICE_SOURCE`. This is the SAME search that
+    `user_profile.views.UserSearchView` already does with DRF's
+    `SearchFilter` (plain `icontains`, no ranking) — that view is left
+    as-is (it's a fine, simple endpoint on its own), but a caller that
+    wants "add friend" folded into the one unified `/search/` box now
+    can, by passing a `user` key into `scoped_querysets`. The caller
+    MUST build that queryset with the exact same exclusions
+    `UserSearchView.get_queryset()` already applies (self +
+    `BlockUser` both directions) — see `USER_SOURCE`'s own docstring
+    below and the module docstring's golden rule: this file will not
+    re-derive who's blocked, it only ranks/merges what it's handed.
+    ⚠️ ASSUMPTION — the concrete `User` model (`AUTH_USER_MODEL`)
+    wasn't part of any upload, so its recency field is assumed to be
+    Django's default `date_joined` (same kind of assumption
+    `user_profile/tasks.py` already flags for `followers_count`/
+    `following_count`) — if your `User` model names it differently,
+    change `USER_SOURCE`'s `order_field` below, nothing else.
   - ❌ posts (`post` app) — STUB ONLY. `post/models.py` was never part
     of any upload, so `Post`'s searchable field name(s) are unknown.
     Wire up by adding a `SearchSource` to `SOURCES` below (see
@@ -235,6 +254,26 @@ def _serialize_testseries(series) -> dict:
     }
 
 
+def _serialize_user(user) -> dict:
+    full_name = f"{user.first_name} {user.last_name}".strip()
+    return {
+        "source": "user",
+        "id": user.id,
+        "title": user.username,
+        "snippet": full_name or None,
+        "created_at": getattr(user, "date_joined", None),
+        "rank": getattr(user, "rank", None),
+        "similarity": getattr(user, "similarity", None),
+        "extra": {
+            "username": user.username,
+            "first_name": user.first_name,
+            "last_name": user.last_name,
+            "profile_photo": getattr(user, "profile_photo", None) and str(user.profile_photo),
+            "is_private": getattr(user, "is_private", False),
+        },
+    }
+
+
 MESSAGE_SOURCE = SearchSource(
     name="message",
     run=lambda qs, query: message_search_utils.search_messages(qs, query),
@@ -259,6 +298,32 @@ TESTSERIES_SOURCE = SearchSource(
     serialize=_serialize_testseries,
 )
 
+USER_SOURCE = SearchSource(
+    name="user",
+    # 🔥 "add friend" — same fields UserSearchView.search_fields already
+    # searches (username, first_name, last_name), just run through the
+    # ranked-FTS/trigram path every other source here uses instead of
+    # DRF SearchFilter's plain icontains. `username` goes first since
+    # that's the single most important match for "add friend" (people
+    # usually search a handle, not a first name) — see
+    # `_search_generic_model`'s docstring for why only the first field
+    # gets trigram similarity.
+    #
+    # ⚠️ CALLER CONTRACT (golden rule at the top of this file): the
+    # `user` queryset passed into `search_everything()` must ALREADY be
+    # scoped the same way `UserSearchView.get_queryset()` scopes it —
+    # `is_active=True`, excluding the requesting user themself, and
+    # excluding everyone in a `BlockUser` relationship with them (either
+    # direction). This file will not re-derive that here — see
+    # `user_profile.views.is_blocked_between` for the exact check to
+    # reuse. A caller that skips this leaks blocked/self rows into
+    # "add friend" search results.
+    run=lambda qs, query: _search_generic_model(
+        qs, query, fields=("username", "first_name", "last_name"), order_field="date_joined"
+    ),
+    serialize=_serialize_user,
+)
+
 # ❌ post / classroom-material sources intentionally NOT registered
 # yet — see module docstring STATUS. Add them here, same shape as
 # NOTICE_SOURCE, once their models are available:
@@ -279,6 +344,7 @@ SOURCES = {
     NOTICE_SOURCE.name: NOTICE_SOURCE,
     assigments_SOURCE.name: assigments_SOURCE,
     TESTSERIES_SOURCE.name: TESTSERIES_SOURCE,
+    USER_SOURCE.name: USER_SOURCE,
 }
 
 
@@ -301,6 +367,9 @@ def search_everything(
                 "campus_notice": Notice.objects.filter(campus__in=my_campus_ids, ...),
                 "assigments": assigments.objects.filter(...),
                 "testseries": TestSeries.objects.filter(...),
+                # "add friend" — same exclusions UserSearchView.get_queryset()
+                # already applies; see USER_SOURCE's docstring above.
+                "user": User.objects.filter(is_active=True).exclude(id__in=excluded_ids),
             },
             query="exam schedule",
         )

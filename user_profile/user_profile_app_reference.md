@@ -1,42 +1,187 @@
 # `user_profile` App — Complete Self-Contained Reference
 
-> **v6 — v5 ke upar §11 item 10 (Buy-Coin webhook signature verification)
-> aur §11 item 12 (Coin-Withdrawal admin/ops lifecycle actions) resolve
-> hue hain, plus donon ke liye test coverage add hui hai.**
+> **v7 — TASK 30 (`CoinPurchaseRequest` diffed against `liveclass.
+> CoinPurchase` → `gateway_payment_id`/`gateway_signature` added), TASK
+> 31 (`UserPreference.for_user()` diffed against `core.
+> NotificationPreference` → confirmed, no code change), TASK 38
+> (`CoinWithdrawalRequest` diffed against `liveclass.CoinWithdrawal` →
+> `MIN_WITHDRAWAL_COINS`, `amount_inr`, `reviewed_by`/`reviewed_at`
+> added), aur TASK 37 (earn-rate-limit constants moved from hardcoded
+> `fraud.py` values to Django settings) is pass me resolve hue hain.**
 > Ye ek hi file hai jisme poore **user_profile** Django app ka sara logic,
 > code, connections, flows, fraud rules, aur known issues cover hain. Iske
 > alawa kisi aur file ki zaroorat nahi — sab kuch (models → serializers →
 > views → urls → admin → fraud → services → tasks → tests) yahin milega,
 > current code ke saath.
 >
-> **v5 se kya badla, sabse pehle:** section 0.5 (Changelog v5 → v6) padho.
-> Short version — do open items §11 me se close hue is pass me:
-> - **§11 item 10** — `BuyCoinConfirmView` ab ek real, gateway-agnostic
->   HMAC-SHA256 webhook-signature check (`_verify_gateway_webhook_signature`,
->   `views.py`) ke peeche hai, `IsAuthenticated` + ownership check ki jagah
->   `AllowAny` + signature verification. **Behavior change:** ab ek blank
->   `gateway` wali (manual/admin top-up) `CoinPurchaseRequest` is route se
->   confirm nahi ho sakti — see §6 view notes.
-> - **§11 item 12** — naya `CoinWithdrawalAdminActionView` (staff-only,
->   `POST /profile/coin-withdrawals/<id>/action/`) + naya
->   `CoinWithdrawalRequestAdmin` (Django admin bulk actions) — donon
->   `mark_processing()`/`confirm_success()`/`reject()` (models.py) ko ab
->   ek Django shell ke bina reach karne ke do sanctioned tareeke hain.
-> - Test gaps jo §11 item 9/15 me carried-over the — `CoinLedgerAdmin`
->   ka add/change/delete refusal, aur `record_transaction()` ka
->   `CAMPUS_REWARD` path — dono ab covered hain (`tests.py`, naya
->   `CoinLedgerAdminPermissionTests` + `RecordTransactionCampusRewardTests`).
+> **v6 se kya badla, sabse pehle:** section 0.6 (Changelog v6 → v7)
+> padho. Short version:
+> - **TASK 30** — `CoinPurchaseRequest` ab `liveclass.CoinPurchase` ke
+>   against directly diffed hai (pehle sirf inferred tha). Us model ka
+>   apna Task 6 already deprecated kar chuka hai (`mark_success()`/
+>   `mark_failed()` ab `RuntimeError` raise karte hain), isliye field-
+>   for-field parity goal nahi tha — lekin ek real gap mila:
+>   `gateway_payment_id` / `gateway_signature` kahin persist nahi ho rahe
+>   the. Dono fields add hue, aur `confirm_success()` (models.py) ab
+>   dono ko optionally accept + store karta hai. `retry_of` deliberately
+>   NAHI add kiya — see §4.
+> - **TASK 38** — `CoinWithdrawalRequest` ab `liveclass.CoinWithdrawal`
+>   ke against diffed hai (Task 4 ne ye explicitly deferred kiya tha).
+>   Teen fields add hue: `MIN_WITHDRAWAL_COINS = 100` (class constant,
+>   `request_withdrawal()` me enforced), `COIN_TO_INR_RATE` + `amount_inr`
+>   (request time par snapshot hota hai), aur `reviewed_by`/`reviewed_at`
+>   (`mark_processing()`/`reject()` — jo bhi pehle chale — stamp karta
+>   hai). **Naya migration zaroori tha** — see §3a.
+> - **TASK 37** — `fraud.py`'s teeno earn-rate-limit constants
+>   (`EARN_RATE_LIMIT_WINDOW`/`_MAX_TRANSACTIONS`/`_MAX_COINS`) ab
+>   hardcoded nahi, Django `settings.py` se aate hain (env-overridable) —
+>   values wahi hain, sirf relocation hai, retune nahi. See §8b / §12.
+> - **TASK 31** — `UserPreference.for_user()` ko `core.
+>   NotificationPreference.for_user()` ke against diff kiya gaya (§11 item
+>   17 ka open gap tha) — clean confirmation nikla, koi code change nahi
+>   chahiye tha.
 >
-> **Migration housekeeping (v6):** is app ke liye ab koi hand-written
-> migration file track nahi ki jaati is doc me — pichla `0002_
-> add_userpreference.py` (v5) hand-likha gaya tha kyunki us pass me Django
-> install available nahi tha; woh ab superseded hai. Project ki saari
-> migrations (is app samet) ek clean `makemigrations`/`migrate` se fresh
-> generate hui hain current `models.py` ke against — §3a ab sirf itna
-> documents karta hai, koi specific migration file content nahi. Poora
-> document is round ke baad, fully updated code ke saath, dubara organize
-> kiya gaya hai; purane version-history (v1→v2→v3→v3.1→v4→v5) sections §0
-> me neeche traceable hain, delete nahi kiye gaye.
+> **Migration housekeeping (v7):** v6 me is app ke liye koi hand-written
+> migration track nahi hoti thi (fresh `makemigrations` reset ke baad).
+> TASK 30/38 dono real columns add karte hain, aur is pass me bhi Django
+> install available nahi tha — isliye do naye hand-written migrations
+> (`0002_coinpurchaserequest_gateway_verification_fields.py`,
+> `0003_coinwithdrawalrequest_review_and_inr_fields.py`) is baar track
+> ho rahi hain, `0001_initial` ke upar. Poora detail §3a me. Purane
+> version-history (v1→v2→v3→v3.1→v4→v5→v6) sections §0 me neeche
+> traceable hain, delete nahi kiye gaye.
+
+---
+
+## 0.6 Changelog — v6 → v7 (TASK 30 — CoinPurchaseRequest gateway fields; TASK 38 — CoinWithdrawalRequest review/INR fields; TASK 37 — earn-rate settings; TASK 31 — UserPreference confirmed)
+
+Char naye/resolved items is pass me, `models.py` (§4), `fraud.py` (§8b),
+aur naye migrations (§3a) ke through:
+
+### 🔍 TASK 30 — `CoinPurchaseRequest` diffed against `liveclass.CoinPurchase`
+
+`liveclass/models.py` finally review ho gaya (§11 item 11 ka open gap
+tha). Findings:
+- `liveclass.CoinPurchase` khud already deprecated hai (uska apna Task 6
+  `mark_success()`/`mark_failed()` ko `RuntimeError` bana chuka hai) —
+  is model se field-for-field parity kabhi bhi real goal nahi thi.
+- Money precision (`amount`, `max_digits=10` vs `CoinPurchase`'s 8) aur
+  gateway-identity (`gateway` field vs no such field at all) — dono
+  jagah is model ka shape strictly better nikla, koi gap nahi.
+- `retry_of` (self-FK, failed purchase ko retry se link karta hai) —
+  `CoinPurchase` me hai, yahan deliberately NAHI add kiya:
+  `gateway_reference`'s uniqueness already har retry ko ek naya row bana
+  deti hai, aur koi bhi jagah retry-chain read nahi karti.
+- **[FIX] `gateway_payment_id` / `gateway_signature`** — `CoinPurchase`
+  ke paas dono the, is model ke paas nahi tha. Real gap: webhook ka
+  signed payment-id/signature persist karne ki jagah hi nahi thi, matlab
+  `confirm_success()` ke paas later audit/dispute ke liye koi proof
+  nahi rehta tha. Dono blank-ok `CharField`s add hue
+  (`gateway_payment_id`, max_length=100; `gateway_signature`,
+  max_length=255), aur `confirm_success()` ab dono ko optional kwargs
+  ke roop me accept karke, jab present ho tab hi persist karta hai —
+  idempotency check (`gateway_reference` par) me ye dono participate
+  nahi karte, wahi rehta hai jaisa pehle tha.
+- `views.py` ke andar `BuyCoinConfirmView`/`AdminCoinPurchaseConfirmView`
+  abhi bhi in naye kwargs ko pass nahi kar rahe — model/manager level par
+  support ready hai, wiring ek separate, is pass se bahar ka kaam hai
+  (§11 me naya open item, neeche).
+
+### 🔍 TASK 38 — `CoinWithdrawalRequest` diffed against `liveclass.CoinWithdrawal`
+
+Task 4's docstring ne ye teeno explicitly defer kiye the ("no
+`reviewed_by`, no `MIN_WITHDRAWAL_COINS` floor, no INR snapshot ... add
+if/when an admin-facing withdrawal review UI is built") — woh review UI
+ab exist karta hai (`CoinWithdrawalAdminActionView` + admin bulk
+actions, v6 se), isliye ye pass unhe close karta hai:
+
+- **`MIN_WITHDRAWAL_COINS = 100`** — plain class constant, `liveclass.
+  CoinWithdrawal`'s same value/reasoning se copy ("below this, a
+  bank/UPI transfer typically costs more in fees than the payout
+  itself"). `request_withdrawal()` me hi enforce hota hai — wahi single
+  choke point jo already `coins <= 0` aur balance check karta hai, isliye
+  koi caller isse view-level check skip karke bypass nahi kar sakta.
+- **`COIN_TO_INR_RATE = 1` + `amount_inr` field** — request time par
+  hi snapshot ho jata hai (`coins * COIN_TO_INR_RATE`), taaki
+  `COIN_TO_INR_RATE` future me change ho to purane requests ka
+  historical value silently rewrite na ho. **Not `null=True`** on the
+  model — isliye is field ke liye ek real (nullable-then-backfill-then-
+  tighten) migration chahiye tha, na ki simple `AddField` — see §3a.
+  Apna alag `COIN_TO_INR_RATE` hai (liveclass wala import nahi kiya —
+  same "own parallel definition" precedent jo `CoinPurchaseRequest`'s
+  money precision/gateway field pehle se set kar chuke hain).
+- **`reviewed_by` (nullable FK, `SET_NULL`) + `reviewed_at`
+  (nullable DateTimeField)** — `liveclass.CoinWithdrawal.reviewed_by`
+  single stamp hai (`approve()`/`reject()` jo pehle chale). Is model ka
+  lifecycle me ek extra PROCESSING stage hai, isliye `mark_processing()`
+  aur `reject()` dono `if wr.reviewed_by_id is None` check karke stamp
+  karte hain — jo bhi pehle chale, wahi reviewer record hota hai, baad
+  me overwrite nahi hota. `confirm_success()` inhe stamp NAHI karta —
+  SUCCESS tak pahunchne se pehle already `mark_processing()` se guzarna
+  chahiye, agar nahi guzra to woh ops process ka gap hai, model ka nahi.
+- Naya `CheckConstraint(amount_inr__gt=0)` — `coinpurchaserequest_
+  amount_positive` jaisa hi, kyunki `amount_inr` `coins` se derive hota
+  hai isliye kabhi bhi zero/negative nahi hona chahiye.
+- **Migration**: `0003_coinwithdrawalrequest_review_and_inr_fields.py`
+  — three-step (nullable add → `RunPython` backfill from existing
+  `coins` at the current rate → tighten to `NOT NULL` + constraint), na
+  ki single `AddField(default=0)`, taaki koi bhi existing row constraint-
+  violating `amount_inr=0` par permanently na phase. Poora detail §3a.
+
+### ⚙️ TASK 37 — earn-rate-limit constants moved to Django settings
+
+`fraud.py`'s `EARN_RATE_LIMIT_WINDOW`/`_MAX_TRANSACTIONS`/`_MAX_COINS`
+pehle plain hardcoded module constants the (§11 item 14 ka open gap
+tha). Ab `settings.EARN_RATE_LIMIT_WINDOW_MINUTES` /
+`settings.EARN_RATE_LIMIT_MAX_TRANSACTIONS` /
+`settings.EARN_RATE_LIMIT_MAX_COINS` se, import time par hi, same teeno
+module-level names me read hote hain — same env-overridable-constant
+shape jo is project ke doosre coin-economy numbers
+(`REFERRAL_BONUS_COINS`, `CAMPUS_ATTENDANCE_STREAK_BONUS_COINS`, ...)
+already use karte hain. **Values unchanged** — 1 hour / 20 transactions
+/ 500 coins, wahi purane defaults; ye sirf relocation hai, retune nahi.
+`tests_fraud.py`'s `patch.object(fraud, "EARN_RATE_LIMIT_MAX_
+TRANSACTIONS", N)` pattern bina kisi change ke kaam karta rehta hai,
+kyunki woh module attribute ko patch karta hai, settings value ko nahi.
+`settings.py` khud is upload ka hissa nahi tha, isliye us file me exact
+kya add hua woh confirm nahi ho sakta — but the required shape is
+documented in §12.
+
+### 🔍 TASK 31 — `UserPreference.for_user()` diffed against `core.NotificationPreference.for_user()` (confirmed, no change)
+
+§11 item 17 ka open gap tha — `core/models.py` finally review ho gaya.
+Result: clean confirmation, guess nahi nikla. Classmethod name
+(`for_user`), get-or-create keying (`user=user` only, koi `defaults=`
+dict nahi), aur default-population behavior (dono sirf model field
+defaults par rely karte hain) — sab already match kar rahe the. **Koi
+code change nahi chahiye tha.**
+
+### Test coverage — unchanged this pass
+
+`tests.py`, `tests_fraud.py`, `serializers.py`, `views.py`, `admin.py`,
+`services.py`, `tasks.py`, `urls.py` — sab **unchanged** is round me.
+Naya `gateway_payment_id`/`gateway_signature`/`amount_inr`/
+`reviewed_by`/`reviewed_at` field koi bhi serializer expose nahi karta
+(dono `CoinPurchaseRequestSerializer`/`CoinWithdrawalRequestSerializer`
+apne `fields = [...]` list explicit rakhte hain — naya field automatic
+expose nahi hota), isliye API response shape is pass se unaffected hai.
+Ye naya code (migration backfill logic, `confirm_success()`'s naye
+kwargs, `mark_processing()`/`reject()`'s `reviewed_by` stamping) abhi
+tak **direct test coverage ke bina** hai — naya open item, §11 neeche.
+
+### Status as of v7
+
+- **Coin economy**: `CoinPurchaseRequest` ab gateway webhook proof
+  persist kar sakta hai; `CoinWithdrawalRequest` ab minimum-withdrawal
+  floor, INR snapshot, aur reviewer audit-trail ke saath complete hai —
+  dono `liveclass`'s reference models ke against confirmed-diffed hain,
+  ab sirf inferred nahi.
+- **Fraud/rate-limiting**: ops ab earn-rate limits ko ek deploy ke bina
+  retune kar sakte hain (settings.py env var change + restart).
+- **UserPreference**: pattern confirmed correct, koi outstanding gap
+  nahi.
+- Har cheez jo v6 me open thi (§11) aur is pass se directly related
+  nahi thi — waisi hi khuli hai; neeche §11 me updated markers dekho.
 
 ---
 
@@ -745,6 +890,24 @@ actual signature is inferred from those existing call sites, not
 verified. Harmless today since nothing calls `services._notify()` yet
 (see §8c) — this only matters once that wiring happens.
 
+**v7 note — `fraud.py`'s earn-rate limiting now reads three
+`settings.py` entries (TASK 37 → §0.6/§8b), unlike the two `PAYMENT_
+GATEWAY_*` settings above these are read at *import time* (`fraud.py`
+module load), not lazily via `getattr` — so if any of the three is
+missing, importing `fraud.py` (and therefore `models.py`, and therefore
+the app) raises `AttributeError` at startup, not a 503 at request time.
+`settings.py` itself wasn't part of this upload, so its presence there
+isn't independently confirmed — `fraud.py`'s own Task 37 comment says
+it's "already added", but treat that as unverified until `settings.py`
+is actually reviewed (same caution §11 items 11/17 applied before
+being resolved in v7). Required shape:
+```python
+EARN_RATE_LIMIT_WINDOW_MINUTES = 60       # 1 hour, same value fraud.py hardcoded before v7
+EARN_RATE_LIMIT_MAX_TRANSACTIONS = 20     # unchanged from the old hardcoded default
+EARN_RATE_LIMIT_MAX_COINS = 500           # unchanged from the old hardcoded default
+```
+See §12 for where this fits in the setup checklist.
+
 ---
 
 ## 3. `apps.py`
@@ -761,39 +924,195 @@ Nothing special — standard app config, unchanged from v1.
 
 ---
 
-## 3a. `migrations/` (v6 — no hand-written migration tracked anymore)
+## 3a. `migrations/` (v7 — two new hand-written migrations this pass)
 
-Up to v5 this section hand-wrote and tracked `0002_add_userpreference.py`
-verbatim, because the pass that added `UserPreference` had no Django
-install available to run `makemigrations` against. **As of v6 that's no
-longer the case** — the project's migrations (across every app, not just
-this one) were regenerated fresh with `manage.py makemigrations` /
-`manage.py migrate` against current `models.py`, so:
+Up to v6 this section tracked no specific migration filename — the
+project's migration state had just been reset/regenerated fresh
+against `models.py`, and no v6 change touched a model/field, so there
+was nothing new to hand-write. **As of v7 that's changed again**: TASK
+30 and TASK 38 (see §0.6 / §4) each add real columns to an existing
+table, and this pass had no Django install available to run
+`makemigrations` against (same situation the old, now-superseded
+`0002_add_userpreference.py` was written under, pre-v6) — so these two
+migrations are hand-written, checked directly against `0001_initial`
+being the only migration this app had on disk at the time (confirmed
+via a screenshot of `user_profile/migrations/`, not guessed).
 
-- This doc does **not** pin a specific migration filename or hand-written
-  operations list for `user_profile` anymore — whatever
-  `manage.py makemigrations user_profile` produces against the current
-  `models.py` in §4 **is** the source of truth, not a copy kept here.
-- Every model in §4 — `BlockUser`, `CoinLedger`, `Follow`, `RestrictUser`,
-  `CoinPurchaseRequest`, `CoinWithdrawalRequest`, `UserPreference` — is
-  covered by that regenerated migration state; there's no longer a gap
-  where `CoinPurchaseRequest`/`CoinWithdrawalRequest` "would need their
-  own follow-up migration, not shown in any upload" (that was the v5
-  caveat for this table — superseded).
-- §11 item 5's old `CoinLedger` migration-risk caution (renaming from an
-  older `coins`/`credit`/`debit` shape) is **moot post-reset** — a fresh
-  `makemigrations` against the current `CoinLedger` shape has no older
-  shape to reconcile against; that caution only ever applied to a
-  project that already had migration history predating the redesign.
-- No new migration is needed specifically for this v6 pass — `views.py`,
-  `urls.py`, `admin.py`, `tests.py` changed, but no model/field changed
-  (see §0.5), so `makemigrations user_profile` should report "No changes
-  detected" against a project whose migration state is already current.
+- **`0002_coinpurchaserequest_gateway_verification_fields.py`** (TASK
+  30) — adds `gateway_payment_id` (`CharField(max_length=100,
+  blank=True)`) and `gateway_signature` (`CharField(max_length=255,
+  blank=True)`) to `CoinPurchaseRequest`. Depends on `0001_initial`.
+  Both fields are added with `default=""` + `preserve_default=False` —
+  a pure additive migration, no backfill needed for existing rows
+  (blank-ok, so existing PENDING/SUCCESS/FAILED rows just get `""`).
+
+```python
+# Task 30 — add gateway_payment_id/gateway_signature to
+# CoinPurchaseRequest, closing the signature-verification gap found by
+# diffing against liveclass.CoinPurchase (see that model's class
+# docstring in user_profile/models.py for the full diff).
+#
+# Depends directly on 0001_initial — the screenshot of
+# user_profile/migrations/ confirms that's the only migration in this
+# app so far (just __init__.py + 0001_initial.py), so this is 0002, no
+# placeholder guessing needed.
+#
+# Both new fields are blank-ok CharFields with an empty-string
+# default, so this is a pure additive migration — no backfill needed
+# for existing rows.
+from django.db import migrations, models
+
+
+class Migration(migrations.Migration):
+
+    dependencies = [
+        ("user_profile", "0001_initial"),
+    ]
+
+    operations = [
+        migrations.AddField(
+            model_name="coinpurchaserequest",
+            name="gateway_payment_id",
+            field=models.CharField(max_length=100, blank=True, default=""),
+            preserve_default=False,
+        ),
+        migrations.AddField(
+            model_name="coinpurchaserequest",
+            name="gateway_signature",
+            field=models.CharField(max_length=255, blank=True, default=""),
+            preserve_default=False,
+        ),
+    ]
+```
+
+- **`0003_coinwithdrawalrequest_review_and_inr_fields.py`** (TASK 38) —
+  adds `reviewed_by` (nullable FK to `settings.AUTH_USER_MODEL`,
+  `SET_NULL`), `reviewed_at` (nullable `DateTimeField`), and
+  `amount_inr` (`DecimalField(max_digits=10, decimal_places=2)`) to
+  `CoinWithdrawalRequest`, plus a `CheckConstraint` that `amount_inr >
+  0`. Depends on `0002_...` above. **Not a pure-additive migration** —
+  `amount_inr` has no `null=True` on the model (see §4's
+  `CoinWithdrawalRequest` docstring), so existing rows need a real
+  value, not `NULL`. Handled as a three-step migration instead of a
+  single `AddField(default=0)`:
+  1. Add `amount_inr` nullable, no default.
+  2. `RunPython` backfill — every existing row gets `amount_inr =
+     coins * COIN_TO_INR_RATE` at the rate hardcoded into the migration
+     itself (`coin_to_inr_rate = 1`, matching `CoinWithdrawalRequest.
+     COIN_TO_INR_RATE` as of this migration), since the historical
+     migration model `apps.get_model()` hands back doesn't carry the
+     real model's class constant. `noop_reverse` does nothing on
+     unmigrate — the following `RemoveField`-equivalent (dropping the
+     column via reversing the `AddField`) takes the data with it, so
+     there's nothing to undo by hand.
+  3. `AlterField` to tighten `amount_inr` to `NOT NULL`, then add the
+     `amount_inr__gt=0` `CheckConstraint`.
+  This avoids leaving every pre-migration row sitting at a
+  constraint-violating `amount_inr=0` forever, which a single
+  `AddField(default=0)` pass would have done. If `COIN_TO_INR_RATE` is
+  ever changed going forward, existing rows are **not** expected to be
+  rewritten — `amount_inr` is a point-in-time snapshot (see the model
+  docstring), so hardcoding the rate that was actually in force for
+  every pre-migration row is correct here, not a shortcut.
+
+```python
+# Task 38 — add MIN_WITHDRAWAL_COINS floor (a plain class constant,
+# schema-invisible — no migration needed for that part), reviewed_by,
+# reviewed_at, and an INR-conversion snapshot (amount_inr) to
+# CoinWithdrawalRequest, closing the gap Task 4's own docstring in
+# user_profile/models.py deliberately deferred until liveclass.
+# CoinWithdrawal (the reference model) was actually reviewed.
+#
+# amount_inr is added as a required field (no null=True on the model),
+# so existing PENDING/PROCESSING/SUCCESS/REJECTED rows from before this
+# migration need a value backfilled, not left NULL. Two-step: add it
+# nullable with no default, backfill every existing row from its own
+# `coins` value at the CURRENT COIN_TO_INR_RATE (the only rate that's
+# ever been in force so far — this table has no historical rate change
+# to account for), then tighten to NOT NULL. Safer than a single
+# AddField(default=0) pass, which would leave pre-existing rows sitting
+# at a wrong, constraint-violating amount_inr=0 forever (this migration
+# also adds a CHECK amount_inr > 0 further down).
+from django.conf import settings
+from django.db import migrations, models
+import django.db.models.deletion
+
+
+def backfill_amount_inr(apps, schema_editor):
+    CoinWithdrawalRequest = apps.get_model("user_profile", "CoinWithdrawalRequest")
+    # COIN_TO_INR_RATE lives on the real model class, not the historical
+    # migration model apps.get_model() hands back, so it's inlined here
+    # as the same literal value defined on CoinWithdrawalRequest in
+    # models.py as of this migration. If that rate is ever changed
+    # going forward, existing rows are NOT expected to be rewritten
+    # (see CoinWithdrawalRequest's Task 38 docstring — amount_inr is a
+    # point-in-time snapshot, not a live conversion), so hardcoding the
+    # rate that was in force for every row created before this
+    # migration is correct, not a shortcut.
+    coin_to_inr_rate = 1
+    CoinWithdrawalRequest.objects.update(amount_inr=models.F("coins") * coin_to_inr_rate)
+
+
+def noop_reverse(apps, schema_editor):
+    # No reverse backfill needed — RemoveField below drops the column
+    # (and its data) outright on unmigrate.
+    pass
+
+
+class Migration(migrations.Migration):
+
+    dependencies = [
+        migrations.swappable_dependency(settings.AUTH_USER_MODEL),
+        ("user_profile", "0002_coinpurchaserequest_gateway_verification_fields"),
+    ]
+
+    operations = [
+        migrations.AddField(
+            model_name="coinwithdrawalrequest",
+            name="amount_inr",
+            field=models.DecimalField(max_digits=10, decimal_places=2, null=True),
+        ),
+        migrations.AddField(
+            model_name="coinwithdrawalrequest",
+            name="reviewed_by",
+            field=models.ForeignKey(
+                blank=True,
+                null=True,
+                on_delete=django.db.models.deletion.SET_NULL,
+                related_name="coin_withdrawal_requests_reviewed",
+                to=settings.AUTH_USER_MODEL,
+            ),
+        ),
+        migrations.AddField(
+            model_name="coinwithdrawalrequest",
+            name="reviewed_at",
+            field=models.DateTimeField(blank=True, null=True),
+        ),
+        migrations.RunPython(backfill_amount_inr, noop_reverse),
+        migrations.AlterField(
+            model_name="coinwithdrawalrequest",
+            name="amount_inr",
+            field=models.DecimalField(max_digits=10, decimal_places=2),
+        ),
+        migrations.AddConstraint(
+            model_name="coinwithdrawalrequest",
+            constraint=models.CheckConstraint(
+                condition=models.Q(("amount_inr__gt", 0)),
+                name="coinwithdrawalrequest_amount_inr_positive",
+            ),
+        ),
+    ]
+```
+
 - Run `python manage.py migrate user_profile` (or a project-wide
-  `python manage.py migrate`) after pulling in model changes — no data
-  migration is needed for anything in this app today (every table here
-  is either brand-new-table-zero-rows at creation, or already reconciled
-  by the reset above).
+  `python manage.py migrate`) to apply both. `0003`'s `RunPython`
+  backfill runs automatically as part of that — no separate manual data
+  migration is needed.
+- §11 item 5's old `CoinLedger` migration-risk caution and the v6
+  migration-reset note above remain accurate for every model these two
+  migrations don't touch (`Follow`, `BlockUser`, `RestrictUser`,
+  `CoinLedger`, `UserPreference`) — only `CoinPurchaseRequest` and
+  `CoinWithdrawalRequest` gained new columns this pass.
 
 ---
 
@@ -914,10 +1233,45 @@ WHAT CHANGED in this pass, and why:
    `CoinWithdrawalRequest`'s class docstring below for the full
    lifecycle and what's deliberately left out of this pass (no
    `reviewed_by`, no `MIN_WITHDRAWAL_COINS` floor, no INR snapshot).
+
+8. TASK 30 (this pass) — `CoinPurchaseRequest` diffed directly against
+   `liveclass.CoinPurchase`, closing the gap an earlier pass had to
+   leave as an inference (that pass's upload didn't include
+   `liveclass/models.py`). Result: `liveclass.CoinPurchase` turned out
+   to already be deprecated (its own Task 6 disabled
+   `mark_success()`/`mark_failed()`), so full parity wasn't the goal —
+   but it surfaced one real gap, not just a shape difference: this
+   model had nowhere to persist a gateway webhook's payment id/
+   signature for later verification. Added `gateway_payment_id` /
+   `gateway_signature` to `CoinPurchaseRequest` and wired them through
+   `confirm_success()`. See that model's class docstring for the full
+   diff (money precision, `gateway` field, `retry_of` — each kept or
+   skipped deliberately, not guessed).
+
+9. TASK 31 (this pass) — `UserPreference.for_user()` diffed directly
+   against `core.NotificationPreference.for_user()`, same "close the
+   inference gap" situation as Task 30 (that earlier pass's upload
+   didn't include `core/models.py` either). Unlike Task 30, this one
+   turned out to be a clean confirmation, not a fix: classmethod name,
+   get-or-create keying (`user=user` only), and default-population
+   behavior (no `defaults=` dict on either — both just rely on model
+   field defaults) all already matched. No code change needed — see
+   `UserPreference`'s class docstring for the full point-by-point diff.
+
+10. TASK 38 (this pass) — `CoinWithdrawalRequest` diffed directly
+    against `liveclass.CoinWithdrawal` now that `liveclass/models.py`
+    has actually been reviewed (Task 4's docstring above deferred this
+    with "no reviewed_by, no MIN_WITHDRAWAL_COINS floor, no INR
+    snapshot ... add them if/when an admin-facing withdrawal review UI
+    is built" — that's now). See `CoinWithdrawalRequest`'s own
+    docstring for the full diff and what each added field means for
+    this model's PENDING -> PROCESSING -> SUCCESS/REJECTED lifecycle,
+    which is NOT the same status set `liveclass.CoinWithdrawal` uses.
 """
 from django.conf import settings
 from django.db import IntegrityError, models, transaction
 from django.db.models import CheckConstraint, F, Q, UniqueConstraint
+from django.utils import timezone
 
 
 class Follow(models.Model):
@@ -1426,11 +1780,19 @@ class CoinPurchaseRequestManager(models.Manager):
             created = False
         return obj, created
 
-    def confirm_success(self, *, gateway_reference):
+    def confirm_success(self, *, gateway_reference, gateway_payment_id="", gateway_signature=""):
         """
         Mark a request SUCCESS and credit `coins` via
         `CoinLedger.objects.record_transaction()` — never a direct
         `User.coin` write — atomically, exactly once.
+
+        [ADDED — Task 30] `gateway_payment_id`/`gateway_signature` are
+        optional — a caller that already has them (the normal case: a
+        verified gateway webhook) passes them through to be persisted
+        on the row; a caller that doesn't (e.g. a manual admin confirm)
+        can omit them and this stays exactly as safe as before this
+        pass. Neither participates in the idempotency check below —
+        that's still `gateway_reference` alone, same as before.
 
         Idempotent at two layers: if this request is already SUCCESS,
         it's returned as-is with no second credit (checked under
@@ -1474,7 +1836,14 @@ class CoinPurchaseRequestManager(models.Manager):
 
             purchase.status = self.model.Status.SUCCESS
             purchase.ledger_entry = ledger_entry
-            purchase.save(update_fields=["status", "ledger_entry", "updated_at"])
+            update_fields = ["status", "ledger_entry", "updated_at"]
+            if gateway_payment_id:
+                purchase.gateway_payment_id = gateway_payment_id
+                update_fields.append("gateway_payment_id")
+            if gateway_signature:
+                purchase.gateway_signature = gateway_signature
+                update_fields.append("gateway_signature")
+            purchase.save(update_fields=update_fields)
             return purchase
 
     def mark_failed(self, *, gateway_reference, reason=""):
@@ -1515,16 +1884,41 @@ class CoinPurchaseRequest(models.Model):
     `CoinLedger` is the one shared ledger every coin-changing action
     writes to.
 
-    NOTE: `liveclass/models.py` wasn't included in this pass's upload
-    (only `user_profile`'s own four files were), so the field shape below
-    is inferred from this app's own established patterns — `CoinLedger`'s
-    `reference`/idempotency shape and the pending/success/failed
-    lifecycle the task description asks for — rather than copied
-    field-for-field from `CoinPurchase`. If `CoinPurchase`'s actual shape
-    differs in a way that matters (e.g. its gateway list, its money
-    field's precision), reconcile the two before relying on this as
-    final — ideally by rerunning this task with `liveclass/models.py`
-    included so the two don't silently diverge.
+    [TASK 30 — RESOLVED] Diffed directly against `liveclass.CoinPurchase`
+    now that `liveclass/models.py` has actually been reviewed (previously
+    inferred, see git history of this docstring for the old caveat).
+    Findings:
+
+      - `liveclass.CoinPurchase` is itself already deprecated as of that
+        app's own Task 6: `mark_success()`/`mark_failed()` there raise
+        `RuntimeError`, and its own docstring says coin top-ups now go
+        through THIS model instead. So field-for-field parity with a
+        disabled legacy model was never really the goal — but two real
+        gaps below were worth closing regardless of the legacy shape.
+      - Money precision: `CoinPurchase.amount_inr` is
+        `DecimalField(max_digits=8, decimal_places=2)` (max ~999,999.99).
+        This model's `amount` is `max_digits=10` (max ~99,999,999.99) —
+        strictly more headroom, not a gap, so left as-is rather than
+        narrowed to match a deprecated model.
+      - Gateway identity: `CoinPurchase` has no field naming WHICH
+        gateway a row went through at all (a Razorpay-shaped design per
+        its own module comment, not gateway-agnostic). `gateway` here is
+        a deliberate improvement over that, not a divergence to fix.
+      - `retry_of` (self-FK linking a retried purchase back to the
+        failed one it retries): `CoinPurchase` has it, this model
+        doesn't. Deliberately not added — `gateway_reference`'s
+        uniqueness already makes a retry just a new row with a new
+        reference, and nothing anywhere reads a retry chain today. Flag,
+        don't build unread state.
+      - [FIX] `gateway_payment_id` / `gateway_signature`: `CoinPurchase`
+        has both — the gateway-posted payment id and signature, filled
+        in once a webhook confirms payment — and this model had NEITHER
+        before this pass. Not a naming difference: without a signature
+        field there was nowhere to persist what a gateway webhook
+        actually signed, so a `confirm_success()` caller had no way to
+        keep proof of verification for later audit/dispute. Added both
+        below (blank-ok — optional, so a caller without them yet isn't
+        broken), and `confirm_success()` now accepts and stores them.
 
     Lifecycle: PENDING (created by `start_purchase`, wallet untouched) ->
     SUCCESS (via `confirm_success`, credits `coins` through
@@ -1566,6 +1960,18 @@ class CoinPurchaseRequest(models.Model):
     # `confirm_success`/`mark_failed` key off of instead of an internal
     # id the gateway doesn't know about.
     gateway_reference = models.CharField(max_length=150, unique=True, db_index=True)
+
+    # [ADDED — Task 30] Mirrors liveclass.CoinPurchase.gateway_payment_id
+    # / .gateway_signature — filled in by confirm_success() once a
+    # gateway webhook actually confirms payment. Both blank-ok at
+    # creation time (start_purchase() runs before the gateway has
+    # confirmed anything, so neither is known yet); this is the
+    # persisted proof of what the gateway signed, for later
+    # verification/audit — a real gap this model had before this pass,
+    # not just a naming difference from the liveclass model (see class
+    # docstring's Task 30 diff for the full comparison).
+    gateway_payment_id = models.CharField(max_length=100, blank=True)
+    gateway_signature = models.CharField(max_length=255, blank=True)
 
     # Real money paid, in the product's billing currency. Decimal (not
     # Integer) because money — same reasoning that keeps `CoinLedger`
@@ -1644,6 +2050,17 @@ class CoinWithdrawalRequestManager(models.Manager):
         amount=-coins, ...)` and create a PENDING CoinWithdrawalRequest,
         in the same DB transaction.
 
+        [ADDED — Task 38] Enforces `CoinWithdrawalRequest.
+        MIN_WITHDRAWAL_COINS` before anything else runs — a request for
+        fewer coins than the floor is rejected with `ValueError` before
+        the row is created or the ledger is touched, same as the
+        existing `coins <= 0` guard just below it. Also snapshots
+        `amount_inr = coins * COIN_TO_INR_RATE` onto the request at
+        creation time, so a later change to `COIN_TO_INR_RATE` never
+        silently rewrites what a past request was actually worth —
+        mirrors `liveclass.CoinWithdrawal.amount_inr`'s own snapshot
+        comment exactly.
+
         `record_transaction` raises `ValueError` for insufficient
         balance (see `CoinLedgerManager.record_transaction` above) —
         that propagates straight out of here uncaught. Because the row
@@ -1656,10 +2073,17 @@ class CoinWithdrawalRequestManager(models.Manager):
         if coins <= 0:
             raise ValueError("Withdrawal coins must be positive.")
 
+        if coins < self.model.MIN_WITHDRAWAL_COINS:
+            raise ValueError(
+                f"Withdrawal of {coins} coins is below the minimum of "
+                f"{self.model.MIN_WITHDRAWAL_COINS} coins."
+            )
+
         with transaction.atomic():
             withdrawal = self.create(
                 user=user,
                 coins=coins,
+                amount_inr=coins * self.model.COIN_TO_INR_RATE,
                 payout_method=payout_method,
                 payout_details=payout_details or {},
                 status=self.model.Status.PENDING,
@@ -1676,11 +2100,21 @@ class CoinWithdrawalRequestManager(models.Manager):
             withdrawal.save(update_fields=["debit_ledger_entry"])
             return withdrawal
 
-    def mark_processing(self, *, withdrawal_id):
+    def mark_processing(self, *, withdrawal_id, reviewed_by=None):
         """
         Admin/ops moves a PENDING request into PROCESSING (payout
         initiated externally, e.g. a bank transfer submitted). No coin
         movement — the coins already left the wallet at request time.
+
+        [ADDED — Task 38] `reviewed_by` is the admin/ops user making
+        this call — the natural point to stamp `reviewed_by`/
+        `reviewed_at`, since this is this model's "an admin has looked
+        at this" step, the same role `liveclass.CoinWithdrawal.
+        approve(admin_user)` plays there. Optional and only applied
+        when not already set, so an existing caller that doesn't pass
+        it yet keeps working exactly as before, and a request that was
+        already reviewed (e.g. re-queued from PROCESSING) doesn't get
+        its original reviewer overwritten.
 
         Raises `ValueError` if the request is already SUCCESS or
         REJECTED (both terminal).
@@ -1692,7 +2126,12 @@ class CoinWithdrawalRequestManager(models.Manager):
                     f"Withdrawal {withdrawal_id} is already {wr.status} — cannot move to processing."
                 )
             wr.status = self.model.Status.PROCESSING
-            wr.save(update_fields=["status", "updated_at"])
+            update_fields = ["status", "updated_at"]
+            if reviewed_by is not None and wr.reviewed_by_id is None:
+                wr.reviewed_by = reviewed_by
+                wr.reviewed_at = timezone.now()
+                update_fields += ["reviewed_by", "reviewed_at"]
+            wr.save(update_fields=update_fields)
             return wr
 
     def confirm_success(self, *, withdrawal_id):
@@ -1723,11 +2162,18 @@ class CoinWithdrawalRequestManager(models.Manager):
             wr.save(update_fields=["status", "updated_at"])
             return wr
 
-    def reject(self, *, withdrawal_id, reason=""):
+    def reject(self, *, withdrawal_id, reason="", reviewed_by=None):
         """
         Reject a PENDING/PROCESSING withdrawal and credit the coins
         back via `CoinLedger.objects.record_transaction(
         transaction_type=WITHDRAWAL_REJECTED, amount=+coins, ...)`.
+
+        [ADDED — Task 38] `reviewed_by` is stamped the same way
+        `mark_processing()` stamps it — optional, and only applied when
+        `reviewed_by` isn't already set on the row, so a request
+        rejected straight from PENDING (skipping `mark_processing`
+        entirely) still records who made the call, without overwriting
+        an earlier reviewer if one was already recorded.
 
         Idempotent the same way `CoinPurchaseRequestManager.
         confirm_success` is: the refund is keyed on this request's own
@@ -1764,7 +2210,12 @@ class CoinWithdrawalRequestManager(models.Manager):
             wr.status = self.model.Status.REJECTED
             wr.failure_reason = reason
             wr.refund_ledger_entry = refund_entry
-            wr.save(update_fields=["status", "failure_reason", "refund_ledger_entry", "updated_at"])
+            update_fields = ["status", "failure_reason", "refund_ledger_entry", "updated_at"]
+            if reviewed_by is not None and wr.reviewed_by_id is None:
+                wr.reviewed_by = reviewed_by
+                wr.reviewed_at = timezone.now()
+                update_fields += ["reviewed_by", "reviewed_at"]
+            wr.save(update_fields=update_fields)
             return wr
 
 
@@ -1787,51 +2238,88 @@ class CoinWithdrawalRequest(models.Model):
         PROCESSING -> SUCCESS, or -> REJECTED from PENDING/PROCESSING.
         PROCESSING plays the same "payout initiated, not yet confirmed"
         role `liveclass.CoinWithdrawal`'s APPROVED does.
-      - No `reviewed_by`/admin-user tracking, no `MIN_WITHDRAWAL_COINS`
-        floor, no INR conversion snapshot — out of scope for this pass;
-        add them if/when an admin-facing withdrawal review UI is built,
-        the same way `RestrictUser`'s docstring above scopes out
-        consumer-app integration work it doesn't own.
+      - No CANCELLED status — `liveclass.CoinWithdrawal` lets a user
+        cancel their own PENDING request; here that's just `reject()`
+        called while still PENDING (see that manager method's own
+        `liveclass` cross-reference in its Task 6 stub docstring on the
+        `liveclass` side). Not revisited by Task 38 — out of scope for
+        a fields-only pass.
       - `payout_method`/`payout_details` are still modeled as a
         choices field + JSONField, same shape as `liveclass.
         CoinWithdrawal` uses, since there's no separate saved-bank-
         detail model in this app to reference by id instead.
 
-8. TASK 5 (this pass) — fraud/anti-abuse layer. New `user_profile/
-   fraud.py` module with two checks, both wired into
-   `CoinLedgerManager.record_transaction()` (not the view layer) so
-   they apply no matter which app/call site triggers a coin change:
-     - `fraud.is_withdrawal_eligible(user, coins)` — only coins from
-       `PURCHASE`/`GIFT_RECEIVED` (real money or a gift) may be
-       withdrawn; `EARN`/`CAMPUS_REWARD` coins can be spent but never
-       cashed out. Called by `CoinWithdrawalRequestView` (views.py)
-       before `request_withdrawal()`, so an ineligible request never
-       touches the balance. See `fraud.get_withdrawal_eligible_balance`
-       for how a mixed balance's eligible portion is derived.
-     - `fraud.check_earn_rate_limit(user, transaction_type)` — caps
-       EARN/CAMPUS_REWARD credits per user within a rolling window to
-       block burst-farming. Enforced inside `record_transaction()`
-       itself (raises `fraud.EarnRateLimitExceeded`), not in a view, so
-       campus tasks / referral bonuses / anything else that credits
-       EARN or CAMPUS_REWARD coins is covered automatically.
-   `record_transaction()` also now always sets
-   `metadata["withdrawal_eligible"]` (derived purely from
-   `transaction_type`) on every row it writes, for `admin.py`'s
-   read-only ops filter — see that method's own docstring below for
-   why this lives in `metadata` instead of a new column.
+    [TASK 38 — RESOLVED] Diffed directly against `liveclass.
+    CoinWithdrawal` now that `liveclass/models.py` has actually been
+    reviewed (Task 4's docstring above deferred all three of these with
+    "add them if/when an admin-facing withdrawal review UI is built").
+    Findings, each mapped onto THIS model's own shape rather than
+    copied field-for-field:
+
+      - [ADDED] `MIN_WITHDRAWAL_COINS = 100` — copied as a plain class
+        constant, same value and same reasoning `liveclass.
+        CoinWithdrawal.MIN_WITHDRAWAL_COINS` already documents ("below
+        this, a bank/UPI transfer typically costs more in fees than the
+        payout itself"). Enforced in
+        `CoinWithdrawalRequestManager.request_withdrawal()` — the same
+        single choke point that already enforces `coins <= 0` and
+        sufficient balance, so a caller can't route around the floor by
+        skipping a view-level check.
+      - [ADDED] `COIN_TO_INR_RATE = 1` and `amount_inr` — also copied
+        from `liveclass.CoinWithdrawal` as-is (same rate, same
+        "snapshotted at request time so a later rate change never
+        rewrites history" reasoning, same `DecimalField(max_digits=10,
+        decimal_places=2)` shape). `request_withdrawal()` computes and
+        stores it once, at creation; nothing later recomputes it.
+        NOTE: this app has its own separate `COIN_TO_INR_RATE` rather
+        than importing `liveclass.CoinWithdrawal`'s — importing a model
+        constant across apps for one integer is more coupling than the
+        value is worth, and `CoinPurchaseRequest` above already sets
+        the precedent of this app keeping its own parallel definitions
+        (money precision, gateway field) rather than reaching into
+        `liveclass`. If the two rates should always move together in
+        practice, that's an ops/config concern (keep both settings in
+        sync when pricing changes) rather than a code-coupling one.
+      - [ADDED] `reviewed_by` / `reviewed_at` — `liveclass.
+        CoinWithdrawal.reviewed_by` is a single FK stamped once, at
+        `approve()`/`reject()`, whichever comes first (its lifecycle has
+        no separate "PROCESSING" stage in between). This model's
+        lifecycle does have that extra stage, so `reviewed_by`/
+        `reviewed_at` are stamped at whichever of `mark_processing()` /
+        `reject()` runs FIRST for a given request (both check `if
+        wr.reviewed_by_id is None` before writing) — a request rejected
+        straight from PENDING still gets a reviewer recorded, and one
+        that goes PENDING -> PROCESSING -> REJECTED keeps the reviewer
+        from the PROCESSING step rather than being overwritten by
+        whoever calls `reject()` later. `confirm_success()` does NOT
+        stamp these — by the time a request reaches SUCCESS it must
+        already have passed through `mark_processing()` in the normal
+        flow, and if it didn't, that's a process gap for ops to fix, not
+        something for this model to paper over with a second reviewer.
+        Both fields nullable/blank, same as `liveclass.CoinWithdrawal`'s
+        (`on_delete=SET_NULL` so a deleted admin account doesn't cascade
+        into deleting withdrawal history).
 
     Lifecycle: PENDING (created by `request_withdrawal`, debits `coins`
-    immediately via a WITHDRAWAL_REQUESTED CoinLedger entry) ->
-    PROCESSING (via `mark_processing`, no coin movement) -> SUCCESS (via
-    `confirm_success`, no coin movement — the debit already happened) OR
-    REJECTED (via `reject`, from PENDING or PROCESSING, credits `coins`
-    back via a WITHDRAWAL_REJECTED entry). SUCCESS and REJECTED are both
-    terminal.
+    immediately via a WITHDRAWAL_REQUESTED CoinLedger entry, and now
+    also snapshots `amount_inr`) -> PROCESSING (via `mark_processing`,
+    no coin movement, now also stamps `reviewed_by`/`reviewed_at` if not
+    already set) -> SUCCESS (via `confirm_success`, no coin movement —
+    the debit already happened) OR REJECTED (via `reject`, from PENDING
+    or PROCESSING, credits `coins` back via a WITHDRAWAL_REJECTED entry,
+    and stamps `reviewed_by`/`reviewed_at` if not already set). SUCCESS
+    and REJECTED are both terminal.
 
     Nothing here writes to `User.coin` directly — same boundary
     `CoinPurchaseRequest` draws: the only sanctioned path to a balance
     change is `CoinLedger.objects.record_transaction()`.
     """
+
+    # [ADDED — Task 38] Copied from `liveclass.CoinWithdrawal` — see the
+    # class docstring's Task 38 section for why this app keeps its own
+    # copy rather than importing the liveclass one.
+    COIN_TO_INR_RATE = 1  # 1 coin == this many INR; adjust to match the actual coin pricing used when passes are priced
+    MIN_WITHDRAWAL_COINS = 100  # below this, a bank/UPI transfer typically costs more in fees than the payout itself
 
     class Status(models.TextChoices):
         PENDING = "pending", "Pending"
@@ -1851,6 +2339,10 @@ class CoinWithdrawalRequest(models.Model):
 
     coins = models.PositiveIntegerField()
 
+    # [ADDED — Task 38] coins * COIN_TO_INR_RATE, snapshotted once by
+    # `request_withdrawal()` at request time — see class docstring.
+    amount_inr = models.DecimalField(max_digits=10, decimal_places=2)
+
     payout_method = models.CharField(max_length=20, choices=PayoutMethod.choices, blank=True)
 
     # Bank: {"account_holder", "account_number", "ifsc"}. UPI: {"upi_id"}.
@@ -1864,6 +2356,22 @@ class CoinWithdrawalRequest(models.Model):
 
     # Populated by reject() — why the withdrawal was turned down.
     failure_reason = models.CharField(max_length=255, blank=True)
+
+    # [ADDED — Task 38] The admin/ops user who first reviewed this
+    # request (via mark_processing() or reject(), whichever ran first).
+    # SET_NULL so a deleted admin account doesn't cascade into deleting
+    # withdrawal history — same reasoning debit_ledger_entry/
+    # refund_ledger_entry already use SET_NULL for.
+    reviewed_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="coin_withdrawal_requests_reviewed",
+    )
+
+    # [ADDED — Task 38] Set alongside reviewed_by, same call site(s).
+    reviewed_at = models.DateTimeField(null=True, blank=True)
 
     # The debit written by request_withdrawal(). SET_NULL for the same
     # reason CoinPurchaseRequest.ledger_entry is SET_NULL: an
@@ -1906,6 +2414,10 @@ class CoinWithdrawalRequest(models.Model):
         ]
         constraints = [
             CheckConstraint(condition=Q(coins__gt=0), name="coinwithdrawalrequest_coins_positive"),
+            # [ADDED — Task 38] Mirrors coinpurchaserequest_amount_positive
+            # above — amount_inr is derived from coins so it should never
+            # be able to reach zero or negative either.
+            CheckConstraint(condition=Q(amount_inr__gt=0), name="coinwithdrawalrequest_amount_inr_positive"),
         ]
 
     def __str__(self):
@@ -4677,7 +5189,8 @@ def reconcile_follow_counts():
   `user-profile-reconcile-follow-counts` entry in
   `CELERY_BEAT_SCHEDULE` (see §12) — nothing about that changed either.
 
-## 8b. `fraud.py` (new this pass — TASK 5 — full current code)
+## 8b. `fraud.py` (TASK 5 originally; TASK 37 this pass moved the
+earn-rate constants to settings — full current code)
 
 ```python
 # user_profile/fraud.py
@@ -4708,9 +5221,19 @@ bypass them by going around a particular view:
 Both functions take a plain `user` object (not a user id) and never
 mutate anything — this module reads the ledger, it never writes to
 it. The only writer stays `CoinLedgerManager.record_transaction()`.
+
+[TASK 37 — RESOLVED] The three earn-rate-limit constants below
+(`EARN_RATE_LIMIT_WINDOW` / `_MAX_TRANSACTIONS` / `_MAX_COINS`) used
+to be hardcoded directly in this file. Now sourced from Django
+settings (`LearnScroll/settings.py`, env-overridable, same shape as
+`REFERRAL_BONUS_COINS` etc.) so ops can retune them without a deploy
+— see that block in settings.py and the comment just above these
+three lines. Values are unchanged; this was a relocation, not a
+retune.
 """
 from datetime import timedelta
 
+from django.conf import settings
 from django.db.models import Sum
 from django.utils import timezone
 
@@ -4876,14 +5399,23 @@ def is_withdrawal_eligible(user, coins=None):
 
 # --- Earn-rate limiting -----------------------------------------------------
 
-# Deliberately conservative constants, not config-driven — same
-# "cheap moment, no live traffic depends on the exact number yet" call
-# this file's sibling models already make for other first-pass
-# choices. Tighten/loosen these (or move them to Django settings) once
-# there's real farming-attempt data to calibrate against.
-EARN_RATE_LIMIT_WINDOW = timedelta(hours=1)
-EARN_RATE_LIMIT_MAX_TRANSACTIONS = 20
-EARN_RATE_LIMIT_MAX_COINS = 500
+# [MOVED — Task 37] Was hardcoded here directly, with a comment saying
+# to move these to Django settings "once there's real production signal
+# to tune against" — moved now (LearnScroll/settings.py, TASK 37 block),
+# same env-overridable-constant shape every other coin-economy number in
+# that file already uses (REFERRAL_BONUS_COINS,
+# CAMPUS_ATTENDANCE_STREAK_BONUS_COINS, ...). Read from `settings` at
+# import time here (not inside `check_earn_rate_limit()` per call) —
+# same "module-level constant, not settings.X re-read on every call"
+# shape this module already had before this pass; ops retuning these now
+# still only needs an env var change + restart, not a code deploy,
+# which was the actual point of moving them.
+#
+# Values themselves are UNCHANGED from the previous hardcoded ones — see
+# settings.py's TASK 37 comment for why (relocation, not a retune).
+EARN_RATE_LIMIT_WINDOW = timedelta(minutes=settings.EARN_RATE_LIMIT_WINDOW_MINUTES)
+EARN_RATE_LIMIT_MAX_TRANSACTIONS = settings.EARN_RATE_LIMIT_MAX_TRANSACTIONS
+EARN_RATE_LIMIT_MAX_COINS = settings.EARN_RATE_LIMIT_MAX_COINS
 
 
 def check_earn_rate_limit(user, transaction_type):
@@ -4957,12 +5489,24 @@ def check_earn_rate_limit(user, transaction_type):
   vantage point), `ADMIN_ADJUSTMENT` (an ops adjustment isn't "real
   paisa" either — if a specific one should be withdrawable, issue it as
   an explicit `GIFT_RECEIVED`/`PURCHASE` instead of widening this set).
-- **Earn-rate limiting constants** (`EARN_RATE_LIMIT_WINDOW`,
-  `EARN_RATE_LIMIT_MAX_TRANSACTIONS`, `EARN_RATE_LIMIT_MAX_COINS`) are
-  plain module constants, not settings-driven — same "cheap moment, no
-  live traffic to calibrate against yet" call other first-pass choices
-  in this app already make. Move them to Django settings once there's
-  real farming-attempt data.
+- **[CHANGED — Task 37] Earn-rate limiting constants are now
+  settings-driven, not hardcoded.** `EARN_RATE_LIMIT_WINDOW` is built
+  from `settings.EARN_RATE_LIMIT_WINDOW_MINUTES`, and
+  `EARN_RATE_LIMIT_MAX_TRANSACTIONS` / `EARN_RATE_LIMIT_MAX_COINS` are
+  read straight from `settings.EARN_RATE_LIMIT_MAX_TRANSACTIONS` /
+  `settings.EARN_RATE_LIMIT_MAX_COINS` — same env-overridable-constant
+  shape this project's other coin-economy numbers already use
+  (`REFERRAL_BONUS_COINS`, `CAMPUS_ATTENDANCE_STREAK_BONUS_COINS`, ...).
+  This was a **relocation, not a retune** — the values themselves are
+  unchanged from the old hardcoded ones (1 hour / 20 transactions / 500
+  coins); see §12 for the exact `settings.py` block this now requires.
+  Read at import time into the same three module-level names
+  (`fraud.EARN_RATE_LIMIT_WINDOW`/`_MAX_TRANSACTIONS`/`_MAX_COINS`), not
+  re-read from `settings` on every `check_earn_rate_limit()` call, so
+  `tests_fraud.py`'s existing `patch.object(fraud, "EARN_RATE_LIMIT_MAX_
+  TRANSACTIONS", N)` pattern still works unchanged — the tests patch the
+  module attribute, not the settings value, and that attribute still
+  exists with the same name.
 - **`EarnRateLimitExceeded` is deliberately not a `ValueError`** — see
   §0.3 for why: it lets a caller distinguish "you're farming too fast"
   from "you're broke" without also swallowing unrelated `ValueError`s,
@@ -6246,7 +6790,7 @@ open gap this introduces:** a blank-`gateway` "manual admin top-up"
 `CoinPurchaseRequest` can no longer be confirmed by its owner — see §11
 item 18.
 
-### 10.11 Withdraw coins (`POST /profile/coin-withdrawals/`) — v4 TASK 4 + TASK 5, admin actions added v6
+### 10.11 Withdraw coins (`POST /profile/coin-withdrawals/`) — v4 TASK 4 + TASK 5, admin actions added v6, floor/INR/review fields added v7 TASK 38
 
 ```
 POST /profile/coin-withdrawals/ {coins, payout_method, payout_details}
@@ -6265,8 +6809,14 @@ fraud.is_withdrawal_eligible(request.user, coins)   ◀── TASK 5
         │ eligible
         ▼
 CoinWithdrawalRequest.objects.request_withdrawal(user, coins, ...)
+  coins < MIN_WITHDRAWAL_COINS (100)?  ◀── [ADDED v7, TASK 38]
+      │ yes ──▶ ValueError, before the row/ledger is touched
+      │ no
+      ▼
   transaction.atomic():
-    create CoinWithdrawalRequest(status=PENDING)
+    create CoinWithdrawalRequest(status=PENDING,
+      amount_inr=coins * COIN_TO_INR_RATE)   ◀── [ADDED v7] snapshotted
+                                                  once, at request time
     CoinLedger.objects.record_transaction(
       transaction_type=WITHDRAWAL_REQUESTED, amount=-coins,
       reference=f"coin_withdrawal_request:{pk}")
@@ -6285,12 +6835,20 @@ resolved), both calling only the same three manager methods below ...
   (b) Django admin bulk actions on CoinWithdrawalRequestAdmin (admin.py)
       — "Mark selected as processing/successful", "Reject selected"
 
-mark_processing() → PROCESSING (no coin movement)
-confirm_success() → SUCCESS (no coin movement — debit already happened)
-reject(reason)     → REJECTED, credits coins back via
+mark_processing(reviewed_by=...) → PROCESSING (no coin movement);
+                     stamps reviewed_by/reviewed_at [ADDED v7] if not
+                     already set on the row
+confirm_success() → SUCCESS (no coin movement — debit already happened);
+                     does NOT stamp reviewed_by/reviewed_at — by SUCCESS
+                     the request should already have passed through
+                     mark_processing()
+reject(reason, reviewed_by=...) → REJECTED, credits coins back via
                      CoinLedger.objects.record_transaction(
                        transaction_type=WITHDRAWAL_REJECTED, amount=+coins,
-                       reference=f"coin_withdrawal_request_refund:{pk}")
+                       reference=f"coin_withdrawal_request_refund:{pk}");
+                     stamps reviewed_by/reviewed_at [ADDED v7] if not
+                     already set (covers a request rejected straight from
+                     PENDING, skipping mark_processing entirely)
 
 Either path (a)/(b) surfaces an invalid state transition (e.g. rejecting
 an already-SUCCESS request) as the manager's own ValueError — 409 via
@@ -6300,7 +6858,13 @@ bulk action.
 Note the two distinct rejection codes on the initial POST: **403** means
 "you have enough coins overall, but not enough *withdrawal-eligible*
 ones" (policy); **402** means "you don't have enough coins, period"
-(balance). A client should show different messaging for each.
+(balance). A **`ValueError` for below `MIN_WITHDRAWAL_COINS`** [ADDED
+v7] is a third, separate rejection reason on the same call — the view
+doesn't currently distinguish it from the 402 case with its own status
+code (both are `ValueError` from `request_withdrawal()`), so a client
+relying on status code alone can't yet tell "too little for a payout to
+make sense" apart from "you don't have that many coins" — worth a
+follow-up if the UI needs to show different copy for the two.
 
 ### 10.12 Earn-rate limiting (`fraud.check_earn_rate_limit`) — v4, TASK 5, new
 
@@ -6391,8 +6955,9 @@ Items 1–4 below are **resolved as of v3** (kept here, struck through, so
 the history is traceable) — see §0.1 for what changed. Item 2's admin
 caveat is further **resolved as of v3.1 (B-8)**. Item 5 is **moot as of
 v6** (migration reset — see §3a). Items 10, 12, and 15 (and half of item
-9) are **resolved as of v6** — see §0.5. Items 6, 8, 9 (partially), 11,
-13, 14, and 16–20 are still open.
+9) are **resolved as of v6** — see §0.5. Items 11, 13, 14, and 17 are
+**resolved as of v7** — see §0.6. Items 6, 8, 9 (partially), 16, and
+18–22 are still open.
 
 1. ~~`RestrictUser` model is unused~~ — **resolved in v3**: wired via
    `RestrictedUsersView` / `UnrestrictUserView` / `RestrictUserSerializer`
@@ -6498,12 +7063,14 @@ v6** (migration reset — see §3a). Items 10, 12, and 15 (and half of item
     `[AllowAny]`, since a genuine webhook call isn't "acting as" any
     authenticated user. **New sub-gap this introduces, still open** — see
     item 18 below.
-11. **`CoinPurchaseRequest`'s shape is inferred, not confirmed against
-    `liveclass.CoinPurchase`.** `liveclass/models.py` wasn't part of any
-    upload for this app. If `liveclass.CoinPurchase`'s actual field
-    shape (gateway list, money precision, etc.) differs in a way that
-    matters, reconcile the two — ideally by rerunning TASK 3 with
-    `liveclass/models.py` included so they don't silently diverge.
+11. ~~**`CoinPurchaseRequest`'s shape is inferred, not confirmed against
+    `liveclass.CoinPurchase`.**~~ — **resolved in v7 (TASK 30 → §0.6):**
+    `liveclass/models.py` has now actually been reviewed. Result: not a
+    field-for-field match (that model is itself deprecated, so full
+    parity was never the real goal), but one real gap was found and
+    closed — `gateway_payment_id`/`gateway_signature` added to
+    `CoinPurchaseRequest`, and `confirm_success()` now accepts/persists
+    both. `retry_of` deliberately not added — see §4/§0.6 for why.
 12. ~~**No admin/ops endpoint for `CoinWithdrawalRequest.objects.
     mark_processing()` / `.confirm_success()` / `.reject()`.**~~ —
     **resolved in v6 (§11 item 12 → §0.5):** two new sanctioned entry
@@ -6513,18 +7080,27 @@ v6** (migration reset — see §3a). Items 10, 12, and 15 (and half of item
     `CoinWithdrawalRequestAdmin` (Django-admin bulk actions, see §8). A
     Django shell is no longer the only way to move a withdrawal past
     `PENDING`.
-13. **`CoinWithdrawalRequest` has no `MIN_WITHDRAWAL_COINS` floor, no
-    `reviewed_by` tracking, and no INR conversion snapshot** — all three
-    exist on the `liveclass.CoinWithdrawal` this was modeled after but
-    were deliberately left out of this pass as out of scope; add them
-    if/when an admin-facing withdrawal review UI is built.
-14. **Earn-rate-limit constants are hardcoded, not settings-driven**
-    (`fraud.EARN_RATE_LIMIT_WINDOW` / `_MAX_TRANSACTIONS` /
-    `_MAX_COINS`). Fine for a first pass with no real farming-attempt
-    data to calibrate against, but tightening/loosening them today means
-    editing `fraud.py` directly rather than a settings/ops change — move
-    them to Django settings once there's production signal to tune
-    against.
+13. ~~**`CoinWithdrawalRequest` has no `MIN_WITHDRAWAL_COINS` floor, no
+    `reviewed_by` tracking, and no INR conversion snapshot**~~ —
+    **resolved in v7 (TASK 38 → §0.6):** the admin-facing withdrawal
+    review UI this item's original text named as the trigger
+    (`CoinWithdrawalAdminActionView` + admin bulk actions) has existed
+    since v6, so this pass added all three: `MIN_WITHDRAWAL_COINS = 100`
+    (enforced in `request_withdrawal()`), `amount_inr` (snapshotted at
+    request time via `COIN_TO_INR_RATE`), and `reviewed_by`/`reviewed_at`
+    (stamped by whichever of `mark_processing()`/`reject()` runs first).
+    Required a real migration (nullable → backfill → tighten) for
+    `amount_inr` specifically — see §3a.
+14. ~~**Earn-rate-limit constants are hardcoded, not settings-driven**~~
+    — **resolved in v7 (TASK 37 → §0.6):**
+    `fraud.EARN_RATE_LIMIT_WINDOW`/`_MAX_TRANSACTIONS`/`_MAX_COINS` now
+    read from `settings.EARN_RATE_LIMIT_WINDOW_MINUTES`/
+    `_MAX_TRANSACTIONS`/`_MAX_COINS` at import time — same
+    env-overridable shape this project's other coin-economy constants
+    use. Values unchanged (relocation, not a retune). See §12 for the
+    `settings.py` block this now requires (not confirmed present, since
+    `settings.py` itself wasn't part of this upload — see new item 22
+    below).
 15. ~~**`fraud.py`'s two rules have partial test coverage, not full.**~~
     — **resolved in v6, same fix as item 9's carried-over gap**:
     `CoinLedgerAdminPermissionTests` and `RecordTransactionCampusRewardTests`
@@ -6553,18 +7129,13 @@ v6** (migration reset — see §3a). Items 10, 12, and 15 (and half of item
     differ — one is "someone wants to follow you", the other is "you
     have a new follower" — but that's a product decision, not something
     inferable from this app's own files).
-17. **`UserPreference.for_user()`'s shape is inferred, not confirmed
-    against `core.NotificationPreference`.** The task that requested
-    `UserPreference` asked for the "exact same pattern" as `core.
-    NotificationPreference`, but `core/models.py` wasn't part of any
-    upload for this app (same gap item 16 above and §11 item 11's
-    `liveclass.CoinPurchase` reconciliation note both hit) — so
-    `for_user()`'s `get_or_create(user=user)` body is a reasonable
-    guess at that pattern, not copied code. If the real
-    `core.NotificationPreference` uses a different classmethod name,
-    different get-or-create keying, or does something extra (e.g.
-    pre-populating defaults from a settings dict), reconcile the two —
-    ideally by rerunning TASK 1 with `core/models.py` included.
+17. ~~**`UserPreference.for_user()`'s shape is inferred, not confirmed
+    against `core.NotificationPreference`.**~~ — **resolved in v7 (TASK
+    31 → §0.6):** `core/models.py` has now actually been reviewed —
+    classmethod name (`for_user`), get-or-create keying (`user=user`
+    only, no `defaults=` dict), and default-population behavior (both
+    rely purely on model field defaults) all already matched. A clean
+    confirmation, not a fix — **no code change was needed.**
 
 ---
 
@@ -6611,6 +7182,46 @@ v6** (migration reset — see §3a). Items 10, 12, and 15 (and half of item
     external-dependency gap, the same category as item 6's
     `autocomplete_fields`/`search_fields` requirement, not a code bug in
     this app.
+
+---
+
+> **v7 additions below (items 21–22)** — everything above this line is
+> unchanged from v6 except the resolved markers noted inline on items
+> 11, 13, 14, and 17. TASK 30/37/38 add the following, still-open items.
+
+21. **`gateway_payment_id`/`gateway_signature` exist on the model but
+    nothing populates them yet.** TASK 30 (§0.6) added both fields and
+    taught `CoinPurchaseRequest.objects.confirm_success()` to accept and
+    persist them — but neither `BuyCoinConfirmView` nor
+    `AdminCoinPurchaseConfirmView` (`views.py`, unchanged this pass)
+    actually passes a payment id/signature through when they call
+    `confirm_success()`. The webhook already verifies a signature via
+    `_verify_gateway_webhook_signature()` (v6) before calling
+    `confirm_success()`, but the verified signature itself is never
+    forwarded into the two new kwargs, so `gateway_payment_id`/
+    `gateway_signature` stay blank on every row created through the
+    current code path. Wiring this needs a decision this pass didn't
+    make: which part of the raw webhook payload/headers should be
+    treated as "the payment id" and "the signature" to persist — that's
+    gateway-specific (Razorpay's shape differs from another gateway's),
+    and `_verify_gateway_webhook_signature()`'s own payload parsing
+    wasn't extended to extract and return them in this pass.
+22. **No test coverage yet for TASK 30/37/38's new code.** Specifically
+    untested as of v7: `CoinPurchaseRequestManager.confirm_success()`'s
+    new `gateway_payment_id`/`gateway_signature` kwargs (both the "set
+    when passed" and "not touched by the idempotency check" behavior);
+    `CoinWithdrawalRequestManager.request_withdrawal()`'s new
+    `MIN_WITHDRAWAL_COINS` floor rejection; `mark_processing()`/
+    `reject()`'s new `reviewed_by`/`reviewed_at` stamping (including the
+    "first call wins, second doesn't overwrite" behavior); and the
+    `0003_...` migration's `RunPython` backfill function itself
+    (`backfill_amount_inr`) has no migration-test coverage. `fraud.py`'s
+    behavior is unaffected by TASK 37 (same values, different source),
+    so `tests_fraud.py` needing no changes is expected, not a gap — but
+    the settings-reading import-time code path itself
+    (`EARN_RATE_LIMIT_WINDOW = timedelta(minutes=settings.
+    EARN_RATE_LIMIT_WINDOW_MINUTES)`) has no test asserting it actually
+    reads from `settings` rather than a stale hardcoded fallback.
 
 ---
 
@@ -6664,21 +7275,52 @@ serializers, views, urls, admin, tasks, tests — is enough to run the
       above. Be aware of the flagged behavior change for blank-`gateway`
       manual top-ups (§11 item 18) if your product still needs that
       flow.
-- [ ] **v4:** If `liveclass/models.py` exists in your actual codebase,
-      diff `CoinPurchaseRequest`'s shape against `liveclass.CoinPurchase`
-      before relying on this as final (§11 item 11).
+- [x] **v7:** `CoinPurchaseRequest` has already been diffed against
+      `liveclass.CoinPurchase` in code (TASK 30, §11 item 11 resolved) —
+      `gateway_payment_id`/`gateway_signature` exist and
+      `confirm_success()` accepts/stores them. Nothing left to reconcile
+      here; if you want a webhook to actually populate them, wire
+      `BuyCoinConfirmView`/`AdminCoinPurchaseConfirmView` to pass the
+      gateway's payment id/signature through (currently unwired — new
+      item 21).
 - [x] **v6:** `CoinWithdrawalRequest.objects.mark_processing()` /
       `.confirm_success()` / `.reject()` are already reachable in code —
       via `CoinWithdrawalAdminActionView` (staff-only API endpoint) and
       `CoinWithdrawalRequestAdmin`'s bulk actions (Django admin). Nothing
       left to wire up (§11 item 12 resolved) — just confirm your staff
       users actually have `is_staff=True` for the API path.
+- [ ] **v7 — REQUIRED for `fraud.py` to import successfully at all:**
+      add `EARN_RATE_LIMIT_WINDOW_MINUTES` / `EARN_RATE_LIMIT_MAX_
+      TRANSACTIONS` / `EARN_RATE_LIMIT_MAX_COINS` to `settings.py` (see
+      §2, §11 items 14/22) — unlike the `PAYMENT_GATEWAY_*` settings
+      above, these are read at import time, so a missing one raises
+      `AttributeError` on app startup, not a lazy 503 at request time.
+- [x] **v7:** `fraud.py`'s earn-rate-limit constants are already
+      settings-driven in code (TASK 37, §11 item 14 resolved) — nothing
+      left to change in `fraud.py` itself; only the `settings.py` values
+      above need to actually exist (see the checklist item just above).
+- [x] **v7:** `CoinWithdrawalRequest.MIN_WITHDRAWAL_COINS` /
+      `amount_inr` / `reviewed_by` / `reviewed_at` are already added in
+      code (TASK 38, §11 item 13 resolved) — run the two new migrations
+      below and nothing else is needed.
+- [ ] **v7 — REQUIRED before `/buy-coin/`, `/coin-withdrawals/` etc. work
+      against the current model shape:** run
+      `python manage.py migrate user_profile` to apply
+      `0002_coinpurchaserequest_gateway_verification_fields` and
+      `0003_coinwithdrawalrequest_review_and_inr_fields` (see §3a) — the
+      second one runs a data backfill (`amount_inr` for every existing
+      `CoinWithdrawalRequest` row) as part of the migration itself, no
+      separate manual step needed.
+- [x] **v7:** `UserPreference.for_user()` has already been diffed
+      against `core.NotificationPreference.for_user()` in code (TASK 31,
+      §11 item 17 resolved) — confirmed matching, nothing to change.
 - [x] **v4:** `fraud.py`'s two rules (withdrawal eligibility, earn-rate
       limiting) are already wired into
       `CoinLedgerManager.record_transaction()` in code — nothing to
-      configure to turn them on. Only the rate-limit *constants*
-      (`EARN_RATE_LIMIT_WINDOW`/`_MAX_TRANSACTIONS`/`_MAX_COINS`) are
-      worth revisiting once you have real usage data (§11 item 14).
+      configure to turn them on. The rate-limit *constants* are now
+      settings-driven as of v7 (see the `EARN_RATE_LIMIT_*` checklist
+      items above) rather than something you'd edit `fraud.py` directly
+      for.
 - [x] **v4:** `CoinLedgerAdmin` (in the now-uploaded `admin.py`) is
       already read-only in code, same as noted for B-8 in v3.1 — if you
       already had your own `admin.py` with other model registrations in

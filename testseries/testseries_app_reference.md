@@ -1,4 +1,4 @@
-# `testseries` App — Implementation Reference (v4 — full 12-file resync, `TestSeriesPurchaseSerializer` gap closed)
+# `testseries` App — Implementation Reference (v5 — TASK 19/32/33/35 resync, first hand-written migration tracked)
 
 > Ye woh single doc hai jisse **sara kaam ho sakta hai** — settings wiring,
 > prerequisite migrations/gaps, API integration (campus/liveclass/message
@@ -19,16 +19,44 @@
 > series ka notify", is pass me add hua hai (§7.1, §11, §13, §16, §17,
 > §18).
 >
-> **v4 update (this pass):** saari 12 files dobara file-by-file diff ki
-> gayi hain against is doc ke against — koi behavior change nahi mila,
-> sirf ek documentation gap close hua: `serializers.py`'s
+> **v4 update:** saari 12 files dobara file-by-file diff ki gayi hain
+> against is doc ke against — koi behavior change nahi mila, sirf ek
+> documentation gap close hua: `serializers.py`'s
 > `TestSeriesPurchaseSerializer` (fully read-only, currently unused/
 > unwired — no `views.py`/`urls.py` route references it) pehle is doc me
-> missing tha, ab §8 me add kiya gaya hai. Confirm bhi kiya gaya ki **koi
-> manual/hand-written migration file is doc me kahin nahi thi** — `#0.`
-> file tree aur `§18` checklist dono already sirf `manage.py
-> makemigrations testseries` (auto-generate) bolte hain, to us baare me
-> hatane ko kuch nahi tha.
+> missing tha, ab §8 me add kiya gaya hai.
+>
+> **v5 update (this pass):** char cheezein close hui hain —
+> - **TASK 19** — `campus.bridge.can_review_testseries_attempt(user,
+>   context_type, context_id) -> bool` ab **confirmed** exist karta hai
+>   (real `campus/bridge.py` ke against directly diffed, keyword-only
+>   args match). §3.4 ab RESOLVED — campus subject-teacher ab attempt
+>   review kar sakte hain, `permissions.py`'s `try/except ImportError`
+>   fallback ab effectively dead code hai (safe defensive fallback ke
+>   roop me rakha gaya, hataya nahi gaya).
+> - **TASK 32** — bridge.py ke `message` cross-app assumptions (§3.7,
+>   §3.8) real `message/models.py`/`message/services.py` ke against
+>   diffed — dono **CONFIRMED**. Ek naya gap surface hua: `answer_
+>   doubt_question()`'s testseries-notify step
+>   `Notification.NotifType.TESTSERIES_QUERY_ANSWERED` par depend karta
+>   hai, jo abhi tak `core`-side confirmed nahi hai — naya §3.11, aur
+>   `views.py::answer_query` ismein `AttributeError` catch nahi karta
+>   (naya open item, §17).
+> - **TASK 33** — `tasks.py`'s `core.services.create_bulk_notifications()`
+>   call **confirmed** — real signature
+>   `(recipients, notif_type, title, message="", *, classroom=None,
+>   session=None, data=None)` ke against exact match, koi drift nahi.
+>   §3.10 ab fully resolved (pehle sirf "assumed reused").
+> - **TASK 35** — naya `TestSeriesReviewAdmin` (`admin.py`) — reviews ab
+>   Django admin se bhi moderate ho sakte hain (add disabled, taaki
+>   `TestSeriesReview.create_review()` hi ek sanctioned creation path
+>   rahe). §10, §17 item 10 ab RESOLVED.
+>
+> **Migration housekeeping (v5):** is baar pehli dafa ek **real,
+> hand-written migration file** (`0002_testattempt_multi_attempt_
+> constraint.py`, Task 28) upload me shamil hai — pehle sirf naam se
+> reference hoti thi (§4.6), poora code kabhi nahi dekha gaya tha. Ab
+> naya §4.8 me full code documented hai.
 
 ---
 
@@ -297,7 +325,7 @@ backstop for any other caller.
 | Field | Type | Notes |
 |---|---|---|
 | `series`, `student` | FK CASCADE | |
-| `attempt_number` | PositiveIntegerField, default `1` | groundwork only — see §17 item 2 |
+| `attempt_number` | PositiveIntegerField, default `1` | ✅ **now real (Task 28)** — see below, was groundwork-only |
 | `auto_score` | PositiveIntegerField, default `0` | sum of graded auto responses |
 | `final_score` | PositiveIntegerField, nullable | set only once **every** response reviewed |
 | `status` | choices: `in_progress`/`submitted`/`partially_checked`/`checked` | `partially_checked` = auto-graded done, ≥1 `text` still pending |
@@ -305,8 +333,41 @@ backstop for any other caller.
 | `roll_number`, `enrollment_no` | CharField(30), blank | snapshot from caller's roster, campus/liveclass only |
 | `submitted_at`, `checked_at` | DateTime, nullable | `checked_at` only set on `status="checked"` |
 
-Constraint: `UniqueConstraint(series, student)` name
-`unique_attempt_per_student_per_series` (MVP, `attempts_allowed=1` only).
+Constraint: `UniqueConstraint(series, student, attempt_number)` name
+`unique_attempt_per_student_series_number` — ✅ **changed this pass
+(Task 28, migration `0002_testattempt_multi_attempt_constraint.py`)**.
+Was `UniqueConstraint(series, student)` /
+`unique_attempt_per_student_per_series` (MVP, `attempts_allowed=1`
+only) — that was the actual blocker stopping a second attempt row from
+ever existing, not just an unenforced cap. No data migration needed:
+the old constraint made it impossible for more than one row to ever
+exist per (series, student), so every pre-existing row already has
+`attempt_number=1` (the field's default).
+
+**§17 item 2 is now RESOLVED, not just "groundwork"** — multi-attempt
+(`attempts_allowed > 1`) is fully implemented:
+- The uniqueness constraint above is the piece that actually let a
+  second/third/etc. row exist at all.
+- `TestSeriesPurchase.purchase_and_start_attempt()` now actually
+  **passes** the attempt number it computes through to
+  `TestAttempt.objects.create()` — previously it was computed but
+  silently discarded, so every paid attempt landed on the default
+  `attempt_number=1` regardless of how many prior attempts existed.
+- The `attempts_allowed` cap itself is enforced as a clean 400 in
+  `TestAttemptStartSerializer.validate()` (§8, new) *before*
+  `TestAttemptViewSet.start()` (§7.3, §12.3) creates a row through
+  either the paid or free path — not left to surface later as a raw
+  `IntegrityError`, which wouldn't even catch a cap violation correctly
+  (a fresh `attempt_number` never collides with anything).
+- `TestAttemptViewSet.start()` itself was fixed alongside this: it used
+  to short-circuit on **any** existing attempt regardless of status, so
+  once a student's one allowed attempt reached `submitted`/`checked`
+  they'd just get that same finished attempt handed back forever —
+  attempt #2 could never actually start even with `attempts_allowed`
+  raised. Now only an **`IN_PROGRESS`** attempt short-circuits; anything
+  else (submitted/checked/etc.) falls through to starting the next
+  `attempt_number`, gated by the serializer's cap-check above. See §7.3/
+  §12.3.
 
 - **`submit(answers: dict, files=None)`** (`@transaction.atomic`) —
   bulk-creates one `QuestionResponse` per question, auto-grades gradable
@@ -339,9 +400,21 @@ series.
 
 Constraint: `UniqueConstraint(series, student)` name
 `unique_review_per_student_per_series` — **one review per (series,
-student) EVER**, not per attempt. Even once `attempts_allowed > 1`
-becomes real (§17 item 2), a student still only gets one say on a
-series overall. `ordering = ["-created_at"]`.
+student) EVER**, not per attempt. **Re-confirmed, not silently changed,
+now that Task 28 has made `attempts_allowed > 1` real** (§4.6) — a
+student still only gets one say on a series overall, not one per retry.
+`ordering = ["-created_at"]`.
+
+⚠️ **New open question surfaced by Task 28, flagged not fixed**:
+`TestSeriesReviewSerializer.validate()` (§8) looks at the student's
+**latest** attempt only (`order_by("-attempt_number").first()`). With
+multi-attempt now real, a student `CHECKED` on attempt #1 but mid-way
+through an `IN_PROGRESS` attempt #2 currently **cannot** review yet
+under this rule, even though they already have a checked result.
+"Latest attempt only" vs. "any checked attempt is enough" is a genuine
+product call this pass has no confirmed answer for — left as the
+existing latest-only behavior, not silently changed either way. See
+§17 item 2 (updated) for the open-items tracking.
 
 - **`clean()`** — defence-in-depth (primary 400s live in
   `TestSeriesReviewSerializer.validate()`, §8): checks `attempt`

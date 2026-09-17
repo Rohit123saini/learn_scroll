@@ -11,29 +11,77 @@
 > bridge function, ek naya bug fix) ko sirf isi file ke bharose pe kar
 > sakta hai.
 >
-> **Last synced against real source:** 2026-09-14 — is pass `assigments/`
+> **Last synced against real source:** 2026-09-15 — is pass `assigments/`
 > ki saari uploaded files (`models.py`, `serializers.py`, `views.py`,
 > `urls.py`, `admin.py`, `apps.py`, `bridge.py`, `permissions.py`,
 > `throttling.py`, `tasks.py`, `tests.py`, management command) aur
 > `common/question_grading.py` dobara, seedha diff kiye gaye against is
-> doc ke Part 3 code blocks. **`assigments/models.py` me ek fix apply
-> hua hai is pass me** (neeche dekho) — baaki koi file nahi badli.
+> doc ke Part 3 code blocks — **plus, is pass, ek deeper correctness
+> pass bhi hui (sirf textual drift nahi, actual runtime-correctness
+> check).** Us deeper pass me ek **CRITICAL, is-app-ko-pehle-se-hi-
+> tod-rahi bug** mili, jo pehle kabhi kisi pass me catch nahi hui thi —
+> neeche sabse pehle.
 >
-> **✅ FIXED — is pass me:** `common/question_grading.py` ab `GradingResult`
-> dataclass aur `QuestionType` string-constants class use karta hai —
-> `auto_grade(*, question_type, marks, correct_answer, answer_data)` (koi
-> `options` param nahi hai) return karta hai ek `GradingResult
-> (is_auto_graded, is_correct, marks_awarded)` object, tuple nahi.
-> `assigments/models.py`'s `submit_structured()` pehle purani shape call
-> kar raha tha: `is_correct, marks_awarded = auto_grade(question_type=...,
-> options=question.options, correct_answer=..., answer_data=...,
-> marks=...)` — ye do tarah se crash karta: (1) `options=` ek nonexistent
-> keyword argument hai → `TypeError`; (2) return value ek `GradingResult`
-> object hai jise tuple-unpack nahi kiya ja sakta. **Har
-> `POST .../submit_structured/` call crash ho raha tha**, kisi bhi
-> question type ke liye. Fixed ab call site ko real signature se match
-> karke aur `GradingResult.is_correct`/`.marks_awarded` seedha object se
-> padh ke. Poora before/after Part 3.5 me hai.
+> ## 🔴 CRITICAL — FIXED THIS PASS: `assigments` creation ka HAR path crash karta tha (`UnboundLocalError`)
+>
+> **Do jagah, dono jagah same shape ka bug:** `serializers.py`'s
+> `assigmentsCreateSerializer.create()` **aur** `bridge.py`'s
+> `create_context_assigments()` — dono me line thi `assigments =
+> assigments.objects.create(...)`. Python me jaise hi kisi function/method
+> ke andar `assigments` ko assign kiya jaata hai, Python us poore
+> function scope ke liye `assigments` ko ek **local** naam bana deta hai
+> — is line ke right-hand-side (`assigments.objects`) bhi usi local naam
+> ko refer karta hai, jo abhi tak assign hi nahi hua (module-level import
+> `from .models import assigments` ab is scope ke andar shadow ho chuka
+> hai). Nateeja: `UnboundLocalError: cannot access local variable
+> 'assigments' where it is not associated with a value` — **har ek call
+> pe**, bina exception.
+>
+> **Impact — ye do hi jagah hain jahan se koi `assigments` row banti hai:**
+> - `serializers.py`'s path = `POST /api/assigments/assigmentss/`
+>   (personal assigments, koi bhi authenticated user) — **har request
+>   crash**.
+> - `bridge.py`'s path = `campus.bridge.create_assigments()` /
+>   `liveclass.bridge.create_assigments()` se call hoti — **campus/
+>   liveclass se ek bhi assigments kabhi successfully post nahi ho sakti
+>   thi**.
+>
+> Yani poora app — dono creation entry points — functionally down tha,
+> chahe baaki sab (submission, grading, public share, etc.) sahi likha ho.
+>
+> **Kyu ye ab tak kisi pass me pakड़ा nahi gaya:** `tests.py`'s apna
+> `_make_assigments()` helper seedha `assigments.objects.create(**kwargs)`
+> call karta hai (model manager, koi serializer ya bridge nahi) — poori
+> test suite dono buggy code paths ko bypass karti hai, isliye koi bhi
+> test kabhi fail nahi hua. Sirf real HTTP request ya real bridge call
+> pe hi ye surface hota.
+>
+> **Fix:** dono jagah local variable ka naam `assigments` se
+> `assigments_obj` kar diya (function ke andar sirf naming, model/API
+> shape me koi change nahi) — Part 3 ke `serializers.py`/`bridge.py`
+> code blocks ab fixed version hain. Poora before/after neeche Part 3.5
+> me hai.
+>
+> ---
+>
+> **✅ FIXED — is pass me (dusra, chhota fix):**
+> `bridge.py::notify_submission_received()` pehle raw string
+> `notif_type="submission_received"` bhejta tha, ab
+> `Notification.NotifType.SUBMISSION_RECEIVED` enum member seedha
+> reference karta hai (`from core.models import Notification` naya import
+> ke saath). Value aaj identical hai isliye ye koi live crash nahi tha,
+> lekin isi bug-shape (raw string vs enum) ne is codebase me pehle bhi
+> `tasks.py`'s `assigments_DUE_SOON` reminder ko break kiya tha — ab
+> dono call sites consistent hain. Poora before/after Part 3.5 me hai.
+>
+> **✅ (pichli pass se, still true) FIXED:** `common/question_grading.py`
+> `GradingResult` dataclass aur `QuestionType` string-constants class use
+> karta hai — `auto_grade(*, question_type, marks, correct_answer,
+> answer_data)` (koi `options` param nahi hai) return karta hai ek
+> `GradingResult(is_auto_graded, is_correct, marks_awarded)` object,
+> tuple nahi. `assigments/models.py`'s `submit_structured()` iske real
+> signature se ab match karta hai — is pass me dobara confirm hua, koi
+> naya change nahi.
 >
 > Is doc me **koi manual/hand-written Django migration file nahi hai aur
 > na hi honi chahiye** — is app ke paas sirf ek khaali `migrations/
@@ -1655,9 +1703,17 @@ class assigmentsCreateSerializer(serializers.ModelSerializer):
         # assigments with no way for the client to know it's incomplete.
         questions_data = validated_data.pop("questions", [])
         try:
-            assigments = assigments.objects.create(**validated_data)
+            # [FIX — CRITICAL, this pass] local var renamed `assigments`
+            # -> `assigments_obj`. See Part 3.5 for the full explanation:
+            # `assigments = assigments.objects.create(...)` made `assigments`
+            # a local name for this entire method (Python scoping), so the
+            # `assigments.objects` on the right-hand side of that same line
+            # was reading the not-yet-assigned local, not the imported
+            # model class — every call raised UnboundLocalError before this
+            # fix.
+            assigments_obj = assigments.objects.create(**validated_data)
             for question_data in questions_data:
-                assigmentsQuestion.objects.create(assigments=assigments, **question_data)
+                assigmentsQuestion.objects.create(assigments=assigments_obj, **question_data)
         except DjangoValidationError as exc:
             # Belt-and-suspenders (see module docstring point 3): this
             # serializer's own validate()/assigmentsQuestionSerializer.
@@ -1666,7 +1722,7 @@ class assigmentsCreateSerializer(serializers.ModelSerializer):
             # same checks again — if the two ever drift, surface a clean
             # 400 here instead of an unhandled 500.
             raise serializers.ValidationError({"detail": exc.messages})
-        return assigments
+        return assigments_obj
 
     def update(self, instance, validated_data):
         # Nested `questions` are intentionally NOT handled here on update
@@ -2373,17 +2429,28 @@ Nothing here ever resolves `context_id` into a real `campus.Section` or
 plain, already-resolved data (title, roster, etc.). This module's whole
 job is "store/track what I'm given", never "go find out more about it".
 
-[ASSUMPTION — NOT VERIFIED]: `core.services.create_notification`'s exact
-signature wasn't available in this pass (only core/models.py was
-provided, not core/services.py itself). The call in
-`notify_submission_received()` below assumes keyword args matching
-`core.Notification`'s own fields. Verify against the real function
-signature before relying on this in production.
+[VERIFIED] `core.services.create_notification`'s real signature is
+confirmed (see `assigments/tasks.py`'s module docstring for the full
+signature and the reasoning behind the keyword args used). The call in
+`notify_submission_received()` below matches it.
+
+[FIX — Task 12 / notif_type collision]: `notify_submission_received()`
+previously sent notif_type="submission_received" as a raw string
+literal — the same bug class fixed in `tasks.py` for the due-reminder
+notif_type (see that module's docstring). Even though
+`Notification.NotifType.SUBMISSION_RECEIVED`'s value happens to be the
+identical string today, sending the literal instead of the enum member
+left this call site silently exposed to the same drift risk: nothing
+here would catch a future rename of that member in core/models.py.
+Fixed to reference `Notification.NotifType.SUBMISSION_RECEIVED`
+directly, for the same reason `tasks.py` now does the same for
+`assigments_DUE_SOON`.
 """
 import logging
 
 from django.db import transaction
 
+from core.models import Notification
 from core.services import create_notification
 from login.models import User
 
@@ -2437,6 +2504,17 @@ def create_context_assigments(
     docstring) elsewhere in this app. Enforced here now, at the one
     other place an `assigments` can come into existence.
 
+    [VERIFIED — Task 26] Roster-shape mismatch between callers confirmed
+    safe: `campus.bridge.create_assigments()` sends
+    `{"user_id","roll_number","enrollment_no"}` per entry while
+    `liveclass.bridge.create_assigments()` sends only `{"user_id"}`. The
+    `bulk_create` below reads `entry["user_id"]` (required — matches
+    both callers) but `entry.get("roll_number", "")` and
+    `entry.get("enrollment_no", "")` (optional, default `""`), so
+    liveclass's narrower roster entries do not raise `KeyError`. No code
+    change was needed here; this note just records the check so it
+    isn't re-litigated later.
+
     [ADDED — Task 11] `extra_data`: an optional dict merged into `data`
     alongside `context_type`/`context_id`, additive-only (defaults to
     `None`, so every existing caller is unaffected). Added because
@@ -2460,7 +2538,14 @@ def create_context_assigments(
     data["context_type"] = context_type
     data["context_id"] = str(context_id) if context_id else None
     with transaction.atomic():
-        assigments = assigments.objects.create(
+        # [FIX — CRITICAL, this pass] local var renamed `assigments` ->
+        # `assigments_obj`. See Part 3.5 for the full explanation:
+        # `assigments = assigments.objects.create(...)` made `assigments`
+        # a local name for this entire function (Python scoping), so the
+        # `assigments.objects` on the right-hand side of that same line
+        # was reading the not-yet-assigned local, not the imported model
+        # class — every call raised UnboundLocalError before this fix.
+        assigments_obj = assigments.objects.create(
             source=source,
             context_type=context_type,
             context_id=context_id,
@@ -2475,7 +2560,7 @@ def create_context_assigments(
         assigmentsSubmission.objects.bulk_create(
             [
                 assigmentsSubmission(
-                    assigments=assigments,
+                    assigments=assigments_obj,
                     student_id=entry["user_id"],
                     roll_number=entry.get("roll_number", ""),
                     enrollment_no=entry.get("enrollment_no", ""),
@@ -2491,9 +2576,9 @@ def create_context_assigments(
     # work to a whole roster), not noise.
     logger.info(
         "assigments.created id=%s source=%s context_type=%s context_id=%s roster_size=%d",
-        assigments.id, source, context_type, context_id, len(roster),
+        assigments_obj.id, source, context_type, context_id, len(roster),
     )
-    return assigments
+    return assigments_obj
 
 
 def get_submissions_for_context(context_type: str, context_id):
@@ -2515,13 +2600,16 @@ def notify_submission_received(submission: assigmentsSubmission) -> None:
     `data` carries the assigments's own `context_type`/`context_id` so
     the client can deep-link back into whichever context page is
     relevant.
+
+    `notif_type` is `Notification.NotifType.SUBMISSION_RECEIVED`, not a
+    raw string — see [FIX — Task 12] in this module's docstring.
     """
     assigments = submission.assigments
     if not assigments.posted_by_id:
         return
     create_notification(
         recipient=assigments.posted_by,
-        notif_type="submission_received",
+        notif_type=Notification.NotifType.SUBMISSION_RECEIVED,
         title="New Submission",
         message=f"{submission.student} submitted \"{assigments.title}\".",
         data={"context_type": assigments.context_type, "context_id": str(assigments.context_id or "")},
@@ -2995,6 +3083,92 @@ class DueReminderIdempotencyTests(TestCase):
 
 ## Part 3.5 — Known Issues Found & Fixed This Pass
 
+### 🔴 FIXED THIS PASS — CRITICAL: both `assigments`-creation entry points raised `UnboundLocalError` on every call
+
+**How this was found:** every previous sync pass only diffed the
+uploaded files against this doc's Part 3 code blocks **textually** — if
+a file matched the doc byte-for-byte, it was marked "no drift" and
+moved on. This pass added a second, independent check on top of that:
+reading each file's actual control flow for runtime correctness, not
+just comparing it against what this doc already claimed. That's what
+surfaced this bug — it was sitting identically in both the real files
+*and* this doc's own Part 3 code blocks, undetected, across every prior
+pass.
+
+**The bug, in both places, same shape:**
+
+```python
+# serializers.py — assigmentsCreateSerializer.create()
+assigments = assigments.objects.create(**validated_data)
+```
+
+```python
+# bridge.py — create_context_assigments()
+assigments = assigments.objects.create(
+    source=source, ...
+)
+```
+
+In Python, assigning to a name anywhere inside a function body makes
+that name **local to the entire function**, from the first line — not
+just from the point of assignment onward. Because `assigments` is
+assigned on the left-hand side of these lines, `assigments` becomes a
+local variable for the whole method/function; the `assigments.objects`
+on the **right-hand side of that very same line** then resolves to that
+local (not-yet-assigned) name instead of the module-level imported
+model class (`from .models import assigments`). The result is
+`UnboundLocalError: cannot access local variable 'assigments' where it
+is not associated with a value` — raised immediately, on every single
+call, before the `.objects.create(...)` ever runs.
+
+**Impact — these are the *only two* places in the entire app where an
+`assigments` row is ever created:**
+
+| Path | Who calls it | Result before this fix |
+|---|---|---|
+| `assigmentsCreateSerializer.create()` | `assigmentsViewSet.perform_create()` → every `POST /api/assigments/assigmentss/` (personal assigments, any authenticated user, §7) | **500, every request** |
+| `create_context_assigments()` | `campus.bridge.create_assigments()` / `liveclass.bridge.create_assigments()` — the *only* way campus/liveclass ever post an assigments to a roster | **Crashes inside the caller's own `transaction.atomic()` block, every call — no campus or liveclass assigments could ever be created** |
+
+In other words: submission, grading, publish/unpublish, the public
+share page — everything downstream of an `assigments` already
+existing — was correctly built and would have worked. But nothing could
+ever get an `assigments` row into existence in the first place, through
+either of this app's two creation paths. This was a total, silent
+outage of the app's core "post an assigments" feature.
+
+**Why no test ever caught this:** `tests.py`'s own `_make_assigments()`
+fixture helper calls the model manager directly —
+`assigments.objects.create(**defaults)` — bypassing both the serializer
+and the bridge entirely. Every test in this app's suite builds its
+fixtures through that helper, so the 12+ tests in `tests.py` all pass
+today even though both real creation paths are broken. This is worth
+remembering as a standing gap, not just a one-time miss: a fixture
+helper that bypasses the exact code path it's meant to be testing
+against will hide exactly this class of bug indefinitely — see the new
+Part 4 test-coverage note this pass adds.
+
+**Fix applied (both files, Part 3 above now reflects this):** renamed
+the local variable from `assigments` to `assigments_obj` in both
+`assigmentsCreateSerializer.create()` and `create_context_assigments()`
+— a pure local-naming change, no model/API/response-shape change at
+all. Every place inside each function that referenced the old local
+`assigments` (the bulk-create loop, the log line, the `return`
+statement) was updated to `assigments_obj` alongside it.
+
+**What changed in this doc this pass:** Part 3's `assigments/
+serializers.py` (`assigmentsCreateSerializer.create()`) and `assigments/
+bridge.py` (`create_context_assigments()`) code blocks both updated to
+the fixed, renamed-variable version. The top-of-doc sync note now leads
+with this finding. **Recommended immediate follow-up, not done here**:
+add at least one test that actually goes through
+`assigmentsViewSet`/`assigmentsSubmissionViewSet` via DRF's `APIClient`
+(or calls `create_context_assigments()` directly) instead of the
+`_make_assigments()` shortcut — see Part 4's updated test-coverage note
+— so a regression here is caught by the suite next time, not by a
+manual code read.
+
+---
+
 > **History note (kept for context, not currently accurate):** ek pichli
 > sync-pass ne bilkul yehi mismatch report kiya tha, aur uske agli pass ne
 > use **retract** kar diya tha — kyunki tab dono real files (`common/
@@ -3093,6 +3267,70 @@ ya `assigments/models.py` dobara upload ho, dono real files ko seedha
 diff karo, kisi doc ke pichle claims pe (chahe wo claim "matched" ho ya
 "broken") bharosa mat karo — is baar bhi wahi tareeqa use hua hai jo
 poori is response me use hua.
+
+### ✅ FIXED THIS PASS: `bridge.py::notify_submission_received()` sent a raw string `notif_type`, not the enum member
+
+**Real file re-diffed this pass** (`models.py`, `serializers.py`,
+`permissions.py`, `throttling.py`, `views.py`, `urls.py`, `admin.py`,
+`apps.py`, `tasks.py`, `tests.py`, `question_grading.py`, and the
+management command all came back byte-identical to what this doc already
+had — no drift, nothing to update there). Only `bridge.py` changed:
+
+**Before (what this doc previously had, and what the app shipped with
+until this fix):**
+
+```python
+create_notification(
+    recipient=assigments.posted_by,
+    notif_type="submission_received",
+    ...
+)
+```
+
+**After (the real, current `bridge.py`):**
+
+```python
+create_notification(
+    recipient=assigments.posted_by,
+    notif_type=Notification.NotifType.SUBMISSION_RECEIVED,
+    ...
+)
+```
+
+**Why this matters:** `Notification.NotifType.SUBMISSION_RECEIVED`'s
+value happens to be the identical string (`"submission_received"`)
+today, so this was never a *live* crash — but sending the raw literal
+instead of the enum member left this call site silently exposed to the
+exact same drift risk `tasks.py`'s `assigments_DUE_SOON` reminder call
+already had to be fixed for once (§ this doc's own Part 3.5 history, and
+the same bug-shape flagged repeatedly across `core_app_documentation.md`
+/ `LEARNSCROLL_LIVECLASS.md` for other apps' notif_type call sites): if
+`core/models.py` ever renames that enum member, a raw string here would
+never notice — the notification would just silently stop matching what
+clients expect to deep-link off, with no error anywhere. Referencing the
+enum member means a future rename breaks loudly (`AttributeError`) at
+the call site instead.
+
+**Also newly confirmed in this pass, module docstring only (no behavior
+change):**
+- `core.services.create_notification`'s signature — previously flagged
+  in this file's own docstring as `[ASSUMPTION — NOT VERIFIED]` — is now
+  marked `[VERIFIED]`, cross-checked against `tasks.py`'s own confirmed
+  signature note.
+- A new `from core.models import Notification` import backs the enum
+  reference above.
+- `[VERIFIED — Task 26]` note added: the roster-shape mismatch between
+  `campus.bridge.create_assigments()` (sends `user_id`/`roll_number`/
+  `enrollment_no`) and `liveclass.bridge.create_assigments()` (sends only
+  `user_id`) is confirmed safe — `create_context_assigments()`'s
+  `bulk_create` already reads the optional two fields via `.get(..., "")`,
+  so liveclass's narrower roster never raises `KeyError`. Documented so
+  it isn't re-investigated later as if it were still open.
+
+**What changed in this doc this pass:** Part 3's `assigments/bridge.py`
+code block updated to the real, fixed file (verbatim). No other section
+of this doc referenced the old `"submission_received"` string literal,
+so nothing else needed updating for this fix.
 
 ---
 
@@ -3275,16 +3513,35 @@ Covered:
 6. `recompute_total_marks()` — signal fires correctly on question
    add/edit/delete.
 
+**🔴 NEW, this pass — why this gap is no longer just theoretical:** every
+fixture in this file goes through `_make_assigments()`, which calls
+`assigments.objects.create(**defaults)` directly — the model manager,
+bypassing both `assigmentsCreateSerializer.create()` and
+`create_context_assigments()` entirely. Those were exactly the two
+functions found broken with a call-every-time `UnboundLocalError` this
+pass (Part 3.5) — a bug that a real serializer- or bridge-level test
+would have caught immediately, the very first time it ran. The two
+"not covered" gaps below aren't just missing coverage anymore; they're
+the reason this pass's critical bug shipped invisibly. Treat adding
+these as higher priority than the rest of this list.
+
 **Not covered here (flagged, not silently skipped)**:
 - Permission-class / viewset-level tests (`IsassigmentsStaffOrOwner`,
   `IsPersonalSourceOnly`, IDOR scoping) — needs `APIClient` + a real
   authenticated test user fixture, which depends on how the project's own
   test setup authenticates (`login.User` factory pattern wasn't provided
-  in this pass).
+  in this pass). **This would also have caught Part 3.5's serializer bug**
+  — any test that actually POSTs through `assigmentsViewSet` instead of
+  calling the model manager directly exercises
+  `assigmentsCreateSerializer.create()` for real.
 - `bridge.py`'s `create_context_assigments`/`get_submissions_for_context`
   — needs a realistic roster fixture; the shape of a "resolved roster"
   from campus/liveclass wasn't concretely available (§6 of the functional
   doc flags liveclass's roster source as `[NOT YET VERIFIED]` itself).
+  **This would also have caught Part 3.5's bridge bug** for the same
+  reason — a direct call to `create_context_assigments()` in a test would
+  have raised the same `UnboundLocalError` a real campus/liveclass call
+  does today.
 - Concurrency/race tests on the unique constraints (two simultaneous
   submissions for the same `(assigments, student)`) — constraint-level
   correctness is trusted to Postgres here rather than re-tested at the
@@ -3538,7 +3795,7 @@ jise sab depend kar sakte hain):
 
 | Call site | `notif_type` | Kab fire hota hai |
 |---|---|---|
-| `assigments/bridge.py::notify_submission_received()` | `"submission_received"` (plain string) | Jab bhi koi student `submit_freeform`/`submit_structured` call karta hai — assigments ke `posted_by` ko notify karta hai |
+| `assigments/bridge.py::notify_submission_received()` | `Notification.NotifType.SUBMISSION_RECEIVED` (enum member — **is pass me raw string se fix hua, neeche dekho**) | Jab bhi koi student `submit_freeform`/`submit_structured` call karta hai — assigments ke `posted_by` ko notify karta hai |
 | `assigments/tasks.py::send_due_reminders()` | `Notification.NotifType.assigments_DUE_SOON` (`"assigments_due_soon"`) | Due-date reminder sweep — student ko notify karta hai jinka submission abhi bhi `MISSING` hai aur due date `lookahead_hours` ke andar hai |
 
 ✅ **[VERIFIED — is pass me]**: `core.services.create_notification()`'s
@@ -3564,13 +3821,17 @@ member (`NotifType.assigments_DUE_SOON`) reference karta hai, raw string
 nahi — taaki future me `core/models.py` me rename ho to import-time/
 call-time hi break ho, silent mismatch dobara na aaye.
 
-⚠️ **[ASSUMPTION — `bridge.py` ka call site abhi bhi unverified]**:
-`assigments/bridge.py::notify_submission_received()` ka `"submission_
-received"` call site upar wali confirmed signature ke against explicitly
-nahi verify hua is pass me (sirf `tasks.py` ka call site verify hua) —
-shape khud compatible dikhti hai (same keyword args), lekin **is master
-doc ka agla reader**: agar kabhi is call site ko bhi actually run karke
-confirm karna ho, same tareeqe se karo jaise `tasks.py` ka hua.
+✅ **[FIXED — is pass me]**: `assigments/bridge.py::notify_submission_
+received()` ka call site ab bhi `tasks.py` ki tarah hi confirmed
+signature use karta hai, **aur** apna khud ka `notif_type` bug fix ho
+chuka hai — pehle raw string `"submission_received"` bhejta tha (same
+bug-shape jo `tasks.py`'s `assigments_DUE_REMINDER`/`assigments_DUE_SOON`
+collision upar document hai), ab `Notification.NotifType.
+SUBMISSION_RECEIVED` enum member seedha reference karta hai (`core.
+models.Notification` ab is file me import hai). Value aaj identical hai
+isliye ye pehle bhi live crash nahi tha, lekin drift-risk wahi tha jo
+`tasks.py` wale bug me tha — ab dono call sites consistent hain. Poora
+before/after Part 3.5 me hai.
 
 ### 6.6 `common` integration — shared, non-Django utility modules
 
@@ -3605,27 +3866,25 @@ automatic mechanism dono ko in-sync nahi rakhta.
 
 ### 6.8 Notification-type naming — cross-app consistency note
 
-Ab do alag patterns hain, dono call sites ke beech, jaan-bujh kar
-**consistent nahi** rakhe gaye (§6.5 ke [FIX] ke baad se):
+✅ **RESOLVED THIS PASS — dono call sites ab consistent hain.** Pehle
+`bridge.py` iss list me `tasks.py` se jaan-bujh kar alag (inconsistent)
+tha; ab dono hi `core.models.Notification` import karke apna respective
+enum member reference karte hain, koi plain string nahi:
 
-- `assigments/tasks.py::send_due_reminders()` **ab `core.models.
-  Notification` import karta hai** aur `NotifType.assigments_DUE_SOON`
-  enum member reference karta hai — plain string nahi. Ye §6.5 ke
-  notif_type-collision fix ka hissa tha: jab tak ye sirf ek string tha,
-  ye silently `core`'s existing (campus ke) same-named-but-different
-  value se collide kar gaya. Enum member reference karne se ye class of
-  bug future me import/call-time hi pakड़ा jaayega, silent nahi rahega.
-- `assigments/bridge.py::notify_submission_received()` **abhi bhi plain
-  string** (`"submission_received"`) bhejta hai — `core.models` import
-  nahi karta. Is baar iske collide hone ka wahi risk hai jo `tasks.py`
-  ke purane code me tha: agar `core.models.NotifType` par
-  `"submission_received"` ka exact-match member na ho (ya kisi aur app
-  ka same-named-lekin-different value ho), ye silently mismatch ho
-  jayega. **Is master doc ka agla reader**: `core.models.NotifType` ko
-  check karke confirm karo ki `"submission_received"` wahan
-  character-for-character match karta hai — agar nahi, to `bridge.py`
-  ko bhi `tasks.py` jaisa hi enum-import pattern pe le jao, same fix
-  jo abhi sirf ek call site pe applied hai.
+- `assigments/tasks.py::send_due_reminders()` — `core.models.
+  Notification` import karta hai aur `NotifType.assigments_DUE_SOON`
+  enum member reference karta hai. Ye pehle ek notif_type-collision bug
+  tha: jab tak ye sirf ek string tha, ye silently `core`'s existing
+  (campus ke) same-named-but-different value se collide kar gaya. Enum
+  member reference karne se ye class of bug future me import/call-time
+  hi pakड़ा jaayega, silent nahi rahega.
+- `assigments/bridge.py::notify_submission_received()` — **is pass me
+  fix hua** (Part 3.5 me poora before/after): ab ye bhi `core.models.
+  Notification` import karke `NotifType.SUBMISSION_RECEIVED` enum member
+  reference karta hai, `"submission_received"` plain string nahi. Wahi
+  collision-risk jo `tasks.py` ke purane code me tha (agar `core`'s enum
+  kabhi rename ho) ab yahan bhi close ho chuka hai — dono call sites ab
+  ek hi pattern follow karte hain, koi doc-vs-code drift nahi bacha.
 
 ### 6.9 Quick "who imports what" map (is app ki poori dependency surface)
 

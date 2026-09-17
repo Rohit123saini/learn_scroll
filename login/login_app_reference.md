@@ -1,11 +1,25 @@
 # `login` App — Complete Self-Contained Reference
 
-> **v8 — full 10-file resync pass, no functional drift found.** Ye ek
-> hi file hai jisme poore **login** (auth) Django app ka sara logic,
+> **v9 — real drift found this pass, admin.py rewritten (TASK 39).** Ye
+> ek hi file hai jisme poore **login** (auth) Django app ka sara logic,
 > code, connections, flows aur known issues cover hain. Iske alawa
 > kisi aur file ki zaroorat nahi — sab kuch (models → serializers →
 > views → urls → admin → apps.py → sms_service.py) yahin milega, saath
 > me har piece kya kaam karta hai uski explanation bhi.
+>
+> **v8 se v9 me kya badla:** har ek uploaded `.py` file (`models.py`,
+> `serializers.py`, `views.py`, `sms_service.py`, `admin.py`, `apps.py`,
+> `tests.py`, `urls.py`) is doc ke embedded code-blocks ke against
+> programmatically byte-diff kiya gaya (fresh 10-file upload). Result:
+> **`admin.py` ke alawa sab 7 files exactly wahi hain jo already
+> documented the — zero change unme.** `admin.py` me ek real, poori
+> tarah rewrite mili — pehle bare `admin.site.register(User)` tha, ab
+> `django.contrib.auth.admin.UserAdmin` se subclass ki gayi proper
+> `UserAdmin` hai (hashed two-step add-form, custom "Profile" fieldset,
+> denormalized counters `readonly_fields` me). §6 poora replace kiya
+> gaya is naye code + explanation ke saath; §11 item 8 (jo isi gap ko
+> flag karta tha) ab RESOLVED mark kiya. §0's file-map row bhi update
+> ki. Manual/hand-written migration ka is baar bhi koi sawaal nahi tha.
 >
 > **v7 se v8 me kya badla:** har ek uploaded `.py` file (`models.py`,
 > `serializers.py`, `views.py`, `sms_service.py`, `admin.py`, `apps.py`,
@@ -228,7 +242,7 @@ delivery).
 | `views.py` | All API endpoint logic (Login, Signup, Google auth, OTP, change-password, complete-profile) |
 | `sms_service.py` | Phone-OTP delivery via MSG91 (`send_otp_sms`, `SMSDeliveryError`) |
 | `urls.py` | URL routing (+ JWT refresh endpoint) |
-| `admin.py` | Django admin registration |
+| `admin.py` | **[TASK 39]** Proper `UserAdmin` subclass (add/change forms, password hashing, read-only denormalized counters) — see §6 |
 | `apps.py` | App config (`name = 'login'`) |
 | `tests.py` | Empty — no tests written yet |
 
@@ -2011,22 +2025,151 @@ def send_otp_sms(phone: str, otp_code: str) -> None:
 
 ---
 
-## 6. `admin.py` (full code)
+## 6. `admin.py` (full code) — 🆕 TASK 39, rewritten this pass
+
+**v8 se v9 me kya badla:** pehle `admin.py` sirf `admin.site.register(User)`
+tha — Django ke default bare `ModelAdmin`, koi custom fieldsets/forms
+nahi (§11 item 8 ne yehi flag kiya tha). Ab poora replace ho chuka hai
+proper `UserAdmin` subclass se — is section ka poora content is pass
+me update kiya gaya hai.
 
 ```python
+# login/admin.py
+"""
+TASK 39 — proper UserAdmin for the custom `User` model, instead of the
+bare `admin.site.register(User)` (which gives every field a flat,
+unstyled change form with no grouping, no password-hash-safe widget,
+and no add-user flow — the default ModelAdmin's add page shows a raw
+`password` CharField, i.e. a new admin-created user's password would
+be saved as plaintext unless someone remembers to hash it by hand).
+
+Subclassed off `django.contrib.auth.admin.UserAdmin` (not written from
+scratch) so we keep, for free: the two-step "add user" form
+(username + password1/password2, hashed via `UserCreationForm`), the
+"change password" link instead of an editable raw hash field
+(`UserChangeForm`), and permission/group management UI.
+
+Only change from stock `UserAdmin`: its `fieldsets`/`add_fieldsets`
+are written for a bare `AbstractUser` and know nothing about this
+project's added fields (`phone`, `email` being unique now, `bio`,
+`profile_photo`, `is_private`, `is_verified`, and the four denormalized
+counters). Extended, not replaced, by appending a fieldset — so any
+upstream Django change to the base fieldsets still applies.
+
+`followers_count` / `following_count` / `posts_count` / `coin` are
+listed in `readonly_fields`, NOT left editable. See models.py's own
+docstring (§4): these are denormalized counters that must only ever
+move via an atomic `F('...') + 1` update from the Follow/Post/
+CoinLedger write paths. The admin's `save_model()` does a plain
+`obj.save()` with whatever value sits in the form field — editing one
+of these here would be exactly the read-modify-write the model
+docstring warns against (two admins/tabs editing the same user
+concurrently would silently drop one increment). Read-only in the
+admin makes that invariant impossible to violate by accident instead
+of just documenting it; the counters are still visible for
+debugging/support, just not hand-editable.
+"""
 from django.contrib import admin
-from .models import *
-# Register your models here.
-admin.site.register(User)
+from django.contrib.auth.admin import UserAdmin as DjangoUserAdmin
+
+from .models import OTPVerification, User
+
+
+@admin.register(User)
+class UserAdmin(DjangoUserAdmin):
+    # Stock UserAdmin fieldsets, plus one appended group for this
+    # project's own fields. `fieldsets`/`add_fieldsets` are tuples, so
+    # concatenate rather than mutate — keeps whatever the installed
+    # Django version ships in DjangoUserAdmin.fieldsets untouched.
+    fieldsets = DjangoUserAdmin.fieldsets + (
+        (
+            "Profile",
+            {
+                "fields": (
+                    "phone",
+                    "bio",
+                    "profile_photo",
+                    "is_private",
+                    "is_verified",
+                )
+            },
+        ),
+        (
+            "Denormalized counters (read-only — see models.py)",
+            {
+                "fields": (
+                    "followers_count",
+                    "following_count",
+                    "posts_count",
+                    "coin",
+                )
+            },
+        ),
+    )
+
+    # email is unique now (models.py §3) — surfacing it in the add form
+    # lets a duplicate get caught by the form's own validation instead
+    # of only failing later as a raw DB IntegrityError.
+    add_fieldsets = DjangoUserAdmin.add_fieldsets + (
+        ("Profile", {"fields": ("phone", "email")}),
+    )
+
+    readonly_fields = DjangoUserAdmin.readonly_fields + (
+        "followers_count",
+        "following_count",
+        "posts_count",
+        "coin",
+    )
+
+    list_display = (
+        "username",
+        "email",
+        "phone",
+        "is_staff",
+        "is_verified",
+        "is_private",
+        "date_joined",
+    )
+    list_filter = DjangoUserAdmin.list_filter + ("is_private", "is_verified")
+    search_fields = DjangoUserAdmin.search_fields + ("phone",)
+
+
 admin.site.register(OTPVerification)
 ```
 
-Both models registered with Django's default `ModelAdmin`. Note:
-registering the custom `User` model this way (instead of extending
-`UserAdmin`) means the admin list/detail view won't have the nice
-password-change widget or fieldset grouping Django's built-in `UserAdmin`
-gives you — works, but consider `class UserAdmin(admin.ModelAdmin)` with
-custom `fieldsets` later if the admin UI matters to you.
+**Kya badla, aur kyun:**
+- **`User`** ab `django.contrib.auth.admin.UserAdmin` se subclass hai
+  (bare `ModelAdmin` nahi) — iska matlab standard two-step "add user"
+  form (username + password1/password2, `UserCreationForm` se hashed)
+  aur "change password" link (raw hash field editable nahi) dono free
+  me mil gaye, bina khud likhe. `fieldsets`/`add_fieldsets` **append**
+  kiye gaye hain (tuple concatenation), replace nahi — matlab agar
+  Django upstream apne stock `UserAdmin.fieldsets` badle, wo change
+  yahan bhi automatically propagate hoga.
+- **Naya "Profile" fieldset**: `phone`, `bio`, `profile_photo`,
+  `is_private`, `is_verified` — ye fields pehle admin me bilkul
+  dikhte hi nahi the (default `ModelAdmin` sirf `AbstractUser`'s apne
+  fields dikhata, custom fields ko `fields`/`fieldsets` explicitly na
+  hone ki wajah se skip kar deta).
+- **Naya "Denormalized counters" fieldset — `readonly_fields`
+  me hain, editable NAHI**: `followers_count`/`following_count`/
+  `posts_count`/`coin`. `models.py`'s apna docstring (§3 upar) already
+  warn karta hai ye counters sirf atomic `F('...') + 1` update se
+  move hone chahiye, kabhi read-modify-write se nahi — agar admin form
+  se editable rehte, to `save_model()` ka plain `obj.save()` exactly
+  wahi race create kar sakta tha (do admin tabs ek hi user ko edit
+  karein to ek increment silently drop ho jaye). Read-only banake ye
+  invariant sirf document nahi, structurally enforce ki gayi hai.
+- **`add_fieldsets` me `phone`/`email` add kiye** — `email` ab
+  DB-level `unique=True` hai (§3), to add-form pe dikhana matlab
+  duplicate form-validation se hi pakda jaye, baad me raw
+  `IntegrityError` se nahi.
+- **`list_display`/`list_filter`/`search_fields`** — `username`,
+  `email`, `phone`, `is_staff`, `is_verified`, `is_private`,
+  `date_joined` list me; `is_private`/`is_verified` filter me; `phone`
+  search me (stock `UserAdmin`'s apne defaults ke upar, replace nahi).
+- **`OTPVerification`** unchanged — abhi bhi bare
+  `admin.site.register(OTPVerification)`, koi custom `ModelAdmin` nahi.
 
 ---
 
@@ -2383,9 +2526,10 @@ serializer/view-level detail.
    pending OTP can exist per email/phone at a time — resending overwrites
    the old one entirely (old code becomes permanently invalid the moment
    a new one is requested), which is generally the safer behavior.
-8. **Admin registration of `User`** doesn't use Django's `UserAdmin` —
-   see §6 note if you want the nicer built-in admin UX for user
-   management.
+8. ✅ **RESOLVED (v9, TASK 39)** — `User` ab bare `admin.site.register()`
+   se nahi, ek proper `UserAdmin` subclass se registered hai (hashed
+   add-form, read-only denormalized counters, custom fieldsets) — see
+   §6.
 
 ---
 

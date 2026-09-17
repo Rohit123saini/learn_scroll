@@ -2,16 +2,22 @@
 
 > Ye document `LearnScroll/` folder (Django project root — `settings.py`, `asgi.py`, `wsgi.py`, `celery.py`, `urls.py`, `ws_auth.py`) ka single source of truth hai — wahi tarika jo `campus_app_design.md` aur `core_app_documentation.md` already follow karte hain. Ye teeno docs ab ek doosre ko complete karte hain: `campus`/`core` apps *kya* karte hain wo un docs me hai; ye project *kaise wire hota hai* (INSTALLED_APPS, throttle rates, celery beat, auth, deployment) yahan hai. Koi bhi is project pe kaam continue kare, teeno docs ek saath padhe.
 >
-> **Is pass me saari 8 project-root files (`settings.py`, `asgi.py`, `__init__.py`, `celery.py`, `urls.py`, `ws_auth.py`, `wsgi.py`) dobara diff ki gayi. Pichle saare items same state me hain, ek NAYA undocumented `CELERY_BEAT_SCHEDULE` entry mila** (neeche §6/§7 me poora detail):
-> - ✅ **STILL RESOLVED — §7.3 (`ws_auth.py` dead code):** `asgi.py` ab bhi `from LearnScroll.ws_auth import JWTAuthMiddleware` use karta hai, `message.Middleware.JWTAuthMiddleware` nahi — no change is pass me. `liveclass/ws_auth.py`/`message/Middleware.py` ki duplicate copies abhi bhi delete nahi hui (still-open cleanup, unchanged).
-> - ✅ **STILL RESOLVED — §7.2 (campus F-3 streak-reward tasks):** `campus-check-attendance-streak-rewards`/`campus-check-assigments-ontime-streak-rewards` dono ab bhi registered hain — unchanged, sirf line numbers shift hue hain (neeche note).
-> - 🔴 **STILL OPEN — `LearnScroll/__init__.py` ab bhi khaali hai (0 bytes).** Koi change nahi is pass me — §3.1/§8 me detail wahi hai.
-> - 🟡 **STILL OPEN — §7.1 (`'assigments'` typo in `INSTALLED_APPS`/`urls.py`):** koi change nahi.
-> - 🆕 **NAYA — `settings.py`'s `CELERY_BEAT_SCHEDULE` me ek 20vi entry mil gayi jo is doc me kabhi document nahi hui thi: `message-expire-stale-parent-access` (daily 4:00 AM).** Ye `message/management/commands/expire_stale_parent_access.py` (Parent Mode DB hygiene — `ParentToken`/`ParentAccessCode` cleanup) ko wire karti hai, lekin `settings.py`'s apna comment khud flag karta hai ki iska Celery task-wrapper (`message.tasks.expire_stale_parent_access`) confirm nahi hai kyunki `message/tasks.py` is pass ke upload me nahi aaya — agar wrapper exist nahi karta to ye beat entry silently kuch nahi karega (tick drop ho jayegi, koi error nahi). Poora detail §6/§8 me naya.
-> - `settings.py` ab **1270 lines** hai (pehle is doc me "1141 lines" likha tha — stale, ab fix kiya). Isi wajah se neeche ke kuch line-number references (jaise campus streak tasks) shift hue hain — updated.
+> **Is pass me saari 8 project-root files (`settings.py`, `asgi.py`, `__init__.py`, `celery.py`, `urls.py`, `ws_auth.py`, `wsgi.py`) dobara diff ki gayi — is baar do purane "STILL OPEN" critical items khud RESOLVE ho chuke hain, aur ek naya settings entry mila jo pehle kabhi document nahi hua tha:**
+> - 🟢 **RESOLVED THIS PASS — `LearnScroll/__init__.py` ab khaali NAHI hai.** Pichli pass "🔴 CONFIRMED THIS PASS — 0 bytes" thi (§3.1/§8 item 4); is pass ka upload confirm karta hai ki file ab exactly `celery.py`'s docstring ne jo maanga tha wahi rakhti hai:
+>   ```python
+>   from .celery import app as celery_app
+>   __all__ = ("celery_app",)
+>   ```
+>   `celery.py`'s apna wiring pre-requisite ab satisfied hai — §3.1, §4, §8 update kiye.
+> - 🟢 **RESOLVED THIS PASS — §7.1 ka `INSTALLED_APPS` typo (`'assigments'` → `'assigments'`) fix ho gaya.** `settings.py` me typo'd string ab sahi spelling (`assigments`) me hai, apne khud ke naye inline comment ke saath jo exactly wahi failure mode explain karta hai jo is doc pehle se flag kar rahi thi (`get_app_config("assigments")` → `LookupError`). `urls.py` pehle se hi sahi spelling use karta tha, isliye ab settings.py + urls.py + `campus/bridge.py`/`core/views.py::SearchView` — sab EK hi spelling par consistent hain. §2, §5, §7.1, §8 update kiye.
+> - 🆕 **NAYA — `settings.py` me ab `CONFIG_DRIFT_APPS = ["user_profile", "core", "assigments", "testseries", "campus"]` maujood hai**, jo `core_app_documentation.md` §9 item 16 / is doc ke purane §8 item 5 ("confirmed MISSING") ko RESOLVE karta hai. Inline comment khud confirm karta hai ki spelling-typo fix isi list ko add karne ke dauraan surface hua (`get_app_config()` warna `LookupError` deta) — matlab dono fixes (typo + drift-apps list) ek hi pass me saath aaye, ek-dusre se independent nahi. `CONFIG_DRIFT_ADMIN_SKIP`/`CONFIG_DRIFT_ONDEMAND_TASKS`/`CONFIG_DRIFT_URL_SKIP` teeno abhi bhi jaan-bujh kar khaali (`set()`) hain. §2, §8 me naya sub-section.
+> - ✅ **STILL RESOLVED, unchanged — §7.3 (`ws_auth.py` dead code):** `asgi.py` ab bhi `from LearnScroll.ws_auth import JWTAuthMiddleware` use karta hai. `liveclass/ws_auth.py`/`message/Middleware.py` ki duplicate copies abhi bhi delete nahi hui (still-open cleanup, unchanged).
+> - ✅ **STILL RESOLVED, unchanged — §7.2 (campus F-3 streak-reward tasks):** `campus-check-attendance-streak-rewards`/`campus-check-assigments-ontime-streak-rewards` dono ab bhi registered hain, 19:00/19:30 daily — no change.
+> - ⚠️ **STILL UNCONFIRMED, unchanged — `message-expire-stale-parent-access`** (daily 4:00 AM) beat entry ab bhi wahi hai; task-wrapper ka existence ab bhi verify nahi ho paaya (`message/tasks.py` is pass bhi upload nahi hua). §6/§8 me as-is flag kiya.
+> - `settings.py` ab **1319 lines** hai (pehle "1270 lines" likha tha — typo-fix comment block aur naya `CONFIG_DRIFT_APPS` entry ke extra lines ki wajah se badha). Line-number references jahan zaroori update kiye.
 
 >
-> Baaki poora `settings.py` (1270 lines), `asgi.py`, `celery.py`, `urls.py`, `wsgi.py` neeche as-built document kiya gaya hai.
+> Baaki poora `settings.py` (1319 lines), `asgi.py`, `celery.py`, `urls.py`, `wsgi.py` neeche as-built document kiya gaya hai.
 
 ---
 
@@ -25,7 +31,7 @@
 | `wsgi.py` | Standard Django WSGI entrypoint (plain HTTP, sync) — §3 |
 | `celery.py` | Celery app bootstrap — `autodiscover_tasks()` se har app ka `tasks.py` register hota hai — §4 |
 | `ws_auth.py` | Project-level shared `JWTAuthMiddleware` for Channels — **✅ ab `asgi.py` se wired hai (RESOLVED this pass) — §3, §7.3. `liveclass`/`message` ki apni duplicate copies abhi delete karna baaki hai.** |
-| `__init__.py` | **🔴 CONFIRMED THIS PASS — 0 bytes, poori tarah khaali.** `celery.py`'s wiring-requirement (`from .celery import app as celery_app`) missing hai — §3.1, §4, §8. |
+| `__init__.py` | **🟢 RESOLVED THIS PASS — ab khaali nahi hai.** `celery.py`'s wiring-requirement (`from .celery import app as celery_app` + `__all__ = ("celery_app",)`) ab dono lines present hain — §3.1, §4, §8. |
 
 ---
 
@@ -48,7 +54,7 @@ django.contrib.postgres, django_filters, rest_framework, drf_spectacular, corshe
 login, user_profile, post, message, liveclass, campus, testseries, assigments, core
 [+ 'storages' if USE_S3_STORAGE]
 ```
-**🟡 UPDATED THIS PASS, PARTIALLY FIXED** — `testseries` ab correctly registered hai. Lekin chautha naya entry `'assigments'` hai (typo — missing 'n'), `'assigments'` nahi, jabki `campus/bridge.py` aur `core/views.py::SearchView` dono `assigments.bridge`/`assigments.models` hi hard-import karte hain. Poora detail + impact **§7.1** me.
+**🟢 RESOLVED THIS PASS** — `testseries` pehle se correctly registered tha; ab `assigments` bhi sahi spelling ke saath registered hai (pichli pass ka typo fix ho gaya) — `campus/bridge.py`/`core/views.py::SearchView` ke hard-import (`assigments.bridge`/`assigments.models`) se ab match karta hai. Poora detail **§7.1** me.
 
 ### Database
 `DATABASE_URL` env-var se driven — set ho to Postgres (`CONN_MAX_AGE=60`), na ho to SQLite fallback (`db.sqlite3`, WAL mode + `busy_timeout=30000` `connection_created` signal se activate hota hai). Postgres ka `psycopg2-binary`/`psycopg[binary]` install hona chahiye jab `DATABASE_URL` set karo.
@@ -97,7 +103,12 @@ Project-level `JWTAuthMiddleware` — same contract (`?token=<jwt>` query-string
 
 ### New section — 3.1 `LearnScroll/__init__.py` 🔴 CONFIRMED EMPTY
 
-Is pass me `__init__.py` upload hua — file **0 bytes hai, poori tarah khaali**. `celery.py`'s apna module docstring explicitly bolta hai ki isme `from .celery import app as celery_app` (+ `__all__ = ("celery_app",)`) hona zaroori hai taaki har app ka `@shared_task` is Celery app ko automatically pick kare — is line ke bina, Celery ka `app.autodiscover_tasks()` (celery.py, §4) ke through discover kiye gaye tasks Django ke apps registry se independently kaam to kar sakte hain jab tak `celery -A LearnScroll worker`/`beat` explicitly `LearnScroll` module string se launch ho rahe hain (jo `-A LearnScroll` flag khud Celery ko `LearnScroll/celery.py`'s `app` object dhoondne ko bolta hai, `__init__.py` se independent) — lekin `shared_task`'s default app-resolution aur kuch Django-integration edge cases (jaise Django admin/shell se `from myproject.celery import app` ka auto-discovery) is line par depend karte hain. **Pehle ye sirf "unverified, upload nahi hua" tha (open item 4) — ab confirm ho gaya hai ki file genuinely khaali hai.** Fix: `__init__.py` me exactly wahi do lines add karo jo `celery.py`'s docstring already deta hai.
+**🟢 RESOLVED THIS PASS** — `__init__.py` upload hua aur ab khaali nahi hai. `celery.py`'s apna module docstring jo maanga tha, file ab exactly wahi content rakhti hai:
+```python
+from .celery import app as celery_app
+__all__ = ("celery_app",)
+```
+Isse har app ka `@shared_task` is Celery app ko automatically pick karega, aur Django admin/shell se `from LearnScroll.celery import app`-style auto-discovery bhi ab is line par depend kar sakti hai — pehle ye "confirmed empty" tha (open item 4), ab RESOLVED. Koi further action item nahi bacha is file ke liye.
 
 ---
 
@@ -110,7 +121,7 @@ app.autodiscover_tasks()
 ```
 - `namespace="CELERY"` — har `CELERY_*` setting Celery ke apne naam pe map hoti hai (`CELERY_BROKER_URL` → `broker_url`).
 - `autodiscover_tasks()` — har `INSTALLED_APPS` app ka `tasks.py` auto-register hota hai, manual registration ki zaroorat nahi. **(Isi wajah se `assigments`/`testseries` INSTALLED_APPS me na hone ka asar sirf models/admin tak seemit nahi — agar in apps ka apna `tasks.py` hai, uska bhi auto-discovery nahi hoga — §7.1.)**
-- **Wiring pre-requisite** (khud command ke docstring ke mutabik): `LearnScroll/__init__.py` me `from .celery import app as celery_app` + `__all__ = ("celery_app",)` — **🔴 CONFIRMED THIS PASS: `__init__.py` khaali hai (0 bytes), ye lines wahan nahi hain.** Pehle ye sirf unverified tha; ab directly confirm ho gaya — dekho §3.1.
+- **Wiring pre-requisite** (khud command ke docstring ke mutabik): `LearnScroll/__init__.py` me `from .celery import app as celery_app` + `__all__ = ("celery_app",)` — **🟢 RESOLVED THIS PASS: dono lines ab `__init__.py` me maujood hain.** Pehle ye khaali (0 bytes) tha — dekho §3.1.
 - Production me **worker aur beat dono alag long-lived processes** chalane zaroori hain (`celery -A LearnScroll worker`, `celery -A LearnScroll beat`) — sirf worker se koi periodic task khud kabhi nahi chalega; sirf beat se tasks queue hote rehte hain, kabhi execute nahi hote.
 
 ---
@@ -137,7 +148,7 @@ urlpatterns = [
 ```
 - **`core.urls` yahan wire ho chuka hai** — `core_app_documentation.md` §9's open item #4 ("root urlconf me `path("core/", include("core.urls"))` add karna hai") **ab RESOLVED hai**, is upload se confirm hua. Prefix `"core/"` hai, jaisa `core/urls.py`'s apne docstring me suggest kiya gaya tha.
 - **`campus.urls` bhi wired hai**, prefix `"campus/"`.
-- **✅ NEW THIS PASS — `testseries.urls`/`assigments.urls` (typo spelling) dono ab yahan wired hain**, prefixes `"testseries/"`/`"assigments/"` — pehle ye dono bilkul wired hi nahi the ("yahan KAHIN nahi hain" wala pichla finding, ab stale, replaced). **Naya signal §7.1 ke liye**: `urls.py` bhi `settings.py`'s `INSTALLED_APPS` jaisi hi `'assigments'` (typo) spelling consistently use karta hai — ye `campus/bridge.py`/`core/views.py::SearchView` ke `assigments` (sahi spelling) hard-import ke against ambiguity ko resolve nahi karta, bas ye confirm karta hai ki project-level files (`settings.py` + `urls.py` dono) apni (galat/sahi, abhi tak unconfirmed) spelling par ek-doosre se consistent hain — dekho §7.1 updated.
+- **`testseries.urls`/`assigments.urls` dono yahan wired hain**, prefixes `"testseries/"`/`"assigments/"` — `urls.py` hamesha se sahi spelling (`assigments`) use kar raha tha; `settings.py`'s `INSTALLED_APPS` ka typo (jo pehle inconsistent tha) is pass **fix ho chuka hai** (§7.1) — ab dono files ek hi sahi spelling par consistent hain.
 - Do `settings`-import lines duplicate hain (`from django.conf import settings` do baar) — harmless, cosmetic.
 - File ke end me commented-out `if settings.DEBUG: urlpatterns += static(...)` aur ek `re_path` media fallback — dono inactive, kyunki `path("media/<path:path>", serve_media_with_range, ...)` upar already unconditionally wired hai (§2's `SERVE_MEDIA_VIA_DJANGO` flag view-level pe decide karta hai, url-level pe nahi).
 - **⚠️ Cleanup reminder** (`core_app_documentation.md` §9 se bhi): agar `liveclass/urls.py` me abhi bhi purana `notifications`/`notification-preferences/me/` router registered hai, to `core.urls` wire ho jaane ke baad wo hata dena hai — warna do endpoints ek hi `Notification` table serve karenge.
@@ -194,24 +205,17 @@ urlpatterns = [
 
 Is section ka maksad: dono app-level docs ke "kya settings.py me hona chahiye" wale open items ko is asli `settings.py` ke against check karna — same reconciliation jo `campus`/`core` docs khud apne code ke liye karte hain.
 
-### 7.1 🟡 `assigments` — `INSTALLED_APPS` me galat spelling se add hua (`testseries` sahi hai)
+### 7.1 🟢 RESOLVED THIS PASS — `assigments` spelling ab `INSTALLED_APPS` me sahi hai
 
-**✅ Is pass me updated:** `INSTALLED_APPS` me ab `'testseries'` aur `'assigments'` dono add ho chuke hain (§2 upar). `testseries` bilkul sahi hai — koi issue nahi.
+**Pichli pass ka issue (history ke liye rakha gaya):** `INSTALLED_APPS` me galat-spelling `'assigments'` (typo — missing 'n') registered tha, jabki `campus/bridge.py` (`create_assigments()`/`get_assigments_submissions()`) aur `core/views.py::SearchView` (`from assigments.models import assigments, assigmentsSource`) dono sahi-spelling `assigments` hi hard-import karte the — matlab asli app app-registry me kabhi registered hi nahi thi, sirf ek galat-naam ki entry thi.
 
-**🟡 Lekin `'assigments'` likha gaya hai, `'assigments'` nahi (typo — missing 'n'):**
-- `campus/bridge.py` (`campus_app_design.md` §10): `create_assigments()`/`get_assigments_submissions()` `assigments.bridge`/`assigments.models` import karte hain — module path `assigments`, `assigments` nahi.
-- `core/views.py::SearchView` (`core_app_documentation.md` §6.2/§7): `from assigments.models import assigments, assigmentsSource` — yahan bhi `assigments`.
-- Dono docs consistently `assigments` (poora word, sahi spelling) ko hi "confirmed sibling app" label bolte hain — kahin bhi `assigments` nahi likha.
-
-**Impact agar actual app ka folder/`AppConfig.name` `assigments` hai (jaisa har jagah use hota hai):** `'assigments'` string se Django ek **naya, non-existent app** register karne ki koshish karega — agar `assigments/` naam ka koi folder/module hi nahi hai to Django startup pe hi `ModuleNotFoundError`/`ImproperlyConfigured` degi ("Cannot import 'assigments'"), poora project boot hi nahi hoga. Agar koi purana/dummy `assigments` folder kahin accidentally maujood hai to project boot to ho jayega, lekin asli `assigments` app (jise `campus/bridge.py`/`core/views.py` import karte hain) **ab bhi app-registry me registered NAHI hai** — wahi purana §7.1 impact (migrations/admin/`get_app_config("assigments")` sab fail) jyon ka tyon rehta hai, sirf ab ek extra bhoot-entry (`assigments`) ke saath. Dono cases me ye **still-critical** hai, sirf failure ka shape badla hai.
-
-**Fix:** `INSTALLED_APPS` me `'assigments'` ko `'assigments'` se replace karo (spelling fix, ek character). Confirm karo `assigments` app ka apna `AppConfig.name` isi label se match karta hai (jaisa is doc me pehle bhi flag kiya gaya tha — is app ka apna `apps.py`/models is upload me kabhi nahi aaya).
+**✅ CONFIRMED FIXED is pass:** `settings.py` me ab sahi spelling (`assigments`) hai, apne khud ke naye inline comment ke saath jo exact isi purani mismatch-risk ko document karta hai (`get_app_config("assigments")` → `LookupError` hota agar fix na hota). `urls.py` pehle se hi sahi spelling use kar raha tha (§5), isliye ab **settings.py, urls.py, `campus/bridge.py`, aur `core/views.py::SearchView` — chaaro jagah ek hi spelling par consistent hain**. Koi further action item nahi bacha.
 
 ### 7.2 ✅ RESOLVED — Campus F-3 streak-reward tasks ab beat schedule me hain
 
 `campus_app_design.md` (§7a, §12) confirm karta hai: `check_attendance_streak_rewards`/`check_assigments_ontime_streak_rewards` dono ab **poore functional** hain (`services.py`'s streak functions ab exist karte hain, `bridge.NotifTypes.CAMPUS_REWARD_EARNED` bhi define hai) — pehle ye dono crash karte the, ab nahi. Dono `campus.tasks.rollover_session`/`refresh_analytics_snapshot` ki tarah "ek specific campus/session ke liye" nahi hain — `compute_attendance_streak(enrollment)`/`compute_assigments_ontime_streak(student, section)` (services.py) per-enrollment/per-student compute karte hain, isliye in do tasks ka apna khud ka "har relevant student/enrollment par loop karo" wrapper hona chahiye, `check_low_attendance`/`send_assigments_due_reminders` jaisa hi.
 
-**✅ CONFIRMED FIXED, still true this pass:** `CELERY_BEAT_SCHEDULE` me ab dono registered hain, args-less/self-looping shape confirm karte hue apne khud ke comment me (settings.py lines ~1187-1194 — shifted from the previously-documented ~1116-1137 kyunki file 1141 se 1270 lines ho gayi hai, naye `message-expire-stale-parent-access` entry ke comment block ki wajah se, §6 dekho):
+**✅ CONFIRMED FIXED, still true this pass:** `CELERY_BEAT_SCHEDULE` me ab dono registered hain, args-less/self-looping shape confirm karte hue apne khud ke comment me (settings.py lines ~1236-1242 — shifted again is pass kyunki file 1270 se 1319 lines ho gayi hai, `'assigments'` typo-fix comment block aur naya `CONFIG_DRIFT_APPS` entry ki wajah se, §6/§7.1/§7.4 dekho):
 ```python
 "campus-check-attendance-streak-rewards": {
     "task": "campus.tasks.check_attendance_streak_rewards",
@@ -232,15 +236,28 @@ Is section ka maksad: dono app-level docs ke "kya settings.py me hona chahiye" w
 
 **Abhi bhi baaki (chhota, non-functional cleanup):** `liveclass/ws_auth.py` aur `message/Middleware.py` ki apni duplicate `JWTAuthMiddleware` classes delete nahi hui — `asgi.py`'s apna comment khud isse "flagged, not done here" bolta hai, kyunki wo do files is pass ke upload me nahi aayi. Dono ab genuinely dead code hain (kahin se import nahi ho rahi), sirf delete karna baaki hai jab wo files khud available ho.
 
+### 7.4 ✅ RESOLVED THIS PASS — `CONFIG_DRIFT_APPS` ab `settings.py` me define hai
+
+`core_app_documentation.md` §9 item 16 aur is doc ka purana §8 item 5 dono flag karte the ki `core/management/commands/check_config_drift.py` ye setting expect karta hai lekin `settings.py` me kahin nahi thi — command apne hardcoded fallback (`["user_profile", "core"]`) par chal raha tha, matlab baaki koi bhi app (throttle-scope/celery-beat/admin-registration/urls-wiring drift checks) coverage me nahi tha.
+
+**✅ CONFIRMED FIXED is pass:**
+```python
+CONFIG_DRIFT_APPS = ["user_profile", "core", "assigments", "testseries", "campus"]
+CONFIG_DRIFT_ADMIN_SKIP = set()        # {"app_label.ModelName", ...}
+CONFIG_DRIFT_ONDEMAND_TASKS = set()    # {"task_function_name", ...}
+CONFIG_DRIFT_URL_SKIP = set()          # {"app_label.ViewClassName", ...}
+```
+Inline comment khud confirm karta hai ki ye list add karne ke dauraan hi §7.1 ka typo bug pakda gaya (`assigments` ko is list me daalne se pehle `get_app_config("assigments")` `LookupError` deta agar `INSTALLED_APPS` ka typo fix na hota) — dono fixes ek hi pass me saath aaye. `'liveclass'/'message'/'post'/'login'` jaan-bujh kar is list me nahi hain — koi signal nahi mila ki unhe include/exclude karna decide kiya gaya ho, isliye guess nahi kiya gaya, future pass me explicit decision ke saath add honge. Escape-hatch sets (`CONFIG_DRIFT_ADMIN_SKIP` etc.) abhi bhi jaan-bujh kar khaali hain — sirf jab koi specific check genuinely deliberate cheez ko flag kare tab entry add hogi, preemptively nahi.
+
 ---
 
 ## 8. Open items (agla kaam yahi se shuru hoga)
 
-1. **🟡 `INSTALLED_APPS` me `'assigments'` ko `'assigments'` se fix karna (spelling)** — §7.1. `testseries` already sahi hai. Ye ab ek one-character typo fix hai, lekin jab tak fix nahi hota tab tak impact utna hi critical hai jitna pehle "missing entirely" wala tha. **Is pass me naya signal**: `urls.py` bhi ab consistently `'assigments'` use karta hai (§5) — settings.py aur urls.py aapas me consistent hain, but `campus/bridge.py`/`core/views.py` ke against ambiguity abhi bhi unresolved hai.
-2. ✅ ~~Campus streak-reward tasks ko `CELERY_BEAT_SCHEDULE` me add karna~~ — **RESOLVED is pass, §7.2.**
-3. ✅ ~~`ws_auth.py` ko `asgi.py` me actually wire karna~~ — **RESOLVED is pass, §3, §7.3.** Duplicate copies (`liveclass/ws_auth.py`/`message/Middleware.py`) delete karna abhi bhi baaki hai — chhota cleanup item, functional impact nahi.
-4. 🔴 **`LearnScroll/__init__.py` — CONFIRMED THIS PASS: file khaali hai (0 bytes).** `from .celery import app as celery_app` + `__all__ = ("celery_app",)` add karna hai (celery.py's apna wiring-requirement) — dekho §3.1.
-5. `core_app_documentation.md` §9 item 16 (`check_config_drift.py`'s `CONFIG_DRIFT_APPS` setting) — **confirmed MISSING** is pass me (`settings.py` me kahin `CONFIG_DRIFT_APPS` nahi hai) — command ab bhi apne hardcoded default (`["user_profile", "core"]`) par chalega, jo theek hai, lekin agar `assigments`/`testseries` add karne ke baad in apps ko bhi check karwana hai to explicit setting add karo.
+1. ✅ ~~`INSTALLED_APPS` me `'assigments'` ko `'assigments'` se fix karna (spelling)~~ — **RESOLVED is pass, §7.1.** `settings.py`, `urls.py`, `campus/bridge.py`, aur `core/views.py::SearchView` ab sab ek hi sahi spelling par consistent hain.
+2. ✅ ~~Campus streak-reward tasks ko `CELERY_BEAT_SCHEDULE` me add karna~~ — **RESOLVED, §7.2.**
+3. ✅ ~~`ws_auth.py` ko `asgi.py` me actually wire karna~~ — **RESOLVED, §3, §7.3.** Duplicate copies (`liveclass/ws_auth.py`/`message/Middleware.py`) delete karna abhi bhi baaki hai — chhota cleanup item, functional impact nahi.
+4. ✅ ~~`LearnScroll/__init__.py` khaali hai — Celery wiring lines add karna~~ — **RESOLVED is pass, §3.1, §4.** File ab `from .celery import app as celery_app` + `__all__ = ("celery_app",)` rakhti hai.
+5. ✅ ~~`core_app_documentation.md` §9 item 16 (`check_config_drift.py`'s `CONFIG_DRIFT_APPS` setting) — confirmed MISSING~~ — **RESOLVED is pass, §7.4.** `CONFIG_DRIFT_APPS = ["user_profile", "core", "assigments", "testseries", "campus"]` ab set hai.
 6. `ALLOWED_HOSTS` ka module-level `["*"]` default — §1 me flag kiya, verify karo production `.env` me explicit value set hai.
 7. `liveclass/urls.py` cleanup — agar `core.urls` wire hone se pehle ka purana `notifications`/`notification-preferences/me/` router abhi bhi wahan hai to hatao (§5, `core_app_documentation.md` §9 se carried over).
 8. 🆕 **Verify `message/tasks.py` has an `@shared_task(name="message.expire_stale_parent_access")` wrapper** for the newly-documented `message-expire-stale-parent-access` beat entry (§6) — `message/tasks.py` hasn't been uploaded yet, so this can't be confirmed from this doc alone. Without that wrapper, the beat entry is a silent no-op (dropped tick, no error, no cleanup).
