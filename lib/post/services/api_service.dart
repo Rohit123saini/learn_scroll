@@ -3,9 +3,9 @@ import 'dart:io';
 import 'package:http/http.dart' as http;
 import 'package:crypto/crypto.dart';
 import 'package:shared_preferences/shared_preferences.dart';
-import '../services/auth_service.dart';
-import '../utils/api.dart';
-import 'models.dart';
+import '../../services/auth_service.dart';
+import '../../utils/api.dart';
+import '../models/models.dart';
 
 class ApiService {
   // 🔥 NAYA — chunked upload (4GB tak, comment_view.py ke chunked upload jaisa hi)
@@ -387,6 +387,31 @@ class ApiService {
     } catch (e) {
       throw Exception('Error: $e');
     }
+  }
+
+  // 🔥 TASK 1 — real reaction toggle (like/confuse/wrong/imp/explain).
+  // Same request/response contract as `HomeFeedService.toggleReaction` in
+  // `services/home_api_model_service.dart` (feed's version — already
+  // wired and correct), duplicated here so `post/`'s own `ApiService` is
+  // the single entry point for everything `singlepost.dart` needs, same
+  // as every other call in this file.
+  //   POST /post/like/<post_id>/reaction/   body: {"reaction": "<type>"}
+  //   → {"status", "my_reaction", "counts": {like,confuse,wrong,imp,explain,total}}
+  // Same reaction sent twice = unlike (handled server-side); a different
+  // reaction = change. Caller should optimistically update UI and roll
+  // back on failure — see `singlepost.dart`'s `_handleReaction`.
+  Future<Map<String, dynamic>> toggleReaction(String postId, String reaction) async {
+    final token = await AuthService.getToken();
+    if (token == null) throw Exception('User not logged in');
+    final url = Uri.parse('${Api.baseUrl}/post/like/$postId/reaction/');
+    final response = await http.post(
+      url,
+      headers: {'Authorization': 'Bearer $token', 'Content-Type': 'application/json'},
+      body: jsonEncode({'reaction': reaction}),
+    );
+    if (response.statusCode == 200) return jsonDecode(response.body);
+    final data = jsonDecode(response.body);
+    throw Exception(data['message'] ?? data['error'] ?? 'Reaction failed: ${response.statusCode}');
   }
 
   // --- YE NAYA METHOD ADD HUA HAI, ISKI WAJAH SE ERROR AA RAHA THA ---

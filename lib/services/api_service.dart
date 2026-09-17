@@ -170,6 +170,88 @@ class ApiService {
     }
   }
 
+  // ================= FORGOT / RESET PASSWORD (B-7 dedicated flow) =================
+  // 🔧 login_app_reference.md §10.8 / views.py ForgotPasswordView &
+  // ResetPasswordView — deliberately NOT sendOtp()/verifyOtp()/
+  // changePassword() above. Those exist for a different job (signup OTP,
+  // and passwordless OTP-login which silently starts a session). This
+  // pair never issues a token and never logs the caller in — after a
+  // successful reset the user is expected to sign in normally with the
+  // new password.
+
+  // Step 1 — request a reset code for a known account. Same generic
+  // response whether or not the account exists (account-enumeration
+  // safe), so there's nothing account-specific to branch on here.
+  Future<void> forgotPassword(String emailOrPhone) async {
+    final response = await http.post(
+      Uri.parse("${Api.baseUrl}/login/auth/forgot-password/"),
+      headers: {"Content-Type": "application/json"},
+      body: jsonEncode({"email_or_phone": emailOrPhone}),
+    );
+
+    if (response.statusCode != 200) {
+      throw Exception(_firstError(_safeDecode(response)) ?? "Failed to send reset code");
+    }
+  }
+
+  // Step 2 — spend the code + set a new password in one call. The OTP
+  // itself is only actually checked here (not in a separate "verify"
+  // call) — backend's ResetPasswordSerializer validates otp + new
+  // password together.
+  Future<void> resetPassword({
+    required String emailOrPhone,
+    required String otp,
+    required String newPassword,
+    required String confirmPassword,
+  }) async {
+    final response = await http.post(
+      Uri.parse("${Api.baseUrl}/login/auth/reset-password/"),
+      headers: {"Content-Type": "application/json"},
+      body: jsonEncode({
+        "email_or_phone": emailOrPhone,
+        "otp": otp,
+        "new_password": newPassword,
+        "confirm_password": confirmPassword,
+      }),
+    );
+
+    if (response.statusCode != 200) {
+      throw Exception(_firstError(_safeDecode(response)) ?? "Failed to reset password");
+    }
+  }
+
+  // 🔥 HARDENING — a plain `jsonDecode(response.body)` throws
+  // FormatException on any non-JSON body (a proxy timeout page, a raw
+  // 502/503 HTML error page, an empty body on some 5xx responses). That
+  // exception isn't wrong, exactly, but it surfaces to the user as a
+  // useless "FormatException: Unexpected character" snackbar instead of
+  // a normal error message. Decode defensively here and fall through to
+  // the generic fallback message in forgotPassword/resetPassword above
+  // when the body isn't parseable JSON.
+  Map<String, dynamic> _safeDecode(http.Response response) {
+    try {
+      final decoded = jsonDecode(response.body);
+      if (decoded is Map<String, dynamic>) return decoded;
+      return {};
+    } catch (_) {
+      return {};
+    }
+  }
+
+  // Shared error-message picker for the two calls above: view-level
+  // failures (expired/locked/wrong code) come back as {"message": "..."},
+  // but plain serializer validation failures (weak password, mismatch,
+  // blank otp) come back as DRF's default {"field": ["..."]} shape with
+  // no "message" key at all — same ambiguity testseries_service.dart's
+  // `_fail()` already handles for that app's errors.
+  String? _firstError(Map<String, dynamic> data) {
+    if (data.isEmpty) return null;
+    final direct = data["message"] ?? data["detail"];
+    if (direct != null) return direct.toString();
+    final first = data.values.first;
+    return first is List && first.isNotEmpty ? first.first.toString() : first.toString();
+  }
+
   // ================= internal helper =================
   Future<void> _saveSession(Map<String, dynamic> data) async {
     SharedPreferences pref = await SharedPreferences.getInstance();

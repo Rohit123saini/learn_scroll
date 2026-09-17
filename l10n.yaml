@@ -1,0 +1,18 @@
+# flutter gen-l10n config — project root me, pubspec.yaml ke bagal me rakhna.
+# `flutter gen-l10n` (ya `flutter run`/`flutter build`, jo khud-ba-khud
+# gen-l10n chala dete hain jab pubspec.yaml me `flutter: generate: true` ho)
+# isi file ko padhta hai.
+#
+# 🔥 FIX — `synthetic-package: false` hata diya. Naye Flutter SDK me ye
+# option deprecated ho gaya hai (build log me warning aa rahi thi:
+# "The argument 'synthetic-package' no longer has any effect and should
+# be removed" — http://flutter.dev/to/flutter-gen-deprecation). Behaviour
+# same hi rehta hai — output ab bhi seedha `lib/l10n/` me generate hota
+# hai, koi separate synthetic package nahi banta — sirf ye flag ab default
+# hi ban gaya hai to explicitly set karne ki zaroorat nahi.
+
+arb-dir: lib/l10n
+template-arb-file: app_en.arb
+output-localization-file: app_localizations.dart
+output-class: AppLocalizations
+nullable-getter: false

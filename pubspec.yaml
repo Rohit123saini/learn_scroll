@@ -30,6 +30,10 @@ environment:
 dependencies:
   flutter:
     sdk: flutter
+  # 🔥 NAYA (Task 2 — i18n): Material/Cupertino/Widgets ke built-in strings
+  # (date pickers, "Cancel"/"OK" buttons, etc.) ko translate karne ke liye.
+  flutter_localizations:
+    sdk: flutter
 
   cupertino_icons: ^1.0.8
   easy_audience_network_plus: ^1.1.0
@@ -78,7 +82,7 @@ dependencies:
   flutter_callkit_incoming: ^2.5.0 
   google_sign_in: ^7.2.0
   firebase_auth: ^6.5.7
-  intl: ^0.20.3
+  intl: 0.20.2
   image_cropper: ^12.2.1
   ffmpeg_kit_flutter_new: ^4.6.2
   google_mlkit_selfie_segmentation: ^0.11.0
@@ -110,6 +114,10 @@ dev_dependencies:
 
 # The following section is specific to Flutter packages.
 flutter:
+  # 🔥 NAYA (Task 2 — i18n): `flutter gen-l10n` khud-ba-khud chalane ke
+  # liye (build/run ke waqt). Config `l10n.yaml` (project root, isi
+  # pubspec.yaml ke bagal) me hai.
+  generate: true
 
   # The following line ensures that the Material Icons font is
   # included with your application, so that you can use the icons in
@@ -150,4 +158,3 @@ flutter:
   #
   # For details regarding fonts from package dependencies,
   # see https://flutter.dev/to/font-from-package
-  

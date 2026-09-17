@@ -59,6 +59,17 @@ accessed via absolute URLs. Auth: JWT Bearer tokens.
   `url_launcher`
 - 🔥 NAYA (Phase 8): `flutter_tts` (~^4.x — client-only text-to-speech,
   `tts_service.dart`, Feature 10)
+- 🔥 NAYA (Phase 17, `main.dart`, not previously documented):
+  `background_downloader` (`FileDownloader`) — started once in `main()`
+  with `configureNotification` (running/complete/error states, progress
+  bar, tap-to-open, grouped under notification id
+  `learnscroll.downloads`) + a `taskNotificationTapCallback`. Whole setup
+  wrapped in its own try/catch (log-only on failure, never blocks
+  startup). No confirmed call-site yet for actually enqueueing a
+  download task in any uploaded file — `media_download_service.dart`
+  (§4.11) still uses plain `Dio` for its own downloads, so it's unclear
+  whether this is a parallel/newer download path meant to replace it or
+  an unrelated addition. Flagged in §10.
 
 ---
 
@@ -180,13 +191,25 @@ message/
 
 Outside `message/` (referenced but **still not uploaded** — treat as
 external/unknown until shared):
-- `../../utils/api.dart` → `Api.baseUrl` (single source of backend base URL)
-- `../../services/auth_service.dart` → `AuthService.getToken()` / login/logout
 - `../../profile/screens/target_profile.dart`, `../../profile/api_service.dart` (as `ProfileApi`)
-- `../../widgets/sticker_picker_sheet.dart`
-- `app_bottom_nav.dart` (inside `message/screens/`, imported by
-  `conversations_screen.dart` — content not yet reviewed, only its
-  existence/usage inferred)
+
+✅ **Shared this session (Phase 17)** — the last three long-standing
+unknowns in this bucket are now resolved:
+- `../../utils/api.dart` → `Api.baseUrl` (single source of backend base
+  URL) — see §4.18. Confirmed a plain 2-line class, LAN-IP `baseUrl` is
+  live, a commented-out `onrender.com` URL sits right below it as the
+  presumed prod fallback (manual swap, not env-based).
+- `../../services/auth_service.dart` → see §4.17 (new full section — far
+  more than the `getToken()`/login/logout used to be described as: JWT
+  expiry decoding, auto-refresh with request de-duplication, dual-shape
+  auth-response parsing, `onForceLogout` hook).
+- `../../widgets/sticker_picker_sheet.dart` → see §6.6 (new section) —
+  **real drift found**: no longer Rive/Lottie, now plain PNG assets.
+
+✅ `app_bottom_nav.dart` (inside `message/screens/`, imported by
+`conversations_screen.dart`) has been reviewed in full — see §5.10 (this
+bullet was stale, claiming it as unreviewed, through at least Phase 15;
+corrected now, Phase 16).
 
 ✅ **Shared this session**: `main.dart` (`MaterialApp`, mounts only
 `MinimizedCallBar()` — see §6.1/§7.1) and `home.dart` (`HomeScreen`,
@@ -219,10 +242,41 @@ Mirrors Django serializers 1:1 (per file header comment). Key classes:
   - Local-only fields NOT from server: `isSending`, `sendFailed`,
     `uploadProgress`, `localFilePath`, `localFilePaths` — used for
     optimistic UI / upload progress, stripped from `toJson()` (cache).
-- **`PollOptionModel`**, **`PollModel`** — poll data travels inside
-  `MessageModel.meta['poll']`, NOT as separate top-level fields. History
-  (paginated) messages of type=poll come back WITHOUT poll data — must
-  be fetched fresh via `getPoll()` or arrive live via socket.
+- **`PollOptionModel`**, **`PollModel`** — 🔧 **Phase 15 correction (doc
+  was self-contradictory)**: poll data is a **top-level `Message.poll`**
+  field (`MessageModel.poll`, mutable — replaced wholesale on the
+  `poll_update` WS event), NOT inside `meta['poll']` as this bullet
+  previously said. `message_models.dart`'s own header comment calls the
+  old `meta['poll']` assumption a "purana/galat assumption" (Phase 1
+  model fix) — this matches the Phase 14 correction already made to
+  §4.1/§7.5 for the endpoint shapes, which this bullet had NOT been
+  updated to match until now. `getPoll(pollId)` no longer exists at all
+  (deleted, §4.1) — poll data only ever arrives via the message payload
+  or the `poll_update` socket event.
+- 🔥 **Feature 11 — Announcements** (Phase 15 model fields, Phase 16
+  confirmed wired into both screens) — fields both still hardcoded to
+  parse as `false` until backend adds the corresponding serializer keys
+  (guessed key names, unconfirmed):
+  - `ConversationModel.hasUnreadAnnouncement` (from guessed
+    `has_unread_announcement`) — 🔧 **Phase 16**: confirmed actively
+    used by `conversations_screen.dart` (§5.1) for sort-priority
+    (pinned → unread-announcement → rest) and an orange-tinted
+    row/badge — not just scaffolding anymore, the UI side is done.
+  - `MessageModel.isAnnouncement` (from guessed `is_announcement`) —
+    🔧 **Phase 16**: confirmed actively used by `chat_screen.dart`'s
+    `_MessageBubble` (§5.2) for an orange-border + "📢 Announcement"
+    chip. File's own comment says backend `views.py` already sets
+    `Message.is_announcement` at create time, but
+    `MessageSerializer.Meta.fields` doesn't expose it yet — so despite
+    the UI being fully built, the feature still can't activate until
+    backend adds the two real fields. See §10.
+- 🔧 **Confirmed present (Phase 15) — closes the Phase 14 build
+  blocker** — **`MessageReadStatusModel`** (`user: UserMini`,
+  `isDelivered`, `deliveredAt`, `isRead`, `readAt`) is now defined in
+  `message_models.dart`, matching backend
+  `MessageReadStatusSerializer`'s fields exactly. `message_info_screen.
+  dart`'s "seen by" screen can compile now — see §4.1 for a paired fix
+  in how `getReadStatus()` parses the response, and §10.
 - **`PinnedMessageModel`** — wraps a MessageModel + who pinned + when.
 - **`ScheduledMessageModel`** — future-send messages (draft state incl.
   type/text/fileUrl/meta/replyTo/scheduledFor/isSent/isCancelled).
@@ -337,7 +391,7 @@ used for group send-permission errors specifically.
 | | DELETE `/message/messages/<id>/?for_everyone=bool` | delete |
 | | POST/DELETE `/message/messages/<id>/react/` `{emoji}` | react/unreact |
 | | POST `/message/messages/<id>/read/` | mark one read |
-| | GET `/message/messages/<id>/read-status/` | 🔥 NAYA (Phase 14, `getReadStatus`) — "seen by" list, → `List<MessageReadStatusModel>`. ⚠️ **`MessageReadStatusModel` is NOT defined anywhere in the re-uploaded `message_models.dart`** — genuine undefined-symbol build blocker for `message_info_screen.dart` (§5.18), see §10 |
+| | GET `/message/messages/<id>/read-status/` | `getReadStatus(messageId)` → `List<MessageReadStatusModel>`. ✅ **Phase 15**: `MessageReadStatusModel` now defined (§3.1), closing the Phase 14 build blocker. 🔧 **Phase 15 fix (paired, real runtime bug)**: backend actually returns `{"delivered_to": [...], "read_by": [...]}` (`MessageViewSet.read_status`), not a flat list — the old parsing code would have thrown a cast error on every single call. Now merges both lists by `user.id`, keeping the `read_by` entry (has `read_at`) over the `delivered_to` one when a user appears in both (backend doesn't de-duplicate) |
 | | POST `/message/messages/forward/` `{message_ids, conversation_ids, caption?}` | forward N msgs → N chats in one call. 🔧 **Phase 14**: `caption` param confirmed present now (`forward_message_screen.dart` needs it — see §10, previously an unconfirmed/likely mismatch risk, now resolved) |
 | Pins | GET `/message/conversations/<id>/pinned/` | list pins (🔧 Phase 6: corrected, was documented as `/pins/`) |
 | | POST/DELETE `/message/messages/<id>/pin/` | pin/unpin — message-level action, NOT under `conversations/<id>/`; max 3 pinned/conversation (backend-enforced) |
@@ -362,7 +416,9 @@ used for group send-permission errors specifically.
 | | GET `/message/groups/<id>/join-requests/` (admin/mod) | pending list |
 | | POST `/message/groups/<id>/join-requests/<req_id>/approve\|reject/` | |
 | Blocking | GET/POST/DELETE `/profile/blocked-users/` | block/unblock/list — `profile` app, not `message` |
-| Presence | GET `/message/users/<user_id>/presence/` | online/last-seen |
+| Presence | GET `/message/presence/<user_id>/` | online/last-seen. 🔧 **Phase 17 correction**: path was documented as `/message/users/<user_id>/presence/` — the re-uploaded file's own comment confirms that was 404ing and has been fixed to `/message/presence/<user_id>/`, confirmed against `CHAT_APP_DOCUMENTATION.md §6 "UserPresenceView"`. Only broke the initial on-open REST fetch (WS `presence`/`presence_update` events, §8.1, kept working independently) |
+| Smart replies | POST `/message/ai/smart-replies/` `{conversation_id}` | → `SmartReplyModel` (§3.1). Throttle scope `ai_smart_reply` server-side; client should debounce, not fire per incoming message |
+| Read-receipt privacy | GET/PATCH `/message/presence/read-receipts/` `{show_read_receipts}` | mutual — off hides your read receipts from others AND theirs from you (§5.12) |
 | Calls | GET `/message/calls/history/` , GET `/message/calls/history/<id>/` | history/detail (🔧 Phase 6: corrected, was missing `history/` segment — see §17.1). NOTE: initiate/action live in `call_api_service.dart` at the bare `/calls/` prefix (different, plain-path views — that part was already correct); missed/addable-participants/add-participant also live in `call_api_service.dart`, also under `calls/history/` |
 | Search | GET `/message/conversations/<id>/search/` | in-chat search → `List<MessageModel>` |
 | | GET `/message/conversations/search_all/` | global search (🔧 Phase 6: corrected, was `/message/search_all/` — see §17.1). 🔧 **Phase 14**: return type confirmed as `List<SearchResultModel>` (message + optional `ConversationPreviewModel`), not `List<MessageModel>` — see §3.1 |
@@ -645,6 +701,21 @@ verbatim intent):
    the whole call — tradeoff explicitly documented: aggressive-OEM
    phones (Xiaomi/Oppo/Vivo) MAY suspend mic if app is backgrounded
    during a normal call.
+4. 🔥 **NAYA (Phase 15)** — *"call backend pe hamesha 'ongoing' reh
+   jaati thi agar sirf ek hi taraf se 'end' gaya"*: new private
+   `_notifyBackendLeft()` (best-effort, swallows errors like `endCall()`
+   does) now fires `CallApiService.callAction(id, 'end')` from the two
+   **passive** disconnect paths — `RoomDisconnectedEvent` and the
+   reconnect-countdown expiring (§ above) — not just from the explicit
+   `endCall()` button path. Rationale per the file's own comment:
+   backend's `CallActionView` (action='end') waits for BOTH
+   participants' `left_at` to be set; if only the side that pressed
+   "End" ever told the backend, a call where the OTHER side just closed
+   the app / lost connection would stay "ongoing" server-side forever,
+   showing up next time as a stale "already active"/waiting-call state.
+   Not called when the peer's own explicit `{'type':'call_end'}`
+   data-channel signal already arrived (that side already told the
+   backend itself — no duplicate call).
 
 `toggleScreenShare()`, `switchCamera()`, `addParticipant(userId)` (group
 call invite — reuses the normal incoming-call push flow, no special
@@ -744,7 +815,12 @@ Push `data.type` routing (background handler):
   one message)
 - anything else (chat message) → `_showBackgroundChatNotification`
   (has its own Reply action + own `FlutterLocalNotificationsPlugin`
-  instance since it's a separate isolate)
+  instance since it's a separate isolate). 🔥 **NAYA (Phase 15)**: if
+  `data['message_type'] == 'study_room'`, the notification body is
+  overridden to a friendly "🧑‍🎓 Started a Study Room — tap to join"
+  instead of showing the raw invite-card text/placeholder — same
+  override doesn't (yet confirmed) exist on the foreground
+  `_showLocalNotification` path, only the background one.
 
 Both new types reuse the SAME generic tap-handler
 (`_handleNotificationResponse`) as everything else — it only ever reads
@@ -831,9 +907,94 @@ SharedPreferences-backed, best-effort (never throws to caller).
   background → overwrite UI + re-save cache. Network failure with
   cache already shown ⇒ don't show an error.
 - `clearAll()` for a settings "Clear cache" button (not yet wired to
-  any uploaded screen). Logout doesn't need a separate cache-clear
-  call since `AuthService.logout()` presumably does `prefs.clear()`
-  (per comment — `auth_service.dart` not yet shared).
+  any uploaded screen). ✅ **Confirmed (Phase 17)**: `AuthService.logout()`
+  does exactly `prefs.clear()` (§4.17) — the old "presumably" is
+  resolved, logout does wipe the message cache too (it's the same
+  `SharedPreferences` instance), no separate cache-clear call needed.
+
+### 4.17 🔥 NAYA (Phase 17) `auth_service.dart` — shared for the first time
+Previously an unknown, referenced only as "`AuthService.getToken()` /
+login/logout". Turns out to hold significantly more logic than that:
+
+- **Storage**: `getToken()` reads `"access"`, falling back to
+  `"access_token"`. `saveToken(token, {refreshToken})` double-writes
+  both `"access"` AND `"access_token"` keys (backward-compat with
+  whichever old code reads either), plus `"refresh"` if given.
+  `getRefreshToken()` / `getUserId()` are plain reads. `logout()` is a
+  flat `prefs.clear()` (confirms §4.12's cache-clear assumption).
+- **`saveAuthResponse(body)`** — 🔥 the one call every login/signup/OTP/
+  Google-auth screen is meant to use instead of hand-rolling their own
+  parsing. Handles TWO different backend response shapes transparently:
+  `Login`/`Signup`/`GoogleAuthView` nest tokens under `{"token": {access,
+  refresh}}`, while `VerifyOTPView` (OTP login) returns them flat
+  (`{access, refresh}`, no wrapper). Picks whichever shape is present;
+  saves nothing (silent no-op) if no access token is found, so existing
+  status-code-based error handling in callers is untouched. No confirmed
+  call-site in any uploaded screen yet (login/signup screens haven't
+  been shared) — flagged in §10.
+- **JWT expiry-aware auto-refresh** (the real new logic):
+  - `_getExpiry(token)` manually base64url-decodes the JWT payload
+    (2nd segment, with correct `-`/`_`→`+`/`/` swap and `=` padding) to
+    read `exp` — no `jwt_decode` package needed.
+  - `_isExpiredOrNear(token, {bufferSeconds: 30})` — true if `exp` is
+    within 30s (or already past). Decode failure (malformed token) is
+    treated as **valid** on purpose, to avoid a crash-loop paired with
+    socket reconnect logic.
+  - **`getValidToken()`** — the method the file's own header comment
+    says should be used "everywhere (REST calls AND WS reconnects),
+    NOT `getToken()`": returns the current token if still fresh,
+    otherwise refreshes first. A static `_refreshInFlight` future
+    de-dupes concurrent refresh attempts (both `chat_socket_service.dart`
+    and `inbox_socket_service.dart` can hit an expired token on
+    reconnect at the same moment).
+  - `_doRefresh()` → POST `${Api.baseUrl}/login/auth/token/refresh/`
+    `{refresh}`. 200 → saves and returns the new access token (refresh
+    token itself is NOT rotated/re-saved — comment flags this as a
+    manual follow-up if backend ever turns rotation on). 401/403 →
+    refresh token itself is dead, calls `onForceLogout` and returns
+    `null`. Any other failure (5xx, network error) → returns `null`
+    WITHOUT forcing logout, on the assumption it's transient and the
+    caller's own retry/backoff will handle it.
+  - **`onForceLogout`** — a settable `void Function()?` static hook.
+    File's own doc-comment shows the intended wiring:
+    `AuthService.onForceLogout = () => navigatorKey.currentState
+    ?.pushNamedAndRemoveUntil('/login', (_) => false);`, expected to be
+    set once in `main.dart`.
+  - `_refreshEndpoint = '/login/auth/token/refresh/'` — file's own
+    comment says the exact path is confirmed against `login/urls.py`+
+    `views.py` (`TokenRefreshView`), but the prefix the `login` app is
+    `include()`-d under at the top-level Django `urls.py` is still
+    **unconfirmed** — correct only if that prefix is `/login/`.
+
+⚠️ **New gap found (Phase 17), not previously flaggable since this file
+was unshared**: none of the expiry-aware machinery above is actually
+wired up anywhere in the currently-shared codebase.
+`message_api_service.dart` still calls the old `AuthService.getToken()`
+at all three of its call-sites (never `getValidToken()`), `home.dart`
+calls `getToken()` directly for its file-download auth headers too, and
+`main.dart`'s `_checkAuth()` (gates whether `HomeScreen` or
+`LoginScreen` shows at startup) reads the raw `"access_token"` string
+from `SharedPreferences` itself — it never calls `AuthService` at all,
+so it can't detect an expired token, only a missing one. No
+`AuthService.onForceLogout = ...` assignment was found anywhere in
+`main.dart` either, despite the file's own header comment describing
+exactly that wiring. Net effect: `getValidToken()`/refresh/
+`onForceLogout` are fully implemented but currently dead code as far as
+the uploaded file set shows — added to §10 as an open item, since it's
+unclear whether the wiring exists in an unshared file (`chat_screen.dart`?
+socket services?) or is simply not done yet.
+
+### 4.18 🔥 NAYA (Phase 17) `api.dart` — shared for the first time
+Trivial but now confirmed rather than assumed: a 2-line class,
+`Api.baseUrl` is a `static const String`, currently pointed at a LAN IP
+(`http://10.224.54.189:8000` — dev/local backend, matches the
+"TESTING/PRODUCTION" comment style seen elsewhere in the codebase). A
+second line, commented out, holds a `learn-scroll-onl4.onrender.com`
+HTTPS URL as the presumed production value — swapped manually, no env
+flag/build flavor. Every service (`MessageApiService`, `CallApiService`,
+`AiStudyService`, `AuthService`, and by extension everything under
+§4.1–§4.17) ultimately derives its base URL from this one constant, so
+it's the single place a deploy/environment switch would touch.
 
 ---
 
@@ -1045,6 +1206,14 @@ Mode wiring** lives entirely in this screen, not in
   screen's `_loadFocusStatus()` call-site has the identical build-blocker
   problem, not just `FocusModeScreen`'s start/stop calls.
 
+🔧 **Phase 16, confirmed** — Feature 11 (Announcements, see §3.1/§10):
+`_hasUnreadAnnouncement(convo)` (`c.hasUnreadAnnouncement &&
+c.unreadCount > 0`) drives both `_sortedConversations()`'s ordering
+(pinned first, then unread-announcement, then by `lastMessageAt`) and
+an orange-tinted row background + badge on `_ConversationTile`. Fully
+built and wired UI, inert only because the backend fields it reads
+don't exist yet.
+
 ### 5.2 `chat_screen.dart` (~5000 lines) — main thread UI
 State: `_ChatScreenState` (huge — owns `_messages`, `_socket`
 (`ChatSocketService` instance), pagination (`_currentPage`,
@@ -1129,6 +1298,13 @@ Responsibilities (from method scan):
   via `_removeAt`/`_addMore`/`_send`), `_AudioBubble` (inline voice-note
   player), `_VideoPlayerScreen` (fullscreen video w/ landscape rotation,
   double-tap-seek, controls auto-hide)
+- 🔧 **Phase 16, confirmed** — Feature 11 (Announcements, §3.1/§10):
+  `_MessageBubble` reads `msg.isAnnouncement` to draw an orange border +
+  "📢 Announcement" chip (highest visual priority, above the mention
+  highlight). No compose-time toggle anywhere in this file — an
+  announcement is entirely backend-derived (presumably from
+  sender-is-admin/mod at create time, per the model's own comment), not
+  a user choice in the composer.
 
 ⚠️ **Still not wired (Phase 9/10 gap, unchanged as of Phase 13)**:
 `translatable_message_widgets.dart`'s `ListenButton`/`TranslateToggle`
@@ -1163,16 +1339,31 @@ pass.
 `CallScreen(callId, conversationId, isVideo, isCaller, livekitUrl,
 livekitToken, peerName?, peerAvatar?)`. Listens to `CallManager.instance`
 (ChangeNotifier). Own local UI-only state: PiP offset (`_pipOffset`,
-`_mainIsLocal`), pulsing-ring animation while ringing, outgoing-ring +
-call-waiting-tone `AudioPlayer`s (separate from `CallManager`'s own
-ringtone player — this one seems to duplicate the ring, worth
-reconciling), controls-auto-hide-after-3s + tap-to-show, own 35s
-`_noAnswerTimer` (⚠️ **note**: `CallManager` ALSO has a 30s
-`_noAnswerTimer` internally — two independent timers with different
-durations may both be running; worth reconciling later, don't assume
-they're the same one). Has an inner `_AddParticipantSheet` widget
-(group-call add-participant picker, calls
-`CallApiService.getAddableParticipants`/`addParticipant`).
+`_mainIsLocal`), pulsing-ring animation while ringing, controls-auto-
+hide-after-3s + tap-to-show (🔧 **Phase 16**: confirmed video-call-only
+— `_resetHideControlsTimer` returns early `if (!widget.isVideo)`, so
+voice-call controls never auto-hide, by design), own 35s
+`_noAnswerTimer`. Has an inner `_AddParticipantSheet` widget (group-call
+add-participant picker, calls `CallApiService.getAddableParticipants`/
+`addParticipant`), and a group-call grid (2+ remote participants →
+WhatsApp-style tile grid instead of the 1:1 fullscreen layout).
+
+🔧 **Phase 16 — both §10 audio/timer ambiguities resolved by the file's
+own comments, no longer "worth reconciling"**:
+- The screen's own outgoing-ring `AudioPlayer` **has been removed**
+  specifically to fix a confirmed double-audio bug — `CallManager`'s
+  internal ringtone player (with proper `AudioContext`: speakerphone/
+  alarm/stayAwake) is now the sole source of the outgoing ring. Only
+  `_waitingTonePlayer` remains screen-side, and it's a genuinely
+  different sound for a different case (a second incoming call while
+  this one is active) — not a duplicate of the outgoing ring.
+  `IncomingCallScreen` (§5.4) still owns its own separate ringtone for
+  the callee side, unaffected by this.
+- The screen-level 35s `_noAnswerTimer` is an intentional redundant
+  safety-net, not a stray duplicate: only armed `if (widget.isCaller)`,
+  fires `_endCall()` only if `!_cm.remoteConnected` after 35s — 5s
+  behind `CallManager`'s own internal 30s no-answer timeout, so
+  `CallManager`'s should almost always fire first in practice.
 
 ### 5.4 `incoming_call_screen.dart` — ringing/incoming UI
 `IncomingCallScreen.showIfNeeded(navigatorState, {callId, callType,
@@ -1313,9 +1504,28 @@ points, both closing gaps flagged in earlier phases:
   existed with no screen calling them; this card is what finally
   surfaces that data.
 
+🔧 **Real bug fix (Phase 16)** — `_pickImageFile()` (backs "Change
+group photo") previously threw `UnimplementedError()` — tapping the
+group avatar always fell straight into the catch block and showed
+"Photo update fail" the entire time, never actually working. Now uses
+the same `ImagePicker(source: gallery, imageQuality: 85)` pattern
+`chat_screen.dart`'s `_pickChatWallpaper` already uses successfully.
+
 ### 5.7 `create_group_screen.dart`
 Simple wizard: user search (`searchUsers`) + multi-select + name input
 → `_createGroup()` → `MessageApiService.createGroup(...)`.
+
+🔧 **Phase 16, not previously documented** — the wizard is less bare
+than previously recorded:
+- **Public/Private picker at creation time** (`_buildGroupTypeChoice()`,
+  `_isPrivate` state) — two cards with an inline explainer of what each
+  visibility level means for the invite link/member list/add-members
+  permission (matches the same rules `group_profile_screen.dart` §5.6
+  documents for changing it later). Passed as `isPrivate: _isPrivate`
+  into `createGroup(...)`.
+- **Admin (creator) chosen explicitly at creation time**, per the
+  file's own comment — only the member's `id` (UUID) is sent, not a
+  full object.
 
 ### 5.8 `forward_message_screen.dart`
 `ForwardMessageScreen(messages: [...])` — 🔧 **note (Phase 4)**: takes
@@ -1479,24 +1689,14 @@ session is active). "Smart do-not-disturb during exam/study windows" —
 student picks a duration + who can still reach them, backend presumably
 suppresses push notifications for everyone else during the window.
 
-- **`FocusSessionStatus`** DTO — 🔧 **MOVED (Phase 13)**: this file's
-  own header comment now says the class lives in `message_models.dart`,
-  not in this file anymore. Stated reason: `message_api_service.dart`'s
-  `getFocusStatus()`/`startFocusSession()` need the same return type,
-  and `message_api_service.dart` ↔ `focus_mode_screen.dart` can't import
-  each other (circular import), so the DTO moved to the shared models
-  file where every other DTO (`ConversationModel` etc.) already lives —
-  pattern-consistent per the file's comment. Fields as before: `active`,
-  `endsAt` (parsed `.toLocal()`), `exceptionRule`
-  (`'teachers_only'` | `'nobody'`), `secondsRemaining`. The previously-
-  flagged dead `static inactive()` helper (§10) is **no longer present**
-  in this file — either removed or moved without it; not confirmed which
-  since `message_models.dart` itself wasn't re-uploaded this round.
-  ⚠️ This is a one-sided claim: `message_api_service.dart` and
-  `message_models.dart` were NOT re-uploaded in this batch either, so
-  the move can't be independently verified from the other side — treat
-  as "screen-side half confirmed" only, same caution as the build-blocker
-  note below.
+- **`FocusSessionStatus`** DTO — ✅ **Phase 15 fully confirmed** (was
+  "screen-side half confirmed" as of Phase 13): `message_models.dart`
+  was re-uploaded in Phase 15 and directly confirmed to define this
+  class (§3.1), matching what this file's import already assumed. The
+  dead `static inactive()` factory is confirmed present there too
+  (always returns `null`, harmless). Fields as before: `active`,
+  `endsAt` (parsed `.toLocal()`), `exceptionRule` (`'teachers_only'` |
+  `'nobody'`), `secondsRemaining`.
 - Duration UI: 4 presets (30m/1h/2h/3h, coaching-context durations —
   "one period / two periods / a full exam block" per the file's own
   comment) via `ChoiceChip`s, plus a "Custom duration" bottom sheet
@@ -1516,23 +1716,19 @@ suppresses push notifications for everyone else during the window.
   lives in the CALLER, see §5.1 update below) and an "Update duration"
   label instead of "Start", plus a red "End focus mode now" button.
 
-⚠️ **Backend/frontend contract gap, partially addressed (Phase 13)**:
-Phase 11 flagged `MessageApiService.getFocusStatus`/`startFocusSession`/
-`cancelFocusSession` as missing from `message_api_service.dart`. This
-file no longer carries the "need to be added" header note it used to —
-the `FocusSessionStatus` DTO relocation above (moved specifically so
-`message_api_service.dart` could share the type) is indirect evidence
-those methods now exist there. **Still not directly confirmed** —
-`message_api_service.dart` itself has not been re-uploaded since Phase
-8, so this remains a build-blocker assumption, just a more optimistic
-one than before. Don't treat as resolved until that file is shared
-again (§10).
+✅ **Build blocker RESOLVED (Phase 11 → Phase 14, re-confirmed Phase
+16)**: `MessageApiService.getFocusStatus`/`startFocusSession`/
+`cancelFocusSession` are confirmed present in `message_api_service.dart`
+(§4.1, GET/POST/DELETE `/message/focus-session/`), sharing the
+`FocusSessionStatus` DTO above. Safe to build on top of.
 
-⚠️ **No entry point added for the new history screen (Phase 13)**: this
-file was re-uploaded this round with the DTO change above, but did
-**not** get the AppBar history icon that `focus_session_history_screen.
-dart`'s own header comment asks for (§5.21). The history screen exists
-but nothing in the uploaded codebase pushes it.
+⚠️ **No entry point added for the new history screen, still open
+(Phase 13 → re-confirmed Phase 16)**: `focus_mode_screen.dart` was
+re-uploaded again this round and still does **not** have the AppBar
+history icon that `focus_session_history_screen.dart`'s own header
+comment asks for (§5.21) — grepped for `Icons.history`/`History` in the
+current file, nothing found. The history screen exists but nothing in
+the uploaded codebase pushes it, unchanged since Phase 13.
 
 ### 5.16 🔥 NAYA (Phase 11) `group_media_screen.dart` — shared media gallery
 `GroupMediaScreen({groupId})` — pushed from `group_profile_screen.dart`'s
@@ -1822,29 +2018,116 @@ Building on this: the bubble needs a conditional block for
 `MessageType.text` messages only (per this file's own header comment)
 adding both buttons to its action row.
 
+### 6.6 🔥 NAYA (Phase 17) `sticker_picker_sheet.dart` — shared for the
+first time, and **real drift found from what was assumed**
+This was previously just a bare filename reference (§2) — every earlier
+mention of stickers in this doc (§7.3's media types, §5.2's
+`_sendSticker(...)`, §7.15/§8.1's `sticker` WS event) assumed an
+animated Rive/Lottie picker, since that's what the wider app's sticker
+messages look like elsewhere. The file itself, now shared, says
+otherwise for THIS picker:
+
+- 🔧 **Rewritten away from Rive/Lottie** (per the file's own top
+  comment): it used to show animated `.riv`/`.json` stickers requiring
+  separate downloaded asset files; that's been fully removed. It now
+  shows 100 plain PNGs from `assets/stickers/`, via ordinary
+  `Image.asset()` — no extra package needed (drop the Rive/Lottie
+  dependency if nothing else in the app still uses it — not confirmed
+  either way from files shared so far).
+- `StickerPickerSheet({onSelected, stickerSize = 72})` — a `TabBar`
+  across 10 categories (`stickerCategories`, defined in the
+  not-yet-shared `own_stickers.dart`): Hi, Bye, Morning, Night, Laugh,
+  Okay, No, Sorry, Thanks, Wassup. Each tab is a 4-column
+  `GridView.builder` of square sticker tiles.
+- `onSelected(assetPath)` gives back a plain asset path string (e.g.
+  `"assets/stickers/hi_frog.png"`) — the caller is expected to send it
+  like a normal image message via its own existing upload/send logic;
+  this widget does no sending itself.
+- `errorBuilder` on each `Image.asset` falls back to a placeholder icon
+  instead of crashing if a PNG isn't registered in `pubspec.yaml` yet —
+  defensive against assets being added to `assets/stickers/` without
+  the corresponding `pubspec.yaml` entry.
+- `showStickerPicker(context, {onSelected})` — the one-line convenience
+  entry point (`showModalBottomSheet`, rounded top corners, auto-closes
+  the sheet before calling the caller's `onSelected`).
+- ⚠️ Depends on `own_stickers.dart` (`stickerCategories`, `StickerItem`)
+  — not uploaded, so the exact PNG filenames/count per category can't
+  be verified beyond "100 stickers across 10 categories" per this
+  file's own header comment.
+- No confirmed call-site yet in any uploaded screen (`chat_screen.dart`,
+  the presumed caller per §5.2's `_sendSticker` mention, hasn't been
+  re-shared this round) — can't confirm whether the caller still
+  expects the OLD Rive/Lottie return shape (would break silently if so)
+  or already expects a plain asset path. Flagged in §10.
+
 ---
 
 ## 7. End-to-End Flows
 
-### 7.1 App startup (partially confirmed via `main.dart`, Phase 4)
-Presumed sequence based on cross-references: Firebase init →
-`PushNotificationService.instance.init()` (sets background handler,
-requests permissions, registers FCM token if logged in, starts
-`MissedCallWatcher`) → `CallKitService.instance.init(navigatorKey)` →
-login (via not-yet-shared `AuthService`) → on success,
+### 7.1 App startup (partially confirmed via `main.dart`, Phase 4;
+**init sequence fully confirmed, Phase 17**)
+✅ **Confirmed (Phase 4)**: `main.dart` was shared — `MaterialApp.builder`'s
+Stack mounts ONLY `MinimizedCallBar()` (`floating_call_bar.dart` is
+unused/now deleted, see §6.1); `home.dart` was also shared — its
+`IndexedStack` is Home/Search/Profile (3 tabs) and it separately
+imports+pushes `ConversationsScreen` for the Chats tab (see §5.1),
+confirming the `app_bottom_nav.dart` index-mapping note in §5.10.
+🔧 **Note (Phase 17)**: `home.dart`'s actual "Home" tab content (posts,
+reactions, comments — `PostModel`/`HomeFeedService`/`ProfileApi`) is a
+separate social-feed module, out of scope for this doc's messaging/
+calls/study-room focus; only its routing/tab-shell claims above are
+tracked here.
+
+🔥 **Real `main()` sequence, confirmed (Phase 17, was "presumed" before)**
+— NOT one linear try/catch chain, each step is now independently
+try/caught so one failing step can't silently take out an unrelated one
+(see the Phase 17 bug entry in §9 for why this changed):
+1. `AudioPlayer.global.setAudioContext(...)` (own try/catch, log-only
+   on failure) — Android: `isSpeakerphoneOn`/`stayAwake`/
+   `voiceCommunication`/`AndroidAudioFocus.gain`; iOS: category
+   `playAndRecord` + `{defaultToSpeaker, mixWithOthers}`. 🔧 the iOS
+   category is deliberately `playAndRecord`, not `playback` — see §9.
+2. `CallKitService.instance.init(navigatorKey)` (own try/catch) — runs
+   BEFORE and INDEPENDENTLY of Firebase, since it only needs
+   `navigatorKey` + notification permission + its own event listener,
+   not Firebase.
+3. `Firebase.initializeApp(...)` (own try/catch) → sets a local
+   `firebaseReady` bool; also registers
+   `FirebaseMessaging.onBackgroundMessage` on success.
+4. `PushNotificationService.instance.init()` — only attempted `if
+   (firebaseReady)`; skipped (with a log line) otherwise, since it
+   needs Firebase. Its own comment: skipping it means "no FCM push ->
+   incoming calls/messages won't arrive in background/killed state,
+   sirf app foreground + socket fallback kaam karega".
+5. `FileDownloader().start()` + `configureNotification(...)` +
+   `registerCallbacks(...)` (own try/catch) — see the new
+   `background_downloader` entry in §1. No confirmed call-site that
+   actually enqueues a download task yet (§10).
+6. `WakelockPlus.disable()`, then `runApp(const MyApp())`.
+
+Login (via `AuthService`, now §4.17) → on success,
 `PushNotificationService.instance.registerToken()` (must be called
 manually right after login too, since token isn't registered until a
 user is authenticated) → `ConversationsScreen` connects
-`InboxSocketService`. ✅ **Confirmed (Phase 4)**: `main.dart` was shared
-— `MaterialApp.builder`'s Stack mounts ONLY `MinimizedCallBar()`
-(`floating_call_bar.dart` is unused/now deleted, see §6.1); `home.dart`
-was also shared — its `IndexedStack` is Home/Search/Profile (3 tabs)
-and it separately imports+pushes `ConversationsScreen` for the Chats
-tab (see §5.1), confirming the `app_bottom_nav.dart` index-mapping
-note in §5.10.
+`InboxSocketService`. ⚠️ `_checkAuth()` (decides `HomeScreen` vs
+`LoginScreen` on cold start) reads the raw `"access_token"` string from
+`SharedPreferences` directly — it does NOT call `AuthService` at all, so
+it only detects a MISSING token, never an expired one (§10).
+
+🔥 **NEW (Phase 17, not previously documented) — `_MyAppState.
+didChangeAppLifecycleState`**: a `WidgetsBindingObserver` on the app
+root. On `AppLifecycleState.resumed`, if `CallManager.instance.isActive
+&& isMinimized`, it calls `unminimize()` and pushes `CallScreen` back
+onto the navigator (with empty `livekitUrl`/`livekitToken` — presumably
+`CallScreen` re-fetches/reuses its already-connected LiveKit room
+rather than needing fresh join credentials, consistent with how
+`floating_call_bar.dart`'s old reopen logic worked per §6.1). Restores
+the in-call UI automatically whenever the app is foregrounded mid-call,
+without the user needing to tap the minimized bar.
 
 ### 7.2 Sending a text message
 1. `ChatScreen._sendMessage()` → optimistic `MessageModel` (isSending:
+
    true) inserted into `_messages`, UI scrolls to bottom
 2. If `_isSocketConnected` → `_socket.sendMessage(text, clientId,
    replyTo)` (fire-and-forget over WS)
@@ -2256,6 +2539,33 @@ does — reverting these patterns will likely reintroduce the same bugs.
     longer called in `_initCall`) per explicit product request; kept
     ONLY around screen-share, where Android mandates an active
     foreground service with `mediaProjection` type or capture crashes.
+16. 🔥 **(Phase 17)** `getUserPresence(userId)` hit
+    `/message/users/<user_id>/presence/`, which 404s — real backend
+    path is `/message/presence/<user_id>/`. Only broke the initial
+    on-open REST fetch of online/last-seen status; the WS
+    `presence`/`presence_update` events (§8.1) kept updating it live
+    regardless, so this bug never fully blocked presence, just its
+    first paint. See §4.1.
+17. 🔥 **(Phase 17)** `main()` used to run
+    `Firebase.initializeApp()` + `PushNotificationService.instance.
+    init()` + `CallKitService.instance.init()` inside ONE shared
+    try/catch. If `PushNotificationService.init()` threw for any
+    reason on any device, `CallKitService.init()` — which comes after
+    it in that chain — never ran at all, so the native incoming-call
+    popup was missing app-wide (only `chat_screen.dart`'s own
+    socket-based fallback dialog worked, and only while that specific
+    chat's WebSocket was open) — this was the root cause of "calling
+    UI only shows on the chat screen, nowhere else". Fixed by giving
+    each of Firebase/`CallKitService`/`PushNotificationService` (now
+    gated on Firebase having actually succeeded) its own independent
+    try/catch — see §7.1.
+18. 🔥 **(Phase 17)** iOS `AudioContext`'s `defaultToSpeaker` option is
+    only valid under the `playAndRecord` session category — pairing it
+    with `playback` threw an assertion (silently swallowed by the
+    surrounding try/catch, so it never surfaced as a visible crash,
+    just as audio routing behaving oddly on iOS). Fixed by setting
+    `category: AVAudioSessionCategory.playAndRecord` alongside
+    `defaultToSpeaker` — see §7.1.
 
 ---
 
@@ -2277,12 +2587,21 @@ does — reverting these patterns will likely reintroduce the same bugs.
   → "message this user").
 - ~~Two minimized-call-bar widgets~~ — ✅ RESOLVED Phase 4, see §6.1.
   `floating_call_bar.dart` deleted.
-- `call_screen.dart` has its OWN outgoing-ring/call-waiting-tone
-  `AudioPlayer`s in addition to `CallManager`'s internal ringtone
-  player — potential double-audio, not yet confirmed either way.
-- `call_screen.dart`'s local `_noAnswerTimer` is 35s while
-  `CallManager`'s internal one is 30s — two independent timers,
-  purpose of the screen-level one not fully traced yet.
+- ~~`call_screen.dart` has its OWN outgoing-ring/call-waiting-tone
+  `AudioPlayer`s~~ — ✅ **RESOLVED (Phase 16)**: `call_screen.dart`'s
+  own header comment confirms this was a real double-audio bug, already
+  fixed — the screen's separate outgoing-ring `AudioPlayer` has been
+  removed entirely; only `_waitingTonePlayer` (a genuinely different
+  sound, for a second incoming call during an active one) remains
+  screen-side. `CallManager`'s internal ringtone player is now the sole
+  source of the outgoing ring. See §5.3.
+- ~~`call_screen.dart`'s local `_noAnswerTimer` is 35s while
+  `CallManager`'s internal one is 30s~~ — ✅ **CLARIFIED (Phase 16)**:
+  confirmed intentional, not dead/competing code — the screen-level 35s
+  timer is a redundant local safety-net (only armed `if
+  (widget.isCaller)`, only fires `_endCall()` if `!_cm.remoteConnected`
+  by then), 5s behind `CallManager`'s own 30s no-answer timeout so it
+  should almost never actually be the one to fire. See §5.3.
 - ~~`CallApiService.baseUrl` separate hardcoded constant~~ — ✅
   RESOLVED (Phase 8, §4.2) — now a getter delegating to `Api.baseUrl`,
   same single source as every other service. (This bullet was left
@@ -2320,17 +2639,34 @@ does — reverting these patterns will likely reintroduce the same bugs.
   callout) — 🔧 **Phase 14**: still present, unchanged, in the
   re-uploaded `message_api_service.dart`. Still no confirmed caller
   anywhere uploaded. Flag stands.
-- 🔴 **Confirmed build blocker (Phase 12 → narrowed Phase 13 → CONFIRMED
-  Phase 14)** — `message_info_screen.dart` calls `MessageApiService.
-  getReadStatus(messageId)` expecting a `MessageReadStatusModel`. Both
-  files are now re-uploaded: `getReadStatus()` DOES exist in
-  `message_api_service.dart` (GET `/message/messages/<id>/read-status/`,
-  §4.1) and returns `List<MessageReadStatusModel>` — but
-  `MessageReadStatusModel` is **not defined anywhere** in the
-  re-uploaded `message_models.dart` (grepped the full class list, §3.1
-  — it's simply missing). This is a genuine undefined-symbol compile
-  error, not a doc gap. `message_info_screen.dart` (§5.2's "Info" entry
-  point is already wired) will not build until this class is added.
+- ✅ **Build blocker RESOLVED (Phase 12 → narrowed Phase 13 → confirmed
+  Phase 14 → CLOSED Phase 15)** — `message_info_screen.dart` calls
+  `MessageApiService.getReadStatus(messageId)` expecting a
+  `MessageReadStatusModel`. `MessageReadStatusModel` is now defined in
+  the re-uploaded `message_models.dart` (§3.1), so this compiles. A
+  paired real bug was fixed alongside it in the same file: the response
+  is actually shaped `{"delivered_to": [...], "read_by": [...]}`, not a
+  flat list, so `getReadStatus()`'s parsing was rewritten to merge both
+  by user id (§4.1) — the old code would have thrown a runtime cast
+  error on every call even after the model existed.
+- 🔥 **UPDATED (Phase 15 → Phase 16)** — Feature 11 (Announcements):
+  `message_models.dart` has `ConversationModel.hasUnreadAnnouncement`
+  and `MessageModel.isAnnouncement` (§3.1), parsed from **guessed**
+  backend key names (`has_unread_announcement`, `is_announcement`) that
+  still aren't confirmed to exist in
+  `ConversationListSerializer`/`MessageSerializer` — `is_announcement`
+  is explicitly noted as set-but-not-yet-serialized backend-side, so
+  both fields still always parse `false` in practice. 🔧 **Phase 16
+  correction**: this is **no longer model-layer-only** —
+  `conversations_screen.dart` (§5.1) now actively uses
+  `hasUnreadAnnouncement` for sort-priority (pinned → unread
+  announcements → rest) and an orange-tinted row + badge, and
+  `chat_screen.dart`'s `_MessageBubble` (§5.2) uses `isAnnouncement` for
+  an orange border + "📢 Announcement" chip. The UI is fully built and
+  wired — it just can't actually activate until the backend adds the
+  two real serializer fields, since both are always `false` today. Ask
+  backend to confirm the real key names / add the fields before this
+  can be tested end-to-end.
 - 🔥 **NEW, unconfirmed (Phase 12)** — `manage_parent_access_screen.dart`
   hits `/parent/codes/` (GET/POST/DELETE) directly via its own `http`
   calls — a backend contract not documented anywhere else in this doc
@@ -2357,15 +2693,43 @@ does — reverting these patterns will likely reintroduce the same bugs.
   `MessageApiService` — now the third screen doing this (alongside
   `manage_parent_access_screen.dart`), worth a decision on whether to
   consolidate next time `message_api_service.dart` is touched.
-- Files referenced but still not yet shared: `utils/api.dart`
-  (`Api.baseUrl`), `services/auth_service.dart` (`AuthService`),
-  `profile/screens/target_profile.dart`, `profile/api_service.dart`,
-  `widgets/sticker_picker_sheet.dart`. Don't assume their internals —
-  ask/wait if a task needs their exact behavior. ✅ `main.dart` and
-  `home.dart` WERE shared earlier (see §7.1, §5.1, §6.1); ✅
-  `app_bottom_nav.dart` WAS shared and reviewed (§5.10) — both no
-  longer unknowns (this bullet was stale re: `app_bottom_nav.dart`
-  through Phase 10; corrected now).
+- Files referenced but still not yet shared: `profile/screens/
+  target_profile.dart`, `profile/api_service.dart`, `own_stickers.dart`
+  (§6.6). Don't assume their internals — ask/wait if a task needs their
+  exact behavior. ✅ `main.dart` and `home.dart` WERE shared earlier
+  (see §7.1, §5.1, §6.1); ✅ `app_bottom_nav.dart` WAS shared and
+  reviewed (§5.10); ✅ **(Phase 17)** `utils/api.dart` (§4.18),
+  `services/auth_service.dart` (§4.17), and `widgets/
+  sticker_picker_sheet.dart` (§6.6) are now shared too — none of these
+  five are unknowns any more.
+- 🔥 **NEW (Phase 17)** — `auth_service.dart`'s expiry-aware
+  `getValidToken()`/auto-refresh/`onForceLogout` mechanism (§4.17) is
+  fully implemented but **currently unused** in every file that could
+  call it: `message_api_service.dart` (all 3 of its `AuthService.`
+  call-sites) and `home.dart` (file-download auth headers) still call
+  the older `getToken()`, `main.dart`'s `_checkAuth()` reads the raw
+  token from `SharedPreferences` directly and never checks expiry, and
+  no `AuthService.onForceLogout = ...` assignment exists anywhere in
+  `main.dart` despite the file's own header comment showing that exact
+  wiring as the intended usage. `chat_socket_service.dart`/
+  `inbox_socket_service.dart` (the two files the header comment
+  specifically calls out for WS-reconnect refresh) haven't been
+  re-shared this round, so it's still possible the wiring exists there
+  — **ask the user** rather than assuming it's dead vs. simply not yet
+  connected.
+- 🔥 **NEW (Phase 17)** — `background_downloader`/`FileDownloader` is
+  now started and configured in `main()` (§1, §7.1) but no uploaded
+  file actually enqueues a download task with it — `media_download_
+  service.dart` (§4.11) still does its own downloads via plain `Dio`.
+  Unclear if this is a newer download path meant to eventually replace
+  §4.11, or an unrelated addition for a not-yet-uploaded feature.
+- 🔥 **NEW (Phase 17)** — `sticker_picker_sheet.dart` (§6.6) has been
+  rewritten from animated Rive/Lottie stickers to plain PNG assets,
+  returning a different value shape (`assetPath` string vs. whatever
+  the old picker returned). The presumed caller, `chat_screen.dart`'s
+  `_sendSticker(...)`/`_openStickerPicker` (§5.2), hasn't been
+  re-shared this round, so it's unconfirmed whether that caller already
+  expects the new asset-path shape or would silently mishandle it.
 
 ---
 
@@ -2382,6 +2746,15 @@ does — reverting these patterns will likely reintroduce the same bugs.
   in background/killed states
 - AI: backend proxies to an actual AI provider for
   `/message/study-room/ai-tools/` — app never holds a provider key
+- 🔥 **(Phase 17)** Auth: `login` Django app exposes `TokenRefreshView`
+  at `login/urls.py`, expected reachable at `POST /login/auth/token/
+  refresh/` `{refresh}` → `{access}` (§4.17). The prefix that app is
+  `include()`-d under in the top-level `urls.py` is **unconfirmed** —
+  correct only if that prefix really is `/login/`, per `auth_service.
+  dart`'s own comment. Refresh tokens are NOT rotated server-side (or
+  at least the client never re-saves one from a refresh response) —
+  worth confirming if rotation is actually on, since the client would
+  then be refreshing with an increasingly stale refresh token.
 
 ---
 
@@ -3167,3 +3540,304 @@ when that happens. Priority for next session: get
 `conversations_screen.dart` re-uploaded to confirm they've adapted to
 the `SearchResultModel`/`FocusSessionStatus` contract now that the
 service/model layer is confirmed.
+
+---
+
+## 25. 🔥 Phase 15 Changelog (this session)
+
+18 files uploaded (incl. this doc): `PROJECT_ARCHITECTURE.md`,
+`ai_study_service.dart`, `call_api_service.dart`, `call_kit_service.dart`,
+`call_manager.dart`, `chat_socket_service.dart`, `doubts_api_service.dart`,
+`inbox_socket_service.dart`, `media_download_service.dart`,
+`message_api_service.dart`, `message_cache_service.dart`,
+`message_models.dart`, `missed_call_watcher.dart`,
+`parent_service.dart`, `push_notification_service.dart`,
+`study_room_call_manager.dart`, `study_room_models.dart`,
+`translate_service.dart`, `tts_service.dart`. Same instruction as every
+prior phase: this doc stays the sole reference — no other file gets
+handed over going forward, all work proceeds against this document.
+
+### 25.1 Real logic/contract changes found (not just doc catch-up)
+- **`call_manager.dart` — new `_notifyBackendLeft()` fix.** Passive
+  disconnect paths (`RoomDisconnectedEvent`, reconnect-countdown
+  expiry) now also tell the backend the call ended
+  (`CallApiService.callAction(id, 'end')`), not just the explicit
+  `endCall()` button path. Fixes a real bug: a call could get stuck
+  "ongoing" server-side forever if only one participant ever
+  explicitly ended it. Best-effort, mirrors `endCall()`'s own
+  error-swallowing. See §4.6.
+- **`message_api_service.dart` + `message_models.dart` — the Phase 14
+  `MessageReadStatusModel` build blocker is closed, with a paired real
+  bug fixed alongside it.** The model is now defined (matches backend
+  `MessageReadStatusSerializer` exactly). Separately, `getReadStatus()`
+  was rewritten because the actual backend response shape is
+  `{"delivered_to": [...], "read_by": [...]}`, not a flat list —
+  the previous parsing (documented as unconfirmed since Phase 14) would
+  have thrown a runtime cast error on every call, model or no model.
+  Fixed by merging both lists by user id (`read_by` entry wins when a
+  user appears in both, since it carries `read_at`). See §3.1, §4.1,
+  §10.
+- **`message_models.dart` — doc-internal contradiction fixed, not a
+  code change.** §3.1's poll bullet still said poll data lives in
+  `meta['poll']`, directly contradicting the Phase 14 correction
+  already made to §4.1/§7.5 (top-level `Message.poll` field,
+  `getPoll()` deleted). The file's own header comment calls the old
+  `meta['poll']` assumption "purana/galat" — §3.1 now matches §4.1/§7.5
+  instead of contradicting them.
+- **`message_models.dart` — new Feature 11 (Announcements) scaffolding,
+  zero prior doc coverage.** `ConversationModel.hasUnreadAnnouncement`
+  and `MessageModel.isAnnouncement`, both parsed from **guessed**,
+  unconfirmed backend key names and hardcoded to `false` until backend
+  actually serializes them — compile-error fixes, not a working
+  feature yet. New flag added, see §3.1, §10.
+- **`push_notification_service.dart` — study-room invite pushes get a
+  friendly body in the background handler.** `_showBackgroundChatNotification`
+  now overrides the notification body to "🧑‍🎓 Started a Study Room —
+  tap to join" when `message_type == 'study_room'`, instead of showing
+  raw invite-card text. Not (yet confirmed) mirrored on the foreground
+  `_showLocalNotification` path. See §4.9.
+
+### 25.2 Confirmed unchanged (spot-checked, no drift)
+- `ai_study_service.dart` — matches §4.3 exactly.
+- `call_api_service.dart` — matches §4.2 exactly.
+- `call_kit_service.dart` — matches §4.8 exactly.
+- `call_manager.dart` — full method list re-checked against §4.6 (state
+  groups, hold, waiting-call, reconnect countdown, no-answer timer,
+  call-status poll, screen share, add participant, end/cleanup); only
+  the `_notifyBackendLeft()` addition above is new, everything else
+  matches.
+- `chat_socket_service.dart` — matches §4.4 exactly, including the
+  Phase 8 reconnect-logic rewrite.
+- `doubts_api_service.dart` — matches §4.13 exactly.
+- `inbox_socket_service.dart` — matches §4.5 exactly.
+- `media_download_service.dart` — matches §4.11 exactly.
+- `message_cache_service.dart` — matches §4.12 exactly.
+- `missed_call_watcher.dart` — matches §4.10 exactly.
+- `parent_service.dart` — matches §4.14 exactly, **including** the
+  still-unresolved placeholder `_baseUrl` (flag stands).
+- `study_room_call_manager.dart` — matches §4.7 exactly (the explicit
+  `_requestMicPermission()`/`_requestCameraPermission()` fix already
+  documented there was re-verified against the actual code, no new
+  drift beyond what §4.7 already says).
+- `study_room_models.dart` — matches §3.2 exactly, all classes present
+  and unchanged.
+- `translate_service.dart` — matches §4.15 exactly, including the
+  still-unresolved placeholder `_baseUrl` (flag stands).
+- `tts_service.dart` — matches §4.16 exactly.
+- `push_notification_service.dart` — matches §4.9 aside from the one
+  new item in §25.1 above.
+- `message_api_service.dart` / `message_models.dart` — aside from the
+  changes in §25.1, the rest of both files (poll/pin/schedule/group/
+  block/search/smart-reply/read-receipt-privacy/study-room-state/
+  focus-session endpoints; `DoubtQuestionModel`, `SearchResultModel`,
+  `LinkPreviewModel`, `SearchFilterModel`, `ConversationPreviewModel`,
+  `FocusSessionStatus`) matches §3.1/§4.1 as previously documented.
+
+### 25.3 Going forward
+Unchanged from every prior phase: this doc is the sole basis for all
+future work — no other file will be provided going forward, extend the
+relevant section when new files/behaviour show up, append a new `§26
+Phase 16 Changelog` (don't renumber or restart) when that happens.
+Priority for next session: confirm the real backend key names for
+Feature 11 (Announcements, §25.1/§10) before any screen wires up to
+`hasUnreadAnnouncement`/`isAnnouncement`, and get
+`message_search_screen.dart`/`focus_mode_screen.dart`/
+`conversations_screen.dart` re-uploaded (still the standing ask from
+§24.5, unchanged).
+
+---
+
+## 26. 🔥 Phase 16 Changelog (this session)
+
+13 screens-layer files uploaded (no doc, no services/models this
+round): `call_screen.dart`, `chat_screen.dart`, `conversations_screen.
+dart`, `create_group_screen.dart`, `doubts_screen.dart`,
+`group_profile_screen.dart`, `app_bottom_nav.dart`,
+`chat_screen_pagination_fix.dart`, `class_transcript_screen.dart`,
+`focus_mode_screen.dart`, `focus_session_history_screen.dart`,
+`forward_message_screen.dart`, `group_media_screen.dart`. Same
+instruction as every prior phase: this doc stays the sole reference.
+
+### 26.1 Headline: Feature 11 (Announcements) is confirmed wired into UI
+Phase 15 only had the model-layer fields (`ConversationModel.
+hasUnreadAnnouncement`, `MessageModel.isAnnouncement`), flagged as pure
+scaffolding with "no screen/widget uses these fields yet." That's now
+wrong: `conversations_screen.dart` uses `hasUnreadAnnouncement` for
+sort-priority + row tint/badge, and `chat_screen.dart`'s `_MessageBubble`
+uses `isAnnouncement` for the orange-border + chip. The UI is fully
+built on both ends — the feature is inert only because the backend
+fields it reads are still guessed/unconfirmed key names. See §3.1, §10,
+§5.1, §5.2.
+
+### 26.2 Two long-standing §10 ambiguities resolved
+Both were about `call_screen.dart`, and both were confirmed by the
+file's own comments once it was finally re-uploaded (it hadn't been
+shared since before these flags were written):
+- The "double-audio" outgoing-ring risk was a **real, already-fixed**
+  bug — the screen's own outgoing-ring player was removed entirely;
+  `CallManager`'s internal one is now the sole source. Only the
+  call-waiting tone (a different sound, different purpose) remains
+  screen-side.
+- The screen's 35s `_noAnswerTimer` vs `CallManager`'s 30s one is
+  intentional redundancy (a caller-only local safety-net armed 5s
+  behind the manager's own timeout), not two competing/duplicate
+  timers.
+See §5.3, §10.
+
+### 26.3 Other real logic/content changes found
+- **`group_profile_screen.dart` — real bug fix**: `_pickImageFile()`
+  ("Change group photo") previously threw `UnimplementedError()`,
+  meaning the feature never worked (always landed in the catch block
+  showing "Photo update fail"). Now uses the same `ImagePicker` pattern
+  `chat_screen.dart`'s wallpaper picker already uses successfully. See
+  §5.6.
+- **`create_group_screen.dart` — more built than previously
+  documented**: a Public/Private visibility picker at creation time
+  (with the same explainer copy `group_profile_screen.dart` uses for
+  changing it later) and an explicit admin/creator selection step, both
+  new to this doc. See §5.7.
+- **`conversations_screen.dart`** — full method/field scan confirms it
+  matches §5.1 as previously documented (search, multi-select, pin/
+  label, draft preview, InboxSocket, AppBottomNav, global-search icon,
+  Focus Mode wiring), plus the Feature 11 usage in §26.1.
+- **`chat_screen.dart`** — the standalone `chat_screen_pagination_fix.
+  dart` patch, re-uploaded again this round, is confirmed **already
+  merged** into the actual `chat_screen.dart`'s `_loadMoreMessages()`
+  catch block verbatim (same comment, same 404-handling logic) — this
+  was already noted merged back in Phase 4; re-confirmed still true,
+  no new drift. Full method scan otherwise matches §5.2 as documented
+  (socket event switch, sending, reactions, message actions, polls,
+  scheduled messages, calls, Study Room integration, Doubts entry
+  point, wallpaper, downloads, filters). `translatable_message_widgets.
+  dart`'s `ListenButton`/`TranslateToggle` (§6.5) are still confirmed
+  **not** called anywhere in this file — Features 9/10 remain built but
+  unreachable, unchanged from Phase 9/10/13.
+
+### 26.4 Confirmed unchanged (spot-checked, no drift)
+- `app_bottom_nav.dart` — matches §5.10 exactly (previously flagged as
+  "not yet reviewed" in the file map, §2 — that was stale; corrected,
+  see §2).
+- `class_transcript_screen.dart` — matches §5.13 exactly.
+- `focus_session_history_screen.dart` — matches §5.21 exactly,
+  including the still-open orphan-screen gap (no history icon added to
+  `focus_mode_screen.dart` this round either).
+- `forward_message_screen.dart` — matches §5.8 exactly (caption logic,
+  poll-exclusion, `MessageModel` objects not just ids).
+- `group_media_screen.dart` — matches §5.16 exactly (4-tab filter,
+  per-tab cache, visual grid + file list split).
+- `doubts_screen.dart` — no `🔥`/`🔧` markers at all in this upload
+  (i.e. no flagged changes); method/class scan matches §5.14 exactly.
+
+### 26.5 Going forward
+Unchanged from every prior phase: this doc is the sole basis for all
+future work — no other file will be provided going forward, extend the
+relevant section when new files/behaviour show up, append a new `§27
+Phase 17 Changelog` (don't renumber or restart) when that happens.
+Priority for next session: same standing ask as §25.3 — confirm
+Feature 11's real backend key names, and get
+`message_search_screen.dart`/`conversations_screen.dart` (now itself
+re-uploaded and confirmed, drop from this ask) — remaining ask is just
+`message_search_screen.dart` re-upload to confirm its filter UI still
+matches `SearchFilterModel`/`SearchResultModel` (§3.1).
+---
+
+## 27. 🔥 Phase 17 Changelog (this session)
+
+Nine files uploaded this round. Three were shared for the very first
+time (`api.dart`, `auth_service.dart`, `sticker_picker_sheet.dart` —
+long-standing "unknown, treat as external" entries in §2/§10 through
+every prior phase); three were re-uploads with real drift/new findings
+(`main.dart`, `message_api_service.dart`, `home.dart`); three
+re-confirmed with no drift (`ai_study_service.dart`, `focus_mode_
+screen.dart`, and `PROJECT_ARCHITECTURE.md` itself, re-read as the
+starting point per its own "living doc" instruction). Same standing
+instruction as every prior phase: this doc stays the sole reference —
+extend it in place, don't restart it.
+
+### 27.1 Headline: three long-standing "unknown" files are now fully
+documented, and one of them was hiding a bigger surprise than expected
+`api.dart` turned out to be trivial (§4.18, 2 lines). But
+`auth_service.dart` (§4.17) turned out to hold a full JWT
+expiry-detection + auto-refresh + force-logout system — none of which
+was even hinted at by the old one-line description ("`AuthService.
+getToken()` / login/logout"). And `sticker_picker_sheet.dart` (§6.6)
+turned out to directly contradict what every other section that
+mentioned stickers had been assuming (Rive/Lottie) — it's been PNG-only
+for a while now. All three are the kind of gap that only a full file
+share, not a description carried forward from memory, can close — worth
+remembering next time a file is described only secondhand.
+
+### 27.2 Real logic/contract changes found (not just doc catch-up)
+- **`message_api_service.dart` — one real, previously-undocumented
+  backend-path bug**: `getUserPresence()` was fixed from `/message/
+  users/<user_id>/presence/` to `/message/presence/<user_id>/` (§4.1,
+  §9 item 16). Everything else in the file (endpoint list, `code`-field
+  error handling, the `getOrCreateConversation` duplicate flagged since
+  Phase 5) matches §4.1 exactly as already documented — this was a
+  single-line fix inside an otherwise-unchanged file, not a rewrite.
+- **`main.dart` — two real fixes, both previously undocumented**: the
+  `main()` init sequence was restructured from one shared try/catch
+  (Firebase + Push + CallKit) into independent ones specifically to fix
+  a root-cause bug where a `PushNotificationService` failure silently
+  prevented `CallKitService` from ever initializing app-wide (§9 item
+  17); and an iOS `AudioContext` assertion bug around `defaultToSpeaker`
+  needing the `playAndRecord` category was fixed (§9 item 18). Also
+  newly documented: `background_downloader`/`FileDownloader` setup (§1,
+  §7.1) and the `didChangeAppLifecycleState` auto-restore-call-on-resume
+  observer (§7.1) — both genuinely new content, not corrections.
+- **`sticker_picker_sheet.dart` — confirmed rewritten**, per the file's
+  own header comment: Rive/Lottie animated stickers removed entirely,
+  replaced with 100 plain PNGs across 10 tabbed categories from
+  `assets/stickers/` (§6.6). No package dependency needed any more for
+  this specific picker.
+- **`auth_service.dart` — substantially more logic than the old
+  one-line description implied** (§4.17): dual-key token storage,
+  `saveAuthResponse()`'s two-shape parsing (nested vs. flat, for
+  different login/signup/OTP/Google-auth backend views), manual JWT
+  payload decoding for `exp`, `getValidToken()` with concurrent-refresh
+  de-duplication, and an `onForceLogout` hook. None of this existed in
+  the doc before since the file itself was never shared.
+
+### 27.3 New gap raised this session
+🔥 **The new `auth_service.dart` machinery isn't wired up anywhere in
+the currently-shared code** (§10): `message_api_service.dart` and
+`home.dart` both still call the old `getToken()` instead of the new
+`getValidToken()`, `main.dart`'s `_checkAuth()` reads the raw token
+directly (no expiry check), and no `onForceLogout` subscriber was found
+in `main.dart` despite the file's own comment showing that exact
+wiring. Can't tell from what's been shared whether this lives in an
+unshared file (`chat_socket_service.dart`/`inbox_socket_service.dart`
+are the two the comment specifically calls out for WS-reconnect
+refresh) or is simply unfinished — ask before assuming either way.
+
+### 27.4 Confirmed unchanged (spot-checked, no drift)
+- `ai_study_service.dart` — matches §4.3 exactly, including the
+  `CallApiService.baseUrl` getter fix, `transcribe()`, transcript
+  chunk/search, classroom copilot, and Revision Deck methods. No new
+  `🔥`/`🔧` markers beyond what §4.3 already documents.
+- `focus_mode_screen.dart` — matches §5.15 exactly: same 4 duration
+  presets, same custom-duration stepper (clamped 5–480min, 15min
+  steps), same 2 exception-rule tiles, same start/stop wiring. Still no
+  `Icons.history` AppBar action — the §5.21/§10 orphan-screen gap for
+  `focus_session_history_screen.dart` remains open, unchanged.
+- `home.dart` — its routing/tab-shell claims (IndexedStack Home/
+  Search/Profile, separate push of `ConversationsScreen` for Chats)
+  match §5.1/§7.1 exactly. Its actual Home-tab content (posts,
+  reactions, comments — `PostModel`/`HomeFeedService`/`ProfileApi`) is
+  a separate social-feed module outside this doc's messaging/calls/
+  study-room scope, noted in §7.1 but not documented screen-by-screen
+  here on purpose.
+
+### 27.5 Going forward
+Unchanged from every prior phase: this doc is the sole basis for all
+future work — no other file will be provided going forward per this
+session's explicit instruction. Extend the relevant section when new
+files/behaviour show up; append a new `§28 Phase 18 Changelog` (don't
+renumber or restart) when that happens. Priority items to resolve next
+time relevant files are touched: (1) confirm whether `getValidToken()`/
+`onForceLogout` (§27.3) are wired up anywhere, or wire them up; (2)
+confirm `chat_screen.dart`'s sticker-picker call-site already expects
+the new PNG asset-path shape (§6.6, §10); (3) confirm the `/login/`
+prefix assumption for the token-refresh endpoint (§11); (4) confirm
+whether `FileDownloader` (§1, §7.1) is meant to replace or sit
+alongside `media_download_service.dart` (§4.11).

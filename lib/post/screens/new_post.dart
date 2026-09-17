@@ -9,7 +9,12 @@ import 'package:image_picker/image_picker.dart';
 import 'package:file_selector/file_selector.dart';
 import 'package:intl/intl.dart';
 import 'package:shared_preferences/shared_preferences.dart';
-import '../api_service.dart';
+import '../services/api_service.dart';
+// TASK 6 — same import + alias singlepost.dart already uses for real
+// user search (`lib/post/screens/singlepost.dart` -> `../../search/api_service.dart`
+// as `SearchApi`; this file lives at the same depth, `lib/post/screens/new_post.dart`,
+// so the relative path is identical).
+import '../../search/api_service.dart' as SearchApi;
 import 'quick_post.dart';
 import 'media_edit_screen.dart';
 
@@ -91,20 +96,29 @@ class _NewPostState extends State<NewPost> with TickerProviderStateMixin {
   bool _restoringDraft = false;
 
   // ─── @mentions / #hashtags autocomplete ───
+  // TASK 6 — was `_demoUsers`/`_trendingHashtags`, two hardcoded arrays.
+  // Now backed by real calls: `@` goes through `SearchApiService.searchUsers`
+  // (search/api_service.dart — same module + same pattern singlepost.dart
+  // already uses via `SearchApi.SearchApiService.searchUsers`), `#` goes
+  // through `SearchApiService.trendingHashtags` (see that method's own
+  // docstring — its endpoint/response shape is NOT yet confirmed against
+  // real post/urls.py + post/views.py, flagged there).
   String? _activeTokenType; // '@' or '#' when a token is being typed, else null
   int _tokenStartIndex = -1;
   List<String> _suggestionResults = [];
-  // NOTE: demo/local suggestion sources. Swap these for real calls, e.g.
-  // `await _apiService.searchUsers(query)` / `_apiService.searchHashtags(query)`,
-  // once those endpoints exist — same pattern as `_locationSuggestions` below.
-  static const List<String> _demoUsers = [
-    'aarav.dev', 'priya_singh', 'rohan.codes', 'neha.writes', 'kunal_photo',
-    'ishita.designs', 'vikram_travels', 'ananya.fit', 'devansh.tech', 'meera_art',
-  ];
-  static const List<String> _trendingHashtags = [
-    'flutter', 'flutterdev', 'coding', 'techindia', 'startup', 'motivation',
-    'photography', 'travel', 'foodie', 'fitness', 'design', 'opensource',
-  ];
+  bool _suggestionsLoading = false;
+  // Debounced so we're not firing a network request on every keystroke —
+  // same idea as `_autoSaveDebounce` above, shorter delay since this
+  // drives visible-while-typing suggestions rather than a background save.
+  static const Duration _suggestionDebounceDelay = Duration(milliseconds: 300);
+  Timer? _suggestionDebounce;
+  // Bumped on every new fetch and on clear; a response is only applied if
+  // it's still the most recent request when it lands. Without this,
+  // requests can resolve out of order over the network (e.g. the result
+  // for "ka" arrives after the result for "kar" because the network was
+  // briefly slower for the first one) and an older, narrower/wrong result
+  // set would silently clobber a newer one already on screen.
+  int _suggestionRequestId = 0;
 
   final List<_MediaAttachment> _attachments = [];
   final List<_PollOption> _pollOptions = [];
@@ -211,6 +225,7 @@ class _NewPostState extends State<NewPost> with TickerProviderStateMixin {
   @override
   void dispose() {
     _autoSaveTimer?.cancel();
+    _suggestionDebounce?.cancel();
     _fabAnimController.dispose();
     _entryController.dispose();
     _successController.dispose();
@@ -813,24 +828,79 @@ class _NewPostState extends State<NewPost> with TickerProviderStateMixin {
       return;
     }
     final tokenType = text[i];
-    final query = text.substring(i + 1, cursor).toLowerCase();
-    final source = tokenType == '@' ? _demoUsers : _trendingHashtags;
-    final results = query.isEmpty
-        ? source.take(6).toList()
-        : source.where((s) => s.toLowerCase().contains(query)).take(6).toList();
+    final query = text.substring(i + 1, cursor);
+
+    // Token itself (and its position) update immediately so the UI
+    // switches to the right icon/section right away; the actual
+    // suggestion list is what gets debounced below, since that's the
+    // part that costs a network round trip.
     setState(() {
       _activeTokenType = tokenType;
       _tokenStartIndex = i;
+    });
+    _scheduleSuggestionFetch(tokenType, query);
+  }
+
+  void _scheduleSuggestionFetch(String tokenType, String query) {
+    _suggestionDebounce?.cancel();
+    if (query.trim().isEmpty) {
+      // Nothing typed after @/# yet — don't fire a request for an empty
+      // query (searchUsers('') isn't a meaningful "show me everyone"
+      // call), just clear whatever suggestions were showing for the
+      // previous token.
+      _suggestionRequestId++;
+      setState(() {
+        _suggestionResults = [];
+        _suggestionsLoading = false;
+      });
+      return;
+    }
+    setState(() => _suggestionsLoading = true);
+    _suggestionDebounce = Timer(_suggestionDebounceDelay, () => _fetchSuggestions(tokenType, query));
+  }
+
+  Future<void> _fetchSuggestions(String tokenType, String query) async {
+    final requestId = ++_suggestionRequestId;
+    List<String> results;
+    try {
+      if (tokenType == '@') {
+        final users = await SearchApi.SearchApiService.searchUsers(query);
+        results = users
+            .whereType<Map>()
+            .map((u) => (u['username'] ?? '').toString())
+            .where((u) => u.isNotEmpty)
+            .take(6)
+            .toList();
+      } else {
+        // See SearchApiService.trendingHashtags()'s docstring — this is
+        // real trending data (not a hardcoded list anymore), but true
+        // server-side prefix search isn't confirmed to exist yet, so the
+        // prefix match below is a client-side stand-in over whatever
+        // that call returns.
+        final tags = await SearchApi.SearchApiService.trendingHashtags(query: query);
+        final lower = query.toLowerCase();
+        results = tags.where((t) => t.toLowerCase().contains(lower)).take(6).toList();
+      }
+    } catch (_) {
+      results = [];
+    }
+    // Stale response guard — see `_suggestionRequestId`'s doc comment.
+    if (!mounted || requestId != _suggestionRequestId) return;
+    setState(() {
       _suggestionResults = results;
+      _suggestionsLoading = false;
     });
   }
 
   void _clearSuggestions() {
-    if (_activeTokenType == null && _suggestionResults.isEmpty) return;
+    _suggestionDebounce?.cancel();
+    _suggestionRequestId++; // invalidate any in-flight request
+    if (_activeTokenType == null && _suggestionResults.isEmpty && !_suggestionsLoading) return;
     setState(() {
       _activeTokenType = null;
       _tokenStartIndex = -1;
       _suggestionResults = [];
+      _suggestionsLoading = false;
     });
   }
 
@@ -1802,32 +1872,49 @@ class _NewPostState extends State<NewPost> with TickerProviderStateMixin {
               return null;
             },
           ),
-          if (_suggestionResults.isNotEmpty) ...[
+          if (_activeTokenType != null && (_suggestionResults.isNotEmpty || _suggestionsLoading)) ...[
             const SizedBox(height: 10),
             SizedBox(
               height: 34,
-              child: ListView.separated(
-                scrollDirection: Axis.horizontal,
-                itemCount: _suggestionResults.length,
-                separatorBuilder: (_, __) => const SizedBox(width: 8),
-                itemBuilder: (context, index) {
-                  final value = _suggestionResults[index];
-                  return ActionChip(
-                    onPressed: () => _applySuggestion(value),
-                    avatar: Icon(
-                      _activeTokenType == '@' ? Icons.alternate_email_rounded : Icons.tag_rounded,
-                      size: 13,
-                      color: _primary,
+              child: _suggestionsLoading && _suggestionResults.isEmpty
+                  // Debounced fetch in flight, nothing to show yet —
+                  // small inline spinner instead of an empty gap, so the
+                  // row doesn't visually pop in a moment later.
+                  ? Row(
+                      children: [
+                        SizedBox(
+                          width: 14, height: 14,
+                          child: CircularProgressIndicator(strokeWidth: 2, color: _primary),
+                        ),
+                        const SizedBox(width: 8),
+                        Text(
+                          _activeTokenType == '@' ? 'Searching people…' : 'Searching hashtags…',
+                          style: const TextStyle(fontSize: 11.5, color: _muted, fontWeight: FontWeight.w500),
+                        ),
+                      ],
+                    )
+                  : ListView.separated(
+                      scrollDirection: Axis.horizontal,
+                      itemCount: _suggestionResults.length,
+                      separatorBuilder: (_, __) => const SizedBox(width: 8),
+                      itemBuilder: (context, index) {
+                        final value = _suggestionResults[index];
+                        return ActionChip(
+                          onPressed: () => _applySuggestion(value),
+                          avatar: Icon(
+                            _activeTokenType == '@' ? Icons.alternate_email_rounded : Icons.tag_rounded,
+                            size: 13,
+                            color: _primary,
+                          ),
+                          label: Text(value, style: const TextStyle(fontSize: 12.5, fontWeight: FontWeight.w600, color: _navy)),
+                          backgroundColor: _primarySoft,
+                          side: BorderSide.none,
+                          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+                          visualDensity: VisualDensity.compact,
+                          padding: const EdgeInsets.symmetric(horizontal: 6),
+                        );
+                      },
                     ),
-                    label: Text(value, style: const TextStyle(fontSize: 12.5, fontWeight: FontWeight.w600, color: _navy)),
-                    backgroundColor: _primarySoft,
-                    side: BorderSide.none,
-                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
-                    visualDensity: VisualDensity.compact,
-                    padding: const EdgeInsets.symmetric(horizontal: 6),
-                  );
-                },
-              ),
             ),
           ],
           const SizedBox(height: 8),

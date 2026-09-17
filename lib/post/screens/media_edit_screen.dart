@@ -159,10 +159,10 @@ import 'package:http/http.dart' as http;
 // ⚠️ CHECK THIS PATH — set to match wherever api_service.dart actually
 // sits relative to this screen in your project (e.g. '../api/api_service.dart'
 // or '../services/api_service.dart'). Only used for the Freesound search call.
-import '../api_service.dart';
+import '../services/api_service.dart';
 import 'auto_edit_screen.dart';
 
-part 'media_edit_screen_painters.dart';
+part '../widgets/media_edit_screen_painters.dart';
 
 // Recognized video extensions — used to auto-detect media type from
 // the incoming file so callers don't have to pass an extra flag.

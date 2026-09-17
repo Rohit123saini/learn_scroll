@@ -1,0 +1,1001 @@
+{
+  "@@locale": "en",
+
+  "appTitle": "LearnScroll",
+  "@appTitle": {"description": "App name, shown in OS task switcher etc."},
+
+  "inviteEarn": "Invite & Earn",
+  "@inviteEarn": {"description": "Home screen invite banner title"},
+
+  "inviteEarnSub": "Invite friends and earn rewards",
+  "@inviteEarnSub": {"description": "Home screen invite banner subtitle"},
+
+  "inviteEarnSubCoins": "Invite friends and earn {coins} coins",
+  "@inviteEarnSubCoins": {
+    "description": "Home screen invite banner subtitle with coins count",
+    "placeholders": {
+      "coins": {"type": "int"}
+    }
+  },
+
+  "inviteCta": "Invite",
+  "@inviteCta": {"description": "Invite button text"},
+
+  "searchHint": "Search courses, tests, notices...",
+  "@searchHint": {"description": "Placeholder text in the home screen search bar"},
+
+  "liveNow": "Live Now",
+  "@liveNow": {"description": "Section header for live classes/streams"},
+
+  "liveBadge": "LIVE",
+  "@liveBadge": {"description": "Badge text for live stream"},
+
+  "liveNowCardSubtitle": "{teacher} · {viewers} watching",
+  "@liveNowCardSubtitle": {
+    "description": "Subtitle for live class card",
+    "placeholders": {
+      "teacher": {"type": "String"},
+      "viewers": {"type": "int"}
+    }
+  },
+
+  "seeAll": "See all",
+  "@seeAll": {"description": "Link to view the full list of a section"},
+
+  "join": "Join",
+  "@join": {"description": "Button to join a live class/session"},
+
+  "yourFeed": "Your Feed",
+  "@yourFeed": {"description": "Home feed tab label"},
+
+  "following": "Following",
+  "@following": {"description": "Feed tab label for followed creators/content"},
+
+  "addFriends": "Add Friends",
+  "@addFriends": {"description": "Button/section to add friends"},
+
+  "startClass": "Start Class",
+  "@startClass": {"description": "Button to start/host a class"},
+
+  "startTestSeries": "Start Test Series",
+  "@startTestSeries": {"description": "Button to start a test series"},
+
+  "assignments": "Assignments",
+  "@assignments": {"description": "Section/nav label for assignments"},
+
+  "testSeries": "Test Series",
+  "@testSeries": {"description": "Section/nav label for test series"},
+
+  "notices": "Notices",
+  "@notices": {"description": "Section/nav label for notices"},
+
+  "wallet": "Wallet",
+  "@wallet": {"description": "Section/nav label for wallet"},
+
+  "yourClassrooms": "Your Classrooms",
+  "@yourClassrooms": {"description": "Section label for user classrooms"},
+
+  "joinClassroom": "+ Join",
+  "@joinClassroom": {"description": "Chip label to join classrooms"},
+
+  "jumpBackIn": "Jump Back In",
+  "@jumpBackIn": {"description": "Title for interstitial widget"},
+
+  "themeToggleTooltip": "Toggle dark mode",
+  "@themeToggleTooltip": {"description": "Tooltip for theme toggle"},
+
+  "languageToggleTooltip": "Change language",
+  "@languageToggleTooltip": {"description": "Tooltip for language toggle"},
+
+  "notificationsTooltip": "Notifications",
+  "@notificationsTooltip": {"description": "Tooltip for notifications icon"},
+
+  "newPostTooltip": "Create new post",
+  "@newPostTooltip": {"description": "Tooltip for compose icon"},
+
+  "navHome": "Home",
+  "@navHome": {"description": "Bottom nav label"},
+
+  "navDiscover": "Discover",
+  "@navDiscover": {"description": "Bottom nav label"},
+
+  "navCreate": "Create",
+  "@navCreate": {"description": "Bottom nav label (center action button)"},
+
+  "navNotifications": "Alerts",
+  "@navNotifications": {"description": "Bottom nav label"},
+
+  "navProfile": "Profile",
+  "@navProfile": {"description": "Bottom nav label"},
+
+  "save": "Save",
+  "saveFailed": "Failed to update bookmark state",
+  "like": "Like",
+  "comment": "Comment",
+  "share": "Share",
+
+  "commentsCount": "{count} comments",
+  "@commentsCount": {
+    "description": "Number of comments",
+    "placeholders": {
+      "count": {"type": "int"}
+    }
+  },
+
+  "sessionExpiredRedirecting": "Session expired. Redirecting to login...",
+  "feedErrorTitle": "Couldn't load feed",
+  "feedErrorSubtitle": "Check your internet connection and try again.",
+  "retry": "Retry",
+  "feedEmptyTitle": "No posts yet",
+  "feedEmptySubtitle": "Follow creators or search subjects to fill your feed.",
+  
+  "featureComingSoon": "{feature} is coming soon!",
+  "@featureComingSoon": {
+    "description": "Fallback text for unhandled options",
+    "placeholders": {
+      "feature": {"type": "String"}
+    }
+  },
+
+  "authOr": "OR",
+  "authGoogleCredentialsFailed": "Could not get Google credentials. Please try again.",
+  "authGoogleSignedIn": "Signed in with Google",
+  "authGoogleSignInFailed": "Google sign-in failed. Please try again.",
+
+  "loginSuccessful": "Login Successful!",
+  "loginWelcomeBack": "Welcome Back",
+  "loginSubtitle": "Sign in to continue your journey",
+  "loginUsernameOrEmail": "Username or Email",
+  "loginUsernameRequired": "Username or Email is required",
+  "loginPassword": "Password",
+  "loginPasswordRequired": "Password is required",
+  "loginForgotPassword": "Forgot Password?",
+  "loginSignIn": "Sign In",
+  "loginContinueWithGoogle": "Continue with Google",
+  "loginNoAccount": "Don't have an account? ",
+  "loginSignUp": "Sign Up",
+
+  "signupSuccessful": "Signup Successful!",
+  "signupUsernameExists": "User already exists with this username",
+  "signupEmailExists": "Account already exists with this email",
+  "signupGoogleSuccessful": "Account created with Google",
+  "signupVerifyEmail": "Verify Email Address",
+  "signupOtpSentTo": "We have sent a verification code to",
+  "signupOtpInvalid": "Please enter a valid OTP",
+  "signupVerifyAndCreate": "Verify & Create Account",
+  "signupCreateAccount": "Create Account",
+  "signupSubtitle": "Sign up to get started with LearnScroll",
+  "signupWithGoogle": "Sign up with Google",
+  "signupOrEmail": "OR SIGN UP WITH EMAIL",
+  "signupUsername": "Username",
+  "signupUsernameRequired": "Username is required",
+  "signupEmail": "Email Address",
+  "signupEmailRequired": "Email is required",
+  "signupEmailInvalid": "Enter a valid email address",
+  "signupContact": "Contact Number",
+  "signupContactRequired": "Contact number is required",
+  "signupContactInvalid": "Enter a valid mobile number",
+  "signupFirstName": "First Name",
+  "signupLastName": "Last Name",
+  "signupFieldRequired": "Required",
+  "signupPassword": "Password",
+  "signupPasswordRequired": "Password is required",
+  "signupPasswordMinLength": "Password must be at least 8 characters",
+  "signupConfirmPassword": "Confirm Password",
+  "signupConfirmPasswordRequired": "Confirm password is required",
+  "signupPasswordsNoMatch": "Passwords do not match",
+  "signupButton": "Sign Up",
+
+  "forgotOtpSentSuccess": "OTP sent successfully!",
+  "forgotOtpRequired": "Please enter the OTP",
+  "forgotPasswordUpdated": "Password updated successfully!",
+  "forgotTitleStep1": "Forgot Password?",
+  "forgotTitleStep2": "Verify OTP",
+  "forgotTitleStep3": "Reset Password",
+  "forgotSubtitleStep1": "Enter your registered email or phone number to receive a verification OTP.",
+  "forgotSubtitleStep2": "Enter the 6-digit verification code sent to your registered contact.",
+  "forgotSubtitleStep3": "Enter and confirm your new password to complete the reset.",
+  "forgotIdentityLabel": "Email or Phone Number",
+  "forgotFieldRequired": "This field is required",
+  "forgotOtpLabel": "Enter OTP Code",
+  "forgotNewPassword": "New Password",
+  "forgotNewPasswordRequired": "New password is required",
+  "forgotConfirmNewPassword": "Confirm New Password",
+  "forgotConfirmPasswordRequired": "Confirm password is required",
+  "forgotPasswordsNoMatch": "Passwords do not match",
+  "forgotSendOtp": "Send OTP",
+  "forgotVerifyOtp": "Verify OTP",
+  "forgotUpdatePassword": "Update Password",
+
+  "completeProfileTitle": "One Last Step",
+  "completeProfileSubtitle": "Please add your phone number to finish setting up your account",
+  "completeProfilePhone": "Phone Number",
+  "completeProfilePhoneRequired": "Phone number is required",
+  "completeProfilePhoneInvalid": "Enter a valid mobile number",
+  "completeProfileContinue": "Continue",
+
+  "cancel": "Cancel",
+  "@cancel": {"description": "Generic cancel button"},
+
+  "somethingWentWrong": "Something went wrong",
+  "@somethingWentWrong": {"description": "Generic error fallback message"},
+
+  "testSubmit": "Submit",
+  "@testSubmit": {"description": "Button to submit a test attempt"},
+
+  "testSubmitFailed": "Failed to submit test",
+  "@testSubmitFailed": {"description": "Shown when test submission fails"},
+
+  "testExitTitle": "Exit Test?",
+  "@testExitTitle": {"description": "Title of the exit-test confirmation dialog"},
+
+  "testExitBody": "Your progress will be lost if you exit now.",
+  "@testExitBody": {"description": "Body of the exit-test confirmation dialog"},
+
+  "testExitConfirm": "Exit",
+  "@testExitConfirm": {"description": "Confirm button on the exit-test dialog"},
+
+  "testPaletteTitle": "Question Palette",
+  "@testPaletteTitle": {"description": "Title for the question-navigator palette"},
+
+  "testAnsweredOf": "{answered}/{total} answered",
+  "@testAnsweredOf": {
+    "description": "Count of answered questions out of total",
+    "placeholders": {
+      "answered": {"type": "int"},
+      "total": {"type": "int"}
+    }
+  },
+
+  "testSeriesErrorTitle": "Couldn't load test",
+  "@testSeriesErrorTitle": {"description": "Error title when a test/test-series fails to load"},
+
+  "testNoQuestions": "No questions found",
+  "@testNoQuestions": {"description": "Empty state when a test has no questions"},
+
+  "questionOf": "Question {number} of {total}",
+  "@questionOf": {
+    "description": "Current question position out of total questions",
+    "placeholders": {
+      "number": {"type": "int"},
+      "total": {"type": "int"}
+    }
+  },
+
+  "questionShort": "Q{number}",
+  "@questionShort": {
+    "description": "Short question number label, used in palette/breakdown lists",
+    "placeholders": {
+      "number": {"type": "int"}
+    }
+  },
+
+  "marksShort": "{marks} marks",
+  "@marksShort": {
+    "description": "Marks value for a question",
+    "placeholders": {
+      "marks": {"type": "num"}
+    }
+  },
+
+  "answerHintSelectOne": "Select one option",
+  "@answerHintSelectOne": {"description": "Instruction for single-choice questions"},
+
+  "answerHintSelectMultiple": "Select all that apply",
+  "@answerHintSelectMultiple": {"description": "Instruction for multiple-choice questions"},
+
+  "answerHintMatch": "Match the following",
+  "@answerHintMatch": {"description": "Instruction for match-the-following questions"},
+
+  "answerHintArrange": "Arrange in the correct order",
+  "@answerHintArrange": {"description": "Instruction for arrange/ordering questions"},
+
+  "answerHintText": "Type your answer",
+  "@answerHintText": {"description": "Instruction for free-text answer questions"},
+
+  "testTypeAnswerHint": "Type your answer here...",
+  "@testTypeAnswerHint": {"description": "Placeholder text inside the free-text answer field"},
+
+  "testAttachPhoto": "Attach Photo",
+  "@testAttachPhoto": {"description": "Button to attach a photo answer"},
+
+  "testMatchSelect": "Select a match",
+  "@testMatchSelect": {"description": "Placeholder/hint for a match-the-following dropdown"},
+
+  "testPrevious": "Previous",
+  "@testPrevious": {"description": "Button to go to the previous question"},
+
+  "testNext": "Next",
+  "@testNext": {"description": "Button to go to the next question"},
+
+  "testRateTitle": "Rate this Test Series",
+  "@testRateTitle": {"description": "Title of the rate-test-series card"},
+
+  "testRateSubtitle": "Let us know how it was",
+  "@testRateSubtitle": {"description": "Subtitle of the rate-test-series card"},
+
+  "testReviewHint": "Write a review (optional)",
+  "@testReviewHint": {"description": "Placeholder for the review text field"},
+
+  "testSubmitReview": "Submit Review",
+  "@testSubmitReview": {"description": "Button to submit a rating/review"},
+
+  "testReviewThanks": "Thanks for your feedback!",
+  "@testReviewThanks": {"description": "Shown after a review is submitted successfully"},
+
+  "testAskQueryTitle": "Have a Question?",
+  "@testAskQueryTitle": {"description": "Title of the ask-a-query card"},
+
+  "testAskQuerySubtitle": "Ask about this test series",
+  "@testAskQuerySubtitle": {"description": "Subtitle of the ask-a-query card"},
+
+  "testQueryHint": "Type your question here...",
+  "@testQueryHint": {"description": "Placeholder for the query text field"},
+
+  "testQueryAnonymous": "Ask anonymously",
+  "@testQueryAnonymous": {"description": "Checkbox label to send the query anonymously"},
+
+  "testSendQuery": "Send",
+  "@testSendQuery": {"description": "Button to send a query"},
+
+  "testQueryEmpty": "Please enter your question",
+  "@testQueryEmpty": {"description": "Validation message when the query field is empty"},
+
+  "testQuerySent": "Your question has been sent",
+  "@testQuerySent": {"description": "Shown after a query is sent successfully"},
+
+  "testResultTitle": "Test Result",
+  "@testResultTitle": {"description": "Title of the test result screen"},
+
+  "testFinalScore": "Final Score",
+  "@testFinalScore": {"description": "Label for a manually finalized score"},
+
+  "testAutoScore": "Auto Score",
+  "@testAutoScore": {"description": "Label for an automatically calculated score"},
+
+  "testTotalMarks": "Total Marks",
+  "@testTotalMarks": {"description": "Label for the total marks of a test"},
+
+  "testPercentage": "Percentage",
+  "@testPercentage": {"description": "Label for the score percentage"},
+
+  "testAwaitingCheckNote": "Some answers are awaiting manual checking",
+  "@testAwaitingCheckNote": {"description": "Note shown when part of the test still needs manual grading"},
+
+  "testSubmittedOn": "Submitted On",
+  "@testSubmittedOn": {"description": "Label for the submission date/time"},
+
+  "testCheckedOn": "Checked On",
+  "@testCheckedOn": {"description": "Label for the date/time a test was checked"},
+
+  "testAttemptNumber": "Attempt Number",
+  "@testAttemptNumber": {"description": "Label for the attempt number"},
+
+  "testRateSeries": "Rate this Series",
+  "@testRateSeries": {"description": "Button to open the rate-test-series card"},
+
+  "testAskQuery": "Ask a Question",
+  "@testAskQuery": {"description": "Button to open the ask-a-query card"},
+
+  "testBreakdown": "Question Breakdown",
+  "@testBreakdown": {"description": "Title for the per-question result breakdown section"},
+
+  "testAwaitingReview": "Awaiting Review",
+  "@testAwaitingReview": {"description": "Status label for a question awaiting manual review"},
+
+  "answerCorrect": "Correct",
+  "@answerCorrect": {"description": "Status label for a correctly answered question"},
+
+  "answerIncorrect": "Incorrect",
+  "@answerIncorrect": {"description": "Status label for an incorrectly answered question"},
+
+  "assignmentReviewed": "Reviewed",
+  "@assignmentReviewed": {"description": "Status label for a reviewed assignment answer"},
+
+  "assignmentMarksOf": "{awarded}/{max} marks",
+  "@assignmentMarksOf": {
+    "description": "Marks awarded out of the maximum for a question",
+    "placeholders": {
+      "awarded": {"type": "num"},
+      "max": {"type": "num"}
+    }
+  },
+
+  "testYourAnswer": "Your Answer",
+  "@testYourAnswer": {"description": "Label for the user's submitted answer"},
+
+  "answerNotAnswered": "Not answered",
+  "@answerNotAnswered": {"description": "Shown when a question was left unanswered"},
+
+  "homeTab": "Home",
+  "@homeTab": {"description": "Bottom nav label for the home tab"},
+
+  "campusTab": "Campus",
+  "@campusTab": {"description": "Bottom nav label for the campus tab"},
+
+  "classesTab": "Classes",
+  "@classesTab": {"description": "Bottom nav label for the classes tab"},
+
+  "chatTab": "Chat",
+  "@chatTab": {"description": "Bottom nav label for the chat tab"},
+
+  "profileTab": "Profile",
+  "@profileTab": {"description": "Bottom nav label for the profile tab"},
+
+  "confirm": "Confirm",
+  "@confirm": {"description": "Generic confirm button"},
+
+  "openFailed": "Failed to open file",
+  "@openFailed": {"description": "Shown when opening a file/attachment fails"},
+
+  "assignmentsTabPending": "Pending",
+  "@assignmentsTabPending": {"description": "Assignments tab label for pending assignments"},
+
+  "assignmentsTabSubmitted": "Submitted",
+  "@assignmentsTabSubmitted": {"description": "Assignments tab label for submitted assignments"},
+
+  "assignmentsTabChecked": "Checked",
+  "@assignmentsTabChecked": {"description": "Assignments tab label for checked assignments"},
+
+  "assignmentsErrorTitle": "Couldn't load assignments",
+  "@assignmentsErrorTitle": {"description": "Error title when assignments fail to load"},
+
+  "assignmentsEmptyTitle": "No assignments yet",
+  "@assignmentsEmptyTitle": {"description": "Empty state title for the assignments list"},
+
+  "assignmentsEmptySubtitle": "Assignments from your classrooms will show up here.",
+  "@assignmentsEmptySubtitle": {"description": "Empty state subtitle for the assignments list"},
+
+  "assignmentPostedBy": "Posted by {postedBy}",
+  "@assignmentPostedBy": {
+    "description": "Who posted an assignment",
+    "placeholders": {
+      "postedBy": {"type": "String"}
+    }
+  },
+
+  "assignmentGradeValue": "Grade: {grade}",
+  "@assignmentGradeValue": {
+    "description": "Displayed grade value for an assignment submission",
+    "placeholders": {
+      "grade": {"type": "String"}
+    }
+  },
+
+  "assignmentTotalMarks": "Total Marks: {totalMarks}",
+  "@assignmentTotalMarks": {
+    "description": "Total marks value for an assignment",
+    "placeholders": {
+      "totalMarks": {"type": "num"}
+    }
+  },
+
+  "assignmentNoDueDate": "No due date",
+  "@assignmentNoDueDate": {"description": "Shown when an assignment has no due date"},
+
+  "assignmentDueOn": "Due on {date}",
+  "@assignmentDueOn": {
+    "description": "Due date label for an assignment",
+    "placeholders": {
+      "date": {"type": "String"}
+    }
+  },
+
+  "assignmentOverdue": "Overdue",
+  "@assignmentOverdue": {"description": "Status label for an overdue assignment"},
+
+  "assignmentDueToday": "Due today",
+  "@assignmentDueToday": {"description": "Status label for an assignment due today"},
+
+  "assignmentDueTomorrow": "Due tomorrow",
+  "@assignmentDueTomorrow": {"description": "Status label for an assignment due tomorrow"},
+
+  "assignmentDaysLeft": "{days} days left",
+  "@assignmentDaysLeft": {
+    "description": "Number of days left before an assignment is due",
+    "placeholders": {
+      "days": {"type": "int"}
+    }
+  },
+
+  "assignmentStatusChecked": "Checked",
+  "@assignmentStatusChecked": {"description": "Status label for a fully checked assignment"},
+
+  "assignmentStatusPartiallyChecked": "Partially Checked",
+  "@assignmentStatusPartiallyChecked": {"description": "Status label for a partially checked assignment"},
+
+  "assignmentStatusSubmitted": "Submitted",
+  "@assignmentStatusSubmitted": {"description": "Status label for a submitted assignment"},
+
+  "assignmentStatusLate": "Late",
+  "@assignmentStatusLate": {"description": "Status label for a late assignment submission"},
+
+  "assignmentStatusMissing": "Missing",
+  "@assignmentStatusMissing": {"description": "Status label for a missing assignment"},
+
+  "assignmentNothingToSubmit": "There's nothing to submit",
+  "@assignmentNothingToSubmit": {"description": "Shown when trying to submit an assignment with no answers/attachments"},
+
+  "assignmentSubmitConfirmTitle": "Submit Assignment?",
+  "@assignmentSubmitConfirmTitle": {"description": "Title of the submit-assignment confirmation dialog"},
+
+  "assignmentSubmitConfirmUnanswered": "{unanswered} questions are unanswered. Submit anyway?",
+  "@assignmentSubmitConfirmUnanswered": {
+    "description": "Confirmation body when some assignment questions are unanswered",
+    "placeholders": {
+      "unanswered": {"type": "int"}
+    }
+  },
+
+  "assignmentSubmitConfirmBody": "Are you sure you want to submit this assignment?",
+  "@assignmentSubmitConfirmBody": {"description": "Confirmation body when all assignment questions are answered"},
+
+  "assignmentSubmitSuccess": "Assignment submitted successfully",
+  "@assignmentSubmitSuccess": {"description": "Shown after an assignment is submitted successfully"},
+
+  "assignmentSubmitFailed": "Failed to submit assignment",
+  "@assignmentSubmitFailed": {"description": "Shown when submitting an assignment fails"},
+
+  "assignmentDueLabel": "Due",
+  "@assignmentDueLabel": {"description": "Label for the due-date field on an assignment"},
+
+  "assignmentTotalMarksLabel": "Total Marks",
+  "@assignmentTotalMarksLabel": {"description": "Label for the total-marks field on an assignment/test series"},
+
+  "assignmentQuestionsLabel": "Questions",
+  "@assignmentQuestionsLabel": {"description": "Label for the questions-count field on an assignment"},
+
+  "assignmentOpenAttachment": "Open Attachment",
+  "@assignmentOpenAttachment": {"description": "Button to open an assignment's attachment"},
+
+  "assignmentLateNotice": "This assignment was submitted late",
+  "@assignmentLateNotice": {"description": "Notice shown when an assignment was submitted after the due date"},
+
+  "assignmentYourAnswer": "Your Answer",
+  "@assignmentYourAnswer": {"description": "Label for the student's submitted answer on an assignment"},
+
+  "assignmentAnswerHint": "Type your answer here...",
+  "@assignmentAnswerHint": {"description": "Placeholder text inside the assignment answer field"},
+
+  "assignmentNoQuestions": "No questions found",
+  "@assignmentNoQuestions": {"description": "Empty state when an assignment has no questions"},
+
+  "assignmentAttachFile": "Attach File",
+  "@assignmentAttachFile": {"description": "Button to attach a file to an assignment answer"},
+
+  "assignmentRemoveFile": "Remove File",
+  "@assignmentRemoveFile": {"description": "Tooltip/button to remove an attached file"},
+
+  "assignmentAnsweredOf": "{answered}/{total} answered",
+  "@assignmentAnsweredOf": {
+    "description": "Count of answered assignment questions out of total",
+    "placeholders": {
+      "answered": {"type": "int"},
+      "total": {"type": "int"}
+    }
+  },
+
+  "assignmentSubmit": "Submit",
+  "@assignmentSubmit": {"description": "Button to submit an assignment"},
+
+  "assignmentResult": "Result",
+  "@assignmentResult": {"description": "Section title for assignment result"},
+
+  "assignmentMarksAwarded": "Marks Awarded",
+  "@assignmentMarksAwarded": {"description": "Label for marks awarded on an assignment"},
+
+  "assignmentGrade": "Grade",
+  "@assignmentGrade": {"description": "Label for the grade of an assignment submission"},
+
+  "assignmentSubmittedOn": "Submitted On",
+  "@assignmentSubmittedOn": {"description": "Label for the submission date/time of an assignment"},
+
+  "assignmentCheckedOn": "Checked On",
+  "@assignmentCheckedOn": {"description": "Label for the date/time an assignment was checked"},
+
+  "assignmentPartiallyCheckedNote": "Some answers are awaiting manual checking",
+  "@assignmentPartiallyCheckedNote": {"description": "Note shown when part of an assignment still needs manual grading"},
+
+  "assignmentTeacherFeedback": "Teacher's Feedback",
+  "@assignmentTeacherFeedback": {"description": "Section title for teacher feedback on an assignment"},
+
+  "assignmentNoWrittenAnswer": "No written answer provided",
+  "@assignmentNoWrittenAnswer": {"description": "Shown when a student did not provide a written answer"},
+
+  "assignmentOpenSubmittedFile": "Open Submitted File",
+  "@assignmentOpenSubmittedFile": {"description": "Button to open a file the student submitted"},
+
+  "assignmentAwaitingReview": "Awaiting Review",
+  "@assignmentAwaitingReview": {"description": "Status label for an assignment answer awaiting manual review"},
+
+  "assignmentAttachPhoto": "Attach Photo",
+  "@assignmentAttachPhoto": {"description": "Button to attach a photo to an assignment answer"},
+
+  "testSeriesTabAll": "All",
+  "@testSeriesTabAll": {"description": "Test series tab label for all series"},
+
+  "testSeriesTabFree": "Free",
+  "@testSeriesTabFree": {"description": "Test series tab label for free series"},
+
+  "testSeriesTabPaid": "Paid",
+  "@testSeriesTabPaid": {"description": "Test series tab label for paid series"},
+
+  "testSeriesEmptyTitle": "No test series yet",
+  "@testSeriesEmptyTitle": {"description": "Empty state title for the test series list"},
+
+  "testSeriesEmptySubtitle": "Test series from your classrooms will show up here.",
+  "@testSeriesEmptySubtitle": {"description": "Empty state subtitle for the test series list"},
+
+  "testSeriesCoins": "{coins} coins",
+  "@testSeriesCoins": {
+    "description": "Price of a test series in coins",
+    "placeholders": {
+      "coins": {"type": "int"}
+    }
+  },
+
+  "testSeriesFree": "Free",
+  "@testSeriesFree": {"description": "Chip label for a free test series"},
+
+  "testSeriesBy": "By {creator}",
+  "@testSeriesBy": {
+    "description": "Creator of a test series",
+    "placeholders": {
+      "creator": {"type": "String"}
+    }
+  },
+
+  "testSeriesMarks": "{marks} marks",
+  "@testSeriesMarks": {
+    "description": "Total marks of a test series",
+    "placeholders": {
+      "marks": {"type": "num"}
+    }
+  },
+
+  "testSeriesDuration": "{minutes} min",
+  "@testSeriesDuration": {
+    "description": "Duration of a test series in minutes",
+    "placeholders": {
+      "minutes": {"type": "int"}
+    }
+  },
+
+  "testSeriesAttempts": "{attempts} attempts",
+  "@testSeriesAttempts": {
+    "description": "Number of attempts allowed for a test series",
+    "placeholders": {
+      "attempts": {"type": "int"}
+    }
+  },
+
+  "testSeriesStart": "Start",
+  "@testSeriesStart": {"description": "Button to start a test series attempt"},
+
+  "testSeriesResume": "Resume",
+  "@testSeriesResume": {"description": "Button to resume an in-progress test series attempt"},
+
+  "testSeriesViewResult": "View Result",
+  "@testSeriesViewResult": {"description": "Button to view a completed test series attempt's result"},
+
+  "testSeriesNoRatings": "No ratings yet",
+  "@testSeriesNoRatings": {"description": "Shown when a test series has no ratings"},
+
+  "testSeriesRating": "{rating} ({reviewCount} reviews)",
+  "@testSeriesRating": {
+    "description": "Average rating and review count for a test series",
+    "placeholders": {
+      "rating": {"type": "String"},
+      "reviewCount": {"type": "int"}
+    }
+  },
+
+  "testStatusChecked": "Checked",
+  "@testStatusChecked": {"description": "Status label for a fully checked test attempt"},
+
+  "testStatusPartiallyChecked": "Partially Checked",
+  "@testStatusPartiallyChecked": {"description": "Status label for a partially checked test attempt"},
+
+  "testStatusSubmitted": "Submitted",
+  "@testStatusSubmitted": {"description": "Status label for a submitted test attempt"},
+
+  "testStatusInProgress": "In Progress",
+  "@testStatusInProgress": {"description": "Status label for a test attempt in progress"},
+
+  "testSeriesPayTitle": "Unlock Test Series",
+  "@testSeriesPayTitle": {"description": "Title of the pay-to-unlock confirmation dialog"},
+
+  "testSeriesPayBody": "This test series costs {coins} coins. Continue?",
+  "@testSeriesPayBody": {
+    "description": "Body of the pay-to-unlock confirmation dialog",
+    "placeholders": {
+      "coins": {"type": "int"}
+    }
+  },
+
+  "testSeriesNotEnoughCoins": "You don't have enough coins for this test series",
+  "@testSeriesNotEnoughCoins": {"description": "Shown when a user tries to buy a test series without enough coins"},
+
+  "testSeriesQuestionsLabel": "Questions",
+  "@testSeriesQuestionsLabel": {"description": "Label for the questions-count field on a test series"},
+
+  "testSeriesDurationLabel": "Duration",
+  "@testSeriesDurationLabel": {"description": "Label for the duration field on a test series"},
+
+  "testSeriesNoTimeLimit": "No time limit",
+  "@testSeriesNoTimeLimit": {"description": "Shown when a test series has no time limit"},
+
+  "testSeriesAttemptsLabel": "Attempts",
+  "@testSeriesAttemptsLabel": {"description": "Label for the attempts-allowed field on a test series"},
+
+  "testSeriesYourAttempt": "Your Attempt",
+  "@testSeriesYourAttempt": {"description": "Label for the user's own attempt on a test series"},
+
+  "testSeriesTimerNotice": "This test has a time limit of {minutes} minutes",
+  "@testSeriesTimerNotice": {
+    "description": "Notice shown before starting a timed test",
+    "placeholders": {
+      "minutes": {"type": "int"}
+    }
+  },
+
+  "testSeriesReviews": "Reviews",
+  "@testSeriesReviews": {"description": "Section title for test series reviews"},
+
+  "testSeriesNoReviews": "No reviews yet",
+  "@testSeriesNoReviews": {"description": "Shown when a test series has no reviews"},
+
+  "testTimeUp": "Time's up!",
+  "@testTimeUp": {"description": "Shown when a timed test's duration runs out"},
+
+  "testSubmitConfirmTitle": "Submit Test?",
+  "@testSubmitConfirmTitle": {"description": "Title of the submit-test confirmation dialog"},
+
+  "testSubmitConfirmUnanswered": "{unanswered} questions are unanswered. Submit anyway?",
+  "@testSubmitConfirmUnanswered": {
+    "description": "Confirmation body when some test questions are unanswered",
+    "placeholders": {
+      "unanswered": {"type": "int"}
+    }
+  },
+
+  "testSubmitConfirmBody": "Are you sure you want to submit this test?",
+  "@testSubmitConfirmBody": {"description": "Confirmation body when all test questions are answered"},
+
+  "viewAll": "View all",
+  "settingsTitle": "Settings",
+  "settingsLanguageSection": "Language",
+  "settingsThemeSection": "Appearance",
+  "settingsThemeLight": "Light",
+  "settingsThemeDark": "Dark",
+  "settingsThemeSystem": "Match device",
+  "settingsAccountSection": "Account",
+  "settingsLogout": "Log out",
+  "settingsLogoutConfirm": "You'll need to sign in again to use the app.",
+
+  "roleAdmin": "Campus admin",
+  "rolePrincipalHod": "Principal / HOD",
+  "roleClassTeacher": "Class teacher",
+  "roleSubjectTeacher": "Subject teacher",
+  "roleNonTeaching": "Office staff",
+  "roleStudent": "Student",
+  "roleParent": "Parent",
+  "roleManagement": "Management",
+  "roleNone": "Member",
+
+  "campusSwitchTooltip": "Switch campus",
+  "campusLoadFailed": "Couldn't load your campus",
+  "campusNoneTitle": "You're not part of a campus yet",
+  "campusNoneSubtitle": "Ask your college or school to add you, or create a campus of your own.",
+  "campusPendingTitle": "Waiting for approval",
+  "campusPendingBody": "This campus is under review. Once it's approved you can add staff and students.",
+  "campusRejectedTitle": "Campus not approved",
+  "campusRejectedBody": "This campus was not approved. Contact support if you think this is a mistake.",
+
+  "campusMyClassTitle": "My class",
+  "campusMySectionsTitle": "My sections",
+  "campusAllSectionsTitle": "All sections",
+  "campusManagementTitle": "Campus overview",
+  "campusNoSectionsAssigned": "No sections assigned to you yet. Your campus admin sets this up.",
+  "campusSectionsCount": "Sections",
+  "campusSubjectsCount": "Subjects",
+  "campusAttendanceLabel": "Attendance",
+  "campusTapToView": "Tap to view",
+  "campusMarkAttendance": "Mark attendance",
+  "campusStudents": "Students",
+  "campusTimetableTitle": "Timetable",
+  "campusTimetableLoadFailed": "Couldn't load the timetable",
+  "campusNoClassesToday": "No periods scheduled for this day",
+  "campusUnknownSubject": "Subject",
+  "campusSearchStudents": "Search by name or roll number",
+  "campusNoMatches": "No students match that search",
+  "campusStudentCount": "{count, plural, =1{1 student} other{{count} students}}",
+  "@campusStudentCount": {
+    "placeholders": { "count": { "type": "int" } }
+  },
+  "campusRosterLoadFailed": "Couldn't load the student list",
+  "campusRosterEmptyTitle": "No students in this section",
+  "campusRosterEmptySubtitle": "Students appear here once they're enrolled for the current session.",
+  "campusNoAttendancePermissionTitle": "You can't mark this attendance",
+  "campusNoAttendancePermissionBody": "Only the class teacher or the assigned subject teacher can mark attendance for this section.",
+
+  "campusNoticesTitle": "Notices",
+  "campusNoticesLoadFailed": "Couldn't load notices",
+  "campusNoNotices": "No notices yet",
+  "campusPostNotice": "Post a notice",
+  "noticeAudienceLabel": "Who sees this",
+  "noticeTitleLabel": "Title",
+  "noticeBodyLabel": "Message",
+  "noticePinLabel": "Pin to the top",
+  "noticePinHint": "Stays pinned for 7 days",
+  "noticeSendLabel": "Post notice",
+  "noticeEmptyError": "Add a title and a message before posting.",
+  "noticeNoSessionError": "No active academic session for this campus.",
+  "noticeScopeWholeCampus": "Whole campus",
+  "noticeScopeCampus": "Campus",
+  "noticeScopeClass": "Class",
+  "noticeScopeDepartment": "Department",
+  "noticeScopeSection": "Section",
+
+  "attendanceWholeDay": "Whole day",
+  "attendanceSubjectLabel": "Subject",
+  "attendancePresent": "Present",
+  "attendanceAbsent": "Absent",
+  "attendanceTotal": "Total",
+  "attendanceOverall": "Overall attendance",
+  "attendanceBySubject": "By subject",
+  "attendanceNoSubjectData": "No subject-wise records yet",
+  "attendanceSummaryFailed": "Couldn't load attendance",
+  "attendanceAlreadyMarked": "Attendance for this day is already marked. Pick another date to make changes.",
+  "attendanceSaveLabel": "Save for {count} students",
+  "@attendanceSaveLabel": {
+    "placeholders": { "count": { "type": "int" } }
+  },
+  "attendanceSaving": "Saving {done} of {total}",
+  "@attendanceSaving": {
+    "placeholders": { "done": { "type": "int" }, "total": { "type": "int" } }
+  },
+  "attendanceSavedAll": "Attendance saved for {count} students",
+  "@attendanceSavedAll": {
+    "placeholders": { "count": { "type": "int" } }
+  },
+  "attendanceSavedPartial": "Saved {saved}, {failed} didn't go through",
+  "@attendanceSavedPartial": {
+    "placeholders": { "saved": { "type": "int" }, "failed": { "type": "int" } }
+  },
+  "attendanceFailedCount": "{count, plural, =1{1 student didn't save} other{{count} students didn't save}}",
+  "@attendanceFailedCount": {
+    "placeholders": { "count": { "type": "int" } }
+  },
+  "attendanceBelowThreshold": "Attendance is below the {percent}% your campus expects.",
+  "@attendanceBelowThreshold": {
+    "placeholders": { "percent": { "type": "int" } }
+  },
+
+  "timeMinutesAgo": "{count}m ago",
+  "@timeMinutesAgo": {
+    "placeholders": { "count": { "type": "int" } }
+  },
+  "timeHoursAgo": "{count}h ago",
+  "@timeHoursAgo": {
+    "placeholders": { "count": { "type": "int" } }
+  },
+  "timeDaysAgo": "{count}d ago",
+  "@timeDaysAgo": {
+    "placeholders": { "count": { "type": "int" } }
+  },
+
+  "searchFilterAll": "All",
+  "@searchFilterAll": {"description": "Search screen filter chip — show all result types"},
+
+  "searchFilterPeople": "People",
+  "@searchFilterPeople": {"description": "Search screen filter chip — people/friends only"},
+
+  "searchFilterNotices": "Notices",
+  "@searchFilterNotices": {"description": "Search screen filter chip — campus notices only"},
+
+  "searchFilterAssignments": "Assignments",
+  "@searchFilterAssignments": {"description": "Search screen filter chip — assignments only"},
+
+  "searchFilterTests": "Test Series",
+  "@searchFilterTests": {"description": "Search screen filter chip — test series only"},
+
+  "searchFilterMessages": "Messages",
+  "@searchFilterMessages": {"description": "Search screen filter chip — messages only"},
+
+  "searchSectionPeople": "People",
+  "@searchSectionPeople": {"description": "Search results section header — people"},
+
+  "searchSectionNotices": "Campus Notices",
+  "@searchSectionNotices": {"description": "Search results section header — campus notices"},
+
+  "searchSectionAssignments": "Assignments",
+  "@searchSectionAssignments": {"description": "Search results section header — assignments"},
+
+  "searchSectionTests": "Test Series",
+  "@searchSectionTests": {"description": "Search results section header — test series"},
+
+  "searchSectionMessages": "Messages",
+  "@searchSectionMessages": {"description": "Search results section header — messages"},
+
+  "searchRecentTitle": "Recent",
+  "@searchRecentTitle": {"description": "Header above the list of recent searches"},
+
+  "searchRecentClear": "Clear all",
+  "@searchRecentClear": {"description": "Button to clear all recent searches"},
+
+  "searchEmptyPrompt": "Search for people, classes, notices, assignments and tests",
+  "@searchEmptyPrompt": {"description": "Prompt shown on the search screen before the user types anything"},
+
+  "searchNoResultsFor": "No results for \"{query}\"",
+  "@searchNoResultsFor": {
+    "description": "Shown when a search returns nothing",
+    "placeholders": {"query": {"type": "String"}}
+  },
+
+  "searchDetailUnavailable": "Full detail view for this result isn't wired up yet",
+  "@searchDetailUnavailable": {"description": "Shown in a result's detail sheet for sources without a deep-link screen yet"},
+
+  "couldNotOpenClassroom": "Could not open this classroom.",
+  "@couldNotOpenClassroom": {"description": "Shown when tapping a classroom row fails to open it"},
+
+  "couldNotOpenClass": "Could not open this class.",
+  "@couldNotOpenClass": {"description": "Shown when tapping a live class card fails to open it"},
+
+  "camera": "Camera",
+  "@camera": {"description": "Option to take a photo with the camera, for a story upload"},
+
+  "recordVideo": "Record video",
+  "@recordVideo": {"description": "Option to record a video with the camera, for a story upload"},
+
+  "chooseFromGallery": "Choose from gallery",
+  "@chooseFromGallery": {"description": "Option to pick media from the photo gallery, for a story upload"},
+
+  "yourStory": "Your Story",
+  "@yourStory": {"description": "Label on the current user's own story ring"},
+
+  "couldNotUploadStory": "Could not upload your story.",
+  "@couldNotUploadStory": {"description": "Shown when a story upload fails"},
+
+  "noClassroomsWithReferrals": "None of your classrooms have referrals turned on yet.",
+  "@noClassroomsWithReferrals": {"description": "Shown when the user has no classroom eligible for a referral link"},
+
+  "couldNotCreateReferralLink": "Could not create your referral link.",
+  "@couldNotCreateReferralLink": {"description": "Shown when generating a classroom referral link fails"},
+
+  "open": "Open",
+  "@open": {"description": "Button to open a downloaded file (e.g. a PDF)"},
+
+  "inviteEarnedSoFar": "You've earned ₹{earned} so far — ₹{pending} on the way",
+  "@inviteEarnedSoFar": {
+    "description": "Invite & earn strip subtitle showing commission earned and pending",
+    "placeholders": {"earned": {"type": "int"}, "pending": {"type": "int"}}
+  },
+
+  "inviteShareClassroomLink": "Share a classroom's link — earn a daily % commission for as long as they stay enrolled",
+  "@inviteShareClassroomLink": {"description": "Default invite & earn strip subtitle, shown before the user has earned anything"},
+
+  "referralCommissionEarned": "You'll earn {percent}% of the daily fee for every student you refer to \"{name}\".",
+  "@referralCommissionEarned": {
+    "description": "Confirmation shown after generating a referral link for a classroom",
+    "placeholders": {"percent": {"type": "String"}, "name": {"type": "String"}}
+  },
+
+  "openFailed": "Open failed: {error}",
+  "@openFailed": {
+    "description": "Shown when opening a downloaded file fails",
+    "placeholders": {"error": {"type": "String"}}
+  },
+
+  "failedWithError": "Failed: {error}",
+  "@failedWithError": {
+    "description": "Generic failure message with the underlying error appended",
+    "placeholders": {"error": {"type": "String"}}
+  },
+
+  "filesSelectedCount": "{count} selected",
+  "@filesSelectedCount": {
+    "description": "Count of files currently selected for upload",
+    "placeholders": {"count": {"type": "int"}}
+  }
+}

@@ -13,12 +13,20 @@ import 'package:path_provider/path_provider.dart';
 import 'package:open_filex/open_filex.dart';
 
 import '../../utils/api.dart';
-import '../api_service.dart';
+import '../services/api_service.dart';
 import '../../search/api_service.dart' as SearchApi;
 import '../../profile/screens/target_profile.dart';
 import '../../profile/screens/profile.dart';
 import '../../profile/api_service.dart' as ProfileApi;
 import '../../services/auth_service.dart';
+import '../widgets/comment_sheet.dart';
+// TASK 8 — models.dart's own location wasn't given for this task, only
+// its content. Guessed as a sibling of `screens/`/`services/` inside
+// `lib/post/` (matching how `services/api_service.dart` already imports
+// it per this task's problem statement, and how every other sibling
+// feature-folder import in this file is one level up). ⚠️ If the real
+// path differs, this import (and only this line) needs updating.
+import '../models/models.dart';
 
 Future<void> downloadWithAuth(String url, String fileName, BuildContext context) async {
   try {
@@ -43,10 +51,25 @@ class SinglePostPage extends StatefulWidget {
 }
 
 class _SinglePostPageState extends State<SinglePostPage> {
-  Map<String, dynamic>? post;
+  // TASK 8 — was `Map<String, dynamic>? post`; now the real typed model,
+  // parsed once in `_loadPost` via `SinglePostModel.fromJson`. Every raw
+  // `post!['...']` lookup below is replaced with a typed field access.
+  SinglePostModel? post;
   bool isLoading = true;
   String? error;
-  bool isLiked = false;
+  // 🔥 TASK 1 — replaced local-only `bool isLiked` with real reaction
+  // state. `myReaction` mirrors the backend's `PostLike.reaction_type`
+  // (null = no reaction; 'like'/'confuse'/'wrong'/'imp'/'explain'
+  // otherwise) and `reactionCounts` mirrors `PostReactionAPIView`'s
+  // `counts` shape exactly, so a response from that endpoint can be
+  // dropped straight in with no remapping.
+  String? myReaction;
+  Map<String, int> reactionCounts = {'like': 0, 'confuse': 0, 'wrong': 0, 'imp': 0, 'explain': 0, 'total': 0};
+  // TASK 8 — comments_count used to live and get mutated directly on the
+  // raw `post!['comments_count']` map entry. `post` is now an immutable
+  // `SinglePostModel`, so this mirrors the same seed-then-diverge pattern
+  // `myReaction`/`reactionCounts` above already use.
+  int commentsCount = 0;
   int currentIndex = 0;
   String fullImageUrl = "";
   String? myUsername;
@@ -63,12 +86,75 @@ class _SinglePostPageState extends State<SinglePostPage> {
   Future<void> _loadPost() async {
     try {
       final data = await ApiService().getPostById(widget.postId);
-      if (mounted) { setState((){ post=data; isLiked=data['is_liked']??false; isLoading=false; }); final u=data['user']['username']??''; if(u.isNotEmpty) _fetchPhotoFromSearchApi(u); }
-    } catch (e){ if(mounted) setState(()=>{error=e.toString(), isLoading=false}); }
+      if (mounted) {
+        // TASK 8 — parse through the real model instead of stashing the
+        // raw map. `myReaction`/`reactionCounts`/`commentsCount` are
+        // seeded from it once here, same fallback logic
+        // (`my_reaction` ?? `is_liked`) as before — it just now lives in
+        // `SinglePostModel.fromJson` instead of here.
+        final model = SinglePostModel.fromJson(data);
+        setState(() {
+          post = model;
+          myReaction = model.myReaction;
+          reactionCounts = model.reactionCounts;
+          commentsCount = model.commentsCount;
+          isLoading = false;
+        });
+        if (model.username.isNotEmpty) _fetchPhotoFromSearchApi(model.username);
+      }
+    } catch (e) {
+      if (mounted) setState(() { error = e.toString(); isLoading = false; });
+    }
+  }
+
+  // 🔥 TASK 1 — real reaction call, optimistic update + rollback on
+  // failure. Same pattern as `home.dart`'s `_handleReaction` for the feed
+  // (already correct/production-tested there): flip local state instantly
+  // for a snappy feel, call the backend, reconcile with the real counts
+  // it returns, and revert everything if the call fails instead of
+  // silently drifting from the server.
+  Future<void> _handleReaction(String reaction) async {
+    HapticFeedback.lightImpact();
+    final oldReaction = myReaction;
+    final oldCounts = Map<String, int>.from(reactionCounts);
+    setState(() {
+      if (oldReaction == reaction) {
+        myReaction = null;
+        reactionCounts['total'] = (reactionCounts['total'] ?? 0) - 1;
+      } else {
+        if (oldReaction == null) reactionCounts['total'] = (reactionCounts['total'] ?? 0) + 1;
+        myReaction = reaction;
+      }
+    });
+    try {
+      final res = await ApiService().toggleReaction(widget.postId, reaction);
+      if (!mounted) return;
+      final c = (res['counts'] as Map?) ?? {};
+      setState(() {
+        reactionCounts = {
+          'like': (c['like'] as int?) ?? 0,
+          'confuse': (c['confuse'] as int?) ?? 0,
+          'wrong': (c['wrong'] as int?) ?? 0,
+          'imp': (c['imp'] as int?) ?? 0,
+          'explain': (c['explain'] as int?) ?? 0,
+          'total': (c['total'] as int?) ?? 0,
+        };
+        myReaction = res['my_reaction'];
+      });
+    } catch (e) {
+      if (!mounted) return;
+      setState(() {
+        myReaction = oldReaction;
+        reactionCounts = oldCounts;
+      });
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text("Couldn't update your reaction — check your connection"), backgroundColor: Colors.red),
+      );
+    }
   }
 
   Future<void> _fetchPhotoFromSearchApi(String username) async {
-    try{ final r=await SearchApi.ApiService.searchUsers(username); if(r.isNotEmpty){ dynamic m=r.firstWhere((u)=>u['username']==username, orElse:()=>r[0]); final p=m['profile_photo']; String url=""; if(p!=null&&p.isNotEmpty) url=p.startsWith('http')?p:"${Api.baseUrl}$p"; if(mounted) setState(()=>fullImageUrl=url);} }catch(_){}
+    try{ final r=await SearchApi.SearchApiService.searchUsers(username); if(r.isNotEmpty){ dynamic m=r.firstWhere((u)=>u['username']==username, orElse:()=>r[0]); final p=m['profile_photo']; String url=""; if(p!=null&&p.isNotEmpty) url=p.startsWith('http')?p:"${Api.baseUrl}$p"; if(mounted) setState(()=>fullImageUrl=url);} }catch(_){}
   }
 
   String buildMediaUrl(String? path){ if(path==null||path.isEmpty) return ""; if(path.startsWith('http')){ if(path.contains("/media/")) return "${Api.baseUrl}${path.substring(path.indexOf("/media/"))}"; return path; } return "${Api.baseUrl}$path"; }
@@ -79,9 +165,39 @@ class _SinglePostPageState extends State<SinglePostPage> {
     if(!mounted) return; if(isMe) Navigator.push(context, MaterialPageRoute(builder:(_)=>const ProfileScreen())); else Navigator.push(context, MaterialPageRoute(builder:(_)=>TargetProfilePage(username: postUsername)));
   }
 
+  // 🔥 TASK 2 — wires the comment button (was `onPressed: (){}`) to the
+  // same CommentBottomSheet already built + used by home.dart's feed
+  // (now shared via post/widgets/comment_sheet.dart). singlepost.dart
+  // only has a raw post Map (not a PostModel), so this reads postId/
+  // postOwnerId/commentsCount straight off that map instead.
+  void _openCommentSheet() {
+    if (post == null) return;
+    final cs = Theme.of(context).colorScheme;
+    showModalBottomSheet(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: Colors.transparent,
+      builder: (_) => Padding(
+        padding: EdgeInsets.only(bottom: MediaQuery.of(context).viewInsets.bottom),
+        child: Container(
+          decoration: BoxDecoration(
+              color: cs.surface, borderRadius: const BorderRadius.vertical(top: Radius.circular(20))),
+          child: CommentBottomSheet(
+            postId: widget.postId,
+            postOwnerId: post!.userId,
+            initialCommentsCount: commentsCount,
+            onCommentAdded: () => setState(() => commentsCount++),
+            onGoToProfile: _goToProfile,
+          ),
+        ),
+      ),
+    );
+  }
+
   void _openFullScreen(){
-    final media=(post!['media'] as List?)??[]; if(media.isEmpty) return;
-    final m=media[currentIndex]; final fileUrl=buildMediaUrl(m['file']); final ext=fileUrl.split('.').last.toLowerCase().split('?').first; final type=(m['media_type']??'').toString().toLowerCase();
+    final media = post?.media ?? [];
+    if(media.isEmpty) return;
+    final m=media[currentIndex]; final fileUrl=buildMediaUrl(m.file); final ext=fileUrl.split('.').last.toLowerCase().split('?').first; final type=m.mediaType.toLowerCase();
     if(type=='video'||['mp4','mov','mkv'].contains(ext)) Navigator.push(context, MaterialPageRoute(builder:(_)=>FullScreenVideoPage(url:fileUrl)));
     else if(['jpg','jpeg','png','webp','gif'].contains(ext)||type=='image') Navigator.push(context, MaterialPageRoute(builder:(_)=>FullScreenImagePage(url:fileUrl)));
     else Navigator.push(context, MaterialPageRoute(builder:(_)=>DocumentViewerPage(url:fileUrl, fileName:fileUrl.split('/').last.split('?').first)));
@@ -90,7 +206,7 @@ class _SinglePostPageState extends State<SinglePostPage> {
   @override Widget build(BuildContext context){
     if(isLoading) return const Scaffold(body:Center(child:CircularProgressIndicator()));
     if(error!=null) return Scaffold(body:Center(child:Text(error!)));
-    final user=post!['user']; final media=(post!['media'] as List?)??[]; final createdAt=DateTime.tryParse(post!['created_at']??''); final username=user['username']??'';
+    final media = post!.media; final createdAt = post!.createdAt; final username = post!.username;
     return Scaffold(
       backgroundColor:Colors.white,
       appBar:AppBar(backgroundColor:const Color(0xFF030F27), iconTheme:const IconThemeData(color:Colors.white), title:Text(username, style:const TextStyle(color:Colors.white))),
@@ -98,7 +214,7 @@ class _SinglePostPageState extends State<SinglePostPage> {
         InkWell(onTap:()=>_goToProfile(username), child:ListTile(leading:CircleAvatar(radius:22, backgroundColor:Colors.grey.shade200, child:ClipOval(child:fullImageUrl.isEmpty?const Icon(Icons.person):CachedNetworkImage(imageUrl:fullImageUrl, width:44, height:44, fit:BoxFit.cover))), title:Text(username, style:const TextStyle(fontWeight:FontWeight.bold)), subtitle:Text(createdAt!=null?timeago.format(createdAt):''))),
         Container(height:580, color:Colors.black, child:Stack(children:[
           PageView.builder(controller:pageController, itemCount:media.length, onPageChanged:(i)=>setState(()=>currentIndex=i), itemBuilder:(c,i){
-            final fileUrl=buildMediaUrl(media[i]['file']); final ext=fileUrl.split('.').last.toLowerCase().split('?').first; final type=(media[i]['media_type']??'').toString().toLowerCase();
+            final fileUrl=buildMediaUrl(media[i].file); final ext=fileUrl.split('.').last.toLowerCase().split('?').first; final type=media[i].mediaType.toLowerCase();
             if(type=='video'||['mp4','mov','mkv'].contains(ext)) return SmallVideoPlayer(url: fileUrl);
             if(ext=='pdf'||type=='pdf') return SmallPdfViewer(url: fileUrl);
             if(['doc','docx','xls','xlsx','ppt','pptx','txt'].contains(ext)) return DocThumbnail(url: fileUrl, ext: ext, onOpen: _openFullScreen);
@@ -106,19 +222,121 @@ class _SinglePostPageState extends State<SinglePostPage> {
           }),
           Positioned(top:10,right:10, child:InkWell(onTap:_openFullScreen, child:Container(padding:const EdgeInsets.all(6), decoration:BoxDecoration(color:Colors.black54, borderRadius:BorderRadius.circular(20)), child:const Icon(Icons.fullscreen, color:Colors.white, size:20)))),
         ])),
-        Padding(padding:const EdgeInsets.symmetric(horizontal:8, vertical:6), child:Row(children:[IconButton(icon:Icon(isLiked?Icons.favorite:Icons.favorite_border, color:isLiked?Colors.red:Colors.black87), onPressed:()=>setState(()=>isLiked=!isLiked)), Text("${post!['likes_count']??0}"), const SizedBox(width:12), IconButton(icon:const Icon(Icons.chat_bubble_outline), onPressed:(){}), Text("${post!['comments_count']??0}"), const Spacer(), IconButton(icon:const Icon(Icons.share_outlined), onPressed:()=>Share.share("${post!['title']??''}\n${post!['content']??''}"))])),
-        Padding(padding:const EdgeInsets.symmetric(horizontal:16), child:Text(post!['title']??'', style:const TextStyle(fontWeight:FontWeight.bold))),
+        Padding(padding:const EdgeInsets.symmetric(horizontal:8, vertical:6), child:Row(children:[
+          // 🔥 TASK 1 — real reaction button: tap = like/unlike, long-press
+          // = full 5-reaction picker (same emoji set as the feed's).
+          _ReactionTapTarget(myReaction: myReaction, onReaction: _handleReaction),
+          Text("${reactionCounts['total'] ?? 0}"),
+          const SizedBox(width:12),
+          IconButton(icon:const Icon(Icons.chat_bubble_outline), onPressed: _openCommentSheet),
+          Text("$commentsCount"),
+          const Spacer(),
+          IconButton(icon:const Icon(Icons.share_outlined), onPressed:()=>Share.share("${post!.title ?? ''}\n${post!.caption}")),
+        ])),
+        Padding(padding:const EdgeInsets.symmetric(horizontal:16), child:Text(post!.title ?? '', style:const TextStyle(fontWeight:FontWeight.bold))),
         // 🔥 Category + Subcategory - pehle subcategory kabhi render hi nahi hota tha
-        if((post!['category_label']??post!['category']??'').toString().isNotEmpty || (post!['subcategory_label']??post!['subcategory']??'').toString().isNotEmpty)
+        if((post!.categoryLabel ?? post!.category).isNotEmpty || (post!.subcategoryLabel ?? post!.subcategory ?? '').isNotEmpty)
           Padding(padding:const EdgeInsets.symmetric(horizontal:16, vertical:4), child:Wrap(spacing:8, children:[
-            if((post!['category_label']??post!['category']??'').toString().isNotEmpty)
-              Chip(label:Text((post!['category_label']??post!['category']).toString()), backgroundColor:Colors.grey.shade200),
-            if((post!['subcategory_label']??post!['subcategory']??'').toString().isNotEmpty)
-              Chip(label:Text((post!['subcategory_label']??post!['subcategory']).toString()), backgroundColor:Colors.grey.shade200),
+            if((post!.categoryLabel ?? post!.category).isNotEmpty)
+              Chip(label:Text(post!.categoryLabel ?? post!.category), backgroundColor:Colors.grey.shade200),
+            if((post!.subcategoryLabel ?? post!.subcategory ?? '').isNotEmpty)
+              Chip(label:Text(post!.subcategoryLabel ?? post!.subcategory ?? ''), backgroundColor:Colors.grey.shade200),
           ])),
         const SizedBox(height:20),
       ])),
     );
+  }
+}
+
+// 🔥 TASK 1 — real reaction tap target: tap = quick like/unlike,
+// long-press = full 5-reaction picker (like/confuse/wrong/imp/explain),
+// same emoji set + colors as `home.dart`'s feed reaction button
+// (`_PostReactionButton`) for visual consistency across the app. Kept as
+// its own small widget here rather than importing home.dart's version,
+// since that one is private to home.dart's library.
+class _ReactionTapTarget extends StatefulWidget {
+  final String? myReaction;
+  final void Function(String reaction) onReaction;
+  const _ReactionTapTarget({required this.myReaction, required this.onReaction});
+  @override
+  State<_ReactionTapTarget> createState() => _ReactionTapTargetState();
+}
+
+class _ReactionTapTargetState extends State<_ReactionTapTarget> {
+  static const Map<String, String> _emojiMap = {'like': '👍', 'confuse': '🤔', 'wrong': '❗', 'imp': '⭐', 'explain': '💡'};
+  static const Map<String, Color> _emojiColor = {
+    'like': Color(0xFF1877F2),
+    'confuse': Color(0xFFF7B928),
+    'wrong': Color(0xFFE0245E),
+    'imp': Color(0xFFFFAD33),
+    'explain': Color(0xFF45BD62),
+  };
+  OverlayEntry? _overlayEntry;
+
+  void _showPicker(BuildContext context) {
+    final RenderBox box = context.findRenderObject() as RenderBox;
+    final Offset pos = box.localToGlobal(Offset.zero);
+    _overlayEntry = OverlayEntry(builder: (c) => Stack(children: [
+      GestureDetector(onTap: _hidePicker, child: Container(color: Colors.transparent, width: double.infinity, height: double.infinity)),
+      Positioned(
+        left: pos.dx,
+        top: pos.dy - 62,
+        child: Material(
+          color: Colors.transparent,
+          child: Container(
+            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 8),
+            decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(30), boxShadow: const [BoxShadow(color: Colors.black26, blurRadius: 12)]),
+            child: Row(
+              children: _emojiMap.entries.map((e) {
+                final sel = widget.myReaction == e.key;
+                return GestureDetector(
+                  onTap: () { _hidePicker(); widget.onReaction(e.key); },
+                  child: Container(
+                    margin: const EdgeInsets.symmetric(horizontal: 4),
+                    padding: const EdgeInsets.all(10),
+                    decoration: BoxDecoration(
+                      color: sel ? _emojiColor[e.key]!.withOpacity(0.18) : Colors.grey.shade100,
+                      shape: BoxShape.circle,
+                      border: sel ? Border.all(color: _emojiColor[e.key]!, width: 2) : null,
+                    ),
+                    child: Text(e.value, style: const TextStyle(fontSize: 26)),
+                  ),
+                );
+              }).toList(),
+            ),
+          ),
+        ),
+      ),
+    ]));
+    Overlay.of(context).insert(_overlayEntry!);
+  }
+
+  void _hidePicker() {
+    _overlayEntry?.remove();
+    _overlayEntry = null;
+  }
+
+  @override
+  void dispose() {
+    _overlayEntry?.remove();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Builder(builder: (btnCtx) {
+      return InkWell(
+        onTap: () => widget.onReaction('like'),
+        onLongPress: () => _showPicker(btnCtx),
+        borderRadius: BorderRadius.circular(20),
+        child: Padding(
+          padding: const EdgeInsets.all(8),
+          child: widget.myReaction == null
+              ? const Icon(Icons.favorite_border, color: Colors.black87)
+              : Text(_emojiMap[widget.myReaction] ?? '👍', style: const TextStyle(fontSize: 20)),
+        ),
+      );
+    });
   }
 }
 

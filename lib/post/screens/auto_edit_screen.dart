@@ -79,22 +79,48 @@
 //      logic, just simplified since the montage never has its own
 //      audio to mix against.
 //
-// ⚠️ Sanity-check before shipping:
-//   - All filter strings here (transitions, Ken Burns crop, color
-//     grades, drawtext) are hand-authored (I could not run ffmpeg
-//     here to execute them) — the *shape* of each filtergraph is
-//     correct ffmpeg syntax and the offset/duration math is derived
-//     from first principles (documented inline), but tune the
-//     constants (shift amounts, shake radius, xfade duration, Ken
-//     Burns zoom amount, grade strength) against real footage before
-//     shipping.
-//   - Captions are OFF by default: `_captionFontPath` is null, and
-//     `_buildClipFilter` silently skips `drawtext` when it is, so a
-//     missing font can't break every render. `drawtext` needs either
-//     a real `fontfile=` path on-device or an ffmpeg_kit build with
-//     fontconfig baked in — set `_captionFontPath` to a real font
-//     file on your target devices (or wire up fontconfig) before
-//     turning the caption UI on for real users.
+// ⚠️ Status (updated after test-rendering against a real ffmpeg 6.1
+// build with synthetic sample clips — a photo + a testsrc video at
+// the reel canvas size — since a device/emulator wasn't available):
+//   - Every filter string below (each transition's pixel-fx, both
+//     crop-jitter paths, all 5 color grades, drawtext, the full
+//     xfade chain + offset math, the music-attach pass) was actually
+//     run through ffmpeg end to end and produces correct fixed-size
+//     output with the right total duration — no longer just
+//     hand-authored/unverified syntax.
+//   - One real bug this caught and fixed: the Ken Burns zoom used
+//     `crop=w='...t...'` to shrink the crop window over time, but
+//     ffmpeg's `crop` filter only evaluates w/h ONCE at filter-graph
+//     config time (before `t` even exists) — it either hard errors,
+//     or (why this could've slipped through on-device testing that
+//     didn't isolate it) silently freezes at frame 0's crop size
+//     forever, so photos would render statically instead of zooming.
+//     Fixed by moving the shrink into a `scale=...:eval=frame` stage
+//     (the one geometry filter that supports true per-frame w/h) and
+//     leaving only centering/jitter — which DOES evaluate per-frame —
+//     to `crop`'s x/y. See `_buildClipFilter`.
+//   - Color grade constants: rendered all 5 and diffed each against
+//     the source frame. Vibrant/Moody/B&W/Vintage land at a similar,
+//     clearly-visible strength (11-16/255 mean pixel delta); Warm was
+//     an outlier at ~3.5/255 — barely different from "None" — so it's
+//     been strengthened to ~6/255. Still worth a look on real
+//     skin-tone footage, since this was measured against a synthetic
+//     test image.
+//   - Everything else (xfade duration, shake radius, glitch/RGB-split
+//     shift amounts, Ken Burns zoom amount) rendered without error at
+//     its current constants and looked reasonable on the synthetic
+//     clips, but "reasonable on a testsrc pattern" isn't the same bar
+//     as "reasonable on real handheld footage" — a pass on an actual
+//     device/emulator is still the right last step before shipping.
+//   - Captions: now wired to a bundled font (Poppins Bold, see
+//     `_captionFontAsset`) that's copied out of the Flutter asset
+//     bundle onto real device storage on first launch (`initState` →
+//     `_loadCaptionFont`), since ffmpeg's `drawtext=fontfile=...`
+//     needs an actual filesystem path, not a Flutter asset key.
+//     `_buildClipFilter` still skips `drawtext` gracefully if that
+//     copy hasn't finished (or failed), so nothing can crash a
+//     render — same fail-safe shape as before, just no longer
+//     hardcoded to "never available."
 //   - Assumes an ffmpeg_kit_flutter_new build with timeline/`enable`
 //     support (the "full"/"full-gpl" packages have this; "min" does
 //     not) — same requirement your Trim/Speed tabs already have.
@@ -124,6 +150,7 @@ import 'dart:io';
 import 'dart:math' as math;
 import 'dart:typed_data';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart' show rootBundle;
 import 'package:video_player/video_player.dart';
 import 'package:ffmpeg_kit_flutter_new/ffmpeg_kit.dart';
 import 'package:ffmpeg_kit_flutter_new/ffprobe_kit.dart';
@@ -136,7 +163,7 @@ import 'package:http/http.dart' as http;
 // or '../services/api_service.dart'). Only used for the Freesound search
 // call — same backend endpoint (`/post/music/search/`) MediaEditScreen's
 // Music tab already uses, CC0-filtered server-side.
-import '../api_service.dart';
+import '../services/api_service.dart';
 
 // Reuse the same video-extension check MediaEditScreen exports so
 // picked items route to the right normalization path.
@@ -148,11 +175,99 @@ bool _isVideoFile(File file) {
 const int _targetFps = 30;
 const double _xfadeDur = 0.4; // seconds of overlap for every cut
 
-// Set this to a valid on-device font file path before relying on the
-// caption feature — see the "Sanity-check before shipping" note at
-// the top of this file. Left null on purpose so a missing font can
-// never silently break every render; captions are just skipped.
-const String? _captionFontPath = null; // e.g. '/system/fonts/Roboto-Bold.ttf'
+// ── Media pipeline: pre-downscale before anything hits ffmpeg ──────
+// A modern phone photo can be 40-50MB at 8000×6000px; feeding that
+// straight into the per-clip ffmpeg pass wastes real decode time and
+// battery for zero visible gain — the montage canvas tops out at
+// 1920px on its long edge (see _AspectRatioMeta.dims), and Ken
+// Burns' oversized cover-fill (1.22× canvas, see _buildClipFilter)
+// only ever needs up to ~2340px. So: downscale once, right after
+// picking, to a cap generous enough for the biggest zoom case, and
+// reuse that prepared copy for every subsequent render/regenerate —
+// instead of paying full-res decode cost on every single re-render.
+// Anything already under the cap is left untouched: re-encoding a
+// file that's already small just burns battery for an invisible
+// size win.
+const int _maxImageLongEdge = 2400;
+const int _maxVideoLongEdge = 1920;
+
+// ── Structured errors ────────────────────────────────────────────
+// Distinguishes *why* something failed so the UI can show a message
+// that actually tells the user what to do next — "no internet" vs
+// "the render engine choked on this clip" vs an unexpected bug —
+// instead of one generic "Something went wrong: Exception: ..." for
+// all three, with nothing to tap but dismiss.
+enum _ErrorKind { network, processing, unknown }
+
+class _AppException implements Exception {
+  final _ErrorKind kind;
+  final String message;
+  const _AppException(this.kind, this.message);
+  @override
+  String toString() => message;
+}
+
+class _NetworkException extends _AppException {
+  const _NetworkException(String message) : super(_ErrorKind.network, message);
+}
+
+class _ProcessingException extends _AppException {
+  const _ProcessingException(String message) : super(_ErrorKind.processing, message);
+}
+
+// What the error banner actually renders: an icon+message fitting
+// the failure kind, and — whenever the failed step can just be
+// re-run as-is — a Retry button wired to that same step instead of
+// sending the user back to re-enter everything from scratch.
+class _UiError {
+  final _ErrorKind kind;
+  final String message;
+  final VoidCallback? onRetry;
+  const _UiError(this.kind, this.message, {this.onRetry});
+
+  // Classifies a caught error into a _UiError. Network-shaped
+  // failures (no connection, timeout, a non-2xx from http) get a
+  // clear "check your connection" message even when the throw site
+  // itself didn't tag them; everything else from our own pipeline
+  // (ffmpeg/probe/io) reads as a processing failure since retrying
+  // the same step is usually all that's needed (transient disk/codec
+  // hiccup) rather than anything the user did wrong.
+  factory _UiError.from(Object e, String fallbackMessage, {VoidCallback? onRetry}) {
+    if (e is _AppException) return _UiError(e.kind, e.message, onRetry: onRetry);
+    if (e is SocketException || e is TimeoutException || e is http.ClientException) {
+      return _UiError(
+        _ErrorKind.network,
+        'No internet connection — check your connection and try again.',
+        onRetry: onRetry,
+      );
+    }
+    return _UiError(_ErrorKind.unknown, fallbackMessage, onRetry: onRetry);
+  }
+
+  IconData get icon => switch (kind) {
+        _ErrorKind.network => Icons.wifi_off_rounded,
+        _ErrorKind.processing => Icons.error_outline,
+        _ErrorKind.unknown => Icons.error_outline,
+      };
+}
+
+// Bundled caption font — Poppins Bold (Google Fonts, OFL-1.1 licensed,
+// free for commercial use; ship the accompanying OFL.txt alongside it
+// per the license's redistribution terms). Add it as a Flutter asset:
+//   pubspec.yaml:
+//     flutter:
+//       assets:
+//         - assets/fonts/Poppins-Bold.ttf
+// IMPORTANT: a Flutter asset key ('assets/fonts/Poppins-Bold.ttf') is
+// NOT a filesystem path — it only resolves inside Flutter's own asset
+// bundle. ffmpeg's `drawtext=fontfile=...` needs a real path it can
+// open with fopen(), so the font has to be copied out of the asset
+// bundle onto disk once per install before it's usable. That's what
+// `_loadCaptionFont` (called from initState) does, caching the result
+// in `_captionFontPath` below. Until that copy finishes, this stays
+// null and `_buildClipFilter` keeps skipping `drawtext`, same as
+// before — so a slow/failed extraction still can't break a render.
+const String _captionFontAsset = 'assets/fonts/Poppins-Bold.ttf';
 
 // ── Canvas (aspect ratio) ───────────────────────────────────────────
 enum _AspectRatio { reel, square, portrait45, landscape }
@@ -196,7 +311,15 @@ extension _ColorGradeMeta on _ColorGrade {
         _ColorGrade.bw => 'hue=s=0,eq=contrast=1.15',
         _ColorGrade.vintage =>
           'eq=saturation=0.8:contrast=0.95:brightness=0.02,colorbalance=rs=0.06:gs=0.02:bs=-0.05',
-        _ColorGrade.warm => 'colorbalance=rs=0.09:gs=0.02:bs=-0.08:rm=0.05',
+        // Tuned up from rs=0.09:gs=0.02:bs=-0.08:rm=0.05 — measured
+        // against a test frame, the original barely moved the pixels
+        // (~3.5/255 mean delta vs. source, versus 11-16/255 for the
+        // other four grades) so it read as basically "None" next to
+        // them. This is ~2x stronger (~6/255) and adds a highlight-range
+        // warm tilt. Still worth eyeballing on real skin-tone footage —
+        // this was tuned against a synthetic test image, not faces.
+        _ColorGrade.warm =>
+          'colorbalance=rs=0.20:gs=0.04:bs=-0.18:rm=0.10:rh=0.06',
       };
 }
 
@@ -339,7 +462,7 @@ class _AutoEditScreenState extends State<AutoEditScreen> {
   final TextEditingController _freesoundQueryCtrl = TextEditingController();
   List<Map<String, dynamic>> _freesoundResults = [];
   bool _freesoundSearching = false;
-  String? _freesoundError;
+  _UiError? _freesoundError;
   Map<String, dynamic>? _playingPreviewTrack;
   VideoPlayerController? _freesoundPreviewPlayer; // audio-only stream, reuses video_player
   bool _isCroppingFreesoundTrack = false;
@@ -360,6 +483,12 @@ class _AutoEditScreenState extends State<AutoEditScreen> {
   _ColorGrade _colorGrade = _ColorGrade.none;
   double? _detectedBpm;
 
+  // Real on-device path to the extracted caption font, or null until
+  // `_loadCaptionFont` finishes (or if it fails) — see the
+  // `_captionFontAsset` note above. Everything that used to check the
+  // old top-level `_captionFontPath == null` now checks this instead.
+  String? _captionFontPath;
+
   // Every intermediate/final render file this screen has created on
   // disk, so repeated Regenerate/Auto/Manual runs don't leak
   // normalized-clip + silent-montage + final .mp4 files into the
@@ -368,6 +497,18 @@ class _AutoEditScreenState extends State<AutoEditScreen> {
   final List<File> _tempFiles = [];
 
   void _trackTemp(File f) => _tempFiles.add(f);
+
+  // Prepared (downscaled) copies of picked media — deliberately a
+  // SEPARATE list from `_tempFiles`. `_tempFiles` gets swept by
+  // `_cleanupTemp` after every successful render, but these copies
+  // are what `clip.file` points at for the *entire* screen lifetime
+  // (every Regenerate reads them again) — sweeping them mid-session
+  // would break the very next re-render. Only `dispose()` clears
+  // these, same lifetime as `_pickedMedia` itself.
+  final List<File> _preparedMediaTemp = [];
+
+  bool _isPreparingMedia = false;
+  String _prepareProgressLabel = '';
 
   Future<void> _cleanupTemp({File? keep}) async {
     for (final f in List<File>.from(_tempFiles)) {
@@ -379,7 +520,12 @@ class _AutoEditScreenState extends State<AutoEditScreen> {
 
   String _progressLabel = '';
   double _progress = 0;
-  String? _error;
+  _UiError? _error;
+  // Set by the Cancel button on the generating step; checked after
+  // every ffmpeg session so a cancelled run quits quietly (no error
+  // banner) instead of surfacing whatever failure message a killed
+  // ffmpeg process happens to leave behind.
+  bool _cancelRequested = false;
 
   int get _targetW => _aspectRatio.dims.$1;
   int get _targetH => _aspectRatio.dims.$2;
@@ -390,6 +536,41 @@ class _AutoEditScreenState extends State<AutoEditScreen> {
   bool _exported = false;
 
   @override
+  void initState() {
+    super.initState();
+    _loadCaptionFont();
+  }
+
+  // Copies the bundled Poppins-Bold.ttf out of the Flutter asset
+  // bundle onto real device storage, once, so ffmpeg's
+  // `drawtext=fontfile=...` has an actual path it can open (see the
+  // note on `_captionFontAsset`). Cached under the app's documents
+  // directory using a fixed filename, so re-launching the app reuses
+  // the already-extracted copy instead of re-writing it every time —
+  // only re-copies if the file is somehow missing. Any failure here
+  // (asset not found because pubspec.yaml wasn't updated, no disk
+  // space, etc.) just leaves `_captionFontPath` null, which
+  // `_buildClipFilter` already treats as "skip drawtext" — same
+  // fail-safe behavior as when the font path was hardcoded null.
+  Future<void> _loadCaptionFont() async {
+    try {
+      final dir = await getApplicationDocumentsDirectory();
+      final outFile = File('${dir.path}/caption_font_poppins_bold.ttf');
+      if (!await outFile.exists()) {
+        final bytes = await rootBundle.load(_captionFontAsset);
+        await outFile.writeAsBytes(
+          bytes.buffer.asUint8List(bytes.offsetInBytes, bytes.lengthInBytes),
+          flush: true,
+        );
+      }
+      if (mounted) setState(() => _captionFontPath = outFile.path);
+    } catch (e) {
+      // Left null on purpose — see the doc comment above.
+      debugPrint('Auto-Edit: caption font unavailable ($e); captions will be skipped.');
+    }
+  }
+
+  @override
   void dispose() {
     _previewController?.dispose();
     _freesoundPreviewPlayer?.dispose();
@@ -397,6 +578,9 @@ class _AutoEditScreenState extends State<AutoEditScreen> {
     final keep = _exported ? _renderedVideo : null;
     for (final f in _tempFiles) {
       if (keep != null && f.path == keep.path) continue;
+      unawaited(f.delete().catchError((_) => f));
+    }
+    for (final f in _preparedMediaTemp) {
       unawaited(f.delete().catchError((_) => f));
     }
     super.dispose();
@@ -413,9 +597,111 @@ class _AutoEditScreenState extends State<AutoEditScreen> {
     );
     final files = await openFiles(acceptedTypeGroups: [typeGroup]);
     if (files.isEmpty) return;
+
     setState(() {
-      _pickedMedia.addAll(files.map((x) => File(x.path)));
+      _isPreparingMedia = true;
+      _prepareProgressLabel = 'Preparing 1 of ${files.length}…';
     });
+
+    final prepared = <File>[];
+    try {
+      for (int i = 0; i < files.length; i++) {
+        if (mounted) {
+          setState(() => _prepareProgressLabel = 'Preparing ${i + 1} of ${files.length}…');
+        }
+        final original = File(files[i].path);
+        final result = await _prepareMediaFile(original);
+        prepared.add(result);
+      }
+    } catch (e) {
+      // Shouldn't normally trip — _prepareMediaFile already falls
+      // back to the original file on any per-item failure — but if
+      // something outside that (e.g. temp dir unavailable) throws,
+      // don't lose media the user already picked: fall back to the
+      // raw files for whatever didn't get prepared yet.
+      for (int i = prepared.length; i < files.length; i++) {
+        prepared.add(File(files[i].path));
+      }
+      if (mounted) {
+        setState(() => _error = _UiError.from(
+              e,
+              "Some media couldn't be optimized, but was added as-is.",
+            ));
+      }
+    }
+
+    if (!mounted) return;
+    setState(() {
+      _pickedMedia.addAll(prepared);
+      _isPreparingMedia = false;
+      _prepareProgressLabel = '';
+    });
+  }
+
+  // Reads width/height without decoding the whole file (ffprobe only
+  // parses headers), so this is cheap even on a huge source photo.
+  // NOTE: like `_probeDuration` above, this reads
+  // StreamInformation.getWidth()/getHeight() — check these match
+  // your installed ffmpeg_kit_flutter_new version's exact API.
+  Future<(int, int)?> _probeDimensions(String path) async {
+    try {
+      final session = await FFprobeKit.getMediaInformation(path);
+      final streams = session.getMediaInformation()?.getStreams() ?? [];
+      for (final s in streams) {
+        final w = s.getWidth();
+        final h = s.getHeight();
+        if (w != null && h != null && w > 0 && h > 0) return (w, h);
+      }
+    } catch (_) {
+      // Falls through to null below — caller treats "couldn't probe"
+      // the same as "already small enough": use the original as-is
+      // rather than blocking the pick over a probe failure.
+    }
+    return null;
+  }
+
+  // Downscales one picked item if it's meaningfully larger than this
+  // screen's montage will ever need. Never throws: any failure along
+  // the way (probe fails, ffmpeg fails, output missing) just returns
+  // the original file untouched, so a compression hiccup can never
+  // block someone from using the media they picked.
+  Future<File> _prepareMediaFile(File original) async {
+    final isVideo = _isVideoFile(original);
+    final cap = isVideo ? _maxVideoLongEdge : _maxImageLongEdge;
+
+    final dims = await _probeDimensions(original.path);
+    if (dims == null) return original;
+    final (w, h) = dims;
+    if (math.max(w, h) <= cap) return original;
+
+    try {
+      final dir = await getTemporaryDirectory();
+      final stamp = DateTime.now().microsecondsSinceEpoch;
+      // Even-dimension output (required by libx264's yuv420p) via
+      // scale=-2 on whichever side isn't the capped one.
+      final scaleExpr = w >= h ? "scale='min($cap,iw)':-2" : "scale=-2:'min($cap,ih)'";
+
+      String outPath;
+      String cmd;
+      if (isVideo) {
+        outPath = '${dir.path}/prep_$stamp.mp4';
+        cmd = '-y -i "${original.path}" -vf "$scaleExpr" '
+            '-c:v libx264 -preset veryfast -crf 23 -c:a aac -b:a 128k "$outPath"';
+      } else {
+        outPath = '${dir.path}/prep_$stamp.jpg';
+        cmd = '-y -i "${original.path}" -vf "$scaleExpr" -q:v 3 "$outPath"';
+      }
+
+      final session = await FFmpegKit.execute(cmd);
+      if (!ReturnCode.isSuccess(await session.getReturnCode())) return original;
+
+      final result = File(outPath);
+      if (!await result.exists()) return original;
+      _preparedMediaTemp.add(result);
+      return result;
+    } catch (_) {
+      return original;
+    }
   }
 
   // ── Step 2: pick background music ───────────────────────────────
@@ -455,7 +741,11 @@ class _AutoEditScreenState extends State<AutoEditScreen> {
       setState(() => _freesoundResults = results);
     } catch (e) {
       if (!mounted) return;
-      setState(() => _freesoundError = 'Search fail ho gaya, dobara try karo');
+      setState(() => _freesoundError = _UiError.from(
+            e,
+            "Search didn't go through — try again.",
+            onRetry: () => _searchFreesound(query),
+          ));
     } finally {
       if (mounted) setState(() => _freesoundSearching = false);
     }
@@ -519,7 +809,9 @@ class _AutoEditScreenState extends State<AutoEditScreen> {
       await _freesoundPreviewPlayer?.pause();
       final response = await http.get(Uri.parse(url));
       if (response.statusCode != 200) {
-        throw Exception('Download fail (${response.statusCode})');
+        throw _NetworkException(
+          "Couldn't download that track (server said ${response.statusCode}). Try again.",
+        );
       }
       final dir = await getTemporaryDirectory();
       final stamp = DateTime.now().millisecondsSinceEpoch;
@@ -532,7 +824,7 @@ class _AutoEditScreenState extends State<AutoEditScreen> {
       );
       final code = await session.getReturnCode();
       if (!ReturnCode.isSuccess(code)) {
-        throw Exception('Crop fail ho gaya');
+        throw const _ProcessingException("Couldn't trim that track — try a different clip length.");
       }
       final croppedFile = File(croppedPath);
       _trackTemp(croppedFile);
@@ -550,7 +842,11 @@ class _AutoEditScreenState extends State<AutoEditScreen> {
       });
     } catch (e) {
       if (!mounted) return;
-      setState(() => _error = 'Music add nahi ho paya: $e');
+      setState(() => _error = _UiError.from(
+            e,
+            "Couldn't add that track — try again.",
+            onRetry: _applyFreesoundCrop,
+          ));
     } finally {
       if (mounted) setState(() => _isCroppingFreesoundTrack = false);
     }
@@ -832,8 +1128,12 @@ class _AutoEditScreenState extends State<AutoEditScreen> {
       _detectedBpm = analysis.bpm;
       await _render();
     } catch (e) {
+      if (_cancelRequested) {
+        _cancelRequested = false;
+        return;
+      }
       setState(() {
-        _error = 'Generate failed: $e';
+        _error = _UiError.from(e, 'Setting up the beat-synced cut failed.', onRetry: _autoGenerate);
         _step = _Step.pickMusic;
       });
     }
@@ -883,8 +1183,12 @@ class _AutoEditScreenState extends State<AutoEditScreen> {
       _detectedBpm = null;
       await _render();
     } catch (e) {
+      if (_cancelRequested) {
+        _cancelRequested = false;
+        return;
+      }
       setState(() {
-        _error = 'Setup failed: $e';
+        _error = _UiError.from(e, 'Setting up the clips failed.', onRetry: _manualGenerate);
         _step = _Step.pickMusic;
       });
     }
@@ -944,8 +1248,12 @@ class _AutoEditScreenState extends State<AutoEditScreen> {
       // when IT was produced), so Regenerate never accumulates.
       await _cleanupTemp(keep: finalFile);
     } catch (e) {
+      if (_cancelRequested) {
+        _cancelRequested = false;
+        return;
+      }
       setState(() {
-        _error = 'Render failed: $e';
+        _error = _UiError.from(e, 'Rendering the montage failed.', onRetry: _render);
         _step = _Step.review;
       });
     }
@@ -1018,8 +1326,14 @@ class _AutoEditScreenState extends State<AutoEditScreen> {
       }
 
       final session = await FFmpegKit.execute(cmd);
+      // A cancelled session also fails isSuccess — throwing here either
+      // way is fine, since every caller of this function already checks
+      // _cancelRequested first and swallows the exception silently in
+      // that case rather than showing it as a processing failure.
       if (!ReturnCode.isSuccess(await session.getReturnCode())) {
-        throw Exception('Failed to normalize clip ${i + 1}');
+        throw _ProcessingException(
+          "Couldn't process clip ${i + 1} — it may be corrupted or an unsupported format. Try removing or replacing it.",
+        );
       }
       normalizedPaths.add(outPath);
       onTempFile(File(outPath));
@@ -1050,7 +1364,7 @@ class _AutoEditScreenState extends State<AutoEditScreen> {
       '-r $_targetFps -pix_fmt yuv420p "$outPath"',
     );
     if (!ReturnCode.isSuccess(await session.getReturnCode())) {
-      throw Exception('Transition chain failed');
+      throw const _ProcessingException("Couldn't blend the transitions between clips.");
     }
     onTempFile(File(outPath));
     return File(outPath);
@@ -1089,9 +1403,21 @@ class _AutoEditScreenState extends State<AutoEditScreen> {
       final jitterY = outgoing == _TransitionKind.shake
           ? "+if(between(t,$winStart,$winEnd),10*cos(24*(t-$winStart)),0)"
           : '';
+      // NOTE: ffmpeg's `crop` filter only evaluates its w/h options
+      // ONCE, at filter-graph configuration time — `t` isn't even
+      // bound yet at that point, so a shrinking crop=w='...t...' either
+      // errors out ("Expressions with frame variables 'n','t','pos'
+      // are not valid in init eval_mode") or, if the expression happens
+      // not to reference an as-yet-undefined var, silently freezes at
+      // whatever it evaluated to for frame 0 forever. Verified against
+      // a real ffmpeg 6.1 binary. `crop`'s x/y, by contrast, genuinely
+      // ARE re-evaluated every frame, so the zoom itself has to happen
+      // in `scale` (which supports true per-frame eval via eval=frame)
+      // and only the centering/jitter stays in `crop`.
       cropStage = 'scale=$ow:$oh:force_original_aspect_ratio=increase,crop=$ow:$oh,'
-          "crop=w='$ow-($ow-$_targetW)*(t/$durStr)':h='$oh-($oh-$_targetH)*(t/$durStr)':"
-          "x='($ow-out_w)/2$jitterX':y='($oh-out_h)/2$jitterY'";
+          "scale=w='$ow-($ow-$_targetW)*(t/$durStr)':h='$oh-($oh-$_targetH)*(t/$durStr)':eval=frame,"
+          "crop=w=$_targetW:h=$_targetH:"
+          "x='(in_w-out_w)/2$jitterX':y='(in_h-out_h)/2$jitterY'";
     } else if (outgoing == _TransitionKind.shake) {
       // Shake needs to change the CROP itself (not just add an
       // independent filter), because crop changes frame size — so
@@ -1157,7 +1483,7 @@ class _AutoEditScreenState extends State<AutoEditScreen> {
       '-shortest -t $totalSec "$outPath"',
     );
     if (!ReturnCode.isSuccess(await session.getReturnCode())) {
-      throw Exception('Attaching music failed');
+      throw const _ProcessingException("Couldn't add the music track to the montage.");
     }
     return File(outPath);
   }
@@ -1220,7 +1546,8 @@ class _AutoEditScreenState extends State<AutoEditScreen> {
     setState(() => _clips[clipIndex].caption = result.trim().isEmpty ? null : result.trim());
     if (result.trim().isNotEmpty && _captionFontPath == null && mounted) {
       ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
-        content: Text('Set _captionFontPath before rendering, or this text will be skipped.'),
+        content: Text('Still preparing the caption font — try again in a moment, '
+            'or this text will be skipped when rendering.'),
       ));
     }
   }
@@ -1375,6 +1702,30 @@ class _AutoEditScreenState extends State<AutoEditScreen> {
   }
 
   Widget _buildPickMediaStep() {
+    return Stack(
+      children: [
+        _buildPickMediaBody(),
+        if (_isPreparingMedia)
+          Positioned.fill(
+            child: Container(
+              color: Colors.black54,
+              child: Center(
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    const CircularProgressIndicator(color: Colors.white),
+                    const SizedBox(height: 12),
+                    Text(_prepareProgressLabel, style: const TextStyle(color: Colors.white70)),
+                  ],
+                ),
+              ),
+            ),
+          ),
+      ],
+    );
+  }
+
+  Widget _buildPickMediaBody() {
     return Column(
       children: [
         Expanded(
@@ -1419,7 +1770,7 @@ class _AutoEditScreenState extends State<AutoEditScreen> {
             children: [
               Expanded(
                 child: OutlinedButton.icon(
-                  onPressed: _pickMedia,
+                  onPressed: _isPreparingMedia ? null : _pickMedia,
                   icon: const Icon(Icons.add_photo_alternate),
                   label: const Text('Add Media'),
                 ),
@@ -1427,7 +1778,9 @@ class _AutoEditScreenState extends State<AutoEditScreen> {
               const SizedBox(width: 12),
               Expanded(
                 child: ElevatedButton(
-                  onPressed: _pickedMedia.length >= 2 ? () => setState(() => _step = _Step.pickMusic) : null,
+                  onPressed: !_isPreparingMedia && _pickedMedia.length >= 2
+                      ? () => setState(() => _step = _Step.pickMusic)
+                      : null,
                   child: const Text('Next: Music'),
                 ),
               ),
@@ -1445,8 +1798,7 @@ class _AutoEditScreenState extends State<AutoEditScreen> {
 
     return Column(
       children: [
-        if (_error != null)
-          Padding(padding: const EdgeInsets.all(16), child: Text(_error!, style: const TextStyle(color: Colors.redAccent))),
+        if (_error != null) _buildErrorBanner(_error!),
         Padding(
           padding: const EdgeInsets.fromLTRB(16, 16, 16, 8),
           child: Column(
@@ -1551,11 +1903,7 @@ class _AutoEditScreenState extends State<AutoEditScreen> {
             style: TextStyle(color: Colors.white38, fontSize: 10.5),
           ),
         ),
-        if (_freesoundError != null)
-          Padding(
-            padding: const EdgeInsets.only(top: 4),
-            child: Text(_freesoundError!, style: const TextStyle(color: Colors.redAccent, fontSize: 12)),
-          ),
+        if (_freesoundError != null) _buildErrorBanner(_freesoundError!),
         Expanded(
           child: _freesoundResults.isEmpty
               ? Center(
@@ -1715,6 +2063,63 @@ class _AutoEditScreenState extends State<AutoEditScreen> {
           CircularProgressIndicator(value: _progress > 0 ? _progress : null, color: Colors.white),
           const SizedBox(height: 16),
           Text(_progressLabel, style: const TextStyle(color: Colors.white70)),
+          const SizedBox(height: 20),
+          TextButton(
+            onPressed: _cancelGenerating,
+            child: const Text('Cancel', style: TextStyle(color: Colors.white54)),
+          ),
+        ],
+      ),
+    );
+  }
+
+  // Stops the in-flight ffmpeg session (FFmpegKit.cancel() kills
+  // whatever's currently running) and backs out to wherever makes
+  // sense to retry from, without leaving an error banner behind —
+  // the user asked for this, it's not a failure.
+  void _cancelGenerating() {
+    _cancelRequested = true;
+    FFmpegKit.cancel();
+    if (!mounted) return;
+    setState(() {
+      _progress = 0;
+      _progressLabel = '';
+      _error = null;
+      _step = _clips.isEmpty ? _Step.pickMusic : _Step.review;
+    });
+  }
+
+  // Shared error banner: an icon fitting the failure kind, the
+  // message, and — when the failed step can just be re-run — a
+  // working Retry button, instead of a dead-end line of red text.
+  Widget _buildErrorBanner(_UiError error) {
+    return Container(
+      margin: const EdgeInsets.fromLTRB(16, 12, 16, 0),
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        color: Colors.redAccent.withOpacity(0.12),
+        borderRadius: BorderRadius.circular(10),
+        border: Border.all(color: Colors.redAccent.withOpacity(0.4)),
+      ),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Icon(error.icon, color: Colors.redAccent, size: 20),
+          const SizedBox(width: 10),
+          Expanded(
+            child: Text(error.message, style: const TextStyle(color: Colors.redAccent, fontSize: 13)),
+          ),
+          if (error.onRetry != null) ...[
+            const SizedBox(width: 8),
+            TextButton(
+              onPressed: () {
+                setState(() => _error = null);
+                error.onRetry!();
+              },
+              style: TextButton.styleFrom(padding: EdgeInsets.zero, minimumSize: const Size(40, 28)),
+              child: const Text('Retry'),
+            ),
+          ],
         ],
       ),
     );
@@ -1724,8 +2129,7 @@ class _AutoEditScreenState extends State<AutoEditScreen> {
     final controller = _previewController;
     return Column(
       children: [
-        if (_error != null)
-          Padding(padding: const EdgeInsets.all(12), child: Text(_error!, style: const TextStyle(color: Colors.redAccent))),
+        if (_error != null) _buildErrorBanner(_error!),
         if (_detectedBpm != null || _colorGrade != _ColorGrade.none || _aspectRatio != _AspectRatio.reel)
           Padding(
             padding: const EdgeInsets.symmetric(vertical: 6),

@@ -5,7 +5,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:shared_preferences/shared_preferences.dart';
-import '../api_service.dart';
+import '../services/api_service.dart';
 
 enum _MediaType { image, video }
 
@@ -56,6 +56,10 @@ class _QuickTextPostState extends State<QuickTextPost> with TickerProviderStateM
   static const int _maxMedia = 6;
   static const String _draftKey = 'quick_post_draft_text';
   static const String _draftTimeKey = 'quick_post_draft_time';
+  // TASK 7 — same 20MB cutoff as new_post.dart's `_chunkedUploadThreshold`;
+  // above this, a single attachment goes through the chunked/resumable
+  // upload path instead of one big multipart request.
+  static const int _chunkedUploadThreshold = 20 * 1024 * 1024; // 20MB
 
   final _contentController = TextEditingController();
   final _apiService = ApiService();
@@ -447,19 +451,60 @@ class _QuickTextPostState extends State<QuickTextPost> with TickerProviderStateM
       final hashtagRegex = RegExp(r'#(\w+)');
       final hashtags = hashtagRegex.allMatches(text).map((m) => m.group(1)!).toList();
 
-      final result = await _apiService.createPost(
-        title: '',
-        content: text,
-        category: _category!,
-        subcategory: null,
-        postType: _hasVideo ? 'video' : (_mediaItems.isNotEmpty ? 'media' : 'text'),
-        visibility: _visibility,
-        hashtags: hashtags,
-        mediaFiles: _mediaItems.isNotEmpty ? _mediaItems.map((m) => m.file).toList() : null,
-        mediaTypes: _mediaItems.isNotEmpty
-            ? _mediaItems.map((m) => m.type == _MediaType.video ? 'video' : 'image').toList()
-            : null,
-      );
+      // TASK 7 — chunked-upload parity with new_post.dart. Same rule as
+      // there: a single attachment over the 20MB threshold goes through
+      // the resumable chunked path instead of one big multipart POST, so
+      // a large video doesn't time out / can't resume on a flaky
+      // connection. Multiple attachments (or anything under the
+      // threshold) keep using plain multipart `createPost` — Quick
+      // Post's whole point is speed, so we don't force every tiny image
+      // through the heavier chunked flow.
+      final bool useChunkedUpload = _mediaItems.length == 1 &&
+          _mediaItems.first.file.lengthSync() > _chunkedUploadThreshold;
+
+      late final Map<String, dynamic> result;
+
+      if (useChunkedUpload) {
+        final item = _mediaItems.first;
+        result = await _apiService.createPostWithChunkedUpload(
+          file: item.file,
+          title: '',
+          content: text,
+          category: _category!,
+          subcategory: null,
+          postType: item.type == _MediaType.video ? 'video' : 'image',
+          visibility: _visibility,
+          hashtags: hashtags,
+          location: null,
+          pollOptions: null,
+          mediaCaption: '',
+          mediaType: item.type == _MediaType.video ? 'video' : 'image',
+          scheduledAt: null,
+          // Lightweight progress treatment: reuse the existing spinner +
+          // label on the Post button (`_loadingLabel`) instead of adding
+          // a separate progress ring like new_post.dart's full composer
+          // — Quick Post stays a single compact control.
+          onProgress: (progress) {
+            if (mounted) {
+              setState(() => _loadingLabel = 'Uploading ${(progress * 100).toStringAsFixed(0)}%');
+            }
+          },
+        );
+      } else {
+        result = await _apiService.createPost(
+          title: '',
+          content: text,
+          category: _category!,
+          subcategory: null,
+          postType: _hasVideo ? 'video' : (_mediaItems.isNotEmpty ? 'media' : 'text'),
+          visibility: _visibility,
+          hashtags: hashtags,
+          mediaFiles: _mediaItems.isNotEmpty ? _mediaItems.map((m) => m.file).toList() : null,
+          mediaTypes: _mediaItems.isNotEmpty
+              ? _mediaItems.map((m) => m.type == _MediaType.video ? 'video' : 'image').toList()
+              : null,
+        );
+      }
 
       if (!mounted) return;
       await _clearDraft();

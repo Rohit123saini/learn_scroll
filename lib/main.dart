@@ -1,382 +1,3 @@
-// import 'package:easy_audience_network_plus/easy_audience_network.dart';
-// import 'package:flutter/material.dart';
-
-// void main() => runApp(AdExampleApp());
-
-// class AdExampleApp extends StatelessWidget {
-//   @override
-//   Widget build(BuildContext context) {
-//     return MaterialApp(
-//       debugShowCheckedModeBanner: false,
-//       title: 'Audience Network Example',
-//       theme: ThemeData(
-//         primarySwatch: Colors.blue,
-//         buttonTheme: ButtonThemeData(
-//           textTheme: ButtonTextTheme.primary,
-//           buttonColor: Colors.blue,
-//         ),
-//       ),
-//       home: Scaffold(
-//         appBar: AppBar(
-//           title: Text(
-//             'Audience Network Example',
-//           ),
-//         ),
-//         body: AdsPage(),
-//       ),
-//     );
-//   }
-// }
-
-// class AdsPage extends StatefulWidget {
-//   final String idfa;
-
-//   const AdsPage({Key? key, this.idfa = ''}) : super(key: key);
-
-//   @override
-//   AdsPageState createState() => AdsPageState();
-// }
-
-// class AdsPageState extends State<AdsPage> {
-//   bool _isInterstitialAdLoaded = false;
-//   bool _isRewardedAdLoaded = false;
-//   InterstitialAd? _interstitialAd;
-//   RewardedAd? _rewardedAd;
-
-//   /// All widget ads are stored in this variable. When a button is pressed, its
-//   /// respective ad widget is set to this variable and the view is rebuilt using
-//   /// setState().
-//   Widget _currentAd = SizedBox(
-//     width: 0.0,
-//     height: 0.0,
-//   );
-
-//   @override
-//   void initState() {
-//     super.initState();
-
-//     // testingId is useful when you want to test if your implementation works in production
-//     // without getting real ads, I believe it does not work properly on iOS,
-//     // if you want to get your testingId, don't set any testingId and don't set testMode
-//     EasyAudienceNetwork.init(
-//       testingId: "b602d594afd2b0b327e07a06f36ca6a7e42546d0",
-//       testMode: true,
-//       iOSAdvertiserTrackingEnabled: true,
-//     ).then((_) {
-//       _loadInterstitialAd();
-//       _loadRewardedVideoAd();
-//     });
-//   }
-
-//   void _loadInterstitialAd() {
-//     final interstitialAd = InterstitialAd(InterstitialAd.testPlacementId);
-//     interstitialAd.listener = InterstitialAdListener(
-//       onLoaded: () {
-//         _isInterstitialAdLoaded = true;
-//         print('interstitial ad loaded');
-//       },
-//       onError: (code, message) {
-//         print('interstitial ad error\ncode = $code\nmessage = $message');
-//       },
-//       onDismissed: () {
-//         // load next ad already
-//         interstitialAd.destroy();
-//         _isInterstitialAdLoaded = false;
-//         _loadInterstitialAd();
-//       },
-//     );
-//     interstitialAd.load();
-//     _interstitialAd = interstitialAd;
-//   }
-
-//   void _loadRewardedVideoAd() {
-//     final rewardedAd = RewardedAd(RewardedAd.testPlacementId);
-//     rewardedAd.listener = RewardedAdListener(
-//       onLoaded: () {
-//         _isRewardedAdLoaded = true;
-//         print('rewarded ad loaded');
-//       },
-//       onError: (code, message) {
-//         print('rewarded ad error\ncode = $code\nmessage = $message');
-//       },
-//       onVideoClosed: () {
-//         // load next ad already
-//         rewardedAd.destroy();
-//         _isRewardedAdLoaded = false;
-//         _loadRewardedVideoAd();
-//       },
-//     );
-//     rewardedAd.load();
-//     _rewardedAd = rewardedAd;
-//   }
-
-//   @override
-//   Widget build(BuildContext context) {
-//     return Column(
-//       mainAxisAlignment: MainAxisAlignment.start,
-//       crossAxisAlignment: CrossAxisAlignment.center,
-//       children: <Widget>[
-//         Flexible(
-//           child: Align(
-//             alignment: Alignment(0, -1.0),
-//             child: Padding(
-//               padding: EdgeInsets.all(16),
-//               child: _getAllButtons(),
-//             ),
-//           ),
-//           fit: FlexFit.tight,
-//           flex: 2,
-//         ),
-//         // Column(children: <Widget>[
-//         //   _nativeAd(),
-//         //   // _nativeBannerAd(),
-//         //   _nativeAd(),
-//         // ],),
-//         Flexible(
-//           child: Align(
-//             alignment: Alignment(0, 1.0),
-//             child: _currentAd,
-//           ),
-//           fit: FlexFit.tight,
-//           flex: 3,
-//         )
-//       ],
-//     );
-//   }
-
-//   Widget _getAllButtons() {
-//     return GridView.count(
-//       shrinkWrap: true,
-//       crossAxisCount: 2,
-//       childAspectRatio: 3,
-//       children: <Widget>[
-//         _getRaisedButton(title: "Banner Ad", onPressed: _showBannerAd),
-//         _getRaisedButton(title: "Native Ad", onPressed: _showNativeAd),
-//         _getRaisedButton(
-//             title: "Native Banner Ad", onPressed: _showNativeBannerAd),
-//         _getRaisedButton(
-//             title: "Intestitial Ad", onPressed: _showInterstitialAd),
-//         _getRaisedButton(title: "Rewarded Ad", onPressed: _showRewardedAd),
-//       ],
-//     );
-//   }
-
-//   Widget _getRaisedButton({required String title, void Function()? onPressed}) {
-//     return Padding(
-//       padding: EdgeInsets.all(8),
-//       child: ElevatedButton(
-//         onPressed: onPressed,
-//         child: Text(
-//           title,
-//           textAlign: TextAlign.center,
-//         ),
-//       ),
-//     );
-//   }
-
-//   _showInterstitialAd() {
-//     final interstitialAd = _interstitialAd;
-
-//     if (interstitialAd != null && _isInterstitialAdLoaded == true)
-//       interstitialAd.show();
-//     else
-//       print("Interstial Ad not yet loaded!");
-//   }
-
-//   _showRewardedAd() {
-//     final rewardedAd = _rewardedAd;
-
-//     if (rewardedAd != null && _isRewardedAdLoaded) {
-//       rewardedAd.show();
-//     } else {
-//       print("Rewarded Ad not yet loaded!");
-//     }
-//   }
-
-//   _showBannerAd() {
-//     setState(() {
-//       _currentAd = BannerAd(
-//         placementId: BannerAd.testPlacementId,
-//         bannerSize: BannerSize.STANDARD,
-//         listener: BannerAdListener(
-//           onError: (code, message) =>
-//               print('banner ad error\ncode: $code\nmessage:$message'),
-//           onLoaded: () => print('banner ad loaded'),
-//         ),
-//       );
-//     });
-//   }
-
-//   _showNativeBannerAd() {
-//     setState(() {
-//       _currentAd = _nativeBannerAd();
-//     });
-//   }
-
-//   Widget _nativeBannerAd() {
-//     return NativeAd(
-//       placementId: NativeAd.testPlacementId,
-//       adType: NativeAdType.NATIVE_BANNER_AD,
-//       bannerAdSize: NativeBannerAdSize.HEIGHT_100,
-//       width: double.infinity,
-//       backgroundColor: Colors.blue,
-//       titleColor: Colors.white,
-//       descriptionColor: Colors.white,
-//       buttonColor: Colors.deepPurple,
-//       buttonTitleColor: Colors.white,
-//       buttonBorderColor: Colors.white,
-//       listener: NativeAdListener(
-//         onError: (code, message) =>
-//             print('native banner ad error\ncode: $code\nmessage:$message'),
-//         onLoaded: () => print('native banner ad loaded'),
-//         onMediaDownloaded: () => 'native banner ad media downloaded',
-//       ),
-//     );
-//   }
-
-//   _showNativeAd() {
-//     setState(() {
-//       _currentAd = _nativeAd();
-//     });
-//   }
-
-//   Widget _nativeAd() {
-//     return NativeAd(
-//       placementId: NativeAd.testPlacementId,
-//       adType: NativeAdType.NATIVE_AD_VERTICAL,
-//       width: double.infinity,
-//       height: 300,
-//       backgroundColor: Colors.blue,
-//       titleColor: Colors.white,
-//       descriptionColor: Colors.white,
-//       buttonColor: Colors.deepPurple,
-//       buttonTitleColor: Colors.white,
-//       buttonBorderColor: Colors.white,
-//       listener: NativeAdListener(
-//         onError: (code, message) =>
-//             print('native ad error\ncode: $code\nmessage:$message'),
-//         onLoaded: () => print('native ad loaded'),
-//         onMediaDownloaded: () => 'native ad media downloaded',
-//       ),
-//       keepExpandedWhileLoading: true,
-//       expandAnimationDuraion: 1000,
-//     );
-//   }
-// }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-// import 'package:flutter/material.dart';
-// import 'package:shared_preferences/shared_preferences.dart';
-// import 'package:background_downloader/background_downloader.dart';
-// import 'login/login_screen.dart';
-// import 'home.dart';
-
-// void main() async {
-//   WidgetsFlutterBinding.ensureInitialized();
-//   await FileDownloader().start();
-//   await FileDownloader().configureNotification(
-//     running: TaskNotification('Downloading {filename}', '{progress}'),
-//     complete: TaskNotification('Download complete', '{filename}'),
-//     error: TaskNotification('Download failed', '{filename}'),
-//     progressBar: true,
-//     tapOpensFile: true,
-//   );
-//   runApp(const MyApp());
-// }
-
-// class MyApp extends StatelessWidget {
-//   const MyApp({super.key});
-//   Future<bool> _checkAuth() async {
-//     final prefs = await SharedPreferences.getInstance();
-//     final String? token = prefs.getString('access_token');
-//     return token!= null && token.isNotEmpty;
-//   }
-//   @override
-//   Widget build(BuildContext context) {
-//     return MaterialApp(
-//       debugShowCheckedModeBanner: false,
-//       title: 'LearnScroll App',
-//       home: FutureBuilder<bool>(
-//         future: _checkAuth(),
-//         builder: (context, snapshot) {
-//           if (snapshot.connectionState == ConnectionState.waiting) {
-//             return const Scaffold(body: Center(child: CircularProgressIndicator()));
-//           }
-//           if (snapshot.hasData && snapshot.data == true) {
-//             return const HomeScreen();
-//           } else {
-//             return const LoginScreen();
-//           }
-//         },
-//       ),
-//     );
-//   }
-// }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 import 'dart:developer' as developer;
 import 'package:flutter/material.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -385,16 +6,34 @@ import 'package:wakelock_plus/wakelock_plus.dart';
 import 'package:firebase_core/firebase_core.dart';
 import 'package:firebase_messaging/firebase_messaging.dart';
 import 'package:audioplayers/audioplayers.dart';
+import 'package:flutter_localizations/flutter_localizations.dart';
 import 'firebase_options.dart';
+import 'theme_service.dart';
+// 🔥 NAYA (Task 2 — i18n) — language state (theme_service.dart jaisa
+// pattern) + `flutter gen-l10n` se generated strings class.
+// `l10n.yaml` me `synthetic-package: false` set hai isliye ye seedha
+// `lib/l10n/` me generate hota hai — relative import se aa jaata hai,
+// alag package import ki zaroorat nahi.
+import 'language_service.dart';
+import 'l10n/app_localizations.dart';
 import 'login/login_screen.dart';
 import 'home.dart';
+// 🔥 TASK 8 — force-logout hook + app-wide navigatorKey.
+import 'services/auth_service.dart';
+import 'services/session_service.dart';
 import 'message/services/push_notification_service.dart';
 import 'message/services/call_kit_service.dart';
 import 'message/services/call_manager.dart';
 import 'message/screens/call_screen.dart';
 import 'message/widgets/minimized_call_bar.dart';
 
-final navigatorKey = GlobalKey<NavigatorState>();
+// ⚠️ `navigatorKey` ab yahan declare NAHI hota — wo `session_service.dart`
+// me hai aur is file me import se aata hai. Wajah: home.dart ko bhi wahi key
+// chahiye (session expire hone pe login pe redirect karne ke liye), aur agar
+// dono files apni-apni key banayein to MaterialApp sirf EK se attach hoga —
+// doosri ka `.currentState` hamesha null rahega aur redirect chupchaap fail
+// ho jaayega. CallKitService, call-screen push, sab wahi ek key use karte
+// hain — inke liye kuch nahi badla.
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -495,6 +134,24 @@ void main() async {
   }
 
   await WakelockPlus.disable();
+
+  // Theme preference load karo runApp se pehle taaki pehla frame hi
+  // saved mode (light/dark) me render ho — flash of wrong theme na dikhe.
+  try {
+    await ThemeService.instance.init();
+  } catch (e) {
+    developer.log("ThemeService init failed: $e");
+  }
+
+  // 🔥 NAYA — saved language load karo runApp se pehle taaki pehla frame
+  // hi saved language me render ho, aur `timeago` locale messages bhi
+  // yahin register ho jaayein (dekhein LanguageService._registerTimeagoLocales).
+  try {
+    await LanguageService.instance.init();
+  } catch (e) {
+    developer.log("LanguageService init failed: $e");
+  }
+
   runApp(const MyApp());
 }
 
@@ -509,6 +166,14 @@ class _MyAppState extends State<MyApp> with WidgetsBindingObserver {
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
+
+    // 🔥 TASK 8.2 — refresh-token khud mar jaaye to AuthService._doRefresh()
+    // ye callback maarta hai. Yahan se seedha navigate NAHI karna: home
+    // screen ko pehle 3 second ka "Session expired" banner dikhana hai, wo
+    // logic home.dart me hai. Yahan sirf global flag set hota hai.
+    AuthService.onForceLogout = () {
+      SessionService.markExpired();
+    };
   }
 
   @override
@@ -551,37 +216,79 @@ class _MyAppState extends State<MyApp> with WidgetsBindingObserver {
 
   @override
   Widget build(BuildContext context) {
-    return MaterialApp(
-      navigatorKey: navigatorKey,
-      debugShowCheckedModeBanner: false,
-      title: 'LearnScroll App',
-      theme: ThemeData(
-        useMaterial3: true,
-        scaffoldBackgroundColor: const Color(0xFF0F0F11),
-      ),
-      // 🔥 NAYA — WhatsApp-style floating call bar jo call minimize karne
-      // ke baad app ke UPAR, kisi bhi screen pe, hamesha dikhta hai.
-      builder: (context, child) {
-        return Stack(
-          children: [
-            if (child != null) child,
-            const MinimizedCallBar(),
-          ],
+    // 🔥 NAYA — theme_service.dart ke ValueNotifier<ThemeMode> ko sunte
+    // hain taaki ThemeService.instance.toggle()/setThemeMode() call hote
+    // hi poori app turant rebuild ho jaaye, bina context lookup ke.
+    // Purana hardcoded `theme: ThemeData(scaffoldBackgroundColor: Color(0xFF0F0F11))`
+    // yahin se AppTheme.dark (design tokens ke saath) me replace hua hai.
+    return ValueListenableBuilder<ThemeMode>(
+      valueListenable: ThemeService.instance.themeMode,
+      builder: (context, mode, child) {
+        // 🔥 NAYA (Task 2 — i18n) — `ThemeMode` ValueListenableBuilder ke
+        // andar hi `Locale` waala nest kiya hai (bilkul same pattern) taaki
+        // `LanguageService.instance.setLocale()` call hote hi bhi poori app
+        // turant naye language me rebuild ho jaaye — koi context lookup
+        // ya extra InheritedWidget ki zaroorat nahi.
+        return ValueListenableBuilder<Locale>(
+          valueListenable: LanguageService.instance.locale,
+          builder: (context, locale, child) {
+            return MaterialApp(
+              navigatorKey: navigatorKey,
+              debugShowCheckedModeBanner: false,
+              title: 'LearnScroll App',
+              theme: AppTheme.light,
+              darkTheme: AppTheme.dark,
+              themeMode: mode,
+              // 🔥 NAYA — i18n wiring. `locale:` LanguageService se bound
+              // hai, `supportedLocales` waahi 10-language list hai jo
+              // language_service.dart me maintain hoti hai.
+              localizationsDelegates: const [
+                AppLocalizations.delegate,
+                GlobalMaterialLocalizations.delegate,
+                GlobalWidgetsLocalizations.delegate,
+                GlobalCupertinoLocalizations.delegate,
+              ],
+              supportedLocales: LanguageService.supportedLocales,
+              locale: locale,
+              // 🔥 TASK 8.3 — home.dart session expire hone pe
+              // `pushNamedAndRemoveUntil('/login', ...)` call karta hai,
+              // isliye ye named route register hona ZAROORI hai. Pehle
+              // `routes:` map tha hi nahi, to wo call exception deti.
+              routes: {
+                '/login': (_) => const LoginScreen(),
+                '/home': (_) => const HomeScreen(),
+              },
+              // 🔥 NAYA — WhatsApp-style floating call bar jo call minimize karne
+              // ke baad app ke UPAR, kisi bhi screen pe, hamesha dikhta hai.
+              builder: (context, child) {
+                return Stack(
+                  children: [
+                    if (child != null) child,
+                    const MinimizedCallBar(),
+                  ],
+                );
+              },
+              home: FutureBuilder<bool>(
+                future: _checkAuth(),
+                builder: (context, snapshot) {
+                  // Pehle `AsyncSnapshot.waiting().connectionState` likha tha
+                  // — kaam to karta tha (ek throwaway snapshot bana ke uska
+                  // enum padhna), par seedha enum compare karna wahi cheez
+                  // saaf tarike se karta hai.
+                  if (snapshot.connectionState == ConnectionState.waiting) {
+                    return const Scaffold(body: Center(child: CircularProgressIndicator()));
+                  }
+                  if (snapshot.hasData && snapshot.data == true) {
+                    return const HomeScreen();
+                  } else {
+                    return const LoginScreen();
+                  }
+                },
+              ),
+            );
+          },
         );
       },
-      home: FutureBuilder<bool>(
-        future: _checkAuth(),
-        builder: (context, snapshot) {
-          if (snapshot.connectionState == AsyncSnapshot.waiting().connectionState) {
-            return const Scaffold(body: Center(child: CircularProgressIndicator()));
-          }
-          if (snapshot.hasData && snapshot.data == true) {
-            return const HomeScreen();
-          } else {
-            return const LoginScreen();
-          }
-        },
-      ),
     );
   }
 }

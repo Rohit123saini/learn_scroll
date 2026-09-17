@@ -231,6 +231,185 @@
 > **optimistic-update** pattern in the account-wide screen group — every
 > sibling screen in that group reloads from the server after a mutation
 > instead — see §6.6 for detail.
+>
+> **Latest pass (this revision)** re-uploaded the module's four shared/
+> utility files again — `liveclass_theme.dart`, `liveclass_datetime.dart`,
+> `liveclass_upload_limits.dart`, `liveclass_models.dart` — no screens.
+> Three of the four (`liveclass_datetime.dart`, `liveclass_upload_limits.dart`,
+> and everything in `liveclass_models.dart` already covered by the prior
+> pass's condensed pointers) are confirmed **unchanged, token-for-token**
+> — no drift there. **The fourth, `liveclass_theme.dart`, is not fully
+> unchanged this time: `LiveClassCard` gained four new optional override
+> params** (`borderRadius`/`boxShadow`/`border`/`clipBehavior`, all
+> backward-compatible defaults) — see §2.2, §11 item 24. This is the
+> code-side fix for half of item 2's tracked design-system drift (the
+> hand-rolled-`Container`+`BoxShadow`-card flavor specifically), but **not
+> confirmed applied anywhere yet** — none of the three screens carrying
+> that flavor were re-uploaded this pass. Separately, `liveclass_models.dart`
+> surfaced one real finding worth flagging even though the file itself
+> reads as unchanged: **`SessionCaptionLine`/`SessionReactionSummary`
+> were never previously catalogued in this doc, and they describe real
+> backend-persisted captions/reactions endpoints that directly contradict
+> §6.4's confirmed line-by-line read of `live_session_screen.dart`**
+> (which states both features are ephemeral, peer-to-peer-only over the
+> LiveKit data channel, with captions explicitly "nothing sent to any
+> server, nothing persists" and reactions "confirmed not backed by any
+> model field"). Not resolved either way — `live_session_screen.dart`
+> wasn't part of this pass's uploads — see §4, §11 item 25.
+>
+> **Latest pass (this revision)** re-uploaded eight already-✅-tagged
+> files — `banned_students_screen.dart`, `certificates_screen.dart`,
+> `chat_message_reports_screen.dart`, `classroom_purchases_screen.dart`,
+> `classroom_recordings_screen.dart`, `coin_wallet_screen.dart`,
+> `doubts_screen.dart`, and `pip_service.dart` — to verify their existing
+> write-ups still match source. Six of the eight (Banned Students,
+> Recordings, Chat Message Reports, Doubts, Certificates, PiP Service)
+> read as **unchanged, token-for-token**, from what's already written up
+> in §5.4/§6.2/§6.4/§6.5 — no drift, no new findings, carried forward as-is.
+> **The other two both show real, confirmed code changes since their last
+> read:**
+> (1) **`coin_wallet_screen.dart`** — the transaction-tile missing-`context`
+> locale bug tracked as a genuinely open, unfixed finding at §11 item 21
+> has now been **fixed**: the date line's `liveClassFmtDateTime` call now
+> passes `context` through, per the file's own new `FIX` comment (which
+> names `my_reminders_screen.dart`/`notice_board_screen.dart` as the
+> screens it now matches). §6.6 and §11 item 21 are updated to mark this
+> resolved in code, not just in the doc; the cross-references at
+> `ScheduleManagerScreen`'s (§6.2) and `ReferralScreen`'s (§6.6) own
+> instances of this same bug are updated too, since the "how many screens
+> still have this bug live" count drops from three to two now that
+> `CoinWalletScreen`'s is fixed.
+> (2) **`classroom_purchases_screen.dart`** — one of the three screens
+> named in §11 item 24 as a candidate for `LiveClassCard`'s new override
+> params, and previously documented (§6.3) as still hand-rolling its own
+> card `Container`+`BoxShadow`. That hand-rolled card is now **replaced**
+> with a plain, default-args `LiveClassCard`, per the file's own new `🔴
+> FIX` comment, which confirms the swap is visually identical to the old
+> hand-rolled decoration (so none of the four new override params were
+> actually needed here — the shared defaults already matched). This is
+> the first of the three screens named in item 24 to have that fix
+> confirmed landed; `ClassroomReportsScreen` and `NoticeBoardScreen`
+> still carry the old pattern as far as this doc knows. **Not a full fix,
+> though:** the screen's empty state is still a bare `ListView`+
+> `Center(Text(...))`, not `LiveClassEmptyState` — that half of the
+> original drift finding is unchanged. §6.3, §8.5, and §11 item 2 are
+> updated to reflect the partial fix and the revised running count.
+>
+> **Latest pass (this revision)** re-uploaded five more files —
+> `holidays_screen.dart`, `liveclass_home_screen.dart`,
+> `materials_screen.dart`, `join_requests_screen.dart`, and
+> `live_session_screen.dart` — to check for drift. Three of the five
+> (Holidays, Home Screen, Materials) read as **unchanged,
+> token-for-token**, from their existing §6.1/§6.2/§6.5 write-ups.
+> `live_session_screen.dart` (still the largest file in the module) was
+> re-uploaded but not re-read line-by-line this pass given its size — its
+> existing §6.4 write-up is carried forward as-is, not independently
+> re-verified against this specific upload. **`join_requests_screen.dart`
+> was read line-by-line in full for the first time — promoted 📋 → ✅.**
+> §0 coverage moves 39✅/5📋 → **40✅/4📋**. Full write-up added in §6.3,
+> replacing the old "unchanged, carries forward" placeholder. Three
+> design-system fixes surfaced along the way, none previously documented
+> since the file had never been read: the same hex-literal-aliasing fix
+> already seen on `classroom_purchases_screen.dart`/`wishlist_screen.dart`;
+> a combined timezone + missing-`context` locale fix in one wrapper
+> function; and a **genuinely new pattern for this doc** — a deprecated
+> `Color.withOpacity` → `withValues(alpha:)` swap, which per the fixing
+> file's own comment was already independently applied on
+> `coin_wallet_screen.dart`/`coupons_screen.dart` before this doc ever
+> tracked it. New §8.11 and §11 item 27 cover this. The file also fully
+> clears itself of the §8.5/§11.2 structural-drift pattern (loading/error/
+> empty states and both card widgets now on the shared design system) —
+> see §6.3 for the one caveat (a plain `AppBar`+`TabBar` combination left
+> uncounted rather than guessed at as a drift flavor).
+>
+> **Latest pass (this revision)** re-uploaded all ten files from the
+> "closes the last three claimed-✅-no-body gaps" pass and its
+> predecessor — `referral_screen.dart`, `request_join_screen.dart`,
+> `session_engagement_report_screen.dart`, `staff_management_screen.dart`,
+> `teacher_earnings_screen.dart`, `wishlist_screen.dart`,
+> `schedule_manager_screen.dart`, `sessions_list_screen.dart`,
+> `submission_grading_screen.dart`, and `waitlist_screen.dart` — to check
+> for drift. **Four read as unchanged, token-for-token:**
+> `referral_screen.dart`, `request_join_screen.dart`,
+> `staff_management_screen.dart`, `teacher_earnings_screen.dart` — no new
+> findings, existing §6.2/§6.3/§6.6 write-ups carried forward as-is.
+> **`session_engagement_report_screen.dart` and
+> `submission_grading_screen.dart`** are also unchanged in logic, but both
+> expose the **same pre-existing doc overclaim**: their §6.4 write-ups
+> state each screen "uses the shared … `LiveClassEmptyState` … throughout,"
+> but neither file actually references `LiveClassEmptyState` anywhere —
+> each hand-rolls its own inner empty-list block instead (a bare
+> `Padding`+`Center(Text(...))` for a completed session with no attendance
+> rows, and a bare `Icon`+`Center(Text('No submissions yet'))` for an
+> assignment with none) since the overall "load failed" state on these
+> read-only dashboards is already covered by `LiveClassErrorState`, not
+> `LiveClassEmptyState`. Not a functional bug — just a doc claim that
+> didn't match either source when actually checked; both call sites are
+> corrected below (§6.4) rather than carried forward uncorrected.
+>
+> **The other four all show real, confirmed code changes since their last
+> read — three of them land the `LiveClassCard` override params (§2.2,
+> §11 item 24) on screens not previously named as candidates for that
+> fix:**
+> (1) **`schedule_manager_screen.dart`** — three fixes in one file: the
+> `_fmtDate` wrapper now takes and forwards `[BuildContext? context]` (was
+> flagged live/unfixed at §11 item 21 — now fixed, every call site passes
+> `context`); the Hindi `' se aage'` string leak is gone, replaced with
+> English "onwards" (§8.10); and the schedule card is now a plain
+> `LiveClassCard` instead of a hand-rolled `Container`+`BoxShadow`, per the
+> file's own `🔴 FIX` comment. **Not fixed:** the screen's own local
+> `_decoration()` `InputDecoration` helper is still hand-rolled, not
+> `liveClassInputDecoration` — this file stays on the flavor-3 drift list
+> for that reason alone.
+> (2) **`sessions_list_screen.dart`** — the session card is now a plain
+> `LiveClassCard` (was hand-rolled `Container`+`BoxShadow`), per an
+> in-file `🔴 FIX` comment. Everything else re-confirmed unchanged: the
+> extensive Hindi string leak in `_ReminderSheet` ("Wapas," "`N` din/ghante/min
+> pehle," "Reminder Hataayein," "Kitni der pehle?," "Kaise batayein?"), the
+> `isJoinable` host-bypass logic, the `url_launcher` recording hand-off,
+> and the correctly-`context`-threaded `_fmtDate`/`_fmtTime`/`_fmtWeekdayShort`
+> helpers. The date-strip day chips and the empty state remain hand-rolled
+> (`Container`s and a bare `ListView`+`Center(Text)` respectively) — only
+> the session card itself moved onto the shared widget.
+> (3) **`waitlist_screen.dart`** — two fixes: its local `_fmtRelative`
+> duplicate (flagged in its own §6.4 write-up as "worth a spot-check
+> against §11 item 8") is now gone — both call sites use the shared
+> `liveClassFmtRelative` directly, per the file's own `🔴 FIX` comment;
+> and **both** card variants (`_manageCard`/`_studentCard`) are now
+> `LiveClassCard`, using the new `borderRadius`/`boxShadow` override params
+> on the manage card (to preserve its denser, tighter-radius row look) and
+> the new `border` override on the student card (for its conditional
+> green "seat opened" highlight) — per the file's own comments, this is
+> exactly why that card couldn't migrate until `LiveClassCard` gained
+> those params. **Not fixed:** the empty state is still a bare
+> `ListView`+`Center(Text)`, not `LiveClassEmptyState`.
+> (4) **`wishlist_screen.dart`** — `_WishlistCard`'s hand-rolled
+> `Container`+`BoxShadow` is now a `LiveClassCard`, using the new
+> `borderRadius`/`boxShadow`/`clipBehavior` override params (the
+> full-bleed cover image needs `clipBehavior: Clip.antiAlias` to still
+> clip to the rounded corners) — the first confirmed use of the
+> `clipBehavior` override anywhere in the module. **Not fixed:** the empty
+> state is still a bare `ListView`+`Center` block, not `LiveClassEmptyState`.
+>
+> **Net effect:** §11 item 24's "not confirmed applied anywhere yet" is
+> now wrong on two counts — `waitlist_screen.dart` and
+> `wishlist_screen.dart` both confirmed using the new override params,
+> neither of which was on that item's original three-screen candidate
+> list (`ClassroomPurchasesScreen`/`ClassroomReportsScreen`/
+> `NoticeBoardScreen`, all three still unconfirmed/unfixed as far as this
+> doc knows). §11 item 21 (missing-`context` locale bug) drops from "two
+> remaining confirmed live instances" to **one** — only
+> `referral_screen.dart`'s `liveClassFmtDate(p.purchasedAt)` call is still
+> unfixed; `schedule_manager_screen.dart`'s is now fixed. §11 item 8
+> (`_fmtRelative` duplication) is updated to reflect `waitlist_screen.dart`
+> as a second confirmed-fixed instance alongside `notifications_screen.dart`.
+> §11 item 2 / §8.5's drift tally is updated: three more screens
+> (`ScheduleManagerScreen`, `SessionsListScreen`, `WaitlistScreen`,
+> `WishlistScreen` — four, not three) now have their card chrome on
+> `LiveClassCard`, each with a smaller residual gap left open (a hand-rolled
+> `_decoration()` helper, or a still-hand-rolled empty state) — see §6.2/§6.4/
+> §6.6/§8.5/§11 for the updated per-file detail. No change to §0's ✅/📋
+> counts — all ten files were already ✅ before this pass.
 
 ---
 
@@ -249,7 +428,7 @@ Every screen/file section below is tagged:
   without re-deriving it from the API service / model shapes that
   **are** verified, or asking for the specific detail needed.
 
-**✅ VERIFIED files (39):** liveclass_theme.dart, liveclass_datetime.dart,
+**✅ VERIFIED files (40):** liveclass_theme.dart, liveclass_datetime.dart,
 liveclass_models.dart, liveclass_api_service.dart,
 liveclass_notification_handler.dart, liveclass_home_screen.dart,
 banned_students_screen.dart, certificates_screen.dart,
@@ -267,22 +446,23 @@ classroom_detail_screen.dart, live_session_screen.dart,
 pip_service.dart, liveclass_upload_limits.dart,
 assignments_screen.dart, classroom_form_screen.dart,
 classroom_reports_screen.dart,
-**my_passes_screen.dart, notice_board_screen.dart**.
+my_passes_screen.dart, notice_board_screen.dart, **join_requests_screen.dart**.
 
-**📋 SUMMARY-LEVEL files (5):** coupons_screen.dart, explore_screen.dart,
-join_requests_screen.dart, pass_gift_claim_screen.dart,
+**📋 SUMMARY-LEVEL files (4):** coupons_screen.dart, explore_screen.dart,
+pass_gift_claim_screen.dart,
 pass_management_screen.dart.
 
 If future work touches a 📋 file in a way that needs exact current state,
 that gap should be surfaced explicitly. The two biggest, highest-uncertainty
 files in the module (`classroom_detail_screen.dart`, the true hub, and
 `live_session_screen.dart`, the largest file) are now both ✅, and — as of
-this pass — every screen that reads as architecturally load-bearing
+a prior pass — every screen that reads as architecturally load-bearing
 (create/edit flow, coursework, moderation queues) is also ✅. **This pass
-promotes `my_passes_screen.dart` and `notice_board_screen.dart` from 📋 to
-✅ (see the top-of-doc revision note, §6.3, §6.5).** The 5
+promotes `join_requests_screen.dart` from 📋 to ✅** (see the top-of-doc
+revision note, §6.3) — a prior pass promoted `my_passes_screen.dart` and
+`notice_board_screen.dart` the same way. The 4
 screens still remaining are all narrower, lower-traffic flows
-(`coupons_screen.dart`, `explore_screen.dart`, `join_requests_screen.dart`,
+(`coupons_screen.dart`, `explore_screen.dart`,
 `pass_gift_claim_screen.dart`, `pass_management_screen.dart`); remaining
 gaps in them are private method names / exact widget trees, not
 architecture-level unknowns.
@@ -332,7 +512,8 @@ External touchpoints (outside `lib/liveclass/`):
 
 ## 2. Design System — `theme/liveclass_theme.dart` ✅
 
-*(re-uploaded and re-read again this pass — still unchanged, token-for-token, from the documentation below.)*
+*(re-uploaded and re-read again this pass — mostly unchanged, EXCEPT
+`LiveClassCard` gained four new optional override params; see §2.2.)*
 
 ### 2.1 Tokens
 
@@ -360,12 +541,30 @@ class LiveClassRadius  { card=14, chip=10, sheet=18 }
 |---|---|---|
 | `liveClassAppBar` | `AppBar liveClassAppBar(String title, {List<Widget>? actions, Widget? leading})` | White bg, navy fg, elevation 0.5, bold 16px single-line ellipsized title |
 | `liveClassInputDecoration` | `InputDecoration liveClassInputDecoration(String hint, {String? label})` | filled grey50, chip-radius border, navy 1.4px focus border, dense |
-| `LiveClassCard` | `LiveClassCard({child, padding = EdgeInsets.all(14), margin = EdgeInsets.only(bottom: 12), onTap})` | White rounded (14) container w/ cardShadow; wraps in `InkWell` only if `onTap` given |
+| `LiveClassCard` | `LiveClassCard({child, padding = EdgeInsets.all(14), margin = EdgeInsets.only(bottom: 12), onTap, borderRadius, boxShadow, border, clipBehavior = Clip.none})` | White rounded (14) container w/ cardShadow; wraps in `InkWell` only if `onTap` given. 🔴 **Updated this pass** — see the note directly below the table |
 | `LiveClassIconBadge` | `LiveClassIconBadge({icon, size=42, gradient, color})` | Rounded-square icon chip; default = the orange→pink gradient fill, white icon |
 | `LiveClassStatusChip` | `LiveClassStatusChip({label, color, background})` | Small bold pill, 10.5px |
 | `LiveClassEmptyState` | `{icon=Icons.inbox_outlined, title, subtitle, actionLabel, onAction}` | Returns a `ListView` (so pull-to-refresh still works over an empty list) |
 | `LiveClassErrorState` | `{message, onRetry}` | Returns a `ListView` w/ error icon + retry button |
 | `LiveClassLoading` | no args | Centered `CircularProgressIndicator(color: navy)` |
+
+🔴 **New this pass — `LiveClassCard` gained four optional overrides**
+(`borderRadius`, `boxShadow`, `border`, `clipBehavior`), all defaulting to
+exactly what the widget already hardcoded, so every existing call site
+renders byte-identical to before. The file's own header comment on the
+class explains why: several of the module's hand-rolled-card screens
+(§8.5/§11.2's tracked "10 screens" group) need a slightly different
+radius, a lighter/heavier shadow, or a conditional highlight border (e.g.
+a green border once a waitlist seat opens up) that the old fixed-shape
+widget had no way to express — a straight swap to `LiveClassCard` would
+have silently dropped that visual signal, which is presumably *why* those
+screens went with a hand-rolled `Container` in the first place rather
+than out of neglect. This is a **fix now available**, same status as
+`liveClassFmtRelative`/§11 item 8 — none of the tracked hand-rolled-card
+screens (`ClassroomPurchasesScreen`, `ClassroomReportsScreen`,
+`NoticeBoardScreen`) were re-uploaded this pass, so it's **not confirmed**
+that any of them have actually been migrated to use these new overrides
+instead of their own `Container`+`BoxShadow`. See §11 item 24.
 
 **Note (confirmed again this pass):** `classroom_detail_screen.dart` ✅ and
 `live_session_screen.dart` ✅ both **hand-roll their own** loading/error/
@@ -521,12 +720,13 @@ missed** — it is confirmed present now.
 
 ## 4. Data Models — `models/liveclass_models.dart` ✅
 
-*(Re-uploaded this pass; content unchanged from the prior ✅ verified
-read — no new findings. Full field-by-field inventory, the `_instantJson()`
-timezone-audit fix, the `NotifType`/`kAllNotifTypesForPreferences` gap,
-and every other detail from the prior pass all stand as previously
-documented. See the prior pass's full write-up — condensed pointers below
-for anything this pass's two newly-verified screens directly touch.)*
+*(Re-uploaded this pass. Previously-documented content (field-by-field
+inventory, the `_instantJson()` timezone-audit fix, the `NotifType`/
+`kAllNotifTypesForPreferences` gap, etc.) stands as before — no drift
+there. **One real new finding this pass**, not previously catalogued:
+`SessionCaptionLine`/`SessionReactionSummary`, see below — flagged
+because it apparently contradicts §6.4's confirmed read of
+`live_session_screen.dart`.)*
 
 Relevant to this pass's two newly-verified screens:
 - `MyPassStatus.accessLevel` (`owner`/`admin`/`active`/`expired`/`pending`/`none`)
@@ -547,6 +747,40 @@ Relevant to this pass's two newly-verified screens:
 - `Notice.isPinned` is what drives the pinned-notice banner in
   `LiveSessionScreen` (§6.4) and the pin toggle in
   `ClassroomDetailScreen`'s `_NoticesTab` (§6.1).
+
+🔴 **NEW this pass, real contradiction found — `SessionCaptionLine` and
+`SessionReactionSummary` were not previously catalogued anywhere in this
+doc, and their existence conflicts with §6.4's write-up.** Both classes
+are present in the re-uploaded `liveclass_models.dart`, each with an
+explicit "NEW (persistence fix)" doc comment:
+- `SessionCaptionLine{id, speaker: UserMini, text, createdAt}` — mirrors
+  a `SessionCaptionSerializer` (serializers.py); its own comment names
+  real REST call sites, `SessionApi.postCaption`/`.getCaptionHistory`
+  and `ClassSessionViewSet.captions()` (views.py). `speaker` is
+  server-set from the authenticated caller, never client-writable.
+- `SessionReactionSummary{total, counts: Map<String,int>}` — mirrors the
+  `{"total","counts"}` shape returned by `sessions/{id}/reactions/`
+  (both GET and POST), `counts` only including emoji with ≥1 tap (same
+  convention as `ChatMessage.reactionCounts`).
+
+**This directly contradicts §6.4's confirmed line-by-line read of
+`live_session_screen.dart`**, which states live captions are on-device
+`speech_to_text` only, broadcast peer-to-peer over the LiveKit data
+channel, with "nothing sent to any server, nothing persists" — and that
+emoji reactions are "confirmed **not** backed by any model field,"
+purely the same ephemeral data-channel mechanism. Both statements were
+accurate as of that read. Possibilities, not distinguishable from the
+model file alone: (a) a backend persistence layer for captions/reactions
+was added *after* `live_session_screen.dart` was last read, and the
+screen simply hasn't been updated to call these new endpoints yet; (b)
+these REST endpoints exist server-side for some other consumer (a
+post-session summary/report view?) while the live in-room UX
+deliberately stays peer-to-peer for latency reasons, and both are
+correct simultaneously; or (c) these are forward-looking/scaffolded
+models with no real caller anywhere yet, same category as other
+previously-flagged not-yet-wired models in this doc. `live_session_
+screen.dart` wasn't part of this pass's uploads, so this can't be
+resolved without re-reading it — see §11 item 25.
 
 ---
 
@@ -1312,28 +1546,25 @@ apply on top of that), and `_isEdit` (`widget.existing != null`)
 pre-filling every field from the existing schedule, including parsing its
 `HH:mm:ss` `startTime` string back into a `TimeOfDay`.
 
-⚠️ **Missing-`context` locale bug, NOT flagged in-file despite the
-file's own fix comment claiming parity with already-fixed screens — a
-new, real, currently-live instance of the module-wide pattern (§2.3,
-§11 item 21's `CoinWalletScreen` finding):** the module-level `_fmtDate(DateTime
-d) => liveClassFmtDate(d)` helper never accepts or forwards a `context`
-argument at all — every one of its call sites (the schedule card's date
-line, the date-picker field labels) is silently on `intl`'s default
-locale, not the device/app one. The file's own header comment claims this
-is "the same fix already applied to doubts/holidays/submission-grading
-elsewhere in this module," but those files' fixes pass `context` through;
-this one's helper signature doesn't even have the parameter to pass.
+✅ **RESOLVED a later pass — missing-`context` locale bug, previously
+tracked live at §11 item 21.** The module-level `_fmtDate` wrapper now
+reads `String _fmtDate(DateTime d, [BuildContext? context]) =>
+liveClassFmtDate(d, context)` and every call site (the schedule card's
+date line, the date-picker field labels) passes `context` through — the
+file's own comment now matches its body; previously the header's "same
+fix already applied to doubts/holidays/submission-grading" claim was
+contradicted by a helper signature that had no `context` parameter to
+pass at all. `referral_screen.dart` is now the only remaining confirmed
+live instance of this pattern (§6.6) — see §11 item 21.
 
-⚠️ **Mixed-language (Hindi) string leak, NEW finding this pass, adds a
-file to §8.10's tracked pattern:** the schedule card's date-range detail
-line falls back to `` '${_fmtDate(s.startDate)} se aage' `` ("onwards"/
-"going forward" in Hindi) whenever a recurring (non-`specificDate`,
-non-`weekly`, non-`monthly`) schedule has no `endDate` set — the only
-non-English string in an otherwise fully-English screen. See §8.10/§11
-for the running tally.
+✅ **RESOLVED a later pass — Hindi string leak, previously tracked as a
+finding for §8.10.** The schedule card's open-ended-recurrence detail
+line no longer falls back to `' se aage'` ("onwards" in Hindi) — it's
+now the English "onwards," per the file's own `FIX` comment, leaving this
+screen fully English throughout.
 
-**Local-time display, confirmed real fix (not the bug above):** the
-schedule card's own time chips route through
+**Local-time display, confirmed real fix (unrelated to the two bugs
+above):** the schedule card's own time chips route through
 `LiveClassDateTime.of(context).scheduleTimeLabel(s)` (§3) — per an
 in-file comment, this screen ("the primary place a teacher/co-teacher
 actually reads these times from") had been missed when that helper was
@@ -1341,18 +1572,20 @@ first wired into `_ScheduleTab`, and is now resolved-to-local-time here
 too, with the original wall-clock + zone shown only parenthetically when
 the conversion actually changes what's displayed.
 
-⚠️ **Design-system drift, confirmed this pass — spans BOTH previously-
-tracked flavors in one file, not previously counted for either (§8.5/
-§11.2):** aliases `LiveClassColors.navy`/`.bg`/`.gradient` into local
-`_kNavy`/`_kBg`/`_kGradient` constants (the hex-duplication fix already
-applied to `wishlist_screen.dart`/`waitlist_screen.dart`/
-`sessions_list_screen.dart`, per this file's own comment) but (a)
-hand-rolls its own `_decoration()` `InputDecoration` helper instead of
-the shared `liveClassInputDecoration` — same flavor as
-`ClassroomFormScreen` — and (b) hand-rolls its own `Container`+`BoxShadow`
-schedule cards and empty state instead of `LiveClassCard`/
-`LiveClassEmptyState` — same flavor as `ClassroomPurchasesScreen`/
-`ClassroomReportsScreen`/`NoticeBoardScreen`. One file, two flavors.
+⚠️ **Design-system drift, narrower than previously tracked — one flavor
+resolved, one remains (§8.5/§11.2):** still aliases `LiveClassColors.navy`/
+`.bg`/`.gradient` into local `_kNavy`/`_kBg`/`_kGradient` constants (the
+hex-duplication fix already applied to `wishlist_screen.dart`/
+`waitlist_screen.dart`/`sessions_list_screen.dart`, per this file's own
+comment), and still hand-rolls its own `_decoration()` `InputDecoration`
+helper instead of the shared `liveClassInputDecoration` — same flavor as
+`ClassroomFormScreen`. **Now fixed, per an in-file `🔴 FIX` comment:** the
+schedule card itself is a plain `LiveClassCard`, not the hand-rolled
+`Container`+`BoxShadow` previously flagged here (the same
+hand-rolled-but-identical pattern already fixed on
+`classroom_purchases_screen.dart`/`wishlist_screen.dart`/
+`waitlist_screen.dart`, per the fixing comment's own cross-reference) —
+one flavor down, one to go for this file.
 
 **Card UI:** repeat icon badge, recurrence label + detail line (days/
 day-of-month/date-range as above), a "Paused" pill when `!isActive`
@@ -1405,10 +1638,13 @@ per-pass "Allow gifting" `SwitchListTile` in the editor sheet (default
 `true`), the field `MyPassesScreen`'s/`PassGiftClaimScreen`'s gift flows
 ultimately depend on (§6.3).
 
-⚠️ **Mixed-language (Hindi) string leak, NEW finding this pass, adds a
-second file to §8.10's tracked pattern:** the pass card's stat row shows
-validity as `` '${p.validityDays} din' `` ("days" in Hindi) instead of an
-English unit — the only non-English string in this screen.
+✅ **RESOLVED this pass — Hindi string leak, previously tracked as a
+finding for §8.10.** The pass card's stat row used to show validity as
+`` '${p.validityDays} din' `` ("days" in Hindi) sitting next to the
+all-English 'Price'/'Max Classes' labels on the same card — now switched
+to plain English ("`${p.validityDays} days`"), per the in-file `FIX
+(translation-consistency audit)` comment. Screen is fully English
+throughout again.
 
 ⚠️ **Design-system drift, confirmed this pass — a THIRD distinct flavor
 of the hand-rolled-loading/error/app-bar pattern, not previously
@@ -1421,9 +1657,11 @@ state — joining `WishlistScreen`/`WaitlistScreen`/`ScheduleManagerScreen`/
 `SessionsListScreen`/`ClassroomDetailScreen`/`LiveSessionScreen` in that
 specific flavor group, and also hand-rolls its own `Container`+`BoxShadow`
 pass cards instead of `LiveClassCard` (the `ClassroomPurchasesScreen`/
-`ClassroomReportsScreen`/`NoticeBoardScreen`/`ScheduleManagerScreen`
-flavor) **and** its own local `_inputDecoration()` helper (the
-`ClassroomFormScreen`/`ScheduleManagerScreen` flavor). All three flavors
+`ClassroomReportsScreen`/`NoticeBoardScreen` flavor — `ScheduleManagerScreen`'s
+own instance of this specific one has since been fixed, per a later pass's
+re-upload, §6.2) **and** its own local `_inputDecoration()` helper (the
+`ClassroomFormScreen`/`ScheduleManagerScreen` flavor, still live on both).
+All three flavors
 in one file. Also aliases `_kNavy`/`_kBg`/`_kGradient` locally, same
 hex-duplication fix already applied elsewhere — per an in-file comment
 citing the identical gap in `explore_screen.dart`.
@@ -1526,19 +1764,138 @@ throughout (§2.2) — not part of the design-system-drift group
 ---
 
 ### 6.3 Enrollment / Access Flow
-*(`JoinRequestsScreen` 📋 unchanged this pass — carries forward exactly
-as documented previously; not re-uploaded. `ClassroomPurchasesScreen`
-was re-uploaded and re-read a prior pass — full write-up below is
-unchanged since. `MyPassesScreen` was read line-by-line a prior pass —
-full write-up below replaced its old connection-graph-only mention then
-and is unchanged since. `RequestJoinScreen` and `PassGiftClaimScreen`
-were both read line-by-line a prior pass — full write-ups below are
-unchanged since. **Note:** `WaitlistScreen` is cross-referenced
-throughout this subsection (it's `RequestJoinScreen`'s and
-`ClassroomDetailScreen`'s sibling in the enrollment/access flow) but its
-own full write-up now lives in §6.4, alongside `SessionsListScreen`/
-`LiveSessionScreen` — the screens that actually push it — since this
-pass gave it a real body for the first time.)*
+*(`JoinRequestsScreen` was re-uploaded and read line-by-line this pass —
+**promoted 📋 → ✅**, full write-up below replaces the old "unchanged,
+carries forward" placeholder (see the top-of-doc revision note).
+`ClassroomPurchasesScreen` was re-uploaded and re-read a prior pass —
+full write-up below is unchanged since. `MyPassesScreen` was read
+line-by-line a prior pass — full write-up below replaced its old
+connection-graph-only mention then and is unchanged since.
+`RequestJoinScreen` and `PassGiftClaimScreen` were both read line-by-line
+a prior pass — full write-ups below are unchanged since. **Note:**
+`WaitlistScreen` is cross-referenced throughout this subsection (it's
+`RequestJoinScreen`'s and `ClassroomDetailScreen`'s sibling in the
+enrollment/access flow) but its own full write-up now lives in §6.4,
+alongside `SessionsListScreen`/`LiveSessionScreen` — the screens that
+actually push it — since a prior pass gave it a real body for the first
+time.)*
+
+#### `JoinRequestsScreen` — `join_requests_screen.dart` ✅
+
+⚻ **Read line-by-line in full this pass — promoted from 📋 SUMMARY-LEVEL,
+where it had sat with only cross-reference-derived detail (its two named
+constructors, its resource endpoint, and its role as `RequestJoinScreen`'s
+stale-duplicate predecessor per §6.3's `RequestJoinScreen` write-up).**
+One file, one resource (`join-requests/`), two named constructors serving
+two very different views — per the file's own header:
+
+- **`JoinRequestsScreen.inbox({required classroomId, classroomTitle})`**
+  — teacher/co-teacher/moderator inbox for **one** classroom. Accept
+  (`POST .../accept/` — charges coins, creates a `PassPurchase`) / Reject
+  (`POST .../reject/` — no charge), both with an optional note.
+- **`JoinRequestsScreen.mine()`** — student's own requests across
+  **every** classroom (`GET join-requests/` with no `classroom` param —
+  backend scopes this to "own" for a non-manager, the same reliance
+  `request_join_screen.dart` already has, per that screen's own §6.3
+  write-up). Pending ones can be cancelled (`POST .../cancel/`).
+
+Both constructors set `isInbox`/`classroomId`/`classroomTitle` on
+construction; a single `_JoinRequestsScreenState` drives both views,
+branching on `widget.isInbox` wherever the two diverge.
+
+**API:** `LiveClassApi.joinRequests.list(classroomId:)` (`null` for
+`.mine()`, a real id for `.inbox()`); `.accept(id, note:)`;
+`.reject(id, note:)`; `.cancel(id)`.
+
+**State:** `_tabCtrl` (`TabController`, 5 tabs: All/Pending/Accepted/
+Rejected/Cancelled, `initialIndex: 1` — Pending — for `.inbox()`, `0` —
+All — for `.mine()`); `_all` (`List<ClassJoinRequest>`, sorted
+`requestedAt` descending); `_loading`/`_error`; `_busyIds` (per-request
+accept/reject/cancel-in-flight guard). `_filtered` (getter) narrows
+`_all` by the selected tab's status, or returns everything for "All".
+`_tabCtrl`'s listener triggers a plain `setState` (not a re-fetch) —
+switching tabs re-filters client-side over the already-loaded `_all`,
+it doesn't call `_load()` again.
+
+**Teacher decision (`_decide`, accept or reject)** — a single
+`AlertDialog` for both actions: accept copy quotes the exact coin price
+the student will be charged (`_coins(req.classPassPrice)`), reject copy
+states plainly no charge is made; both share an optional 2-line note
+`TextField`. The `noteCtrl` here is a **local, per-call**
+`TextEditingController` (not a per-open sheet controller) — created,
+read, and disposed inline in the same method body immediately after the
+dialog closes, so there's no leak-prone bottom-sheet lifecycle to track
+here (a structurally different, also-safe shape from the §8.4
+create-fresh-per-open/`finally`-dispose bottom-sheet pattern tracked
+elsewhere in the module). On confirm, calls `.accept()`/`.reject()` and
+replaces the item in `_all` in place via `_replace()` rather than
+reloading the whole list.
+
+**Student cancel (`_cancel`)** — plain `AlertDialog` confirm, then
+`.cancel(id)`, same in-place `_replace()` pattern as accept/reject.
+
+⚻ **Three separate design-system-consistency fixes confirmed via this
+pass's `FIX`-tagged comments, none previously documented anywhere in this
+doc since the file was never read before now:**
+1. **Hex-literal aliasing** — `_kNavy`/`_kBg`/`_kGradient` alias
+   `LiveClassColors.navy`/`.bg`/`.gradient`, the same drift-prevention fix
+   the file's own comment says was already called out for
+   `classroom_purchases_screen.dart` and `wishlist_screen.dart` (§6.3/§6.6).
+2. **Timezone + missing-`context` locale fix, both confirmed in one
+   helper** — the module-level `_fmtDateTime(DateTime d, [BuildContext?
+   context]) => liveClassFmtDateTime(d, context)` wrapper used to be a
+   hardcoded English month array with no `.toLocal()` call (the §8.2
+   timezone bug, same pattern already fixed in
+   Doubts/Holidays/Submission-Grading) **and separately** took no
+   `context` param at all, so even after that first fix every call site
+   was still silently stuck on `intl`'s default locale (the §2.3/§8.2
+   missing-`context` locale bug tracked at §11 item 21 and its
+   cross-references). Both fixed together this pass: delegates to the
+   shared helper and threads `context` through at both call sites
+   (`_inboxCard`/`_mineCard`'s "Requested"/"Decided" lines).
+3. **Deprecated `withOpacity` → `withValues(alpha:)`** — `_statusPill`'s
+   color-tint call used the now-deprecated `Color.withOpacity` (precision
+   loss on wide-gamut color, per that API's own deprecation note); the
+   file's own comment says `coin_wallet_screen.dart`/`coupons_screen.dart`
+   already made this swap and this was a remaining call site. Same alpha
+   value, zero visual change. **Genuinely new pattern, not previously
+   tracked anywhere in this doc** — see §8.11/§11 for a new cross-cutting
+   entry, since this is the first confirmed instance this doc has
+   recorded even though the file's own comment implies at least two
+   other screens already made the same swap independently.
+
+⚻ **Design-system drift — fully resolved in this file, confirmed by its
+own `FIX` comments walking through each remaining piece:** the loading
+state (`LiveClassLoading`) and both card widgets (`_inboxCard`/`_mineCard`,
+both now plain default-args `LiveClassCard` — the file's own comment
+calls out `_mineCard` as "the one call site left still hand-rolling the
+`Container`") were migrated onto the shared design system; the error and
+empty states, previously a local unused-now-removed `_ErrorState` widget
+and a hand-rolled centered `Text`, are now `LiveClassErrorState`/
+`LiveClassEmptyState`. Per the in-file comments this was a staged
+migration (some pieces already fixed before this pass, the rest — mainly
+`_mineCard` and the error/empty states — fixed this pass) rather than one
+single change; either way, the file carries **no** remaining instance of
+the §8.5/§11.2 structural-drift pattern as of this read. The app bar
+itself, though, is still a **plain `AppBar`** (not `liveClassAppBar()`) —
+white background, navy foreground, elevation `0.5`, with an
+`isScrollable` `TabBar` in `bottom:` — not flagged as drift in-file, and
+not previously catalogued as a flavor of §8.5 (a `TabBar`-carrying app
+bar doesn't fit `liveClassAppBar()`'s plain-title shape used elsewhere in
+the module), so left uncounted here rather than guessed at.
+
+**Card UI:** `_inboxCard` — avatar, student name/`@username`, status pill
+(`_statusPill`), a `Divider`, `_kv()` rows for Pass/Price/optional Coupon,
+optional italicized student message, "Requested: `<datetime>`", optional
+decision note, and — only when `status == pending` — a Reject
+`OutlinedButton` + a gradient-filled custom Accept button (`DecoratedBox`+
+`InkWell`, not a themed button widget). `_mineCard` — classroom title,
+status pill, `_kv()` rows for Pass/Price, "Requested"/"Decided"
+timestamps, optional teacher decision note, and — only when pending — a
+full-width Cancel `OutlinedButton`. Fully English throughout — no
+Hindi-string-leak instance (§8.10).
+
+---
 
 #### `MyPassesScreen` — `my_passes_screen.dart` ✅ (Screen 9, per the module's own architecture doc numbering)
 
@@ -1705,16 +2062,30 @@ itself a fix: a flat "Coins" total previously gave the teacher no
 visibility into how much of a purchase was already theirs vs. still
 refundable), optional coupon code, and the Refund button when `canRefund`.
 
-⚠️ **Design-system drift, confirmed and self-flagged in-file:** the
-screen aliases `LiveClassColors.navy`/`.bg` into local `_kNavy`/`_kBg`
-constants (fixing an earlier hex-literal-duplication drift risk the
-file's own comment says was already called out for `wishlist_screen.dart`
-and `waitlist_screen.dart`) but still **hand-rolls its own card
-`Container`+`BoxShadow`** rather than using the shared `LiveClassCard`,
-and its empty state is a bare `ListView`+`Center(Text(...))` rather than
-`LiveClassEmptyState` — this screen is a confirmed **8th** instance of the
-structural drift tracked in §8.5/§11.2 (that gap's count should be updated
-from 7 to 8, see §14).
+⚠️ **Design-system drift — PARTIALLY FIXED this pass, re-confirmed
+against a fresh re-upload:** the screen still aliases
+`LiveClassColors.navy`/`.bg` into local `_kNavy`/`_kBg` constants (fixing
+an earlier hex-literal-duplication drift risk the file's own comment says
+was already called out for `wishlist_screen.dart` and
+`waitlist_screen.dart`), but the purchase card itself is **no longer**
+hand-rolled — a `🔴 FIX` comment in-file confirms `_purchaseCard()` now
+returns a plain, default-args `LiveClassCard` in place of its old hand-rolled
+`Container`+`BoxShadow`. The comment is explicit that this was checked to
+be a **zero-visual-change swap**: the old hand-rolled decoration was
+confirmed an exact match to `LiveClassCard`'s own defaults (same radius,
+same shadow math — `black@0.04` alpha ≈ `0x0A`, same blur/offset, same
+default padding/margin) before being replaced, so this did **not** need
+any of `LiveClassCard`'s four new override params from §2.2/§11 item 24
+— plain defaults were already visually identical. This is the **first**
+of the three screens named in §11 item 24's "not confirmed applied" note
+to actually have that fix landed; `ClassroomReportsScreen` and
+`NoticeBoardScreen` still carry the old hand-rolled card chrome as far as
+this doc has confirmed (neither was re-uploaded this pass) — see §8.5/§11
+item 2 for the updated running count. ⚠️ **Not fully fixed, though:** the
+empty state is still a bare `ListView`+`Center(Text('No purchases yet.'))`
+rather than `LiveClassEmptyState` — unchanged from before, and still a
+live (smaller) residual instance of the same structural-drift pattern
+tracked in §8.5/§11.2.
 
 ---
 
@@ -1944,17 +2315,21 @@ calendar-day** risk near midnight, not just a wrong-hour one).
 (client-side filters via a `_visible` getter), `_dateStrip` (14 fixed
 `DateTime`s computed once in `initState`).
 
-⚠️ **Design-system drift, confirmed — the hand-rolled-loading/error/
-app-bar flavor (§8.5/§11.2), already counted for this file in that
-tracked group:** hand-rolled `Container`+`BoxShadow` session cards and
-date-strip chips (not `LiveClassCard`), a bare `ListView`+`Center(Text)`
-empty state (not `LiveClassEmptyState`), though it does use
-`liveClassAppBar`/`LiveClassLoading`/`LiveClassErrorState`. Also aliases
-`_kNavy`/`_kBg`/`_kGradient` locally (the same hex-duplication fix
-applied to `wishlist_screen.dart`/`waitlist_screen.dart`, per an in-file
-comment) — confirmed as the file the `ScheduleManagerScreen`/
-`PassManagementScreen` write-ups (§6.2) cite when describing their own
-identical alias pattern.
+⚠️ **Design-system drift, narrower than previously tracked — one flavor
+resolved a later pass (§8.5/§11.2):** ✅ **the session card itself is now
+a plain `LiveClassCard`**, per an in-file `🔴 FIX` comment ("exact match
+to `LiveClassCard`'s defaults … zero-visual-change swap, same as
+elsewhere in the module") — previously hand-rolled `Container`+
+`BoxShadow`, now fixed. **Still hand-rolled:** the date-strip day chips
+(bespoke `Container`s for the 14-day calendar strip — not really a
+`LiveClassCard` use case, but still outside the shared design system) and
+a bare `ListView`+`Center(Text)` empty state, not `LiveClassEmptyState`.
+The screen does use `liveClassAppBar`/`LiveClassLoading`/
+`LiveClassErrorState`. Also aliases `_kNavy`/`_kBg`/`_kGradient` locally
+(the same hex-duplication fix applied to `wishlist_screen.dart`/
+`waitlist_screen.dart`, per an in-file comment) — confirmed as the file
+the `ScheduleManagerScreen`/`PassManagementScreen` write-ups (§6.2) cite
+when describing their own identical alias pattern.
 
 **Card UI:** status pill (live pulse dot for `live`), `canManage`-only
 edit/waitlist/delete `PopupMenuButton` on scheduled sessions, date/time
@@ -2065,6 +2440,21 @@ manage a real `lk.Room`. Confirmed features on top of basic connect:
 - **Screen share** toggle (`_toggleScreenShare`).
 - **Audio-only mode** (`_toggleAudioOnly`) — remembers the pre-toggle cam
   state (`_camOnBeforeAudioOnly`) to restore on exit.
+- **Audio settings — noise suppression / echo cancellation** (new this
+  pass, `_noiseSuppressionOn`/`_echoCancellationOn`, both default **ON**
+  to match LiveKit/WebRTC's own defaults so a user who never opens the
+  sheet sees no behavior change). Long-press the mic control button
+  (`_openAudioSettings`) opens a small bottom sheet with the two
+  `SwitchListTile` toggles — purely a **local device preference**, never
+  synced, each participant only affects the audio they themselves
+  capture/send. Built into `lk.AudioCaptureOptions` (`_audioCaptureOptions`,
+  `autoGainControl` left permanently on) and applied two ways: at initial
+  connect via `defaultAudioCaptureOptions` on `_doLiveKitConnect`, and
+  mid-call via `_applyAudioProcessingSettings`, which briefly disables then
+  re-enables the mic (`setMicrophoneEnabled(false)` → `true` with the new
+  options) since WebRTC's audio constraints apply at capture-start, not
+  patchable onto an already-running track — a no-op if the mic is already
+  off, since the new options are simply picked up the next natural unmute.
 - **App-lifecycle camera pause**: `WidgetsBindingObserver` turns the
   camera off on backgrounding (remembers prior state in
   `_camOnBeforeBackground`) and restores it on return; mic is deliberately
@@ -2152,6 +2542,32 @@ matching REST sub-API from §5.2, largely already documented there.
 `_removeChatReaction`/`_showChatReactionPicker`, `_pinChat`/`_unpinChat`
 (host-only, at most one pinned message per session, pinning a new one
 auto-unpins the prior — matches §5.2's `ChatMessageApi` doc exactly).
+
+- **Reply-to-message** (new this pass, `_replyingTo`/`_startReply`/
+  `_cancelReply`) — WhatsApp-style **one-level** reply, not a nested
+  thread (per the in-file comment pointing at `ChatMessage.reply_to`'s
+  docstring in `models.py`). Tapping a message's reply icon sets
+  `_replyingTo`, which shows a quote-preview strip (sender + one-line
+  message snippet, with a cancel ✕) above the compose bar; `_sendChat`
+  captures it into `replyTo: replyTo?.id` on `ChatMessageApi.send(...)`
+  and clears it on success. Each rendered message shows its own quoted
+  `replyToPreview` (via `ChatMessageSerializer.get_reply_to_detail`) when
+  it is itself a reply — `replyToPreview == null` covers both "not a
+  reply" and "original hard-deleted at the DB level", while
+  `replyToPreview.isDeleted == true` renders "Original message deleted"
+  for the far more common **moderated-away** case.
+- **Message search** (new this pass, `_chatSearchActive`/`_chatSearchCtrl`/
+  `_chatSearchResults`/`_onChatSearchChanged`) — a search icon in the chat
+  panel's header row toggles into a search field that debounces 350ms
+  before re-querying `ChatMessageApi.list(sessionId, search: query)`
+  (backend `?search=` filter, `ChatMessageViewSet.get_queryset`) and
+  swaps the rendered list over to `_chatSearchResults` (soft-deleted
+  messages filtered out client-side) **without mutating** the live
+  `_chatMessages` list underneath. The pinned-message banner and the
+  normal compose bar (send/reply) are both hidden while searching — one
+  mode at a time, same simplicity as the existing pinned-banner/list
+  split. Clearing the search field drops `_chatSearchResults` back to
+  `null` (back to the live list) rather than showing an empty result.
 
 **Polls panel** — `_CreatePollSheet` (its own private `StatefulWidget`)
 supports both a manual create flow and a **"use a saved template"** flow
@@ -2256,9 +2672,16 @@ above), and a per-student attendance list (`SessionAttendanceRow`: avatar
 or initial, name, a hand-raised icon when `raisedHand`, and that
 student's own watch duration).
 
-**UI:** uses the shared `LiveClassCard`/`LiveClassEmptyState`/
-`LiveClassErrorState`/`LiveClassLoading` pieces throughout (§2.2) — not
-part of the design-system-drift group (§8.5/§11.2). Fully English
+**UI:** uses the shared `LiveClassCard`/`LiveClassErrorState`/
+`LiveClassLoading` pieces throughout (§2.2) for the stat grid, poll bar,
+and attendance rows, plus the overall loading/error states — **correction,
+a later pass:** the write-up previously also credited this screen with
+using `LiveClassEmptyState`, but the file never actually references that
+widget — the "no attendance data for this session" case is a hand-rolled
+`Padding`+`Center(Text(...))` block, not `LiveClassEmptyState` (there's no
+scenario where the whole report itself is "empty," only its attendance
+list, so this is a smaller, easy-to-miss gap rather than the file being
+part of the §8.5/§11.2 drift group in the usual sense). Fully English
 throughout. No FAB, no write actions — purely read-only, matching
 `MyProgressScreen`'s (§6.6) read-only-dashboard shape.
 
@@ -2314,25 +2737,42 @@ constructor shape documented for `LiveSessionScreen` above, skipping that
 screen's own join call since this screen already completed it.
 
 **Card UI:** **manage view** — a numbered position circle, student
-name, a relative "Waiting since `Xm/h/d` ago" line (`_fmtRelative`, a
-local helper — not `liveClassFmtRelative` from the shared theme file,
-worth a spot-check against the §11 item 8 "duplicated relative-time
-helper" tracking if this file is ever re-audited for that specific
-pattern), a green "Notified" pill when `e.notified`, and a Promote
-button. **Student view** — a gradient icon tile, classroom title (or
-"Session #`id`" fallback) + scheduled time from `_sessionCache`, a
-"Seat opened!" pill when `e.notified` (with a green card border to match),
-the same relative-wait line, and side-by-side Leave/Try Enter buttons.
+name, a relative "Waiting since `Xm/h/d` ago" line, a green "Notified"
+pill when `e.notified`, and a Promote button. **Student view** — a
+gradient icon tile, classroom title (or "Session #`id`" fallback) +
+scheduled time from `_sessionCache`, a "Seat opened!" pill when
+`e.notified` (with a green card border to match), the same relative-wait
+line, and side-by-side Leave/Try Enter buttons.
 
-⚠️ **Design-system drift, confirmed — the hand-rolled-card flavor
-(§8.5/§11.2):** both card variants hand-roll their own
-`Container`+`BoxShadow` (not `LiveClassCard`), and the empty state is a
-bare `ListView`+`Center(Text)` block, not `LiveClassEmptyState` — though
-the screen does use `liveClassAppBar`/`LiveClassLoading`/
-`LiveClassErrorState`. Also aliases `LiveClassColors.navy`/`.bg`/`.gradient`
-into local `_kNavy`/`_kBg`/`_kGradient` constants, per an in-file comment
-explicitly citing this as the same hex-duplication fix already called
-out for `wishlist_screen.dart` (§6.6) — confirmed as one of the files the
+✅ **RESOLVED a later pass — the local `_fmtRelative` duplicate flagged
+above as "worth a spot-check against §11 item 8" is now gone.** Both
+"Waiting since …" lines call the shared `liveClassFmtRelative(e.joinedAt,
+context)` directly, per the file's own `🔴 FIX` comment (which cites
+`liveclass_theme.dart`'s own header comment already calling out this
+exact duplication for `notifications_screen.dart`) — `WaitlistScreen` is
+now a second confirmed-fixed instance of that pattern alongside
+`notifications_screen.dart`. See §11 item 8.
+
+⚠️ **Design-system drift, narrower than previously tracked — the
+hand-rolled-card flavor is resolved, the hand-rolled loading/error/
+empty-state flavor is not (§8.5/§11.2):** ✅ **both card variants are now
+`LiveClassCard`**, per the file's own `🔴 FIX` comments — the manage card
+uses the new `borderRadius: 12`/`boxShadow:` override params to keep its
+denser, tighter-radius row look (rather than silently adopting the
+shared defaults and changing its appearance), and the student card uses
+the new `border:` override to express its conditional green "seat
+opened" highlight, which the widget had no way to express before gaining
+that param. Per the fixing comments, this is exactly why this file
+couldn't migrate until `LiveClassCard` itself gained the four override
+params (§2.2, §11 item 24) — now confirmed applied here, on a screen that
+wasn't even on that item's original three-screen candidate list. **Still
+hand-rolled:** the empty state is a bare `ListView`+`Center(Text)` block,
+not `LiveClassEmptyState` — though the screen does use `liveClassAppBar`/
+`LiveClassLoading`/`LiveClassErrorState`. Also still aliases
+`LiveClassColors.navy`/`.bg`/`.gradient` into local
+`_kNavy`/`_kBg`/`_kGradient` constants, per an in-file comment explicitly
+citing this as the same hex-duplication fix already called out for
+`wishlist_screen.dart` (§6.6) — confirmed as one of the files the
 `ScheduleManagerScreen`/`SessionsListScreen` write-ups (§6.2/§6.4) point
 to when describing their own identical alias pattern.
 
@@ -2481,10 +2921,20 @@ score, optional "View attachment" button); teacher rows are
 student's own status tile swaps its leading icon between an hourglass
 (ungraded) and a gold grade icon (graded), with a two-line subtitle when
 feedback is present. Uses the shared `LiveClassCard`/`LiveClassIconBadge`/
-`LiveClassEmptyState`/`LiveClassErrorState`/`LiveClassLoading` pieces
-throughout (§2.2) — per the file's own header, this pass's (the one that
-introduced these fixes) restyle onto the shared design system; not part
-of the design-system-drift group (§8.5/§11.2). Fully English throughout.
+`LiveClassErrorState`/`LiveClassLoading` pieces throughout (§2.2) — per
+the file's own header, this pass's (the one that introduced these fixes)
+restyle onto the shared design system. **Correction, a later pass:** the
+write-up previously also credited this screen with using
+`LiveClassEmptyState`, but the file never actually references that
+widget — the teacher-side "no submissions yet" case is a hand-rolled
+`Icon`+`Center(Text(...))` block, not `LiveClassEmptyState`. A minor,
+easy-to-miss gap rather than membership in the §8.5/§11.2 drift group in
+the usual sense — every other design-system piece in this file genuinely
+is the shared one. Fully English throughout; `CircleAvatar`'s background
+already uses `.withValues(alpha: 0.08)`, not the deprecated
+`.withOpacity` (§8.11) — one more confirmed instance of that swap,
+alongside `join_requests_screen.dart`/`coin_wallet_screen.dart`/
+`coupons_screen.dart`.
 
 ---
 
@@ -2927,9 +3377,11 @@ and, conditionally, the separate Classroom Referral Earnings section
 (total-earned summary card + a per-purchase list showing each referred
 student, classroom, purchase date via `liveClassFmtDate(p.purchasedAt)`
 — ⚠️ **called with no `context` argument**, the same missing-`context`
-locale-fallback bug already tracked for `CoinWalletScreen`/
-`ScheduleManagerScreen` (§11 item 21 and above) — a **third** confirmed
-live instance of this exact pattern, and `+referralCoinsReleased`).
+locale-fallback bug tracked at §11 item 21 — `CoinWalletScreen`'s
+instance was fixed a prior pass and `ScheduleManagerScreen`'s was fixed
+this pass (§6.2); re-confirmed against a fresh re-upload, **this
+`ReferralScreen` call site is still unfixed** — the sole remaining
+confirmed live instance of this exact pattern, and `+referralCoinsReleased`).
 
 Uses the shared `LiveClassCard`/`LiveClassEmptyState`/`LiveClassErrorState`/
 `LiveClassLoading`/`liveClassInputDecoration` pieces throughout (§2.2) —
@@ -3000,16 +3452,19 @@ the running balance **as of that transaction**, not the current balance,
 pulled straight from the `CoinTransaction` record rather than recomputed
 client-side.
 
-⚠️ **NEW finding this pass, currently unfixed — a real instance of the
-module's missing-`context` locale bug (§2.3/§8.2/§8.3), not previously
-documented anywhere:** the tile's date line calls
-`liveClassFmtDateTime(t.createdAt)` with **no `context` argument** —
-since `context` is optional (`[BuildContext? context]`, §2.3),
-this compiles and runs, but silently falls back to `intl`'s default
-locale instead of the device/app one, exactly the same class of gap
-already confirmed fixed at every call site in `my_reminders_screen.dart`
-(§6.6). Unlike that screen, `CoinWalletScreen` still has this bug live —
-not a resolved instance, a genuinely open one. See §11 item 21.
+⚻ **RESOLVED this pass, confirmed against a fresh re-upload — the
+missing-`context` locale bug flagged in §11 item 21 is now actually
+fixed, not just documented.** The tile's date line used to call
+`liveClassFmtDateTime(t.createdAt)` with no `context` argument — since
+`context` is optional (`[BuildContext? context]`, §2.3), that compiled
+and ran, but silently fell back to `intl`'s default locale instead of the
+device/app one. The file's own `FIX` comment now calls it out explicitly
+and names `my_reminders_screen.dart`/`notice_board_screen.dart` as the
+other screens that already threaded `context` through — this was, per
+that comment, "the one call site in the module still missing it." The
+call is now `liveClassFmtDateTime(t.createdAt, context)`. This closes the
+finding item 21 tracked as "live and unfixed" — see §11 item 21 for the
+resolution note and §8.2 for the module-wide pattern.
 
 **Empty/loading/error states and list layout:** a plain `ListView`
 (not `ListView.builder` — the balance card and the whole transaction
@@ -3124,11 +3579,27 @@ bottom-left when `!classroom.isActive`, below which sits the title
 (2-line ellipsis), teacher name, a star-rating-or-"New" line, and the
 classroom's language.
 
-⚠️ **Design-system drift, confirmed — the hand-rolled-card flavor
-(§8.5/§11.2):** `_WishlistCard`'s own `Container`+`BoxShadow` (not
-`LiveClassCard`), and the empty state is a bare `ListView`+`Center` block
-(icon + two lines of text), not `LiveClassEmptyState` — though the screen
-does use `liveClassAppBar`/`LiveClassLoading`/`LiveClassErrorState`. Also
+⚠️ **Design-system drift, narrower than previously tracked — the
+hand-rolled-card flavor is resolved, the hand-rolled empty state is not
+(§8.5/§11.2):** ✅ **`_WishlistCard` is now a `LiveClassCard`**, per the
+file's own `🔴 FIX` comment — it needed the widget's `clipBehavior`
+override (added specifically for this case, per that comment) so the
+full-bleed 16:10 cover image still clips to the rounded corners, plus
+the `borderRadius`/`boxShadow` overrides to keep the card's existing
+16px-radius look rather than silently adopting `LiveClassCard`'s
+defaults. This is the first confirmed use of the `clipBehavior` override
+param anywhere in the module (§2.2, §11 item 24) — previously hand-rolled
+`Container`+`BoxShadow`, now fixed; `onTap` also moved onto
+`LiveClassCard` itself (it already wraps its child in an `InkWell` when
+`onTap` is given), so the separate `GestureDetector` this card used to
+need is gone too. **Still hand-rolled:** the empty state is a bare
+`ListView`+`Center` block (icon + two lines of text), not
+`LiveClassEmptyState` — though the screen does use `liveClassAppBar`/
+`LiveClassLoading`/`LiveClassErrorState`. Its `BoxShadow`/`Container`
+overlays (the remove-button circle, the "Closed" badge) still call the
+deprecated `Colors.black.withOpacity(...)` rather than
+`.withValues(alpha:)` (§8.11) — not yet part of that swap's tracked list.
+Also
 aliases `LiveClassColors.navy`/`.bg`/`.gradient` into local
 `_kNavy`/`_kBg`/`_kGradient` constants per an in-file comment citing this
 as the same hex-duplication fix already applied elsewhere in the module —
@@ -3554,10 +4025,31 @@ pip_service.dart ✅ NEW (services/, §5.4) ── claimed (not yet re-verified)
                           existing mini-view button; onPipModeChanged drives chrome-free layout
 ```
 
-**Orphans (not currently wired from anywhere in the module):** none
-currently tracked. `PassGiftClaimScreen` was the last one — **RESOLVED
-this pass**, confirmed wired from `my_passes_screen.dart`'s app-bar
-"Gifted passes" icon (§6.3, §8.9, §11 item 1).
+**Orphans (not currently wired from anywhere in the module):**
+`ReferralScreen` and `TeacherEarningsScreen`'s **unscoped** mode
+(`classroomId` omitted, "My Earnings" across every classroom the caller
+teaches) — **newly surfaced this pass, not previously called out here,
+even though both files have been ✅ for several passes.** Neither screen
+appears anywhere in the graph above: `ReferralScreen`'s own header
+(§6.6) says as much explicitly ("wire it in from wherever this app's
+main menu/profile/wallet section lives — that file wasn't part of this
+upload, so it isn't touched here"), and `MyProgressScreen`'s write-up
+(§6.6) cites `ReferralScreen` as sharing its "account-wide, not
+classroom-scoped" situation — but unlike `MyProgressScreen` (confirmed
+wired from `ExploreScreen`'s app-bar "insights" icon) or `CoinWalletScreen`/
+`WishlistScreen` (both shown reachable from `LiveClassHomeScreen`'s tabs
+in the graph above), no file anywhere in this doc claims an actual, live
+entry point into `ReferralScreen` or into `TeacherEarningsScreen`'s
+unscoped constructor call — only the **scoped** call
+(`TeacherEarningsScreen(classroomId:)`) has a confirmed caller,
+`ClassroomDetailScreen`'s manage sheet. This is the same *class* of gap
+`PassGiftClaimScreen` was tracked under before it was resolved (§11 item
+1) — a real, ✅-verified screen with no confirmed in-module navigation
+edge — just not previously written down for these two. Not necessarily a
+bug (the intended caller may simply live in host-app code outside this
+`lib/liveclass/` upload, as `ReferralScreen`'s own header assumes), but
+worth flagging rather than silently claiming "none currently tracked."
+See §11 item 28.
 
 ---
 
@@ -3620,6 +4112,38 @@ pass later:** `notice_board_screen.dart` ✅ (§6.5) hand-rolls the same
 `ClassroomReportsScreen`, bumping that flavor's count again. See §11.2
 for the updated running count.
 
+⚻ **PARTIALLY RESOLVED a later pass — `ClassroomPurchasesScreen`'s card
+chrome.** Re-uploaded and re-read; its purchase card is now a plain,
+default-args `LiveClassCard` instead of a hand-rolled `Container`+
+`BoxShadow` (§6.3) — confirmed a zero-visual-change swap, per the file's
+own comment, using `LiveClassCard`'s existing defaults rather than the
+four override params item 24 made available. This **removes one screen**
+from the card-chrome flavor's list, dropping it from `ClassroomPurchasesScreen`/
+`ClassroomReportsScreen`/`NoticeBoardScreen` to just the latter two —
+neither of which has been re-uploaded/re-confirmed fixed. `ClassroomPurchasesScreen`
+still has a **residual, smaller** instance of the drift pattern, though:
+its empty state remains a bare `ListView`+`Center(Text(...))` rather than
+`LiveClassEmptyState`, unchanged from before. See §11 item 2 for the
+updated running count.
+
+⚻ **FURTHER RESOLVED a later pass — four more card-chrome fixes,
+confirmed via re-upload, none of them on this section's original
+candidate list (`ClassroomPurchasesScreen`/`ClassroomReportsScreen`/
+`NoticeBoardScreen`).** `ScheduleManagerScreen` (§6.2), `SessionsListScreen`,
+`WaitlistScreen`, and `WishlistScreen` (§6.4/§6.6) all now use
+`LiveClassCard` for their previously hand-rolled `Container`+`BoxShadow`
+cards. Two of the four (`WaitlistScreen`, `WishlistScreen`) are the
+**first confirmed live uses of `LiveClassCard`'s four new override
+params** (`borderRadius`/`boxShadow`/`border`/`clipBehavior`, §2.2,
+§11 item 24) — previously "not confirmed applied anywhere." Each of the
+four still carries a smaller, residual gap: `ScheduleManagerScreen` still
+hand-rolls its own `_decoration()` `InputDecoration` helper;
+`SessionsListScreen`'s date-strip chips and all four screens' empty
+states remain hand-rolled, not `LiveClassEmptyState`. `ClassroomReportsScreen`
+and `NoticeBoardScreen` remain the only two files still carrying the
+*unfixed* version of the card-chrome flavor. See §11 item 2/24 for the
+updated running counts.
+
 ### 8.6 Missing-class build break — unchanged, carried forward.
 
 ### 8.7 Flutter's built-in `MaterialType` collision — unchanged, carried
@@ -3652,6 +4176,39 @@ forward. **Confirmed this pass: none of `assignments_screen.dart`,
 `classroom_form_screen.dart`, or `classroom_reports_screen.dart` carries
 any of this pattern** — all three are fully English throughout, in UI
 copy and in code comments.
+
+⚻ **RESOLVED a later pass, one instance:** `schedule_manager_screen.dart`'s
+open-ended-recurrence detail line no longer reads `' se aage'` — it's the
+English "onwards" now (§6.2). `sessions_list_screen.dart`'s much larger
+concentration of Hindi strings in `_ReminderSheet` (the "Wapas" cancel
+labels, the "`N` din/ghante/min pehle" offset-unit suffixes, "Reminder
+Hataayein," "Kitni der pehle?," "Kaise batayein?") is unchanged/still
+live, re-confirmed against a fresh re-upload (§6.4).
+
+### 8.11 Deprecated `Color.withOpacity` → `withValues(alpha:)` — **NEW
+this pass, first confirmed instance in this doc.** `Color.withOpacity` is
+deprecated in Flutter (precision loss on wide-gamut color, per that API's
+own deprecation note) in favor of `withValues(alpha:)`. Confirmed fixed
+in `join_requests_screen.dart`'s `_statusPill` (§6.3) — same alpha value,
+zero visual change. Per that fix's own comment, `coin_wallet_screen.dart`
+and `coupons_screen.dart` had **already** made this same swap
+independently, before this doc ever tracked the pattern — so this is at
+minimum a **3-screen-wide** pattern already in progress, not a brand-new
+one, just newly catalogued here. `coupons_screen.dart` is still 📋 and
+hasn't been independently re-confirmed against this specific claim. Worth
+a module-wide `withOpacity(` grep the next time any screen is touched, to
+see how many call sites (if any) still use the deprecated form.
+
+⚻ **One more confirmed instance, a later pass:** `submission_grading_screen.dart`'s
+teacher-row avatar background already uses
+`LiveClassColors.navy.withValues(alpha: 0.08)` (§6.4) — a fifth screen on
+the "already independently swapped" side of this pattern. **Counter-
+finding, same pass:** `waitlist_screen.dart` and `wishlist_screen.dart`
+(§6.4/§6.6) both landed brand-new `LiveClassCard` `boxShadow`/overlay code
+this pass that still calls the deprecated `Colors.black.withOpacity(...)`/
+`_kNavy.withOpacity(...)` form — so the swap is not module-wide even in
+code freshly touched by other fixes; new code is being written on both
+sides of this particular pattern.
 
 ---
 
@@ -3717,18 +4274,46 @@ standard guard for any new mutating action, optimistic or not.
    second of two intended entry points. §7's "Orphans" list is now
    empty. `PassGiftClaimScreen` itself remains 📋 SUMMARY-LEVEL — this
    resolves its reachability, not its own internal verification status.
-2. **Design-system structural drift** — now confirmed to span **10**
-   screens across **three distinct flavors** (§8.5, updated this pass):
-   hand-rolled loading/error/app-bar UI (`WishlistScreen`,
-   `WaitlistScreen`, `ScheduleManagerScreen`, `SessionsListScreen`,
-   `ClassroomDetailScreen`, `LiveSessionScreen`); hand-rolled
-   `Container`+`BoxShadow` card chrome instead of `LiveClassCard`
-   (`ClassroomPurchasesScreen`, `ClassroomReportsScreen`, and **new this
-   pass:** `NoticeBoardScreen`, §6.5); and a locally re-implemented
-   `InputDecoration` helper instead of the shared
-   `liveClassInputDecoration` (**a third flavor not previously
-   catalogued before a prior pass:** `ClassroomFormScreen`). Same low-risk,
-   low-priority cleanup as before — just a larger, now three-part list.
+2. **Design-system structural drift** — was confirmed to span **10**
+   screens across **three distinct flavors** (§8.5): hand-rolled
+   loading/error/app-bar UI (`WishlistScreen`, `WaitlistScreen`,
+   `ScheduleManagerScreen`, `SessionsListScreen`, `ClassroomDetailScreen`,
+   `LiveSessionScreen`); hand-rolled `Container`+`BoxShadow` card chrome
+   instead of `LiveClassCard` (`ClassroomPurchasesScreen`,
+   `ClassroomReportsScreen`, `NoticeBoardScreen`); and a locally
+   re-implemented `InputDecoration` helper instead of the shared
+   `liveClassInputDecoration` (`ClassroomFormScreen`). **Updated a later
+   pass: down to 9, one flavor-2 instance fixed.** `ClassroomPurchasesScreen`
+   was re-uploaded and its card chrome is now a plain `LiveClassCard`
+   (§6.3/§8.5) — removed from the card-chrome flavor's list, which now
+   reads `ClassroomReportsScreen`/`NoticeBoardScreen` only. Note this
+   doesn't fully clear `ClassroomPurchasesScreen` from the drift tally: its
+   empty state is still a bare `ListView`+`Center(Text(...))`, a smaller,
+   residual instance of the same underlying pattern that isn't cleanly
+   one of the three named flavors — worth folding in as a loosely-related
+   fourth if this list is ever formally re-tallied. Same low-risk,
+   low-priority cleanup otherwise.
+   **Updated a later pass: four more card-chrome fixes confirmed, none
+   previously named as candidates.** `ScheduleManagerScreen`,
+   `SessionsListScreen`, `WaitlistScreen`, and `WishlistScreen` (§6.2/§6.4/
+   §6.6, §8.5) all now use `LiveClassCard` for what used to be hand-rolled
+   `Container`+`BoxShadow` cards — `WaitlistScreen`/`WishlistScreen` are
+   also the first confirmed live uses of the four new override params
+   (see item 24). Each still has a smaller residual gap open
+   (`ScheduleManagerScreen`'s own `_decoration()` helper stays
+   unfixed — it also still counts toward the flavor-3 tally alongside
+   `ClassroomFormScreen`; the other three's empty states, and
+   `SessionsListScreen`'s date-strip chips, are still hand-rolled, not
+   `LiveClassEmptyState`). The flavor-1 (loading/error/app-bar) and
+   flavor-2 (card-chrome) lists above are now stale in one direction —
+   `WishlistScreen`/`WaitlistScreen`/`ScheduleManagerScreen`/
+   `SessionsListScreen` were originally counted only under flavor-1, but
+   each also independently carried (and three of the four have now partly
+   fixed) a flavor-2-style card-chrome instance that was never folded into
+   this item's flavor-2 list — treat the two lists as overlapping, not
+   disjoint, for these four files specifically. `ClassroomReportsScreen`/
+   `NoticeBoardScreen` remain the only files with a fully unfixed
+   card-chrome instance.
 3. **`NotificationPreference` model shape** — unresolved, unchanged.
 4. **`SessionEngagementReport` fields** — unresolved, unchanged.
 5. **3-way `NotifType` sync rule** — unresolved, unchanged from the prior
@@ -3753,7 +4338,19 @@ standard guard for any new mutating action, optimistic or not.
    item description implies. Re-confirmed again this pass against the
    freshly re-uploaded `sessions_list_screen.dart`: still fixed, no
    regression. This item entry itself was simply stale, not the code.
-8. **`_fmtRelative` duplicated, not shared** — unresolved, unchanged.
+8. **`_fmtRelative` duplicated, not shared** — **two confirmed-fixed
+   instances now, not previously tallied together.** `notifications_screen.dart`'s
+   own local copy was deleted in favor of the shared `liveClassFmtRelative`
+   (per that file's own header comment, noted several passes ago).
+   **NEW this pass:** `waitlist_screen.dart` (§6.4) — flagged in its own
+   write-up as "worth a spot-check against this item" — has, on
+   re-upload, also had its local `_fmtRelative` removed in favor of the
+   shared helper, per an explicit in-file `🔴 FIX` comment citing
+   `liveclass_theme.dart`'s own header comment for the pattern. No other
+   file in this doc has been confirmed to still carry a live local
+   duplicate — this item is likely resolved module-wide as far as this
+   doc's coverage goes, but that's an absence-of-evidence conclusion
+   (no screen has been caught still having it), not an exhaustive sweep.
 9. **RESOLVED this pass — the last three architecture-level-uncertain 📋
    files are now ✅.** `assignments_screen.dart`, `classroom_form_screen.dart`,
    and `classroom_reports_screen.dart` were all read line-by-line this
@@ -3861,24 +4458,35 @@ standard guard for any new mutating action, optimistic or not.
     Worth flagging for anyone wiring a new caller to this screen —
     treating the result as always-a-`Classroom` will silently mishandle
     the close/delete paths.
-21. **NEW this pass, RESOLVED (doc-only) — `CoinWalletScreen` had no
-    actual write-up despite being tagged ✅ in §0.** Same class of gap as
-    the two prior "claimed ✅, no body" fixes earlier in this doc's
-    revision history — this time it was `coin_wallet_screen.dart` itself.
-    A full write-up now exists in §6.6, sourced from this pass's actual
-    line-by-line read. **Not fully resolved is a genuine, still-open code
-    finding surfaced by that read:** the transaction tile's date line
-    calls `liveClassFmtDateTime(t.createdAt)` with no `context` argument
+21. **NEW this pass, RESOLVED (doc-only), then RESOLVED IN CODE a pass
+    later — `CoinWalletScreen` had no actual write-up despite being
+    tagged ✅ in §0.** Same class of gap as the two prior "claimed ✅, no
+    body" fixes earlier in this doc's revision history — this time it was
+    `coin_wallet_screen.dart` itself. A full write-up now exists in §6.6,
+    sourced from that pass's actual line-by-line read. That read surfaced
+    a genuine, still-open code finding: the transaction tile's date line
+    called `liveClassFmtDateTime(t.createdAt)` with no `context` argument
     (§2.3), silently falling back to `intl`'s default locale instead of
     the device/app one — the same bug class already fixed at every call
-    site in `my_reminders_screen.dart`, but **live and unfixed** here. Not
-    a doc-only item; a real, actionable follow-up for whoever next touches
-    `coin_wallet_screen.dart`. Worth a targeted sweep of every
-    `liveClassFmtDate`/`liveClassFmtDateWeekday`/`liveClassFmtDateTime`
-    call site module-wide for the same missing-`context` mistake, since
-    this doc has now found it twice (previously `my_reminders_screen.dart`,
-    now `coin_wallet_screen.dart`) purely by chance of which files got
-    re-uploaded, not by a systematic check.
+    site in `my_reminders_screen.dart`, but live and unfixed there at the
+    time. **Update this pass: now actually fixed, confirmed against a
+    fresh re-upload of `coin_wallet_screen.dart` — the call site now
+    passes `context` through, per the file's own `FIX` comment (§6.6).**
+    This item is now fully closed, code and doc both. The remaining
+    open action from this item is unchanged: still worth a targeted sweep
+    of every `liveClassFmtDate`/`liveClassFmtDateWeekday`/
+    `liveClassFmtDateTime` call site module-wide for the same
+    missing-`context` mistake, since this doc has now found it at four
+    separate screens purely by chance of which files got re-uploaded.
+    **Updated a later pass:** `schedule_manager_screen.dart`'s instance is
+    now also fixed — its `_fmtDate` wrapper takes and forwards `context`
+    at every call site, confirmed against a fresh re-upload (§6.2). That
+    leaves **`referral_screen.dart`'s** `liveClassFmtDate(p.purchasedAt)`
+    call (§6.6) as the **sole remaining confirmed-live** instance of this
+    pattern in the doc — three of four found-by-chance instances
+    (`my_reminders_screen.dart`, `coin_wallet_screen.dart`,
+    `schedule_manager_screen.dart`) are now fixed, still not by a
+    systematic sweep.
 22. **NEW this pass — `my_passes_screen.dart`'s header comment is stale
     relative to its own body.** The header claims this screen "only ever
     displays status" and that refund is handled entirely elsewhere; the
@@ -3898,6 +4506,104 @@ standard guard for any new mutating action, optimistic or not.
     `join_requests_screen.dart`, `pass_gift_claim_screen.dart`,
     `pass_management_screen.dart`) are unchanged from the prior pass's
     assessment — narrower, lower-traffic flows, private-detail gaps only.
+24. **NEW this pass — `LiveClassCard` gained four optional override
+    params** (`borderRadius`/`boxShadow`/`border`/`clipBehavior`, §2.2),
+    all backward-compatible defaults. This is a **fix now available**
+    for item 2's tracked "10 screens, three flavors" design-system drift
+    — specifically the hand-rolled-`Container`+`BoxShadow`-card flavor
+    (`ClassroomPurchasesScreen`, `ClassroomReportsScreen`,
+    `NoticeBoardScreen`) — but **not confirmed applied**: none of those
+    three screens were re-uploaded this pass. Re-check each the next
+    time it's touched, same pattern as item 8's `liveClassFmtRelative`.
+    **Update a later pass: one of the three now confirmed fixed.**
+    `classroom_purchases_screen.dart` was re-uploaded and its card is now
+    a plain, default-args `LiveClassCard` (§6.3/§8.5) — but it turned out
+    the four new override params weren't actually needed: the old
+    hand-rolled decoration was confirmed an exact match to `LiveClassCard`'s
+    existing defaults, so a plain swap sufficed. `ClassroomReportsScreen`
+    and `NoticeBoardScreen` remain unconfirmed/unfixed — still worth a
+    re-check next time either is touched.
+    **Updated a later pass: the override params are now confirmed live,
+    on two screens that were never on this item's candidate list.**
+    `waitlist_screen.dart` uses `borderRadius`/`boxShadow` on its manage
+    card and `border` on its student card (the conditional green
+    "seat opened" highlight — explicitly the feature this widget couldn't
+    express before gaining the param, per the file's own comment);
+    `wishlist_screen.dart` uses `borderRadius`/`boxShadow`/`clipBehavior`
+    on `_WishlistCard` (`clipBehavior` needed so its full-bleed cover
+    image still clips to the rounded corners — the first confirmed use of
+    that specific override anywhere in the module). See §6.4/§6.6/§8.5 for
+    full detail. `ClassroomReportsScreen`/`NoticeBoardScreen` are still the
+    only two files carrying a fully unfixed hand-rolled card.
+25. **NEW this pass, UNRESOLVED — `SessionCaptionLine`/
+    `SessionReactionSummary` (§4) apparently contradict §6.4's confirmed
+    read of `live_session_screen.dart`.** The models describe real,
+    named REST endpoints for persisting captions
+    (`SessionApi.postCaption`/`.getCaptionHistory`) and reactions
+    (`sessions/{id}/reactions/`), server-backed with a
+    `SessionCaptionSerializer`/`ClassSessionViewSet.captions()`. §6.4
+    states — from a direct line-by-line read — that both features are
+    peer-to-peer-only over the LiveKit data channel, with captions
+    explicitly "nothing sent to any server, nothing persists" and
+    reactions "confirmed not backed by any model field." Can't be
+    resolved from `liveclass_models.dart` alone — needs
+    `live_session_screen.dart` re-read to tell whether it has since
+    started calling these endpoints, whether they serve some other
+    (non-live-room) consumer, or whether they're unwired scaffolding.
+    See §4 for the full detail.
+26. **NEW this pass — two genuine code fixes confirmed via re-upload,
+    both closing previously-tracked open findings.** (1) `coin_wallet_screen.dart`'s
+    missing-`context` locale bug (item 21) is now fixed — see §6.6. (2)
+    `classroom_purchases_screen.dart`'s hand-rolled card chrome (item 2,
+    item 24, §8.5) is now fixed — its card is a plain `LiveClassCard` —
+    but its empty state is still hand-rolled, so this is a **partial**
+    fix, not a full clear of that screen from the drift tally. No other
+    files re-uploaded this pass (`banned_students_screen.dart`,
+    `certificates_screen.dart`, `chat_message_reports_screen.dart`,
+    `classroom_recordings_screen.dart`, `doubts_screen.dart`,
+    `pip_service.dart`) showed any change — all six re-confirmed
+    token-for-token against their existing write-ups. No change to §0
+    ✅/📋 counts — all eight files were already ✅.
+27. **NEW this pass — `join_requests_screen.dart` promoted 📋 → ✅**, the
+    first 📋 → ✅ promotion since the `my_passes_screen.dart`/
+    `notice_board_screen.dart` pair (item 23). §0 coverage moves
+    39✅/5📋 → **40✅/4📋** — see §6.3 for the full write-up. Also
+    surfaces `join_requests_screen.dart`'s own three design-system fixes
+    (hex-literal aliasing, combined timezone+missing-`context` locale fix,
+    and a deprecated `Color.withOpacity` → `withValues(alpha:)` swap) and
+    fully clears the file of the §8.5/§11.2 structural-drift pattern —
+    see §6.3 for detail. The `withOpacity`→`withValues` swap is a
+    genuinely new cross-cutting pattern not previously tracked anywhere in
+    this doc, even though the fixing file's own comment implies
+    `coin_wallet_screen.dart`/`coupons_screen.dart` already made the same
+    swap independently — see the new §8.11. `holidays_screen.dart`,
+    `liveclass_home_screen.dart`, and `materials_screen.dart` were also
+    re-uploaded this pass and re-confirmed **unchanged, token-for-token**,
+    against their existing §6.2/§6.1/§6.5 write-ups — no drift, no new
+    findings there. `live_session_screen.dart` was re-uploaded too but,
+    given its size (5,494 lines, the largest file in the module), was not
+    re-read line-by-line this pass — its existing §6.4 write-up is carried
+    forward unverified against this specific re-upload; flag for a
+    targeted re-read if a future task depends on exact current behavior
+    there.
+28. **NEW this pass — `ReferralScreen` and `TeacherEarningsScreen`'s
+    unscoped mode are orphans, not previously flagged as such.** Both
+    have been ✅ VERIFIED for several passes with full write-ups (§6.6),
+    but neither ever appears in §7's connection graph, and no file
+    anywhere in this doc claims a confirmed in-module caller for either —
+    `ReferralScreen`'s own header says so outright (its intended caller
+    is host-app code outside this upload); `TeacherEarningsScreen` only
+    has a confirmed caller for its **scoped** constructor
+    (`ClassroomDetailScreen`'s manage sheet), not its unscoped
+    "My Earnings across every classroom" mode. This is the same class of
+    gap `PassGiftClaimScreen` was tracked under before item 1 resolved
+    it — surfaced now only because this pass re-read both files' write-ups
+    closely enough to check the graph against them, not because anything
+    changed in the source. §7's "Orphans" list is updated to name both
+    rather than read "none currently tracked." Not necessarily a bug (see
+    §7 for the caveat that a host-app entry point may simply live outside
+    this `lib/liveclass/` upload) — worth confirming next time either
+    screen, or the host app's own menu/profile code, is touched.
 
 ---
 
@@ -3955,3 +4661,31 @@ there.
 all now purely private-implementation-detail gaps (method names, widget
 trees), not architecture-level unknowns, since the hub screen and the
 biggest file in the module are both now ✅.
+
+---
+
+### 13.1 Latest re-check (this update) — new logic confirmed against a
+fresh re-upload of both files
+
+- **New in `live_session_screen.dart`'s chat panel:** reply-to-message
+  (`_replyingTo`/`_startReply`/`_cancelReply`, one-level WhatsApp-style
+  reply with a quote-preview strip, wired into `ChatMessageApi.send(...,
+  replyTo:)` and rendered via each message's `replyToPreview`) and
+  message search (`_chatSearchActive`/`_onChatSearchChanged`, 350ms
+  debounced `ChatMessageApi.list(..., search:)`, swaps the rendered list
+  without touching the live `_chatMessages`). Both confirmed genuinely
+  wired, not stubs — see the updated Chat panel write-up in §6.4.
+- **New in `live_session_screen.dart`'s LiveKit integration:** a
+  noise-suppression/echo-cancellation audio-settings sheet
+  (`_noiseSuppressionOn`/`_echoCancellationOn`, long-press the mic control
+  button to open), applied via `lk.AudioCaptureOptions` at connect time
+  and re-applied mid-call by briefly restarting local mic capture. Local
+  device preference only, both default ON to match LiveKit/WebRTC's own
+  defaults. See the updated LiveKit-integration bullet list in §6.4.
+- **Resolved in `pass_management_screen.dart`:** the Hindi
+  `'${p.validityDays} din'` string leak flagged in §6.2 is fixed — the
+  validity stat now reads in English (`'${p.validityDays} days'`),
+  consistent with the rest of that card. Screen write-up in §6.2 updated
+  accordingly; this does not change the §8.10 module-wide tally, since
+  this instance was never folded into that cross-cutting section to begin
+  with.

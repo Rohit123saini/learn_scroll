@@ -1,4 +1,4 @@
-part of 'media_edit_screen.dart';
+part of '../screens/media_edit_screen.dart';
 
 // Instagram-style rule-of-thirds crop grid — three equal columns/rows
 // drawn as thin translucent white lines over the viewport. Purely a
