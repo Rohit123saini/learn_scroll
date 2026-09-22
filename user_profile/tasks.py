@@ -1,6 +1,20 @@
 """
 user_profile/tasks.py
 
+UPDATE (issue #4): the root-cause fix now exists —
+`user_profile/signals.py` recomputes followers_count/following_count
+from the real Follow rows on every Follow post_save/post_delete (incl.
+admin deletes and user.delete() cascades), and the API views no longer
+update the counters by hand. Everything below that says "the actual fix
+would be a signal" is therefore historical.
+
+This task is kept ONLY as a low-frequency safety net for the one thing
+signals cannot see: `QuerySet.update()` / `bulk_create()` on Follow
+(Django sends no signals for those) and raw SQL. It now runs weekly
+(settings.CELERY_BEAT_SCHEDULE) instead of every 6 hours; a non-zero
+"corrected" count in its log line means some code path is bypassing the
+signals and should be found and fixed.
+
 TASK 28 — followers_count/following_count drift reconciliation.
 
 `followers_count`/`following_count` are kept in sync per-operation today
@@ -39,8 +53,8 @@ Follow.Status.ACCEPTED).values_list('following_id', ...)`), so
 `follower`/`following`/`status`/`Follow.Status.ACCEPTED` are already
 confirmed real. If your `User` model's counter fields aren't literally
 named `followers_count`/`following_count`, adjust the two `hasattr`
-checks and the `bulk_update` field list below — everything else stays
-the same.
+checks and the `recompute_follow_counts` call below — everything else
+stays the same.
 
 Wire into settings.py CELERY_BEAT_SCHEDULE (already added):
 
@@ -59,11 +73,9 @@ from django.db.models import Count
 
 logger = logging.getLogger(__name__)
 
-# Caps how many (user, new_count) pairs sit in memory / go into a single
-# bulk_update() UPDATE at once. Keeps this task's memory and per-query
-# cost bounded on an app with a large user table, rather than building
-# one unbounded list for the whole run.
-_BULK_UPDATE_BATCH_SIZE = 500
+# How many users are checked (and, if drifted, fixed) per round trip. Keeps the
+# task's memory and per-query cost bounded on a large user table.
+_CHUNK_SIZE = 1000
 
 
 @shared_task
@@ -94,59 +106,64 @@ def reconcile_follow_counts():
         )
         return {"skipped": True}
 
-    # Two aggregate GROUP BY queries cover every user's correct count in
-    # one shot each — this is what keeps a 6-hourly run cheap regardless
-    # of user count, instead of one query per user.
-    correct_followers_by_user = dict(
-        Follow.objects.filter(status=Follow.Status.ACCEPTED)
-        .values("following_id")
-        .annotate(c=Count("id"))
-        .values_list("following_id", "c")
-    )
-    correct_following_by_user = dict(
-        Follow.objects.filter(status=Follow.Status.ACCEPTED)
-        .values("follower_id")
-        .annotate(c=Count("id"))
-        .values_list("follower_id", "c")
-    )
+    # Issue #20 / scalability: walk the user table in id-ordered CHUNKS
+    # (keyset pagination) and, per chunk, ask the database for the true counts
+    # of just those users with two grouped queries. Memory is bounded by the
+    # chunk, not by the number of users (the old version held one dict entry
+    # per user-with-follows for the whole table).
+    #
+    # Users found drifted are fixed with `recompute_follow_counts()` — the
+    # SAME single-statement `UPDATE ... SET count = (SELECT COUNT(*) ...)` the
+    # signals use — instead of `bulk_update()` of values read earlier. Two
+    # advantages: a follow that lands between "read" and "write" is not
+    # overwritten with a stale absolute number (the count is recomputed by
+    # the database at write time), and it goes through the one code path that
+    # also emits `follow_counts_recomputed` (signals.py), the hook a cache
+    # layer subscribes to — `bulk_update()`/`update()` fire no model
+    # post_save, so without that hook a cached copy would stay stale.
+    from .signals import recompute_follow_counts
 
-    to_update = []
+    accepted = Follow.objects.filter(status=Follow.Status.ACCEPTED).order_by()
     checked = 0
     corrected_followers = 0
     corrected_following = 0
+    last_id = 0
 
-    # Walk every user, not just IDs that appear in the two maps above — a
-    # user whose real accepted-follow count just dropped to zero (every
-    # Follow row touching them got deleted) won't appear in either map at
-    # all, but their stored counter could still be sitting on a stale
-    # nonzero value. Checking map keys only would miss exactly that
-    # direction of drift.
-    queryset = User.objects.only("id", "followers_count", "following_count").iterator(chunk_size=1000)
-    for user in queryset:
-        checked += 1
-        true_followers = correct_followers_by_user.get(user.id, 0)
-        true_following = correct_following_by_user.get(user.id, 0)
+    while True:
+        chunk = list(
+            User.objects.filter(id__gt=last_id)
+            .order_by("id")
+            .values_list("id", "followers_count", "following_count")[:_CHUNK_SIZE]
+        )
+        if not chunk:
+            break
+        last_id = chunk[-1][0]
+        ids = [row[0] for row in chunk]
+        checked += len(chunk)
 
-        needs_followers_fix = user.followers_count != true_followers
-        needs_following_fix = user.following_count != true_following
-        if not (needs_followers_fix or needs_following_fix):
-            continue
+        # Every user in the chunk is checked, including ones that appear in
+        # neither map below — a user whose real count just dropped to zero can
+        # still carry a stale non-zero counter, and only walking all users
+        # (not just map keys) catches that direction of drift.
+        true_followers = dict(
+            accepted.filter(following_id__in=ids)
+            .values("following_id").annotate(c=Count("id")).values_list("following_id", "c")
+        )
+        true_following = dict(
+            accepted.filter(follower_id__in=ids)
+            .values("follower_id").annotate(c=Count("id")).values_list("follower_id", "c")
+        )
 
-        if needs_followers_fix:
-            corrected_followers += 1
-        if needs_following_fix:
-            corrected_following += 1
-
-        user.followers_count = true_followers
-        user.following_count = true_following
-        to_update.append(user)
-
-        if len(to_update) >= _BULK_UPDATE_BATCH_SIZE:
-            User.objects.bulk_update(to_update, ["followers_count", "following_count"])
-            to_update = []
-
-    if to_update:
-        User.objects.bulk_update(to_update, ["followers_count", "following_count"])
+        drifted = []
+        for uid, followers_count, following_count in chunk:
+            fix_followers = followers_count != true_followers.get(uid, 0)
+            fix_following = following_count != true_following.get(uid, 0)
+            if fix_followers or fix_following:
+                drifted.append(uid)
+                corrected_followers += fix_followers
+                corrected_following += fix_following
+        if drifted:
+            recompute_follow_counts(drifted)
 
     total_corrected = corrected_followers + corrected_following
     if total_corrected:

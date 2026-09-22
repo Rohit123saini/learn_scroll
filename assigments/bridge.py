@@ -121,7 +121,10 @@ def create_context_assigments(
     data["context_type"] = context_type
     data["context_id"] = str(context_id) if context_id else None
     with transaction.atomic():
-        assigments = assigments.objects.create(
+        # [FIX] was `assigments = assigments.objects.create(...)` — the local
+        # shadowed the model class, so every campus / liveclass assignment post
+        # died with UnboundLocalError before creating anything.
+        assignment = assigments.objects.create(
             source=source,
             context_type=context_type,
             context_id=context_id,
@@ -136,7 +139,7 @@ def create_context_assigments(
         assigmentsSubmission.objects.bulk_create(
             [
                 assigmentsSubmission(
-                    assigments=assigments,
+                    assigments=assignment,
                     student_id=entry["user_id"],
                     roll_number=entry.get("roll_number", ""),
                     enrollment_no=entry.get("enrollment_no", ""),
@@ -152,9 +155,9 @@ def create_context_assigments(
     # work to a whole roster), not noise.
     logger.info(
         "assigments.created id=%s source=%s context_type=%s context_id=%s roster_size=%d",
-        assigments.id, source, context_type, context_id, len(roster),
+        assignment.id, source, context_type, context_id, len(roster),
     )
-    return assigments
+    return assignment
 
 
 def get_submissions_for_context(context_type: str, context_id):

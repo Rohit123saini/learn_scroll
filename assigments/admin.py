@@ -18,17 +18,17 @@ class assigmentsQuestionInline(admin.TabularInline):
 @admin.register(assigments)
 class assigmentsAdmin(admin.ModelAdmin):
     list_display = [
-        "title", "source", "context_type", "posted_by", "due_date",
+        "title", "source", "kind", "status", "visibility", "context_type", "posted_by", "due_date",
         "has_structured_questions", "total_marks", "created_at",
     ]
-    list_filter = ["source", "has_structured_questions", "context_type"]
-    search_fields = ["title", "posted_by__username", "posted_by__email"]
+    list_filter = ["source", "kind", "status", "visibility", "has_structured_questions", "context_type"]
+    search_fields = ["title", "public_slug", "posted_by__username", "posted_by__email"]
     # total_marks is auto-derived (recompute_total_marks(), see models.py)
     # for the structured path — editing it directly in admin for a
     # structured assigments would just get silently overwritten on the
     # next question add/remove, so make that non-obviousness explicit
     # rather than letting an admin user "fix" a value that won't stick.
-    readonly_fields = ["total_marks"]
+    readonly_fields = ["total_marks", "public_slug", "published_at"]
     inlines = [assigmentsQuestionInline]
 
 

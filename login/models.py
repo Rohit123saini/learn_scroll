@@ -138,6 +138,14 @@ class User(AbstractUser):
         # blank signups.
         if self.phone == "":
             self.phone = None
+        # Same reasoning for `email`: it's `unique=True, null=True` above,
+        # but Django's `create_user()`/`createsuperuser` (and the admin
+        # form) store a blank email as '' — NOT NULL — so the SECOND user
+        # created without an email hits `UNIQUE constraint failed:
+        # login_user.email`. Normalize '' -> None so any number of
+        # email-less accounts can coexist.
+        if self.email == "":
+            self.email = None
         super().save(*args, **kwargs)
 
     def __str__(self):

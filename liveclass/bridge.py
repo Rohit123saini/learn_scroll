@@ -266,3 +266,30 @@ def create_testseries(
         questions=questions,
         roster=roster,
     )
+
+
+def user_accessible_testseries_context_ids(*, user, context_type):
+    """[ADVANCED test series — access control] Which live classrooms may
+    `user` see and attempt test series for?
+
+    Same semantics as `Classroom.is_enrolled()` / `_can_view_classroom_internals()`:
+    the classroom's teacher, any `ClassroomStaff` row, or anyone who has EVER
+    held a successful pass (active or lapsed). Returned as UUIDs because
+    `TestSeries.context_id` is a `UUIDField` — an integer classroom pk is stored
+    as `uuid.UUID(int=pk)` (that is what `create_testseries()` above does
+    implicitly), so the same mapping is applied here.
+    """
+    import uuid
+
+    if context_type != "classroom" or not getattr(user, "is_authenticated", False):
+        return set()
+
+    from .models import Classroom, ClassroomStaff, PassPurchase
+
+    pks = set(Classroom.objects.filter(teacher=user).values_list("id", flat=True))
+    pks |= set(ClassroomStaff.objects.filter(user=user).values_list("classroom_id", flat=True))
+    pks |= set(
+        PassPurchase.objects.filter(student=user, status=PassPurchase.Status.SUCCESS, is_active=True)
+        .values_list("class_pass__classroom_id", flat=True)
+    )
+    return {pk if isinstance(pk, uuid.UUID) else uuid.UUID(int=int(pk)) for pk in pks}

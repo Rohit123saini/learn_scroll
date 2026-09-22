@@ -20,28 +20,42 @@ adds it from scratch with just the two things TASK 5 actually needs:
     quickly see/filter which credits are/aren't withdrawal-eligible
     without cross-referencing `transaction_type` by hand.
 
-IMPORTANT: if `Follow`, `BlockUser`, `RestrictUser`,
-`CoinPurchaseRequest`, or `CoinWithdrawalRequest` are already
-registered in a version of this file elsewhere in the codebase (this
-upload never included an existing admin.py, so this pass has no
-visibility into one), merge those registrations into this file rather
-than letting this overwrite them — this file only defines
-`CoinLedger`'s registration; it doesn't know about or touch the
-others.
+Registered here now (bottom of this file): `Follow`, `BlockUser`,
+`RestrictUser` (plain editable admins — Follow edits/deletes keep the
+follower counters exact via user_profile/signals.py) and
+`CoinPurchaseRequest` (READ-ONLY viewer; manual top-ups are confirmed
+through `POST /profile/buy-coin/admin-confirm/`). `CoinLedger`,
+`CoinWithdrawalRequest` and `UserPreference` are registered above. If any
+of these models is ALSO registered in another admin.py elsewhere in the
+codebase, Django raises AlreadyRegistered at startup — keep exactly one.
 """
 from django.contrib import admin, messages
 
-from .models import CoinLedger, CoinWithdrawalRequest, UserPreference
+from .models import (
+    BlockUser,
+    CoinLedger,
+    CoinPurchaseRequest,
+    CoinWithdrawalRequest,
+    Follow,
+    RestrictUser,
+    UserPreference,
+)
 
 
 class WithdrawalEligibleFilter(admin.SimpleListFilter):
     """
-    Ops-facing filter on the `metadata["withdrawal_eligible"]` flag
-    `CoinLedgerManager.record_transaction()` stamps on every row. Reads
-    the flag rather than re-deriving eligibility from
-    `transaction_type` here, so this filter and `fraud.py` can never
-    silently disagree about what "eligible" means for a given row —
-    there is exactly one place (`record_transaction`) that decides it.
+    Ops-facing "withdrawal eligible" filter.
+
+    Filters on `transaction_type` using `fraud.eligible_source_types()` — the
+    same single definition `fraud.py` and `record_transaction()` use — and
+    NOT on `metadata__withdrawal_eligible`. The flag is a pure function of
+    `transaction_type`, so querying inside the JSON column bought nothing and
+    cost a lot: without a Postgres GIN index that is a full scan of the
+    append-only ledger with a JSON extraction per row (the dashboard would
+    time out on a big table), and a GIN index is Postgres-only, heavy to
+    maintain on a hot insert table, and still wouldn't cover rows written
+    before the flag existed. `transaction_type` is covered by the
+    (transaction_type, -created_at) index instead.
     """
 
     title = "withdrawal eligible"
@@ -49,15 +63,17 @@ class WithdrawalEligibleFilter(admin.SimpleListFilter):
 
     def lookups(self, request, model_admin):
         return (
-            ("1", "Eligible (purchase / gift)"),
+            ("1", "Eligible (purchase / gift / rejected-withdrawal refund)"),
             ("0", "Not eligible (earn / reward / other)"),
         )
 
     def queryset(self, request, queryset):
+        from .fraud import eligible_source_types
+
         if self.value() == "1":
-            return queryset.filter(metadata__withdrawal_eligible=True)
+            return queryset.filter(transaction_type__in=eligible_source_types())
         if self.value() == "0":
-            return queryset.filter(metadata__withdrawal_eligible=False)
+            return queryset.exclude(transaction_type__in=eligible_source_types())
         return queryset
 
 
@@ -210,3 +226,59 @@ class UserPreferenceAdmin(admin.ModelAdmin):
     list_display = ("id", "user", "theme", "language", "updated_at")
     list_filter = ("theme", "language")
     search_fields = ("user__username",)
+
+
+# ---------------------------------------------------------------------------
+# Social-graph tables (issue #4 / #2).
+#
+# Deleting or editing a Follow here is now SAFE: user_profile/signals.py
+# recounts followers_count/following_count on every Follow save/delete
+# (including admin's bulk "delete selected", which deletes row by row so
+# signals fire). Before, an admin delete silently drifted the counters.
+# ---------------------------------------------------------------------------
+@admin.register(Follow)
+class FollowAdmin(admin.ModelAdmin):
+    list_display = ("id", "follower", "following", "status", "created_at")
+    list_filter = ("status",)
+    search_fields = ("follower__username", "following__username")
+    raw_id_fields = ("follower", "following")
+
+
+@admin.register(BlockUser)
+class BlockUserAdmin(admin.ModelAdmin):
+    list_display = ("id", "blocker", "blocked", "created_at")
+    search_fields = ("blocker__username", "blocked__username")
+    raw_id_fields = ("blocker", "blocked")
+
+
+@admin.register(RestrictUser)
+class RestrictUserAdmin(admin.ModelAdmin):
+    list_display = ("id", "user", "restricted", "created_at")
+    search_fields = ("user__username", "restricted__username")
+    raw_id_fields = ("user", "restricted")
+
+
+@admin.register(CoinPurchaseRequest)
+class CoinPurchaseRequestAdmin(admin.ModelAdmin):
+    """
+    READ-ONLY viewer, same reasoning as `CoinLedgerAdmin`: flipping `status`
+    by hand would skip the manager method that credits the wallet exactly
+    once. Pending manual (blank-gateway) top-ups are confirmed through
+    `POST /profile/buy-coin/admin-confirm/` (AdminCoinPurchaseConfirmView,
+    IsAdminUser) — admin here only lets ops SEE which ones are waiting.
+    """
+
+    list_display = ("id", "user", "gateway", "gateway_reference", "amount", "coins", "status", "created_at")
+    list_filter = ("status", "gateway")
+    search_fields = ("gateway_reference", "user__username")
+    ordering = ("-created_at",)
+
+    def has_add_permission(self, request):
+        return False
+
+    def has_change_permission(self, request, obj=None):
+        return False
+
+    def has_delete_permission(self, request, obj=None):
+        return False
+

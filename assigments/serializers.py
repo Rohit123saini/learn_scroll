@@ -42,17 +42,86 @@ changed here versus the version originally handed off with Task 8:
      answer_attachment` — a field Task 7 added that didn't exist in the
      model this file was originally written against.
 """
+from django.conf import settings
 from django.core.exceptions import ValidationError as DjangoValidationError
 from django.db import IntegrityError, transaction
 from rest_framework import serializers
 
 from .models import (
+    MAX_RUBRIC_CRITERIA,
+    MAX_TAGS,
+    SUBMISSION_TYPES,
     assigments,
     assigmentsAnswer,
+    assigmentsKind,
     assigmentsQuestion,
     assigmentsSource,
     assigmentsSubmission,
 )
+
+
+def _person_name(user) -> str:
+    if user is None:
+        return ""
+    return (getattr(user, "get_full_name", lambda: "")() or getattr(user, "username", "") or "").strip()
+
+
+def _share_url(obj, request):
+    if not obj.public_slug:
+        return None
+    template = getattr(settings, "ASSIGNMENTS_SHARE_URL_TEMPLATE", "")
+    if template:
+        return template.format(slug=obj.public_slug)
+    path = f"/assigments/p/{obj.public_slug}/"
+    return request.build_absolute_uri(path) if request else path
+
+
+def validate_tags(value):
+    if not isinstance(value, list):
+        raise serializers.ValidationError("tags must be a list of strings.")
+    clean = []
+    for tag in value:
+        if not isinstance(tag, str) or not tag.strip():
+            raise serializers.ValidationError("Every tag must be a non-empty string.")
+        tag = tag.strip().lower()
+        if len(tag) > 30:
+            raise serializers.ValidationError("A tag can be at most 30 characters.")
+        if tag not in clean:
+            clean.append(tag)
+    if len(clean) > MAX_TAGS:
+        raise serializers.ValidationError(f"At most {MAX_TAGS} tags.")
+    return clean
+
+
+def validate_rubric(value):
+    if not isinstance(value, list):
+        raise serializers.ValidationError("rubric must be a list of {criterion, max_marks}.")
+    if len(value) > MAX_RUBRIC_CRITERIA:
+        raise serializers.ValidationError(f"At most {MAX_RUBRIC_CRITERIA} rubric criteria.")
+    seen, clean = set(), []
+    for item in value:
+        if not isinstance(item, dict):
+            raise serializers.ValidationError("Each rubric entry must be an object.")
+        name = str(item.get("criterion", "")).strip()
+        try:
+            max_marks = int(item.get("max_marks"))
+        except (TypeError, ValueError):
+            raise serializers.ValidationError(f"max_marks for {name or 'a criterion'} must be a whole number.")
+        if not name or len(name) > 80:
+            raise serializers.ValidationError("criterion must be 1-80 characters.")
+        if not 1 <= max_marks <= 100:
+            raise serializers.ValidationError(f"max_marks for {name!r} must be between 1 and 100.")
+        if name.lower() in seen:
+            raise serializers.ValidationError(f"Duplicate criterion {name!r}.")
+        seen.add(name.lower())
+        clean.append({"criterion": name, "max_marks": max_marks})
+    return clean
+
+
+def validate_submission_types(value):
+    if not isinstance(value, list) or any(v not in SUBMISSION_TYPES for v in value):
+        raise serializers.ValidationError(f"submission_types must be a list drawn from {list(SUBMISSION_TYPES)}.")
+    return list(dict.fromkeys(value))
 
 
 class assigmentsQuestionSerializer(serializers.ModelSerializer):
@@ -190,6 +259,9 @@ class assigmentsSerializer(serializers.ModelSerializer):
             "id", "source", "context_type", "context_id", "posted_by", "title",
             "description", "attachment", "due_date", "total_marks",
             "has_structured_questions", "data", "questions", "created_at", "updated_at",
+            # ---- publishing + projects (migration 0003)
+            "kind", "status", "visibility", "public_slug", "share_url", "published_at",
+            "tags", "difficulty", "submission_types", "rubric", "participants_count",
         ]
         # source/context_type/context_id/posted_by/total_marks/data are all
         # either server-set or derived (total_marks via
@@ -214,7 +286,20 @@ class assigmentsSerializer(serializers.ModelSerializer):
         # context_type/context_id/posted_by field at all, so there's no
         # payload shape on the write path that could set any of these
         # regardless of what's marked read_only here.
-        read_only_fields = ["source", "posted_by", "context_type", "context_id", "total_marks", "data"]
+        read_only_fields = [
+            "source", "posted_by", "context_type", "context_id", "total_marks", "data",
+            "status", "visibility", "public_slug", "published_at",
+        ]
+
+    participants_count = serializers.SerializerMethodField()
+    share_url = serializers.SerializerMethodField()
+
+    def get_participants_count(self, obj) -> int:
+        annotated = getattr(obj, "n_participants", None)
+        return annotated if annotated is not None else obj.submissions.count()
+
+    def get_share_url(self, obj):
+        return _share_url(obj, self.context.get("request"))
 
     def to_representation(self, instance):
         # See assigmentsQuestionSerializer.to_representation() — seed the
@@ -243,7 +328,20 @@ class assigmentsCreateSerializer(serializers.ModelSerializer):
         fields = [
             "id", "title", "description", "attachment", "due_date",
             "total_marks", "has_structured_questions", "questions",
+            # ---- projects (migration 0003). Publishing itself (status /
+            # visibility / slug) is NOT writable here — it goes through the
+            # `publish` action, which checks the assignment is actually ready.
+            "kind", "tags", "difficulty", "submission_types", "rubric",
         ]
+
+    def validate_tags(self, value):
+        return validate_tags(value)
+
+    def validate_rubric(self, value):
+        return validate_rubric(value)
+
+    def validate_submission_types(self, value):
+        return validate_submission_types(value)
 
     def validate(self, attrs):
         has_structured = attrs.get(
@@ -253,6 +351,21 @@ class assigmentsCreateSerializer(serializers.ModelSerializer):
             raise serializers.ValidationError(
                 {"questions": "has_structured_questions=True requires at least one question."}
             )
+
+        # ---- projects / rubric
+        rubric = attrs.get("rubric", getattr(self.instance, "rubric", []))
+        if rubric and has_structured:
+            raise serializers.ValidationError(
+                {"rubric": "A rubric grades free-form hand-ins; it can't be combined with structured questions."}
+            )
+        kind = attrs.get("kind", getattr(self.instance, "kind", assigmentsKind.ASSIGNMENT))
+        if kind == assigmentsKind.PROJECT and not attrs.get("submission_types") and not (
+            self.instance and self.instance.submission_types
+        ):
+            attrs["submission_types"] = list(SUBMISSION_TYPES)
+        if "rubric" in attrs and attrs["rubric"]:
+            # total_marks of a rubric-graded assignment is, by definition, the rubric's sum.
+            attrs["total_marks"] = sum(c["max_marks"] for c in attrs["rubric"])
         return attrs
 
     def validate_has_structured_questions(self, value):
@@ -277,9 +390,13 @@ class assigmentsCreateSerializer(serializers.ModelSerializer):
         # assigments with no way for the client to know it's incomplete.
         questions_data = validated_data.pop("questions", [])
         try:
-            assigments = assigments.objects.create(**validated_data)
+            # [FIX] the local used to be named `assigments`, which shadows the
+            # model class of the same name for the WHOLE function body, so the
+            # right-hand side `assigments.objects` raised UnboundLocalError on
+            # every single create — i.e. no one could create an assignment.
+            assignment = assigments.objects.create(**validated_data)
             for question_data in questions_data:
-                assigmentsQuestion.objects.create(assigments=assigments, **question_data)
+                assigmentsQuestion.objects.create(assigments=assignment, **question_data)
         except DjangoValidationError as exc:
             # Belt-and-suspenders (see module docstring point 3): this
             # serializer's own validate()/assigmentsQuestionSerializer.
@@ -288,7 +405,7 @@ class assigmentsCreateSerializer(serializers.ModelSerializer):
             # same checks again — if the two ever drift, surface a clean
             # 400 here instead of an unhandled 500.
             raise serializers.ValidationError({"detail": exc.messages})
-        return assigments
+        return assignment
 
     def update(self, instance, validated_data):
         # Nested `questions` are intentionally NOT handled here on update
@@ -343,6 +460,7 @@ class assigmentsSubmissionSerializer(serializers.ModelSerializer):
             "roll_number", "enrollment_no", "status", "grade",
             "total_marks_awarded", "feedback", "public_slug",
             "submitted_at", "checked_at", "answers", "is_late",
+            "link_url", "rubric_scores",
         ]
         # Every field here except the assigments FK itself is either a
         # roster-time snapshot (roll_number/enrollment_no — set by
@@ -359,6 +477,7 @@ class assigmentsSubmissionSerializer(serializers.ModelSerializer):
         read_only_fields = [
             "student", "roll_number", "enrollment_no", "status", "grade",
             "total_marks_awarded", "public_slug", "submitted_at", "checked_at", "answers",
+            "link_url", "rubric_scores",
         ]
 
     def get_is_late(self, obj) -> bool:
@@ -409,6 +528,14 @@ class assigmentsSubmissionSerializer(serializers.ModelSerializer):
                 "assigments is posted — use submit_freeform/submit_structured on "
                 "the existing submission instead."
             )
+        # [SECURITY FIX] a private / draft personal assignment could be
+        # "joined" by anyone who knew its (UUID) id. Only the poster, or anyone
+        # once it is published with link/public visibility, may create a submission.
+        if self.instance is None:
+            request = self.context.get("request")
+            user = getattr(request, "user", None)
+            if not assigments.is_open_to(user):
+                raise serializers.ValidationError("This assignment is not available.")
         return assigments
 
     def create(self, validated_data):
@@ -447,7 +574,7 @@ class PublicSubmissionSerializer(serializers.ModelSerializer):
         fields = [
             "assigments_title", "student_name", "roll_number", "enrollment_no",
             "submitted_at", "status", "written_content", "file", "grade",
-            "total_marks_awarded", "breakdown",
+            "total_marks_awarded", "breakdown", "link_url", "rubric_scores",
         ]
 
     def get_student_name(self, obj) -> str:
@@ -479,6 +606,24 @@ class PublicSubmissionSerializer(serializers.ModelSerializer):
 class FreeformSubmitSerializer(serializers.Serializer):
     written_content = serializers.CharField(required=False, allow_blank=True, default="")
     file = serializers.FileField(required=False)
+    # Project hand-in: a URL (repo, live demo, design file). http(s) only.
+    link_url = serializers.URLField(required=False, allow_blank=True, max_length=500, default="")
+
+    def validate_link_url(self, value):
+        if value and not value.lower().startswith(("http://", "https://")):
+            raise serializers.ValidationError("Only http(s) links are accepted.")
+        return value
+
+    def validate(self, attrs):
+        # The poster decides which hand-in types this assignment accepts
+        # (`submission_types`; empty = all). The view passes the assignment in.
+        assignment = self.context.get("assignment")
+        if assignment is not None:
+            allowed = assignment.allowed_submission_types()
+            for field, kind in (("written_content", "text"), ("file", "file"), ("link_url", "link")):
+                if attrs.get(field) and kind not in allowed:
+                    raise serializers.ValidationError({field: f"This assignment doesn't accept '{kind}' hand-ins."})
+        return attrs
 
 
 class StructuredAnswerInputSerializer(serializers.Serializer):
@@ -514,3 +659,51 @@ class AnswerReviewSerializer(serializers.Serializer):
 
     marks_awarded = serializers.IntegerField(min_value=0)
     feedback = serializers.CharField(required=False, allow_blank=True, default="")
+
+
+# =====================================================================
+# PUBLISHING / EXPLORE
+# =====================================================================
+class assigmentsExploreSerializer(serializers.ModelSerializer):
+    """Card shown in Explore and behind a share link. Marketing info only — no
+    questions, options or answer keys; those are served through the normal
+    retrieve once the caller has joined."""
+
+    poster_name = serializers.SerializerMethodField()
+    participants_count = serializers.SerializerMethodField()
+    question_count = serializers.SerializerMethodField()
+    share_url = serializers.SerializerMethodField()
+
+    class Meta:
+        model = assigments
+        fields = [
+            "id", "title", "description", "kind", "tags", "difficulty", "due_date", "total_marks",
+            "has_structured_questions", "question_count", "submission_types", "rubric",
+            "poster_name", "participants_count", "published_at", "public_slug", "share_url",
+        ]
+        read_only_fields = fields
+
+    def get_poster_name(self, obj) -> str:
+        return _person_name(obj.posted_by)
+
+    def get_participants_count(self, obj) -> int:
+        annotated = getattr(obj, "n_participants", None)
+        return annotated if annotated is not None else obj.submissions.count()
+
+    def get_question_count(self, obj) -> int:
+        annotated = getattr(obj, "n_questions", None)
+        return annotated if annotated is not None else obj.questions.count()
+
+    def get_share_url(self, obj):
+        return _share_url(obj, self.context.get("request"))
+
+
+class RubricGradeSerializer(serializers.Serializer):
+    """`PATCH submissions/{id}/grade-rubric/` — `{"scores": {criterion: marks}, "feedback": ""}`."""
+
+    scores = serializers.DictField(child=serializers.IntegerField(min_value=0))
+    feedback = serializers.CharField(required=False, allow_blank=True, default="")
+
+
+class PublishSerializer(serializers.Serializer):
+    visibility = serializers.ChoiceField(choices=["public", "link"], default="public")

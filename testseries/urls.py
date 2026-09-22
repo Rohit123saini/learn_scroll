@@ -5,6 +5,9 @@ from rest_framework.routers import DefaultRouter
 from .views import (
     QuestionViewSet, TestAttemptViewSet, TestSeriesReviewViewSet, TestSeriesViewSet,
 )
+from .views_advanced import (
+    CertificateVerifyView, LiveKitWebhookView, MyCertificatesView, PublicSeriesView,
+)
 
 router = DefaultRouter()
 router.register(r"testseries", TestSeriesViewSet, basename="testseries")
@@ -28,6 +31,17 @@ review_list = TestSeriesReviewViewSet.as_view({"get": "list", "post": "create"})
 review_my_view = TestSeriesReviewViewSet.as_view({"get": "my_view"})
 
 urlpatterns = [
+    # ---- public / non-router endpoints. Listed BEFORE the router include so
+    # a literal segment (e.g. "livekit-webhook") is never swallowed by the
+    # router's `testseries/<pk>/` detail route.
+    path("testseries/public/<str:slug>/", PublicSeriesView.as_view(), name="testseries-public"),
+    path(
+        "testseries/certificates/verify/<str:code>/",
+        CertificateVerifyView.as_view(),
+        name="testseries-certificate-verify",
+    ),
+    path("testseries/certificates/mine/", MyCertificatesView.as_view(), name="testseries-certificate-mine"),
+    path("testseries/livekit-webhook/", LiveKitWebhookView.as_view(), name="testseries-livekit-webhook"),
     path("", include(router.urls)),
     path("testseries/<uuid:series_pk>/questions/", question_list, name="testseries-question-list"),
     path("testseries/<uuid:series_pk>/questions/<uuid:pk>/", question_detail, name="testseries-question-detail"),

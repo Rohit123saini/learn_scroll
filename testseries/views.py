@@ -2,9 +2,10 @@
 import json
 
 from django.core.exceptions import ValidationError as DjangoValidationError
-from django.db import IntegrityError
+from django.db import IntegrityError, transaction
 from django.db import models as db_models
 from django.shortcuts import get_object_or_404
+from django.utils import timezone
 from rest_framework import mixins, status, viewsets
 from rest_framework.decorators import action
 from rest_framework.exceptions import PermissionDenied, ValidationError
@@ -12,9 +13,15 @@ from rest_framework.parsers import FormParser, JSONParser, MultiPartParser
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 
+from . import live, policy
+from .access import user_can_access_series, visible_series_q
 from .models import (
-    Question, TestAttempt, TestSeries, TestSeriesPurchase, TestSeriesReview,
+    Question, TestAttempt, TestLiveSession, TestSeries, TestSeriesPurchase, TestSeriesReview,
     attachment_extension_validator, validate_attachment_size,
+)
+from .views_advanced import (
+    AttemptAdvancedActionsMixin, SeriesAdvancedActionsMixin, _questions_missing_answer_key,
+    close_proctor_room,
 )
 from .bridge import ask_query_on_series, answer_query_on_series
 from .permissions import (
@@ -28,7 +35,7 @@ from .serializers import (
 
 
 
-class TestSeriesViewSet(viewsets.ModelViewSet):
+class TestSeriesViewSet(SeriesAdvancedActionsMixin, viewsets.ModelViewSet):
     """§5: `source="individual"` — any authenticated user creates
     directly here, choosing `is_paid`/`price_coins` themselves.
     `source="campus"`/`"liveclass"` series are NOT created through this
@@ -43,19 +50,22 @@ class TestSeriesViewSet(viewsets.ModelViewSet):
     permission_classes = [IsAuthenticated, IsSeriesCreatorOrReadOnly]
 
     def get_queryset(self):
-        qs = super().get_queryset()
+        qs = super().get_queryset().annotate(q_count=db_models.Count("questions", distinct=True))
         source = self.request.query_params.get("source")
         if source:
             qs = qs.filter(source=source)
         # Individual/marketplace discovery is browse-based (§4 — no
-        # follower/subscriber concept yet), so published individual
-        # series are visible to everyone; a creator additionally sees
-        # their own drafts. Campus/liveclass series are scoped by
-        # context upstream by the calling bridge endpoint, not filtered
-        # here — this app never resolves context membership itself.
-        return qs.filter(
-            db_models.Q(status=TestSeries.Status.PUBLISHED) | db_models.Q(creator=self.request.user)
-        )
+        # follower/subscriber concept yet), so published individual series
+        # are visible to everyone; a creator additionally sees their own
+        # drafts.
+        #
+        # [SECURITY FIX] campus / liveclass series used to be returned to
+        # EVERY logged-in user here ("scoped upstream by the bridge endpoint" —
+        # but this endpoint is reachable directly). They are now limited to
+        # members of that section / classroom via `access.visible_series_q`,
+        # which asks the owning app through a configured resolver, so this app
+        # still never imports campus or liveclass (golden rule).
+        return qs.filter(visible_series_q(self.request.user))
 
     def perform_create(self, serializer):
         # No bulk TESTSERIES_POSTED notification here — that's a
@@ -74,9 +84,46 @@ class TestSeriesViewSet(viewsets.ModelViewSet):
             raise ValidationError("Only a draft series can be published.")
         if not series.questions.exists():
             raise ValidationError("Cannot publish a series with no questions.")
+
+        # "Final check" guarantee: every objective question must already carry
+        # its answer key, otherwise submit-time auto-grading would mark every
+        # student wrong on it.
+        missing = _questions_missing_answer_key(series)
+        if missing:
+            return Response(
+                {"detail": "Fill in the answer key before publishing.", "missing_question_orders": missing},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        # Pricing policy, STRICT (config: settings.TESTSERIES_PRICING_POLICY):
+        # individual = paid, campus = free, liveclass = free or paid. Legacy
+        # drafts created before the policy existed are caught here, not silently
+        # published against the rules.
+        try:
+            policy.normalize_pricing(
+                source=series.source, is_paid=series.is_paid, price_coins=series.price_coins, strict=True
+            )
+        except policy.PolicyError as exc:
+            raise ValidationError({exc.field: exc.message})
+
+        if series.delivery_mode != TestSeries.DeliveryMode.SELF_PACED:
+            if series.starts_at is None:
+                raise ValidationError({"starts_at": "Required for scheduled and live tests."})
+            if series.ends_at is not None and series.ends_at <= timezone.now():
+                raise ValidationError({"ends_at": "The test window has already ended."})
+        if series.certificate_enabled and not series.pass_percentage:
+            raise ValidationError({"pass_percentage": "Set a pass mark (1-100) to issue certificates."})
+
         series.recompute_total_marks(save=False)
+        series.ensure_share_slug(save=False)
         series.status = TestSeries.Status.PUBLISHED
-        series.save(update_fields=["status", "total_marks"])
+        series.save(update_fields=["status", "total_marks", "share_slug"])
+
+        if series.delivery_mode == TestSeries.DeliveryMode.LIVE:
+            TestLiveSession.objects.get_or_create(
+                series=series,
+                defaults={"room_name": live.live_room_name(series.id), "host": request.user},
+            )
 
         # TASK 5: notify the creator's followers that a new (individual/
         # marketplace) series is live. Only for source="individual" —
@@ -108,7 +155,20 @@ class QuestionViewSet(viewsets.ModelViewSet):
         return get_object_or_404(TestSeries, pk=self.kwargs["series_pk"])
 
     def get_queryset(self):
-        return Question.objects.filter(series_id=self.kwargs["series_pk"])
+        # [SECURITY FIX] this used to return the questions of ANY series to ANY
+        # logged-in user — drafts and unpurchased PAID tests included. Now:
+        #   * the creator (and platform staff) always see them;
+        #   * everyone else needs an attempt on this series, i.e. they have
+        #     started it (for paid series that means they have paid), so the
+        #     paywall can't be bypassed by reading the question list.
+        series = self.get_series()
+        user = self.request.user
+        qs = Question.objects.filter(series=series).select_related("series")
+        if series.creator_id == user.id or user.is_staff:
+            return qs
+        if not TestAttempt.objects.filter(series=series, student=user).exists():
+            raise PermissionDenied("Start this test to see its questions.")
+        return qs
 
     def get_serializer_context(self):
         ctx = super().get_serializer_context()
@@ -139,7 +199,9 @@ class QuestionViewSet(viewsets.ModelViewSet):
         series.recompute_total_marks()
 
 
-class TestAttemptViewSet(mixins.RetrieveModelMixin, mixins.ListModelMixin, viewsets.GenericViewSet):
+class TestAttemptViewSet(
+    AttemptAdvancedActionsMixin, mixins.RetrieveModelMixin, mixins.ListModelMixin, viewsets.GenericViewSet
+):
     """Students see/submit only their own attempts; a series creator (or,
     for campus context, the resolved subject-teacher — see
     `permissions.user_can_review_attempt`) can see and review attempts
@@ -208,11 +270,33 @@ class TestAttemptViewSet(mixins.RetrieveModelMixin, mixins.ListModelMixin, views
         cap-check."""
         series = get_object_or_404(TestSeries, pk=series_id, status=TestSeries.Status.PUBLISHED)
 
+        # [SECURITY FIX] anyone could start any published series, including a
+        # campus series of another school or a live class they never joined.
+        if not user_can_access_series(request.user, series):
+            raise PermissionDenied("You don't have access to this test series.")
+
         existing_in_progress = TestAttempt.objects.filter(
             series=series, student=request.user, status=TestAttempt.Status.IN_PROGRESS
         ).first()
         if existing_in_progress:
             return Response(TestAttemptSerializer(existing_in_progress, context={"request": request}).data)
+
+        # Delivery window (scheduled / live tests). Checked AFTER the
+        # in-progress short-circuit above so a student who already started can
+        # always get their attempt back, and BEFORE any coins are charged.
+        window = series.window_state()
+        if window != policy.OPEN:
+            # A plain Response, not ValidationError: DRF would stringify the
+            # datetimes / None into "None" inside the error envelope.
+            return Response(
+                {
+                    "detail": policy.WINDOW_MESSAGES[window],
+                    "code": window,
+                    "starts_at": series.starts_at.isoformat() if series.starts_at else None,
+                    "ends_at": series.ends_at.isoformat() if series.ends_at else None,
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
 
         serializer = TestAttemptStartSerializer(
             data=request.data, context={"series": series, "student": request.user}
@@ -259,27 +343,41 @@ class TestAttemptViewSet(mixins.RetrieveModelMixin, mixins.ListModelMixin, views
 
         return Response(TestAttemptSerializer(attempt, context={"request": request}).data, status=status.HTTP_201_CREATED)
 
+    @staticmethod
+    def _json_field(request, name):
+        """A JSON object sent either as a real JSON body field or — in
+        multipart requests, which can't carry nested JSON — as a JSON string."""
+        raw = request.data.get(name, {})
+        if isinstance(raw, str):
+            try:
+                raw = json.loads(raw)
+            except (TypeError, ValueError):
+                raise ValidationError({name: "Must be valid JSON when sent as a form field."})
+        raw = raw or {}
+        if not isinstance(raw, dict):
+            raise ValidationError({name: "Must be an object keyed by question id."})
+        return raw
+
     @action(detail=True, methods=["post"], parser_classes=[JSONParser, MultiPartParser, FormParser])
     def submit(self, request, pk=None):
         """Body: `{"answers": {question_id: answer_data, ...}}` as plain
         JSON — OR, to attach an image/file answer to a `text` question,
         `multipart/form-data` with `answers` as a JSON-encoded string
         field (multipart can't carry nested JSON) plus one file per
-        attached answer under `answer_<question_id>`."""
+        attached answer under `answer_<question_id>`. Optional
+        `timings`: `{question_id: seconds}` (same encoding rules).
+
+        IDEMPOTENT: submitting an attempt that is already submitted returns
+        that attempt (200) instead of a 400, so a client whose first response
+        was lost on a bad network can simply retry. A submit after
+        `deadline + grace` follows `policy.late_policy()` (default: grade the
+        last server-side autosave)."""
         attempt = self.get_object()
         if attempt.student_id != request.user.id:
             raise PermissionDenied("You can only submit your own attempt.")
-        if attempt.status != TestAttempt.Status.IN_PROGRESS:
-            raise ValidationError("This attempt has already been submitted.")
 
-        answers_raw = request.data.get("answers", {})
-        if isinstance(answers_raw, str):
-            try:
-                answers = json.loads(answers_raw)
-            except (TypeError, ValueError):
-                raise ValidationError({"answers": "Must be valid JSON when sent as a form field."})
-        else:
-            answers = answers_raw or {}
+        answers = self._json_field(request, "answers")
+        timings = self._json_field(request, "timings")
 
         for field_name, uploaded_file in request.FILES.items():
             if not field_name.startswith("answer_"):
@@ -290,8 +388,20 @@ class TestAttemptViewSet(mixins.RetrieveModelMixin, mixins.ListModelMixin, views
             except DjangoValidationError as exc:
                 raise ValidationError({field_name: exc.messages})
 
-        attempt.submit(answers=answers, files=request.FILES)
+        with transaction.atomic():
+            # Row lock: two concurrent submits (double tap, retry racing the
+            # original) must not both create the per-question response rows.
+            attempt = TestAttempt.objects.select_for_update().select_related("series").get(pk=attempt.pk)
+            if attempt.status != TestAttempt.Status.IN_PROGRESS:
+                return Response(TestAttemptSerializer(attempt, context={"request": request}).data)
+            if policy.late_policy() == "reject" and policy.is_past_deadline(
+                now=timezone.now(), deadline=attempt.deadline_at
+            ):
+                raise ValidationError({"detail": "Time is up for this attempt.", "code": "deadline_passed"})
+            attempt.submit(answers=answers, files=request.FILES, timings=timings)
+
         attempt.refresh_from_db()
+        close_proctor_room(attempt)
         return Response(TestAttemptSerializer(attempt, context={"request": request}).data)
 
     @action(detail=True, methods=["post"], url_path=r"answer/(?P<question_id>[^/.]+)/review")

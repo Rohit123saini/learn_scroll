@@ -451,7 +451,11 @@ else:
 #       irrelevant for new uploads.
 # Either way, this is the ONLY line to touch — nothing in views.py/
 # urls.py needs to change again.
-SERVE_MEDIA_VIA_DJANGO = os.getenv("SERVE_MEDIA_VIA_DJANGO", "True") == "True"
+# Default flips to False automatically when USE_S3_STORAGE=true, so enabling S3
+# is a one-env-var change (the two used to conflict and crash boot in prod).
+SERVE_MEDIA_VIA_DJANGO = os.getenv(
+    "SERVE_MEDIA_VIA_DJANGO", "False" if USE_S3_STORAGE else "True"
+) == "True"
 
 if not DEBUG and SERVE_MEDIA_VIA_DJANGO and USE_S3_STORAGE:
     # Contradictory combination: with S3 on, model FileFields already
@@ -532,6 +536,46 @@ LOGGING = {
     },
 }
 
+# --- Abuse / input-validation limits (user_profile) -----------------------
+# Profile photo upload: size + type are enforced in
+# user_profile.serializers.SafeProfilePhotoField (and the Content-Length
+# pre-check in UpdateProfileView) BEFORE the file is stored.
+PROFILE_PHOTO_MAX_BYTES = int(os.getenv("PROFILE_PHOTO_MAX_BYTES", str(5 * 1024 * 1024)))  # 5 MB
+PROFILE_PHOTO_ALLOWED_EXTENSIONS = ("jpg", "jpeg", "png", "webp")
+PROFILE_PHOTO_MAX_DIMENSION = 8000  # px, per side (decompression-bomb guard)
+
+# Languages a user may pick in UserPreference.language (ISO 639-1 primary
+# subtag; a region/script suffix like "en-US" is accepted for these too).
+# Add a code here when the app ships a new translation.
+SUPPORTED_LANGUAGES = (
+    "en", "hi", "bn", "mr", "ta", "te", "gu", "kn", "ml", "pa", "ur", "or", "as",
+)
+
+# INR value of ONE coin, used to snapshot `amount_inr` on every withdrawal
+# request (CoinWithdrawalRequest.get_coin_to_inr_rate reads this at call time,
+# so a changed env var takes effect on restart — no code deploy). Decimal
+# string, must be > 0 (a bad value falls back to 1). Only NEW requests use
+# the new rate; existing requests keep the amount they were created with.
+# NOTE: liveclass has its own separate coin/INR constant — keep both in sync
+# if pricing changes.
+COIN_TO_INR_RATE = os.getenv("COIN_TO_INR_RATE", "1")
+
+# Max time (ms) a wallet operation waits for another transaction's row lock
+# (CoinLedger.record_transaction / purchase confirm / withdrawal steps) before
+# failing fast with CoinLedgerBusy -> HTTP 503 + Retry-After instead of
+# queueing behind a stuck transaction forever. PostgreSQL only; 0 disables.
+COIN_LEDGER_LOCK_TIMEOUT_MS = int(os.getenv("COIN_LEDGER_LOCK_TIMEOUT_MS", "5000"))
+
+# BuyCoinView DB-bloat guard: a user may hold at most this many PENDING
+# (unconfirmed) purchase rows at once. Throttle rates are in
+# DEFAULT_THROTTLE_RATES below ("profile_coin_purchase*").
+COIN_PURCHASE_MAX_PENDING_PER_USER = int(os.getenv("COIN_PURCHASE_MAX_PENDING_PER_USER", "20"))
+
+# Issue #5 — hard ceiling on any client-requested page size (`?page_size=`).
+# Enforced by common.pagination.StandardPagination; views that define their
+# own paginator (post/liveclass) already cap at <= 100 themselves.
+MAX_PAGE_SIZE = int(os.getenv("MAX_PAGE_SIZE", "100"))
+
 REST_FRAMEWORK = {
     "DEFAULT_SCHEMA_CLASS": "drf_spectacular.openapi.AutoSchema",
     "DEFAULT_AUTHENTICATION_CLASSES": (
@@ -611,6 +655,13 @@ REST_FRAMEWORK = {
         # so rated tighter than the general chunked-upload scopes above.
         "coin_withdrawal": "10/min",
         "coin_purchase": "10/min",
+        # user_profile.BuyCoinView (POST /profile/buy-coin/) — each call
+        # inserts a PENDING row, so a burst limit AND a daily ceiling.
+        # Deliberately NOT the liveclass "coin_purchase" scope: throttle
+        # cache keys are per scope, so sharing it would make the two
+        # unrelated endpoints eat each other's quota.
+        "profile_coin_purchase": "10/min",
+        "profile_coin_purchase_daily": "100/day",
         # NOTE (fix — same bug class as the scopes documented above):
         # ClassroomViewSet.share now sets throttle_scope="classroom_share"
         # via ScopedRateThrottle (see views.py) but had no rate here —
@@ -735,6 +786,18 @@ REST_FRAMEWORK = {
         # token-guessing surface, not a retry-heavy legitimate flow (a
         # parent verifies their link once, not repeatedly).
         "campus_parent_link_verify": "10/min",
+        # NOTE (fix — CRITICAL, same bug class as the scopes above):
+        # assigments/throttling.py::assigmentsPublicPageThrottle sets
+        # scope = "assigments_public_page" for the one AllowAny surface in the
+        # assigments app (PublicSubmissionView), but this dict never had that
+        # key — DRF raises ImproperlyConfigured on the very first request, so
+        # the public share URL of a submission was a guaranteed 500.
+        "assigments_public_page": "60/min",
+        # Public, unauthenticated surfaces of the advanced testseries/assignments
+        # features (see testseries/throttling.py, assigments/throttling.py).
+        "testseries_public_page": "60/min",
+        "testseries_certificate_verify": "30/min",
+        "assigments_explore": "120/min",
     },
     # NOTE (fix — production breaking gap): NOT having this meant every
     # list endpoint (classrooms, sessions, chat-messages, notices, etc.)
@@ -744,7 +807,7 @@ REST_FRAMEWORK = {
     # request, and an easy accidental DoS vector as data grows. 20/page is
     # a reasonable default — the Flutter client should already handle
     # DRF's standard {"count","next","previous","results"} envelope.
-    "DEFAULT_PAGINATION_CLASS": "rest_framework.pagination.PageNumberPagination",
+    "DEFAULT_PAGINATION_CLASS": "common.pagination.StandardPagination",
     "PAGE_SIZE": 20,
     # NOTE (fix — dead code activation): liveclass/exceptions.py already
     # contains a complete, well-designed error-envelope normalizer
@@ -974,6 +1037,24 @@ CELERY_TIMEZONE = TIME_ZONE
 CELERY_TASK_ACKS_LATE = True
 CELERY_TASK_REJECT_ON_WORKER_LOST = True
 
+# Cross-app side effects (notifications, chat-group sync — see
+# core/async_utils.py + core/tasks.py) are enqueued from inside web requests,
+# so an unreachable Redis must fail FAST (then core.async_utils falls back to
+# running the task inline) instead of hanging the request on kombu's default
+# multi-second connection retries.
+CELERY_BROKER_CONNECTION_TIMEOUT = 2
+CELERY_BROKER_TRANSPORT_OPTIONS = {"socket_connect_timeout": 2}
+CELERY_BROKER_CONNECTION_RETRY_ON_STARTUP = True
+
+# Under `manage.py test` / pytest there is no worker: run tasks inline so
+# tests never try to reach Redis. Also switchable via env for local dev
+# without a worker (CELERY_TASK_ALWAYS_EAGER=true).
+import sys as _sys  # noqa: E402
+
+TESTING = "test" in _sys.argv or "pytest" in _sys.modules
+CELERY_TASK_ALWAYS_EAGER = TESTING or os.environ.get("CELERY_TASK_ALWAYS_EAGER", "false").lower() == "true"
+CELERY_TASK_EAGER_PROPAGATES = False
+
 from celery.schedules import crontab  # noqa: E402
 
 CELERY_BEAT_SCHEDULE = {
@@ -1176,14 +1257,16 @@ CELERY_BEAT_SCHEDULE = {
     # so the stored counters can silently drift from what Follow rows
     # actually say.
     #
-    # Detect-and-correct safety net, not the root-cause fix (a Follow
-    # post_delete signal would make drift structurally impossible instead
-    # of periodically corrected — see user_profile/tasks.py's own
-    # docstring). 6-hourly matches the cadence already used for the other
-    # counter-recompute jobs in this schedule.
+    # UPDATE (issue #4): the root-cause fix is now in place —
+    # user_profile/signals.py recounts from real Follow rows on every
+    # Follow post_save/post_delete, and the views no longer do their own
+    # F() +1/-1. This job is now just a weekly safety net for writes that
+    # never emit signals (QuerySet.update()/bulk_create()/raw SQL), so it
+    # was moved from every-6-hours to Sunday 03:15. If its log line ever
+    # reports corrections, some code path is bypassing the signals.
     "user-profile-reconcile-follow-counts": {
         "task": "user_profile.tasks.reconcile_follow_counts",
-        "schedule": crontab(hour="*/6", minute=15),
+        "schedule": crontab(hour=3, minute=15, day_of_week=0),
     },
     # FEE-6 — campus/tasks.py::send_fee_due_reminders. Task string is
     # "campus.tasks.<name>" (Celery's default module-path-derived name,
@@ -1273,6 +1356,38 @@ CELERY_BEAT_SCHEDULE = {
     # refresh_analytics_snapshot(campus_id, session_id) for each —
     # that wrapper doesn't exist yet. Add it, then register the
     # wrapper's task path here, rather than the raw per-session task.
+
+    # ------------------------------------------------------------------
+    # TESTSERIES. Same "written but never registered" bug class as every
+    # block above: testseries/tasks.py defined refund_unchecked_paid_attempts
+    # and send_pending_check_reminders, but neither was ever scheduled — so
+    # escrowed coins for a test the creator never checked were NEVER
+    # auto-refunded, whatever TESTSERIES_AUTO_REFUND_DAYS said. Task names are
+    # "testseries.tasks.<fn>" (no explicit name= is passed to @shared_task).
+    # ------------------------------------------------------------------
+    "testseries-refund-unchecked-paid-attempts": {
+        "task": "testseries.tasks.refund_unchecked_paid_attempts",
+        "schedule": crontab(hour=3, minute=0),
+    },
+    "testseries-send-pending-check-reminders": {
+        "task": "testseries.tasks.send_pending_check_reminders",
+        "schedule": crontab(hour=9, minute=0),
+    },
+    # Server-side timer: closes attempts whose deadline + grace passed and
+    # that the student never submitted (autosave draft is graded).
+    "testseries-auto-submit-expired-attempts": {
+        "task": "testseries.tasks.auto_submit_expired_attempts",
+        "schedule": crontab(minute="*"),
+    },
+    # A host who forgot to press "End" must not leave a LiveKit room running.
+    "testseries-end-overrun-live-sessions": {
+        "task": "testseries.tasks.end_overrun_live_sessions",
+        "schedule": crontab(minute="*/10"),
+    },
+    "testseries-expire-stale-recordings": {
+        "task": "testseries.tasks.expire_stale_recordings",
+        "schedule": crontab(minute=5),
+    },
 }
 
 # 🔧 GAP FIX — grace window ke liye, dekho message/tasks.py:
@@ -1318,3 +1433,71 @@ CONFIG_DRIFT_APPS = ["user_profile", "core", "assigments", "testseries", "campus
 CONFIG_DRIFT_ADMIN_SKIP = set()        # {"app_label.ModelName", ...}
 CONFIG_DRIFT_ONDEMAND_TASKS = set()    # {"task_function_name", ...}
 CONFIG_DRIFT_URL_SKIP = set()          # {"app_label.ViewClassName", ...}
+
+
+# =====================================================================
+# TESTSERIES — ADVANCED CONFIG  (see testseries/policy.py, access.py, live.py)
+# Every value has a sane default in code; these lines just make the knobs
+# visible. Env overrides are for staging / experiments.
+# =====================================================================
+
+# Who may charge for a test series.
+#   mode "required"  -> must be paid   "optional" -> creator chooses
+#         "forbidden" -> always free
+# Product rule: a test series a user creates on their own (individual) is
+# PAID; a campus one is FREE; a live-class one is FREE by default and the
+# teacher may make it paid. Flip a single mode to change that — e.g.
+# TESTSERIES_INDIVIDUAL_PRICING=optional lets individuals publish free tests.
+TESTSERIES_PRICING_POLICY = {
+    "individual": {
+        "mode": os.getenv("TESTSERIES_INDIVIDUAL_PRICING", "required"),
+        "min_coins": int(os.getenv("TESTSERIES_MIN_PRICE_COINS", "1")),
+        "max_coins": int(os.getenv("TESTSERIES_MAX_PRICE_COINS", "100000")),
+    },
+    "campus": {"mode": "forbidden"},
+    "liveclass": {
+        "mode": os.getenv("TESTSERIES_LIVECLASS_PRICING", "optional"),
+        "min_coins": int(os.getenv("TESTSERIES_MIN_PRICE_COINS", "1")),
+        "max_coins": int(os.getenv("TESTSERIES_MAX_PRICE_COINS", "100000")),
+    },
+}
+
+# Server-side timer. A submit arriving up to this many seconds after the
+# deadline is still accepted as on-time (network latency / clock jitter).
+TESTSERIES_SUBMIT_GRACE_SECONDS = int(os.getenv("TESTSERIES_SUBMIT_GRACE_SECONDS", "30"))
+# What to do with a submit later than deadline + grace:
+#   "use_draft" (default) grade the last autosave · "accept" grade it, flag it · "reject" 400
+TESTSERIES_LATE_SUBMIT = os.getenv("TESTSERIES_LATE_SUBMIT", "use_draft")
+
+# Campus / live-class series are visible and startable only by members of that
+# context. Resolvers live in the owning apps (golden rule: testseries never
+# imports campus/liveclass). Set a value to "public" to make that source
+# world-readable (live-class marketplace), or ENFORCE=0 to turn the check off.
+TESTSERIES_ENFORCE_CONTEXT_ACCESS = os.getenv("TESTSERIES_ENFORCE_CONTEXT_ACCESS", "1") == "1"
+TESTSERIES_CONTEXT_ACCESS = {
+    "section": "campus.bridge.user_accessible_testseries_context_ids",
+    "classroom": "liveclass.bridge.user_accessible_testseries_context_ids",
+}
+
+# Public share link, e.g. "https://learnscroll.app/test/{slug}". Empty = the API
+# preview URL (/testseries/public/<slug>/) is returned instead.
+TESTSERIES_SHARE_URL_TEMPLATE = os.getenv("TESTSERIES_SHARE_URL_TEMPLATE", "")
+
+# Escrow safety nets (previously read via getattr() defaults only).
+TESTSERIES_AUTO_REFUND_DAYS = int(os.getenv("TESTSERIES_AUTO_REFUND_DAYS", "14"))
+TESTSERIES_REMINDER_DAYS = int(os.getenv("TESTSERIES_REMINDER_DAYS", "3"))
+
+# Live video: a recording still "recording" after this long never got its
+# egress_ended webhook -> marked failed. A live session is force-ended this many
+# minutes after its window closed.
+TESTSERIES_STALE_RECORDING_HOURS = int(os.getenv("TESTSERIES_STALE_RECORDING_HOURS", "6"))
+TESTSERIES_LIVE_OVERRUN_MINUTES = int(os.getenv("TESTSERIES_LIVE_OVERRUN_MINUTES", "30"))
+
+
+# =====================================================================
+# ASSIGNMENTS — PUBLISHING (assigments/views.py: publish / explore / join)
+# =====================================================================
+# Public share link of a published assignment / project, e.g.
+# "https://learnscroll.app/a/{slug}". Empty = the API preview URL
+# (/assigments/p/<slug>/) is returned instead.
+ASSIGNMENTS_SHARE_URL_TEMPLATE = os.getenv("ASSIGNMENTS_SHARE_URL_TEMPLATE", "")

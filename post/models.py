@@ -1,4 +1,4 @@
-# post/models.py--
+# post/models.py
 import uuid
 from datetime import timedelta
 from django.db import models
@@ -283,7 +283,20 @@ class PostPollVote(models.Model):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     poll = models.ForeignKey(PostPoll, on_delete=models.CASCADE, related_name='votes')
     option = models.ForeignKey(PostPollOption, on_delete=models.CASCADE, related_name='votes')
-    user = models.ForeignKey(User, on_delete=models.CASCADE, related_name='poll_votes')
+    # 🔥 FIX (fields.E304/E305) — was related_name='poll_votes', which
+    # collided with `message.PollVote.user`'s own related_name='poll_votes'
+    # (that model votes on chat/group polls in the `message` app; this one
+    # votes on post polls here in `post`). Both are plain FKs straight to
+    # `User`, and Django requires reverse-accessor names to be unique per
+    # target model across the WHOLE project — not just within one app — so
+    # two unrelated apps both calling their thing "poll_votes" broke
+    # `runserver`/`makemigrations`/`migrate` outright (fields.E304/E305).
+    # `message.PollVote` is the older, already-wired-up feature (real
+    # voting endpoint exists via MessageViewSet.poll_vote), so it keeps
+    # `poll_votes`; this one is renamed instead. If any code already
+    # (or in future) calls `user.poll_votes` expecting POST poll votes
+    # specifically, use `user.post_poll_votes`.
+    user = models.ForeignKey(User, on_delete=models.CASCADE, related_name='post_poll_votes')
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
@@ -340,7 +353,6 @@ class PostLike(models.Model):
             models.Index(fields=['post', '-created_at']),
             models.Index(fields=['user', '-created_at']),
         ]
-
 
 
 class PostComment(models.Model):

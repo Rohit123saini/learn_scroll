@@ -505,7 +505,25 @@ class ChatConsumer(AsyncWebsocketConsumer):
     async def typing_event(self, event):
         await self.send(text_data=json.dumps({'type': 'typing', **event}))
 
+    # Issue #2 (RestrictUser) — `A restricted B` means A's read receipts and
+    # online/last-seen must never reach B. These group events are broadcast
+    # to the whole room, so the filter is applied per receiving socket: if
+    # the event's actor has restricted THIS socket's user, drop it silently
+    # (no error, no placeholder — B must not be able to tell).
+    @database_sync_to_async
+    def _actor_restricted_me(self, actor_user_id):
+        from user_profile.services import has_restricted
+        try:
+            actor_id = int(actor_user_id)
+        except (TypeError, ValueError):
+            return False
+        if actor_id == self.user.id:
+            return False
+        return has_restricted(actor_id, self.user.id)
+
     async def read_event(self, event):
+        if await self._actor_restricted_me(event.get('user_id')):
+            return
         await self.send(text_data=json.dumps({'type': 'read', **event}))
 
     async def delete_event(self, event):
@@ -565,6 +583,8 @@ class ChatConsumer(AsyncWebsocketConsumer):
         await self.send(text_data=json.dumps(event))
 
     async def presence_update(self, event):
+        if await self._actor_restricted_me(event.get('user_id')):
+            return
         await self.send(text_data=json.dumps({'type': 'presence', **event}))
 
     async def call_event(self, event):
@@ -1073,6 +1093,11 @@ class ChatConsumer(AsyncWebsocketConsumer):
         return presence.is_online, presence.last_seen_at
 
     @database_sync_to_async
+    def get_restricted_ids(self, user_id):
+        from user_profile.services import restricted_ids_by
+        return restricted_ids_by(user_id)
+
+    @database_sync_to_async
     def get_direct_partner_ids(self, user_id):
         """
         🔥 NAYA — is user ke jitne bhi ACTIVE 1-1 (direct) conversations
@@ -1124,6 +1149,10 @@ class ChatConsumer(AsyncWebsocketConsumer):
         update ho sakein, REST poll/cache-TTL ka wait kiye bina.
         """
         partner_ids = await self.get_direct_partner_ids(self.user.id)
+        # Issue #2 (RestrictUser): don't push my presence to people I restricted.
+        restricted_by_me = await self.get_restricted_ids(self.user.id)
+        if restricted_by_me:
+            partner_ids = [p for p in partner_ids if p not in restricted_by_me]
         if not partner_ids:
             return
         payload = {
@@ -1219,7 +1248,21 @@ class InboxConsumer(AsyncWebsocketConsumer):
     # `ChatConsumer.presence_update` ka bhi pehle se yahi behavior hai
     # (aur `reaction_event`/`pin_event` ka bhi), isliye client jo bhi
     # already handle kar raha hai wahi consistently milta rahega.
+    @database_sync_to_async
+    def _actor_restricted_me(self, actor_user_id):
+        # Issue #2 (RestrictUser): drop presence of anyone who restricted me.
+        from user_profile.services import has_restricted
+        try:
+            actor_id = int(actor_user_id)
+        except (TypeError, ValueError):
+            return False
+        if actor_id == self.user.id:
+            return False
+        return has_restricted(actor_id, self.user.id)
+
     async def presence_update(self, event):
+        if await self._actor_restricted_me(event.get('user_id')):
+            return
         await self.send(text_data=json.dumps({'type': 'presence', **event}))
 
 

@@ -54,6 +54,10 @@ urlpatterns = [
     # staff-only path manual/admin-initiated (gateway-less) top-ups use.
     path("buy-coin/", BuyCoinView.as_view(), name="buy-coin"),
     path("buy-coin/confirm/", BuyCoinConfirmView.as_view(), name="buy-coin-confirm"),
+    # Same webhook, but the gateway is named in the URL — configure THIS one
+    # in each gateway's dashboard. It is what disambiguates a reference
+    # string that two gateways happen to share (see BuyCoinConfirmView).
+    path("buy-coin/confirm/<slug:gateway>/", BuyCoinConfirmView.as_view(), name="buy-coin-confirm-gateway"),
     # TASK 16 — staff-only replacement confirm path for manual/admin-
     # initiated top-ups (blank-`gateway` CoinPurchaseRequests), which
     # buy-coin/confirm/ above can no longer serve now that it's a

@@ -125,7 +125,14 @@ class Command(BaseCommand):
     # ------------------------------------------------------------------
     def _migrate_purchase(self, purchase, dry_run, rollback_entries):
         gateway_reference = purchase.order_id
-        if CoinPurchaseRequest.objects.filter(gateway_reference=gateway_reference).exists():
+        # Identity is (gateway, gateway_reference) now — see
+        # CoinPurchaseRequest's unique_gateway_reference_per_gateway. These
+        # liveclass rows are all Razorpay (the gateway used at create() below),
+        # so a same-string reference on ANOTHER gateway must not count as
+        # "already migrated".
+        if CoinPurchaseRequest.objects.filter(
+            gateway="razorpay", gateway_reference=gateway_reference,
+        ).exists():
             return "skipped"
 
         source_txn = CoinTransaction.objects.filter(

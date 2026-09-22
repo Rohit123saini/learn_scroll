@@ -310,7 +310,7 @@ def generate_video_thumbnail_file(video_path, time_offset="00:00:01", timeout=30
 try:
     from core.services import create_notification as _create_notification_row
 except ImportError:  # pragma: no cover - only if the `core` app isn't installed
-    def _create_notification_row(recipient, notif_type, title, message=None, data=None):
+    def _create_notification_row(recipient, notif_type, title, message=None, data=None, actor=None):
         logger.debug(
             "core.services.create_notification not available — skipping notification "
             "(%s: %s -> %s)", notif_type, title, recipient,
@@ -334,6 +334,19 @@ except ImportError:  # pragma: no cover - only if the `core` app isn't installed
     _Notification = None
 
 
+def hidden_commenter_ids(post_owner_id, viewer_id=None):
+    """Issue #2 (RestrictUser) — ids whose comments must be hidden on
+    `post_owner_id`'s posts: everyone the post owner has restricted, minus
+    the viewer themself (a restricted user keeps seeing their own comments
+    exactly as before — restrict is invisible to them). Used by every
+    comment-reading endpoint so they all agree."""
+    from user_profile.services import restricted_ids_by
+
+    ids = restricted_ids_by(post_owner_id)
+    ids.discard(viewer_id)
+    return ids
+
+
 def notify_post_liked(post, actor):
     """Call from PostReactionAPIView.post(), only on the branch where a new
     PostLike was just created (status_msg == 'liked') — not on unlike or
@@ -349,6 +362,7 @@ def notify_post_liked(post, actor):
         _Notification.NotifType.POST_LIKED,
         f"{actor_name} liked your post",
         data={"post_id": str(post.id), "actor_id": str(actor.id)},
+        actor=actor,  # lets core skip it if the post owner restricted `actor`
     )
 
 
@@ -367,6 +381,7 @@ def notify_post_commented(post, comment):
         f"{actor_name} commented on your post",
         (comment.content or "")[:200],
         data={"post_id": str(post.id), "comment_id": str(comment.id)},
+        actor=comment.user,  # lets core skip it if the post owner restricted the commenter
     )
 
 

@@ -147,10 +147,69 @@ WHAT CHANGED in this pass, and why:
     this model's PENDING -> PROCESSING -> SUCCESS/REJECTED lifecycle,
     which is NOT the same status set `liveclass.CoinWithdrawal` uses.
 """
+from decimal import Decimal, InvalidOperation
+
 from django.conf import settings
-from django.db import IntegrityError, models, transaction
+from contextlib import contextmanager
+
+from django.db import IntegrityError, OperationalError, connection, models, transaction
 from django.db.models import CheckConstraint, F, Q, UniqueConstraint
 from django.utils import timezone
+
+
+class CoinLedgerBusy(Exception):
+    """A coin/wallet row lock could not be acquired within
+    `settings.COIN_LEDGER_LOCK_TIMEOUT_MS`: another transaction is holding it
+    for too long. Deliberately NOT a ValueError (that means "bad request /
+    insufficient balance"). Safe to retry — nothing was written. Views map it
+    to HTTP 503 + Retry-After; a payment gateway retries a 5xx webhook."""
+
+
+def _lock_timeout_ms():
+    try:
+        return int(getattr(settings, "COIN_LEDGER_LOCK_TIMEOUT_MS", 5000))
+    except (TypeError, ValueError):
+        return 5000
+
+
+@contextmanager
+def coin_lock_guard():
+    """Wrap the statement(s) that TAKE a wallet/purchase/withdrawal row lock
+    (`select_for_update()`), inside `transaction.atomic()`.
+
+    Without a limit a `SELECT ... FOR UPDATE` waits forever behind whoever
+    holds the row — a stuck or slow transaction would silently queue up every
+    other operation on that user. On PostgreSQL this sets `lock_timeout` for
+    the CURRENT transaction only (`set_config(..., is_local=true)`; it resets
+    at commit/rollback and never leaks to other queries on the pooled
+    connection), and turns the resulting "lock not available" error
+    (SQLSTATE 55P03) into `CoinLedgerBusy`. Other database errors pass through
+    untouched. On other databases (SQLite in tests) it's a no-op."""
+    ms = _lock_timeout_ms()
+    if ms > 0 and connection.vendor == "postgresql":
+        with connection.cursor() as cursor:
+            cursor.execute("SELECT set_config('lock_timeout', %s, true)", [f"{ms}ms"])
+    try:
+        yield
+    except OperationalError as exc:
+        cause = exc.__cause__
+        code = getattr(cause, "pgcode", None) or getattr(cause, "sqlstate", None)
+        if code == "55P03":  # lock_not_available
+            raise CoinLedgerBusy("Wallet is busy, please retry shortly.") from exc
+        raise
+
+
+class AmbiguousGatewayReference(ValueError):
+    """Two purchases (different gateways) share this `gateway_reference` and the
+    caller didn't say which gateway it means. Subclasses ValueError so a caller
+    that already maps ValueError -> 409 keeps working."""
+
+
+class WithdrawalNotEligible(ValueError):
+    """The requested coins aren't covered by withdrawal-ELIGIBLE (purchased /
+    gifted) coins. A policy rejection (HTTP 403), distinct from the plain
+    ValueError for an insufficient wallet balance (HTTP 402) — which is why
+    the view must catch this subclass FIRST."""
 
 
 class Follow(models.Model):
@@ -274,18 +333,24 @@ class RestrictUser(models.Model):
     reachable at `/profile/restricted-users/` — same URL/view shape as
     BlockUser's `/profile/blocked-users/` for consistency.
 
-    Scope decision: this app (user_profile) only owns the
-    relationship itself — who has restricted whom — the same way it
-    owns Follow/BlockUser without knowing about posts, comments, DMs,
-    or notifications. The actual *effects* of being restricted
-    (hide the restricted user's comments from everyone but themselves,
-    suppress notifications/read-receipts/online-status from them in
-    the message app) are consumer-side integration work for the posts,
-    notifications, and message apps respectively — each of those should
-    filter through `views.is_restricted_between(user, other)` the same
-    way this app's own `is_blocked_between()` is already used. Not
-    implemented here because those apps' models/views weren't part of
-    this pass.
+    This app (user_profile) owns the relationship itself — who has
+    restricted whom — and the lookups other apps ask about it
+    (`services.has_restricted / restricted_ids_by / restrictor_ids_of`).
+    The EFFECTS are enforced by the consuming apps, and ARE implemented
+    (`A` = the restricting user, `B` = the restricted one):
+      - post: B's comments and replies on A's posts are hidden from
+        everyone except B (`post.services.hidden_commenter_ids`, used by
+        CommentListAPIView, CommentRepliesAPIView and the post-detail
+        comment preview).
+      - core: `create_notification(actor=B)` writes no bell row for A;
+        post like/comment notifications pass `actor`.
+      - message: B's chat/mention pushes and bell rows for A are dropped
+        (`push_utils._filter_recipients_for_restrict`); A's read receipts
+        (REST `read-status` and the WebSocket read event) and A's
+        online/last-seen (presence REST + WebSocket) are hidden from B.
+    B never sees an error or any other sign of it. Messages themselves are
+    still delivered and stored normally — restrict is not block.
+    Regression tests: user_profile/tests_issue_fixes.py (Restrict*Tests).
     """
 
     user = models.ForeignKey(
@@ -405,14 +470,22 @@ class CoinLedgerManager(models.Manager):
         # uses a local import for, just against a different module.
         from .fraud import EarnRateLimitExceeded, check_earn_rate_limit
 
+        from .fraud import eligible_source_types
+
         merged_metadata = dict(metadata or {})
-        merged_metadata["withdrawal_eligible"] = transaction_type in (
-            self.model.TransactionType.PURCHASE,
-            self.model.TransactionType.GIFT_RECEIVED,
-        )
+        # Same set fraud.py uses for the eligible BALANCE (it used to be
+        # PURCHASE/GIFT_RECEIVED only here, so a WITHDRAWAL_REJECTED refund was
+        # counted as eligible by fraud.py but flagged "not eligible" on the row).
+        merged_metadata["withdrawal_eligible"] = transaction_type in eligible_source_types()
 
         with transaction.atomic():
-            locked_user = UserModel.objects.select_for_update().get(pk=user.pk)
+            # Lock ONLY what is needed (`id` + `coin`, not the whole wide user
+            # row) and never wait forever for it — see coin_lock_guard().
+            # Everything between here and the end of this block runs while
+            # the row is locked, so it must stay short: no network calls, no
+            # notifications, no cache/Redis I/O in here.
+            with coin_lock_guard():
+                locked_user = UserModel.objects.select_for_update().only("pk", "coin").get(pk=user.pk)
 
             if not check_earn_rate_limit(locked_user, transaction_type):
                 raise EarnRateLimitExceeded(
@@ -607,6 +680,11 @@ class CoinLedger(models.Model):
         ordering = ["-created_at"]
         indexes = [
             models.Index(fields=["user", "-created_at"]),
+            # Admin dashboards / ops reports slice the ledger by type over a
+            # date range ("all PURCHASE rows this week", the "withdrawal
+            # eligible" filter). Without this that is a scan of the whole
+            # append-only table.
+            models.Index(fields=["transaction_type", "-created_at"], name="coinledger_type_created_idx"),
         ]
         constraints = [
             CheckConstraint(condition=~Q(amount=0), name="coinledger_amount_not_zero"),
@@ -631,35 +709,66 @@ class CoinPurchaseRequestManager(models.Manager):
     def start_purchase(self, *, user, gateway_reference, amount, coins, gateway=""):
         """
         Create (or return the existing) PENDING request for this
-        `gateway_reference`. Does NOT touch `User.coin` — a purchase
-        only ever credits coins via `confirm_success()` below.
+        (`gateway`, `gateway_reference`). Does NOT touch `User.coin` — a
+        purchase only ever credits coins via `confirm_success()` below.
+
+        A gateway's transaction id is only unique WITHIN that gateway
+        (Razorpay and Stripe can legitimately hand out the same string), so
+        the identity is the PAIR, enforced by the DB `UniqueConstraint`
+        `unique_gateway_reference_per_gateway` (see Meta below) — not the
+        reference alone. `gateway` is normalised (stripped, lower-cased) so
+        "Razorpay" and "razorpay" can't become two identities.
 
         Idempotent the same way `CoinLedger.objects.record_transaction()`
-        is idempotent on `reference`: a second call with the same
-        `gateway_reference` returns the row that's already there
-        (`get_or_create`) instead of raising or creating a duplicate —
-        safe for a client retrying a dropped response. `gateway_reference`
-        also carries a DB `UniqueConstraint` (see Meta below), so if two
-        concurrent requests both miss the `get_or_create` SELECT and race
-        to INSERT, the loser's `IntegrityError` is caught here and turned
-        into a re-fetch of the winner's row instead of a 500.
+        is idempotent on `reference`: a second call with the same pair
+        returns the row that's already there (`get_or_create`) instead of
+        raising or creating a duplicate — safe for a client retrying a
+        dropped response. If two concurrent requests both miss the
+        `get_or_create` SELECT and race to INSERT, the loser's
+        `IntegrityError` is caught here and turned into a re-fetch of the
+        winner's row instead of a 500.
         """
+        gateway = (gateway or "").strip().lower()
         try:
-            obj, created = self.get_or_create(
-                gateway_reference=gateway_reference,
-                defaults={
-                    "user": user,
-                    "amount": amount,
-                    "coins": coins,
-                    "gateway": gateway,
-                },
-            )
+            with transaction.atomic():
+                obj, created = self.get_or_create(
+                    gateway=gateway,
+                    gateway_reference=gateway_reference,
+                    defaults={
+                        "user": user,
+                        "amount": amount,
+                        "coins": coins,
+                    },
+                )
         except IntegrityError:
-            obj = self.get(gateway_reference=gateway_reference)
+            obj = self.get(gateway=gateway, gateway_reference=gateway_reference)
             created = False
         return obj, created
 
-    def confirm_success(self, *, gateway_reference, gateway_payment_id="", gateway_signature=""):
+    def _lock_purchase(self, gateway_reference, gateway=None):
+        """`select_for_update()` the purchase for (`gateway_reference`,
+        `gateway`). `gateway=None` means "the caller doesn't know / care
+        which gateway" — fine while the reference is unique, but if two
+        gateways share it this raises `AmbiguousGatewayReference` instead
+        of silently crediting the wrong user. Raises `DoesNotExist` like
+        `.get()` when nothing matches. Must run inside `transaction.atomic()`."""
+        qs = self.select_for_update().filter(gateway_reference=gateway_reference)
+        if gateway is not None:
+            qs = qs.filter(gateway=(gateway or "").strip().lower())
+        with coin_lock_guard():
+            rows = list(qs.order_by("pk")[:2])
+        if not rows:
+            raise self.model.DoesNotExist(
+                f"No coin purchase with gateway_reference {gateway_reference!r}."
+            )
+        if len(rows) > 1:
+            raise AmbiguousGatewayReference(
+                f"gateway_reference {gateway_reference!r} exists on more than one "
+                "gateway — specify which gateway."
+            )
+        return rows[0]
+
+    def confirm_success(self, *, gateway_reference, gateway_payment_id="", gateway_signature="", gateway=None):
         """
         Mark a request SUCCESS and credit `coins` via
         `CoinLedger.objects.record_transaction()` — never a direct
@@ -686,7 +795,7 @@ class CoinPurchaseRequestManager(models.Manager):
         purchase must be retried as a new request, not resurrected.
         """
         with transaction.atomic():
-            purchase = self.select_for_update().get(gateway_reference=gateway_reference)
+            purchase = self._lock_purchase(gateway_reference, gateway)
 
             if purchase.status == self.model.Status.SUCCESS:
                 return purchase
@@ -725,7 +834,7 @@ class CoinPurchaseRequestManager(models.Manager):
             purchase.save(update_fields=update_fields)
             return purchase
 
-    def mark_failed(self, *, gateway_reference, reason=""):
+    def mark_failed(self, *, gateway_reference, reason="", gateway=None):
         """
         Mark a request FAILED. Never touches `User.coin` — that's the
         whole point of a two-step (pending -> success/failed) flow: a
@@ -738,7 +847,7 @@ class CoinPurchaseRequestManager(models.Manager):
         here.
         """
         with transaction.atomic():
-            purchase = self.select_for_update().get(gateway_reference=gateway_reference)
+            purchase = self._lock_purchase(gateway_reference, gateway)
 
             if purchase.status == self.model.Status.FAILED:
                 return purchase
@@ -832,13 +941,14 @@ class CoinPurchaseRequest(models.Model):
     # gateway name handy (e.g. a manual admin-initiated top-up).
     gateway = models.CharField(max_length=30, blank=True)
 
-    # The gateway's own transaction/order id. This is the idempotency
-    # key for the whole request lifecycle: unique at the DB level so two
-    # `start_purchase()` calls (or a retried client request) for the
-    # same gateway transaction can never create two rows, and it's what
-    # `confirm_success`/`mark_failed` key off of instead of an internal
-    # id the gateway doesn't know about.
-    gateway_reference = models.CharField(max_length=150, unique=True, db_index=True)
+    # The gateway's own transaction/order id. Together with `gateway` this is
+    # the idempotency key for the whole request lifecycle — unique as a PAIR
+    # (`unique_gateway_reference_per_gateway`, Meta below), NOT on its own:
+    # ids are only unique within one gateway, so a second gateway (Stripe
+    # next to Razorpay) handing out the same string must not make the other
+    # user's purchase fail. Still indexed alone because webhooks look a
+    # purchase up by reference first.
+    gateway_reference = models.CharField(max_length=150, db_index=True)
 
     # [ADDED — Task 30] Mirrors liveclass.CoinPurchase.gateway_payment_id
     # / .gateway_signature — filled in by confirm_success() once a
@@ -897,6 +1007,10 @@ class CoinPurchaseRequest(models.Model):
             models.Index(fields=["status", "created_at"]),
         ]
         constraints = [
+            UniqueConstraint(
+                fields=["gateway", "gateway_reference"],
+                name="unique_gateway_reference_per_gateway",
+            ),
             CheckConstraint(condition=Q(amount__gt=0), name="coinpurchaserequest_amount_positive"),
             CheckConstraint(condition=Q(coins__gt=0), name="coinpurchaserequest_coins_positive"),
         ]
@@ -922,7 +1036,8 @@ class CoinWithdrawalRequestManager(models.Manager):
     still pending. They only come back if the request is rejected.
     """
 
-    def request_withdrawal(self, *, user, coins, payout_method="", payout_details=None):
+    def request_withdrawal(self, *, user, coins, payout_method="", payout_details=None,
+                           enforce_eligibility=True):
         """
         Debit `coins` from `user` via `CoinLedger.objects.
         record_transaction(transaction_type=WITHDRAWAL_REQUESTED,
@@ -934,7 +1049,8 @@ class CoinWithdrawalRequestManager(models.Manager):
         fewer coins than the floor is rejected with `ValueError` before
         the row is created or the ledger is touched, same as the
         existing `coins <= 0` guard just below it. Also snapshots
-        `amount_inr = coins * COIN_TO_INR_RATE` onto the request at
+        `amount_inr = coins * COIN_TO_INR_RATE` (rate from
+        `settings.COIN_TO_INR_RATE`) onto the request at
         creation time, so a later change to `COIN_TO_INR_RATE` never
         silently rewrites what a past request was actually worth —
         mirrors `liveclass.CoinWithdrawal.amount_inr`'s own snapshot
@@ -948,6 +1064,13 @@ class CoinWithdrawalRequestManager(models.Manager):
         and no partial debit happens. The view is expected to catch
         `ValueError` and turn it into a 402 (same shape as campus's
         `FeePaymentViewSet.pay`).
+
+        Withdrawal ELIGIBILITY (only purchased/gifted coins may be cashed
+        out — see fraud.py) is now enforced HERE too, under the user's row
+        lock, and raises `WithdrawalNotEligible` (a ValueError subclass:
+        catch it BEFORE the plain ValueError -> 402 mapping; it is a 403).
+        Pass `enforce_eligibility=False` only for a trusted internal
+        migration/backfill that has already applied its own policy.
         """
         if coins <= 0:
             raise ValueError("Withdrawal coins must be positive.")
@@ -958,11 +1081,27 @@ class CoinWithdrawalRequestManager(models.Manager):
                 f"{self.model.MIN_WITHDRAWAL_COINS} coins."
             )
 
+        from . import fraud
+
+        UserModel = user.__class__
         with transaction.atomic():
+            # Take the SAME per-user row lock `record_transaction()` takes,
+            # BEFORE checking eligibility. The view also checks (fast
+            # fail), but that read is not serialised: two simultaneous
+            # requests could each pass it against the same eligible pool
+            # and together withdraw more than it holds. Checking again here,
+            # under the lock, makes the check + debit one atomic step.
+            with coin_lock_guard():
+                locked_user = UserModel.objects.select_for_update().only("pk", "coin").get(pk=user.pk)
+            if enforce_eligibility:
+                ok, reason = fraud.is_withdrawal_eligible(locked_user, coins)
+                if not ok:
+                    raise WithdrawalNotEligible(reason)
+
             withdrawal = self.create(
                 user=user,
                 coins=coins,
-                amount_inr=coins * self.model.COIN_TO_INR_RATE,
+                amount_inr=(coins * self.model.get_coin_to_inr_rate()).quantize(Decimal("0.01")),
                 payout_method=payout_method,
                 payout_details=payout_details or {},
                 status=self.model.Status.PENDING,
@@ -999,7 +1138,8 @@ class CoinWithdrawalRequestManager(models.Manager):
         REJECTED (both terminal).
         """
         with transaction.atomic():
-            wr = self.select_for_update().get(pk=withdrawal_id)
+            with coin_lock_guard():
+                wr = self.select_for_update().get(pk=withdrawal_id)
             if wr.status in (self.model.Status.SUCCESS, self.model.Status.REJECTED):
                 raise ValueError(
                     f"Withdrawal {withdrawal_id} is already {wr.status} — cannot move to processing."
@@ -1030,7 +1170,8 @@ class CoinWithdrawalRequestManager(models.Manager):
         withdrawal can't retroactively be completed.
         """
         with transaction.atomic():
-            wr = self.select_for_update().get(pk=withdrawal_id)
+            with coin_lock_guard():
+                wr = self.select_for_update().get(pk=withdrawal_id)
             if wr.status == self.model.Status.SUCCESS:
                 return wr
             if wr.status == self.model.Status.REJECTED:
@@ -1070,7 +1211,8 @@ class CoinWithdrawalRequestManager(models.Manager):
         already-succeeded purchase).
         """
         with transaction.atomic():
-            wr = self.select_for_update().get(pk=withdrawal_id)
+            with coin_lock_guard():
+                wr = self.select_for_update().get(pk=withdrawal_id)
             if wr.status == self.model.Status.REJECTED:
                 return wr
             if wr.status == self.model.Status.SUCCESS:
@@ -1197,8 +1339,25 @@ class CoinWithdrawalRequest(models.Model):
     # [ADDED — Task 38] Copied from `liveclass.CoinWithdrawal` — see the
     # class docstring's Task 38 section for why this app keeps its own
     # copy rather than importing the liveclass one.
-    COIN_TO_INR_RATE = 1  # 1 coin == this many INR; adjust to match the actual coin pricing used when passes are priced
+    # FALLBACK default only. The live rate comes from `settings.COIN_TO_INR_RATE`
+    # (env `COIN_TO_INR_RATE`) via `get_coin_to_inr_rate()` below, so ops can
+    # change it without a code deploy. 1 coin == this many INR.
+    COIN_TO_INR_RATE = 1
     MIN_WITHDRAWAL_COINS = 100  # below this, a bank/UPI transfer typically costs more in fees than the payout itself
+
+    @classmethod
+    def get_coin_to_inr_rate(cls):
+        """INR value of one coin, read from `settings.COIN_TO_INR_RATE` at
+        CALL time (not import time) so a settings/env change or a test
+        override takes effect immediately. Falls back to the class default
+        if the setting is missing, unparseable or not positive — a bad
+        config must never produce a zero/negative payout amount."""
+        raw = getattr(settings, "COIN_TO_INR_RATE", cls.COIN_TO_INR_RATE)
+        try:
+            rate = Decimal(str(raw))
+        except (InvalidOperation, ValueError, TypeError):
+            return Decimal(str(cls.COIN_TO_INR_RATE))
+        return rate if rate > 0 else Decimal(str(cls.COIN_TO_INR_RATE))
 
     class Status(models.TextChoices):
         PENDING = "pending", "Pending"

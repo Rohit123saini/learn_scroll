@@ -7,7 +7,7 @@ from firebase_admin import credentials, messaging
 from django.core.cache import cache
 from django.utils import timezone
 
-from .models import DeviceToken, FocusSession  # 🔥 NAYA — FocusSession, Feature 12 ke baad models.py me merge hone se yahan aayega
+from .models import DeviceToken, FocusSession, Message  # 🔥 NAYA — FocusSession, Feature 12 ke baad models.py me merge hone se yahan aayega
 
 # 🔥 NAYA (task 44 — core-app migration) — is module ka kaam ab sirf FCM
 # push bhejna nahi hai; har push ke saath ek matching bell-row
@@ -65,6 +65,34 @@ def _filter_recipients_for_focus(recipient_ids, *, is_announcement):
             allowed.append(uid)  # teacher/staff ka message — through jaane do
         # warna (chit-chat, focus on) — silently drop, koi push nahi
     return allowed
+
+# Issue #2 (RestrictUser) — recipient A who has restricted sender B must
+# get NO push and NO bell row for B's messages/mentions; B must never be
+# able to tell (the message itself is still delivered/stored normally, and
+# nothing here errors). The sender is looked up from `message_id` rather
+# than a new parameter so the ~8 existing call-sites (views/consumers/
+# offline_queue/scheduled_messages) need no change. Never raises: on any
+# lookup failure the recipients are returned unfiltered (a leaked push is
+# better than a silently dropped one for everyone).
+def _filter_recipients_for_restrict(recipient_ids, message_id):
+    if not recipient_ids or not message_id:
+        return recipient_ids
+    try:
+        from user_profile.services import restrictor_ids_of
+
+        sender_id = (
+            Message.objects.filter(pk=message_id).values_list("sender_id", flat=True).first()
+        )
+        if sender_id is None:
+            return recipient_ids
+        restrictors = {str(r) for r in restrictor_ids_of(sender_id, among=recipient_ids)}
+        if not restrictors:
+            return recipient_ids
+        return [r for r in recipient_ids if str(r) not in restrictors]
+    except Exception:
+        logger.exception("restrict filter failed for message %s; sending unfiltered", message_id)
+        return recipient_ids
+
 
 # 🔥 UPDATED — Notification batching / digest, now WhatsApp-style
 # (immediate send, no artificial wait). Pehle ye ek fixed
@@ -329,6 +357,7 @@ def send_chat_message_push(recipient_ids, sender_name, message_text, message_typ
     # ek fresh "1 message" push mile, beech ke saare messages ka count
     # nahi — jo sahi hai, kyunki unhe koi individual push mila hi nahi).
     recipient_ids = _filter_recipients_for_focus(recipient_ids, is_announcement=is_announcement)
+    recipient_ids = _filter_recipients_for_restrict(recipient_ids, message_id)
     if not recipient_ids:
         return
 
@@ -463,6 +492,7 @@ def send_mention_push(recipient_ids, sender_name, message_text, conversation_id,
     hai `type: 'mention'` dekh kar.
     """
     recipient_ids = _filter_recipients_for_focus(recipient_ids, is_announcement=is_announcement)
+    recipient_ids = _filter_recipients_for_restrict(recipient_ids, message_id)
     if not recipient_ids:
         return
 

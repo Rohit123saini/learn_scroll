@@ -227,10 +227,51 @@ class CampusParentLinkSerializer(serializers.ModelSerializer):
     student_detail = MinimalUserSerializer(source="student", read_only=True)
     parent_detail = MinimalUserSerializer(source="parent", read_only=True)
 
+    # 🔥 FIX — frontend "parent view" gap: attendance-summary/report-card
+    # (campus/views.py) both need an `enrollment` id to look anything up,
+    # and both already allow a linked parent to read them
+    # (`is_linked_parent_of_student`). `StudentEnrollmentViewSet` DOES
+    # technically allow a parent to GET (its `IsCampusAdminOrPrincipal`
+    # permission already lets every safe method through — see that
+    # class's own `has_permission()`), but only by listing/filtering the
+    # WHOLE campus's enrollments and searching for their child's row
+    # client-side, which is both wasteful (one call per child instead of
+    # getting it inline with the link they already fetched) and leakier
+    # than it needs to be (exposes every other student's enrollment to
+    # get one). Computed here instead — read-only, scoped to exactly the
+    # one row the caller is already allowed to see.
+    active_enrollment = serializers.SerializerMethodField()
+
     class Meta:
         model = CampusParentLink
-        fields = ["id", "campus", "student", "student_detail", "parent", "parent_detail", "created_at"]
+        fields = [
+            "id", "campus", "student", "student_detail", "parent", "parent_detail",
+            "active_enrollment", "created_at",
+        ]
         read_only_fields = fields
+
+    def get_active_enrollment(self, obj):
+        enrollment = (
+            StudentEnrollment.objects.filter(
+                student_id=obj.student_id,
+                section__school_class__campus_id=obj.campus_id,
+                status=StudentEnrollment.Status.ACTIVE,
+            )
+            .select_related("section", "section__school_class")
+            .order_by("-session__start_date")
+            .first()
+        )
+        if not enrollment:
+            return None
+        return {
+            "id": enrollment.id,
+            "section_id": enrollment.section_id,
+            "section_name": enrollment.section.name,
+            "school_class_id": enrollment.section.school_class_id,
+            "school_class_name": enrollment.section.school_class.name,
+            "department_id": enrollment.section.school_class.department_id,
+            "session_id": enrollment.session_id,
+        }
 
 
 # ============================================================

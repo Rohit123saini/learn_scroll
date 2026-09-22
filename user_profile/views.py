@@ -1,12 +1,14 @@
 # user_profile/views.py
 import hashlib
 import hmac
+import logging
 
 from django.conf import settings
 from django.contrib.auth import get_user_model
 from django.db import IntegrityError, transaction
-from django.db.models import F, Q
+from django.db.models import Q
 from django.http import Http404
+from django.http.request import RawPostDataException
 from django.shortcuts import get_object_or_404
 from drf_spectacular.types import OpenApiTypes
 from drf_spectacular.utils import OpenApiParameter, extend_schema
@@ -16,21 +18,29 @@ from rest_framework.parsers import FormParser, MultiPartParser
 from rest_framework.permissions import AllowAny, IsAdminUser, IsAuthenticated
 from rest_framework.response import Response
 
+from common.pagination import get_max_page_size
+
+from rest_framework.throttling import UserRateThrottle
+
 from . import fraud
 from .models import (
     BlockUser,
     CoinLedger,
+    CoinLedgerBusy,
     CoinPurchaseRequest,
     CoinWithdrawalRequest,
     Follow,
     RestrictUser,
     UserPreference,
+    WithdrawalNotEligible,
 )
+from .throttles import CoinPurchaseBurstThrottle, CoinPurchaseDailyThrottle
 from .serializers import (
     BlockUserSerializer,
     CoinLedgerSerializer,
     CoinPurchaseConfirmSerializer,
     CoinPurchaseRequestSerializer,
+    CoinWithdrawalActionSerializer,
     CoinWithdrawalRequestSerializer,
     FollowActionResponseSerializer,
     MessageContactSearchSerializer,
@@ -42,11 +52,23 @@ from .serializers import (
     UserProfileDetailResponseSerializer,
     UserProfileSerializer,
     UserSearchSerializer,
-    accepted_connection_ids,
     bulk_accepted_connection_ids,
 )
 
 User = get_user_model()
+logger = logging.getLogger(__name__)
+
+
+def _wallet_busy_response():
+    """503 + Retry-After for CoinLedgerBusy (a wallet/purchase row lock timed
+    out). Nothing was written, so retrying is safe — and a payment gateway
+    retries a 5xx webhook on its own."""
+    response = Response({
+        "status": False,
+        "message": "The wallet is busy right now. Please retry in a moment.",
+    }, status=status.HTTP_503_SERVICE_UNAVAILABLE)
+    response["Retry-After"] = "2"
+    return response
 
 
 def is_blocked_between(user_a, user_b):
@@ -251,23 +273,34 @@ class MessageContactSearchView(ListAPIView):
     search_fields = ["username", "first_name", "last_name"]
 
     def get_queryset(self):
-        connected_ids = accepted_connection_ids(self.request.user)
-        connected_ids.discard(self.request.user.id)
+        # Issue #17: this used to pull ALL of the viewer's connection ids into
+        # a Python set and then run `id IN (<that whole set>)` — for a user
+        # with tens of thousands of connections that is a huge in-memory set
+        # AND a huge SQL statement (PostgreSQL also caps bind parameters),
+        # before pagination could limit anything. Now the whole thing stays in
+        # the database as subqueries, and only the requested page is fetched.
+        me = self.request.user
+        accepted = Follow.objects.filter(status=Follow.Status.ACCEPTED)
 
         # 🔥 FIX: someone you've since blocked (or who blocked you) could
         # still show up here as a "connection" and be pickable as a chat
-        # contact.
-        blocked_ids = BlockUser.objects.filter(
-            Q(blocker=self.request.user) | Q(blocked=self.request.user)
-        ).values_list("blocker_id", "blocked_id")
-        for blocker_id, blocked_id in blocked_ids:
-            connected_ids.discard(blocker_id)
-            connected_ids.discard(blocked_id)
-
-        return User.objects.filter(id__in=connected_ids)
+        # contact — excluded in both directions.
+        return (
+            User.objects.filter(
+                Q(id__in=accepted.filter(follower=me).values("following_id"))
+                | Q(id__in=accepted.filter(following=me).values("follower_id"))
+            )
+            .exclude(id=me.id)
+            .exclude(id__in=BlockUser.objects.filter(blocker=me).values("blocked_id"))
+            .exclude(id__in=BlockUser.objects.filter(blocked=me).values("blocker_id"))
+        )
 
     def get_serializer_context(self):
-        return {"request": self.request, "connections_map": self._connections_map}
+        return {
+            "request": self.request,
+            "connections_map": self._connections_map,
+            "connections_map_is_mutual_only": True,  # built with restrict_to_user — see serializer
+        }
 
     @extend_schema(
         parameters=[
@@ -286,8 +319,16 @@ class MessageContactSearchView(ListAPIView):
         # bulk_accepted_connection_ids docstring).
         queryset = self.filter_queryset(self.get_queryset())
         page = self.paginate_queryset(queryset)
-        rows = page if page is not None else queryset
-        self._connections_map = bulk_accepted_connection_ids(u.id for u in rows)
+        if page is None:
+            # No paginator configured: never materialise the whole table
+            # (issue #5) — fall back to one bounded page.
+            page_rows = list(queryset[:get_max_page_size()])
+            rows = page_rows
+        else:
+            rows = page
+        self._connections_map = bulk_accepted_connection_ids(
+            (u.id for u in rows), restrict_to_user=request.user
+        )
 
         if page is not None:
             serializer = self.get_serializer(page, many=True)
@@ -323,14 +364,26 @@ class FollowersListView(ListAPIView):
         return User.objects.filter(id__in=follower_ids)
 
     def get_serializer_context(self):
-        return {"request": self.request, "connections_map": self._connections_map}
+        return {
+            "request": self.request,
+            "connections_map": self._connections_map,
+            "connections_map_is_mutual_only": True,  # built with restrict_to_user — see serializer
+        }
 
     @extend_schema(description="List of a user's followers, with mutual_friends relative to you")
     def list(self, request, *args, **kwargs):
         queryset = self.filter_queryset(self.get_queryset())
         page = self.paginate_queryset(queryset)
-        rows = page if page is not None else queryset
-        self._connections_map = bulk_accepted_connection_ids(u.id for u in rows)
+        if page is None:
+            # No paginator configured: never materialise the whole table
+            # (issue #5) — fall back to one bounded page.
+            page_rows = list(queryset[:get_max_page_size()])
+            rows = page_rows
+        else:
+            rows = page
+        self._connections_map = bulk_accepted_connection_ids(
+            (u.id for u in rows), restrict_to_user=request.user
+        )
 
         if page is not None:
             serializer = self.get_serializer(page, many=True)
@@ -364,14 +417,26 @@ class FollowingListView(ListAPIView):
         return User.objects.filter(id__in=following_ids)
 
     def get_serializer_context(self):
-        return {"request": self.request, "connections_map": self._connections_map}
+        return {
+            "request": self.request,
+            "connections_map": self._connections_map,
+            "connections_map_is_mutual_only": True,  # built with restrict_to_user — see serializer
+        }
 
     @extend_schema(description="List of who a user is following, with mutual_friends relative to you")
     def list(self, request, *args, **kwargs):
         queryset = self.filter_queryset(self.get_queryset())
         page = self.paginate_queryset(queryset)
-        rows = page if page is not None else queryset
-        self._connections_map = bulk_accepted_connection_ids(u.id for u in rows)
+        if page is None:
+            # No paginator configured: never materialise the whole table
+            # (issue #5) — fall back to one bounded page.
+            page_rows = list(queryset[:get_max_page_size()])
+            rows = page_rows
+        else:
+            rows = page
+        self._connections_map = bulk_accepted_connection_ids(
+            (u.id for u in rows), restrict_to_user=request.user
+        )
 
         if page is not None:
             serializer = self.get_serializer(page, many=True)
@@ -433,15 +498,9 @@ class FollowAPIView(GenericAPIView):
         ).first()
 
         if follow_obj:
-            # Unfollow: count minus karo
-            if follow_obj.status == Follow.Status.ACCEPTED:
-                User.objects.filter(id=request.user.id).update(
-                    following_count=F("following_count") - 1
-                )
-                User.objects.filter(id=following_user.id).update(
-                    followers_count=F("followers_count") - 1
-                )
-
+            # Unfollow. followers_count/following_count are NOT touched
+            # here any more — the Follow post_delete signal
+            # (user_profile/signals.py) recounts both users from real rows.
             follow_obj.delete()
             return Response({
                 "message": "Unfollowed successfully",
@@ -457,11 +516,22 @@ class FollowAPIView(GenericAPIView):
             # `.create()` — the DB's UniqueConstraint would correctly
             # reject the second one, but as an unhandled IntegrityError
             # that surfaces as a raw 500 instead of a clean response.
-            new_follow = Follow.objects.create(
-                follower=request.user,
-                following=following_user,
-                status=Follow.Status.PENDING if is_private else Follow.Status.ACCEPTED,
-            )
+            #
+            # The create runs inside its OWN savepoint (`atomic()`): this
+            # whole view is already wrapped in @transaction.atomic, and on
+            # PostgreSQL an IntegrityError leaves the OUTER transaction
+            # in an aborted state — the very next query (the `existing`
+            # lookup in the except-block below) would then raise
+            # TransactionManagementError -> a 500, i.e. exactly the
+            # failure this except-block exists to prevent. The savepoint
+            # rolls back only the failed INSERT and keeps the outer
+            # transaction usable.
+            with transaction.atomic():
+                new_follow = Follow.objects.create(
+                    follower=request.user,
+                    following=following_user,
+                    status=Follow.Status.PENDING if is_private else Follow.Status.ACCEPTED,
+                )
         except IntegrityError:
             existing = Follow.objects.filter(
                 follower=request.user, following=following_user
@@ -472,13 +542,9 @@ class FollowAPIView(GenericAPIView):
                 "follow_id": existing.id if existing else None,
             }, status=status.HTTP_200_OK)
 
-        if not is_private:
-            User.objects.filter(id=request.user.id).update(
-                following_count=F("following_count") + 1
-            )
-            User.objects.filter(id=following_user.id).update(
-                followers_count=F("followers_count") + 1
-            )
+        # No manual counter update: Follow's post_save signal
+        # (user_profile/signals.py) recounts both users once this
+        # transaction commits (a PENDING request changes no count).
 
         # TASK 2: notify the other side of a follow action. Lazy imports
         # (core.models for the NotifType enum, .services for the
@@ -548,15 +614,10 @@ class AcceptFollowRequestView(GenericAPIView):
             status=Follow.Status.PENDING,
         )
 
+        # save() fires Follow's post_save signal, which recounts both
+        # users' followers_count/following_count (user_profile/signals.py).
         follow_request.status = Follow.Status.ACCEPTED
         follow_request.save(update_fields=["status"])
-
-        User.objects.filter(id=follow_request.follower_id).update(
-            following_count=F("following_count") + 1
-        )
-        User.objects.filter(id=request.user.id).update(
-            followers_count=F("followers_count") + 1
-        )
 
         # TASK 2: notify the original requester. Same lazy-import
         # pattern as FollowAPIView.post above — see that comment for why.
@@ -627,6 +688,22 @@ class UpdateProfileView(GenericAPIView):
         description="Update current user's profile. Send only fields you want to update.",
     )
     def patch(self, request):
+        # Cheap early reject: an oversized upload is refused from the
+        # Content-Length header alone, before the body is parsed/spooled.
+        # (Not trusted on its own — SafeProfilePhotoField re-checks the
+        # real file size — this just avoids parsing an obviously huge body.)
+        max_bytes = getattr(settings, "PROFILE_PHOTO_MAX_BYTES", 5 * 1024 * 1024)
+        try:
+            declared = int(request.META.get("CONTENT_LENGTH") or 0)
+        except (TypeError, ValueError):
+            declared = 0
+        if declared > max_bytes + 1024 * 1024:  # +1 MB slack for the other form fields
+            return Response({
+                "status": False,
+                "message": "Upload too large.",
+                "errors": {"profile_photo": [f"Photo must be at most {max_bytes // (1024 * 1024)} MB."]},
+            }, status=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE)
+
         serializer = self.get_serializer(
             request.user,
             data=request.data,
@@ -699,19 +776,13 @@ class BlockedUsersView(GenericAPIView):
             # Block hote hi dono taraf ka follow-relation khatam karo, aur
             # jo ACCEPTED tha uska count bhi ghata do (FollowAPIView ke
             # unfollow wale logic jaisa hi).
-            follow_qs = Follow.objects.filter(
+            # `QuerySet.delete()` sends post_delete per Follow row (a
+            # receiver is registered), so the counters are corrected by
+            # user_profile/signals.py — no manual F() decrement needed.
+            Follow.objects.filter(
                 Q(follower=request.user, following=blocked_user)
                 | Q(follower=blocked_user, following=request.user)
-            )
-            for f in follow_qs:
-                if f.status == Follow.Status.ACCEPTED:
-                    User.objects.filter(id=f.follower_id).update(
-                        following_count=F("following_count") - 1
-                    )
-                    User.objects.filter(id=f.following_id).update(
-                        followers_count=F("followers_count") - 1
-                    )
-            follow_qs.delete()
+            ).delete()
 
         return Response({
             "status": True,
@@ -908,10 +979,13 @@ class BuyCoinView(GenericAPIView):
     """
     permission_classes = [IsAuthenticated]
     serializer_class = CoinPurchaseRequestSerializer
+    # DB-bloat guard: keeps the global per-user default AND adds the two
+    # purchase-specific limits (see user_profile/throttles.py).
+    throttle_classes = [UserRateThrottle, CoinPurchaseBurstThrottle, CoinPurchaseDailyThrottle]
 
     @extend_schema(
         request=CoinPurchaseRequestSerializer,
-        responses={201: CoinPurchaseRequestSerializer, 200: CoinPurchaseRequestSerializer},
+        responses={201: CoinPurchaseRequestSerializer, 200: CoinPurchaseRequestSerializer, 429: OpenApiTypes.OBJECT},
         description="Start a coin purchase (creates a pending request; idempotent on "
         "gateway_reference). Does not credit coins — see /buy-coin/confirm/.",
     )
@@ -925,6 +999,24 @@ class BuyCoinView(GenericAPIView):
             }, status=status.HTTP_400_BAD_REQUEST)
 
         data = serializer.validated_data
+
+        # Cap on unconfirmed rows per user. A retry of an EXISTING reference
+        # is idempotent (creates nothing), so it is never blocked by the cap.
+        max_pending = getattr(settings, "COIN_PURCHASE_MAX_PENDING_PER_USER", 20)
+        if (
+            not CoinPurchaseRequest.objects.filter(
+                gateway=data.get("gateway", ""), gateway_reference=data["gateway_reference"],
+            ).exists()
+            and CoinPurchaseRequest.objects.filter(
+                user=request.user, status=CoinPurchaseRequest.Status.PENDING,
+            ).count() >= max_pending
+        ):
+            return Response({
+                "status": False,
+                "message": "Too many pending purchases. Complete or wait for the "
+                           "existing ones before starting a new one.",
+            }, status=status.HTTP_429_TOO_MANY_REQUESTS)
+
         purchase, created = CoinPurchaseRequest.objects.start_purchase(
             user=request.user,
             gateway_reference=data["gateway_reference"],
@@ -968,7 +1060,7 @@ class GatewayWebhookSignatureError(Exception):
         self.is_misconfiguration = is_misconfiguration
 
 
-def _verify_gateway_webhook_signature(request, gateway):
+def _verify_gateway_webhook_signature(request, gateway, raw_body=None):
     """
     TASK (this pass) — user_profile_app_reference.md §11 item 10:
     `BuyCoinConfirmView` had no real payment-gateway signature check,
@@ -1064,14 +1156,22 @@ def _verify_gateway_webhook_signature(request, gateway):
     # Django raises `RawPostDataException` on a later `.body` access — see
     # BuyCoinConfirmView.post()'s own comment on why it reads `.body`
     # before `self.get_serializer(data=request.data)`, not after.
+    # Prefer the bytes the view already captured (`raw_body`) so this never
+    # depends on a second `.body` access succeeding.
+    body_bytes = raw_body if raw_body is not None else request.body
     expected_signature = hmac.new(
-        secret.encode("utf-8"), request.body, hashlib.sha256,
+        secret.encode("utf-8"), body_bytes, hashlib.sha256,
     ).hexdigest()
 
     # `compare_digest`, not `==` — constant-time, so a caller can't use
     # response-timing differences to guess the correct signature one
-    # byte at a time.
-    if not hmac.compare_digest(provided_signature, expected_signature):
+    # byte at a time. Compared as BYTES: `compare_digest(str, str)` raises
+    # TypeError if either str contains a non-ASCII character, and the
+    # header value is attacker-controlled — a header like "é" would turn
+    # a plain 401 into an unhandled 500.
+    if not hmac.compare_digest(
+        provided_signature.encode("utf-8"), expected_signature.encode("utf-8"),
+    ):
         raise GatewayWebhookSignatureError("Signature verification failed.")
 
 
@@ -1125,7 +1225,7 @@ class BuyCoinConfirmView(GenericAPIView):
         "Signature-verified — not callable as a regular authenticated user "
         "action. Idempotent — safe to retry (e.g. a duplicated webhook delivery).",
     )
-    def post(self, request):
+    def post(self, request, gateway=None):
         # MUST happen before `self.get_serializer(data=request.data)`
         # below — see `_verify_gateway_webhook_signature()`'s own comment
         # on why. Forces Django to cache the raw body now, while the
@@ -1134,7 +1234,20 @@ class BuyCoinConfirmView(GenericAPIView):
         # stream directly — without this ordering, the signature check
         # further down would hit Django's `RawPostDataException` instead
         # of a raw body to hash.
-        request.body
+        #
+        # If something upstream (a middleware, a proxy layer) already
+        # consumed the stream WITHOUT caching it, `.body` raises
+        # RawPostDataException. We can't verify an HMAC without the raw
+        # bytes, so fail CLOSED with a clean 400 (the gateway will retry)
+        # instead of an unhandled 500.
+        try:
+            raw_body = request.body
+        except RawPostDataException:
+            logger.error("buy-coin webhook: raw body unavailable (stream already consumed)")
+            return Response({
+                "status": False,
+                "message": "Could not read the request body.",
+            }, status=status.HTTP_400_BAD_REQUEST)
 
         serializer = self.get_serializer(data=request.data)
         if not serializer.is_valid():
@@ -1147,21 +1260,39 @@ class BuyCoinConfirmView(GenericAPIView):
         gateway_reference = serializer.validated_data["gateway_reference"]
         outcome = serializer.validated_data["status"]
 
-        purchase = CoinPurchaseRequest.objects.filter(
-            gateway_reference=gateway_reference
-        ).first()
-        if purchase is None:
+        # A gateway's transaction id is only unique WITHIN that gateway, so
+        # the same string can exist on two purchases. Which one is meant is
+        # decided by the gateway-specific URL (/buy-coin/confirm/<gateway>/ —
+        # configured by us in the gateway's webhook settings, not by the
+        # caller) or, failing that, an optional `gateway` in the body. With
+        # neither, the reference must identify exactly one purchase.
+        # The hint only NARROWS the lookup; the signature below is still
+        # verified against the secret of the purchase's own recorded gateway,
+        # so it can't be used to confirm anything without that gateway's key.
+        gateway_hint = (gateway or serializer.validated_data.get("gateway") or "").strip().lower()
+        matches = CoinPurchaseRequest.objects.filter(gateway_reference=gateway_reference)
+        if gateway_hint:
+            matches = matches.filter(gateway=gateway_hint)
+        matches = list(matches.order_by("pk")[:2])
+        if not matches:
             return Response({
                 "status": False,
                 "message": "Coin purchase request not found.",
             }, status=status.HTTP_404_NOT_FOUND)
+        if len(matches) > 1:
+            return Response({
+                "status": False,
+                "message": "This reference exists on more than one gateway — use "
+                           "/buy-coin/confirm/<gateway>/ to say which.",
+            }, status=status.HTTP_409_CONFLICT)
+        purchase = matches[0]
 
         # Replaces the old `purchase.user_id != request.user.id` ownership
         # check — see class docstring. Keyed off `purchase.gateway` (this
         # server's own record of which gateway the purchase was started
         # against), never off anything the caller claims in this request.
         try:
-            _verify_gateway_webhook_signature(request, purchase.gateway)
+            _verify_gateway_webhook_signature(request, purchase.gateway, raw_body=raw_body)
         except GatewayWebhookSignatureError as exc:
             if exc.is_misconfiguration:
                 # Our config's fault (no secret on file / no gateway to
@@ -1183,15 +1314,18 @@ class BuyCoinConfirmView(GenericAPIView):
         try:
             if outcome == "success":
                 purchase = CoinPurchaseRequest.objects.confirm_success(
-                    gateway_reference=gateway_reference
+                    gateway_reference=gateway_reference, gateway=purchase.gateway,
                 )
                 message = "Coin purchase confirmed and wallet credited."
             else:
                 purchase = CoinPurchaseRequest.objects.mark_failed(
                     gateway_reference=gateway_reference,
                     reason=serializer.validated_data.get("failure_reason", ""),
+                    gateway=purchase.gateway,
                 )
                 message = "Coin purchase marked as failed."
+        except CoinLedgerBusy:
+            return _wallet_busy_response()
         except ValueError as exc:
             # confirm_success()/mark_failed() raise this for an invalid
             # state transition (e.g. trying to fail an already-succeeded
@@ -1283,10 +1417,19 @@ class AdminCoinPurchaseConfirmView(GenericAPIView):
         gateway_reference = serializer.validated_data["gateway_reference"]
         outcome = serializer.validated_data["status"]
 
+        # Only ever look at BLANK-gateway rows: a gateway-backed purchase that
+        # merely shares this reference string must never be picked up here.
         purchase = CoinPurchaseRequest.objects.filter(
-            gateway_reference=gateway_reference
+            gateway_reference=gateway_reference, gateway=""
         ).first()
         if purchase is None:
+            if CoinPurchaseRequest.objects.filter(gateway_reference=gateway_reference).exists():
+                return Response({
+                    "status": False,
+                    "message": "This purchase has a gateway on file and must be "
+                    "confirmed via the gateway webhook (/buy-coin/confirm/), not "
+                    "the admin manual-confirm endpoint.",
+                }, status=status.HTTP_409_CONFLICT)
             return Response({
                 "status": False,
                 "message": "Coin purchase request not found.",
@@ -1306,15 +1449,18 @@ class AdminCoinPurchaseConfirmView(GenericAPIView):
         try:
             if outcome == "success":
                 purchase = CoinPurchaseRequest.objects.confirm_success(
-                    gateway_reference=gateway_reference
+                    gateway_reference=gateway_reference, gateway="",
                 )
                 message = "Coin purchase confirmed and wallet credited (manual admin action)."
             else:
                 purchase = CoinPurchaseRequest.objects.mark_failed(
                     gateway_reference=gateway_reference,
                     reason=serializer.validated_data.get("failure_reason", ""),
+                    gateway="",
                 )
                 message = "Coin purchase marked as failed (manual admin action)."
+        except CoinLedgerBusy:
+            return _wallet_busy_response()
         except ValueError as exc:
             # Invalid state transition (e.g. failing an already-succeeded
             # purchase) — same 409 shape BuyCoinConfirmView uses above.
@@ -1422,6 +1568,16 @@ class CoinWithdrawalRequestView(GenericAPIView):
                 payout_method=data.get("payout_method", ""),
                 payout_details=data.get("payout_details", {}),
             )
+        except WithdrawalNotEligible as exc:
+            # The under-lock re-check inside request_withdrawal() (the one
+            # the pre-check above can't make race-proof) rejected it: same
+            # policy 403 as the pre-check, no debit, no row.
+            return Response({
+                "status": False,
+                "message": str(exc),
+            }, status=status.HTTP_403_FORBIDDEN)
+        except CoinLedgerBusy:
+            return _wallet_busy_response()
         except ValueError as exc:
             # Insufficient balance — 402, same "request was well-formed,
             # the wallet just can't cover it" shape campus's
@@ -1487,15 +1643,17 @@ class CoinWithdrawalAdminActionView(GenericAPIView):
     """
 
     permission_classes = [IsAdminUser]
-    serializer_class = CoinWithdrawalRequestSerializer
+    serializer_class = CoinWithdrawalActionSerializer
 
-    ACTION_PROCESSING = "processing"
-    ACTION_SUCCESS = "success"
-    ACTION_REJECT = "reject"
-    VALID_ACTIONS = (ACTION_PROCESSING, ACTION_SUCCESS, ACTION_REJECT)
+    # Kept as attributes for anything that imports them; the accepted values
+    # themselves are defined once, on CoinWithdrawalActionSerializer.
+    ACTION_PROCESSING = CoinWithdrawalActionSerializer.ACTION_PROCESSING
+    ACTION_SUCCESS = CoinWithdrawalActionSerializer.ACTION_SUCCESS
+    ACTION_REJECT = CoinWithdrawalActionSerializer.ACTION_REJECT
+    VALID_ACTIONS = CoinWithdrawalActionSerializer.VALID_ACTIONS
 
     @extend_schema(
-        request=OpenApiTypes.OBJECT,
+        request=CoinWithdrawalActionSerializer,
         responses={
             200: CoinWithdrawalRequestSerializer,
             400: OpenApiTypes.OBJECT,
@@ -1506,17 +1664,19 @@ class CoinWithdrawalAdminActionView(GenericAPIView):
         "{'action': 'processing'|'success'|'reject', 'reason': '<reject only, optional>'}.",
     )
     def post(self, request, withdrawal_id):
-        action = request.data.get("action")
-        if action not in self.VALID_ACTIONS:
+        serializer = self.get_serializer(data=request.data)
+        if not serializer.is_valid():
             return Response({
                 "status": False,
-                "message": f"'action' must be one of {list(self.VALID_ACTIONS)}.",
+                "message": "Validation failed.",
+                "errors": serializer.errors,
             }, status=status.HTTP_400_BAD_REQUEST)
+        action = serializer.validated_data["action"]
 
         try:
             if action == self.ACTION_PROCESSING:
                 withdrawal = CoinWithdrawalRequest.objects.mark_processing(
-                    withdrawal_id=withdrawal_id
+                    withdrawal_id=withdrawal_id, reviewed_by=request.user,
                 )
                 message = "Withdrawal moved to processing."
             elif action == self.ACTION_SUCCESS:
@@ -1527,7 +1687,8 @@ class CoinWithdrawalAdminActionView(GenericAPIView):
             else:
                 withdrawal = CoinWithdrawalRequest.objects.reject(
                     withdrawal_id=withdrawal_id,
-                    reason=request.data.get("reason", ""),
+                    reason=serializer.validated_data.get("reason", ""),
+                    reviewed_by=request.user,
                 )
                 message = "Withdrawal rejected and coins refunded."
         except CoinWithdrawalRequest.DoesNotExist:
@@ -1535,6 +1696,8 @@ class CoinWithdrawalAdminActionView(GenericAPIView):
                 "status": False,
                 "message": f"No withdrawal request with id {withdrawal_id}.",
             }, status=status.HTTP_404_NOT_FOUND)
+        except CoinLedgerBusy:
+            return _wallet_busy_response()
         except ValueError as exc:
             # Invalid state transition (e.g. rejecting an already-
             # SUCCESS request) — the manager methods raise ValueError
@@ -1547,7 +1710,7 @@ class CoinWithdrawalAdminActionView(GenericAPIView):
         return Response({
             "status": True,
             "message": message,
-            "data": self.get_serializer(withdrawal).data,
+            "data": CoinWithdrawalRequestSerializer(withdrawal).data,
         }, status=status.HTTP_200_OK)
 
 

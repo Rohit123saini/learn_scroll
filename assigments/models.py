@@ -37,12 +37,9 @@ WHAT'S IN THIS FILE:
      `is_correct` semantics. Grading is delegated to `common.
      question_grading.auto_grade()` (verified against the real module —
      a plain `(question_type, options, correct_answer, answer_data,
-     marks) -> (is_correct, marks_awarded)` function, not the
-     `GradingResult`-returning, `options`-less draft this file was
-     originally written against; that earlier mismatch would have raised
-     an `ImportError` on `GradingResult`/`QuestionType` at import time and
-     is now fixed, along with `submit_structured()`'s call site — see
-     that method's own docstring for the full list of what changed).
+     marks) -> (is_correct, marks_awarded)` function. `submit_structured()`
+     calls it with exactly that signature — see that method's own
+     docstring).
   4. `assigmentsSubmission` — one student's attempt. Snapshots
      `roll_number`/`enrollment_no` at submit time (never re-derived) so a
      submission stays independently verifiable even if enrollment changes
@@ -105,6 +102,45 @@ class assigmentsSource(models.TextChoices):
     PERSONAL = "personal", "Personal"
     CAMPUS = "campus", "Campus"
     LIVECLASS = "liveclass", "LiveClass"
+
+
+class assigmentsKind(models.TextChoices):
+    """`assignment` = the classic task. `project` = a longer build-something
+    brief: students hand in a LINK (repo / live demo / design file) and/or a
+    file, and the poster grades it against a rubric."""
+
+    ASSIGNMENT = "assignment", "Assignment"
+    PROJECT = "project", "Project"
+
+
+class assigmentsStatus(models.TextChoices):
+    DRAFT = "draft", "Draft"
+    PUBLISHED = "published", "Published"
+    ARCHIVED = "archived", "Archived"
+
+
+class assigmentsVisibility(models.TextChoices):
+    """Who can FIND / open a PERSONAL assignment.
+      private — only the poster (and anyone who already holds a submission).
+      link    — anyone with the share link (unlisted; not in Explore).
+      public  — listed in Explore for everyone, plus the share link.
+    Campus / liveclass assignments ignore this: they are scoped by their
+    roster (a submission row per member), not by visibility."""
+
+    PRIVATE = "private", "Private"
+    LINK = "link", "Anyone with the link"
+    PUBLIC = "public", "Public"
+
+
+class assigmentsDifficulty(models.TextChoices):
+    EASY = "easy", "Easy"
+    MEDIUM = "medium", "Medium"
+    HARD = "hard", "Hard"
+
+
+SUBMISSION_TYPES = ("text", "file", "link")
+MAX_TAGS = 8
+MAX_RUBRIC_CRITERIA = 12
 
 
 class assigmentsBaseModel(models.Model):
@@ -184,10 +220,41 @@ class assigments(assigmentsBaseModel):
     # `bridge.create_context_assigments()`, not hand-maintained here.
     data = models.JSONField(default=dict, blank=True)
 
+    # ------------------------------------------------------------------
+    # PUBLISHING + PROJECTS (migration 0003). Defaults reproduce the old
+    # behaviour for every existing row: an assignment is "published" (usable),
+    # "private" (found only by its poster / roster) and a plain "assignment".
+    # A NEW personal assignment created through the API starts as a `draft`
+    # (see assigmentsViewSet.perform_create) until its poster publishes it.
+    # ------------------------------------------------------------------
+    kind = models.CharField(max_length=10, choices=assigmentsKind.choices, default=assigmentsKind.ASSIGNMENT)
+    status = models.CharField(
+        max_length=10, choices=assigmentsStatus.choices, default=assigmentsStatus.PUBLISHED, db_index=True
+    )
+    visibility = models.CharField(
+        max_length=7, choices=assigmentsVisibility.choices, default=assigmentsVisibility.PRIVATE, db_index=True
+    )
+    # Share slug of the ASSIGNMENT itself (distinct from a submission's
+    # `public_slug`, which shares a student's finished work). Minted once on
+    # first publish and kept, so a link you already posted somewhere stays valid.
+    public_slug = models.CharField(max_length=24, unique=True, null=True, blank=True)
+    published_at = models.DateTimeField(null=True, blank=True)
+
+    tags = models.JSONField(default=list, blank=True)
+    difficulty = models.CharField(max_length=6, choices=assigmentsDifficulty.choices, blank=True)
+    # Which hand-in types are accepted: any of "text" / "file" / "link".
+    # Empty list = all three (the pre-migration behaviour).
+    submission_types = models.JSONField(default=list, blank=True)
+    # Project rubric: [{"criterion": "Design", "max_marks": 10}, ...]. When set,
+    # `total_marks` is the sum of `max_marks` and the poster grades through
+    # `assigmentsSubmission.grade_rubric()`.
+    rubric = models.JSONField(default=list, blank=True)
+
     class Meta:
         indexes = [
             models.Index(fields=["source", "context_type", "context_id"]),
             models.Index(fields=["posted_by", "due_date"]),
+            models.Index(fields=["status", "visibility", "-published_at"], name="assign_explore_idx"),
         ]
 
     def __str__(self):
@@ -205,6 +272,61 @@ class assigments(assigmentsBaseModel):
         condition instead of re-deriving it.
         """
         return not self.submissions.exclude(status=assigmentsSubmission.SubmissionStatus.MISSING).exists()
+
+    # ---- publishing helpers -------------------------------------------
+    def allowed_submission_types(self) -> set:
+        return set(self.submission_types or SUBMISSION_TYPES)
+
+    def rubric_total(self) -> int:
+        return sum(int(c.get("max_marks", 0)) for c in (self.rubric or []))
+
+    def ensure_public_slug(self) -> str:
+        """Mint the share slug once (idempotent). 10 URL-safe chars (~56 bits);
+        the unique constraint + retry covers the (astronomically rare) collision."""
+        if self.public_slug:
+            return self.public_slug
+        for _ in range(8):
+            slug = secrets.token_urlsafe(7).replace("_", "x").replace("-", "y")
+            if not assigments.objects.filter(public_slug=slug).exists():
+                self.public_slug = slug
+                return slug
+        raise RuntimeError("Could not mint a unique assignment slug.")  # pragma: no cover
+
+    def is_open_to(self, user) -> bool:
+        """May `user` open / join this PERSONAL assignment? The poster always;
+        anyone else only once it is published and not private."""
+        if user is None or not getattr(user, "is_authenticated", False):
+            return False
+        if self.posted_by_id == user.id or getattr(user, "is_staff", False):
+            return True
+        return (
+            self.source == assigmentsSource.PERSONAL
+            and self.status == assigmentsStatus.PUBLISHED
+            and self.visibility in (assigmentsVisibility.LINK, assigmentsVisibility.PUBLIC)
+        )
+
+    def publish_listing(self, visibility: str = assigmentsVisibility.PUBLIC) -> str:
+        """Poster publishes a personal assignment. Idempotent; re-publishing keeps
+        the same share link. Returns the slug. (Not to be confused with
+        `assigmentsSubmission.publish()`, which shares a student's finished work.)"""
+        if self.source != assigmentsSource.PERSONAL:
+            raise ValidationError("Only personal assignments can be published; campus and live-class ones follow their roster.")
+        if visibility not in (assigmentsVisibility.LINK, assigmentsVisibility.PUBLIC):
+            raise ValidationError("visibility must be 'link' or 'public'.")
+        slug = self.ensure_public_slug()
+        self.status = assigmentsStatus.PUBLISHED
+        self.visibility = visibility
+        self.published_at = self.published_at or timezone.now()
+        self.save(update_fields=["public_slug", "status", "visibility", "published_at", "updated_at"])
+        return slug
+
+    def unpublish_listing(self) -> None:
+        """Takes the assignment off Explore and kills the link. People who
+        already joined keep their submission (and access) — their work is
+        not deleted by the poster changing their mind."""
+        self.status = assigmentsStatus.DRAFT
+        self.visibility = assigmentsVisibility.PRIVATE
+        self.save(update_fields=["status", "visibility", "updated_at"])
 
     def save(self, *args, **kwargs):
         """Model-level backstop for the `has_structured_questions`
@@ -469,6 +591,12 @@ class assigmentsSubmission(assigmentsBaseModel):
     # per §2's own note.
     grade = models.CharField(max_length=10, blank=True)
 
+    # PROJECTS (migration 0003): a hand-in can be a URL (GitHub repo, live demo,
+    # Figma...) instead of / alongside a file, and is graded per rubric
+    # criterion: {"Design": 8, "Code quality": 12}.
+    link_url = models.URLField(max_length=500, blank=True)
+    rubric_scores = models.JSONField(default=dict, blank=True)
+
     # Structured path only — sum of assigmentsAnswer.marks_awarded, only
     # fully populated once every question (including every `text`
     # question) has been reviewed. See `_recompute_structured_status()`.
@@ -526,7 +654,7 @@ class assigmentsSubmission(assigmentsBaseModel):
     # ---------------------------------------------------------------
     # Free-form path
     # ---------------------------------------------------------------
-    def submit_freeform(self, *, written_content: str = "", file=None) -> None:
+    def submit_freeform(self, *, written_content: str = "", file=None, link_url: str = "") -> None:
         """§2 table — free-form path only. Goes to SUBMITTED or LATE and
         stops there; grading is a separate, explicit manual step
         (`grade_freeform`) — matching the doc's "seedha submitted/late →
@@ -535,9 +663,43 @@ class assigmentsSubmission(assigmentsBaseModel):
         self.written_content = written_content
         if file is not None:
             self.file = file
+        self.link_url = link_url or ""
         self.submitted_at = timezone.now()
         self.status = self.SubmissionStatus.LATE if self.is_late() else self.SubmissionStatus.SUBMITTED
-        self.save(update_fields=["written_content", "file", "submitted_at", "status", "updated_at"])
+        self.save(update_fields=["written_content", "file", "link_url", "submitted_at", "status", "updated_at"])
+
+    def grade_rubric(self, *, scores: dict, feedback: str = "") -> None:
+        """Project grading: one score per rubric criterion. Validates against the
+        assignment's rubric (unknown criterion / above max -> ValidationError),
+        stores the per-criterion scores, sets `total_marks_awarded` to their sum
+        and resolves the submission to CHECKED."""
+        rubric = {c["criterion"]: int(c["max_marks"]) for c in (self.assigments.rubric or [])}
+        if not rubric:
+            raise ValidationError("This assignment has no rubric.")
+        clean = {}
+        for name, value in (scores or {}).items():
+            if name not in rubric:
+                raise ValidationError(f"Unknown rubric criterion: {name!r}.")
+            try:
+                mark = int(value)
+            except (TypeError, ValueError):
+                raise ValidationError(f"Score for {name!r} must be a whole number.")
+            if mark < 0 or mark > rubric[name]:
+                raise ValidationError(f"Score for {name!r} must be between 0 and {rubric[name]}.")
+            clean[name] = mark
+        missing = [n for n in rubric if n not in clean]
+        if missing:
+            raise ValidationError(f"Missing score for: {', '.join(missing)}.")
+        total = sum(clean.values())
+        self.rubric_scores = clean
+        self.total_marks_awarded = total
+        self.grade = f"{total}/{sum(rubric.values())}"
+        self.feedback = feedback
+        self.status = self.SubmissionStatus.CHECKED
+        self.checked_at = timezone.now()
+        self.save(update_fields=[
+            "rubric_scores", "total_marks_awarded", "grade", "feedback", "status", "checked_at", "updated_at",
+        ])
 
     def grade_freeform(self, *, grade: str, feedback: str = "") -> None:
         self.grade = grade
@@ -559,16 +721,15 @@ class assigmentsSubmission(assigmentsBaseModel):
           - `is_auto_graded` is computed from `question_type != TEXT`
             *before* grading (same as `TestAttempt.submit()`), not derived
             from the grading call's return value.
-          - `common.question_grading.auto_grade()` returns a `GradingResult`
-            dataclass (`is_auto_graded`, `is_correct`, `marks_awarded`) —
-            confirmed against the real module. It takes no `options=`
-            kwarg at all (MCQ/MSQ/LIST grading only needs `correct_answer`
-            vs `answer_data`); a previous version of this call site passed
-            `options=` and tried to unpack the result as a 2-tuple, which
-            would have raised `TypeError` on every structured submission.
-            Fixed to call with the real signature and read `.is_correct`/
-            `.marks_awarded` off the returned `GradingResult`. Both are
-            `None` for `text` questions.
+          - `common.question_grading.auto_grade()` takes
+            `(question_type, options, correct_answer, answer_data, marks)`
+            and returns a plain `(is_correct, marks_awarded)` tuple —
+            the same function `testseries.Question.auto_grade()` wraps.
+            A previous version of this call site omitted the required
+            `options=` kwarg and read `.is_correct`/`.marks_awarded` off
+            a `GradingResult` that doesn't exist in `common`, which
+            would have raised `TypeError` on every structured
+            submission. Both values are `None` for `text` questions.
           - `answer_attachment` is only ever taken for non-auto-graded
             (`text`) questions — same as `TestAttempt.submit()`'s
             `None if is_auto_graded else files.get(...)` — an
@@ -593,13 +754,13 @@ class assigmentsSubmission(assigmentsBaseModel):
             question = questions[str(entry["question_id"])]
             answer_data = entry["answer_data"]
             is_auto_graded = question.question_type != assigmentsQuestion.QuestionTypeChoices.TEXT
-            grading_result = auto_grade(
+            is_correct, marks_awarded = auto_grade(
                 question_type=question.question_type,
+                options=question.options,
                 correct_answer=question.correct_answer,
                 answer_data=answer_data,
                 marks=question.marks,
             )
-            is_correct, marks_awarded = grading_result.is_correct, grading_result.marks_awarded
             answer_rows.append(
                 assigmentsAnswer(
                     submission=self,

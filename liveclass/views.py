@@ -120,6 +120,7 @@ from .moderation import screen_message
 # pattern; see throttles.py's module docstring for why.
 from .throttles import ParentJoinIPThrottle
 from .serializers import (
+    UserMiniSerializer,  # was used (chat.read broadcasts) but never imported -> NameError
     BreakoutRoomSerializer,
     CertificateIssueSerializer,
     CertificateSerializer,
@@ -5463,7 +5464,7 @@ class ReferralViewSet(mixins.ListModelMixin, viewsets.GenericViewSet):
             user_ids = sorted([referrer.id, user.id])
             locked = {
                 u.id: u
-                for u in get_user_model().objects.select_for_update().filter(pk__in=user_ids)
+                for u in get_user_model().objects.select_for_update().filter(pk__in=user_ids).order_by("pk")
             }
             referrer_locked = locked[referrer.id]
             user_locked = locked[user.id]

@@ -382,8 +382,17 @@ class CoinWithdrawalRequestManagerTests(APITestCase):
 
     def setUp(self):
         self.alice = User.objects.create_user(username="alice", password="pass12345")
-        self.alice.coin = 500
-        self.alice.save(update_fields=["coin"])
+        # Fund via a PURCHASE ledger entry: request_withdrawal() now enforces
+        # withdrawal ELIGIBILITY itself (under the user's row lock), and only
+        # purchased/gifted coins are eligible — poking `User.coin` directly
+        # leaves 0 eligible coins.
+        CoinLedger.objects.record_transaction(
+            user=self.alice,
+            transaction_type=CoinLedger.TransactionType.PURCHASE,
+            amount=500,
+            reference="test-fund",
+        )
+        self.alice.refresh_from_db()
 
     def test_withdrawal_debits_exact_amount(self):
         withdrawal = CoinWithdrawalRequest.objects.request_withdrawal(
@@ -437,11 +446,21 @@ class CoinWithdrawalRequestManagerTests(APITestCase):
 class CoinWithdrawalRequestAPITests(APITestCase):
     def setUp(self):
         self.alice = User.objects.create_user(username="alice", password="pass12345")
-        self.alice.coin = 500
-        self.alice.save(update_fields=["coin"])
+        # Fund through the ledger as a PURCHASE: only purchased/gifted coins
+        # are withdrawal-eligible (fraud.is_withdrawal_eligible), so poking
+        # `User.coin` directly leaves 0 eligible coins and every request 403s.
+        CoinLedger.objects.record_transaction(
+            user=self.alice,
+            transaction_type=CoinLedger.TransactionType.PURCHASE,
+            amount=500,
+            reference="test-fund",
+        )
+        self.alice.refresh_from_db()
         self.client.force_authenticate(user=self.alice)
 
-    def test_insufficient_balance_returns_402(self):
+    def test_more_than_eligible_balance_is_rejected_with_no_debit(self):
+        # Asking for more than the (eligible) balance is now stopped by the
+        # eligibility policy check (403) before the 402 wallet check.
         response = self.client.post(
             reverse("coin-withdrawal-requests"),
             {
@@ -451,7 +470,7 @@ class CoinWithdrawalRequestAPITests(APITestCase):
             },
             format="json",
         )
-        self.assertEqual(response.status_code, status.HTTP_402_PAYMENT_REQUIRED)
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
         self.assertFalse(response.data["status"])
 
         # No partial debit, and no request row left behind — the debit

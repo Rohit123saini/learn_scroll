@@ -38,7 +38,7 @@ from.serializers import (
     ReactionRequestSerializer,
 )
 from.signals import decrement_posts_count_on_soft_delete
-from.Services import notify_post_liked, save_uploaded_chunk, assemble_chunks, list_received_chunks, CHUNK_UPLOAD_MAX_SIZE
+from .services import notify_post_liked, save_uploaded_chunk, assemble_chunks, list_received_chunks, CHUNK_UPLOAD_MAX_SIZE
 from user_profile.models import Follow
 
 # TASK 4 — freesound_music_search's HTTP client. Guarded the same way

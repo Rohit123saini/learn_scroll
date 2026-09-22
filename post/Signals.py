@@ -55,6 +55,7 @@ change case, with no special-casing needed for any of the three.
 import logging
 
 from django.db.models import Count, F, Q
+from django.db.models.functions import Greatest
 from django.db.models.signals import post_delete, post_save
 from django.dispatch import receiver
 
@@ -88,7 +89,7 @@ def decrement_posts_count_on_hard_delete(sender, instance, **kwargs):
     User = _user_model()
     if not hasattr(User, "posts_count"):
         return
-    User.objects.filter(pk=instance.user_id).update(posts_count=F("posts_count") - 1)
+    User.objects.filter(pk=instance.user_id).update(posts_count=Greatest(F("posts_count") - 1, 0))
 
 
 def decrement_posts_count_on_soft_delete(post):
@@ -99,7 +100,7 @@ def decrement_posts_count_on_soft_delete(post):
     User = _user_model()
     if not hasattr(User, "posts_count"):
         return
-    User.objects.filter(pk=post.user_id).update(posts_count=F("posts_count") - 1)
+    User.objects.filter(pk=post.user_id).update(posts_count=Greatest(F("posts_count") - 1, 0))
 
 
 # ----------------------------------------------------------------------

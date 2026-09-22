@@ -19,6 +19,8 @@ call-site already does.
 """
 import logging
 
+from django.db import transaction
+
 from .models import Notification
 
 logger = logging.getLogger(__name__)
@@ -76,15 +78,21 @@ def create_notification(
             return None
 
     try:
-        return Notification.objects.create(
-            recipient_id=recipient_id,
-            notif_type=notif_type,
-            title=title,
-            message=message,
-            classroom=classroom,
-            session=session,
-            data=data or {},
-        )
+        # Own savepoint: this is called from inside @transaction.atomic
+        # views (follow/accept/comment...). Without it, a DB error here is
+        # swallowed by the except below but leaves the CALLER's transaction
+        # aborted on PostgreSQL, turning "notification failed" into a 500
+        # for the real action.
+        with transaction.atomic():
+            return Notification.objects.create(
+                recipient_id=recipient_id,
+                notif_type=notif_type,
+                title=title,
+                message=message,
+                classroom=classroom,
+                session=session,
+                data=data or {},
+            )
     except Exception:
         logger.exception(
             "Failed to create in-app notification (%s) for user %s", notif_type, recipient_id

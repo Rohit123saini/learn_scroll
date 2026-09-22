@@ -29,6 +29,8 @@ urlconf gives `core.urls` — see that file):
     GET    search/                        Task 18 — unified cross-app search
                                            (?q=..., optional ?sources=a,b,c)
 """
+import logging
+
 from django.db.models import Q
 from django.utils import timezone
 from rest_framework import mixins, pagination, viewsets
@@ -40,6 +42,8 @@ from rest_framework.views import APIView
 from .models import Notification, NotificationPreference
 from .search import search_everything
 from .serializers import NotificationPreferenceSerializer, NotificationSerializer
+
+logger = logging.getLogger(__name__)
 
 
 def _is_truthy(value) -> bool:
@@ -223,6 +227,14 @@ class SearchView(APIView):
         `RestrictUser`) are still unconfirmed. Add a scoped-queryset
         builder here once that's tasked and `core.search.SOURCES` has
         a `POST_SOURCE` entry to match.
+      - ✅ user / friend [gap-fix] — `core.search.SOURCES` already had
+        `USER_SOURCE`/`FRIEND_SOURCE` registered, but this view never
+        built their scoped querysets, so `?sources=user`/`?sources=
+        friend` ("add friend" search) always silently came back empty.
+        Now mirrors `UserSearchView.get_queryset()`'s exclusions
+        exactly (active, not yourself, not blocked either direction);
+        `friend` narrows that further to an ACCEPTED `Follow` either
+        direction.
     """
 
     permission_classes = [IsAuthenticated]
@@ -235,70 +247,127 @@ class SearchView(APIView):
         user = request.user
         scoped_querysets = {}
 
-        # --- assigments ------------------------------------------------
-        # Mirrors assigmentsViewSet.get_queryset() (assigments/views.py)
-        # verbatim. See class docstring above for why campus/liveclass
-        # sourced assigmentss stay excluded for non-staff here too.
-        from assigments.models import assigments, assigmentsSource
+        try:
+            # --- assigments ------------------------------------------------
+            # Mirrors assigmentsViewSet.get_queryset() (assigments/views.py)
+            # verbatim. See class docstring above for why campus/liveclass
+            # sourced assigmentss stay excluded for non-staff here too.
+            from assigments.models import assigments, assigmentsSource
 
-        assigments_qs = assigments.objects.all()
-        if not user.is_staff:
-            assigments_qs = assigments_qs.filter(
-                Q(posted_by=user) | Q(source=assigmentsSource.PERSONAL, submissions__student=user)
+            assigments_qs = assigments.objects.all()
+            if not user.is_staff:
+                assigments_qs = assigments_qs.filter(
+                    Q(posted_by=user) | Q(source=assigmentsSource.PERSONAL, submissions__student=user)
+                ).distinct()
+            scoped_querysets["assigments"] = assigments_qs
+        except Exception:
+            # One app failing must not take down search for every other source.
+            logger.exception("SearchView: skipping source %r (build failed).", 'assigments')
+
+        try:
+            # --- testseries --------------------------------------------------
+            # individual/published + own-created + attempted + campus-context
+            # series for sections the user is actively enrolled in. See class
+            # docstring above for the liveclass-context gap.
+            from testseries.models import TestSeries
+            from campus.models import StudentEnrollment
+
+            active_section_ids = StudentEnrollment.objects.filter(
+                student=user, status=StudentEnrollment.Status.ACTIVE
+            ).values_list("section_id", flat=True)
+
+            testseries_qs = TestSeries.objects.filter(
+                Q(source=TestSeries.Source.INDIVIDUAL, status=TestSeries.Status.PUBLISHED)
+                | Q(creator=user)
+                | Q(attempts__student=user)
+                | Q(source=TestSeries.Source.CAMPUS, context_type="section", context_id__in=active_section_ids)
             ).distinct()
-        scoped_querysets["assigments"] = assigments_qs
+            scoped_querysets["testseries"] = testseries_qs
+        except Exception:
+            # One app failing must not take down search for every other source.
+            logger.exception("SearchView: skipping source %r (build failed).", 'testseries')
 
-        # --- testseries --------------------------------------------------
-        # individual/published + own-created + attempted + campus-context
-        # series for sections the user is actively enrolled in. See class
-        # docstring above for the liveclass-context gap.
-        from testseries.models import TestSeries
-        from campus.models import StudentEnrollment
+        try:
+            # --- message [Task 13] -------------------------------------------
+            # Exact mirror of ConversationViewSet.search_all()'s own scoped
+            # queryset (message/views.py), minus the search_messages() call
+            # itself — core.search.MESSAGE_SOURCE.run() does that part. See
+            # class docstring above for why BlockedUser isn't filtered here.
+            from message.models import Message
 
-        active_section_ids = StudentEnrollment.objects.filter(
-            student=user, status=StudentEnrollment.Status.ACTIVE
-        ).values_list("section_id", flat=True)
+            message_qs = Message.objects.filter(
+                conversation__memberships__user=user,
+                conversation__memberships__left_at__isnull=True,
+            ).filter(
+                Q(expires_at__isnull=True) | Q(expires_at__gt=timezone.now())
+            ).exclude(
+                deleted_for_everyone=True,
+            ).exclude(
+                deleted_for_users=user,
+            ).exclude(
+                is_scheduled=True,
+            ).distinct()
+            scoped_querysets["message"] = message_qs
+        except Exception:
+            # One app failing must not take down search for every other source.
+            logger.exception("SearchView: skipping source %r (build failed).", 'message')
 
-        testseries_qs = TestSeries.objects.filter(
-            Q(source=TestSeries.Source.INDIVIDUAL, status=TestSeries.Status.PUBLISHED)
-            | Q(creator=user)
-            | Q(attempts__student=user)
-            | Q(source=TestSeries.Source.CAMPUS, context_type="section", context_id__in=active_section_ids)
-        ).distinct()
-        scoped_querysets["testseries"] = testseries_qs
+        try:
+            # --- campus_notice [Task 13] ---------------------------------------
+            # Exact mirror of NoticeViewSet.get_queryset() (campus/views.py):
+            # filter_queryset_to_my_campuses() with the default
+            # campus_field_path="campus", i.e. campus_id__in=my campus ids.
+            # get_my_campus_ids() is imported directly rather than
+            # re-derived — see class docstring above for why.
+            from campus.models import Notice
+            from campus.views import get_my_campus_ids
 
-        # --- message [Task 13] -------------------------------------------
-        # Exact mirror of ConversationViewSet.search_all()'s own scoped
-        # queryset (message/views.py), minus the search_messages() call
-        # itself — core.search.MESSAGE_SOURCE.run() does that part. See
-        # class docstring above for why BlockedUser isn't filtered here.
-        from message.models import Message
+            notice_qs = Notice.objects.filter(campus_id__in=get_my_campus_ids(user))
+            scoped_querysets["campus_notice"] = notice_qs
+        except Exception:
+            # One app failing must not take down search for every other source.
+            logger.exception("SearchView: skipping source %r (build failed).", 'campus_notice')
 
-        message_qs = Message.objects.filter(
-            conversation__memberships__user=user,
-            conversation__memberships__left_at__isnull=True,
-        ).filter(
-            Q(expires_at__isnull=True) | Q(expires_at__gt=timezone.now())
-        ).exclude(
-            deleted_for_everyone=True,
-        ).exclude(
-            deleted_for_users=user,
-        ).exclude(
-            is_scheduled=True,
-        ).distinct()
-        scoped_querysets["message"] = message_qs
+        try:
+            # --- user / friend ["add friend" search — Task 18 gap-fix] --------
+            # `core.search.USER_SOURCE` and `FRIEND_SOURCE` were both
+            # registered on the SOURCES side already, but this view never
+            # built either scoped queryset — so `?sources=user` and
+            # `?sources=friend` silently returned nothing (see
+            # `search_everything()`'s own docstring: an unscoped source is
+            # skipped, not an error). Same exclusion rule
+            # `UserSearchView.get_queryset()` (user_profile/views.py) already
+            # applies: active users, never yourself, never anyone in a
+            # `BlockUser` relationship with you either direction.
+            from django.contrib.auth import get_user_model
+            from user_profile.models import BlockUser, Follow
 
-        # --- campus_notice [Task 13] ---------------------------------------
-        # Exact mirror of NoticeViewSet.get_queryset() (campus/views.py):
-        # filter_queryset_to_my_campuses() with the default
-        # campus_field_path="campus", i.e. campus_id__in=my campus ids.
-        # get_my_campus_ids() is imported directly rather than
-        # re-derived — see class docstring above for why.
-        from campus.models import Notice
-        from campus.views import get_my_campus_ids
+            User = get_user_model()
+            blocked_pairs = BlockUser.objects.filter(
+                Q(blocker=user) | Q(blocked=user)
+            ).values_list("blocker_id", "blocked_id")
+            excluded_ids = {user.id}
+            for blocker_id, blocked_id in blocked_pairs:
+                excluded_ids.add(blocker_id)
+                excluded_ids.add(blocked_id)
 
-        notice_qs = Notice.objects.filter(campus_id__in=get_my_campus_ids(user))
-        scoped_querysets["campus_notice"] = notice_qs
+            base_users = User.objects.filter(is_active=True).exclude(id__in=excluded_ids)
+            scoped_querysets["user"] = base_users
+
+            # "friend" = people you already have an ACCEPTED follow
+            # relationship with, either direction — same `Follow` model
+            # `FollowAPIView` (user_profile/views.py) writes to.
+            friend_ids = set(
+                Follow.objects.filter(follower=user, status=Follow.Status.ACCEPTED)
+                .values_list("following_id", flat=True)
+            ) | set(
+                Follow.objects.filter(following=user, status=Follow.Status.ACCEPTED)
+                .values_list("follower_id", flat=True)
+            )
+            scoped_querysets["friend"] = base_users.filter(id__in=friend_ids)
+        except Exception:
+            # One app failing must not take down search for every other source.
+            logger.exception("SearchView: skipping source %r (build failed).", 'user/friend')
 
         try:
             results = search_everything(scoped_querysets, query, sources=requested_sources)

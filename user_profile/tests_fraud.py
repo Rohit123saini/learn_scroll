@@ -66,12 +66,9 @@ class WithdrawalEligibilityTests(TestCase):
         user.refresh_from_db()
         self.assertEqual(user.coin, 200)
 
-        # Note: `CoinWithdrawalRequestManager.request_withdrawal()` on
-        # its own does NOT enforce eligibility (it only checks total
-        # balance, which 200 covers) — it's `CoinWithdrawalRequestView`
-        # calling `fraud.is_withdrawal_eligible()` first that provides
-        # the guarantee this test is actually checking. That's a view-
-        # layer responsibility, so it isn't re-asserted here.
+        # `request_withdrawal()` re-checks eligibility itself under the
+        # user's row lock and raises WithdrawalNotEligible (see
+        # user_profile/tests_issue_fixes.py::WithdrawalAccountingTests).
 
     def test_mixed_balance_only_purchased_portion_withdrawable(self):
         """

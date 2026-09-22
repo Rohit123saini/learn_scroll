@@ -16,6 +16,7 @@ from django.conf import settings
 from django.core.exceptions import ValidationError
 from django.db import transaction
 from django.db.models import F, Count
+from django.db.models.functions import Greatest
 from django.shortcuts import get_object_or_404
 from django.utils import timezone
 
@@ -28,7 +29,7 @@ from drf_spectacular.utils import extend_schema
 
 from.models import Post, PostComment, CommentMedia, ChunkedUpload, PostChunkedUpload, CommentLike
 from.comment_serializers import CreateCommentSerializer, PostCommentSerializer
-from.Services import notify_post_commented, save_uploaded_chunk, assemble_chunks
+from .services import notify_post_commented, save_uploaded_chunk, assemble_chunks, hidden_commenter_ids
 
 def get_media_type(file):
     content_type = getattr(file, 'content_type', '') or ''
@@ -446,9 +447,9 @@ class CommentDeleteAPIView(APIView):
         # adjustment (below) is unrelated — it toggles is_hidden, not
         # is_deleted — and stays exactly as-is.
         if comment.parent_id:
-            PostComment.objects.filter(id=comment.parent_id).update(replies_count=F('replies_count') - 1)
+            PostComment.objects.filter(id=comment.parent_id).update(replies_count=Greatest(F('replies_count') - 1, 0))
         else:
-            Post.objects.filter(id=comment.post_id).update(comments_count=F('comments_count') - 1)
+            Post.objects.filter(id=comment.post_id).update(comments_count=Greatest(F('comments_count') - 1, 0))
         return Response({"message": "Comment deleted"}, status=200)
 
 class CommentListAPIView(APIView):
@@ -458,6 +459,12 @@ class CommentListAPIView(APIView):
         qs = PostComment.objects.filter(post=post, parent__isnull=True, is_deleted=False).select_related('user').prefetch_related('media')
         if not request.user.is_authenticated or request.user.id!= post.user_id:
             qs = qs.filter(is_hidden=False)
+        # RestrictUser (issue #2): the post owner's restricted users' comments
+        # are hidden from everyone except the commenter themself.
+        viewer_id = request.user.id if request.user.is_authenticated else None
+        hidden_ids = hidden_commenter_ids(post.user_id, viewer_id)
+        if hidden_ids:
+            qs = qs.exclude(user_id__in=hidden_ids)
         comments = qs.order_by('-is_pinned', '-created_at')[:50]
         serializer = PostCommentSerializer(comments, many=True, context={'request': request})
         return Response(serializer.data)
@@ -468,6 +475,11 @@ class CommentRepliesAPIView(APIView):
         parent = get_object_or_404(PostComment, id=comment_id, is_deleted=False)
         # FIX 2 - nested replies ke liye sab reply laayenge
         replies = PostComment.objects.filter(parent=parent, is_deleted=False, is_hidden=False).select_related('user').prefetch_related('media').order_by('created_at')
+        # RestrictUser (issue #2) — same rule as CommentListAPIView.
+        viewer_id = request.user.id if request.user.is_authenticated else None
+        hidden_ids = hidden_commenter_ids(parent.post.user_id, viewer_id)
+        if hidden_ids:
+            replies = replies.exclude(user_id__in=hidden_ids)
         serializer = PostCommentSerializer(replies, many=True, context={'request': request})
         return Response(serializer.data)
 
@@ -484,7 +496,7 @@ class CommentHideAPIView(APIView):
             comment.hidden_by = request.user
             comment.hidden_at = timezone.now()
             if comment.parent_id is None:
-                Post.objects.filter(id=post.id).update(comments_count=F('comments_count') - 1)
+                Post.objects.filter(id=post.id).update(comments_count=Greatest(F('comments_count') - 1, 0))
         else:
             comment.hidden_by = None
             comment.hidden_at = None

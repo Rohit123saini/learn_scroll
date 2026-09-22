@@ -101,7 +101,9 @@ from assigments.models import assigmentsSource
 from core.classroom_chat_bridge import create_section_group as _create_section_group
 from core.classroom_chat_bridge import provision_video_room as _provision_video_room
 from core.classroom_chat_bridge import resolve_parent_from_token as _resolve_parent_from_token
+from core.async_utils import dispatch_after_commit, in_celery_worker
 from core.models import Notification
+from core.tasks import create_notification_rows, create_notifications
 from testseries.bridge import create_context_testseries, get_attempts_for_context
 from testseries.models import TestSeries
 
@@ -176,26 +178,27 @@ def notify(*, users, notif_type, title, body='', data=None):
     `core.models.Notification` is now a confirmed, wired dependency
     (see module STATUS above) — no more `except ImportError` degrade.
 
-    Returns the list of created `Notification` rows.
+    Fire-and-forget, same "never raises" contract as
+    `core.services.create_notification`: from a request, the rows are
+    created by a Celery worker (`core.create_notifications`, with retries)
+    once the surrounding transaction commits; from inside a Celery task
+    they're created directly (no extra hop). A failed bell row can never
+    fail the campus action that triggered it. Returns `[]` — callers never
+    use the created rows.
     """
-    created = []
-    for user in users:
-        created.append(
-            Notification.objects.create(
-                # NOTE (bug fix): core.models.Notification's actual fields
-                # are `recipient` and `message` — not `user`/`body`. The
-                # original call below would have raised
-                # TypeError('unexpected keyword arguments') the moment
-                # core.models became importable, i.e. it was never
-                # actually tested end-to-end against the real model.
-                recipient=user,
-                notif_type=notif_type,
-                title=title,
-                message=body,
-                data=data or {},
-            )
-        )
-    return created
+    recipient_ids = [getattr(user, "pk", user) for user in users]
+    if not recipient_ids:
+        return []
+    try:
+        if in_celery_worker():
+            failed = create_notification_rows(recipient_ids, notif_type, title, body, data)
+            if failed:
+                logger.error("campus.bridge.notify: %d notification(s) failed (type=%s).", len(failed), notif_type)
+        else:
+            dispatch_after_commit(create_notifications, recipient_ids, notif_type, title, body, data)
+    except Exception:
+        logger.exception("campus.bridge.notify failed (type=%s).", notif_type)
+    return []
 
 
 def provision_video_room(live_session, actor):
@@ -535,3 +538,37 @@ def get_testseries_attempts(section):
     before showing anything back to a non-owning caller.
     """
     return get_attempts_for_context(context_type="section", context_id=section.id)
+
+
+def user_accessible_testseries_context_ids(*, user, context_type):
+    """[ADVANCED test series — access control] Which campus `Section` ids may
+    `user` see and attempt test series for?
+
+    Called by `testseries.access` (configured through
+    `settings.TESTSERIES_CONTEXT_ACCESS`) so `testseries` never has to import
+    campus models itself (golden rule). Answer = every section the user is
+    ACTIVELY enrolled in as a student, plus every section of any campus where
+    they hold an active `StaffProfile` (staff already have review rights over
+    all of that campus's test series, see `can_review_testseries_attempt`).
+
+    Before this existed, `TestSeriesViewSet` listed every published campus
+    series to every logged-in user and `start()` let anyone attempt one.
+    """
+    if context_type != "section" or not getattr(user, "is_authenticated", False):
+        return set()
+
+    from .models import Section, StaffProfile, StudentEnrollment
+
+    enrolled = set(
+        StudentEnrollment.objects.filter(student=user, status=StudentEnrollment.Status.ACTIVE)
+        .values_list("section_id", flat=True)
+    )
+    campus_ids = list(
+        StaffProfile.objects.filter(user=user, is_active=True).values_list("campus_id", flat=True)
+    )
+    staff_sections = set()
+    if campus_ids:
+        staff_sections = set(
+            Section.objects.filter(school_class__campus_id__in=campus_ids).values_list("id", flat=True)
+        )
+    return enrolled | staff_sections

@@ -349,14 +349,16 @@ def on_participant_left(sender, instance, created, **kwargs):
             # created after they first got access. No-op if this
             # classroom has no linked group — see classroom_chat_bridge.py.
             try:
-                from core.classroom_chat_bridge import sync_membership_on_join_accept
+                from core.async_utils import dispatch_after_commit
+                from core.tasks import chat_sync
 
-                sync_membership_on_join_accept(
-                    next_in_line.session.classroom, next_in_line.student,
+                dispatch_after_commit(
+                    chat_sync, "join_accept",
+                    next_in_line.session.classroom_id, next_in_line.student_id,
                 )
             except Exception:
                 logger.exception(
-                    "Failed syncing promoted waitlist student %s into chat group for entry %s.",
+                    "Failed queueing chat group sync for promoted waitlist student %s (entry %s).",
                     next_in_line.student_id, next_in_line.pk,
                 )
 
@@ -445,17 +447,15 @@ def sync_chat_group_on_join_accept(sender, instance, created, **kwargs):
     if previous == ClassJoinRequest.Status.ACCEPTED or instance.status != ClassJoinRequest.Status.ACCEPTED:
         return  # not a fresh transition into ACCEPTED
 
-    def _sync():
-        try:
-            from core.classroom_chat_bridge import sync_membership_on_join_accept
+    try:
+        from core.async_utils import dispatch_after_commit
+        from core.tasks import chat_sync
 
-            sync_membership_on_join_accept(instance.classroom, instance.student)
-        except Exception:
-            logger.exception(
-                "Failed syncing chat group membership for accepted join-request %s.", instance.pk,
-            )
-
-    transaction.on_commit(_sync)
+        dispatch_after_commit(chat_sync, "join_accept", instance.classroom_id, instance.student_id)
+    except Exception:
+        logger.exception(
+            "Failed queueing chat group sync for accepted join-request %s.", instance.pk,
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -468,18 +468,16 @@ def sync_chat_group_on_staff_add(sender, instance, created, **kwargs):
     if not created:
         return  # role changes on an existing staff row don't need re-promotion
 
-    def _sync():
-        try:
-            from core.classroom_chat_bridge import promote_to_moderator
+    try:
+        from core.async_utils import dispatch_after_commit
+        from core.tasks import chat_sync
 
-            promote_to_moderator(instance.classroom, instance.user)
-        except Exception:
-            logger.exception(
-                "Failed promoting staff user %s to moderator for classroom %s.",
-                instance.user_id, instance.classroom_id,
-            )
-
-    transaction.on_commit(_sync)
+        dispatch_after_commit(chat_sync, "promote", instance.classroom_id, instance.user_id)
+    except Exception:
+        logger.exception(
+            "Failed queueing moderator promotion for staff user %s in classroom %s.",
+            instance.user_id, instance.classroom_id,
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -519,15 +517,13 @@ def sync_chat_group_on_classroom_change(sender, instance, created, **kwargs):
     was_active = previous.get("is_active", True)
     is_deleted_now = getattr(instance, "is_deleted", False)
     if was_active and not instance.is_active or is_deleted_now:
-        def _archive():
-            try:
-                from core.classroom_chat_bridge import archive_group_on_classroom_close
+        try:
+            from core.async_utils import dispatch_after_commit
+            from core.tasks import chat_sync
 
-                archive_group_on_classroom_close(instance)
-            except Exception:
-                logger.exception("Failed archiving chat group for classroom %s close.", instance.pk)
-
-        transaction.on_commit(_archive)
+            dispatch_after_commit(chat_sync, "archive", instance.pk)
+        except Exception:
+            logger.exception("Failed queueing chat group archive for classroom %s close.", instance.pk)
         return  # closed/deleted classroom's metadata doesn't need syncing too
 
     # --- task 36: title/cover_image/description -> sync metadata -------
@@ -538,15 +534,13 @@ def sync_chat_group_on_classroom_change(sender, instance, created, **kwargs):
     if not changed:
         return
 
-    def _sync():
-        try:
-            from core.classroom_chat_bridge import sync_group_metadata
+    try:
+        from core.async_utils import dispatch_after_commit
+        from core.tasks import chat_sync
 
-            sync_group_metadata(instance)
-        except Exception:
-            logger.exception("Failed syncing chat group metadata for classroom %s.", instance.pk)
-
-    transaction.on_commit(_sync)
+        dispatch_after_commit(chat_sync, "metadata", instance.pk)
+    except Exception:
+        logger.exception("Failed queueing chat group metadata sync for classroom %s.", instance.pk)
 
 
 # ---------------------------------------------------------------------------
@@ -562,18 +556,16 @@ def sync_chat_group_on_ban(sender, instance, created, **kwargs):
     if not created:
         return
 
-    def _sync():
-        try:
-            from core.classroom_chat_bridge import sync_membership_on_removal
+    try:
+        from core.async_utils import dispatch_after_commit
+        from core.tasks import chat_sync
 
-            sync_membership_on_removal(instance.classroom, instance.student, reason="kick")
-        except Exception:
-            logger.exception(
-                "Failed removing banned student %s from chat group for classroom %s.",
-                instance.student_id, instance.classroom_id,
-            )
-
-    transaction.on_commit(_sync)
+        dispatch_after_commit(chat_sync, "removal", instance.classroom_id, instance.student_id, reason="kick")
+    except Exception:
+        logger.exception(
+            "Failed queueing chat group removal for banned student %s in classroom %s.",
+            instance.student_id, instance.classroom_id,
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -606,16 +598,15 @@ def sync_chat_group_on_purchase_refund(sender, instance, created, **kwargs):
     if previous == PassPurchase.Status.REFUNDED or instance.status != PassPurchase.Status.REFUNDED:
         return  # not a fresh transition into REFUNDED
 
-    def _sync():
-        try:
-            from core.classroom_chat_bridge import sync_membership_on_removal
+    try:
+        from core.async_utils import dispatch_after_commit
+        from core.tasks import chat_sync
 
-            classroom = instance.class_pass.classroom
-            sync_membership_on_removal(classroom, instance.student, reason="refund")
-        except Exception:
-            logger.exception(
-                "Failed removing refunded student %s from chat group for purchase %s.",
-                instance.student_id, instance.pk,
-            )
-
-    transaction.on_commit(_sync)
+        dispatch_after_commit(
+            chat_sync, "removal", instance.class_pass.classroom_id, instance.student_id, reason="refund",
+        )
+    except Exception:
+        logger.exception(
+            "Failed queueing chat group removal for refunded student %s (purchase %s).",
+            instance.student_id, instance.pk,
+        )

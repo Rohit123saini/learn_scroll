@@ -1,7 +1,10 @@
 # testseries/admin.py
 from django.contrib import admin
 
-from .models import Question, QuestionResponse, TestAttempt, TestSeries, TestSeriesPurchase, TestSeriesReview
+from .models import (
+    Question, QuestionResponse, TestAttempt, TestCertificate, TestLiveSession, TestProctorEvent,
+    TestRecording, TestSeries, TestSeriesPurchase, TestSeriesReview,
+)
 
 
 class QuestionInline(admin.TabularInline):
@@ -13,10 +16,13 @@ class QuestionInline(admin.TabularInline):
 
 @admin.register(TestSeries)
 class TestSeriesAdmin(admin.ModelAdmin):
-    list_display = ["title", "source", "creator", "is_paid", "price_coins", "status", "total_marks", "created_at"]
-    list_filter = ["source", "status", "is_paid"]
-    search_fields = ["title", "creator__username", "creator__email"]
-    readonly_fields = ["total_marks", "created_at", "updated_at"]
+    list_display = [
+        "title", "source", "delivery_mode", "creator", "is_paid", "price_coins", "status",
+        "certificate_enabled", "total_marks", "created_at",
+    ]
+    list_filter = ["source", "status", "is_paid", "delivery_mode", "proctoring", "certificate_enabled"]
+    search_fields = ["title", "creator__username", "creator__email", "share_slug"]
+    readonly_fields = ["total_marks", "share_slug", "results_released_at", "created_at", "updated_at"]
     inlines = [QuestionInline]
 
 
@@ -80,3 +86,35 @@ class TestSeriesReviewAdmin(admin.ModelAdmin):
 
     def has_add_permission(self, request):
         return False
+
+
+@admin.register(TestCertificate)
+class TestCertificateAdmin(admin.ModelAdmin):
+    # Certificates are issued by `TestAttempt._finalize()` only; never hand-created.
+    list_display = ["code", "student", "series", "percentage", "issued_at", "revoked_at"]
+    list_filter = ["revoked_at"]
+    search_fields = ["code", "student__username", "series__title"]
+    readonly_fields = [
+        "attempt", "series", "student", "code", "title", "score", "total_marks", "percentage", "issued_at",
+    ]
+
+
+@admin.register(TestLiveSession)
+class TestLiveSessionAdmin(admin.ModelAdmin):
+    list_display = ["series", "status", "host", "started_at", "ended_at"]
+    list_filter = ["status"]
+    readonly_fields = ["room_name", "created_at"]
+
+
+@admin.register(TestRecording)
+class TestRecordingAdmin(admin.ModelAdmin):
+    list_display = ["kind", "series", "attempt", "status", "duration_seconds", "started_at"]
+    list_filter = ["kind", "status"]
+    search_fields = ["egress_id", "room_name", "series__title"]
+    readonly_fields = ["egress_id", "room_name", "started_at"]
+
+
+@admin.register(TestProctorEvent)
+class TestProctorEventAdmin(admin.ModelAdmin):
+    list_display = ["attempt", "event_type", "occurred_at"]
+    list_filter = ["event_type"]

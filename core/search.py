@@ -324,6 +324,39 @@ USER_SOURCE = SearchSource(
     serialize=_serialize_user,
 )
 
+
+def _serialize_friend(user) -> dict:
+    # Same shape as USER_SOURCE, just tagged with its own source key so
+    # the frontend's "Friends" tab (`SearchFilter.friends` ->
+    # `sources=friend`) can tell "already connected" results apart from
+    # the full-user-base "people" results.
+    data = _serialize_user(user)
+    data["source"] = "friend"
+    return data
+
+
+# 🔥 FIX (was missing entirely): `models/search_result.dart`'s own doc
+# comment on the frontend already documents `SearchFilter.friends` as
+# "a real /core/search/ source (core.search.FRIEND_SOURCE) — search
+# scoped to people the caller follows or is followed by" — but no such
+# source was ever registered here, and `SearchView.get()` never built a
+# `scoped_querysets["friend"]` either. `search_everything()` silently
+# skips any source key that isn't in BOTH dicts (by design — see its own
+# docstring), so `?sources=friend` has always come back empty, no error,
+# nothing in the logs: exactly the "friends search doesn't work" kind of
+# bug that's easy to miss because it never crashes. `run`/`serialize`
+# here match USER_SOURCE's shape exactly; the CALLER CONTRACT note above
+# applies here too — see `SearchView.get()` (core/views.py) for the
+# actual "people I'm connected to" queryset this source expects to run
+# against.
+FRIEND_SOURCE = SearchSource(
+    name="friend",
+    run=lambda qs, query: _search_generic_model(
+        qs, query, fields=("username", "first_name", "last_name"), order_field="date_joined"
+    ),
+    serialize=_serialize_friend,
+)
+
 # ❌ post / classroom-material sources intentionally NOT registered
 # yet — see module docstring STATUS. Add them here, same shape as
 # NOTICE_SOURCE, once their models are available:
@@ -345,6 +378,7 @@ SOURCES = {
     assigments_SOURCE.name: assigments_SOURCE,
     TESTSERIES_SOURCE.name: TESTSERIES_SOURCE,
     USER_SOURCE.name: USER_SOURCE,
+    FRIEND_SOURCE.name: FRIEND_SOURCE,
 }
 
 

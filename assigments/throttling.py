@@ -15,8 +15,15 @@ built-in `anon` scope, so tuning this rate in settings can never
 accidentally change the limit on unrelated public endpoints elsewhere in
 the project.
 """
-from rest_framework.throttling import AnonRateThrottle
+from rest_framework.throttling import AnonRateThrottle, UserRateThrottle
 
 
 class assigmentsPublicPageThrottle(AnonRateThrottle):
     scope = "assigments_public_page"
+
+
+class assigmentsExploreThrottle(UserRateThrottle):
+    """Explore lists every public assignment — a scraping target. Rate lives in
+    DEFAULT_THROTTLE_RATES["assigments_explore"]."""
+
+    scope = "assigments_explore"

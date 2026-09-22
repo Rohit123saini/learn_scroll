@@ -42,3 +42,19 @@ class IsassigmentsStaffOrOwner(permissions.BasePermission):
             and request.user.is_authenticated
             and (request.user.is_staff or assigments.posted_by_id == request.user.id)
         )
+
+
+class IsAssignmentPosterOrReadOnly(permissions.BasePermission):
+    """[SECURITY FIX] `assigmentsViewSet.get_queryset()` also returns personal
+    assignments the caller merely holds a SUBMISSION for — and nothing stopped
+    such a submitter from PATCHing or DELETEing the poster's assignment. That was
+    a latent hole; with public assignments (anyone can join) it would be an open
+    door. Writes are now poster / staff only. `join` is the one non-safe action
+    a non-poster may call."""
+
+    def has_object_permission(self, request, view, obj) -> bool:
+        if request.method in permissions.SAFE_METHODS:
+            return True
+        if getattr(view, "action", None) == "join":
+            return True
+        return bool(request.user and (request.user.is_staff or obj.posted_by_id == request.user.id))

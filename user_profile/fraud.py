@@ -83,7 +83,11 @@ class EarnRateLimitExceeded(Exception):
 # coins as un-withdrawable forever, which is a bug, not a fraud
 # control — no acceptance test covers this edge case, but leaving it
 # out would be wrong on inspection.
-def _eligible_source_types():
+def eligible_source_types():
+    """THE single definition of "which credit types are withdrawal-eligible".
+    `get_withdrawal_eligible_balance()` below, the `withdrawal_eligible`
+    metadata flag `record_transaction()` stamps on each row, and the admin
+    "withdrawal eligible" filter ALL read this, so they cannot disagree."""
     from .models import CoinLedger
 
     return {
@@ -93,75 +97,92 @@ def _eligible_source_types():
     }
 
 
+_eligible_source_types = eligible_source_types  # old private name, kept for callers/tests
+
+
 def get_withdrawal_eligible_balance(user):
     """
     How many of `user`'s current coins are withdrawal-eligible (i.e.
     traceable back to a purchase or a received gift), as of right now.
 
-    This is NOT `sum(amount for PURCHASE/GIFT_RECEIVED rows)` — a user
-    can spend coins on something, and that spend has to come out of
-    *some* bucket. The rule applied here: non-eligible coins (EARN,
-    CAMPUS_REWARD, ...) are treated as spent first, and only once
-    they're exhausted does further spend start eating into the
-    eligible (purchased/gifted) pool. This is the generous-to-the-user
-    reading (their real-money coins survive as long as possible) and
-    is also the one that keeps `User.coin` and this figure mutually
-    consistent without needing a second running-balance column: see
-    the derivation below.
+    The ledger is REPLAYED IN ORDER into two buckets:
 
-    Implementation: a single grouped aggregate over this user's
-    `CoinLedger` rows (one query, not a row-by-row replay) is enough,
-    because the two buckets only interact in one place (debits that
-    exceed the non-eligible bucket "overflow" into the eligible one),
-    and that overflow amount only depends on the FINAL totals of each
-    bucket, not the order the rows happened in — as long as no
-    withdrawal was ever approved for more than the eligible balance at
-    the time (which `is_withdrawal_eligible` below exists to
-    guarantee). Concretely:
+      eligible  — coins that came from money / another user
+                  (PURCHASE, GIFT_RECEIVED, WITHDRAWAL_REJECTED)
+      other     — everything else that is a credit (EARN, CAMPUS_REWARD,
+                  REFUND, ADMIN_ADJUSTMENT, TESTSERIES_*, ...)
 
-      eligible_balance
-        = (eligible credits: PURCHASE + GIFT_RECEIVED + WITHDRAWAL_REJECTED)
-        - (eligible debits: WITHDRAWAL_REQUESTED, which only ever draws
-           from this pool by construction)
-        + min(0, non_eligible_net)
+    and each row moves coins like this:
 
-      where `non_eligible_net` is the net of every OTHER
-      transaction_type (EARN, CAMPUS_REWARD, SPEND, GIFT_SENT, REFUND,
-      ADMIN_ADJUSTMENT, TESTSERIES_*, ...) — if that net is negative,
-      i.e. more was spent than was ever earned/rewarded, the shortfall
-      must have come out of the eligible pool, so it's subtracted from
-      it too.
+      credit, eligible type   -> eligible += amount
+      credit, any other type  -> other    += amount
+      WITHDRAWAL_REQUESTED    -> comes out of `eligible` (only ever
+                                 requested against that pool); if it is
+                                 somehow short, the rest comes out of `other`
+      any other debit (SPEND, GIFT_SENT, ...)
+                              -> comes out of `other` FIRST, and only the
+                                 overflow eats into `eligible`
 
-    Clamped to >= 0 defensively; it should never go negative given the
-    invariants above, but a negative "eligible balance" is meaningless
-    either way.
+    "Earned coins are spent first" is the user-friendly rule (their real-
+    money coins survive as long as possible), and replaying in time order
+    is what makes it hold AT THE MOMENT OF EACH SPEND.
+
+    WHY NOT THE OLD FORMULA — the previous version added up the final total
+    of every bucket and subtracted `min(0, other_net)`. That ignores order,
+    so it could be gamed: buy 100, spend 100 (eligible -> 0), then EARN 100
+    (other_net back to 0) and the "overflow" vanished — 100 EARNED coins
+    became withdrawable. Replaying can't be fooled that way.
+
+    REFUNDS: a REFUND credit goes to `other`, NOT back to `eligible`. The
+    ledger doesn't record which bucket the refunded spend originally came
+    from, and a cash-out path must fail CLOSED — guessing "it came from the
+    purchased coins" would let earned coins be laundered by spending and
+    refunding them. Cost: someone who spent purchased coins and was later
+    refunded can't withdraw those coins until ops re-issues them as an
+    explicit GIFT_RECEIVED / PURCHASE entry (same rule this module already
+    states for ADMIN_ADJUSTMENT). If refunds ever need to restore
+    eligibility automatically, the refund row must carry a link to the
+    original spend — a schema change, deliberately not guessed at here.
+
+    Cost: one ordered pass over this user's ledger rows (streamed, two
+    columns). It runs per withdrawal request / eligibility check, never on
+    a hot path.
+
+    Never negative. `User.coin` should equal eligible + other; this
+    function only reports the eligible part.
     """
     from .models import CoinLedger
 
     eligible_types = _eligible_source_types()
-    withdrawal_debit_type = CoinLedger.TransactionType.WITHDRAWAL_REQUESTED
+    withdrawal_debit = CoinLedger.TransactionType.WITHDRAWAL_REQUESTED
 
-    totals_by_type = dict(
+    eligible = 0
+    other = 0
+    rows = (
         CoinLedger.objects.filter(user=user)
-        .values_list("transaction_type")
-        .annotate(total=Sum("amount"))
+        .order_by("created_at", "id")
+        .values_list("transaction_type", "amount")
+        .iterator(chunk_size=2000)
     )
+    for ttype, amount in rows:
+        if amount > 0:
+            if ttype in eligible_types:
+                eligible += amount
+            else:
+                other += amount
+            continue
 
-    eligible_credits = sum(
-        totals_by_type.get(t, 0) for t in eligible_types
-    )
-    eligible_debits = totals_by_type.get(withdrawal_debit_type, 0)  # already negative
-    non_eligible_net = sum(
-        total
-        for ttype, total in totals_by_type.items()
-        if ttype not in eligible_types and ttype != withdrawal_debit_type
-    )
+        debit = -amount
+        if ttype == withdrawal_debit:
+            from_eligible = min(eligible, debit)
+            eligible -= from_eligible
+            other = max(other - (debit - from_eligible), 0)
+        else:
+            from_other = min(other, debit)
+            other -= from_other
+            eligible = max(eligible - (debit - from_other), 0)
 
-    eligible_balance = eligible_credits + eligible_debits
-    if non_eligible_net < 0:
-        eligible_balance += non_eligible_net
-
-    return max(eligible_balance, 0)
+    return max(eligible, 0)
 
 
 def is_withdrawal_eligible(user, coins=None):
@@ -218,9 +239,11 @@ def is_withdrawal_eligible(user, coins=None):
 #
 # Values themselves are UNCHANGED from the previous hardcoded ones — see
 # settings.py's TASK 37 comment for why (relocation, not a retune).
-EARN_RATE_LIMIT_WINDOW = timedelta(minutes=settings.EARN_RATE_LIMIT_WINDOW_MINUTES)
-EARN_RATE_LIMIT_MAX_TRANSACTIONS = settings.EARN_RATE_LIMIT_MAX_TRANSACTIONS
-EARN_RATE_LIMIT_MAX_COINS = settings.EARN_RATE_LIMIT_MAX_COINS
+# getattr() fallbacks (same defaults as settings.py) so a settings module
+# missing these keys can't make the app fail to boot at import time.
+EARN_RATE_LIMIT_WINDOW = timedelta(minutes=getattr(settings, "EARN_RATE_LIMIT_WINDOW_MINUTES", 60))
+EARN_RATE_LIMIT_MAX_TRANSACTIONS = getattr(settings, "EARN_RATE_LIMIT_MAX_TRANSACTIONS", 20)
+EARN_RATE_LIMIT_MAX_COINS = getattr(settings, "EARN_RATE_LIMIT_MAX_COINS", 500)
 
 
 def check_earn_rate_limit(user, transaction_type):

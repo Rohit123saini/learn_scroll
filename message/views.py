@@ -1774,6 +1774,14 @@ class MessageViewSet(mixins.RetrieveModelMixin, mixins.UpdateModelMixin,
             ).values_list('user_id', flat=True)
         )
 
+        # Issue #2 (RestrictUser): anyone who has restricted the viewer
+        # never shows the viewer a read receipt — same as their own
+        # receipts toggle being off, but only towards this viewer.
+        from user_profile.services import restrictor_ids_of
+        hidden_user_ids |= restrictor_ids_of(
+            request.user.id, among=[s.user_id for s in statuses],
+        )
+
         delivered_to, read_by = [], []
         for s in statuses:
             if s.is_delivered:
@@ -2837,6 +2845,22 @@ class UserPresenceView(generics.RetrieveAPIView):
     # user's profile, etc.) was hitting the DB directly, defeating the
     # point of a 15s-TTL cache for a value that changes this often.
     def get_object(self):
+        presence = self._get_presence()
+        # Issue #2 (RestrictUser): if the profile owner restricted the
+        # requester, show them "offline, last seen unknown" — via an
+        # UNSAVED copy so the real row/cache is never altered.
+        from user_profile.services import has_restricted
+        target_id = self.kwargs['user_id']
+        try:
+            target_id = int(target_id)
+        except (TypeError, ValueError):
+            return presence
+        if target_id != self.request.user.id and has_restricted(target_id, self.request.user.id):
+            from .models import UserPresence
+            return UserPresence(user=presence.user, is_online=False, last_seen_at=None)
+        return presence
+
+    def _get_presence(self):
         from .models import UserPresence
         user_id = self.kwargs['user_id']
 

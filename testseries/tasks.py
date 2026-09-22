@@ -10,7 +10,12 @@ from celery import shared_task
 from django.conf import settings
 from django.utils import timezone
 
-from .models import TestAttempt, TestSeries, TestSeriesPurchase, _notify
+from django.db import transaction
+
+from . import live, policy
+from .models import (
+    TestAttempt, TestLiveSession, TestRecording, TestSeries, TestSeriesPurchase, _notify,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -182,3 +187,94 @@ def notify_followers_new_testseries(series_id):
         len(recipient_ids), series_id,
     )
     return len(recipient_ids)
+
+
+# =====================================================================
+# ADVANCED — server-side timer, live sessions, recordings
+# =====================================================================
+AUTO_SUBMIT_BATCH = 500
+STALE_RECORDING_HOURS = getattr(settings, "TESTSERIES_STALE_RECORDING_HOURS", 6)
+LIVE_OVERRUN_MINUTES = getattr(settings, "TESTSERIES_LIVE_OVERRUN_MINUTES", 30)
+
+
+@shared_task
+def auto_submit_expired_attempts():
+    """EVERY MINUTE: close attempts whose server-side deadline (+ grace) has
+    passed and that the student never submitted — app killed, phone died, tab
+    closed. Grades the last autosave (`draft_answers`), so the student gets a
+    real result instead of an `in_progress` attempt that lingers forever (and,
+    for a paid test, an escrow that can never resolve).
+
+    Runs against `deadline_at`, which only exists for attempts created after
+    migration 0003 — legacy untimed rows are never touched."""
+    from .views_advanced import close_proctor_room
+
+    cutoff = timezone.now() - timedelta(seconds=policy.grace_seconds())
+    ids = list(
+        TestAttempt.objects.filter(
+            status=TestAttempt.Status.IN_PROGRESS, deadline_at__isnull=False, deadline_at__lt=cutoff
+        ).values_list("pk", flat=True)[:AUTO_SUBMIT_BATCH]
+    )
+    closed = 0
+    for pk in ids:
+        try:
+            with transaction.atomic():
+                # skip_locked: if the student's own submit holds the row right now,
+                # leave it — it is being resolved.
+                attempt = (
+                    TestAttempt.objects.select_for_update(skip_locked=True)
+                    .select_related("series")
+                    .filter(pk=pk, status=TestAttempt.Status.IN_PROGRESS)
+                    .first()
+                )
+                if attempt is None:
+                    continue
+                attempt.submit(answers={}, files=None, auto=True)
+            close_proctor_room(attempt)
+            closed += 1
+        except Exception:  # noqa: BLE001 — one bad attempt must not block the rest
+            logger.exception("auto_submit_expired_attempts: attempt %s failed", pk)
+    if closed:
+        logger.info("auto_submit_expired_attempts: closed %d attempt(s)", closed)
+    return closed
+
+
+@shared_task
+def end_overrun_live_sessions():
+    """Every 10 minutes: a host who forgot to press "End" must not leave a
+    LiveKit room (and a recording egress) running all night. Ends any live
+    session whose series window closed more than LIVE_OVERRUN_MINUTES ago."""
+    cutoff = timezone.now() - timedelta(minutes=LIVE_OVERRUN_MINUTES)
+    sessions = TestLiveSession.objects.filter(
+        status=TestLiveSession.Status.LIVE, series__ends_at__isnull=False, series__ends_at__lt=cutoff
+    ).select_related("series")
+    ended = 0
+    for session in sessions:
+        try:
+            for recording in session.series.recordings.filter(
+                kind=TestRecording.Kind.LIVE_SESSION, status=TestRecording.Status.RECORDING
+            ):
+                try:
+                    live.stop_recording(recording.egress_id)
+                except live.TestLiveError:
+                    logger.warning("end_overrun_live_sessions: could not stop egress %s", recording.egress_id)
+            live.end_room(session.room_name)
+            session.status = TestLiveSession.Status.ENDED
+            session.ended_at = timezone.now()
+            session.save(update_fields=["status", "ended_at"])
+            ended += 1
+        except Exception:  # noqa: BLE001
+            logger.exception("end_overrun_live_sessions: session %s failed", session.pk)
+    return ended
+
+
+@shared_task
+def expire_stale_recordings():
+    """Hourly: a recording still `recording` after STALE_RECORDING_HOURS never
+    got its `egress_ended` webhook (webhook URL not configured / delivery lost).
+    Mark it `failed` so the UI stops showing "recording…" forever; the S3 object,
+    if it exists, is still there for manual recovery."""
+    cutoff = timezone.now() - timedelta(hours=STALE_RECORDING_HOURS)
+    return TestRecording.objects.filter(
+        status=TestRecording.Status.RECORDING, started_at__lt=cutoff
+    ).update(status=TestRecording.Status.FAILED, ended_at=timezone.now())

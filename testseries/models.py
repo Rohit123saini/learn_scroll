@@ -81,10 +81,12 @@ import uuid
 
 from django.core.exceptions import ValidationError
 from django.core.validators import MaxValueValidator, MinValueValidator
-from django.db import models, transaction
+from django.db import IntegrityError, models, transaction
 from django.utils import timezone
 
 from login.models import User
+
+from . import policy
 
 from common.attachment_validators import (
     ATTACHMENT_ALLOWED_EXTENSIONS,  # noqa: F401 — re-exported, some callers import it from here
@@ -198,6 +200,62 @@ class TestSeries(TestSeriesBaseModel):
     # creates a row through either the paid or free path.
     attempts_allowed = models.PositiveIntegerField(default=1)
 
+    # ------------------------------------------------------------------
+    # ADVANCED DELIVERY (migration 0003). Every field below has a default
+    # that reproduces the pre-existing behaviour exactly (self-paced, no
+    # proctoring, no certificate, instant results), so existing series and
+    # existing clients keep working unchanged.
+    # ------------------------------------------------------------------
+    class DeliveryMode(models.TextChoices):
+        SELF_PACED = "self_paced", "Self paced"
+        SCHEDULED = "scheduled", "Scheduled window"
+        LIVE = "live", "Live (video)"
+
+    class Proctoring(models.TextChoices):
+        OFF = "off", "Off"
+        CAMERA = "camera", "Camera (recorded)"
+
+    class ResultRelease(models.TextChoices):
+        INSTANT = "instant", "Instantly after checking"
+        AFTER_END = "after_end", "After the test window ends"
+        MANUAL = "manual", "When the creator releases them"
+
+    # self_paced: start any time.  scheduled: start any time inside
+    # [starts_at, ends_at).  live: everyone starts together at starts_at
+    # (late entry allowed for `late_entry_minutes`), hosted on a live video
+    # room, hard stop at ends_at.
+    delivery_mode = models.CharField(
+        max_length=12, choices=DeliveryMode.choices, default=DeliveryMode.SELF_PACED, db_index=True
+    )
+    starts_at = models.DateTimeField(null=True, blank=True)
+    ends_at = models.DateTimeField(null=True, blank=True)
+    late_entry_minutes = models.PositiveSmallIntegerField(default=0)
+
+    # camera: each attempt gets its own recorded video room the creator can
+    # review afterwards. record_live: save the host's live-session video so
+    # students can replay it together with the test.
+    proctoring = models.CharField(max_length=8, choices=Proctoring.choices, default=Proctoring.OFF)
+    record_live = models.BooleanField(default=True)
+
+    # Certification. `pass_percentage` alone gives pass/fail; add
+    # `certificate_enabled` and a passing attempt automatically earns a
+    # verifiable certificate.
+    pass_percentage = models.PositiveSmallIntegerField(
+        null=True, blank=True, validators=[MinValueValidator(1), MaxValueValidator(100)]
+    )
+    certificate_enabled = models.BooleanField(default=False)
+    certificate_title = models.CharField(max_length=200, blank=True)
+
+    # When may a student see their score and the solutions?
+    result_release = models.CharField(
+        max_length=10, choices=ResultRelease.choices, default=ResultRelease.INSTANT
+    )
+    results_released_at = models.DateTimeField(null=True, blank=True)
+    show_solutions = models.BooleanField(default=True)
+
+    # Public share link: /testseries/public/<share_slug>/ — minted on publish.
+    share_slug = models.CharField(max_length=24, unique=True, null=True, blank=True)
+
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -208,16 +266,58 @@ class TestSeries(TestSeriesBaseModel):
         ]
 
     def save(self, *args, **kwargs):
-        # Defence-in-depth: campus test series are ALWAYS free, no matter
-        # what a caller sets — the real enforcement point is the
-        # campus-facing viewset/serializer (§5), this is a second layer
-        # so a bug there can never actually charge a campus student.
-        if self.source == self.Source.CAMPUS:
-            self.is_paid = False
-            self.price_coins = 0
-        if not self.is_paid:
-            self.price_coins = 0
+        # Defence-in-depth (NON-strict): any source whose pricing policy is
+        # "forbidden" (campus, by default) is forced free no matter what a
+        # caller sets, and a free series always has price 0. The strict,
+        # user-facing enforcement (400s for "individual must be paid", price
+        # ranges, ...) lives in `policy.normalize_pricing(strict=True)`, called
+        # by the serializer and the publish action — deliberately NOT here, or
+        # every legacy free individual series would start failing on
+        # unrelated saves such as `recompute_total_marks()`.
+        self.is_paid, self.price_coins = policy.normalize_pricing(
+            source=self.source, is_paid=self.is_paid, price_coins=self.price_coins, strict=False
+        )
         super().save(*args, **kwargs)
+
+    # -- advanced-delivery helpers ------------------------------------
+    def ensure_share_slug(self, *, save: bool = True) -> str:
+        """Mint the public share slug once (idempotent)."""
+        if self.share_slug:
+            return self.share_slug
+        for _ in range(8):
+            slug = policy.generate_share_slug()
+            if not TestSeries.objects.filter(share_slug=slug).exists():
+                self.share_slug = slug
+                if save:
+                    self.save(update_fields=["share_slug"])
+                return slug
+        raise RuntimeError("Could not mint a unique share slug.")  # pragma: no cover — 8 collisions in a row
+
+    def window_state(self, now=None) -> str:
+        """policy.OPEN / NOT_STARTED / LATE_CLOSED / ENDED — may a student start now?"""
+        return policy.window_state(
+            mode=self.delivery_mode,
+            now=now or timezone.now(),
+            starts_at=self.starts_at,
+            ends_at=self.ends_at,
+            late_entry_minutes=self.late_entry_minutes,
+        )
+
+    def results_visible(self, now=None) -> bool:
+        return policy.results_visible(
+            release_mode=self.result_release,
+            now=now or timezone.now(),
+            ends_at=self.ends_at,
+            released_at=self.results_released_at,
+        )
+
+    @property
+    def is_live_delivery(self) -> bool:
+        return self.delivery_mode == self.DeliveryMode.LIVE
+
+    @property
+    def question_count(self) -> int:
+        return self.questions.count()
 
     def recompute_total_marks(self, *, save: bool = True) -> int:
         """`total_marks` = sum of this series' Question.marks. Called
@@ -293,12 +393,29 @@ class Question(TestSeriesBaseModel):
     options = models.JSONField(default=list, blank=True)
     correct_answer = models.JSONField(default=dict, blank=True)
 
+    # ---- advanced (migration 0003) -----------------------------------
+    class Difficulty(models.TextChoices):
+        EASY = "easy", "Easy"
+        MEDIUM = "medium", "Medium"
+        HARD = "hard", "Hard"
+
+    # Marks DEDUCTED for a wrong (but attempted) auto-graded answer.
+    # Blank answers are never penalised. 0 = no negative marking.
+    negative_marks = models.PositiveIntegerField(default=0)
+    # Free-text label ("Kinematics") — feeds per-topic accuracy analytics.
+    topic = models.CharField(max_length=80, blank=True)
+    difficulty = models.CharField(max_length=6, choices=Difficulty.choices, blank=True)
+    # Shown with the solution once results are released.
+    explanation = models.TextField(blank=True)
+
     class Meta:
         unique_together = ("series", "order")
         ordering = ["order"]
 
     def clean(self):
         super().clean()
+        if self.marks is not None and self.negative_marks and self.negative_marks > self.marks:
+            raise ValidationError("negative_marks cannot be more than the question's marks.")
         if self.question_type == self.QuestionType.TEXT:
             # Force-empty on save regardless of what a client sent —
             # subjective questions have no auto-gradable shape at all.
@@ -411,6 +528,13 @@ class QuestionResponse(TestSeriesBaseModel):
     # Auto-graded: full/zero Question.marks at submit-time. `text`: null
     # until a reviewer calls mark_answer().
     marks_awarded = models.PositiveIntegerField(null=True, blank=True)
+
+    # Negative marking applied to THIS answer (0 unless it was attempted and
+    # wrong on a question with negative_marks > 0). Net score of an attempt =
+    # sum(marks_awarded) - sum(penalty), floored at 0 (see policy.net_score).
+    penalty = models.PositiveIntegerField(default=0)
+    # Client-reported seconds spent on the question (optional; analytics only).
+    time_spent_seconds = models.PositiveIntegerField(null=True, blank=True)
 
     # Per-question review comment — typically used for `text` responses,
     # but allowed on any type (e.g. a note on a wrong MCQ answer).
@@ -631,6 +755,28 @@ class TestAttempt(TestSeriesBaseModel):
     # Only set when status becomes "checked" — NOT on "partially_checked".
     checked_at = models.DateTimeField(null=True, blank=True)
 
+    # ---- server-side timer + autosave (migration 0003) ------------------
+    # Set when the attempt row is created (see save()). NULL only on legacy
+    # rows created before this migration — those stay untimed rather than
+    # being handed a made-up deadline.
+    started_at = models.DateTimeField(null=True, blank=True)
+    # min(started_at + duration, series.ends_at). NULL = untimed.
+    deadline_at = models.DateTimeField(null=True, blank=True)
+    # Latest answers the client saved via PATCH /attempts/{id}/save/ —
+    # survives app kill / device change, and is what the auto-submit task
+    # grades when the student never presses Submit.
+    draft_answers = models.JSONField(default=dict, blank=True)
+    draft_saved_at = models.DateTimeField(null=True, blank=True)
+    # Submitted after deadline + grace (see policy.late_policy()).
+    submitted_late = models.BooleanField(default=False)
+
+    # ---- result / certification --------------------------------------
+    percentage = models.FloatField(null=True, blank=True)
+    # None = the series has no pass mark.
+    passed = models.BooleanField(null=True, blank=True)
+    # Denormalised count of proctoring events (tab switch, face missing, ...).
+    integrity_flags = models.PositiveIntegerField(default=0)
+
     class Meta:
         constraints = [
             # [FIX — Task 28] Was `fields=["series", "student"]`, which
@@ -648,28 +794,86 @@ class TestAttempt(TestSeriesBaseModel):
             ),
         ]
 
+    def save(self, *args, **kwargs):
+        """First save of a new attempt stamps `started_at` and the server-side
+        `deadline_at`. Timing is a property of the ROW, not of the client, so
+        it survives reinstalls, device changes and clock tampering."""
+        if self._state.adding and self.started_at is None:
+            self.started_at = timezone.now()
+            if self.deadline_at is None:
+                series = self.series
+                self.deadline_at = policy.compute_deadline(
+                    started_at=self.started_at,
+                    duration_minutes=series.duration_minutes,
+                    window_end=series.ends_at if series.delivery_mode != TestSeries.DeliveryMode.SELF_PACED else None,
+                )
+        super().save(*args, **kwargs)
+
+    def save_progress(self, answers: dict) -> None:
+        """Server-side autosave (`PATCH /attempts/{id}/save/`). Only dict
+        answers are kept; anything else is dropped rather than trusted."""
+        self.draft_answers = {str(k): v for k, v in (answers or {}).items() if isinstance(v, dict)}
+        self.draft_saved_at = timezone.now()
+        self.save(update_fields=["draft_answers", "draft_saved_at"])
+
+    @staticmethod
+    def _clean_seconds(value):
+        try:
+            seconds = int(value)
+        except (TypeError, ValueError):
+            return None
+        return seconds if 0 <= seconds <= 86_400 else None
+
     @transaction.atomic
-    def submit(self, answers: dict, files=None):
+    def submit(self, answers: dict, files=None, timings=None, auto: bool = False):
         """`answers`: {question_id: answer_data dict}. `files`: optional
         mapping (typically `request.FILES`) of `f"answer_{question_id}"`
         -> uploaded file — an image/file answer for a `text` question
-        (e.g. a photo of handwritten work). Only ever looked at for
-        `text`-type questions; auto-graded types ignore it even if one is
-        sent, since there's nothing to review there. Bulk-creates one
-        `QuestionResponse` per question, auto-grades the auto-gradable
-        types immediately, and resolves the attempt straight to
-        `checked` (releasing escrow, if paid) when there are no `text`
-        questions at all — a fully-objective series shouldn't wait on a
-        reviewer who has nothing to review."""
-        from core.models import Notification
+        (e.g. a photo of handwritten work). `timings`: optional
+        {question_id: seconds}.
 
+        Bulk-creates one `QuestionResponse` per question, auto-grades the
+        auto-gradable types immediately (with negative marking), and
+        resolves the attempt straight to `checked` when there are no `text`
+        questions — a fully-objective series with its answer key already
+        filled in never waits on a reviewer.
+
+        Hardening vs. the previous version:
+          * a malformed answer (string / list / unhashable options) is graded
+            as "no answer" instead of raising a 500 out of the grader;
+          * a submit that arrives after `deadline + grace` follows
+            `policy.late_policy()` (default: grade the last server-side
+            autosave, not the late payload) and sets `submitted_late`;
+          * `auto_score` / `final_score` are NET of negative marking.
+        """
         files = files or {}
+        timings = timings if isinstance(timings, dict) else {}
+        answers = answers if isinstance(answers, dict) else {}
+
+        now = timezone.now()
+        if auto:
+            # Closed by the server (auto-submit task) — the student never pressed
+            # Submit, so grade exactly what the autosave already held. This is
+            # not "late": there was no late client submission to penalise.
+            answers = self.draft_answers if isinstance(self.draft_answers, dict) else {}
+            files = {}
+        elif policy.is_past_deadline(now=now, deadline=self.deadline_at):
+            self.submitted_late = True
+            if policy.late_policy() == "use_draft":
+                answers = self.draft_answers if isinstance(self.draft_answers, dict) else {}
+                files = {}
+
         questions = list(self.series.questions.all())
         responses = []
         for question in questions:
-            answer_data = answers.get(str(question.id), {})
+            answer_data = policy.coerce_answer_data(answers.get(str(question.id)))
             is_auto_graded = question.question_type != Question.QuestionType.TEXT
-            is_correct, marks_awarded = question.auto_grade(answer_data)
+            try:
+                is_correct, marks_awarded = question.auto_grade(answer_data)
+            except (TypeError, AttributeError, ValueError):
+                # Structurally invalid answer for this question type.
+                answer_data = {}
+                is_correct, marks_awarded = (False, 0) if is_auto_graded else (None, None)
             answer_attachment = None if is_auto_graded else files.get(f"answer_{question.id}")
             responses.append(
                 QuestionResponse(
@@ -680,60 +884,54 @@ class TestAttempt(TestSeriesBaseModel):
                     is_auto_graded=is_auto_graded,
                     is_correct=is_correct,
                     marks_awarded=marks_awarded,
+                    penalty=policy.negative_penalty(
+                        question_type=question.question_type,
+                        is_correct=is_correct,
+                        answer_data=answer_data,
+                        negative_marks=question.negative_marks,
+                    ),
+                    time_spent_seconds=self._clean_seconds(timings.get(str(question.id))),
                 )
             )
         QuestionResponse.objects.bulk_create(responses)
 
-        self.auto_score = sum(r.marks_awarded or 0 for r in responses if r.is_auto_graded)
+        self.auto_score = policy.net_score(
+            sum(r.marks_awarded or 0 for r in responses if r.is_auto_graded),
+            sum(r.penalty for r in responses),
+        )
+        self.submitted_at = now
+        # The draft has served its purpose; keep the row light.
+        self.draft_answers = {}
 
         has_pending_text = any(q.question_type == Question.QuestionType.TEXT for q in questions)
-        self.submitted_at = timezone.now()
-
         if not has_pending_text:
             # Fully auto-gradable series — resolves straight to checked,
             # no manual-review step exists for this attempt at all.
-            self.final_score = self.auto_score
-            self.status = self.Status.CHECKED
-            self.checked_at = timezone.now()
-            self.save(update_fields=["auto_score", "final_score", "status", "submitted_at", "checked_at"])
-
-            purchase = getattr(self, "purchase", None)
-            if self.series.is_paid and purchase and purchase.status == TestSeriesPurchase.Status.ESCROWED:
-                purchase.release()
-            _notify(
-                recipient=self.student,
-                notif_type=Notification.NotifType.TESTSERIES_CHECKED,
-                title="Test checked",
-                message=f"Your test '{self.series.title}' has been checked. Score: {self.final_score}",
-                data={"attempt_id": str(self.id), "series_id": str(self.series_id)},
-            )
+            self._finalize(reviewer=None)
         else:
             self.status = self.Status.PARTIALLY_CHECKED
-            self.save(update_fields=["auto_score", "status", "submitted_at"])
+            self.save(update_fields=[
+                "auto_score", "submitted_at", "submitted_late", "draft_answers", "status",
+            ])
 
-    @transaction.atomic
-    def mark_answer_and_maybe_finalize(self, *, question: Question, marks_awarded: int, feedback: str = "", reviewer=None):
-        """Reviewer grades one `text` response. If that was the LAST
-        pending `text` response on this attempt, finalizes the whole
-        attempt (final_score, status=checked, payout release,
-        notification) in the same call. If other `text` responses are
-        still pending, only this one response's review is saved — no
-        notification/payout on partial progress (escrow holds until
-        fully checked, §8)."""
+    def _finalize(self, *, reviewer=None):
+        """Resolve this attempt to `checked`: net final score, percentage,
+        pass/fail, escrow release, student notification, and — if the series
+        is certified and the student passed — the certificate. Single exit
+        point for both paths (all-auto submit, and last manual review)."""
         from core.models import Notification
 
-        response = self.responses.select_related("question").get(question=question)
-        response.mark_answer(marks_awarded, feedback=feedback, reviewer=reviewer)
-
-        still_pending = self.responses.filter(is_auto_graded=False, marks_awarded__isnull=True).exists()
-        if still_pending:
-            return
-
-        self.final_score = self.responses.aggregate(total=models.Sum("marks_awarded"))["total"] or 0
+        totals = self.responses.aggregate(marks=models.Sum("marks_awarded"), penalty=models.Sum("penalty"))
+        self.final_score = policy.net_score(totals["marks"] or 0, totals["penalty"] or 0)
+        self.percentage = policy.percentage(self.final_score, self.series.total_marks)
+        self.passed = policy.has_passed(self.percentage, self.series.pass_percentage)
         self.status = self.Status.CHECKED
         self.checked_at = timezone.now()
         self.checked_by = reviewer
-        self.save(update_fields=["final_score", "status", "checked_at", "checked_by"])
+        self.save(update_fields=[
+            "auto_score", "submitted_at", "submitted_late", "draft_answers",
+            "final_score", "percentage", "passed", "status", "checked_at", "checked_by",
+        ])
 
         purchase = getattr(self, "purchase", None)
         if self.series.is_paid and purchase and purchase.status == TestSeriesPurchase.Status.ESCROWED:
@@ -746,6 +944,25 @@ class TestAttempt(TestSeriesBaseModel):
             message=f"Your test '{self.series.title}' has been checked. Score: {self.final_score}",
             data={"attempt_id": str(self.id), "series_id": str(self.series_id)},
         )
+
+        if self.series.certificate_enabled and self.passed:
+            TestCertificate.issue_for_attempt(self)
+
+    @transaction.atomic
+    def mark_answer_and_maybe_finalize(self, *, question: Question, marks_awarded: int, feedback: str = "", reviewer=None):
+        """Reviewer grades one `text` response. If that was the LAST
+        pending `text` response on this attempt, finalizes the whole
+        attempt (see `_finalize`) in the same call. If other `text`
+        responses are still pending, only this one response's review is
+        saved — no notification/payout on partial progress (escrow holds
+        until fully checked, §8)."""
+        response = self.responses.select_related("question").get(question=question)
+        response.mark_answer(marks_awarded, feedback=feedback, reviewer=reviewer)
+
+        still_pending = self.responses.filter(is_auto_graded=False, marks_awarded__isnull=True).exists()
+        if still_pending:
+            return
+        self._finalize(reviewer=reviewer)
 
     def __str__(self):
         return f"Attempt: {self.student} on {self.series} [{self.status}]"
@@ -850,3 +1067,190 @@ class TestSeriesReview(TestSeriesBaseModel):
 
     def __str__(self):
         return f"Review: {self.student} -> {self.series} ({self.rating}\u2605)"
+
+
+# =====================================================================
+# ADVANCED FEATURES (migration 0003)
+# =====================================================================
+class TestCertificate(TestSeriesBaseModel):
+    """A verifiable certificate, issued automatically the moment an attempt
+    on a `certificate_enabled` series is checked with a passing percentage
+    (see `TestAttempt._finalize`).
+
+    One certificate per (series, student): if the student passes on several
+    attempts, the FIRST passing attempt earns it — retries never mint
+    duplicates. `code` is what appears on the certificate and is looked up
+    by the public, throttled, unauthenticated verify endpoint
+    (`GET /testseries/certificates/verify/<code>/`), so an employer or
+    another institute can confirm it without an account.
+    """
+
+    attempt = models.OneToOneField(TestAttempt, on_delete=models.CASCADE, related_name="certificate")
+    series = models.ForeignKey(TestSeries, on_delete=models.CASCADE, related_name="certificates")
+    student = models.ForeignKey(User, on_delete=models.CASCADE, related_name="testseries_certificates")
+
+    code = models.CharField(max_length=24, unique=True, db_index=True)
+    title = models.CharField(max_length=200)
+
+    # Snapshot at issue time — a certificate must not change if the series
+    # is edited or the attempt is later re-evaluated.
+    score = models.PositiveIntegerField()
+    total_marks = models.PositiveIntegerField()
+    percentage = models.FloatField()
+
+    issued_at = models.DateTimeField(auto_now_add=True)
+    revoked_at = models.DateTimeField(null=True, blank=True)
+    revoked_reason = models.CharField(max_length=200, blank=True)
+
+    class Meta:
+        ordering = ["-issued_at"]
+        constraints = [
+            models.UniqueConstraint(fields=["series", "student"], name="unique_certificate_per_student_series"),
+        ]
+
+    @property
+    def is_valid(self) -> bool:
+        return self.revoked_at is None
+
+    @classmethod
+    def issue_for_attempt(cls, attempt: "TestAttempt"):
+        """Idempotent. Returns `(certificate, created)`."""
+        from core.models import Notification
+
+        existing = cls.objects.filter(series=attempt.series, student=attempt.student).first()
+        if existing is not None:
+            return existing, False
+
+        series = attempt.series
+        cert = None
+        for _ in range(6):
+            try:
+                with transaction.atomic():
+                    cert = cls.objects.create(
+                        attempt=attempt,
+                        series=series,
+                        student=attempt.student,
+                        code=policy.generate_certificate_code(),
+                        title=series.certificate_title or series.title,
+                        score=attempt.final_score or 0,
+                        total_marks=series.total_marks,
+                        percentage=attempt.percentage or 0.0,
+                    )
+                break
+            except IntegrityError:
+                # Either a (astronomically unlikely) code collision, or we lost
+                # a race with a concurrent finalize for the same student.
+                existing = cls.objects.filter(series=series, student=attempt.student).first()
+                if existing is not None:
+                    return existing, False
+        if cert is None:  # pragma: no cover — six code collisions in a row
+            raise RuntimeError("Could not allocate a unique certificate code.")
+
+        _notify(
+            recipient=attempt.student,
+            notif_type=Notification.NotifType.CERTIFICATE_ISSUED,
+            title="Certificate earned",
+            message=f"You passed '{series.title}' — your certificate {cert.code} is ready.",
+            data={"certificate_code": cert.code, "series_id": str(series.id), "attempt_id": str(attempt.id)},
+        )
+        return cert, True
+
+    def revoke(self, reason: str = ""):
+        self.revoked_at = timezone.now()
+        self.revoked_reason = reason[:200]
+        self.save(update_fields=["revoked_at", "revoked_reason"])
+
+    def __str__(self):
+        return f"Certificate {self.code} — {self.student} / {self.series}"
+
+
+class TestLiveSession(TestSeriesBaseModel):
+    """The live video room for a `delivery_mode="live"` series: the creator
+    hosts (video + audio), students join as viewers while they take the test,
+    and — if `series.record_live` — the whole session is recorded to S3 via
+    LiveKit egress so it can be replayed alongside the test.
+
+    Deliberately separate from `liveclass.ClassSession` (golden rule: this app
+    never imports `liveclass`); it talks to the same LiveKit project through
+    `testseries.live`."""
+
+    class Status(models.TextChoices):
+        SCHEDULED = "scheduled", "Scheduled"
+        LIVE = "live", "Live"
+        ENDED = "ended", "Ended"
+
+    series = models.OneToOneField(TestSeries, on_delete=models.CASCADE, related_name="live_session")
+    room_name = models.CharField(max_length=80, unique=True)
+    status = models.CharField(max_length=10, choices=Status.choices, default=Status.SCHEDULED, db_index=True)
+    host = models.ForeignKey(
+        User, on_delete=models.SET_NULL, null=True, blank=True, related_name="testseries_live_hosted"
+    )
+    started_at = models.DateTimeField(null=True, blank=True)
+    ended_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    def __str__(self):
+        return f"Live session for {self.series_id} [{self.status}]"
+
+
+class TestRecording(TestSeriesBaseModel):
+    """One LiveKit egress job. `LIVE_SESSION` = the host's live room;
+    `PROCTOR` = one student's camera room for one attempt. `url` is filled in
+    asynchronously by LiveKit's `egress_ended` webhook
+    (`POST /testseries/livekit-webhook/`)."""
+
+    class Kind(models.TextChoices):
+        LIVE_SESSION = "live_session", "Live session"
+        PROCTOR = "proctor", "Proctoring"
+
+    class Status(models.TextChoices):
+        RECORDING = "recording", "Recording"
+        READY = "ready", "Ready"
+        FAILED = "failed", "Failed"
+
+    series = models.ForeignKey(TestSeries, on_delete=models.CASCADE, related_name="recordings")
+    attempt = models.ForeignKey(
+        TestAttempt, on_delete=models.CASCADE, null=True, blank=True, related_name="recordings"
+    )
+    kind = models.CharField(max_length=12, choices=Kind.choices, db_index=True)
+    room_name = models.CharField(max_length=80)
+    egress_id = models.CharField(max_length=64, db_index=True)
+    status = models.CharField(max_length=10, choices=Status.choices, default=Status.RECORDING, db_index=True)
+    url = models.URLField(max_length=500, blank=True)
+    started_at = models.DateTimeField(auto_now_add=True)
+    ended_at = models.DateTimeField(null=True, blank=True)
+    duration_seconds = models.PositiveIntegerField(null=True, blank=True)
+
+    class Meta:
+        ordering = ["-started_at"]
+        indexes = [models.Index(fields=["series", "kind"], name="ts_rec_series_kind_idx")]
+
+    def __str__(self):
+        return f"{self.get_kind_display()} recording {self.egress_id} [{self.status}]"
+
+
+class TestProctorEvent(TestSeriesBaseModel):
+    """A client-reported integrity signal during an attempt. Advisory only —
+    it feeds a review list for the creator; it never auto-fails anyone."""
+
+    class EventType(models.TextChoices):
+        APP_BACKGROUND = "app_background", "App sent to background"
+        TAB_SWITCH = "tab_switch", "Switched app / tab"
+        FACE_MISSING = "face_missing", "Face not visible"
+        MULTIPLE_FACES = "multiple_faces", "Multiple faces"
+        CAMERA_OFF = "camera_off", "Camera turned off"
+        NETWORK_DROP = "network_drop", "Network dropped"
+        OTHER = "other", "Other"
+
+    attempt = models.ForeignKey(TestAttempt, on_delete=models.CASCADE, related_name="proctor_events")
+    event_type = models.CharField(max_length=20, choices=EventType.choices)
+    occurred_at = models.DateTimeField(default=timezone.now)
+    meta = models.JSONField(default=dict, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["occurred_at"]
+        indexes = [models.Index(fields=["attempt", "event_type"], name="ts_pev_attempt_type_idx")]
+
+    def __str__(self):
+        return f"{self.event_type} @ {self.occurred_at:%H:%M:%S} (attempt {self.attempt_id})"

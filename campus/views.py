@@ -622,7 +622,15 @@ class CampusLiveSessionViewSet(CampusMemberScopedMixin, viewsets.ModelViewSet):
     def perform_create(self, serializer):
         live_session = serializer.save()
         campus = live_session.section.school_class.campus
-        room_id = bridge.provision_video_room(live_session, actor=self.request.user)
+        # Best-effort: video-room provisioning (core/message/LiveKit) being
+        # down must not block scheduling — `join` already returns a clean
+        # 503 for a session with no room_id.
+        try:
+            with transaction.atomic():
+                room_id = bridge.provision_video_room(live_session, actor=self.request.user)
+        except Exception:
+            logger.exception("Video room provisioning failed for live session %s.", live_session.pk)
+            room_id = None
         if room_id:
             live_session.room_id = room_id
             live_session.save(update_fields=["room_id"])
@@ -655,6 +663,18 @@ class CampusLiveSessionViewSet(CampusMemberScopedMixin, viewsets.ModelViewSet):
             return Response({"detail": "Only a scheduled session can be started."}, status=status.HTTP_400_BAD_REQUEST)
         live_session.status = CampusLiveSession.Status.LIVE
         live_session.save(update_fields=["status"])
+        if not live_session.room_id:
+            # Provisioning at schedule time is best-effort (see
+            # perform_create) — retry here so a transient failure then
+            # doesn't leave this session un-joinable.
+            try:
+                with transaction.atomic():
+                    room_id = bridge.provision_video_room(live_session, actor=request.user)
+                if room_id:
+                    live_session.room_id = room_id
+                    live_session.save(update_fields=["room_id"])
+            except Exception:
+                logger.exception("Video room provisioning retry failed for live session %s.", live_session.pk)
         recipients = StudentEnrollment.objects.filter(
             section=live_session.section, status=StudentEnrollment.Status.ACTIVE
         ).values_list("student", flat=True)
