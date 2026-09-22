@@ -105,6 +105,54 @@ class AssignmentQuestion {
   }
 }
 
+/// `assigmentsKind` — classic task vs a longer project (link/file hand-in,
+/// graded against a rubric).
+enum AssignmentKind { assignment, project, unknown }
+
+AssignmentKind assignmentKindFrom(String? raw) {
+  switch (raw) {
+    case 'assignment':
+      return AssignmentKind.assignment;
+    case 'project':
+      return AssignmentKind.project;
+    default:
+      return AssignmentKind.unknown;
+  }
+}
+
+/// `assigmentsStatus` — draft/published/archived. Only meaningful for
+/// `source == personal`; campus/liveclass assignments don't use this flow.
+enum AssignmentPublishStatus { draft, published, archived, unknown }
+
+AssignmentPublishStatus assignmentPublishStatusFrom(String? raw) {
+  switch (raw) {
+    case 'draft':
+      return AssignmentPublishStatus.draft;
+    case 'published':
+      return AssignmentPublishStatus.published;
+    case 'archived':
+      return AssignmentPublishStatus.archived;
+    default:
+      return AssignmentPublishStatus.unknown;
+  }
+}
+
+/// `assigmentsVisibility` — who can find/open a PERSONAL assignment.
+enum AssignmentVisibility { private_, link, public, unknown }
+
+AssignmentVisibility assignmentVisibilityFrom(String? raw) {
+  switch (raw) {
+    case 'private':
+      return AssignmentVisibility.private_;
+    case 'link':
+      return AssignmentVisibility.link;
+    case 'public':
+      return AssignmentVisibility.public;
+    default:
+      return AssignmentVisibility.unknown;
+  }
+}
+
 class AssignmentModel {
   final String id;
   final String title;
@@ -118,6 +166,24 @@ class AssignmentModel {
   final List<AssignmentQuestion> questions;
   final DateTime? createdAt;
 
+  // ---- publishing + projects (migration 0003) ----
+  final AssignmentKind kind;
+  final AssignmentPublishStatus status;
+  final AssignmentVisibility visibility;
+  final String? publicSlug;
+  final String? shareUrl;
+  final DateTime? publishedAt;
+  final List<String> tags;
+  final String difficulty;
+
+  /// Which hand-in types this assignment accepts — `text` / `file` / `link`.
+  /// Empty list = all types allowed.
+  final List<String> submissionTypes;
+
+  /// Project grading rubric: `[{criterion, max_marks}, ...]`.
+  final List<Map<String, dynamic>> rubric;
+  final int participantsCount;
+
   const AssignmentModel({
     required this.id,
     required this.title,
@@ -130,10 +196,26 @@ class AssignmentModel {
     this.attachment,
     this.dueDate,
     this.createdAt,
+    this.kind = AssignmentKind.assignment,
+    this.status = AssignmentPublishStatus.draft,
+    this.visibility = AssignmentVisibility.private_,
+    this.publicSlug,
+    this.shareUrl,
+    this.publishedAt,
+    this.tags = const [],
+    this.difficulty = '',
+    this.submissionTypes = const [],
+    this.rubric = const [],
+    this.participantsCount = 0,
   });
 
   factory AssignmentModel.fromJson(Map<String, dynamic> j) {
     final q = j['questions'];
+    final slug = j['public_slug']?.toString() ?? '';
+    final url = j['share_url']?.toString() ?? '';
+    final tags = j['tags'];
+    final types = j['submission_types'];
+    final rubric = j['rubric'];
     return AssignmentModel(
       id: j['id']?.toString() ?? '',
       title: j['title']?.toString() ?? '',
@@ -148,6 +230,17 @@ class AssignmentModel {
           ? q.map((e) => AssignmentQuestion.fromJson(Map<String, dynamic>.from(e as Map))).toList()
           : const [],
       createdAt: DateTime.tryParse(j['created_at']?.toString() ?? ''),
+      kind: assignmentKindFrom(j['kind']?.toString()),
+      status: assignmentPublishStatusFrom(j['status']?.toString()),
+      visibility: assignmentVisibilityFrom(j['visibility']?.toString()),
+      publicSlug: slug.isNotEmpty ? slug : null,
+      shareUrl: url.isNotEmpty ? url : null,
+      publishedAt: DateTime.tryParse(j['published_at']?.toString() ?? ''),
+      tags: tags is List ? tags.map((e) => e.toString()).toList() : const [],
+      difficulty: j['difficulty']?.toString() ?? '',
+      submissionTypes: types is List ? types.map((e) => e.toString()).toList() : const [],
+      rubric: rubric is List ? rubric.whereType<Map>().map((e) => Map<String, dynamic>.from(e)).toList() : const [],
+      participantsCount: (j['participants_count'] as num?)?.toInt() ?? 0,
     );
   }
 
@@ -162,6 +255,12 @@ class AssignmentModel {
     final t = DateTime(now.year, now.month, now.day);
     return d.difference(t).inDays;
   }
+
+  bool get isProject => kind == AssignmentKind.project;
+  bool get isPublished => status == AssignmentPublishStatus.published;
+
+  /// `submission_types` khaali ho to sab allowed hain.
+  bool acceptsSubmissionType(String type) => submissionTypes.isEmpty || submissionTypes.contains(type);
 }
 
 class AssignmentAnswer {
@@ -225,6 +324,12 @@ class AssignmentSubmission {
   final bool isLate;
   final List<AssignmentAnswer> answers;
 
+  /// Project hand-in link (repo / live demo / design file) — free-form path.
+  final String linkUrl;
+
+  /// Project rubric grading: `{criterion: marks_awarded}`.
+  final Map<String, int> rubricScores;
+
   const AssignmentSubmission({
     required this.id,
     required this.assignmentId,
@@ -240,10 +345,13 @@ class AssignmentSubmission {
     this.totalMarksAwarded,
     this.submittedAt,
     this.checkedAt,
+    this.linkUrl = '',
+    this.rubricScores = const {},
   });
 
   factory AssignmentSubmission.fromJson(Map<String, dynamic> j) {
     final a = j['answers'];
+    final scores = j['rubric_scores'];
     return AssignmentSubmission(
       id: j['id']?.toString() ?? '',
       assignmentId: j['assigments']?.toString() ?? '',
@@ -258,6 +366,10 @@ class AssignmentSubmission {
       submittedAt: DateTime.tryParse(j['submitted_at']?.toString() ?? ''),
       checkedAt: DateTime.tryParse(j['checked_at']?.toString() ?? ''),
       isLate: j['is_late'] == true,
+      linkUrl: j['link_url']?.toString() ?? '',
+      rubricScores: scores is Map
+          ? scores.map((k, v) => MapEntry(k.toString(), (v as num?)?.toInt() ?? 0))
+          : const {},
       answers: a is List
           ? a.map((e) => AssignmentAnswer.fromJson(Map<String, dynamic>.from(e as Map))).toList()
           : const [],

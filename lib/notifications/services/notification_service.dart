@@ -22,7 +22,6 @@ import 'package:http/http.dart' as http;
 import '../models/notification_model.dart';
 import '../../utils/api.dart';
 import '../../services/auth_service.dart';
-
 const Duration kApiTimeout = Duration(seconds: 15); // home_api_model_service.dart wala hi convention
 
 class NotificationService {
@@ -105,6 +104,33 @@ class NotificationService {
     }
     final body = jsonDecode(res.body) as Map<String, dynamic>;
     return body['marked_read'] as int? ?? 0;
+  }
+
+  /// GET core/notification-preferences/me/
+  /// [Task 5] — pehle sirf header comment me documented tha, kabhi call
+  /// nahi hota tha. Always the caller's own row (backend `get_or_create`
+  /// karta hai — pehli baar hit karne pe bhi 404 nahi aata).
+  Future<NotificationPreferences> getPreferences() async {
+    final uri = Uri.parse('${Api.baseUrl}/core/notification-preferences/me/');
+    final res = await http.get(uri, headers: await _authHeaders()).timeout(kApiTimeout);
+    if (res.statusCode != 200) {
+      throw NotificationApiException('failed_to_load_preferences', res.statusCode);
+    }
+    return NotificationPreferences.fromJson(jsonDecode(res.body) as Map<String, dynamic>);
+  }
+
+  /// PATCH core/notification-preferences/me/ — partial update, sirf jo
+  /// fields pass kiye wahi badalte hain. Poora updated object wapas
+  /// aata hai, taaki UI ek hi call se refresh ho jaye.
+  Future<NotificationPreferences> updatePreferences(Map<String, dynamic> patch) async {
+    final uri = Uri.parse('${Api.baseUrl}/core/notification-preferences/me/');
+    final res = await http
+        .patch(uri, headers: await _authHeaders(), body: jsonEncode(patch))
+        .timeout(kApiTimeout);
+    if (res.statusCode != 200) {
+      throw NotificationApiException('failed_to_update_preferences', res.statusCode);
+    }
+    return NotificationPreferences.fromJson(jsonDecode(res.body) as Map<String, dynamic>);
   }
 }
 

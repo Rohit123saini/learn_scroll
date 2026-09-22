@@ -160,6 +160,7 @@ import 'package:http/http.dart' as http;
 // sits relative to this screen in your project (e.g. '../api/api_service.dart'
 // or '../services/api_service.dart'). Only used for the Freesound search call.
 import '../services/api_service.dart';
+import '../../l10n/app_localizations.dart';
 import 'auto_edit_screen.dart';
 
 part '../widgets/media_edit_screen_painters.dart';
@@ -456,13 +457,13 @@ class _HistorySnapshot {
 enum _TransitionKind { glitch, flash, zoom, shake, rgbSplit, slide }
 
 extension _ManualTransitionMeta on _TransitionKind {
-  String get label => switch (this) {
-        _TransitionKind.glitch => 'Glitch',
-        _TransitionKind.flash => 'Flash',
-        _TransitionKind.zoom => 'Zoom',
-        _TransitionKind.shake => 'Shake',
-        _TransitionKind.rgbSplit => 'RGB Split',
-        _TransitionKind.slide => 'Slide',
+  String label(BuildContext context) => switch (this) {
+        _TransitionKind.glitch => AppLocalizations.of(context)!.transGlitch,
+        _TransitionKind.flash => AppLocalizations.of(context)!.transFlash,
+        _TransitionKind.zoom => AppLocalizations.of(context)!.transZoom,
+        _TransitionKind.shake => AppLocalizations.of(context)!.transShake,
+        _TransitionKind.rgbSplit => AppLocalizations.of(context)!.transRgbSplit,
+        _TransitionKind.slide => AppLocalizations.of(context)!.transSlide,
       };
 
   IconData get icon => switch (this) {
@@ -603,10 +604,18 @@ class _SimpleVideoEditController extends ChangeNotifier {
 }
 
 class _MediaEditScreenState extends State<MediaEditScreen> with TickerProviderStateMixin {
-  static const Color _primary = Color(0xFF6366F1);
-  static const Color _accent = Color(0xFF8B5CF6);
+  // Fixed dark-editor palette (not theme-reactive) — same reasoning as
+  // auto_edit_screen.dart: this is a professional media-editing canvas
+  // (crop/trim/filters/text/draw), which stays dark regardless of the
+  // app's light/dark setting, same convention as CapCut/InShot/Premiere.
+  // _primary is retinted to match home.dart's brand purple so the accent
+  // still reads as "the same app"; _accent picks up the app's warm
+  // secondary color for palette variety in the text-color swatches below.
+  static const Color _primary = Color(0xFF8B7CFF);
+  static const Color _accent = Color(0xFFFF6B4A);
   static const Color _muted = Color(0xFF9095A6);
   static const Color _bg = Color(0xFF0B0B0F);
+  AppLocalizations get _l10n => AppLocalizations.of(context)!;
 
   static const List<Color> _textColorSwatches = [
     Colors.white,
@@ -873,7 +882,7 @@ class _MediaEditScreenState extends State<MediaEditScreen> with TickerProviderSt
       if (!mounted) return;
       setState(() => _isPreparing = false);
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Video load nahi ho paya: $e')),
+        SnackBar(content: Text(_l10n.videoLoadFailed(e.toString()))),
       );
     }
   }
@@ -934,7 +943,7 @@ class _MediaEditScreenState extends State<MediaEditScreen> with TickerProviderSt
     } catch (e) {
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Music select nahi ho paya: $e')),
+        SnackBar(content: Text(_l10n.musicSelectFailed(e.toString()))),
       );
     } finally {
       if (mounted) setState(() => _isPickingMusic = false);
@@ -963,7 +972,7 @@ class _MediaEditScreenState extends State<MediaEditScreen> with TickerProviderSt
       setState(() => _freesoundResults = results);
     } catch (e) {
       if (!mounted) return;
-      setState(() => _freesoundError = 'Search fail ho gaya, dobara try karo');
+      setState(() => _freesoundError = _l10n.searchFailedRetry);
     } finally {
       if (mounted) setState(() => _freesoundSearching = false);
     }
@@ -1027,7 +1036,7 @@ class _MediaEditScreenState extends State<MediaEditScreen> with TickerProviderSt
       await _freesoundPreviewPlayer?.pause();
       final response = await http.get(Uri.parse(url));
       if (response.statusCode != 200) {
-        throw Exception('Download fail (${response.statusCode})');
+        throw Exception(_l10n.downloadFailedCode(response.statusCode));
       }
       final dir = await getTemporaryDirectory();
       final stamp = DateTime.now().millisecondsSinceEpoch;
@@ -1040,7 +1049,7 @@ class _MediaEditScreenState extends State<MediaEditScreen> with TickerProviderSt
       );
       final code = await session.getReturnCode();
       if (!ReturnCode.isSuccess(code)) {
-        throw Exception('Crop fail ho gaya');
+        throw Exception(_l10n.cropFailed);
       }
 
       if (!mounted) return;
@@ -1056,7 +1065,7 @@ class _MediaEditScreenState extends State<MediaEditScreen> with TickerProviderSt
     } catch (e) {
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Music add nahi ho paya: $e')),
+        SnackBar(content: Text(_l10n.musicAddFailed(e.toString()))),
       );
     } finally {
       if (mounted) setState(() => _isCroppingFreesoundTrack = false);
@@ -1083,7 +1092,7 @@ class _MediaEditScreenState extends State<MediaEditScreen> with TickerProviderSt
     } catch (e) {
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Clip select nahi ho paya: $e')),
+        SnackBar(content: Text(_l10n.clipSelectFailed(e.toString()))),
       );
     } finally {
       if (mounted) setState(() => _isPickingClip = false);
@@ -1126,7 +1135,7 @@ class _MediaEditScreenState extends State<MediaEditScreen> with TickerProviderSt
     } catch (e) {
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Photo/video add nahi ho paya: $e')),
+        SnackBar(content: Text(_l10n.mediaAddFailed(e.toString()))),
       );
     } finally {
       if (mounted) setState(() => _isPickingManualClip = false);
@@ -1403,7 +1412,7 @@ class _MediaEditScreenState extends State<MediaEditScreen> with TickerProviderSt
       if (!mounted) return;
       setState(() => _isAutoEnhancing = false);
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Auto-enhance nahi ho paya: $e')),
+        SnackBar(content: Text(_l10n.autoEnhanceFailed(e.toString()))),
       );
     }
   }
@@ -1574,7 +1583,7 @@ class _MediaEditScreenState extends State<MediaEditScreen> with TickerProviderSt
       if (!mounted) return;
       setState(() => _isTransforming = false);
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Transform nahi ho paya: $e')),
+        SnackBar(content: Text(_l10n.transformFailed(e.toString()))),
       );
     }
   }
@@ -1761,7 +1770,7 @@ class _MediaEditScreenState extends State<MediaEditScreen> with TickerProviderSt
                                   child: Container(
                                     padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
                                     decoration: BoxDecoration(color: _primary, borderRadius: BorderRadius.circular(18)),
-                                    child: const Text('Done', style: TextStyle(color: Colors.white, fontWeight: FontWeight.w800, fontSize: 14)),
+                                    child: Text(_l10n.doneLabel, style: const TextStyle(color: Colors.white, fontWeight: FontWeight.w800, fontSize: 14)),
                                   ),
                                 ),
                               ],
@@ -1827,11 +1836,11 @@ class _MediaEditScreenState extends State<MediaEditScreen> with TickerProviderSt
                                 Row(
                                   mainAxisAlignment: MainAxisAlignment.center,
                                   children: [
-                                    _panelTab('Style', _TextPanel.style, activePanel, (p) => setSheetState(() => activePanel = p)),
+                                    _panelTab(_l10n.styleLabel, _TextPanel.style, activePanel, (p) => setSheetState(() => activePanel = p)),
                                     const SizedBox(width: 18),
-                                    _panelTab('Font', _TextPanel.font, activePanel, (p) => setSheetState(() => activePanel = p)),
+                                    _panelTab(_l10n.fontLabel, _TextPanel.font, activePanel, (p) => setSheetState(() => activePanel = p)),
                                     const SizedBox(width: 18),
-                                    _panelTab('FX', _TextPanel.anim, activePanel, (p) => setSheetState(() => activePanel = p)),
+                                    _panelTab(_l10n.fxTabLabel, _TextPanel.anim, activePanel, (p) => setSheetState(() => activePanel = p)),
                                     const SizedBox(width: 18),
                                     GestureDetector(
                                       onTap: () => setSheetState(() {
@@ -1901,9 +1910,9 @@ class _MediaEditScreenState extends State<MediaEditScreen> with TickerProviderSt
                                   ),
                                 ),
                                 if (selectedStyle == _TextStyleKind.gradient)
-                                  const Padding(
+                                  Padding(
                                     padding: EdgeInsets.only(top: 4),
-                                    child: Text('Color 2 (gradient) — tap a swatch above', style: TextStyle(color: _muted, fontSize: 10)),
+                                    child: Text(_l10n.color2GradientHint, style: TextStyle(color: _muted, fontSize: 10)),
                                   ),
                               ],
                             ),
@@ -2088,7 +2097,7 @@ class _MediaEditScreenState extends State<MediaEditScreen> with TickerProviderSt
       if (!mounted) return;
       setState(() => _isErasing = false);
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Eraser apply nahi ho paya: $e')),
+        SnackBar(content: Text(_l10n.eraserApplyFailed(e.toString()))),
       );
     }
   }
@@ -2155,7 +2164,7 @@ class _MediaEditScreenState extends State<MediaEditScreen> with TickerProviderSt
               mainAxisSize: MainAxisSize.min,
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                const Text('Add Sticker', style: TextStyle(color: Colors.white, fontWeight: FontWeight.w800, fontSize: 16)),
+                Text(_l10n.addStickerTitle, style: const TextStyle(color: Colors.white, fontWeight: FontWeight.w800, fontSize: 16)),
                 const SizedBox(height: 14),
                 Wrap(
                   spacing: 10,
@@ -2180,7 +2189,7 @@ class _MediaEditScreenState extends State<MediaEditScreen> with TickerProviderSt
                 // valid for editId != null, so double-tapping an
                 // existing sticker can swap it to one of these too.
                 const SizedBox(height: 20),
-                const Text('My Stickers', style: TextStyle(color: Colors.white, fontWeight: FontWeight.w800, fontSize: 16)),
+                Text(_l10n.myStickersTitle, style: const TextStyle(color: Colors.white, fontWeight: FontWeight.w800, fontSize: 16)),
                 const SizedBox(height: 10),
                 StatefulBuilder(
                   builder: (sbContext, sbSetState) {
@@ -2252,17 +2261,17 @@ class _MediaEditScreenState extends State<MediaEditScreen> with TickerProviderSt
                   const SizedBox(height: 20),
                   Row(
                     children: [
-                      const Text('Face Filters', style: TextStyle(color: Colors.white, fontWeight: FontWeight.w800, fontSize: 16)),
+                      Text(_l10n.faceFiltersTitle, style: const TextStyle(color: Colors.white, fontWeight: FontWeight.w800, fontSize: 16)),
                       const SizedBox(width: 8),
                       if (_isDetectingFaces)
                         const SizedBox(width: 12, height: 12, child: CircularProgressIndicator(strokeWidth: 2, color: _accent))
                       else if (_detectedFaces.isEmpty)
-                        const Text('(no face detected — placed centered)', style: TextStyle(color: _muted, fontSize: 11)),
+                        Text(_l10n.noFaceDetectedNote, style: TextStyle(color: _muted, fontSize: 11)),
                     ],
                   ),
                   const SizedBox(height: 4),
-                  const Text(
-                    'Auto-placed on the detected face — drag/pinch/rotate after.',
+                  Text(
+                    _l10n.autoPlacedOnFaceHint,
                     style: TextStyle(color: _muted, fontSize: 11),
                   ),
                   const SizedBox(height: 10),
@@ -2286,15 +2295,15 @@ class _MediaEditScreenState extends State<MediaEditScreen> with TickerProviderSt
                     }).toList(),
                   ),
                   const SizedBox(height: 20),
-                  const Text('Live Stickers', style: TextStyle(color: Colors.white, fontWeight: FontWeight.w800, fontSize: 16)),
+                  Text(_l10n.liveStickersTitle, style: const TextStyle(color: Colors.white, fontWeight: FontWeight.w800, fontSize: 16)),
                   const SizedBox(height: 10),
                   Wrap(
                     spacing: 10,
                     runSpacing: 10,
                     children: [
-                      _dynamicStickerChip(sheetContext, Icons.access_time_rounded, 'Time', _DynamicKind.time),
-                      _dynamicStickerChip(sheetContext, Icons.calendar_today_rounded, 'Date', _DynamicKind.date),
-                      _dynamicStickerChip(sheetContext, Icons.battery_full_rounded, 'Battery', _DynamicKind.battery),
+                      _dynamicStickerChip(sheetContext, Icons.access_time_rounded, _l10n.timeLabel, _DynamicKind.time),
+                      _dynamicStickerChip(sheetContext, Icons.calendar_today_rounded, _l10n.dateLabel, _DynamicKind.date),
+                      _dynamicStickerChip(sheetContext, Icons.battery_full_rounded, _l10n.batteryLabel, _DynamicKind.battery),
                     ],
                   ),
                 ],
@@ -2428,7 +2437,7 @@ class _MediaEditScreenState extends State<MediaEditScreen> with TickerProviderSt
     } catch (e) {
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Photo select nahi ho paya: $e')),
+        SnackBar(content: Text(_l10n.photoSelectFailed(e.toString()))),
       );
     } finally {
       if (mounted) setState(() => _isPickingImages = false);
@@ -2854,7 +2863,7 @@ class _MediaEditScreenState extends State<MediaEditScreen> with TickerProviderSt
     final normalizedPaths = <String>[];
 
     for (int i = 0; i < n; i++) {
-      onProgress(i / (n + 1), 'Clip ${i + 1}/$n taiyar ho raha hai…');
+      onProgress(i / (n + 1), _l10n.clipPreparingOfTotal(i + 1, n));
       final clip = clips[i];
       final isLast = i == n - 1;
       final slotSec = _manualSlotSec(clip);
@@ -2882,14 +2891,14 @@ class _MediaEditScreenState extends State<MediaEditScreen> with TickerProviderSt
 
       final session = await FFmpegKit.execute(cmd);
       if (!ReturnCode.isSuccess(await session.getReturnCode())) {
-        throw Exception('Clip ${i + 1} normalize fail ho gaya');
+        throw Exception(_l10n.clipNormalizeFailed(i + 1));
       }
       normalizedPaths.add(outPath);
     }
 
     if (n == 1) return File(normalizedPaths.first);
 
-    onProgress(n / (n + 1), 'Transitions blend ho rahe hain…');
+    onProgress(n / (n + 1), _l10n.transitionsBlendingProgress);
     final inputs = normalizedPaths.map((p) => '-i "$p"').join(' ');
     final filters = <String>[];
     double cumSlotSec = _manualSlotSec(clips[0]);
@@ -2912,7 +2921,7 @@ class _MediaEditScreenState extends State<MediaEditScreen> with TickerProviderSt
       '-r $_mTargetFps -pix_fmt yuv420p "$outPath"',
     );
     if (!ReturnCode.isSuccess(await session.getReturnCode())) {
-      throw Exception('Transition chain fail ho gaya');
+      throw Exception(_l10n.transitionChainFailed);
     }
     return File(outPath);
   }
@@ -2936,7 +2945,7 @@ class _MediaEditScreenState extends State<MediaEditScreen> with TickerProviderSt
 
       if (_isVideo) {
         final controller = _videoController;
-        if (controller == null) throw Exception('Video controller ready nahi hai');
+        if (controller == null) throw Exception(_l10n.videoControllerNotReady);
         final startSec = controller.startTrim.inMilliseconds / 1000.0;
         final trimDurSec = controller.trimmedDuration.inMilliseconds / 1000.0;
         final rotateFilter = _rotateFilterString(controller.rotationTurns);
@@ -2946,7 +2955,7 @@ class _MediaEditScreenState extends State<MediaEditScreen> with TickerProviderSt
           '-y -ss $startSec -i "${widget.file.path}" -t $trimDurSec$vf -an "$trimOutPath"',
         );
         if (!ReturnCode.isSuccess(await trimSession.getReturnCode())) {
-          throw Exception('Primary clip trim fail ho gaya');
+          throw Exception(_l10n.primaryClipTrimFailed);
         }
         File outFile = File(trimOutPath);
 
@@ -2955,7 +2964,7 @@ class _MediaEditScreenState extends State<MediaEditScreen> with TickerProviderSt
           final fxOutPath = '${dir.path}/manual_primary_fx_$stamp.mp4';
           final fxSession = await FFmpegKit.execute('-y -i "${outFile.path}" -vf "$fxFilter" -an "$fxOutPath"');
           if (!ReturnCode.isSuccess(await fxSession.getReturnCode())) {
-            throw Exception('Primary clip FX fail ho gaya');
+            throw Exception(_l10n.primaryClipFxFailed);
           }
           outFile = File(fxOutPath);
         }
@@ -3014,7 +3023,7 @@ class _MediaEditScreenState extends State<MediaEditScreen> with TickerProviderSt
           '-map 0:v -map 1:a -c:v copy -af "volume=$_musicVolume" -shortest -t $totalSec "$musicOutPath"',
         );
         if (!ReturnCode.isSuccess(await session.getReturnCode())) {
-          throw Exception('Music attach fail ho gaya');
+          throw Exception(_l10n.musicAttachFailed);
         }
         finalFile = File(musicOutPath);
       }
@@ -3026,7 +3035,7 @@ class _MediaEditScreenState extends State<MediaEditScreen> with TickerProviderSt
       if (!mounted) return;
       setState(() => _isSaving = false);
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Montage export fail ho gaya: $e')),
+        SnackBar(content: Text(_l10n.montageExportFailed(e.toString()))),
       );
     }
   }
@@ -3081,7 +3090,7 @@ class _MediaEditScreenState extends State<MediaEditScreen> with TickerProviderSt
         if (!mounted) return;
         setState(() => _isSaving = false);
         ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('Video trim export fail ho gaya')),
+          SnackBar(content: Text(_l10n.videoTrimExportFailed)),
         );
         return;
       }
@@ -3109,7 +3118,7 @@ class _MediaEditScreenState extends State<MediaEditScreen> with TickerProviderSt
           if (!mounted) return;
           setState(() => _isSaving = false);
           ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(content: Text('Boomerang bake fail ho gaya')),
+            SnackBar(content: Text(_l10n.boomerangBakeFailed)),
           );
           return;
         }
@@ -3150,7 +3159,7 @@ class _MediaEditScreenState extends State<MediaEditScreen> with TickerProviderSt
           if (!mounted) return;
           setState(() => _isSaving = false);
           ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(content: Text('Clips jodne me fail ho gaya')),
+            SnackBar(content: Text(_l10n.clipsJoinFailed)),
           );
           return;
         }
@@ -3172,7 +3181,7 @@ class _MediaEditScreenState extends State<MediaEditScreen> with TickerProviderSt
           if (!mounted) return;
           setState(() => _isSaving = false);
           ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(content: Text('FX bake fail ho gaya')),
+            SnackBar(content: Text(_l10n.fxBakeFailed)),
           );
           return;
         }
@@ -3194,7 +3203,7 @@ class _MediaEditScreenState extends State<MediaEditScreen> with TickerProviderSt
           if (!mounted) return;
           setState(() => _isSaving = false);
           ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(content: Text('Speed adjust fail ho gaya')),
+            SnackBar(content: Text(_l10n.speedAdjustFailed)),
           );
           return;
         }
@@ -3225,7 +3234,7 @@ class _MediaEditScreenState extends State<MediaEditScreen> with TickerProviderSt
           if (!mounted) return;
           setState(() => _isSaving = false);
           ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(content: Text('Music mix fail ho gaya')),
+            SnackBar(content: Text(_l10n.musicMixFailed)),
           );
           return;
         }
@@ -3262,7 +3271,7 @@ class _MediaEditScreenState extends State<MediaEditScreen> with TickerProviderSt
       if (!mounted) return;
       setState(() => _isSaving = false);
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Video trim save nahi ho paya: $e')),
+        SnackBar(content: Text(_l10n.videoTrimSaveFailed(e.toString()))),
       );
     }
   }
@@ -3392,7 +3401,7 @@ class _MediaEditScreenState extends State<MediaEditScreen> with TickerProviderSt
         if (!ReturnCode.isSuccess(code)) {
           setState(() => _isSaving = false);
           ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(content: Text('Music ke saath export fail ho gaya, bina music try karo')),
+            SnackBar(content: Text(_l10n.exportWithMusicFailedTryWithout)),
           );
           return;
         }
@@ -3406,7 +3415,7 @@ class _MediaEditScreenState extends State<MediaEditScreen> with TickerProviderSt
       if (!mounted) return;
       setState(() => _isSaving = false);
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Edit save nahi ho paya: $e')),
+        SnackBar(content: Text(_l10n.editSaveFailed(e.toString()))),
       );
     }
   }
@@ -3736,7 +3745,7 @@ class _MediaEditScreenState extends State<MediaEditScreen> with TickerProviderSt
           icon: const Icon(Icons.close_rounded),
           onPressed: _isSaving ? null : () => Navigator.pop(context),
         ),
-        title: Text(_isVideo ? 'Trim' : 'Edit', style: const TextStyle(fontWeight: FontWeight.w700)),
+        title: Text(_isVideo ? _l10n.trimSpeedLabel.split(' ').first : _l10n.editImageLabel.split(' ').first, style: const TextStyle(fontWeight: FontWeight.w700)),
         actions: [
           // Entry point into the multi-media montage flow (pick several
           // photos/videos, beat-synced music, glitch/flash/zoom/shake/
@@ -3744,7 +3753,7 @@ class _MediaEditScreenState extends State<MediaEditScreen> with TickerProviderSt
           // On success it hands back a finished .mp4, so we pop THIS
           // screen with that file, same contract as a normal Done tap.
           IconButton(
-            tooltip: 'Auto Edit',
+            tooltip: _l10n.autoEditTitle,
             icon: const Icon(Icons.auto_awesome_rounded),
             onPressed: busy ? null : _openAutoEdit,
           ),
@@ -3752,7 +3761,7 @@ class _MediaEditScreenState extends State<MediaEditScreen> with TickerProviderSt
             TextButton.icon(
               onPressed: busy ? null : _resetReframe,
               icon: const Icon(Icons.zoom_out_map_rounded, color: Colors.white, size: 18),
-              label: const Text('Reset zoom', style: TextStyle(color: Colors.white)),
+              label: Text(_l10n.resetZoomLabel, style: const TextStyle(color: Colors.white)),
             ),
           Padding(
             padding: const EdgeInsets.only(right: 12, left: 4),
@@ -3962,12 +3971,12 @@ class _MediaEditScreenState extends State<MediaEditScreen> with TickerProviderSt
                 Row(
                   mainAxisAlignment: MainAxisAlignment.center,
                   children: [
-                    _quickIconButton(Icons.swap_horiz_rounded, 'Flip horizontal', busy ? null : _flipHorizontal),
-                    _quickIconButton(Icons.swap_vert_rounded, 'Flip vertical', busy ? null : _flipVertical),
+                    _quickIconButton(Icons.swap_horiz_rounded, _l10n.flipHorizontalTooltip, busy ? null : _flipHorizontal),
+                    _quickIconButton(Icons.swap_vert_rounded, _l10n.flipVerticalTooltip, busy ? null : _flipVertical),
                     Container(width: 1, height: 20, color: Colors.white12, margin: const EdgeInsets.symmetric(horizontal: 6)),
-                    _quickIconButton(Icons.undo_rounded, 'Undo', (_undoStack.isEmpty || busy) ? null : _undo),
-                    _quickIconButton(Icons.redo_rounded, 'Redo', (_redoStack.isEmpty || busy) ? null : _redo),
-                    _quickIconButton(Icons.restore_rounded, 'Reset', (_canReset && !busy) ? _resetAdjustments : null),
+                    _quickIconButton(Icons.undo_rounded, _l10n.undoTooltip, (_undoStack.isEmpty || busy) ? null : _undo),
+                    _quickIconButton(Icons.redo_rounded, _l10n.redoTooltip, (_redoStack.isEmpty || busy) ? null : _redo),
+                    _quickIconButton(Icons.restore_rounded, _l10n.resetTooltip, (_canReset && !busy) ? _resetAdjustments : null),
                   ],
                 ),
                 // ── Tab switch ──
@@ -3977,30 +3986,30 @@ class _MediaEditScreenState extends State<MediaEditScreen> with TickerProviderSt
                   child: Row(
                     mainAxisAlignment: MainAxisAlignment.center,
                     children: [
-                      _tabButton('Filters', _EditTab.filters, Icons.photo_filter_outlined),
+                      _tabButton(_l10n.filtersTabLabel, _EditTab.filters, Icons.photo_filter_outlined),
                       const SizedBox(width: 16),
-                      _tabButton('Adjust', _EditTab.adjust, Icons.tune),
+                      _tabButton(_l10n.adjustTabLabel, _EditTab.adjust, Icons.tune),
                       const SizedBox(width: 16),
-                      _tabButton('Text', _EditTab.text, Icons.text_fields),
+                      _tabButton(_l10n.textTabLabel, _EditTab.text, Icons.text_fields),
                       const SizedBox(width: 16),
-                      _tabButton('Draw', _EditTab.draw, Icons.brush_outlined),
+                      _tabButton(_l10n.drawTabLabel, _EditTab.draw, Icons.brush_outlined),
                       const SizedBox(width: 16),
-                      _tabButton('Stickers', _EditTab.stickers, Icons.emoji_emotions_outlined),
+                      _tabButton(_l10n.stickersTabLabel, _EditTab.stickers, Icons.emoji_emotions_outlined),
                       const SizedBox(width: 16),
-                      _tabButton('FX', _EditTab.fx, Icons.auto_awesome_outlined),
+                      _tabButton(_l10n.fxTabLabel, _EditTab.fx, Icons.auto_awesome_outlined),
                       const SizedBox(width: 16),
-                      _tabButton('Eraser', _EditTab.eraser, Icons.auto_fix_high),
+                      _tabButton(_l10n.eraserTabLabel, _EditTab.eraser, Icons.auto_fix_high),
                       const SizedBox(width: 16),
                       // 🔥 NAYA — photo posts pe bhi music laga sakte ho ab
                       // (Instagram jaisa hi); export image+audio ko chhoti
                       // mp4 me bake kar deta hai, see _onDone().
-                      _tabButton('Music', _EditTab.music, Icons.music_note_outlined),
+                      _tabButton(_l10n.musicTabLabel, _EditTab.music, Icons.music_note_outlined),
                       const SizedBox(width: 16),
                       // 🔥 NAYA — manual multi-photo/video montage: is
                       // photo ke saath aur photos/videos jodo, har ek ka
                       // crop/duration/transition set karo, see
                       // _buildPhotoClipsTab / _onDoneManualMontage.
-                      _tabButton('Add Photos', _EditTab.photoClips, Icons.add_photo_alternate_outlined),
+                      _tabButton(_l10n.addPhotosTabLabel, _EditTab.photoClips, Icons.add_photo_alternate_outlined),
                     ],
                   ),
                 ),
@@ -4349,17 +4358,17 @@ class _MediaEditScreenState extends State<MediaEditScreen> with TickerProviderSt
         elevation: 0,
         leading: IconButton(
           icon: const Icon(Icons.close_rounded),
-          tooltip: 'Remove',
+          tooltip: _l10n.removeAttachmentLabel,
           onPressed: _removeAutoEdit,
         ),
-        title: const Text('Auto Edit', style: TextStyle(fontWeight: FontWeight.w700)),
+        title: Text(_l10n.autoEditTitle, style: const TextStyle(fontWeight: FontWeight.w700)),
         actions: [
           Padding(
             padding: const EdgeInsets.only(right: 12, left: 4),
             child: ElevatedButton.icon(
               onPressed: _useAutoEditResult,
               icon: const Icon(Icons.check_rounded, size: 16),
-              label: const Text('Use This'),
+              label: Text(_l10n.useThisLabel),
               style: ElevatedButton.styleFrom(backgroundColor: _primary, foregroundColor: Colors.white),
             ),
           ),
@@ -4379,7 +4388,7 @@ class _MediaEditScreenState extends State<MediaEditScreen> with TickerProviderSt
             child: OutlinedButton.icon(
               onPressed: _removeAutoEdit,
               icon: const Icon(Icons.delete_outline_rounded),
-              label: const Text('Remove — back to editing'),
+              label: Text(_l10n.removeBackToEditing),
             ),
           ),
         ],
@@ -4439,10 +4448,10 @@ class _MediaEditScreenState extends State<MediaEditScreen> with TickerProviderSt
                   )
                 : Row(
                     mainAxisSize: MainAxisSize.min,
-                    children: const [
+                    children: [
                       Icon(Icons.check_rounded, color: Colors.white, size: 16),
                       SizedBox(width: 4),
-                      Text('Done', style: TextStyle(color: Colors.white, fontWeight: FontWeight.w800, fontSize: 13)),
+                      Text(_l10n.doneLabel, style: const TextStyle(color: Colors.white, fontWeight: FontWeight.w800, fontSize: 13)),
                     ],
                   ),
           ),
@@ -4642,12 +4651,12 @@ class _MediaEditScreenState extends State<MediaEditScreen> with TickerProviderSt
               icon: _isAutoEnhancing
                   ? const SizedBox(width: 14, height: 14, child: CircularProgressIndicator(strokeWidth: 2, color: _accent))
                   : const Icon(Icons.auto_awesome_rounded, size: 16, color: _accent),
-              label: Text(_isAutoEnhancing ? 'Analyzing…' : 'Auto-Enhance', style: const TextStyle(color: Colors.white)),
+              label: Text(_isAutoEnhancing ? _l10n.analyzingLabel : _l10n.autoEnhanceLabel, style: const TextStyle(color: Colors.white)),
             ),
           ),
-          _adjustSlider('Brightness', Icons.wb_sunny_rounded, _brightness, (v) => setState(() => _brightness = v)),
-          _adjustSlider('Contrast', Icons.contrast_rounded, _contrast, (v) => setState(() => _contrast = v)),
-          _adjustSlider('Saturation', Icons.opacity_rounded, _saturation, (v) => setState(() => _saturation = v)),
+          _adjustSlider(_l10n.brightnessLabel, Icons.wb_sunny_rounded, _brightness, (v) => setState(() => _brightness = v)),
+          _adjustSlider(_l10n.contrastLabel, Icons.contrast_rounded, _contrast, (v) => setState(() => _contrast = v)),
+          _adjustSlider(_l10n.saturationLabel, Icons.opacity_rounded, _saturation, (v) => setState(() => _saturation = v)),
           _adjustSlider('Warmth', Icons.thermostat_rounded, _warmth, (v) => setState(() => _warmth = v)),
           _adjustSlider(
             'Vignette',
@@ -4672,25 +4681,25 @@ class _MediaEditScreenState extends State<MediaEditScreen> with TickerProviderSt
           ElevatedButton.icon(
             onPressed: () => _openAddTextSheet(),
             icon: const Icon(Icons.add_rounded, size: 18),
-            label: const Text('Add Text'),
+            label: Text(_l10n.addTextLabel),
             style: ElevatedButton.styleFrom(backgroundColor: _primary, foregroundColor: Colors.white),
           ),
           if (_selectedOverlayId != null) ...[
             OutlinedButton.icon(
               onPressed: () => _openAddTextSheet(editId: _selectedOverlayId),
               icon: const Icon(Icons.edit_rounded, size: 16, color: Colors.white),
-              label: const Text('Edit', style: TextStyle(color: Colors.white)),
+              label: Text(_l10n.editLabel, style: const TextStyle(color: Colors.white)),
             ),
             OutlinedButton.icon(
               onPressed: _deleteSelectedOverlay,
               icon: const Icon(Icons.delete_outline_rounded, size: 16, color: Colors.redAccent),
-              label: const Text('Delete', style: TextStyle(color: Colors.redAccent)),
+              label: Text(_l10n.deleteLabel, style: const TextStyle(color: Colors.redAccent)),
             ),
           ] else if (_textOverlays.isEmpty)
-            const Padding(
+            Padding(
               padding: EdgeInsets.only(top: 8),
               child: Text(
-                'Tap Add Text, then drag/pinch/rotate it on the photo',
+                _l10n.tapAddTextHint,
                 textAlign: TextAlign.center,
                 style: TextStyle(color: _muted, fontSize: 12),
               ),
@@ -4737,7 +4746,7 @@ class _MediaEditScreenState extends State<MediaEditScreen> with TickerProviderSt
               IconButton(
                 onPressed: _canClearDrawing ? _clearDrawing : null,
                 icon: Icon(Icons.layers_clear_rounded, size: 20, color: _canClearDrawing ? Colors.white : _muted.withOpacity(0.35)),
-                tooltip: 'Clear drawing',
+                tooltip: _l10n.clearDrawingTooltip,
               ),
             ],
           ),
@@ -4745,9 +4754,9 @@ class _MediaEditScreenState extends State<MediaEditScreen> with TickerProviderSt
             children: [
               const Icon(Icons.brush_rounded, color: _muted, size: 18),
               const SizedBox(width: 10),
-              const SizedBox(
+              SizedBox(
                 width: 78,
-                child: Text('Brush', style: TextStyle(color: Colors.white, fontSize: 12, fontWeight: FontWeight.w600)),
+                child: Text(_l10n.brushLabel, style: const TextStyle(color: Colors.white, fontSize: 12, fontWeight: FontWeight.w600)),
               ),
               Expanded(
                 child: SliderTheme(
@@ -4784,7 +4793,7 @@ class _MediaEditScreenState extends State<MediaEditScreen> with TickerProviderSt
           ElevatedButton.icon(
             onPressed: () => _openStickerPicker(),
             icon: const Icon(Icons.emoji_emotions_outlined, size: 18),
-            label: const Text('Add Sticker'),
+            label: Text(_l10n.addStickerTitle),
             style: ElevatedButton.styleFrom(backgroundColor: _primary, foregroundColor: Colors.white),
           ),
           // Add one or more photos from the device straight onto the
@@ -4797,19 +4806,19 @@ class _MediaEditScreenState extends State<MediaEditScreen> with TickerProviderSt
             icon: _isPickingImages
                 ? const SizedBox(width: 14, height: 14, child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white))
                 : const Icon(Icons.add_photo_alternate_outlined, size: 18, color: Colors.white),
-            label: Text(_isPickingImages ? 'Loading...' : 'Add Photo', style: const TextStyle(color: Colors.white)),
+            label: Text(_isPickingImages ? _l10n.loadingEllipsis : _l10n.addPhotoLabel, style: const TextStyle(color: Colors.white)),
           ),
           if (_selectedOverlayId != null && _textOverlays.any((o) => o.id == _selectedOverlayId && o.isSticker))
             OutlinedButton.icon(
               onPressed: _deleteSelectedOverlay,
               icon: const Icon(Icons.delete_outline_rounded, size: 16, color: Colors.redAccent),
-              label: const Text('Delete', style: TextStyle(color: Colors.redAccent)),
+              label: Text(_l10n.deleteLabel, style: const TextStyle(color: Colors.redAccent)),
             )
           else if (!_textOverlays.any((o) => o.isSticker))
-            const Padding(
+            Padding(
               padding: EdgeInsets.only(top: 8),
               child: Text(
-                'Tap Add Sticker, then drag/pinch/rotate it on the photo',
+                _l10n.tapAddStickerHint,
                 textAlign: TextAlign.center,
                 style: TextStyle(color: _muted, fontSize: 12),
               ),
@@ -4829,9 +4838,9 @@ class _MediaEditScreenState extends State<MediaEditScreen> with TickerProviderSt
             children: [
               const Icon(Icons.auto_fix_high_rounded, color: _muted, size: 18),
               const SizedBox(width: 10),
-              const SizedBox(
+              SizedBox(
                 width: 78,
-                child: Text('Brush', style: TextStyle(color: Colors.white, fontSize: 12, fontWeight: FontWeight.w600)),
+                child: Text(_l10n.brushLabel, style: const TextStyle(color: Colors.white, fontSize: 12, fontWeight: FontWeight.w600)),
               ),
               Expanded(
                 child: SliderTheme(
@@ -4859,7 +4868,7 @@ class _MediaEditScreenState extends State<MediaEditScreen> with TickerProviderSt
               OutlinedButton.icon(
                 onPressed: _eraserStrokes.isNotEmpty && !_isErasing ? _clearEraserMask : null,
                 icon: const Icon(Icons.layers_clear_rounded, size: 16, color: Colors.white70),
-                label: const Text('Clear', style: TextStyle(color: Colors.white70)),
+                label: Text(_l10n.clearButton, style: const TextStyle(color: Colors.white70)),
               ),
               const SizedBox(width: 12),
               ElevatedButton.icon(
@@ -4867,16 +4876,16 @@ class _MediaEditScreenState extends State<MediaEditScreen> with TickerProviderSt
                 icon: _isErasing
                     ? const SizedBox(width: 14, height: 14, child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white))
                     : const Icon(Icons.auto_fix_high_rounded, size: 16),
-                label: Text(_isErasing ? 'Erasing…' : 'Apply'),
+                label: Text(_isErasing ? _l10n.erasingLabel : _l10n.applyLabel),
                 style: ElevatedButton.styleFrom(backgroundColor: _primary, foregroundColor: Colors.white),
               ),
             ],
           ),
           if (_eraserStrokes.isEmpty)
-            const Padding(
+            Padding(
               padding: EdgeInsets.only(top: 6),
               child: Text(
-                'Paint over a blemish/watermark, then tap Apply. Best for small spots on plain backgrounds.',
+                _l10n.eraserHint,
                 textAlign: TextAlign.center,
                 style: TextStyle(color: _muted, fontSize: 11),
               ),
@@ -4953,12 +4962,12 @@ class _MediaEditScreenState extends State<MediaEditScreen> with TickerProviderSt
           children: [
             _quickIconButton(
               Icons.rotate_left_rounded,
-              'Rotate',
+              _l10n.rotateLabel,
               _isSaving ? null : () => setState(controller.rotateLeft),
             ),
             _quickIconButton(
               Icons.rotate_right_rounded,
-              'Rotate right',
+              _l10n.rotateRightLabel,
               _isSaving ? null : () => setState(controller.rotateRight),
             ),
           ],
@@ -4970,23 +4979,23 @@ class _MediaEditScreenState extends State<MediaEditScreen> with TickerProviderSt
           child: Row(
             mainAxisAlignment: MainAxisAlignment.center,
             children: [
-              _tabButton('Trim', _EditTab.trim, Icons.content_cut),
+              _tabButton(_l10n.trimTabLabel, _EditTab.trim, Icons.content_cut),
               const SizedBox(width: 16),
-              _tabButton('Cover', _EditTab.cover, Icons.image_outlined),
+              _tabButton(_l10n.coverTabLabel, _EditTab.cover, Icons.image_outlined),
               const SizedBox(width: 16),
-              _tabButton('Speed', _EditTab.speed, Icons.speed),
+              _tabButton(_l10n.speedTabLabel, _EditTab.speed, Icons.speed),
               const SizedBox(width: 16),
-              _tabButton('Music', _EditTab.music, Icons.music_note_outlined),
+              _tabButton(_l10n.musicTabLabel, _EditTab.music, Icons.music_note_outlined),
               const SizedBox(width: 16),
-              _tabButton('FX', _EditTab.fx, Icons.auto_awesome_outlined),
+              _tabButton(_l10n.fxTabLabel, _EditTab.fx, Icons.auto_awesome_outlined),
               const SizedBox(width: 16),
-              _tabButton('Boomerang', _EditTab.boomerang, Icons.all_inclusive),
+              _tabButton(_l10n.boomerangTabLabel, _EditTab.boomerang, Icons.all_inclusive),
               const SizedBox(width: 16),
-              _tabButton('Clips', _EditTab.clips, Icons.video_library_outlined),
+              _tabButton(_l10n.clipsTabLabel, _EditTab.clips, Icons.video_library_outlined),
               const SizedBox(width: 16),
               // 🔥 NAYA — manual multi-photo/video montage, see
               // _buildPhotoClipsTab / _onDoneManualMontage.
-              _tabButton('Add Photos', _EditTab.photoClips, Icons.add_photo_alternate_outlined),
+              _tabButton(_l10n.addPhotosTabLabel, _EditTab.photoClips, Icons.add_photo_alternate_outlined),
             ],
           ),
         ),
@@ -5073,14 +5082,14 @@ class _MediaEditScreenState extends State<MediaEditScreen> with TickerProviderSt
                     child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white),
                   )
                 : const Icon(Icons.music_note_rounded, size: 18),
-            label: Text(_isPickingMusic ? 'Loading...' : 'Choose from device'),
+            label: Text(_isPickingMusic ? _l10n.loadingEllipsis : _l10n.chooseMusicFromDevice),
             style: ElevatedButton.styleFrom(backgroundColor: _primary, foregroundColor: Colors.white),
           ),
           const SizedBox(height: 10),
           Row(
-            children: const [
+            children: [
               Expanded(child: Divider(color: Colors.white24)),
-              Padding(padding: EdgeInsets.symmetric(horizontal: 8), child: Text('ya', style: TextStyle(color: Colors.white54, fontSize: 11))),
+              Padding(padding: const EdgeInsets.symmetric(horizontal: 8), child: Text(_l10n.orLabel, style: const TextStyle(color: Colors.white54, fontSize: 11))),
               Expanded(child: Divider(color: Colors.white24)),
             ],
           ),
@@ -5101,7 +5110,7 @@ class _MediaEditScreenState extends State<MediaEditScreen> with TickerProviderSt
               const SizedBox(width: 8),
               Expanded(
                 child: Text(
-                  _musicFileName ?? 'Music track',
+                  _musicFileName ?? _l10n.musicTrackLabel,
                   overflow: TextOverflow.ellipsis,
                   style: const TextStyle(color: Colors.white, fontSize: 13, fontWeight: FontWeight.w600),
                 ),
@@ -5109,7 +5118,7 @@ class _MediaEditScreenState extends State<MediaEditScreen> with TickerProviderSt
               IconButton(
                 onPressed: _removeMusic,
                 icon: const Icon(Icons.close_rounded, size: 18, color: Colors.redAccent),
-                tooltip: 'Remove music',
+                tooltip: _l10n.removeMusicTooltip,
               ),
             ],
           ),
@@ -5149,9 +5158,9 @@ class _MediaEditScreenState extends State<MediaEditScreen> with TickerProviderSt
               children: [
                 const Icon(Icons.fast_forward_rounded, color: _muted, size: 18),
                 const SizedBox(width: 10),
-                const SizedBox(
+                SizedBox(
                   width: 78,
-                  child: Text('Start from', style: TextStyle(color: Colors.white, fontSize: 12, fontWeight: FontWeight.w600)),
+                  child: Text(_l10n.startFromLabel, style: const TextStyle(color: Colors.white, fontSize: 12, fontWeight: FontWeight.w600)),
                 ),
                 Expanded(
                   child: SliderTheme(
@@ -5193,7 +5202,7 @@ class _MediaEditScreenState extends State<MediaEditScreen> with TickerProviderSt
                     size: 18,
                   ),
                   const SizedBox(width: 8),
-                  const Text('Video ki original audio bhi rakho', style: TextStyle(color: Colors.white70, fontSize: 12)),
+                  Text(_l10n.keepOriginalAudioToo, style: const TextStyle(color: Colors.white70, fontSize: 12)),
                 ],
               ),
             ),
@@ -5216,7 +5225,7 @@ class _MediaEditScreenState extends State<MediaEditScreen> with TickerProviderSt
                 controller: _freesoundQueryCtrl,
                 style: const TextStyle(color: Colors.white, fontSize: 13),
                 decoration: InputDecoration(
-                  hintText: 'Freesound par music dhundo (e.g. lofi, guitar)',
+                  hintText: _l10n.searchFreesoundHint,
                   hintStyle: const TextStyle(color: Colors.white38, fontSize: 12),
                   filled: true,
                   fillColor: Colors.white10,
@@ -5235,10 +5244,10 @@ class _MediaEditScreenState extends State<MediaEditScreen> with TickerProviderSt
             ),
           ],
         ),
-        const Padding(
+        Padding(
           padding: EdgeInsets.only(top: 4, bottom: 4),
           child: Text(
-            'Sirf copyright-free (CC0) music dikhaya jata hai',
+            _l10n.cc0OnlyNotice,
             style: TextStyle(color: Colors.white38, fontSize: 10.5),
           ),
         ),
@@ -5251,7 +5260,7 @@ class _MediaEditScreenState extends State<MediaEditScreen> with TickerProviderSt
           child: _freesoundResults.isEmpty
               ? Center(
                   child: Text(
-                    _freesoundSearching ? '' : 'Kuch search karo...',
+                    _freesoundSearching ? '' : _l10n.emptySearchPrompt,
                     style: const TextStyle(color: Colors.white38, fontSize: 12),
                   ),
                 )
@@ -5301,7 +5310,7 @@ class _MediaEditScreenState extends State<MediaEditScreen> with TickerProviderSt
                         ),
                         TextButton(
                           onPressed: () => _openFreesoundCropSheet(track),
-                          child: const Text('Use', style: TextStyle(color: _primary, fontWeight: FontWeight.w700, fontSize: 12)),
+                          child: Text(_l10n.useLabel, style: const TextStyle(color: _primary, fontWeight: FontWeight.w700, fontSize: 12)),
                         ),
                       ],
                     );
@@ -5348,7 +5357,7 @@ class _MediaEditScreenState extends State<MediaEditScreen> with TickerProviderSt
           ),
           Row(
             children: [
-              const SizedBox(width: 90, child: Text('Clip length', style: TextStyle(color: Colors.white, fontSize: 12, fontWeight: FontWeight.w600))),
+              SizedBox(width: 90, child: Text(_l10n.clipLengthLabel, style: const TextStyle(color: Colors.white, fontSize: 12, fontWeight: FontWeight.w600))),
               Expanded(
                 child: Slider(
                   value: _freesoundCropDuration,
@@ -5369,7 +5378,7 @@ class _MediaEditScreenState extends State<MediaEditScreen> with TickerProviderSt
           if (maxStart > 0)
             Row(
               children: [
-                const SizedBox(width: 90, child: Text('Start point', style: TextStyle(color: Colors.white, fontSize: 12, fontWeight: FontWeight.w600))),
+                SizedBox(width: 90, child: Text(_l10n.startPointLabel, style: const TextStyle(color: Colors.white, fontSize: 12, fontWeight: FontWeight.w600))),
                 Expanded(
                   child: Slider(
                     value: _freesoundCropStart.clamp(0, maxStart),
@@ -5390,7 +5399,7 @@ class _MediaEditScreenState extends State<MediaEditScreen> with TickerProviderSt
               style: ElevatedButton.styleFrom(backgroundColor: _primary, foregroundColor: Colors.white),
               child: _isCroppingFreesoundTrack
                   ? const SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white))
-                  : const Text('Use this sound'),
+                  : Text(_l10n.useThisSoundButton),
             ),
           ),
         ],
@@ -5421,7 +5430,7 @@ class _MediaEditScreenState extends State<MediaEditScreen> with TickerProviderSt
           ),
           const SizedBox(height: 10),
           Text(
-            _boomerangEnabled ? 'Boomerang ON — forward + reverse loop' : 'Tap to enable Boomerang',
+            _boomerangEnabled ? _l10n.boomerangOnHint : _l10n.tapToEnableBoomerang,
             style: TextStyle(
               color: _boomerangEnabled ? Colors.white : _muted,
               fontSize: 12,
@@ -5449,8 +5458,8 @@ class _MediaEditScreenState extends State<MediaEditScreen> with TickerProviderSt
               Expanded(
                 child: Text(
                   _extraClips.isEmpty
-                      ? 'Koi extra clip nahi juda \u2014 add karke ek ke baad ek jod sakte ho'
-                      : '${_extraClips.length} extra clip${_extraClips.length == 1 ? '' : 's'} joda jayega end me',
+                      ? _l10n.noExtraClipsYet
+                      : _l10n.extraClipsWillJoinEnd(_extraClips.length),
                   style: const TextStyle(color: _muted, fontSize: 12),
                 ),
               ),
@@ -5463,7 +5472,7 @@ class _MediaEditScreenState extends State<MediaEditScreen> with TickerProviderSt
                         child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white),
                       )
                     : const Icon(Icons.add_rounded, size: 16),
-                label: const Text('Add Clip'),
+                label: Text(_l10n.addClipLabel),
                 style: ElevatedButton.styleFrom(backgroundColor: _primary, foregroundColor: Colors.white),
               ),
             ],
@@ -5525,8 +5534,8 @@ class _MediaEditScreenState extends State<MediaEditScreen> with TickerProviderSt
               Expanded(
                 child: Text(
                   _manualClips.isEmpty
-                      ? 'Aur photos/videos jodo — sabko milake ek video banega'
-                      : '${_manualClips.length + 1} clips ka video banega (isi photo/video ke saath)',
+                      ? _l10n.addMorePhotosVideosHint
+                      : _l10n.clipsWillMakeVideoWith(_manualClips.length + 1),
                   style: const TextStyle(color: _muted, fontSize: 12),
                 ),
               ),
@@ -5539,7 +5548,7 @@ class _MediaEditScreenState extends State<MediaEditScreen> with TickerProviderSt
                         child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white),
                       )
                     : const Icon(Icons.add_rounded, size: 16),
-                label: const Text('Add Photos'),
+                label: Text(_l10n.addPhotosTabLabel),
                 style: ElevatedButton.styleFrom(backgroundColor: _primary, foregroundColor: Colors.white),
               ),
             ],
@@ -5668,7 +5677,7 @@ class _MediaEditScreenState extends State<MediaEditScreen> with TickerProviderSt
                   mainAxisSize: MainAxisSize.min,
                   children: [
                     const SizedBox(height: 16),
-                    const Text('Clip 1 (ye photo/video)', style: TextStyle(color: Colors.white70, fontSize: 12)),
+                    Text(_l10n.clip1ThisMediaLabel, style: const TextStyle(color: Colors.white70, fontSize: 12)),
                     const SizedBox(height: 8),
                     if (!_isVideo)
                       Row(
@@ -5686,13 +5695,13 @@ class _MediaEditScreenState extends State<MediaEditScreen> with TickerProviderSt
                         ],
                       )
                     else
-                      const Padding(
-                        padding: EdgeInsets.symmetric(vertical: 8),
-                        child: Text('Iski length wahi rahegi jo Trim tab me set hai',
-                            style: TextStyle(color: Colors.white38, fontSize: 11)),
+                      Padding(
+                        padding: const EdgeInsets.symmetric(vertical: 8),
+                        child: Text(_l10n.lengthStaysAsTrimSet,
+                            style: const TextStyle(color: Colors.white38, fontSize: 11)),
                       ),
                     const SizedBox(height: 6),
-                    const Align(alignment: Alignment.centerLeft, child: Text('Clip 2 me transition', style: TextStyle(color: Colors.white54, fontSize: 11))),
+                    Align(alignment: Alignment.centerLeft, child: Text(_l10n.clip2TransitionLabel, style: const TextStyle(color: Colors.white54, fontSize: 11))),
                     const SizedBox(height: 6),
                     SizedBox(
                       height: 70,
@@ -5717,7 +5726,7 @@ class _MediaEditScreenState extends State<MediaEditScreen> with TickerProviderSt
                                 children: [
                                   Icon(t.icon, color: Colors.white, size: 18),
                                   const SizedBox(height: 4),
-                                  Text(t.label, style: const TextStyle(color: Colors.white, fontSize: 10)),
+                                  Text(t.label(context), style: const TextStyle(color: Colors.white, fontSize: 10)),
                                 ],
                               ),
                             ),
@@ -5737,7 +5746,7 @@ class _MediaEditScreenState extends State<MediaEditScreen> with TickerProviderSt
                           Navigator.pop(ctx);
                         },
                         style: ElevatedButton.styleFrom(backgroundColor: _primary, foregroundColor: Colors.white, padding: const EdgeInsets.symmetric(vertical: 12)),
-                        child: const Text('Done'),
+                        child: Text(_l10n.doneLabel),
                       ),
                     ),
                     const SizedBox(height: 12),
@@ -5785,7 +5794,7 @@ class _MediaEditScreenState extends State<MediaEditScreen> with TickerProviderSt
                   const SizedBox(height: 12),
                   Container(width: 36, height: 4, decoration: BoxDecoration(color: Colors.white24, borderRadius: BorderRadius.circular(2))),
                   const SizedBox(height: 14),
-                  Text('Clip ${index + 2} — pinch to zoom, drag to pan',
+                  Text(_l10n.clipPinchZoomPan(index + 2),
                       style: const TextStyle(color: Colors.white70, fontSize: 12)),
                   const SizedBox(height: 10),
                   ClipRRect(
@@ -5855,7 +5864,7 @@ class _MediaEditScreenState extends State<MediaEditScreen> with TickerProviderSt
                         ],
                         if (!isLast) ...[
                           const SizedBox(height: 6),
-                          Align(alignment: Alignment.centerLeft, child: Text('Agle clip me transition', style: const TextStyle(color: Colors.white54, fontSize: 11))),
+                          Align(alignment: Alignment.centerLeft, child: Text(_l10n.nextClipTransitionLabel, style: const TextStyle(color: Colors.white54, fontSize: 11))),
                           const SizedBox(height: 6),
                           SizedBox(
                             height: 70,
@@ -5880,7 +5889,7 @@ class _MediaEditScreenState extends State<MediaEditScreen> with TickerProviderSt
                                       children: [
                                         Icon(t.icon, color: Colors.white, size: 18),
                                         const SizedBox(height: 4),
-                                        Text(t.label, style: const TextStyle(color: Colors.white, fontSize: 10)),
+                                        Text(t.label(context), style: const TextStyle(color: Colors.white, fontSize: 10)),
                                       ],
                                     ),
                                   ),
@@ -5914,7 +5923,7 @@ class _MediaEditScreenState extends State<MediaEditScreen> with TickerProviderSt
                               Navigator.pop(ctx);
                             },
                             style: ElevatedButton.styleFrom(backgroundColor: _primary, foregroundColor: Colors.white, padding: const EdgeInsets.symmetric(vertical: 12)),
-                            child: const Text('Done'),
+                            child: Text(_l10n.doneLabel),
                           ),
                         ),
                         const SizedBox(height: 12),
@@ -6089,7 +6098,7 @@ class _MediaEditScreenState extends State<MediaEditScreen> with TickerProviderSt
         mainAxisSize: MainAxisSize.min,
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          const Text('Cover frame chuno', style: TextStyle(color: _muted, fontSize: 12, fontWeight: FontWeight.w700)),
+          Text(_l10n.chooseCoverFrame, style: TextStyle(color: _muted, fontSize: 12, fontWeight: FontWeight.w700)),
           const SizedBox(height: 8),
           SizedBox(
             height: 56,
@@ -6097,7 +6106,7 @@ class _MediaEditScreenState extends State<MediaEditScreen> with TickerProviderSt
               animation: controller,
               builder: (context, _) {
                 if (!controller.thumbnailsReady) {
-                  return const Center(
+                  return Center(
                     child: SizedBox(
                       width: 18,
                       height: 18,
@@ -6106,8 +6115,8 @@ class _MediaEditScreenState extends State<MediaEditScreen> with TickerProviderSt
                   );
                 }
                 if (controller.thumbnails.isEmpty) {
-                  return const Center(
-                    child: Text('Cover preview available nahi hai', style: TextStyle(color: _muted, fontSize: 12)),
+                  return Center(
+                    child: Text(_l10n.coverPreviewUnavailable, style: TextStyle(color: _muted, fontSize: 12)),
                   );
                 }
                 final count = controller.thumbnails.length;

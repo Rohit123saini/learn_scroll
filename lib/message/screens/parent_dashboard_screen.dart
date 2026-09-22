@@ -2,8 +2,17 @@
 //
 // Read-only summary for a parent/guardian. Deliberately shows ONLY
 // attendance + assignment status per classroom — never chat content.
+//
+// 🌐 LANGUAGE FIX — all text from AppLocalizations (was hardcoded English/Hinglish).
+// 🎨 THEME FIX — the stat tiles were `surface2 @ 60%` drawn on top of a `surface2`
+// card, i.e. the same colour in light AND dark mode, so they were invisible. They
+// now use `surface` + an outline so they read as tiles in both themes.
+// 🔧 FIX — when the session is gone/revoked the old "Retry" button could never
+// succeed (the token was already cleared); it now offers "Enter a new code".
 
 import 'package:flutter/material.dart';
+import '../../l10n/app_localizations.dart';
+import '../../theme_service.dart'; // AppThemeTokens
 import '../services/parent_service.dart';
 import 'parent_code_entry_screen.dart';
 
@@ -15,19 +24,28 @@ class ParentDashboardScreen extends StatefulWidget {
 }
 
 class _ParentDashboardScreenState extends State<ParentDashboardScreen> {
-  Future<ParentDashboard>? _future;
+  late Future<ParentDashboard> _future;
 
   @override
   void initState() {
     super.initState();
-    _load();
+    _future = ParentService.instance.fetchDashboard();
   }
 
   void _load() {
     setState(() => _future = ParentService.instance.fetchDashboard());
   }
 
-  Future<void> _signOut() async {
+  Future<void> _refresh() async {
+    _load();
+    try {
+      await _future;
+    } catch (_) {
+      // the FutureBuilder below renders the error state
+    }
+  }
+
+  Future<void> _goToCodeEntry() async {
     await ParentService.instance.signOut();
     if (!mounted) return;
     Navigator.pushReplacement(
@@ -38,13 +56,17 @@ class _ParentDashboardScreenState extends State<ParentDashboardScreen> {
 
   @override
   Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
+    final l10n = AppLocalizations.of(context)!;
     return Scaffold(
-      backgroundColor: const Color(0xFF0F0F11),
       appBar: AppBar(
-        backgroundColor: const Color(0xFF0F0F11),
-        title: const Text('Parent Mode'),
+        title: Text(l10n.parentModeTitle),
         actions: [
-          IconButton(icon: const Icon(Icons.logout), onPressed: _signOut),
+          IconButton(
+            icon: const Icon(Icons.logout),
+            tooltip: l10n.parentDashSignOut,
+            onPressed: _goToCodeEntry,
+          ),
         ],
       ),
       body: FutureBuilder<ParentDashboard>(
@@ -54,18 +76,24 @@ class _ParentDashboardScreenState extends State<ParentDashboardScreen> {
             return const Center(child: CircularProgressIndicator());
           }
           if (snapshot.hasError) {
-            final message = snapshot.error is ParentModeException
-                ? (snapshot.error as ParentModeException).message
-                : 'Load nahi ho paaya.';
+            final error = snapshot.error;
+            final parentError = error is ParentModeException ? error : null;
+            final message = parentError != null
+                ? parentError.localized(l10n)
+                : l10n.parentErrDashboardLoad;
+            final needsNewCode = parentError?.needsNewCode ?? false;
             return Center(
               child: Padding(
                 padding: const EdgeInsets.all(24),
                 child: Column(
                   mainAxisAlignment: MainAxisAlignment.center,
                   children: [
-                    Text(message, style: const TextStyle(color: Colors.white70), textAlign: TextAlign.center),
+                    Text(message, style: TextStyle(color: cs.onSurfaceVariant), textAlign: TextAlign.center),
                     const SizedBox(height: 16),
-                    ElevatedButton(onPressed: _load, child: const Text('Retry')),
+                    ElevatedButton(
+                      onPressed: needsNewCode ? _goToCodeEntry : _load,
+                      child: Text(needsNewCode ? l10n.parentDashEnterNewCode : l10n.retry),
+                    ),
                   ],
                 ),
               ),
@@ -73,28 +101,32 @@ class _ParentDashboardScreenState extends State<ParentDashboardScreen> {
           }
 
           final dashboard = snapshot.data!;
-          if (dashboard.classrooms.isEmpty) {
-            return const Center(
-              child: Text('Abhi koi classroom nahi mila.', style: TextStyle(color: Colors.white70)),
-            );
-          }
-
           return RefreshIndicator(
-            onRefresh: () async => _load(),
+            onRefresh: _refresh,
             child: ListView(
+              // always scrollable so pull-to-refresh also works on the empty state
+              physics: const AlwaysScrollableScrollPhysics(),
               padding: const EdgeInsets.all(16),
               children: [
                 Text(
                   dashboard.studentName,
-                  style: const TextStyle(color: Colors.white, fontSize: 22, fontWeight: FontWeight.bold),
+                  style: TextStyle(color: cs.onSurface, fontSize: 22, fontWeight: FontWeight.bold),
                 ),
                 const SizedBox(height: 4),
-                const Text(
-                  'Attendance aur assignment status — chat content yahan kabhi nahi dikhega.',
-                  style: TextStyle(color: Colors.white38, fontSize: 12),
+                Text(
+                  l10n.parentDashSubtitle,
+                  style: TextStyle(color: cs.onSurfaceVariant, fontSize: 12),
                 ),
                 const SizedBox(height: 20),
-                ...dashboard.classrooms.map(_classroomCard),
+                if (dashboard.classrooms.isEmpty)
+                  Padding(
+                    padding: const EdgeInsets.only(top: 40),
+                    child: Center(
+                      child: Text(l10n.parentDashNoClassrooms, style: TextStyle(color: cs.onSurfaceVariant)),
+                    ),
+                  )
+                else
+                  ...dashboard.classrooms.map((c) => _classroomCard(c, l10n)),
               ],
             ),
           );
@@ -103,30 +135,32 @@ class _ParentDashboardScreenState extends State<ParentDashboardScreen> {
     );
   }
 
-  Widget _classroomCard(ParentClassroomSummary c) {
+  Widget _classroomCard(ParentClassroomSummary c, AppLocalizations l10n) {
+    final cs = Theme.of(context).colorScheme;
+    final tokens = AppThemeTokens.of(context);
     return Container(
       margin: const EdgeInsets.only(bottom: 16),
       padding: const EdgeInsets.all(16),
       decoration: BoxDecoration(
-        color: Colors.white.withOpacity(0.05),
+        color: tokens.surface2,
         borderRadius: BorderRadius.circular(16),
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Text(c.groupName, style: const TextStyle(color: Colors.white, fontSize: 17, fontWeight: FontWeight.w600)),
+          Text(c.groupName, style: TextStyle(color: cs.onSurface, fontSize: 17, fontWeight: FontWeight.w600)),
           const SizedBox(height: 14),
           Row(
             children: [
               _statTile(
                 icon: Icons.local_fire_department,
-                label: 'Current Streak',
-                value: '${c.attendance.currentStreak} days',
+                label: l10n.parentDashStreak,
+                value: l10n.parentDashStreakDays(c.attendance.currentStreak),
               ),
               const SizedBox(width: 12),
               _statTile(
                 icon: Icons.event_available,
-                label: 'Total Classes',
+                label: l10n.parentDashTotalClasses,
                 value: '${c.attendance.totalClassesAttended}',
               ),
             ],
@@ -136,14 +170,14 @@ class _ParentDashboardScreenState extends State<ParentDashboardScreen> {
             children: [
               _statTile(
                 icon: Icons.pending_actions,
-                label: 'Assignments Pending',
+                label: l10n.parentDashAssignmentsPending,
                 value: '${c.assignments.pending}',
                 highlight: c.assignments.pending > 0,
               ),
               const SizedBox(width: 12),
               _statTile(
                 icon: Icons.check_circle_outline,
-                label: 'Submitted',
+                label: l10n.parentDashSubmitted,
                 value: '${c.assignments.submitted}/${c.assignments.total}',
               ),
             ],
@@ -159,20 +193,24 @@ class _ParentDashboardScreenState extends State<ParentDashboardScreen> {
     required String value,
     bool highlight = false,
   }) {
+    final cs = Theme.of(context).colorScheme;
+    final tokens = AppThemeTokens.of(context);
     return Expanded(
       child: Container(
         padding: const EdgeInsets.all(12),
         decoration: BoxDecoration(
-          color: highlight ? Colors.orange.withOpacity(0.12) : Colors.white.withOpacity(0.03),
+          // 🎨 was `surface2.withOpacity(0.6)` on a surface2 card => invisible tile
+          color: highlight ? tokens.warning.withOpacity(0.12) : tokens.surface,
           borderRadius: BorderRadius.circular(12),
+          border: Border.all(color: highlight ? tokens.warning.withOpacity(0.4) : cs.outlineVariant),
         ),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Icon(icon, color: highlight ? Colors.orangeAccent : Colors.white54, size: 20),
+            Icon(icon, color: highlight ? tokens.warning : cs.onSurfaceVariant, size: 20),
             const SizedBox(height: 8),
-            Text(value, style: const TextStyle(color: Colors.white, fontSize: 16, fontWeight: FontWeight.bold)),
-            Text(label, style: const TextStyle(color: Colors.white38, fontSize: 11)),
+            Text(value, style: TextStyle(color: cs.onSurface, fontSize: 16, fontWeight: FontWeight.bold)),
+            Text(label, style: TextStyle(color: cs.onSurfaceVariant, fontSize: 11)),
           ],
         ),
       ),

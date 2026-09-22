@@ -70,7 +70,7 @@ class MessageApiService {
   static String get _profileBase => "${Api.baseUrl}/profile";
 
   static Future<Map<String, String>> _headers({bool json = true}) async {
-    final token = await AuthService.getToken();
+    final token = await AuthService.getValidToken();
     return {
       if (json) "Content-Type": "application/json",
       if (token != null && token.isNotEmpty) "Authorization": "Bearer $token",
@@ -118,7 +118,7 @@ class MessageApiService {
     File file, {
     void Function(double progress)? onProgress,
   }) async {
-    final token = await AuthService.getToken();
+    final token = await AuthService.getValidToken();
     final dio = Dio();
 
     final formData = FormData.fromMap({
@@ -1289,7 +1289,7 @@ class MessageApiService {
 
   static Future<ConversationModel> getOrCreateConversation(
       String targetUserId) async {
-    final token = await AuthService.getToken();
+    final token = await AuthService.getValidToken();
     final url = Uri.parse("${Api.baseUrl}/message/conversations/start_private/");
 
     final response = await http.post(

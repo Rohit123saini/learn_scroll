@@ -1,5 +1,9 @@
 // message/screens/chat_screen.dart
 //
+// 🌐 LANGUAGE + 🎨 THEME PASS: every user-visible string now comes from AppLocalizations
+// (lib/l10n/app_en.arb / app_hi.arb, keys `chat*`), and the input bar / banners / dialogs /
+// date chips use the theme (ColorScheme + AppThemeTokens) so light and dark mode both work.
+//
 // Tere pubspec.yaml me ye sab already maujood hain:
 // image_picker -> photo/video pick
 // file_selector -> audio/any-file pick
@@ -46,13 +50,32 @@ import '../../home.dart'; // 🔥 NAYA — apni khud ki profile pe tap karne par
 import 'call_screen.dart';
 import 'incoming_call_screen.dart'; // 🔥 NAYA — full-screen incoming call UI (outgoing call jaisa look)
 import 'study_room_screen.dart';
+import '../models/study_room_models.dart'; // 🔧 FIX — UserProfileWindowModel chahiye initialParticipants banane ke liye
 import 'forward_message_screen.dart'; // NEW — pick chat(s) to forward selected message(s) to
 import 'group_profile_screen.dart'; // 🔥 NAYA — Group info screen (public/private, members, admin roles, invite link)
 import 'media_viewer_screen.dart'; // 🔥 NAYA — fullscreen swipeable image viewer (zoom + auto-hide thumbnail strip)
 import '../../widgets/sticker_picker_sheet.dart'; // 🔥 NAYA — apne PNG stickers ka picker (assets/stickers/), chat & comments dono me reusable
+import '../widgets/translatable_message_widgets.dart'; // 🔥 NAYA — Features 9/10 (Listen + Translate), ab actually wired
+import '../../theme_service.dart'; // 🎨 THEME FIX — AppThemeTokens
 import 'message_search_screen.dart'; // 🔥 NAYA (Phase 4, §2.1) — in-chat message search
 import 'message_info_screen.dart'; // 🔥 NAYA — "Seen by" / message-info (long-press → Info)
 import '../widgets/mention_suggestions_overlay.dart'; // 🔥 NAYA (Phase 3, §2.2) — @mention autocomplete
+import '../../l10n/app_localizations.dart'; // 🌐 LANGUAGE FIX — chat text now comes from the ARB files (en/hi)
+import 'package:intl/intl.dart' show DateFormat; // localized date labels (`show` avoids intl's TextDirection clash)
+
+/// 🌐 LANGUAGE — gives every State in this file a `_l10n` getter.
+/// The last-resolved [AppLocalizations] is cached, so strings can still be looked up
+/// safely after an `await` when the State may already be unmounted (no
+/// "deactivated widget's ancestor" crash), while a language switch is still picked up
+/// on the next access while mounted.
+mixin _L10nCache<T extends StatefulWidget> on State<T> {
+  AppLocalizations? _l10nCache;
+
+  AppLocalizations get _l10n {
+    if (mounted) _l10nCache = AppLocalizations.of(context)!;
+    return _l10nCache!;
+  }
+}
 
 const _kEmojis = ['👍', '❤', '😂', '😮', '😢', '🙏'];
 
@@ -110,9 +133,12 @@ class _LinkifiedText extends StatelessWidget {
       spans.add(TextSpan(
         text: linkText,
         style: TextStyle(
-          // Sent (dark) bubble pe halka light-blue, received (white)
-          // bubble pe standard link-blue — dono jagah readable rahega.
-          color: color == Colors.white ? const Color(0xFFB3E5FC) : const Color(0xFF039BE5),
+          // 🎨 THEME FIX — was `color == Colors.white ? … : …`, which only held in
+          // light mode. Sent bubble (text == onPrimary): light-blue in light mode, ink
+          // in dark mode (bubble is light violet there). Received bubble: theme info blue.
+          color: color == Theme.of(context).colorScheme.onPrimary
+              ? (Theme.of(context).brightness == Brightness.light ? const Color(0xFFB3E5FC) : color)
+              : AppThemeTokens.of(context).info,
           decoration: TextDecoration.underline,
         ),
         recognizer: TapGestureRecognizer()..onTap = () => _openLink(linkText),
@@ -155,16 +181,17 @@ class _LinkPreviewCard extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final onDark = textColor == Colors.white;
+    final cs = Theme.of(context).colorScheme;
+    final onSent = textColor == cs.onPrimary; // sent bubble (was `== Colors.white`, light-mode only)
     final hasImage = preview.image != null && preview.image!.isNotEmpty;
     return GestureDetector(
       onTap: _open,
       child: Container(
         constraints: const BoxConstraints(maxWidth: 240),
         decoration: BoxDecoration(
-          color: onDark ? Colors.white.withOpacity(0.08) : const Color(0xFFF3F5FA),
+          color: onSent ? textColor.withOpacity(0.10) : AppThemeTokens.of(context).surface2,
           borderRadius: BorderRadius.circular(8),
-          border: Border.all(color: onDark ? Colors.white24 : Colors.black12),
+          border: Border.all(color: onSent ? textColor.withOpacity(0.24) : cs.outlineVariant),
         ),
         clipBehavior: Clip.antiAlias,
         child: Column(
@@ -273,7 +300,7 @@ class ChatScreen extends StatefulWidget {
   State<ChatScreen> createState() => _ChatScreenState();
 }
 
-class _ChatScreenState extends State<ChatScreen> {
+class _ChatScreenState extends State<ChatScreen> with _L10nCache<ChatScreen> {
   final ChatSocketService _socket = ChatSocketService();
   final TextEditingController _textController = TextEditingController();
   final ScrollController _scrollController = ScrollController();
@@ -484,7 +511,7 @@ class _ChatScreenState extends State<ChatScreen> {
     }
     if (mounted) {
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text("Us message tak scroll nahi ho paya (bahut purana ho sakta hai)")),
+        SnackBar(content: Text(_l10n.chatScrollToMessageFailed)),
       );
     }
   }
@@ -558,26 +585,26 @@ class _ChatScreenState extends State<ChatScreen> {
       onTap: _showPinnedMessagesSheet,
       child: Container(
         width: double.infinity,
-        color: const Color(0xFFFFF6D9),
+        color: AppThemeTokens.of(context).warning.withOpacity(0.15),
         padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
         child: Row(children: [
-          const Icon(Icons.push_pin, size: 16, color: Color(0xFF8A6D00)),
+          Icon(Icons.push_pin, size: 16, color: AppThemeTokens.of(context).warning),
           const SizedBox(width: 8),
           Expanded(
             child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
               Text(
-                _pinnedMessages.length == 1 ? "Pinned message" : "${_pinnedMessages.length} pinned messages",
-                style: const TextStyle(color: Color(0xFF8A6D00), fontSize: 11, fontWeight: FontWeight.bold),
+                _l10n.chatPinnedBanner(_pinnedMessages.length),
+                style: TextStyle(color: AppThemeTokens.of(context).warning, fontSize: 11, fontWeight: FontWeight.bold),
               ),
               Text(
-                latest.message.text?.isNotEmpty == true ? latest.message.text! : "📎 Attachment",
+                latest.message.text?.isNotEmpty == true ? latest.message.text! : _l10n.chatAttachment,
                 maxLines: 1,
                 overflow: TextOverflow.ellipsis,
-                style: const TextStyle(color: Colors.black87, fontSize: 12.5),
+                style: TextStyle(color: Theme.of(context).colorScheme.onSurface, fontSize: 12.5),
               ),
             ]),
           ),
-          const Icon(Icons.chevron_right, size: 18, color: Color(0xFF8A6D00)),
+          Icon(Icons.chevron_right, size: 18, color: AppThemeTokens.of(context).warning),
         ]),
       ),
     );
@@ -586,25 +613,25 @@ class _ChatScreenState extends State<ChatScreen> {
   void _showPinnedMessagesSheet() {
     showModalBottomSheet(
       context: context,
-      backgroundColor: Colors.white,
+      backgroundColor: Theme.of(context).colorScheme.surface,
       shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(18))),
       builder: (sheetCtx) => StatefulBuilder(builder: (sheetCtx, setSheetState) {
         return SafeArea(
           child: Column(mainAxisSize: MainAxisSize.min, children: [
-            const Padding(
+            Padding(
               padding: EdgeInsets.all(14),
-              child: Text("Pinned messages", style: TextStyle(fontWeight: FontWeight.bold, fontSize: 15)),
+              child: Text(_l10n.chatPinnedMessagesTitle, style: TextStyle(fontWeight: FontWeight.bold, fontSize: 15)),
             ),
             if (_pinnedMessages.isEmpty)
-              const Padding(padding: EdgeInsets.all(20), child: Text("Koi pinned message nahi hai")),
+              Padding(padding: EdgeInsets.all(20), child: Text(_l10n.chatNoPinned)),
             ..._pinnedMessages.map((p) => ListTile(
                   leading: const Icon(Icons.push_pin_outlined),
                   title: Text(
-                    p.message.text?.isNotEmpty == true ? p.message.text! : "📎 Attachment",
+                    p.message.text?.isNotEmpty == true ? p.message.text! : _l10n.chatAttachment,
                     maxLines: 2,
                     overflow: TextOverflow.ellipsis,
                   ),
-                  subtitle: Text("Pinned by ${p.pinnedBy.displayName}"),
+                  subtitle: Text(_l10n.chatPinnedBy(p.pinnedBy.displayName)),
                   trailing: IconButton(
                     icon: const Icon(Icons.close, size: 18),
                     onPressed: () async {
@@ -657,7 +684,7 @@ class _ChatScreenState extends State<ChatScreen> {
       if (!mounted) return;
       setState(() => _wallpaperUploading = false);
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text("Wallpaper set nahi ho paaya: $e")),
+        SnackBar(content: Text(_l10n.chatWallpaperSetFailed(e.toString()))),
       );
     }
   }
@@ -668,11 +695,11 @@ class _ChatScreenState extends State<ChatScreen> {
     final confirmed = await showDialog<bool>(
       context: context,
       builder: (_) => AlertDialog(
-        title: const Text("Remove wallpaper?"),
-        content: const Text("Ye chat wapas default background pe chali jaayegi."),
+        title: Text(_l10n.chatWallpaperRemoveTitle),
+        content: Text(_l10n.chatWallpaperRemoveBody),
         actions: [
-          TextButton(onPressed: () => Navigator.pop(context, false), child: const Text("Cancel")),
-          TextButton(onPressed: () => Navigator.pop(context, true), child: const Text("Remove")),
+          TextButton(onPressed: () => Navigator.pop(context, false), child: Text(_l10n.cancel)),
+          TextButton(onPressed: () => Navigator.pop(context, true), child: Text(_l10n.chatRemove)),
         ],
       ),
     );
@@ -687,7 +714,7 @@ class _ChatScreenState extends State<ChatScreen> {
       if (!mounted) return;
       setState(() => _wallpaperUrl = previousUrl);
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text("Wallpaper remove nahi ho paaya: $e")),
+        SnackBar(content: Text(_l10n.chatWallpaperRemoveFailed(e.toString()))),
       );
     }
   }
@@ -697,13 +724,13 @@ class _ChatScreenState extends State<ChatScreen> {
   void _showWallpaperSheet() {
     showModalBottomSheet(
       context: context,
-      backgroundColor: Colors.white,
+      backgroundColor: Theme.of(context).colorScheme.surface,
       shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(18))),
       builder: (_) => SafeArea(
         child: Wrap(children: [
           ListTile(
             leading: const Icon(Icons.wallpaper),
-            title: Text(_wallpaperUrl != null ? "Change wallpaper" : "Set wallpaper"),
+            title: Text(_wallpaperUrl != null ? _l10n.chatChangeWallpaper : _l10n.chatSetWallpaper),
             enabled: !_wallpaperUploading,
             onTap: () {
               Navigator.pop(context);
@@ -713,7 +740,7 @@ class _ChatScreenState extends State<ChatScreen> {
           if (_wallpaperUrl != null)
             ListTile(
               leading: const Icon(Icons.image_not_supported_outlined),
-              title: const Text("Remove wallpaper"),
+              title: Text(_l10n.chatRemoveWallpaper),
               onTap: () {
                 Navigator.pop(context);
                 _removeChatWallpaper();
@@ -747,11 +774,11 @@ class _ChatScreenState extends State<ChatScreen> {
 
   String _filterLabel(String value) {
     switch (value) {
-      case 'text': return "Text";
-      case 'media': return "Media";
-      case 'docs': return "Docs";
-      case 'links': return "Links";
-      default: return "All";
+      case 'text': return _l10n.chatFilterText;
+      case 'media': return _l10n.chatFilterMedia;
+      case 'docs': return _l10n.chatFilterDocs;
+      case 'links': return _l10n.chatFilterLinks;
+      default: return _l10n.filterAll;
     }
   }
 
@@ -760,25 +787,25 @@ class _ChatScreenState extends State<ChatScreen> {
   void _showFilterSheet() {
     showModalBottomSheet(
       context: context,
-      backgroundColor: Colors.white,
+      backgroundColor: Theme.of(context).colorScheme.surface,
       shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(18))),
       builder: (_) => SafeArea(
         child: Column(mainAxisSize: MainAxisSize.min, children: [
-          const Padding(
+          Padding(
             padding: EdgeInsets.fromLTRB(16, 14, 16, 4),
-            child: Align(alignment: Alignment.centerLeft, child: Text("Filter messages", style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16))),
+            child: Align(alignment: Alignment.centerLeft, child: Text(_l10n.chatFilterTitle, style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16))),
           ),
-          for (final entry in const [
-            {'value': 'all', 'label': 'All messages', 'icon': Icons.forum_outlined},
-            {'value': 'text', 'label': 'Text', 'icon': Icons.short_text},
-            {'value': 'media', 'label': 'Image / Video', 'icon': Icons.perm_media_outlined},
-            {'value': 'docs', 'label': 'Docs / Files', 'icon': Icons.insert_drive_file_outlined},
-            {'value': 'links', 'label': 'URL / Links', 'icon': Icons.link},
+          for (final entry in [
+            {'value': 'all', 'label': _l10n.chatFilterAllMessages, 'icon': Icons.forum_outlined},
+            {'value': 'text', 'label': _l10n.chatFilterText, 'icon': Icons.short_text},
+            {'value': 'media', 'label': _l10n.chatFilterImageVideo, 'icon': Icons.perm_media_outlined},
+            {'value': 'docs', 'label': _l10n.chatFilterDocsFiles, 'icon': Icons.insert_drive_file_outlined},
+            {'value': 'links', 'label': _l10n.chatFilterUrlLinks, 'icon': Icons.link},
           ])
             ListTile(
-              leading: Icon(entry['icon'] as IconData, color: _chatFilter == entry['value'] ? const Color(0xFF3D7EFF) : Colors.black87),
-              title: Text(entry['label'] as String, style: TextStyle(color: _chatFilter == entry['value'] ? const Color(0xFF3D7EFF) : Colors.black87, fontWeight: _chatFilter == entry['value'] ? FontWeight.bold : FontWeight.normal)),
-              trailing: _chatFilter == entry['value'] ? const Icon(Icons.check, color: Color(0xFF3D7EFF)) : null,
+              leading: Icon(entry['icon'] as IconData, color: _chatFilter == entry['value'] ? Theme.of(context).colorScheme.primary : Theme.of(context).colorScheme.onSurface),
+              title: Text(entry['label'] as String, style: TextStyle(color: _chatFilter == entry['value'] ? Theme.of(context).colorScheme.primary : Theme.of(context).colorScheme.onSurface, fontWeight: _chatFilter == entry['value'] ? FontWeight.bold : FontWeight.normal)),
+              trailing: _chatFilter == entry['value'] ? Icon(Icons.check, color: Theme.of(context).colorScheme.primary) : null,
               onTap: () {
                 Navigator.pop(context);
                 setState(() => _chatFilter = entry['value'] as String);
@@ -970,14 +997,14 @@ class _ChatScreenState extends State<ChatScreen> {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(SnackBar(
           content:
-              Text(newValue ? "Notifications muted" : "Notifications unmuted"),
+              Text(newValue ? _l10n.chatNotificationsMuted : _l10n.chatNotificationsUnmuted),
         ));
       }
     } catch (e) {
       if (mounted) setState(() => _isMuted = !newValue); // revert
       if (mounted) {
         ScaffoldMessenger.of(context)
-            .showSnackBar(SnackBar(content: Text("Failed to update: $e")));
+            .showSnackBar(SnackBar(content: Text(_l10n.chatUpdateFailed(e.toString()))));
       }
     }
   }
@@ -1004,19 +1031,19 @@ class _ChatScreenState extends State<ChatScreen> {
     if (otherId == null || otherId.isEmpty) return;
 
     if (!_isBlocked) {
-      final otherName = widget.conversation.otherParticipant?.displayName ?? 'this user';
+      final otherName = widget.conversation.otherParticipant?.displayName ?? _l10n.chatThisUser;
       final confirmed = await showDialog<bool>(
         context: context,
         builder: (ctx) => AlertDialog(
           shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
-          title: const Text("Block user?"),
+          title: Text(_l10n.chatBlockTitle),
           content: Text(
-              "$otherName won't be able to call or message you, and you won't see their messages either."),
+              _l10n.chatBlockBody(otherName)),
           actions: [
-            TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text("Cancel")),
+            TextButton(onPressed: () => Navigator.pop(ctx, false), child: Text(_l10n.cancel)),
             TextButton(
               onPressed: () => Navigator.pop(ctx, true),
-              child: const Text("Block", style: TextStyle(color: Colors.red)),
+              child: Text(_l10n.chatBlock, style: TextStyle(color: Colors.red)),
             ),
           ],
         ),
@@ -1027,10 +1054,10 @@ class _ChatScreenState extends State<ChatScreen> {
         await MessageApiService.blockUser(otherId);
         if (!mounted) return;
         setState(() => _isBlocked = true);
-        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("User blocked.")));
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(_l10n.chatUserBlocked)));
       } catch (e) {
         if (mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text("Block failed: $e")));
+          ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(_l10n.chatBlockFailed(e.toString()))));
         }
       }
     } else {
@@ -1038,10 +1065,10 @@ class _ChatScreenState extends State<ChatScreen> {
         await MessageApiService.unblockUser(otherId);
         if (!mounted) return;
         setState(() => _isBlocked = false);
-        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("User unblocked.")));
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(_l10n.chatUserUnblocked)));
       } catch (e) {
         if (mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text("Unblock failed: $e")));
+          ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(_l10n.chatUnblockFailed(e.toString()))));
         }
       }
     }
@@ -1059,11 +1086,11 @@ class _ChatScreenState extends State<ChatScreen> {
 
   String _disappearingLabel(String value) {
     switch (value) {
-      case '1_month': return "1 Month";
-      case '6_months': return "6 Months";
-      case '1_year': return "1 Year";
+      case '1_month': return _l10n.chatDisappear1Month;
+      case '6_months': return _l10n.chatDisappear6Months;
+      case '1_year': return _l10n.chatDisappear1Year;
       case 'none':
-      default: return "Off";
+      default: return _l10n.chatDisappearingOff;
     }
   }
 
@@ -1079,15 +1106,15 @@ class _ChatScreenState extends State<ChatScreen> {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(SnackBar(
           content: Text(duration == 'none'
-              ? "Disappearing messages turned off"
-              : "New messages will disappear after ${_disappearingLabel(duration)}"),
+              ? _l10n.chatDisappearingTurnedOff
+              : _l10n.chatDisappearingNewMessages(_disappearingLabel(duration))),
         ));
       }
     } catch (e) {
       if (mounted) setState(() => _disappearingDuration = previous); // revert
       if (mounted) {
         ScaffoldMessenger.of(context)
-            .showSnackBar(SnackBar(content: Text("Failed to update: $e")));
+            .showSnackBar(SnackBar(content: Text(_l10n.chatUpdateFailed(e.toString()))));
       }
     }
   }
@@ -1097,43 +1124,43 @@ class _ChatScreenState extends State<ChatScreen> {
   void _showDisappearingMessagesSheet() {
     showModalBottomSheet(
       context: context,
-      backgroundColor: Colors.white,
+      backgroundColor: Theme.of(context).colorScheme.surface,
       shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(18))),
       builder: (_) => SafeArea(
         child: Column(mainAxisSize: MainAxisSize.min, children: [
-          const Padding(
+          Padding(
             padding: EdgeInsets.fromLTRB(16, 14, 16, 4),
-            child: Align(alignment: Alignment.centerLeft, child: Text("Disappearing messages", style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16))),
+            child: Align(alignment: Alignment.centerLeft, child: Text(_l10n.chatDisappearingTitle, style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16))),
           ),
-          const Padding(
+          Padding(
             padding: EdgeInsets.fromLTRB(16, 0, 16, 8),
             child: Align(
               alignment: Alignment.centerLeft,
               child: Text(
-                "Naye messages chune gaye time ke baad chat se apne aap gayab ho jaayenge.",
-                style: TextStyle(fontSize: 12.5, color: Colors.black54),
+                _l10n.chatDisappearingSubtitle,
+                style: TextStyle(fontSize: 12.5, color: Theme.of(context).colorScheme.onSurfaceVariant),
               ),
             ),
           ),
-          for (final entry in const [
-            {'value': 'none', 'label': 'Off'},
-            {'value': '1_month', 'label': '1 Month'},
-            {'value': '6_months', 'label': '6 Months'},
-            {'value': '1_year', 'label': '1 Year'},
+          for (final entry in [
+            {'value': 'none', 'label': _l10n.chatDisappearingOff},
+            {'value': '1_month', 'label': _l10n.chatDisappear1Month},
+            {'value': '6_months', 'label': _l10n.chatDisappear6Months},
+            {'value': '1_year', 'label': _l10n.chatDisappear1Year},
           ])
             ListTile(
               leading: Icon(
                 entry['value'] == 'none' ? Icons.timer_off_outlined : Icons.timer_outlined,
-                color: _disappearingDuration == entry['value'] ? const Color(0xFF3D7EFF) : Colors.black87,
+                color: _disappearingDuration == entry['value'] ? Theme.of(context).colorScheme.primary : Theme.of(context).colorScheme.onSurface,
               ),
               title: Text(
                 entry['label']!,
                 style: TextStyle(
-                  color: _disappearingDuration == entry['value'] ? const Color(0xFF3D7EFF) : Colors.black87,
+                  color: _disappearingDuration == entry['value'] ? Theme.of(context).colorScheme.primary : Theme.of(context).colorScheme.onSurface,
                   fontWeight: _disappearingDuration == entry['value'] ? FontWeight.bold : FontWeight.normal,
                 ),
               ),
-              trailing: _disappearingDuration == entry['value'] ? const Icon(Icons.check, color: Color(0xFF3D7EFF)) : null,
+              trailing: _disappearingDuration == entry['value'] ? Icon(Icons.check, color: Theme.of(context).colorScheme.primary) : null,
               onTap: () {
                 Navigator.pop(context);
                 _setDisappearingDuration(entry['value']!);
@@ -1161,7 +1188,7 @@ class _ChatScreenState extends State<ChatScreen> {
     showModalBottomSheet(
       context: context,
       isScrollControlled: true,
-      backgroundColor: Colors.white,
+      backgroundColor: Theme.of(context).colorScheme.surface,
       shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(18))),
       builder: (sheetCtx) => StatefulBuilder(
         builder: (sheetCtx, setSheetState) => Padding(
@@ -1169,43 +1196,43 @@ class _ChatScreenState extends State<ChatScreen> {
           child: SafeArea(
             child: SingleChildScrollView(
               child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children: [
-                const Padding(
+                Padding(
                   padding: EdgeInsets.fromLTRB(16, 14, 16, 4),
-                  child: Text("Message permissions", style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
+                  child: Text(_l10n.chatPermissionsTitle, style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
                 ),
-                const Padding(
+                Padding(
                   padding: EdgeInsets.fromLTRB(16, 0, 16, 8),
                   child: Text(
-                    "Decide kaun is group me message bhej sakta hai.",
-                    style: TextStyle(fontSize: 12.5, color: Colors.black54),
+                    _l10n.chatPermissionsSubtitle,
+                    style: TextStyle(fontSize: 12.5, color: Theme.of(sheetCtx).colorScheme.onSurfaceVariant),
                   ),
                 ),
                 RadioListTile<String>(
                   value: 'everyone',
                   groupValue: selectedPermission,
-                  activeColor: const Color(0xFF3D7EFF),
-                  title: const Text("Everyone"),
-                  subtitle: const Text("Sabhi members chat kar sakte hain", style: TextStyle(fontSize: 12)),
+                  activeColor: Theme.of(sheetCtx).colorScheme.primary,
+                  title: Text(_l10n.chatPermEveryone),
+                  subtitle: Text(_l10n.chatPermEveryoneSub, style: TextStyle(fontSize: 12)),
                   onChanged: (v) => setSheetState(() => selectedPermission = v!),
                 ),
                 RadioListTile<String>(
                   value: 'admins_mods',
                   groupValue: selectedPermission,
-                  activeColor: const Color(0xFF3D7EFF),
-                  title: const Text("Only admins & moderators"),
-                  subtitle: const Text("Baki sab sirf padh sakte hain, message nahi bhej sakte", style: TextStyle(fontSize: 12)),
+                  activeColor: Theme.of(sheetCtx).colorScheme.primary,
+                  title: Text(_l10n.chatPermAdminsOnly),
+                  subtitle: Text(_l10n.chatPermAdminsOnlySub, style: TextStyle(fontSize: 12)),
                   onChanged: (v) => setSheetState(() => selectedPermission = v!),
                 ),
                 const Divider(height: 24),
                 Padding(
                   padding: const EdgeInsets.symmetric(horizontal: 16),
-                  child: Text("Daily message limit (members)", style: TextStyle(fontWeight: FontWeight.w600, fontSize: 13.5, color: Colors.grey[800])),
+                  child: Text(_l10n.chatDailyLimitTitle, style: TextStyle(fontWeight: FontWeight.w600, fontSize: 13.5, color: Theme.of(context).colorScheme.onSurface)),
                 ),
                 Padding(
                   padding: const EdgeInsets.fromLTRB(16, 4, 16, 4),
                   child: Text(
-                    "Normal members din bhar me itne hi messages bhej payenge (admin/moderator hamesha unlimited). Khaali chodo to koi limit nahi.",
-                    style: TextStyle(fontSize: 12, color: Colors.black54),
+                    _l10n.chatDailyLimitHelp,
+                    style: TextStyle(fontSize: 12, color: Theme.of(context).colorScheme.onSurfaceVariant),
                   ),
                 ),
                 Padding(
@@ -1214,10 +1241,10 @@ class _ChatScreenState extends State<ChatScreen> {
                     controller: limitController,
                     keyboardType: TextInputType.number,
                     decoration: InputDecoration(
-                      hintText: "e.g. 4",
+                      hintText: _l10n.chatDailyLimitHint,
                       isDense: true,
                       border: OutlineInputBorder(borderRadius: BorderRadius.circular(10)),
-                      suffixText: "msgs / day",
+                      suffixText: _l10n.chatDailyLimitSuffix,
                     ),
                   ),
                 ),
@@ -1227,14 +1254,14 @@ class _ChatScreenState extends State<ChatScreen> {
                   child: SizedBox(
                     width: double.infinity,
                     child: ElevatedButton(
-                      style: ElevatedButton.styleFrom(backgroundColor: const Color(0xFF030F27), padding: const EdgeInsets.symmetric(vertical: 13)),
+                      style: ElevatedButton.styleFrom(backgroundColor: Theme.of(context).colorScheme.primary, foregroundColor: Theme.of(context).colorScheme.onPrimary, padding: const EdgeInsets.symmetric(vertical: 13)),
                       onPressed: () {
                         final raw = limitController.text.trim();
                         final newLimit = raw.isEmpty ? null : int.tryParse(raw);
                         Navigator.pop(sheetCtx);
                         _saveAccessControl(selectedPermission, newLimit);
                       },
-                      child: const Text("Save", style: TextStyle(color: Colors.white)),
+                      child: Text(_l10n.save),
                     ),
                   ),
                 ),
@@ -1263,14 +1290,14 @@ class _ChatScreenState extends State<ChatScreen> {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(
           permission == 'admins_mods'
-              ? "Ab sirf admins & moderators hi message bhej sakte hain."
-              : "Ab sabhi members message bhej sakte hain.",
+              ? _l10n.chatPermUpdatedAdminsOnly
+              : _l10n.chatPermUpdatedEveryone,
         )));
       }
     } catch (e) {
       if (mounted) {
         setState(() { _groupMessagePermission = prevPermission; _groupDailyLimit = prevLimit; });
-        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text("Update failed: $e")));
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(_l10n.chatUpdateFailedDetail(e.toString()))));
       }
     }
   }
@@ -1286,13 +1313,13 @@ class _ChatScreenState extends State<ChatScreen> {
     final picked = await ImagePicker().pickImage(source: ImageSource.gallery, imageQuality: 85);
     if (picked == null) return;
     if (!mounted) return;
-    ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("Uploading photo...")));
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(_l10n.chatUploadingPhoto)));
     try {
       final uploaded = await MessageApiService.uploadFile(File(picked.path));
       await MessageApiService.updateGroup(groupId, {'photo_url': uploaded.fileUrl});
-      if (mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("Group photo updated ✅")));
+      if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(_l10n.chatGroupPhotoUpdated)));
     } catch (e) {
-      if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text("Photo update failed: $e")));
+      if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(_l10n.chatPhotoUpdateFailed(e.toString()))));
     }
   }
 
@@ -1319,7 +1346,7 @@ class _ChatScreenState extends State<ChatScreen> {
     showModalBottomSheet(
       context: context,
       isScrollControlled: true,
-      backgroundColor: Colors.white,
+      backgroundColor: Theme.of(context).colorScheme.surface,
       shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(18))),
       builder: (sheetCtx) => StatefulBuilder(
         builder: (sheetCtx, setSheetState) {
@@ -1340,16 +1367,16 @@ class _ChatScreenState extends State<ChatScreen> {
             expand: false,
             builder: (_, scrollCtl) => SafeArea(
               child: Column(children: [
-                const Padding(
+                Padding(
                   padding: EdgeInsets.fromLTRB(16, 14, 16, 8),
-                  child: Align(alignment: Alignment.centerLeft, child: Text("Join requests", style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16))),
+                  child: Align(alignment: Alignment.centerLeft, child: Text(_l10n.chatJoinRequestsTitle, style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16))),
                 ),
                 if (requests == null && error == null)
                   const Expanded(child: Center(child: CircularProgressIndicator()))
                 else if (error != null)
-                  Expanded(child: Center(child: Text("Failed to load: $error")))
+                  Expanded(child: Center(child: Text(_l10n.chatLoadFailed(error.toString()))))
                 else if (requests!.isEmpty)
-                  const Expanded(child: Center(child: Text("Koi pending request nahi hai", style: TextStyle(color: Colors.black54))))
+                  Expanded(child: Center(child: Text(_l10n.chatNoPendingRequests, style: TextStyle(color: Theme.of(context).colorScheme.onSurfaceVariant))))
                 else
                   Expanded(
                     child: ListView.builder(
@@ -1359,7 +1386,7 @@ class _ChatScreenState extends State<ChatScreen> {
                         final r = requests![i];
                         final user = r is Map ? (r['user'] ?? r) : {};
                         final requestId = (r is Map ? (r['id'] ?? r['request_id']) : null)?.toString() ?? '';
-                        final username = (user is Map ? (user['username'] ?? user['name']) : null)?.toString() ?? 'Unknown';
+                        final username = (user is Map ? (user['username'] ?? user['name']) : null)?.toString() ?? _l10n.chatUnknown;
                         final photoUrl = (user is Map ? user['profile_pic'] : null)?.toString();
                         return ListTile(
                           leading: CircleAvatar(
@@ -1370,27 +1397,27 @@ class _ChatScreenState extends State<ChatScreen> {
                           trailing: Row(mainAxisSize: MainAxisSize.min, children: [
                             IconButton(
                               icon: const Icon(Icons.check_circle, color: Colors.green),
-                              tooltip: "Approve",
+                              tooltip: _l10n.chatApprove,
                               onPressed: () async {
                                 try {
                                   await MessageApiService.approveJoinRequest(groupId, requestId);
                                   setSheetState(() => requests!.removeAt(i));
                                   if (mounted) setState(() => _pendingJoinRequestsCount = requests!.length);
                                 } catch (e) {
-                                  if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text("Approve failed: $e")));
+                                  if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(_l10n.chatApproveFailed(e.toString()))));
                                 }
                               },
                             ),
                             IconButton(
                               icon: const Icon(Icons.cancel, color: Colors.red),
-                              tooltip: "Reject",
+                              tooltip: _l10n.chatReject,
                               onPressed: () async {
                                 try {
                                   await MessageApiService.rejectJoinRequest(groupId, requestId);
                                   setSheetState(() => requests!.removeAt(i));
                                   if (mounted) setState(() => _pendingJoinRequestsCount = requests!.length);
                                 } catch (e) {
-                                  if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text("Reject failed: $e")));
+                                  if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(_l10n.chatRejectFailed(e.toString()))));
                                 }
                               },
                             ),
@@ -1441,14 +1468,14 @@ class _ChatScreenState extends State<ChatScreen> {
       context: context,
       builder: (ctx) => AlertDialog(
           shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
-        title: const Text("Leave group?"),
+        title: Text(_l10n.chatLeaveGroupTitle),
         content: Text(
-            "You'll no longer receive messages from \"${widget.conversation.displayTitle}\"."),
+            _l10n.chatLeaveGroupBody(widget.conversation.displayTitle)),
         actions: [
-          TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text("Cancel")),
+          TextButton(onPressed: () => Navigator.pop(ctx, false), child: Text(_l10n.cancel)),
           TextButton(
             onPressed: () => Navigator.pop(ctx, true),
-            child: const Text("Leave", style: TextStyle(color: Colors.red)),
+            child: Text(_l10n.chatLeave, style: TextStyle(color: Colors.red)),
           ),
         ],
       ),
@@ -1464,7 +1491,7 @@ class _ChatScreenState extends State<ChatScreen> {
       Navigator.of(context).pop(true);
     } catch (e) {
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text("Leave failed: $e")));
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(_l10n.chatLeaveFailed(e.toString()))));
       }
     }
   }
@@ -1482,14 +1509,14 @@ class _ChatScreenState extends State<ChatScreen> {
       context: context,
       builder: (ctx) => AlertDialog(
           shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
-        title: const Text("Delete group?"),
+        title: Text(_l10n.chatDeleteGroupTitle),
         content: Text(
-            "\"${widget.conversation.displayTitle}\" hamesha ke liye delete ho jaayega — saare members ke liye, saare messages/media ke saath. Ye undo nahi ho sakta."),
+            _l10n.chatDeleteGroupBody(widget.conversation.displayTitle)),
         actions: [
-          TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text("Cancel")),
+          TextButton(onPressed: () => Navigator.pop(ctx, false), child: Text(_l10n.cancel)),
           TextButton(
             onPressed: () => Navigator.pop(ctx, true),
-            child: const Text("Delete", style: TextStyle(color: Colors.red)),
+            child: Text(_l10n.delete, style: TextStyle(color: Colors.red)),
           ),
         ],
       ),
@@ -1505,7 +1532,7 @@ class _ChatScreenState extends State<ChatScreen> {
       Navigator.of(context).pop(true);
     } catch (e) {
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text("Delete failed: $e")));
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(_l10n.chatDeleteFailed(e.toString()))));
       }
     }
   }
@@ -1550,7 +1577,7 @@ class _ChatScreenState extends State<ChatScreen> {
         // Cache se messages already dikh rahe hon to error se use mat dabao.
         if (cached.isEmpty) {
           ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(content: Text("Failed to load messages: $e")),
+            SnackBar(content: Text(_l10n.chatLoadMessagesFailed(e.toString()))),
           );
         }
       }
@@ -1622,7 +1649,7 @@ class _ChatScreenState extends State<ChatScreen> {
         });
         if (e.statusCode != 404) {
           ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(content: Text("Failed to load older messages: $e")),
+            SnackBar(content: Text(_l10n.chatLoadOlderFailed(e.toString()))),
           );
         }
       }
@@ -1630,7 +1657,7 @@ class _ChatScreenState extends State<ChatScreen> {
       if (mounted) {
         setState(() => _isLoadingMore = false);
         ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text("Failed to load older messages: $e")),
+          SnackBar(content: Text(_l10n.chatLoadOlderFailed(e.toString()))),
         );
       }
     }
@@ -1711,8 +1738,8 @@ class _ChatScreenState extends State<ChatScreen> {
           if (event['updated_by']?.toString() != _myUserId) {
             ScaffoldMessenger.of(context).showSnackBar(SnackBar(
               content: Text(duration == 'none'
-                  ? "Disappearing messages turned off"
-                  : "Disappearing messages set to ${_disappearingLabel(duration)}"),
+                  ? _l10n.chatDisappearingTurnedOff
+                  : _l10n.chatDisappearingSetTo(_disappearingLabel(duration))),
             ));
           }
         }
@@ -1724,7 +1751,7 @@ class _ChatScreenState extends State<ChatScreen> {
       case 'group_deleted':
         if (mounted) {
           ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(content: Text("This group was deleted by the admin.")),
+            SnackBar(content: Text(_l10n.chatGroupDeletedByAdmin)),
           );
           Navigator.of(context).pop(true);
         }
@@ -1737,7 +1764,7 @@ class _ChatScreenState extends State<ChatScreen> {
       case 'error':
         if (mounted) {
           ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(content: Text(event['message']?.toString() ?? 'Error')),
+            SnackBar(content: Text(event['message']?.toString() ?? _l10n.chatGenericError)),
           );
         }
         break;
@@ -1760,7 +1787,7 @@ class _ChatScreenState extends State<ChatScreen> {
     final eventName = (event['event'] ?? event['type']).toString();
     final callId = (event['call_id'] ?? event['id'])?.toString();
     final callType = (event['call_type'] ?? event['type'] ?? 'audio').toString();
-    final callerName = (event['caller_name'] ?? 'Someone').toString();
+    final callerName = (event['caller_name'] ?? _l10n.chatSomeone).toString();
     // 🔥 NAYA — backend ab `caller_photo` bhi bhejta hai (CallInitiateView),
     // taaki incoming-call popup me caller ki asli photo dikhe, sirf
     // initials wala fallback avatar nahi.
@@ -1816,7 +1843,7 @@ class _ChatScreenState extends State<ChatScreen> {
   Future<void> _startCall(String type) async {
     try {
       // loader
-      showDialog(context: context, barrierDismissible: false, builder: (_) => const Center(child: CircularProgressIndicator(color: Color(0xFF030F27))));
+      showDialog(context: context, barrierDismissible: false, builder: (_) => const Center(child: CircularProgressIndicator()));
       final data = await CallApiService.initiateCall(widget.conversation.id, type);
       if (!mounted) return;
       Navigator.pop(context); // loader close
@@ -1845,7 +1872,7 @@ class _ChatScreenState extends State<ChatScreen> {
     } catch (e) {
       if (mounted) {
         Navigator.pop(context);
-        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text("Call failed: $e")));
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(_l10n.chatCallFailed(e.toString()))));
       }
     }
   }
@@ -1882,7 +1909,27 @@ class _ChatScreenState extends State<ChatScreen> {
         builder: (_) => StudyRoomScreen(
           conversationId: widget.conversation.id,
           currentUserId: _myUserId ?? '',
-          initialParticipants: const [], // TODO: widget.conversation se actual participants map karke UserProfileWindowModel list banao, agar group participants list available ho
+          // 🔧 FIX — pehle yahan hamesha `const []` jaata tha (TODO tha:
+          // "widget.conversation se actual participants map karke banao,
+          // agar group participants list available ho"). `ConversationModel`
+          // khud group members list carry nahi karta, lekin `_groupMembers`
+          // (mention-autocomplete ke liye already `_loadGroupMembers()` se
+          // load/cached `List<UserMini>`) exactly wahi data hai — usi se
+          // banaya, koi extra API call nahi chahiye. Windows ko ek simple
+          // horizontal cascade me place kar diya taaki overlap na ho.
+          initialParticipants: widget.conversation.isGroup
+              ? List.generate(_groupMembers.length, (i) {
+                  final m = _groupMembers[i];
+                  return UserProfileWindowModel(
+                    userId: m.id,
+                    displayName: m.displayName,
+                    avatarUrl: m.profilePhoto,
+                    position: Offset(24.0 + (i % 4) * 90, 24.0 + (i ~/ 4) * 90),
+                    size: const Size(80, 80),
+                    zIndex: i,
+                  );
+                })
+              : const [],
           // 🔥 NAYA — study room ke andar hi call button aur AppBar title ke
           // liye us user ka naam/photo chahiye jiske saath one-to-one chat
           // chal rahi hai (group ho to group ka naam/photo).
@@ -1901,9 +1948,9 @@ class _ChatScreenState extends State<ChatScreen> {
     final optimistic = MessageModel(
       id: clientId,
       conversationId: widget.conversation.id,
-      sender: UserMini(id: _myUserId ?? '', displayName: 'You'),
+      sender: UserMini(id: _myUserId ?? '', displayName: _l10n.chatYou),
       type: MessageType.studyRoom,
-      text: 'Study Room',
+      text: _l10n.chatStudyRoom,
       clientId: clientId,
       createdAt: DateTime.now(),
       isSending: true,
@@ -1911,12 +1958,12 @@ class _ChatScreenState extends State<ChatScreen> {
     setState(() => _messages.add(optimistic));
     _scrollToBottom();
     if (_isSocketConnected) {
-      _socket.sendMessage(text: 'Study Room', messageType: MessageType.studyRoom, clientId: clientId);
+      _socket.sendMessage(text: _l10n.chatStudyRoom, messageType: MessageType.studyRoom, clientId: clientId);
     } else {
       MessageApiService.sendMessageRest(
         widget.conversation.id,
         type: MessageType.studyRoom,
-        text: 'Study Room',
+        text: _l10n.chatStudyRoom,
         clientId: clientId,
       ).then((sent) {
         if (mounted) {
@@ -1987,7 +2034,7 @@ class _ChatScreenState extends State<ChatScreen> {
       final reactions = _messages[idx].reactions;
       final existingIdx = reactions.indexWhere((r) => r.user.id == userId);
       final isMe = userId == _myUserId;
-      final reactor = isMe ? UserMini(id: userId, displayName: 'You') : (existingIdx != -1 ? reactions[existingIdx].user : UserMini(id: userId, displayName: ''));
+      final reactor = isMe ? UserMini(id: userId, displayName: _l10n.chatYou) : (existingIdx != -1 ? reactions[existingIdx].user : UserMini(id: userId, displayName: ''));
       final updated = MessageReactionModel(id: existingIdx != -1 ? reactions[existingIdx].id : '$messageId-$userId', user: reactor, emoji: emoji, createdAt: DateTime.now());
       if (existingIdx != -1) reactions[existingIdx] = updated; else reactions.add(updated);
     });
@@ -2053,7 +2100,7 @@ class _ChatScreenState extends State<ChatScreen> {
     final msg = MessageModel(
       id: poll.messageId,
       conversationId: widget.conversation.id,
-      sender: UserMini(id: _myUserId ?? '', displayName: 'You'),
+      sender: UserMini(id: _myUserId ?? '', displayName: _l10n.chatYou),
       type: MessageType.poll,
       text: poll.question,
       poll: poll,
@@ -2090,7 +2137,7 @@ class _ChatScreenState extends State<ChatScreen> {
     showModalBottomSheet(
       context: context,
       isScrollControlled: true,
-      backgroundColor: Colors.white,
+      backgroundColor: Theme.of(context).colorScheme.surface,
       shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(18))),
       builder: (sheetCtx) => StatefulBuilder(builder: (sheetCtx, setSheetState) {
         return Padding(
@@ -2100,11 +2147,11 @@ class _ChatScreenState extends State<ChatScreen> {
           ),
           child: SingleChildScrollView(
             child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children: [
-              const Text("Create poll", style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
+              Text(_l10n.chatCreatePoll, style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
               const SizedBox(height: 12),
               TextField(
                 controller: questionCtrl,
-                decoration: const InputDecoration(hintText: "Question", border: OutlineInputBorder()),
+                decoration: InputDecoration(hintText: _l10n.chatPollQuestion, border: OutlineInputBorder()),
                 maxLength: 300,
               ),
               const SizedBox(height: 8),
@@ -2114,7 +2161,7 @@ class _ChatScreenState extends State<ChatScreen> {
                       Expanded(
                         child: TextField(
                           controller: optionCtrls[i],
-                          decoration: InputDecoration(hintText: "Option ${i + 1}", border: const OutlineInputBorder()),
+                          decoration: InputDecoration(hintText: _l10n.pollOptionNumber(i + 1), border: const OutlineInputBorder()),
                           maxLength: 200,
                         ),
                       ),
@@ -2129,12 +2176,12 @@ class _ChatScreenState extends State<ChatScreen> {
                 TextButton.icon(
                   onPressed: () => setSheetState(() => optionCtrls.add(TextEditingController())),
                   icon: const Icon(Icons.add),
-                  label: const Text("Add option"),
+                  label: Text(_l10n.addOptionLabel),
                 ),
               SwitchListTile(
                 contentPadding: EdgeInsets.zero,
                 value: allowsMultiple,
-                title: const Text("Allow multiple answers"),
+                title: Text(_l10n.chatAllowMultipleAnswers),
                 onChanged: (v) => setSheetState(() => allowsMultiple = v),
               ),
               // 🔧 FIX (backend mismatch) — "Anonymous voting" switch hata
@@ -2151,7 +2198,7 @@ class _ChatScreenState extends State<ChatScreen> {
                     final options = optionCtrls.map((c) => c.text.trim()).where((t) => t.isNotEmpty).toList();
                     if (question.isEmpty || options.length < 2) {
                       ScaffoldMessenger.of(sheetCtx).showSnackBar(
-                        const SnackBar(content: Text("Question aur kam se kam 2 options chahiye")),
+                        SnackBar(content: Text(_l10n.chatPollNeedsQuestionAndTwo)),
                       );
                       return;
                     }
@@ -2172,7 +2219,7 @@ class _ChatScreenState extends State<ChatScreen> {
                   },
                   child: isSubmitting
                       ? const SizedBox(width: 18, height: 18, child: CircularProgressIndicator(strokeWidth: 2))
-                      : const Text("Send poll"),
+                      : Text(_l10n.chatSendPoll),
                 ),
               ),
             ]),
@@ -2194,7 +2241,7 @@ class _ChatScreenState extends State<ChatScreen> {
     showModalBottomSheet(
       context: context,
       isScrollControlled: true,
-      backgroundColor: Colors.white,
+      backgroundColor: Theme.of(context).colorScheme.surface,
       shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(18))),
       builder: (sheetCtx) => StatefulBuilder(builder: (sheetCtx, setSheetState) {
         return Padding(
@@ -2203,12 +2250,12 @@ class _ChatScreenState extends State<ChatScreen> {
             bottom: MediaQuery.of(sheetCtx).viewInsets.bottom + 16,
           ),
           child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children: [
-            const Text("Schedule message", style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
+            Text(_l10n.chatScheduleMessageTitle, style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
             const SizedBox(height: 12),
             TextField(
               controller: textCtrl,
               minLines: 1, maxLines: 4,
-              decoration: const InputDecoration(hintText: "Message", border: OutlineInputBorder()),
+              decoration: InputDecoration(hintText: _l10n.chatMessageFieldLabel, border: OutlineInputBorder()),
             ),
             const SizedBox(height: 12),
             ListTile(
@@ -2238,7 +2285,7 @@ class _ChatScreenState extends State<ChatScreen> {
                     Navigator.pop(sheetCtx);
                     _showManageScheduledSheet();
                   },
-                  child: const Text("View scheduled"),
+                  child: Text(_l10n.chatViewScheduled),
                 ),
               ),
               const SizedBox(width: 10),
@@ -2248,7 +2295,7 @@ class _ChatScreenState extends State<ChatScreen> {
                     if (textCtrl.text.trim().isEmpty) return;
                     if (selected.isBefore(DateTime.now())) {
                       ScaffoldMessenger.of(sheetCtx).showSnackBar(
-                        const SnackBar(content: Text("Future ka time chuno")),
+                        SnackBar(content: Text(_l10n.chatPickFutureTime)),
                       );
                       return;
                     }
@@ -2262,7 +2309,7 @@ class _ChatScreenState extends State<ChatScreen> {
                       if (mounted) {
                         Navigator.pop(sheetCtx);
                         ScaffoldMessenger.of(context).showSnackBar(
-                          const SnackBar(content: Text("Message schedule ho gaya")),
+                          SnackBar(content: Text(_l10n.chatMessageScheduled)),
                         );
                       }
                     } on MessageApiException catch (e) {
@@ -2272,7 +2319,7 @@ class _ChatScreenState extends State<ChatScreen> {
                   },
                   child: isSubmitting
                       ? const SizedBox(width: 18, height: 18, child: CircularProgressIndicator(strokeWidth: 2))
-                      : const Text("Schedule"),
+                      : Text(_l10n.scheduleLabel),
                 ),
               ),
             ]),
@@ -2285,7 +2332,7 @@ class _ChatScreenState extends State<ChatScreen> {
   void _showManageScheduledSheet() {
     showModalBottomSheet(
       context: context,
-      backgroundColor: Colors.white,
+      backgroundColor: Theme.of(context).colorScheme.surface,
       shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(18))),
       builder: (sheetCtx) => FutureBuilder<List<ScheduledMessageModel>>(
         future: MessageApiService.getScheduledMessages(widget.conversation.id),
@@ -2297,12 +2344,12 @@ class _ChatScreenState extends State<ChatScreen> {
           return StatefulBuilder(builder: (sheetCtx, setSheetState) {
             return SafeArea(
               child: Column(mainAxisSize: MainAxisSize.min, children: [
-                const Padding(
+                Padding(
                   padding: EdgeInsets.all(14),
-                  child: Text("Scheduled messages", style: TextStyle(fontWeight: FontWeight.bold, fontSize: 15)),
+                  child: Text(_l10n.chatScheduledMessagesTitle, style: TextStyle(fontWeight: FontWeight.bold, fontSize: 15)),
                 ),
                 if (items.isEmpty)
-                  const Padding(padding: EdgeInsets.all(20), child: Text("Koi scheduled message nahi hai")),
+                  Padding(padding: EdgeInsets.all(20), child: Text(_l10n.chatNoScheduled)),
                 ...items.map((s) => ListTile(
                       leading: const Icon(Icons.schedule_send_outlined),
                       title: Text(s.text ?? '', maxLines: 2, overflow: TextOverflow.ellipsis),
@@ -2374,9 +2421,9 @@ class _ChatScreenState extends State<ChatScreen> {
 
   String? _presenceSubtitle() {
     if (widget.conversation.isGroup) return null;
-    if (_otherTyping) return 'typing...';
-    if (_otherOnline) return 'online';
-    if (_otherLastSeen != null) return 'last seen ${_formatLastSeen(_otherLastSeen!)}';
+    if (_otherTyping) return _l10n.chatTyping;
+    if (_otherOnline) return _l10n.chatOnline;
+    if (_otherLastSeen != null) return _l10n.chatLastSeen(_formatLastSeen(_otherLastSeen!));
     return null;
   }
 
@@ -2387,9 +2434,9 @@ class _ChatScreenState extends State<ChatScreen> {
     final yesterday = now.subtract(const Duration(days: 1));
     final isYesterday = yesterday.year == local.year && yesterday.month == local.month && yesterday.day == local.day;
     final time = "${local.hour.toString().padLeft(2, '0')}:${local.minute.toString().padLeft(2, '0')}";
-    if (isToday) return "today at $time";
-    if (isYesterday) return "yesterday at $time";
-    return "on ${local.day}/${local.month}/${local.year}";
+    if (isToday) return _l10n.chatLastSeenToday(time);
+    if (isYesterday) return _l10n.chatLastSeenYesterday(time);
+    return _l10n.chatLastSeenOn("${local.day}/${local.month}/${local.year}");
   }
 
   // 🔥 NAYA — reply-compose mode
@@ -2421,7 +2468,7 @@ class _ChatScreenState extends State<ChatScreen> {
     if (text.isEmpty) return;
     final clientId = _newClientId();
     final replyToId = _replyingTo?.id; // 🔥 NAYA
-    final optimistic = MessageModel(id: clientId, conversationId: widget.conversation.id, sender: UserMini(id: _myUserId ?? '', displayName: 'You'), type: MessageType.text, text: text, replyTo: replyToId, clientId: clientId, createdAt: DateTime.now(), isSending: true);
+    final optimistic = MessageModel(id: clientId, conversationId: widget.conversation.id, sender: UserMini(id: _myUserId ?? '', displayName: _l10n.chatYou), type: MessageType.text, text: text, replyTo: replyToId, clientId: clientId, createdAt: DateTime.now(), isSending: true);
     setState(() {
       _messages.add(optimistic);
       _textController.clear();
@@ -2482,11 +2529,11 @@ class _ChatScreenState extends State<ChatScreen> {
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
         icon: Icon(
           isLimitBlock ? Icons.hourglass_bottom : (isRemoved ? Icons.person_off_outlined : Icons.lock_outline),
-          color: const Color(0xFF3D7EFF),
+          color: Theme.of(context).colorScheme.primary,
         ),
-        title: Text(isLimitBlock ? "Daily limit khatam" : (isRemoved ? "Ab member nahi hain" : "Message allowed nahi")),
+        title: Text(isLimitBlock ? _l10n.chatDailyLimitReached : (isRemoved ? _l10n.chatNoLongerMember : _l10n.chatMessageNotAllowed)),
         content: Text(e.message),
-        actions: [TextButton(onPressed: () => Navigator.pop(context), child: const Text("OK"))],
+        actions: [TextButton(onPressed: () => Navigator.pop(context), child: Text(_l10n.ok))],
       ),
     );
     // 🔥 NAYA — agar admin ne beech me hi hata diya (`not_a_member`), to
@@ -2540,7 +2587,7 @@ class _ChatScreenState extends State<ChatScreen> {
   Future<void> _uploadAndSendFile(File file, String messageType, String fileName, {Map<String, dynamic>? extraMeta, String? text}) async {
     final path = file.path;
     final clientId = _newClientId();
-    final optimistic = MessageModel(id: clientId, conversationId: widget.conversation.id, sender: UserMini(id: _myUserId ?? '', displayName: 'You'), type: messageType, text: text ?? '', meta: {'file_name': fileName, ...?extraMeta}, clientId: clientId, createdAt: DateTime.now(), isSending: true, uploadProgress: 0.0, localFilePath: path);
+    final optimistic = MessageModel(id: clientId, conversationId: widget.conversation.id, sender: UserMini(id: _myUserId ?? '', displayName: _l10n.chatYou), type: messageType, text: text ?? '', meta: {'file_name': fileName, ...?extraMeta}, clientId: clientId, createdAt: DateTime.now(), isSending: true, uploadProgress: 0.0, localFilePath: path);
     setState(() => _messages.add(optimistic)); _scrollToBottom();
     try {
       // 🔥 NAYA: onProgress se optimistic message ka uploadProgress
@@ -2562,7 +2609,7 @@ class _ChatScreenState extends State<ChatScreen> {
       if (mounted) {
         setState(() { final idx = _messages.indexWhere((m) => m.clientId == clientId); if (idx != -1) _messages[idx].sendFailed = true; });
         _maybeShowGroupSendBlockedDialog(e); // 🔥 NAYA
-        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text("Upload failed: $e")));
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(_l10n.chatUploadFailed(e.toString()))));
       }
     }
   }
@@ -2586,7 +2633,7 @@ class _ChatScreenState extends State<ChatScreen> {
       final file = await File(tempPath).writeAsBytes(bytes);
       await _uploadAndSendFile(file, MessageType.image, fileName, extraMeta: {'is_sticker': true});
     } catch (e) {
-      if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text("Sticker bhejne me error: $e")));
+      if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(_l10n.chatStickerFailed(e.toString()))));
     }
   }
 
@@ -2597,7 +2644,7 @@ class _ChatScreenState extends State<ChatScreen> {
     var micStatus = await Permission.microphone.status;
     if (!micStatus.isGranted) micStatus = await Permission.microphone.request();
     if (!micStatus.isGranted) {
-      if (mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("Microphone permission chahiye voice note bhejne ke liye")));
+      if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(_l10n.chatMicPermission)));
       return;
     }
     final tempDir = await getTemporaryDirectory();
@@ -2641,36 +2688,36 @@ class _ChatScreenState extends State<ChatScreen> {
       final permission = await Geolocator.checkPermission();
       if (permission == LocationPermission.denied) {
         final requested = await Geolocator.requestPermission();
-        if (requested == LocationPermission.denied || requested == LocationPermission.deniedForever) throw Exception("Location permission denied");
+        if (requested == LocationPermission.denied || requested == LocationPermission.deniedForever) throw Exception(_l10n.chatLocationPermissionDenied);
       }
       final pos = await Geolocator.getCurrentPosition(); final clientId = _newClientId();
-      final optimistic = MessageModel(id: clientId, conversationId: widget.conversation.id, sender: UserMini(id: _myUserId ?? '', displayName: 'You'), type: MessageType.location, text: 'Location', meta: {'lat': pos.latitude, 'lng': pos.longitude}, clientId: clientId, createdAt: DateTime.now(), isSending: true);
+      final optimistic = MessageModel(id: clientId, conversationId: widget.conversation.id, sender: UserMini(id: _myUserId ?? '', displayName: _l10n.chatYou), type: MessageType.location, text: _l10n.locationLabel, meta: {'lat': pos.latitude, 'lng': pos.longitude}, clientId: clientId, createdAt: DateTime.now(), isSending: true);
       setState(() => _messages.add(optimistic)); _scrollToBottom();
-      final sent = await MessageApiService.sendMessageRest(widget.conversation.id, type: MessageType.location, text: 'Location', meta: {'lat': pos.latitude, 'lng': pos.longitude}, clientId: clientId);
+      final sent = await MessageApiService.sendMessageRest(widget.conversation.id, type: MessageType.location, text: _l10n.locationLabel, meta: {'lat': pos.latitude, 'lng': pos.longitude}, clientId: clientId);
       if (mounted) setState(() { final idx = _messages.indexWhere((m) => m.clientId == clientId); if (idx != -1) _messages[idx] = sent; });
     } catch (e) {
-      if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text("Location share failed: $e")));
+      if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(_l10n.chatLocationShareFailed(e.toString()))));
     }
   }
 
   void _showAttachmentSheet() {
-    showModalBottomSheet(context: context, backgroundColor: Colors.white, shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(18))), builder: (_) => SafeArea(child: Wrap(children: [
+    showModalBottomSheet(context: context, backgroundColor: Theme.of(context).colorScheme.surface, shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(18))), builder: (_) => SafeArea(child: Wrap(children: [
       // 🔥 NAYA — seedha camera se photo/video khinch ke bhejo
-      _attachmentTile(Icons.camera_alt, "Camera", const Color(0xFF00BCD4), _showCameraChooser),
+      _attachmentTile(Icons.camera_alt, _l10n.camera, const Color(0xFF00BCD4), _showCameraChooser),
       // 🔥 NAYA — Photo aur Video gallery ab do ALAG buttons hain — Photo
       // Gallery sirf images ka native picker kholta hai, Video Gallery
       // sirf videos ka. Pehle ek hi "Gallery" button tha jo pehle mixed
       // picker try karta, na mile to images-only, na mile to ek video —
       // isliye kabhi photo aati thi kabhi video, mixed/unpredictable tha.
-      _attachmentTile(Icons.photo_library, "Photo Gallery", const Color(0xFF9C27B0), _pickAndSendPhotoGallery),
-      _attachmentTile(Icons.video_library, "Video Gallery", const Color(0xFFE53935), _pickAndSendVideoGallery),
-      _attachmentTile(Icons.mic, "Audio", const Color(0xFFFF9800), () => _pickAndSendAttachment(MessageType.audio)),
-      _attachmentTile(Icons.insert_drive_file, "File", const Color(0xFF3F51B5), () => _pickAndSendAttachment(MessageType.file)),
-      _attachmentTile(Icons.slideshow, "Presentation", const Color(0xFF00897B), () => _pickAndSendAttachment(MessageType.presentation)),
-      _attachmentTile(Icons.location_on, "Location", const Color(0xFF4CAF50), _sendLocation),
+      _attachmentTile(Icons.photo_library, _l10n.chatPhotoGallery, const Color(0xFF9C27B0), _pickAndSendPhotoGallery),
+      _attachmentTile(Icons.video_library, _l10n.chatVideoGallery, const Color(0xFFE53935), _pickAndSendVideoGallery),
+      _attachmentTile(Icons.mic, _l10n.chatAudio, const Color(0xFFFF9800), () => _pickAndSendAttachment(MessageType.audio)),
+      _attachmentTile(Icons.insert_drive_file, _l10n.chatFile, const Color(0xFF3F51B5), () => _pickAndSendAttachment(MessageType.file)),
+      _attachmentTile(Icons.slideshow, _l10n.chatPresentation, const Color(0xFF00897B), () => _pickAndSendAttachment(MessageType.presentation)),
+      _attachmentTile(Icons.location_on, _l10n.locationLabel, const Color(0xFF4CAF50), _sendLocation),
       // 🔥 NAYA
-      _attachmentTile(Icons.poll, "Poll", const Color(0xFF6A4CE0), _showCreatePollSheet),
-      _attachmentTile(Icons.schedule_send, "Schedule message", const Color(0xFF2E7D32), _showScheduleMessageSheet),
+      _attachmentTile(Icons.poll, _l10n.pollLabel, const Color(0xFF6A4CE0), _showCreatePollSheet),
+      _attachmentTile(Icons.schedule_send, _l10n.chatScheduleMessageTitle, const Color(0xFF2E7D32), _showScheduleMessageSheet),
     ])));
   }
 
@@ -2760,7 +2807,7 @@ class _ChatScreenState extends State<ChatScreen> {
     final optimistic = MessageModel(
       id: clientId,
       conversationId: widget.conversation.id,
-      sender: UserMini(id: _myUserId ?? '', displayName: 'You'),
+      sender: UserMini(id: _myUserId ?? '', displayName: _l10n.chatYou),
       type: MessageType.image,
       text: caption ?? '',
       meta: {'count': files.length},
@@ -2820,16 +2867,16 @@ class _ChatScreenState extends State<ChatScreen> {
           final idx = _messages.indexWhere((m) => m.clientId == clientId);
           if (idx != -1) _messages[idx].sendFailed = true;
         });
-        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text("Upload failed: $e")));
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(_l10n.chatUploadFailed(e.toString()))));
       }
     }
   }
 
   // 🔥 NAYA — "Camera" tap karte hi Photo ya Video khinchne ka chhota chooser
   void _showCameraChooser() {
-    showModalBottomSheet(context: context, backgroundColor: Colors.white, shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(18))), builder: (_) => SafeArea(child: Wrap(children: [
-      _attachmentTile(Icons.camera_alt, "Take Photo", const Color(0xFF9C27B0), () => _pickAndSendAttachment(MessageType.image, source: ImageSource.camera)),
-      _attachmentTile(Icons.videocam, "Record Video", const Color(0xFFE53935), () => _pickAndSendAttachment(MessageType.video, source: ImageSource.camera)),
+    showModalBottomSheet(context: context, backgroundColor: Theme.of(context).colorScheme.surface, shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(18))), builder: (_) => SafeArea(child: Wrap(children: [
+      _attachmentTile(Icons.camera_alt, _l10n.takePhotoLabel, const Color(0xFF9C27B0), () => _pickAndSendAttachment(MessageType.image, source: ImageSource.camera)),
+      _attachmentTile(Icons.videocam, _l10n.recordVideo, const Color(0xFFE53935), () => _pickAndSendAttachment(MessageType.video, source: ImageSource.camera)),
     ])));
   }
 
@@ -2868,26 +2915,26 @@ class _ChatScreenState extends State<ChatScreen> {
     final myCurrent = msg.myReaction(_myUserId ?? '');
     // Reaction bar plain emoji dikhata hai (WhatsApp jaisa asli reaction
     // bar) — backend me wahi purana emoji string save/bheja jaata hai.
-    showModalBottomSheet(context: context, backgroundColor: Colors.white, shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(18))), builder: (_) => SafeArea(child: Padding(padding: const EdgeInsets.symmetric(vertical: 18), child: Row(mainAxisAlignment: MainAxisAlignment.spaceEvenly, children: _kEmojis.map((emoji) { final selected = emoji == myCurrent; return GestureDetector(onTap: () { Navigator.pop(context); _toggleReaction(msg, emoji); }, child: Container(padding: const EdgeInsets.all(6), decoration: BoxDecoration(color: selected ? const Color(0xFFEEF1FF) : null, shape: BoxShape.circle), child: Text(emoji, style: const TextStyle(fontSize: 30)))); }).toList()))));
+    showModalBottomSheet(context: context, backgroundColor: Theme.of(context).colorScheme.surface, shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(18))), builder: (_) => SafeArea(child: Padding(padding: const EdgeInsets.symmetric(vertical: 18), child: Row(mainAxisAlignment: MainAxisAlignment.spaceEvenly, children: _kEmojis.map((emoji) { final selected = emoji == myCurrent; return GestureDetector(onTap: () { Navigator.pop(context); _toggleReaction(msg, emoji); }, child: Container(padding: const EdgeInsets.all(6), decoration: BoxDecoration(color: selected ? Theme.of(context).colorScheme.primary.withOpacity(0.12) : null, shape: BoxShape.circle), child: Text(emoji, style: const TextStyle(fontSize: 30)))); }).toList()))));
   }
 
   void _toggleReaction(MessageModel msg, String emoji) async {
     final myCurrent = msg.myReaction(_myUserId ?? '');
     if (myCurrent == emoji) { setState(() { msg.reactions.removeWhere((r) => r.user.id == _myUserId); }); try { await MessageApiService.removeReaction(msg.id); } catch (_) {} }
-    else { setState(() { final idx = msg.reactions.indexWhere((r) => r.user.id == _myUserId); final mine = MessageReactionModel(id: idx != -1 ? msg.reactions[idx].id : '${msg.id}-me', user: UserMini(id: _myUserId ?? '', displayName: 'You'), emoji: emoji, createdAt: DateTime.now()); if (idx != -1) msg.reactions[idx] = mine; else msg.reactions.add(mine); }); _socket.sendReaction(msg.id, emoji); }
+    else { setState(() { final idx = msg.reactions.indexWhere((r) => r.user.id == _myUserId); final mine = MessageReactionModel(id: idx != -1 ? msg.reactions[idx].id : '${msg.id}-me', user: UserMini(id: _myUserId ?? '', displayName: _l10n.chatYou), emoji: emoji, createdAt: DateTime.now()); if (idx != -1) msg.reactions[idx] = mine; else msg.reactions.add(mine); }); _socket.sendReaction(msg.id, emoji); }
   }
 
   void _showMessageActions(MessageModel msg, bool isMe) {
     if (msg.deletedForEveryone || msg.deletedForMe) return;
-    showModalBottomSheet(context: context, backgroundColor: Colors.white, shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(18))), builder: (_) => SafeArea(child: Column(mainAxisSize: MainAxisSize.min, children: [
-      ListTile(leading: const Icon(Icons.reply), title: const Text("Reply"), onTap: () { Navigator.pop(context); _startReply(msg); }),
+    showModalBottomSheet(context: context, backgroundColor: Theme.of(context).colorScheme.surface, shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(18))), builder: (_) => SafeArea(child: Column(mainAxisSize: MainAxisSize.min, children: [
+      ListTile(leading: const Icon(Icons.reply), title: Text(_l10n.reply), onTap: () { Navigator.pop(context); _startReply(msg); }),
       // NEW — forward just this one message straight to a picker.
       // 🔧 FIX (Phase 3, §4.3) — poll messages forward nahi ho sakte
       // (backend silently drop karta hai) — is item ko hi hide kar do,
       // UI me pehle hi rok dena better UX hai.
       if (msg.type != MessageType.poll)
-        ListTile(leading: const Icon(Icons.forward), title: const Text("Forward"), onTap: () { Navigator.pop(context); _forwardOne(msg); }),
-      ListTile(leading: const Icon(Icons.emoji_emotions_outlined), title: const Text("React"), onTap: () { Navigator.pop(context); _showReactionPicker(msg); }),
+        ListTile(leading: const Icon(Icons.forward), title: Text(_l10n.chatForward), onTap: () { Navigator.pop(context); _forwardOne(msg); }),
+      ListTile(leading: const Icon(Icons.emoji_emotions_outlined), title: Text(_l10n.chatReact), onTap: () { Navigator.pop(context); _showReactionPicker(msg); }),
       // 🔥 NAYA — "Seen by" / message-info (WhatsApp-style). Sirf apne
       // bheje hue messages pe — dusre ka message "kisne dekha" tum nahi
       // pooch sakte. Preview line ke liye plain text ya type-label bhejte
@@ -2895,7 +2942,7 @@ class _ChatScreenState extends State<ChatScreen> {
       if (isMe)
         ListTile(
           leading: const Icon(Icons.info_outline_rounded),
-          title: const Text("Info"),
+          title: Text(_l10n.chatInfo),
           onTap: () {
             Navigator.pop(context);
             Navigator.push(
@@ -2913,7 +2960,7 @@ class _ChatScreenState extends State<ChatScreen> {
       // cross hone par _pinMessage() snackbar me error dikha dega).
       ListTile(
         leading: Icon(_pinnedMessages.any((p) => p.message.id == msg.id) ? Icons.push_pin : Icons.push_pin_outlined),
-        title: Text(_pinnedMessages.any((p) => p.message.id == msg.id) ? "Unpin" : "Pin"),
+        title: Text(_pinnedMessages.any((p) => p.message.id == msg.id) ? _l10n.chatUnpin : _l10n.chatPin),
         onTap: () {
           Navigator.pop(context);
           final alreadyPinned = _pinnedMessages.any((p) => p.message.id == msg.id);
@@ -2926,12 +2973,12 @@ class _ChatScreenState extends State<ChatScreen> {
       ),
       // NEW — enter multi-select mode (starting with this message already
       // checked) so several messages can be picked and forwarded together.
-      ListTile(leading: const Icon(Icons.check_circle_outline), title: const Text("Select"), onTap: () { Navigator.pop(context); _enterSelectionMode(msg); }),
-      if (isMe && msg.type == MessageType.text) ListTile(leading: const Icon(Icons.edit_outlined), title: const Text("Edit"), onTap: () { Navigator.pop(context); _showEditDialog(msg); }),
+      ListTile(leading: const Icon(Icons.check_circle_outline), title: Text(_l10n.chatSelect), onTap: () { Navigator.pop(context); _enterSelectionMode(msg); }),
+      if (isMe && msg.type == MessageType.text) ListTile(leading: const Icon(Icons.edit_outlined), title: Text(_l10n.editLabel), onTap: () { Navigator.pop(context); _showEditDialog(msg); }),
       // 🔥 NAYA: media messages ke liye "Save to device" action bhi —
       // multi-image (album) message ho to sab photos ek-ek karke save hoti hain.
       if ((msg.fileUrl != null && msg.fileUrl!.isNotEmpty) || (msg.fileUrls != null && msg.fileUrls!.isNotEmpty))
-        ListTile(leading: const Icon(Icons.download_outlined), title: const Text("Save to device"), onTap: () async {
+        ListTile(leading: const Icon(Icons.download_outlined), title: Text(_l10n.chatSaveToDevice), onTap: () async {
           Navigator.pop(context);
           if (msg.fileUrls != null && msg.fileUrls!.length > 1) {
             for (final u in msg.fileUrls!) {
@@ -2941,8 +2988,8 @@ class _ChatScreenState extends State<ChatScreen> {
             _downloadMedia(context, msg);
           }
         }),
-      ListTile(leading: const Icon(Icons.delete_outline, color: Colors.red), title: const Text("Delete for me", style: TextStyle(color: Colors.red)), onTap: () { Navigator.pop(context); _deleteMessage(msg, forEveryone: false); }),
-      if (isMe) ListTile(leading: const Icon(Icons.delete_forever_outlined, color: Colors.red), title: const Text("Delete for everyone", style: TextStyle(color: Colors.red)), onTap: () { Navigator.pop(context); _deleteMessage(msg, forEveryone: true); }),
+      ListTile(leading: const Icon(Icons.delete_outline, color: Colors.red), title: Text(_l10n.chatDeleteForMe, style: TextStyle(color: Colors.red)), onTap: () { Navigator.pop(context); _deleteMessage(msg, forEveryone: false); }),
+      if (isMe) ListTile(leading: const Icon(Icons.delete_forever_outlined, color: Colors.red), title: Text(_l10n.chatDeleteForEveryone, style: TextStyle(color: Colors.red)), onTap: () { Navigator.pop(context); _deleteMessage(msg, forEveryone: true); }),
     ])));
   }
 
@@ -2997,7 +3044,7 @@ class _ChatScreenState extends State<ChatScreen> {
     );
     if (ok == true && mounted) {
       ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-        content: Text(messages.length == 1 ? "Message forwarded" : "${messages.length} messages forwarded"),
+        content: Text(_l10n.chatMessageForwarded(messages.length)),
       ));
     }
   }
@@ -3034,7 +3081,7 @@ class _ChatScreenState extends State<ChatScreen> {
           _messages[idx].deletedForEveryone = prevDeletedForEveryone;
           _messages[idx].text = prevText;
         });
-        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text("Delete failed: $e")));
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(_l10n.chatDeleteFailed(e.toString()))));
       }
     }
   }
@@ -3042,9 +3089,9 @@ class _ChatScreenState extends State<ChatScreen> {
   void _showEditDialog(MessageModel msg) {
     final controller = TextEditingController(text: msg.text ?? '');
     showDialog(context: context, builder: (_) => AlertDialog(
-          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),title: const Text("Edit message"), content: TextField(controller: controller, maxLines: 4, autofocus: true), actions: [
-      TextButton(onPressed: () => Navigator.pop(context), child: const Text("Cancel")),
-      TextButton(onPressed: () async { final newText = controller.text.trim(); Navigator.pop(context); if (newText.isEmpty || newText == msg.text) return; try { final updated = await MessageApiService.editMessage(msg.id, newText); if (mounted) setState(() { final idx = _messages.indexWhere((m) => m.id == msg.id); if (idx != -1) _messages[idx] = updated; }); } catch (e) { if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text("Edit failed: $e"))); } }, child: const Text("Save")),
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),title: Text(_l10n.chatEditMessageTitle), content: TextField(controller: controller, maxLines: 4, autofocus: true), actions: [
+      TextButton(onPressed: () => Navigator.pop(context), child: Text(_l10n.cancel)),
+      TextButton(onPressed: () async { final newText = controller.text.trim(); Navigator.pop(context); if (newText.isEmpty || newText == msg.text) return; try { final updated = await MessageApiService.editMessage(msg.id, newText); if (mounted) setState(() { final idx = _messages.indexWhere((m) => m.id == msg.id); if (idx != -1) _messages[idx] = updated; }); } catch (e) { if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(_l10n.chatEditFailed(e.toString())))); } }, child: Text(_l10n.save)),
     ]));
   }
 
@@ -3119,7 +3166,7 @@ class _ChatScreenState extends State<ChatScreen> {
       }
     } else if (_downloadedIds.contains(trackingId)) {
       if (context.mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("Pehle se gallery me save hai ✅")));
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(_l10n.chatAlreadySaved)));
       }
       return;
     }
@@ -3135,7 +3182,7 @@ class _ChatScreenState extends State<ChatScreen> {
           builder: (_, value, __) => Row(children: [
             CircularProgressIndicator(value: value > 0 ? value : null),
             const SizedBox(width: 16),
-            const Text("Downloading..."),
+            Text(_l10n.chatDownloading),
           ]),
         ),
       ),
@@ -3164,14 +3211,14 @@ class _ChatScreenState extends State<ChatScreen> {
       // trigger hata diya — warna ek hi download pe 2 notification aate.
       if (context.mounted) {
         ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-          content: Text(isGalleryMedia ? "Gallery me save ho gaya ✅" : "Downloaded ✅ — Download/LearnScroll folder me"),
-          action: isGalleryMedia ? null : SnackBarAction(label: "Open", onPressed: () => MediaDownloadService.openFile(path)),
+          content: Text(isGalleryMedia ? _l10n.chatSavedToGallery : _l10n.chatDownloadedToFolder),
+          action: isGalleryMedia ? null : SnackBarAction(label: _l10n.open, onPressed: () => MediaDownloadService.openFile(path)),
         ));
       }
     } catch (e) {
       if (context.mounted) Navigator.pop(context);
       if (context.mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text("Download failed: $e")));
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(_l10n.chatDownloadFailed(e.toString()))));
       }
     }
   }
@@ -3196,13 +3243,15 @@ class _ChatScreenState extends State<ChatScreen> {
   @override
   Widget build(BuildContext context) {
     final subtitle = _presenceSubtitle();
+    final cs = Theme.of(context).colorScheme;
+    // 🎨 THEME FIX — bg/AppBar/icons ab theme se aate hain (pehle hardcoded
+    // navy header + off-white bg, dark mode me bhi same rehta tha).
     return Scaffold(
-      backgroundColor: const Color(0xFFF3F5FA), // 🔥 NAYA — soft, professional cool-grey chat background (WhatsApp-beige ki jagah)
       appBar: _selectionMode ? _buildSelectionAppBar() : AppBar(
-        backgroundColor: const Color(0xFF030F27),
+        backgroundColor: cs.primary,
         elevation: 3, // 🔥 NAYA — subtle depth, flat/dated na lage
         shadowColor: Colors.black45,
-        iconTheme: const IconThemeData(color: Colors.white),
+        iconTheme: IconThemeData(color: cs.onPrimary),
         titleSpacing: 0,
         title: InkWell(
           // 🔥 NAYA — header (avatar + naam) pe tap karke: private chat me
@@ -3217,17 +3266,17 @@ class _ChatScreenState extends State<ChatScreen> {
           Stack(clipBehavior: Clip.none, children: [
             CircleAvatar(
               radius: 19,
-              backgroundColor: Colors.white24, // 🔥 NAYA — halka ring jaisa fallback background
-              child: CircleAvatar(radius: 18, backgroundColor: Colors.grey[300], backgroundImage: widget.conversation.displayPhoto != null && widget.conversation.displayPhoto!.isNotEmpty ? CachedNetworkImageProvider(widget.conversation.displayPhoto!) : null, child: widget.conversation.displayPhoto == null || widget.conversation.displayPhoto!.isEmpty ? Icon(widget.conversation.isGroup ? Icons.group : Icons.person, color: Colors.grey[600], size: 18) : null),
+              backgroundColor: cs.onPrimary.withOpacity(0.24), // 🔥 NAYA — halka ring jaisa fallback background
+              child: CircleAvatar(radius: 18, backgroundColor: AppThemeTokens.of(context).surface2, backgroundImage: widget.conversation.displayPhoto != null && widget.conversation.displayPhoto!.isNotEmpty ? CachedNetworkImageProvider(widget.conversation.displayPhoto!) : null, child: widget.conversation.displayPhoto == null || widget.conversation.displayPhoto!.isEmpty ? Icon(widget.conversation.isGroup ? Icons.group : Icons.person, color: cs.onSurfaceVariant, size: 18) : null),
             ),
             // 🔥 NAYA — online hone par avatar pe accent-blue dot
             if (!widget.conversation.isGroup && _otherOnline)
-              Positioned(right: -1, bottom: -1, child: Container(width: 11, height: 11, decoration: BoxDecoration(color: const Color(0xFF3D7EFF), shape: BoxShape.circle, border: Border.all(color: const Color(0xFF030F27), width: 2)))),
+              Positioned(right: -1, bottom: -1, child: Container(width: 11, height: 11, decoration: BoxDecoration(color: AppThemeTokens.of(context).success, shape: BoxShape.circle, border: Border.all(color: cs.primary, width: 2)))),
           ]),
           const SizedBox(width: 12),
           Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, mainAxisSize: MainAxisSize.min, children: [
-            Text(widget.conversation.displayTitle, style: const TextStyle(color: Colors.white, fontSize: 15.5, fontWeight: FontWeight.w600, letterSpacing: 0.1)),
-            if (subtitle != null) Padding(padding: const EdgeInsets.only(top: 1), child: Text(subtitle, style: TextStyle(color: _otherTyping ? const Color(0xFF3D7EFF) : Colors.white60, fontSize: 11.5))),
+            Text(widget.conversation.displayTitle, style: TextStyle(color: cs.onPrimary, fontSize: 15.5, fontWeight: FontWeight.w600, letterSpacing: 0.1)),
+            if (subtitle != null) Padding(padding: const EdgeInsets.only(top: 1), child: Text(subtitle, style: TextStyle(color: _otherTyping ? AppThemeTokens.of(context).success : cs.onPrimary.withOpacity(0.6), fontSize: 11.5))),
           ])),
         ]),
         ),
@@ -3236,8 +3285,8 @@ class _ChatScreenState extends State<ChatScreen> {
           // Result tap karne pe MessageSearchScreen us message ka id le kar
           // pop hota hai — jise pakad ke seedha wahan scroll+highlight karo.
           IconButton(
-            icon: const Icon(Icons.search, color: Colors.white),
-            tooltip: "Search in chat",
+            icon: Icon(Icons.search, color: cs.onPrimary),
+            tooltip: _l10n.chatSearchInChat,
             onPressed: () async {
               final selectedId = await Navigator.push<String>(
                 context,
@@ -3250,7 +3299,7 @@ class _ChatScreenState extends State<ChatScreen> {
               }
             },
           ),
-          IconButton(icon: const Icon(Icons.cast_for_education, color: Colors.white), tooltip: "Study Room", onPressed: _openStudyRoom),
+          IconButton(icon: Icon(Icons.cast_for_education, color: cs.onPrimary), tooltip: _l10n.chatStudyRoom, onPressed: _openStudyRoom),
           // 🔥 NAYA — "Doubts" tab entry point (persistent upvotable
           // question board + anonymous asking). Sirf group chats me
           // dikhta hai — private 1:1 chat me "classroom" concept hi nahi
@@ -3260,8 +3309,8 @@ class _ChatScreenState extends State<ChatScreen> {
           // hai realtime doubt/upvote/answer updates ke liye).
           if (widget.conversation.isGroup)
             IconButton(
-              icon: const Icon(Icons.help_outline_rounded, color: Colors.white),
-              tooltip: "Doubts",
+              icon: Icon(Icons.help_outline_rounded, color: cs.onPrimary),
+              tooltip: _l10n.doubtsTab,
               onPressed: () {
                 final group = widget.conversation.group;
                 if (group == null) return;
@@ -3277,12 +3326,12 @@ class _ChatScreenState extends State<ChatScreen> {
                 );
               },
             ),
-          IconButton(icon: const Icon(Icons.call, color: Colors.white), tooltip: "Audio Call", onPressed: () => _startCall('audio')),
-          IconButton(icon: const Icon(Icons.videocam, color: Colors.white), tooltip: "Video Call", onPressed: () => _startCall('video')),
+          IconButton(icon: Icon(Icons.call, color: cs.onPrimary), tooltip: _l10n.chatAudioCall, onPressed: () => _startCall('audio')),
+          IconButton(icon: Icon(Icons.videocam, color: cs.onPrimary), tooltip: _l10n.chatVideoCall, onPressed: () => _startCall('video')),
           // 🔥 NAYA — 3-dot overflow menu: mute/unmute notification
           // (private chat ho ya group, dono ke liye kaam karta hai).
           PopupMenuButton<String>(
-            icon: const Icon(Icons.more_vert, color: Colors.white),
+            icon: Icon(Icons.more_vert, color: cs.onPrimary),
             onSelected: (value) {
               if (value == 'toggle_mute') _toggleMuteNotifications();
               if (value == 'filter') _showFilterSheet();
@@ -3303,22 +3352,22 @@ class _ChatScreenState extends State<ChatScreen> {
                 child: Row(children: [
                   Icon(
                     _isMuted ? Icons.notifications_active_outlined : Icons.notifications_off_outlined,
-                    color: Colors.black87,
+                    color: Theme.of(context).colorScheme.onSurface,
                     size: 20,
                   ),
                   const SizedBox(width: 10),
                   Text(_isMuted
-                      ? (widget.conversation.isGroup ? "Unmute group" : "Unmute notifications")
-                      : (widget.conversation.isGroup ? "Mute group" : "Mute notifications")),
+                      ? (widget.conversation.isGroup ? _l10n.chatUnmuteGroup : _l10n.chatUnmuteNotifications)
+                      : (widget.conversation.isGroup ? _l10n.chatMuteGroup : _l10n.chatMuteNotifications)),
                 ]),
               ),
               // 🔥 NAYA — Filter messages: Text / Media / Docs / Links
               PopupMenuItem<String>(
                 value: 'filter',
                 child: Row(children: [
-                  Icon(Icons.filter_list, color: _chatFilter != 'all' ? const Color(0xFF3D7EFF) : Colors.black87, size: 20),
+                  Icon(Icons.filter_list, color: _chatFilter != 'all' ? Theme.of(context).colorScheme.primary : Theme.of(context).colorScheme.onSurface, size: 20),
                   const SizedBox(width: 10),
-                  Text(_chatFilter == 'all' ? "Filter messages" : "Filter: ${_filterLabel(_chatFilter)}"),
+                  Text(_chatFilter == 'all' ? _l10n.chatFilterTitle : _l10n.chatFilterActive(_filterLabel(_chatFilter))),
                 ]),
               ),
               // 🔥 NAYA — poori chat screen ka wallpaper (WhatsApp jaisa),
@@ -3327,19 +3376,19 @@ class _ChatScreenState extends State<ChatScreen> {
               PopupMenuItem<String>(
                 value: 'wallpaper',
                 child: Row(children: [
-                  Icon(Icons.wallpaper, color: _wallpaperUrl != null ? const Color(0xFF3D7EFF) : Colors.black87, size: 20),
+                  Icon(Icons.wallpaper, color: _wallpaperUrl != null ? Theme.of(context).colorScheme.primary : Theme.of(context).colorScheme.onSurface, size: 20),
                   const SizedBox(width: 10),
-                  Text(_wallpaperUrl != null ? "Change wallpaper" : "Chat wallpaper"),
+                  Text(_wallpaperUrl != null ? _l10n.chatChangeWallpaper : _l10n.chatWallpaperMenu),
                 ]),
               ),
               // 🔥 NAYA — apne scheduled (abhi bheje nahi gaye) messages
               // dekho / reschedule / cancel karo.
-              const PopupMenuItem<String>(
+              PopupMenuItem<String>(
                 value: 'scheduled_messages',
                 child: Row(children: [
-                  Icon(Icons.schedule_send_outlined, color: Colors.black87, size: 20),
-                  SizedBox(width: 10),
-                  Text("Scheduled messages"),
+                  Icon(Icons.schedule_send_outlined, color: Theme.of(context).colorScheme.onSurface, size: 20),
+                  const SizedBox(width: 10),
+                  Text(_l10n.chatScheduledMessagesTitle),
                 ]),
               ),
               // 🔥 NAYA — Block / Unblock user (sirf 1-to-1 chat me dikhta
@@ -3350,13 +3399,13 @@ class _ChatScreenState extends State<ChatScreen> {
                   child: Row(children: [
                     Icon(
                       _isBlocked ? Icons.person_add_alt_1_outlined : Icons.block,
-                      color: _isBlocked ? Colors.black87 : Colors.red,
+                      color: _isBlocked ? Theme.of(context).colorScheme.onSurface : Theme.of(context).colorScheme.error,
                       size: 20,
                     ),
                     const SizedBox(width: 10),
                     Text(
-                      _isBlocked ? "Unblock user" : "Block user",
-                      style: TextStyle(color: _isBlocked ? Colors.black87 : Colors.red),
+                      _isBlocked ? _l10n.chatUnblockUser : _l10n.chatBlockUser,
+                      style: TextStyle(color: _isBlocked ? Theme.of(context).colorScheme.onSurface : Theme.of(context).colorScheme.error),
                     ),
                   ]),
                 ),
@@ -3369,25 +3418,25 @@ class _ChatScreenState extends State<ChatScreen> {
                 child: Row(children: [
                   Icon(
                     _disappearingDuration == 'none' ? Icons.timer_off_outlined : Icons.timer_outlined,
-                    color: _disappearingDuration != 'none' ? const Color(0xFF3D7EFF) : Colors.black87,
+                    color: _disappearingDuration != 'none' ? Theme.of(context).colorScheme.primary : Theme.of(context).colorScheme.onSurface,
                     size: 20,
                   ),
                   const SizedBox(width: 10),
                   Text(_disappearingDuration == 'none'
-                      ? "Disappearing messages"
-                      : "Disappearing: ${_disappearingLabel(_disappearingDuration)}"),
+                      ? _l10n.chatDisappearingTitle
+                      : _l10n.chatDisappearingMenu(_disappearingLabel(_disappearingDuration))),
                 ]),
               ),
               // 🔥 NAYA — Group info: members, roles (admin/moderator),
               // invite link, public/private, add/remove members — sab
               // ek jagah (sirf group chat me dikhta hai).
               if (widget.conversation.isGroup)
-                const PopupMenuItem<String>(
+                PopupMenuItem<String>(
                   value: 'group_info',
                   child: Row(children: [
-                    Icon(Icons.info_outline_rounded, color: Colors.black87, size: 20),
-                    SizedBox(width: 10),
-                    Text("Group info"),
+                    Icon(Icons.info_outline_rounded, color: Theme.of(context).colorScheme.onSurface, size: 20),
+                    const SizedBox(width: 10),
+                    Text(_l10n.chatGroupInfo),
                   ]),
                 ),
               // 🔥 NAYA — ACCESS CONTROL: "kaun message bhej sakta hai" +
@@ -3399,22 +3448,22 @@ class _ChatScreenState extends State<ChatScreen> {
                   child: Row(children: [
                     Icon(
                       _groupMessagePermission == 'admins_mods' ? Icons.admin_panel_settings : Icons.groups_outlined,
-                      color: _groupMessagePermission == 'admins_mods' ? const Color(0xFF3D7EFF) : Colors.black87,
+                      color: _groupMessagePermission == 'admins_mods' ? Theme.of(context).colorScheme.primary : Theme.of(context).colorScheme.onSurface,
                       size: 20,
                     ),
                     const SizedBox(width: 10),
-                    const Text("Message permissions"),
+                    Text(_l10n.chatPermissionsTitle),
                   ]),
                 ),
               // 🔥 NAYA — Change group photo seedha yahin se, bina group
               // info screen khole (admin/moderator only).
               if (widget.conversation.isGroup && _isGroupAdminOrMod)
-                const PopupMenuItem<String>(
+                PopupMenuItem<String>(
                   value: 'change_group_photo',
                   child: Row(children: [
-                    Icon(Icons.add_a_photo_outlined, color: Colors.black87, size: 20),
-                    SizedBox(width: 10),
-                    Text("Change group photo"),
+                    Icon(Icons.add_a_photo_outlined, color: Theme.of(context).colorScheme.onSurface, size: 20),
+                    const SizedBox(width: 10),
+                    Text(_l10n.chatChangeGroupPhoto),
                   ]),
                 ),
               // 🔥 NAYA — Pending join requests (private group, admin/mod
@@ -3423,31 +3472,31 @@ class _ChatScreenState extends State<ChatScreen> {
                 PopupMenuItem<String>(
                   value: 'join_requests',
                   child: Row(children: [
-                    const Icon(Icons.person_add_alt_1_outlined, color: Colors.black87, size: 20),
+                    Icon(Icons.person_add_alt_1_outlined, color: Theme.of(context).colorScheme.onSurface, size: 20),
                     const SizedBox(width: 10),
-                    Text(_pendingJoinRequestsCount > 0 ? "Join requests ($_pendingJoinRequestsCount)" : "Join requests"),
+                    Text(_pendingJoinRequestsCount > 0 ? _l10n.chatJoinRequestsCount(_pendingJoinRequestsCount) : _l10n.chatJoinRequestsTitle),
                   ]),
                 ),
               // 🔥 NAYA — Leave group (sirf group chat me dikhta hai).
               if (widget.conversation.isGroup)
-                const PopupMenuItem<String>(
+                PopupMenuItem<String>(
                   value: 'leave_group',
                   child: Row(children: [
                     Icon(Icons.exit_to_app, color: Colors.red, size: 20),
                     SizedBox(width: 10),
-                    Text("Leave group", style: TextStyle(color: Colors.red)),
+                    Text(_l10n.chatLeaveGroup, style: TextStyle(color: Colors.red)),
                   ]),
                 ),
               // 🔥 NAYA — Delete group (ADMIN ONLY — moderator ko bhi
               // nahi dikhta, backend bhi strictly admin role hi allow
               // karta hai).
               if (widget.conversation.isGroup && _isGroupAdmin)
-                const PopupMenuItem<String>(
+                PopupMenuItem<String>(
                   value: 'delete_group',
                   child: Row(children: [
                     Icon(Icons.delete_forever, color: Colors.red, size: 20),
                     SizedBox(width: 10),
-                    Text("Delete group", style: TextStyle(color: Colors.red)),
+                    Text(_l10n.chatDeleteGroup, style: TextStyle(color: Colors.red)),
                   ]),
                 ),
             ],
@@ -3468,10 +3517,10 @@ class _ChatScreenState extends State<ChatScreen> {
               ? CachedNetworkImage(
                   imageUrl: _wallpaperUrl!,
                   fit: BoxFit.cover,
-                  placeholder: (_, __) => CustomPaint(painter: _ChatWallpaperPainter()),
-                  errorWidget: (_, __, ___) => CustomPaint(painter: _ChatWallpaperPainter()),
+                  placeholder: (_, __) => CustomPaint(painter: _ChatWallpaperPainter(color: cs.outlineVariant.withOpacity(0.6))),
+                  errorWidget: (_, __, ___) => CustomPaint(painter: _ChatWallpaperPainter(color: cs.outlineVariant.withOpacity(0.6))),
                 )
-              : CustomPaint(painter: _ChatWallpaperPainter()),
+              : CustomPaint(painter: _ChatWallpaperPainter(color: cs.outlineVariant.withOpacity(0.6))),
         ),
         Column(children: [
           if (_pinnedMessages.isNotEmpty) _buildPinnedBanner(), // 🔥 NAYA
@@ -3506,8 +3555,8 @@ class _ChatScreenState extends State<ChatScreen> {
                     final suggestion = _smartReplies[i];
                     return ActionChip(
                       label: Text(suggestion, style: const TextStyle(fontSize: 12.5)),
-                      backgroundColor: Colors.white,
-                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20), side: BorderSide(color: Colors.grey[300]!)),
+                      backgroundColor: Theme.of(context).colorScheme.surface,
+                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20), side: BorderSide(color: Theme.of(context).colorScheme.outlineVariant)),
                       onPressed: () {
                         _textController.text = suggestion;
                         _textController.selection = TextSelection.collapsed(offset: suggestion.length);
@@ -3530,10 +3579,10 @@ class _ChatScreenState extends State<ChatScreen> {
               child: Container(
                 padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
                 decoration: BoxDecoration(color: Colors.black87, borderRadius: BorderRadius.circular(20)),
-                child: const Row(mainAxisSize: MainAxisSize.min, children: [
+                child: Row(mainAxisSize: MainAxisSize.min, children: [
                   SizedBox(width: 14, height: 14, child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white)),
                   SizedBox(width: 10),
-                  Text("Setting wallpaper…", style: TextStyle(color: Colors.white, fontSize: 12.5)),
+                  Text(_l10n.chatSettingWallpaper, style: TextStyle(color: Colors.white, fontSize: 12.5)),
                 ]),
               ),
             ),
@@ -3546,19 +3595,20 @@ class _ChatScreenState extends State<ChatScreen> {
   // close (X) to cancel, live count, and a forward icon that opens the
   // conversation picker for every currently-checked message.
   PreferredSizeWidget _buildSelectionAppBar() {
+    final cs = Theme.of(context).colorScheme;
     return AppBar(
-      backgroundColor: const Color(0xFF030F27),
+      backgroundColor: cs.primary,
       elevation: 3,
-      iconTheme: const IconThemeData(color: Colors.white),
+      iconTheme: IconThemeData(color: cs.onPrimary),
       leading: IconButton(icon: const Icon(Icons.close), onPressed: _exitSelectionMode),
       title: Text(
-        "${_selectedMessageIds.length} selected",
-        style: const TextStyle(color: Colors.white, fontSize: 16, fontWeight: FontWeight.w600),
+        _l10n.chatSelectedCount(_selectedMessageIds.length),
+        style: TextStyle(color: cs.onPrimary, fontSize: 16, fontWeight: FontWeight.w600),
       ),
       actions: [
         IconButton(
           icon: const Icon(Icons.forward),
-          tooltip: "Forward",
+          tooltip: _l10n.chatForward,
           onPressed: _selectedMessageIds.isEmpty ? null : _forwardSelected,
         ),
         const SizedBox(width: 4),
@@ -3570,24 +3620,25 @@ class _ChatScreenState extends State<ChatScreen> {
   // bar ki jagah ye banner dikhta hai — na message bheja ja sakta hai,
   // na attachment/mic — sirf ek tap se seedha unblock karne ka option.
   Widget _buildBlockedBanner() {
+    final cs = Theme.of(context).colorScheme;
     return SafeArea(
       top: false,
       child: Container(
         padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
         decoration: BoxDecoration(
-          color: Colors.white,
-          border: Border(top: BorderSide(color: Colors.grey[300]!)),
+          color: cs.surface,
+          border: Border(top: BorderSide(color: cs.outlineVariant)),
         ),
         child: Row(children: [
-          const Icon(Icons.block, color: Colors.red, size: 18),
+          Icon(Icons.block, color: cs.error, size: 18),
           const SizedBox(width: 8),
-          const Expanded(
+          Expanded(
             child: Text(
-              "You've blocked this user. Unblock to send messages.",
-              style: TextStyle(fontSize: 13, color: Colors.black54),
+              _l10n.chatBlockedBanner,
+              style: TextStyle(fontSize: 13, color: cs.onSurfaceVariant),
             ),
           ),
-          TextButton(onPressed: _toggleBlockUser, child: const Text("Unblock")),
+          TextButton(onPressed: _toggleBlockUser, child: Text(_l10n.chatUnblock)),
         ]),
       ),
     );
@@ -3599,21 +3650,22 @@ class _ChatScreenState extends State<ChatScreen> {
   // (`check_group_send_permission`) already hai, ye sirf UI-level clarity
   // hai taaki member confuse na ho ki uska message kyun nahi ja raha.
   Widget _buildRestrictedBanner() {
+    final cs = Theme.of(context).colorScheme;
     return SafeArea(
       top: false,
       child: Container(
         padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
         decoration: BoxDecoration(
-          color: Colors.white,
-          border: Border(top: BorderSide(color: Colors.grey[300]!)),
+          color: cs.surface,
+          border: Border(top: BorderSide(color: cs.outlineVariant)),
         ),
         child: Row(children: [
-          Icon(Icons.lock_outline, color: Colors.grey[600], size: 18),
+          Icon(Icons.lock_outline, color: cs.onSurfaceVariant, size: 18),
           const SizedBox(width: 10),
-          const Expanded(
+          Expanded(
             child: Text(
-              "Sirf admins aur moderators is group me message bhej sakte hain.",
-              style: TextStyle(fontSize: 13, color: Colors.black54),
+              _l10n.chatAdminsOnlyBanner,
+              style: TextStyle(fontSize: 13, color: cs.onSurfaceVariant),
             ),
           ),
         ]),
@@ -3629,33 +3681,33 @@ class _ChatScreenState extends State<ChatScreen> {
     return Container(
       margin: const EdgeInsets.fromLTRB(10, 6, 10, 0),
       padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
-      decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(8), border: const Border(left: BorderSide(color: Color(0xFF3D7EFF), width: 4))),
+      decoration: BoxDecoration(color: Theme.of(context).colorScheme.surface, borderRadius: BorderRadius.circular(8), border: Border(left: BorderSide(color: Theme.of(context).colorScheme.primary, width: 4))),
       child: Row(children: [
         Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, mainAxisSize: MainAxisSize.min, children: [
-          Text(isMe ? "You" : (msg.sender?.displayName ?? ''), style: const TextStyle(color: Color(0xFF3D7EFF), fontWeight: FontWeight.bold, fontSize: 12.5)),
-          Text(_replyPreviewText(msg), maxLines: 1, overflow: TextOverflow.ellipsis, style: const TextStyle(color: Colors.black54, fontSize: 12.5)),
+          Text(isMe ? _l10n.chatYou : (msg.sender?.displayName ?? ''), style: TextStyle(color: Theme.of(context).colorScheme.primary, fontWeight: FontWeight.bold, fontSize: 12.5)),
+          Text(_replyPreviewText(msg), maxLines: 1, overflow: TextOverflow.ellipsis, style: TextStyle(color: Theme.of(context).colorScheme.onSurfaceVariant, fontSize: 12.5)),
         ])),
-        IconButton(icon: const Icon(Icons.close, size: 18, color: Colors.black45), onPressed: _cancelReply, padding: EdgeInsets.zero, constraints: const BoxConstraints()),
+        IconButton(icon: Icon(Icons.close, size: 18, color: Theme.of(context).colorScheme.onSurfaceVariant), onPressed: _cancelReply, padding: EdgeInsets.zero, constraints: const BoxConstraints()),
       ]),
     );
   }
 
   String _replyPreviewText(MessageModel msg) {
     switch (msg.type) {
-      case MessageType.image: return "📷 Photo";
-      case MessageType.video: return "🎥 Video";
-      case MessageType.audio: return "🎵 Audio";
-      case MessageType.file: return "📄 File";
-      case MessageType.presentation: return "📊 Presentation";
-      case MessageType.location: return "📍 Location";
-      case MessageType.studyRoom: return "🧑‍🎓 Study Room";
-      case MessageType.poll: return "📊 Poll"; // 🔥 NAYA
+      case MessageType.image: return _l10n.chatPreviewPhoto;
+      case MessageType.video: return _l10n.chatPreviewVideo;
+      case MessageType.audio: return _l10n.chatPreviewAudio;
+      case MessageType.file: return _l10n.chatPreviewFile;
+      case MessageType.presentation: return _l10n.chatPreviewPresentation;
+      case MessageType.location: return _l10n.chatPreviewLocation;
+      case MessageType.studyRoom: return _l10n.chatPreviewStudyRoom;
+      case MessageType.poll: return _l10n.chatPreviewPoll; // 🔥 NAYA
       default: return msg.text ?? '';
     }
   }
 
   Widget _buildMessageList() {
-    if (_isLoading) return const Center(child: CircularProgressIndicator(color: Color(0xFF030F27)));
+    if (_isLoading) return const Center(child: CircularProgressIndicator());
     // 🔥 POLISH — plain "Say hi" text ki jagah ab ek proper empty-state
     // card hai (icon + heading + subtext), baaki screens ke empty states
     // jaisa consistent look.
@@ -3664,13 +3716,13 @@ class _ChatScreenState extends State<ChatScreen> {
         child: Column(mainAxisSize: MainAxisSize.min, children: [
           Container(
             width: 84, height: 84,
-            decoration: BoxDecoration(color: const Color(0xFF030F27).withOpacity(0.06), shape: BoxShape.circle),
-            child: const Icon(Icons.waving_hand_rounded, size: 36, color: Color(0xFF030F27)),
+            decoration: BoxDecoration(color: Theme.of(context).colorScheme.primary.withOpacity(0.06), shape: BoxShape.circle),
+            child: Icon(Icons.waving_hand_rounded, size: 36, color: Theme.of(context).colorScheme.primary),
           ),
           const SizedBox(height: 14),
-          const Text("Say hi 👋", style: TextStyle(fontSize: 15, fontWeight: FontWeight.w600, color: Colors.black87)),
+          Text(_l10n.chatSayHi, style: TextStyle(fontSize: 15, fontWeight: FontWeight.w600, color: Theme.of(context).colorScheme.onSurface)),
           const SizedBox(height: 4),
-          Text("Send a message to start the conversation", style: TextStyle(fontSize: 12.5, color: Colors.grey[500])),
+          Text(_l10n.chatSendToStart, style: TextStyle(fontSize: 12.5, color: Theme.of(context).colorScheme.onSurfaceVariant)),
         ]),
       );
     }
@@ -3687,8 +3739,8 @@ class _ChatScreenState extends State<ChatScreen> {
         child: filtered.isEmpty
             ? Center(
                 child: Text(
-                  "No ${_filterLabel(_chatFilter).toLowerCase()} messages in this chat",
-                  style: const TextStyle(color: Colors.black45),
+                  _l10n.chatNoFilteredMessages(_filterLabel(_chatFilter).toLowerCase()),
+                  style: TextStyle(color: Theme.of(context).colorScheme.onSurfaceVariant),
                 ),
               )
             : Builder(builder: (context) {
@@ -3716,7 +3768,7 @@ class _ChatScreenState extends State<ChatScreen> {
                           child: SizedBox(
                             width: 22,
                             height: 22,
-                            child: CircularProgressIndicator(strokeWidth: 2.2, color: Color(0xFF030F27)),
+                            child: CircularProgressIndicator(strokeWidth: 2.2),
                           ),
                         ),
                       );
@@ -3800,17 +3852,17 @@ class _ChatScreenState extends State<ChatScreen> {
                           // selection se exclude karo, checkbox tap disabled.
                           onTap: (_selectionMode && msg.type != MessageType.poll) ? () => _toggleMessageSelected(msg) : null,
                           child: Container(
-                            color: isSelected ? const Color(0xFF3D7EFF).withOpacity(0.12) : null,
+                            color: isSelected ? Theme.of(context).colorScheme.primary.withOpacity(0.12) : null,
                             child: Row(crossAxisAlignment: CrossAxisAlignment.center, children: [
                               if (_selectionMode)
                                 Padding(
                                   padding: const EdgeInsets.only(left: 6, right: 2),
                                   child: msg.type == MessageType.poll
-                                      ? Icon(Icons.block, size: 18, color: Colors.grey[300])
+                                      ? Icon(Icons.block, size: 18, color: Theme.of(context).colorScheme.outlineVariant)
                                       : Icon(
                                           isSelected ? Icons.check_circle : Icons.radio_button_unchecked,
                                           size: 20,
-                                          color: isSelected ? const Color(0xFF3D7EFF) : Colors.grey,
+                                          color: isSelected ? Theme.of(context).colorScheme.primary : Theme.of(context).colorScheme.onSurfaceVariant,
                                         ),
                                 ),
                               Expanded(
@@ -3831,24 +3883,25 @@ class _ChatScreenState extends State<ChatScreen> {
   // 🔥 NAYA — filter active hone par top pe ek chhota banner: kaunsa
   // filter laga hai + kitne messages mile + ek tap me clear karne ka option.
   Widget _buildFilterBanner(int count) {
+    final tokens = AppThemeTokens.of(context);
     return Container(
       width: double.infinity,
-      color: const Color(0xFFE7EEFC),
+      color: tokens.info.withOpacity(0.12),
       padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
       child: Row(children: [
-        const Icon(Icons.filter_list, size: 16, color: Color(0xFF2457C5)),
+        Icon(Icons.filter_list, size: 16, color: tokens.info),
         const SizedBox(width: 6),
         Expanded(
           child: Text(
-            "${_filterLabel(_chatFilter)} • $count message${count == 1 ? '' : 's'}",
-            style: const TextStyle(color: Color(0xFF2457C5), fontSize: 12.5, fontWeight: FontWeight.w600),
+            _l10n.chatFilterResultCount(_filterLabel(_chatFilter), count),
+            style: TextStyle(color: tokens.info, fontSize: 12.5, fontWeight: FontWeight.w600),
           ),
         ),
         GestureDetector(
           onTap: () => setState(() => _chatFilter = 'all'),
-          child: const Padding(
-            padding: EdgeInsets.symmetric(horizontal: 4, vertical: 2),
-            child: Text("Clear", style: TextStyle(color: Color(0xFF2457C5), fontSize: 12.5, fontWeight: FontWeight.bold)),
+          child: Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 2),
+            child: Text(_l10n.clearButton, style: TextStyle(color: tokens.info, fontSize: 12.5, fontWeight: FontWeight.bold)),
           ),
         ),
       ]),
@@ -3883,29 +3936,30 @@ class _ChatScreenState extends State<ChatScreen> {
   }
 
   Widget _buildInputBar() {
+    final cs = Theme.of(context).colorScheme;
     // 🔥 NAYA — recording chal rahi ho to poora bar ek "Slide to cancel"
     // jaisa recording indicator ban jaata hai (WhatsApp jaisa).
     if (_isRecording) {
       return SafeArea(child: Padding(padding: const EdgeInsets.fromLTRB(10, 6, 10, 10), child: Container(
         padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
         decoration: BoxDecoration(
-          color: Colors.white,
+          color: cs.surface,
           borderRadius: BorderRadius.circular(28),
           boxShadow: [BoxShadow(color: Colors.black.withOpacity(0.08), blurRadius: 10, offset: const Offset(0, 3))],
         ),
         child: Row(children: [
-          IconButton(icon: const Icon(Icons.delete_outline, color: Colors.red), onPressed: _cancelRecording),
+          IconButton(icon: Icon(Icons.delete_outline, color: cs.error), onPressed: _cancelRecording),
           Expanded(child: Row(children: [
-            const Icon(Icons.fiber_manual_record, color: Colors.red, size: 14),
+            Icon(Icons.fiber_manual_record, color: cs.error, size: 14),
             const SizedBox(width: 8),
-            Text(_fmtRecordDuration(_recordDuration), style: const TextStyle(fontSize: 15, color: Color(0xFF030F27), fontWeight: FontWeight.w600)),
+            Text(_fmtRecordDuration(_recordDuration), style: TextStyle(fontSize: 15, color: cs.onSurface, fontWeight: FontWeight.w600)),
             const SizedBox(width: 8),
-            const Text("Recording...", style: TextStyle(color: Colors.black45, fontSize: 13)),
+            Text(_l10n.chatRecording, style: TextStyle(color: cs.onSurfaceVariant, fontSize: 13)),
           ])),
           const SizedBox(width: 8),
           Container(
-            decoration: BoxDecoration(shape: BoxShape.circle, boxShadow: [BoxShadow(color: const Color(0xFF030F27).withOpacity(0.35), blurRadius: 8, offset: const Offset(0, 2))]),
-            child: CircleAvatar(backgroundColor: const Color(0xFF030F27), child: IconButton(icon: const Icon(Icons.send, color: Colors.white), onPressed: _stopRecordingAndSend)),
+            decoration: BoxDecoration(shape: BoxShape.circle, boxShadow: [BoxShadow(color: cs.primary.withOpacity(0.35), blurRadius: 8, offset: const Offset(0, 2))]),
+            child: CircleAvatar(backgroundColor: cs.primary, child: IconButton(icon: Icon(Icons.send, color: cs.onPrimary), onPressed: _stopRecordingAndSend)),
           ),
         ]),
       )));
@@ -3919,23 +3973,23 @@ class _ChatScreenState extends State<ChatScreen> {
       Expanded(
         child: Container(
           decoration: BoxDecoration(
-            color: Colors.white,
+            color: cs.surface,
             borderRadius: BorderRadius.circular(26),
             boxShadow: [BoxShadow(color: Colors.black.withOpacity(0.06), blurRadius: 8, offset: const Offset(0, 2))],
           ),
           child: Row(crossAxisAlignment: CrossAxisAlignment.end, children: [
-            IconButton(icon: const Icon(Icons.attach_file, color: Color(0xFF030F27)), onPressed: _showAttachmentSheet),
+            IconButton(icon: Icon(Icons.attach_file, color: cs.primary), onPressed: _showAttachmentSheet),
             // 🔥 NAYA — apna sticker picker (assets/stickers/). Tap karte hi
             // chosen sticker seedha ek image message ki tarah bhej diya jaata
             // hai (WhatsApp jaisa — koi text nahi banta).
             IconButton(
-              icon: const Icon(Icons.emoji_emotions_outlined, color: Color(0xFF030F27)),
+              icon: Icon(Icons.emoji_emotions_outlined, color: cs.primary),
               onPressed: () => showStickerPicker(
                 context,
                 onSelected: (assetPath) => _sendSticker(assetPath),
               ),
             ),
-            Expanded(child: TextField(controller: _textController, onChanged: _onTypingChanged, minLines: 1, maxLines: 4, style: const TextStyle(fontSize: 14.5), decoration: const InputDecoration(hintText: "Message...", hintStyle: TextStyle(color: Colors.black38), filled: false, contentPadding: EdgeInsets.symmetric(horizontal: 4, vertical: 12), border: InputBorder.none))),
+            Expanded(child: TextField(controller: _textController, onChanged: _onTypingChanged, minLines: 1, maxLines: 4, style: TextStyle(fontSize: 14.5, color: cs.onSurface), decoration: InputDecoration(hintText: _l10n.chatMessageHint, hintStyle: TextStyle(color: cs.onSurfaceVariant), filled: false, contentPadding: const EdgeInsets.symmetric(horizontal: 4, vertical: 12), border: InputBorder.none))),
             const SizedBox(width: 4),
           ]),
         ),
@@ -3949,12 +4003,12 @@ class _ChatScreenState extends State<ChatScreen> {
         builder: (_, value, __) {
           final hasText = value.text.trim().isNotEmpty;
           return Container(
-            decoration: BoxDecoration(shape: BoxShape.circle, boxShadow: [BoxShadow(color: const Color(0xFF030F27).withOpacity(0.32), blurRadius: 8, offset: const Offset(0, 2))]),
+            decoration: BoxDecoration(shape: BoxShape.circle, boxShadow: [BoxShadow(color: cs.primary.withOpacity(0.32), blurRadius: 8, offset: const Offset(0, 2))]),
             child: CircleAvatar(
               radius: 23,
-              backgroundColor: const Color(0xFF030F27),
+              backgroundColor: cs.primary,
               child: IconButton(
-                icon: Icon(hasText ? Icons.send : Icons.mic, color: Colors.white),
+                icon: Icon(hasText ? Icons.send : Icons.mic, color: cs.onPrimary),
                 onPressed: hasText ? _sendMessage : _startRecording,
               ),
             ),
@@ -4008,7 +4062,7 @@ class _SwipeToReplyState extends State<_SwipeToReply> with SingleTickerProviderS
         if (_dragX > 4)
           Opacity(
             opacity: (_dragX / _maxDrag).clamp(0.0, 1.0),
-            child: const Padding(padding: EdgeInsets.symmetric(horizontal: 6), child: Icon(Icons.reply, color: Colors.black38, size: 20)),
+            child: Padding(padding: const EdgeInsets.symmetric(horizontal: 6), child: Icon(Icons.reply, color: Theme.of(context).colorScheme.onSurfaceVariant, size: 20)),
           ),
         Transform.translate(offset: Offset(offset, 0), child: widget.child),
       ]),
@@ -4021,27 +4075,30 @@ class _DateSeparator extends StatelessWidget {
   final DateTime date;
   const _DateSeparator({required this.date});
 
-  String _label() {
+  String _label(BuildContext context) {
+    final l10n = AppLocalizations.of(context)!;
     final now = DateTime.now();
     final d = date.toLocal();
     final today = DateTime(now.year, now.month, now.day);
     final that = DateTime(d.year, d.month, d.day);
     final diff = today.difference(that).inDays;
-    if (diff == 0) return "Today";
-    if (diff == 1) return "Yesterday";
-    const months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
-    return "${d.day} ${months[d.month - 1]} ${d.year}";
+    if (diff == 0) return l10n.chatToday;
+    if (diff == 1) return l10n.chatYesterday;
+    // 🌐 LANGUAGE FIX — month names were a hardcoded English list ("Jan".."Dec");
+    // now formatted with the app's active locale (Hindi month names in hi).
+    return DateFormat('d MMM y', Localizations.localeOf(context).toString()).format(d);
   }
 
   @override
   Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
     return Padding(
       padding: const EdgeInsets.symmetric(vertical: 10),
       child: Center(
         child: Container(
           padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 5),
-          decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(8), boxShadow: [BoxShadow(color: Colors.black.withOpacity(0.06), blurRadius: 2)]),
-          child: Text(_label(), style: const TextStyle(fontSize: 12, color: Colors.black54, fontWeight: FontWeight.w500)),
+          decoration: BoxDecoration(color: cs.surface, borderRadius: BorderRadius.circular(8), boxShadow: [BoxShadow(color: Colors.black.withOpacity(0.06), blurRadius: 2)]),
+          child: Text(_label(context), style: TextStyle(fontSize: 12, color: cs.onSurfaceVariant, fontWeight: FontWeight.w500)),
         ),
       ),
     );
@@ -4066,18 +4123,19 @@ class _TypingBubbleState extends State<_TypingBubble> with SingleTickerProviderS
 
   @override
   Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
     return Align(
       alignment: Alignment.centerLeft,
       child: Container(
         margin: const EdgeInsets.only(top: 4, bottom: 4),
         padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
-        decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(14), boxShadow: [BoxShadow(color: Colors.black.withOpacity(0.07), blurRadius: 6, offset: const Offset(0, 2))]),
+        decoration: BoxDecoration(color: cs.surface, borderRadius: BorderRadius.circular(14), boxShadow: [BoxShadow(color: Colors.black.withOpacity(0.07), blurRadius: 6, offset: const Offset(0, 2))]),
         child: AnimatedBuilder(
           animation: _controller,
           builder: (_, __) => Row(mainAxisSize: MainAxisSize.min, children: List.generate(3, (i) {
             final t = ((_controller.value - i * 0.2) % 1.0);
             final scale = t < 0.5 ? 0.6 + t : 1.1 - t;
-            return Padding(padding: const EdgeInsets.symmetric(horizontal: 2), child: Transform.scale(scale: scale.clamp(0.6, 1.0), child: Container(width: 7, height: 7, decoration: const BoxDecoration(color: Colors.black38, shape: BoxShape.circle))));
+            return Padding(padding: const EdgeInsets.symmetric(horizontal: 2), child: Transform.scale(scale: scale.clamp(0.6, 1.0), child: Container(width: 7, height: 7, decoration: BoxDecoration(color: cs.onSurfaceVariant.withOpacity(0.6), shape: BoxShape.circle))));
           })),
         ),
       ),
@@ -4087,9 +4145,12 @@ class _TypingBubbleState extends State<_TypingBubble> with SingleTickerProviderS
 
 // 🔥 NAYA — halka repeating doodle pattern, flat color se zyada "app jaisa" feel
 class _ChatWallpaperPainter extends CustomPainter {
+  final Color color;
+  const _ChatWallpaperPainter({required this.color});
+
   @override
   void paint(Canvas canvas, Size size) {
-    final paint = Paint()..color = const Color(0xFFDCE3F0).withOpacity(0.35)..style = PaintingStyle.fill;
+    final paint = Paint()..color = color..style = PaintingStyle.fill;
     const step = 44.0;
     for (double y = 0; y < size.height; y += step) {
       for (double x = 0; x < size.width; x += step) {
@@ -4100,7 +4161,7 @@ class _ChatWallpaperPainter extends CustomPainter {
   }
 
   @override
-  bool shouldRepaint(covariant CustomPainter oldDelegate) => false;
+  bool shouldRepaint(covariant _ChatWallpaperPainter oldDelegate) => oldDelegate.color != color;
 }
 
 class _MessageBubble extends StatelessWidget {
@@ -4167,9 +4228,15 @@ class _MessageBubble extends StatelessWidget {
       return _buildStickerMessage(context);
     }
 
-    final bubbleColor = isMe ? const Color(0xFF16325C) : Colors.white; // 🔥 WhatsApp jaisa dark-teal sent bubble
-    final textColor = isMe ? Colors.white : Colors.black87;
-    final timeColor = isMe ? Colors.white60 : Colors.grey;
+    final cs = Theme.of(context).colorScheme;
+    // 🎨 THEME FIX — pehle bubbleColor/textColor/timeColor hardcoded the
+    // (dark-navy sent bubble + Colors.white receive bubble hamesha, kisi
+    // bhi theme mode me same) — dark mode me received bubble literally
+    // safed hi rehta, ink bhi kabhi nahi badalta. Ab dono theme se aate
+    // hain, home.dart jaisa hi.
+    final bubbleColor = isMe ? cs.primary : cs.surface;
+    final textColor = isMe ? cs.onPrimary : cs.onSurface;
+    final timeColor = isMe ? cs.onPrimary.withOpacity(0.7) : cs.onSurfaceVariant;
 
     // 🔥 NAYA — bubble tail: last-in-group bubble ka ek corner chhota
     // (~4px) rehta hai, jaisa WhatsApp me "pointer" hota hai.
@@ -4185,7 +4252,7 @@ class _MessageBubble extends StatelessWidget {
     // hai. `isJumpHighlighted=false` ho to bilkul normal (koi extra
     // rebuild/cost nahi) — tween sirf tab chalta hai jab parent ye flag
     // thodi der ke liye true karta hai.
-    final Color highlightStart = const Color(0xFFFFE082);
+    final Color highlightStart = AppThemeTokens.of(context).warning.withOpacity(0.55);
 
     return GestureDetector(
       onLongPress: message.deletedForEveryone ? null : onLongPress,
@@ -4213,11 +4280,11 @@ class _MessageBubble extends StatelessWidget {
               // (teacher ka message hai to mention-highlight se bhi zyada
               // noticeable hona chahiye), phir mention, phir normal.
               border: isAnnouncement
-                  ? Border.all(color: const Color(0xFFFF8F00), width: 1.6)
-                  : (isMentioned ? Border.all(color: const Color(0xFFFFC107), width: 1.4) : null),
+                  ? Border.all(color: AppThemeTokens.of(context).warning, width: 1.6)
+                  : (isMentioned ? Border.all(color: AppThemeTokens.of(context).warning.withOpacity(0.75), width: 1.4) : null),
               boxShadow: [
                 BoxShadow(
-                  color: (isAnnouncement ? const Color(0xFFFF8F00) : (isMentioned ? const Color(0xFFFFC107) : Colors.black))
+                  color: (isAnnouncement || isMentioned ? AppThemeTokens.of(context).warning : Colors.black)
                       .withOpacity(isAnnouncement ? 0.22 : (isMentioned ? 0.18 : 0.07)),
                   blurRadius: 6,
                   offset: const Offset(0, 2),
@@ -4231,10 +4298,10 @@ class _MessageBubble extends StatelessWidget {
               if (isAnnouncement)
                 Padding(
                   padding: const EdgeInsets.only(left: 4, bottom: 3),
-                  child: Row(mainAxisSize: MainAxisSize.min, children: const [
-                    Icon(Icons.campaign_rounded, size: 13, color: Color(0xFFFF8F00)),
-                    SizedBox(width: 4),
-                    Text("Announcement", style: TextStyle(fontSize: 11, fontWeight: FontWeight.w700, color: Color(0xFFFF8F00))),
+                  child: Row(mainAxisSize: MainAxisSize.min, children: [
+                    Icon(Icons.campaign_rounded, size: 13, color: AppThemeTokens.of(context).warning),
+                    const SizedBox(width: 4),
+                    Text(AppLocalizations.of(context)!.chatAnnouncement, style: TextStyle(fontSize: 11, fontWeight: FontWeight.w700, color: AppThemeTokens.of(context).warning)),
                   ]),
                 ),
               // 🔥 NAYA — group chat me, apne khud ke message ko chhod ke,
@@ -4244,7 +4311,7 @@ class _MessageBubble extends StatelessWidget {
                 Padding(
                   padding: const EdgeInsets.only(left: 4, bottom: 2),
                   child: Text(
-                    message.sender?.displayName ?? 'Unknown',
+                    message.sender?.displayName ?? AppLocalizations.of(context)!.chatUnknown,
                     style: TextStyle(color: _senderColor(message.sender?.id), fontWeight: FontWeight.bold, fontSize: 12.5),
                   ),
                 ),
@@ -4255,9 +4322,9 @@ class _MessageBubble extends StatelessWidget {
               Padding(
                 padding: const EdgeInsets.only(right: 2, left: 4),
                 child: Row(mainAxisSize: MainAxisSize.min, children: [
-                  if (message.isEdited) Text("edited ", style: TextStyle(fontSize: 10, color: timeColor)),
+                  if (message.isEdited) Text("${AppLocalizations.of(context)!.edited} ", style: TextStyle(fontSize: 10, color: timeColor)),
                   Text("${message.createdAt.hour.toString().padLeft(2, '0')}:${message.createdAt.minute.toString().padLeft(2, '0')}", style: TextStyle(fontSize: 10.5, color: timeColor)),
-                  if (isMe) ...[const SizedBox(width: 3), _buildTick()],
+                  if (isMe) ...[const SizedBox(width: 3), _buildTick(context)],
                 ]),
               ),
             ]),
@@ -4306,7 +4373,7 @@ class _MessageBubble extends StatelessWidget {
             Padding(
               padding: const EdgeInsets.only(left: 4, bottom: 2),
               child: Text(
-                message.sender?.displayName ?? 'Unknown',
+                message.sender?.displayName ?? AppLocalizations.of(context)!.chatUnknown,
                 style: TextStyle(color: _senderColor(message.sender?.id), fontWeight: FontWeight.bold, fontSize: 12.5),
               ),
             ),
@@ -4338,7 +4405,7 @@ class _MessageBubble extends StatelessWidget {
                         "${message.createdAt.hour.toString().padLeft(2, '0')}:${message.createdAt.minute.toString().padLeft(2, '0')}",
                         style: const TextStyle(fontSize: 10, color: Colors.white),
                       ),
-                      if (isMe) ...[const SizedBox(width: 3), _buildTick()],
+                      if (isMe) ...[const SizedBox(width: 3), _buildTick(context)],
                     ]),
                   ),
                 ),
@@ -4367,11 +4434,12 @@ class _MessageBubble extends StatelessWidget {
 
   // 🔥 NAYA — WhatsApp jaisa tick logic: clock = sending, ek grey tick =
   // sent, 2 blue tick = read. Failed pe red "!" icon.
-  Widget _buildTick() {
+  Widget _buildTick(BuildContext context) {
     if (message.sendFailed) return const Icon(Icons.error_outline, size: 13, color: Colors.redAccent);
-    if (message.isSending) return const Icon(Icons.access_time, size: 12, color: Colors.white60);
-    if (isReadByOther) return const Icon(Icons.done_all, size: 15, color: Color(0xFF34B7F1)); // blue double tick
-    return const Icon(Icons.done, size: 14, color: Colors.white60); // single grey tick = sent
+    final onBubble = Theme.of(context).colorScheme.onPrimary.withOpacity(0.7);
+    if (message.isSending) return Icon(Icons.access_time, size: 12, color: onBubble);
+    if (isReadByOther) return const Icon(Icons.done_all, size: 15, color: Color(0xFF34B7F1)); // blue double tick — WhatsApp-jaisa universal "read" indicator, jaan-boojh kar fixed
+    return Icon(Icons.done, size: 14, color: onBubble); // single grey tick = sent
   }
 
   // 🔥 NAYA — reply karte hue jis message ko quote kiya, uska preview
@@ -4379,14 +4447,14 @@ class _MessageBubble extends StatelessWidget {
     final r = replyPreview!;
     String preview;
     switch (r.type) {
-      case MessageType.image: preview = "📷 Photo"; break;
-      case MessageType.video: preview = "🎥 Video"; break;
-      case MessageType.audio: preview = "🎵 Audio"; break;
-      case MessageType.file: preview = "📄 File"; break;
-      case MessageType.presentation: preview = "📊 Presentation"; break;
-      case MessageType.location: preview = "📍 Location"; break;
-      case MessageType.studyRoom: preview = "🧑‍🎓 Study Room"; break;
-      case MessageType.poll: preview = "📊 Poll"; break; // 🔥 NAYA
+      case MessageType.image: preview = AppLocalizations.of(context)!.chatPreviewPhoto; break;
+      case MessageType.video: preview = AppLocalizations.of(context)!.chatPreviewVideo; break;
+      case MessageType.audio: preview = AppLocalizations.of(context)!.chatPreviewAudio; break;
+      case MessageType.file: preview = AppLocalizations.of(context)!.chatPreviewFile; break;
+      case MessageType.presentation: preview = AppLocalizations.of(context)!.chatPreviewPresentation; break;
+      case MessageType.location: preview = AppLocalizations.of(context)!.chatPreviewLocation; break;
+      case MessageType.studyRoom: preview = AppLocalizations.of(context)!.chatPreviewStudyRoom; break;
+      case MessageType.poll: preview = AppLocalizations.of(context)!.chatPreviewPoll; break; // 🔥 NAYA
       default: preview = r.text ?? '';
     }
     return GestureDetector(
@@ -4394,9 +4462,17 @@ class _MessageBubble extends StatelessWidget {
       child: Container(
         margin: const EdgeInsets.only(bottom: 5),
         padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
-        decoration: BoxDecoration(color: textColor == Colors.white ? Colors.white.withOpacity(0.12) : Colors.black.withOpacity(0.05), borderRadius: BorderRadius.circular(6), border: const Border(left: BorderSide(color: Color(0xFF3D7EFF), width: 3))),
+        // 🎨 THEME FIX — pehle `textColor == Colors.white` se sent/received
+        // decide hota tha, jo naye theme-driven textColor ke saath kabhi
+        // match nahi karega (ab wo literal Colors.white nahi, cs.onPrimary
+        // hai). Seedha `isMe` field use kar rahe hain — zyada robust.
+        decoration: BoxDecoration(
+          color: isMe ? Theme.of(context).colorScheme.onPrimary.withOpacity(0.15) : Theme.of(context).colorScheme.onSurface.withOpacity(0.06),
+          borderRadius: BorderRadius.circular(6),
+          border: Border(left: BorderSide(color: Theme.of(context).colorScheme.primary, width: 3)),
+        ),
         child: Column(crossAxisAlignment: CrossAxisAlignment.start, mainAxisSize: MainAxisSize.min, children: [
-          Text(r.sender?.displayName ?? '', style: const TextStyle(color: Color(0xFF3D7EFF), fontWeight: FontWeight.bold, fontSize: 11.5)),
+          Text(r.sender?.displayName ?? '', style: TextStyle(color: Theme.of(context).colorScheme.primary, fontWeight: FontWeight.bold, fontSize: 11.5)),
           Text(preview, maxLines: 1, overflow: TextOverflow.ellipsis, style: TextStyle(color: textColor.withOpacity(0.75), fontSize: 12)),
         ]),
       ),
@@ -4406,15 +4482,15 @@ class _MessageBubble extends StatelessWidget {
   Widget _buildReactionRow() { final counts = <String, int>{}; for (final r in message.reactions) { counts[r.emoji] = (counts[r.emoji] ?? 0) + 1; } return GestureDetector(onTap: onReactionTap, child: Container(margin: const EdgeInsets.only(top: 2), padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3), decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(12), boxShadow: [BoxShadow(color: Colors.black.withOpacity(0.06), blurRadius: 3)]), child: Row(mainAxisSize: MainAxisSize.min, children: counts.entries.map((e) => Padding(padding: const EdgeInsets.symmetric(horizontal: 2), child: Text("${e.key} ${e.value > 1 ? e.value : ''}", style: const TextStyle(fontSize: 12)))).toList()))); }
 
   Widget _buildContent(BuildContext context, Color textColor) {
-    if (message.deletedForEveryone) return Text("This message was deleted", style: TextStyle(color: Colors.grey, fontStyle: FontStyle.italic, fontSize: 14.5));
+    if (message.deletedForEveryone) return Text(AppLocalizations.of(context)!.chatMessageDeleted, style: TextStyle(color: Colors.grey, fontStyle: FontStyle.italic, fontSize: 14.5));
 
     Widget media;
     switch (message.type) {
       case MessageType.image: media = _imageContent(context, textColor); break;
       case MessageType.video: media = _videoContent(context, textColor); break;
       case MessageType.audio: return _AudioBubble(message: message, textColor: textColor, onDownload: onDownload);
-      case MessageType.presentation: media = _fileLikeContent(context, textColor, Icons.slideshow, "Presentation"); break;
-      case MessageType.file: media = _fileLikeContent(context, textColor, Icons.insert_drive_file, "File"); break;
+      case MessageType.presentation: media = _fileLikeContent(context, textColor, Icons.slideshow, AppLocalizations.of(context)!.chatPresentation); break;
+      case MessageType.file: media = _fileLikeContent(context, textColor, Icons.insert_drive_file, AppLocalizations.of(context)!.chatFile); break;
       case MessageType.location: return _locationContent(context, textColor);
       case MessageType.studyRoom: return _studyRoomCard(context); // 🔥 NAYA
       case MessageType.poll: return _pollContent(context, textColor); // 🔥 NAYA
@@ -4428,6 +4504,25 @@ class _MessageBubble extends StatelessWidget {
       // ya thodi der baad `meta_update` event se live aaye), text ke
       // neeche ek preview card bhi dikhao.
       default:
+        // 🔥 NAYA — Features 9/10 (Translate + Listen) ab yahan wire ho
+        // gaye hain. Dono widgets (`translatable_message_widgets.dart`)
+        // pehle se bane the lekin kahin call nahi ho rahe the — is chat
+        // bubble ke text render path me hi missing piece the, in par koi
+        // dependency nahi thi.
+        final txt = message.text ?? '';
+        final actionRow = txt.trim().isEmpty
+            ? null
+            : Padding(
+                padding: const EdgeInsets.only(top: 2),
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    ListenButton(messageId: message.id, text: txt),
+                    const SizedBox(width: 4),
+                    TranslateToggle(messageId: message.id, text: txt),
+                  ],
+                ),
+              );
         if (message.linkPreview != null) {
           return Column(
             crossAxisAlignment: CrossAxisAlignment.start,
@@ -4436,10 +4531,19 @@ class _MessageBubble extends StatelessWidget {
               _LinkifiedText(text: message.text ?? '', color: textColor),
               const SizedBox(height: 6),
               _LinkPreviewCard(preview: message.linkPreview!, textColor: textColor),
+              if (actionRow != null) actionRow,
             ],
           );
         }
-        return _LinkifiedText(text: message.text ?? '', color: textColor);
+        if (actionRow == null) return _LinkifiedText(text: message.text ?? '', color: textColor);
+        return Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            _LinkifiedText(text: message.text ?? '', color: textColor),
+            actionRow,
+          ],
+        );
     }
 
     // 🔥 NAYA: media ke saath caption ho (gallery-preview screen se) to
@@ -4479,20 +4583,20 @@ class _MessageBubble extends StatelessWidget {
           mainAxisSize: MainAxisSize.min,
           children: [
             Row(
-              children: const [
+              children: [
                 Icon(Icons.school, color: Colors.white, size: 22),
                 SizedBox(width: 8),
                 Expanded(
                   child: Text(
-                    'Study Room',
+                    AppLocalizations.of(context)!.chatStudyRoom,
                     style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold, fontSize: 15),
                   ),
                 ),
               ],
             ),
             const SizedBox(height: 8),
-            const Text(
-              'Whiteboard, timer aur live call — sab ek jagah.',
+            Text(
+              AppLocalizations.of(context)!.chatStudyRoomCardSubtitle,
               style: TextStyle(color: Colors.white70, fontSize: 12),
             ),
             const SizedBox(height: 12),
@@ -4501,8 +4605,8 @@ class _MessageBubble extends StatelessWidget {
               padding: const EdgeInsets.symmetric(vertical: 8),
               decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(20)),
               alignment: Alignment.center,
-              child: const Text(
-                'Tap to Join',
+              child: Text(
+                AppLocalizations.of(context)!.chatTapToJoin,
                 style: TextStyle(color: Color(0xFF4E54C8), fontWeight: FontWeight.bold, fontSize: 13),
               ),
             ),
@@ -4526,7 +4630,7 @@ class _MessageBubble extends StatelessWidget {
       return Row(mainAxisSize: MainAxisSize.min, children: [
         Icon(Icons.poll_outlined, color: textColor, size: 18),
         const SizedBox(width: 6),
-        Flexible(child: Text(message.text ?? 'Poll', style: TextStyle(color: textColor, fontWeight: FontWeight.w600))),
+        Flexible(child: Text(message.text ?? AppLocalizations.of(context)!.pollLabel, style: TextStyle(color: textColor, fontWeight: FontWeight.w600))),
       ]);
     }
     return _PollBubbleContent(
@@ -4696,8 +4800,8 @@ class _MessageBubble extends StatelessWidget {
                     padding: const EdgeInsets.only(top: 6),
                     child: Text(
                       message.uploadProgress != null && message.uploadProgress! > 0
-                          ? "${(message.uploadProgress! * 100).toStringAsFixed(0)}% • $count photos"
-                          : "$count photos",
+                          ? AppLocalizations.of(context)!.chatUploadingPhotosPercent((message.uploadProgress! * 100).round(), count)
+                          : AppLocalizations.of(context)!.chatPhotosCount(count),
                       style: const TextStyle(color: Colors.white, fontSize: 12),
                     ),
                   ),
@@ -4716,13 +4820,13 @@ class _MessageBubble extends StatelessWidget {
     return GestureDetector(
       onTap: (url != null && url.isNotEmpty && !message.isSending) ? onDownload : null,
       child: Row(mainAxisSize: MainAxisSize.min, children: [
-        Container(padding: const EdgeInsets.all(8), decoration: BoxDecoration(color: textColor == Colors.white ? Colors.white24 : Colors.grey[200], shape: BoxShape.circle), child: message.isSending ? SizedBox(width: 20, height: 20, child: CircularProgressIndicator(strokeWidth: 2, color: textColor, value: (message.uploadProgress != null && message.uploadProgress! > 0) ? message.uploadProgress : null)) : Icon(icon, color: textColor)),
+        Container(padding: const EdgeInsets.all(8), decoration: BoxDecoration(color: textColor.withOpacity(0.18), shape: BoxShape.circle), child: message.isSending ? SizedBox(width: 20, height: 20, child: CircularProgressIndicator(strokeWidth: 2, color: textColor, value: (message.uploadProgress != null && message.uploadProgress! > 0) ? message.uploadProgress : null)) : Icon(icon, color: textColor)),
         const SizedBox(width: 8),
         Flexible(child: Column(crossAxisAlignment: CrossAxisAlignment.start, mainAxisSize: MainAxisSize.min, children: [
           Text(fileName, style: TextStyle(color: textColor, fontSize: 14), overflow: TextOverflow.ellipsis),
           // 🔥 NAYA: sending ke dauraan "42% uploading..." dikhega
           if (message.isSending && message.uploadProgress != null && message.uploadProgress! > 0)
-            Text("${(message.uploadProgress! * 100).toStringAsFixed(0)}% uploading...", style: TextStyle(color: textColor.withOpacity(0.7), fontSize: 11)),
+            Text(AppLocalizations.of(context)!.chatUploadingPercent((message.uploadProgress! * 100).round()), style: TextStyle(color: textColor.withOpacity(0.7), fontSize: 11)),
         ])),
         if (!message.isSending && url != null && url.isNotEmpty) ...[
           const SizedBox(width: 6),
@@ -4774,7 +4878,7 @@ class _MessageBubble extends StatelessWidget {
 
   Widget _locationContent(BuildContext context, Color textColor) {
     final lat = message.meta?['lat']; final lng = message.meta?['lng'];
-    return GestureDetector(onTap: (lat != null && lng != null) ? () => launchUrl(Uri.parse("https://maps.google.com/?q=$lat,$lng"), mode: LaunchMode.externalApplication) : null, child: Row(mainAxisSize: MainAxisSize.min, children: [Icon(Icons.location_on, color: textColor), const SizedBox(width: 6), Text("Location shared", style: TextStyle(color: textColor, fontSize: 14))]));
+    return GestureDetector(onTap: (lat != null && lng != null) ? () => launchUrl(Uri.parse("https://maps.google.com/?q=$lat,$lng"), mode: LaunchMode.externalApplication) : null, child: Row(mainAxisSize: MainAxisSize.min, children: [Icon(Icons.location_on, color: textColor), const SizedBox(width: 6), Text(AppLocalizations.of(context)!.chatLocationShared, style: TextStyle(color: textColor, fontSize: 14))]));
   }
 }
 
@@ -4792,7 +4896,7 @@ class _PollBubbleContent extends StatefulWidget {
   State<_PollBubbleContent> createState() => _PollBubbleContentState();
 }
 
-class _PollBubbleContentState extends State<_PollBubbleContent> {
+class _PollBubbleContentState extends State<_PollBubbleContent> with _L10nCache<_PollBubbleContent> {
   final Set<String> _selected = {};
 
   @override
@@ -4872,7 +4976,7 @@ class _PollBubbleContentState extends State<_PollBubbleContent> {
         );
       }),
       Text(
-        "${poll.totalVotes} vote${poll.totalVotes == 1 ? '' : 's'}${poll.isClosed ? ' • Closed' : ''}",
+        poll.isClosed ? _l10n.chatPollVotesClosed(poll.totalVotes) : _l10n.chatPollVotes(poll.totalVotes),
         style: TextStyle(color: widget.textColor.withOpacity(0.6), fontSize: 11),
       ),
     ]);
@@ -4904,7 +5008,7 @@ class _MediaPreviewScreen extends StatefulWidget {
   State<_MediaPreviewScreen> createState() => _MediaPreviewScreenState();
 }
 
-class _MediaPreviewScreenState extends State<_MediaPreviewScreen> {
+class _MediaPreviewScreenState extends State<_MediaPreviewScreen> with _L10nCache<_MediaPreviewScreen> {
   static const _videoExtensions = {'mp4', 'mov', 'mkv', '3gp', 'webm', 'avi', 'm4v'};
 
   late List<XFile> _files;
@@ -4990,7 +5094,7 @@ class _MediaPreviewScreenState extends State<_MediaPreviewScreen> {
               IconButton(icon: const Icon(Icons.close, color: Colors.white), onPressed: () => Navigator.pop(context)),
               const Spacer(),
               Text(
-                _files.length == 1 ? "1 item" : "${_files.length} items",
+                _l10n.chatItemsCount(_files.length),
                 style: const TextStyle(color: Colors.white70, fontSize: 13, fontWeight: FontWeight.w500),
               ),
               const SizedBox(width: 14),
@@ -5097,7 +5201,7 @@ class _MediaPreviewScreenState extends State<_MediaPreviewScreen> {
                     minLines: 1,
                     maxLines: 4,
                     style: const TextStyle(color: Colors.white),
-                    decoration: const InputDecoration(hintText: "Add a caption…", hintStyle: TextStyle(color: Colors.white38), border: InputBorder.none),
+                    decoration: InputDecoration(hintText: _l10n.addCaptionHint, hintStyle: TextStyle(color: Colors.white38), border: InputBorder.none),
                   ),
                 ),
               ),
@@ -5161,7 +5265,7 @@ class _AudioBubble extends StatefulWidget {
   State<_AudioBubble> createState() => _AudioBubbleState();
 }
 
-class _AudioBubbleState extends State<_AudioBubble> {
+class _AudioBubbleState extends State<_AudioBubble> with _L10nCache<_AudioBubble> {
   final AudioPlayer _player = AudioPlayer();
   PlayerState _state = PlayerState.stopped;
   Duration _position = Duration.zero;
@@ -5214,7 +5318,7 @@ class _AudioBubbleState extends State<_AudioBubble> {
         await _player.play(UrlSource(url));
       }
     } catch (e) {
-      if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text("Audio play nahi ho payi: $e")));
+      if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(_l10n.chatAudioPlayFailed(e.toString()))));
     } finally {
       if (mounted) setState(() => _loading = false);
     }
@@ -5246,7 +5350,7 @@ class _AudioBubbleState extends State<_AudioBubble> {
     } catch (e) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text("Transcribe nahi ho paya: $e")),
+          SnackBar(content: Text(_l10n.chatTranscribeFailed(e.toString()))),
         );
       }
     } finally {
@@ -5268,7 +5372,7 @@ class _AudioBubbleState extends State<_AudioBubble> {
       return Row(mainAxisSize: MainAxisSize.min, children: [
         SizedBox(width: 20, height: 20, child: CircularProgressIndicator(strokeWidth: 2, color: textColor, value: (msg.uploadProgress != null && msg.uploadProgress! > 0) ? msg.uploadProgress : null)),
         const SizedBox(width: 8),
-        Text(msg.uploadProgress != null && msg.uploadProgress! > 0 ? "${(msg.uploadProgress! * 100).toStringAsFixed(0)}% uploading..." : "Sending audio...", style: TextStyle(color: textColor, fontSize: 13)),
+        Text(msg.uploadProgress != null && msg.uploadProgress! > 0 ? _l10n.chatUploadingPercent((msg.uploadProgress! * 100).round()) : _l10n.chatSendingAudio, style: TextStyle(color: textColor, fontSize: 13)),
       ]);
     }
     final url = msg.fileUrl;
@@ -5287,7 +5391,7 @@ class _AudioBubbleState extends State<_AudioBubble> {
               onLongPress: (url != null && url.isNotEmpty) ? widget.onDownload : null,
               child: Container(
                 padding: const EdgeInsets.all(8),
-                decoration: BoxDecoration(color: textColor == Colors.white ? Colors.white24 : Colors.grey[200], shape: BoxShape.circle),
+                decoration: BoxDecoration(color: textColor.withOpacity(0.18), shape: BoxShape.circle),
                 child: _loading
                     ? SizedBox(width: 20, height: 20, child: CircularProgressIndicator(strokeWidth: 2, color: textColor))
                     : Icon(_state == PlayerState.playing ? Icons.pause : Icons.play_arrow, color: textColor),
@@ -5316,7 +5420,7 @@ class _AudioBubbleState extends State<_AudioBubble> {
                 Padding(
                   padding: const EdgeInsets.only(left: 4),
                   child: Text(
-                    total.inMilliseconds > 0 ? "${_fmt(_position)} / ${_fmt(total)}" : "Audio message",
+                    total.inMilliseconds > 0 ? "${_fmt(_position)} / ${_fmt(total)}" : _l10n.chatAudioMessage,
                     style: TextStyle(color: textColor.withOpacity(0.8), fontSize: 11),
                   ),
                 ),
@@ -5355,7 +5459,7 @@ class _AudioBubbleState extends State<_AudioBubble> {
                     Icon(Icons.subtitles_outlined, size: 13, color: textColor.withOpacity(0.7)),
                   const SizedBox(width: 4),
                   Text(
-                    _transcribing ? "Transcribing..." : "Transcribe",
+                    _transcribing ? _l10n.chatTranscribing : _l10n.chatTranscribe,
                     style: TextStyle(
                       color: textColor.withOpacity(0.7),
                       fontSize: 11,
@@ -5384,7 +5488,7 @@ class _TranscriptText extends StatefulWidget {
   State<_TranscriptText> createState() => _TranscriptTextState();
 }
 
-class _TranscriptTextState extends State<_TranscriptText> {
+class _TranscriptTextState extends State<_TranscriptText> with _L10nCache<_TranscriptText> {
   bool _expanded = false;
 
   @override
@@ -5396,7 +5500,7 @@ class _TranscriptTextState extends State<_TranscriptText> {
         constraints: const BoxConstraints(maxWidth: 220),
         padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
         decoration: BoxDecoration(
-          color: color == Colors.white ? Colors.white.withOpacity(0.08) : Colors.black.withOpacity(0.04),
+          color: color.withOpacity(0.1),
           borderRadius: BorderRadius.circular(6),
         ),
         child: Column(
@@ -5406,7 +5510,7 @@ class _TranscriptTextState extends State<_TranscriptText> {
             Row(children: [
               Icon(Icons.subtitles_outlined, size: 13, color: color.withOpacity(0.7)),
               const SizedBox(width: 4),
-              Text("Transcript", style: TextStyle(color: color.withOpacity(0.7), fontSize: 10.5, fontWeight: FontWeight.w600)),
+              Text(_l10n.chatTranscript, style: TextStyle(color: color.withOpacity(0.7), fontSize: 10.5, fontWeight: FontWeight.w600)),
             ]),
             const SizedBox(height: 2),
             Text(
@@ -5433,7 +5537,7 @@ class _VideoPlayerScreen extends StatefulWidget {
   State<_VideoPlayerScreen> createState() => _VideoPlayerScreenState();
 }
 
-class _VideoPlayerScreenState extends State<_VideoPlayerScreen> {
+class _VideoPlayerScreenState extends State<_VideoPlayerScreen> with _L10nCache<_VideoPlayerScreen> {
   late VideoPlayerController _controller;
   bool _isReady = false;
   String? _error;
@@ -5455,7 +5559,7 @@ class _VideoPlayerScreenState extends State<_VideoPlayerScreen> {
         _restartHideTimer();
       }).catchError((e) {
         if (!mounted) return;
-        setState(() => _error = "Video load nahi ho payi: $e");
+        setState(() => _error = _l10n.chatVideoLoadFailed(e.toString()));
       });
     _controller.addListener(_onTick);
   }

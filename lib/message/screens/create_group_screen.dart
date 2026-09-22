@@ -15,10 +15,7 @@ import 'package:cached_network_image/cached_network_image.dart';
 
 import '../services/message_api_service.dart';
 import 'conversations_screen.dart';
-
-const _kNavy = Color(0xFF030F27);
-const _kAccent = Color(0xFFEE0979);
-const _kBg = Color(0xFFF6F7FB);
+import '../../theme_service.dart'; // 🎨 THEME FIX — AppThemeTokens
 
 class CreateGroupScreen extends StatefulWidget {
   const CreateGroupScreen({super.key});
@@ -189,12 +186,12 @@ class _CreateGroupScreenState extends State<CreateGroupScreen> {
 
   @override
   Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
     return Scaffold(
-      backgroundColor: _kBg,
       appBar: AppBar(
-        backgroundColor: _kNavy,
+        backgroundColor: cs.primary,
         elevation: 0,
-        foregroundColor: Colors.white,
+        foregroundColor: cs.onPrimary,
         title: const Text("New Group", style: TextStyle(fontWeight: FontWeight.w700)),
       ),
       body: Column(
@@ -207,15 +204,15 @@ class _CreateGroupScreenState extends State<CreateGroupScreen> {
               margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 6),
               padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
               decoration: BoxDecoration(
-                color: Colors.red.withOpacity(0.08),
+                color: cs.error.withOpacity(0.08),
                 borderRadius: BorderRadius.circular(10),
-                border: Border.all(color: Colors.red.withOpacity(0.2)),
+                border: Border.all(color: cs.error.withOpacity(0.2)),
               ),
               child: Row(children: [
-                const Icon(Icons.error_outline_rounded, color: Colors.red, size: 18),
+                Icon(Icons.error_outline_rounded, color: cs.error, size: 18),
                 const SizedBox(width: 8),
                 Expanded(
-                  child: Text(_createError!, style: const TextStyle(color: Colors.red, fontSize: 13)),
+                  child: Text(_createError!, style: TextStyle(color: cs.error, fontSize: 13)),
                 ),
               ]),
             ),
@@ -227,9 +224,10 @@ class _CreateGroupScreenState extends State<CreateGroupScreen> {
   }
 
   Widget _buildSelectedChips() {
+    final cs = Theme.of(context).colorScheme;
     return Container(
       width: double.infinity,
-      color: Colors.white,
+      color: cs.surface,
       padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
       child: Wrap(
         spacing: 8,
@@ -237,19 +235,19 @@ class _CreateGroupScreenState extends State<CreateGroupScreen> {
         children: _selectedUsers.map((user) {
           return Chip(
             avatar: CircleAvatar(
-              backgroundColor: Colors.grey[200],
+              backgroundColor: AppThemeTokens.of(context).surface2,
               backgroundImage: (user['avatar'] != null && user['avatar'].toString().isNotEmpty)
                   ? CachedNetworkImageProvider(user['avatar'].toString())
                   : null,
               child: (user['avatar'] == null || user['avatar'].toString().isEmpty)
-                  ? const Icon(Icons.person_rounded, size: 16, color: Colors.grey)
+                  ? Icon(Icons.person_rounded, size: 16, color: cs.onSurfaceVariant)
                   : null,
             ),
             label: Text(_displayName(user), style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w500)),
             onDeleted: () => _removeSelected(user),
-            deleteIconColor: Colors.grey[500],
-            backgroundColor: _kBg,
-            side: BorderSide(color: Colors.grey[300]!),
+            deleteIconColor: cs.onSurfaceVariant,
+            backgroundColor: AppThemeTokens.of(context).surface2,
+            side: BorderSide(color: cs.outlineVariant),
             shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
           );
         }).toList(),
@@ -270,7 +268,7 @@ class _CreateGroupScreenState extends State<CreateGroupScreen> {
   //              ke admin approval ka wait).
   Widget _buildGroupTypeChoice() {
     return Container(
-      color: Colors.white,
+      color: Theme.of(context).colorScheme.surface,
       padding: const EdgeInsets.fromLTRB(14, 4, 14, 4),
       child: Row(
         children: [
@@ -305,6 +303,8 @@ class _CreateGroupScreenState extends State<CreateGroupScreen> {
     required String subtitle,
     required VoidCallback onTap,
   }) {
+    final cs = Theme.of(context).colorScheme;
+    final coral = AppThemeTokens.of(context).coral;
     return InkWell(
       onTap: onTap,
       borderRadius: BorderRadius.circular(12),
@@ -312,22 +312,22 @@ class _CreateGroupScreenState extends State<CreateGroupScreen> {
         duration: const Duration(milliseconds: 150),
         padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
         decoration: BoxDecoration(
-          color: selected ? const Color(0xFFFFF0F6) : _kBg,
+          color: selected ? coral.withOpacity(0.12) : AppThemeTokens.of(context).surface2,
           borderRadius: BorderRadius.circular(12),
-          border: Border.all(color: selected ? _kAccent : Colors.grey[300]!, width: selected ? 1.4 : 1),
+          border: Border.all(color: selected ? coral : cs.outlineVariant, width: selected ? 1.4 : 1),
         ),
         child: Row(
           children: [
-            Icon(icon, size: 20, color: selected ? _kAccent : Colors.grey[600]),
+            Icon(icon, size: 20, color: selected ? coral : cs.onSurfaceVariant),
             const SizedBox(width: 8),
             Expanded(
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 mainAxisSize: MainAxisSize.min,
                 children: [
-                  Text(title, style: TextStyle(fontSize: 13.5, fontWeight: FontWeight.w700, color: selected ? _kNavy : Colors.grey[800])),
+                  Text(title, style: TextStyle(fontSize: 13.5, fontWeight: FontWeight.w700, color: selected ? cs.primary : cs.onSurface)),
                   const SizedBox(height: 1),
-                  Text(subtitle, style: TextStyle(fontSize: 10.5, color: Colors.grey[600]), maxLines: 2),
+                  Text(subtitle, style: TextStyle(fontSize: 10.5, color: cs.onSurfaceVariant), maxLines: 2),
                 ],
               ),
             ),
@@ -335,7 +335,7 @@ class _CreateGroupScreenState extends State<CreateGroupScreen> {
             Icon(
               selected ? Icons.check_circle_rounded : Icons.radio_button_unchecked,
               size: 18,
-              color: selected ? _kAccent : Colors.grey[400],
+              color: selected ? coral : cs.onSurfaceVariant,
             ),
           ],
         ),
@@ -344,18 +344,19 @@ class _CreateGroupScreenState extends State<CreateGroupScreen> {
   }
 
   Widget _buildSearchField() {
+    final cs = Theme.of(context).colorScheme;
     return Container(
-      color: Colors.white,
+      color: cs.surface,
       padding: const EdgeInsets.fromLTRB(14, 4, 14, 12),
       child: TextField(
         controller: _searchController,
         onChanged: _onSearchChanged,
         decoration: InputDecoration(
           hintText: "Search users to add",
-          hintStyle: TextStyle(color: Colors.grey[500], fontSize: 14),
-          prefixIcon: Icon(Icons.search_rounded, color: Colors.grey[500]),
+          hintStyle: TextStyle(color: cs.onSurfaceVariant, fontSize: 14),
+          prefixIcon: Icon(Icons.search_rounded, color: cs.onSurfaceVariant),
           filled: true,
-          fillColor: _kBg,
+          fillColor: AppThemeTokens.of(context).surface2,
           contentPadding: const EdgeInsets.symmetric(vertical: 0, horizontal: 12),
           border: OutlineInputBorder(borderRadius: BorderRadius.circular(12), borderSide: BorderSide.none),
         ),
@@ -364,12 +365,14 @@ class _CreateGroupScreenState extends State<CreateGroupScreen> {
   }
 
   Widget _buildSearchResults() {
+    final cs = Theme.of(context).colorScheme;
+    final coral = AppThemeTokens.of(context).coral;
     if (_isSearching) {
-      return const Center(child: CircularProgressIndicator(color: _kNavy));
+      return Center(child: CircularProgressIndicator(color: cs.primary));
     }
     if (_searchError != null) {
       return Center(
-        child: Text("Search fail: $_searchError", style: const TextStyle(color: Colors.red)),
+        child: Text("Search fail: $_searchError", style: TextStyle(color: cs.error)),
       );
     }
     if (_searchResults.isEmpty) {
@@ -377,23 +380,23 @@ class _CreateGroupScreenState extends State<CreateGroupScreen> {
         child: Column(mainAxisSize: MainAxisSize.min, children: [
           Container(
             width: 80, height: 80,
-            decoration: BoxDecoration(color: _kNavy.withOpacity(0.06), shape: BoxShape.circle),
-            child: Icon(Icons.person_search_rounded, size: 36, color: _kNavy.withOpacity(0.5)),
+            decoration: BoxDecoration(color: cs.primary.withOpacity(0.06), shape: BoxShape.circle),
+            child: Icon(Icons.person_search_rounded, size: 36, color: cs.primary.withOpacity(0.5)),
           ),
           const SizedBox(height: 12),
-          Text("Search for people to add", style: TextStyle(color: Colors.grey[500], fontSize: 13)),
+          Text("Search for people to add", style: TextStyle(color: cs.onSurfaceVariant, fontSize: 13)),
         ]),
       );
     }
     return ListView.separated(
       padding: const EdgeInsets.symmetric(vertical: 4),
       itemCount: _searchResults.length,
-      separatorBuilder: (_, __) => Divider(height: 1, indent: 78, color: Colors.grey[200]),
+      separatorBuilder: (_, __) => Divider(height: 1, indent: 78, color: cs.outlineVariant),
       itemBuilder: (context, index) {
         final user = _searchResults[index];
         final selected = _isSelected(user);
         return Material(
-          color: selected ? const Color(0xFFFFF0F6) : Colors.white,
+          color: selected ? coral.withOpacity(0.12) : cs.surface,
           child: ListTile(
             onTap: () => _toggleSelect(user),
             contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
@@ -401,24 +404,24 @@ class _CreateGroupScreenState extends State<CreateGroupScreen> {
               padding: const EdgeInsets.all(2),
               decoration: BoxDecoration(
                 shape: BoxShape.circle,
-                border: Border.all(color: Colors.grey[200]!, width: 1),
+                border: Border.all(color: cs.outlineVariant, width: 1),
               ),
               child: CircleAvatar(
                 radius: 24,
-                backgroundColor: Colors.grey[200],
+                backgroundColor: AppThemeTokens.of(context).surface2,
                 backgroundImage: (user['avatar'] != null && user['avatar'].toString().isNotEmpty)
                     ? CachedNetworkImageProvider(user['avatar'].toString())
                     : null,
                 child: (user['avatar'] == null || user['avatar'].toString().isEmpty)
-                    ? Icon(Icons.person_rounded, color: Colors.grey[500])
+                    ? Icon(Icons.person_rounded, color: cs.onSurfaceVariant)
                     : null,
               ),
             ),
             title: Text(_displayName(user), style: const TextStyle(fontWeight: FontWeight.w600, fontSize: 15)),
-            subtitle: Text('@${user['username'] ?? ''}', style: TextStyle(fontSize: 12, color: Colors.grey[600])),
+            subtitle: Text('@${user['username'] ?? ''}', style: TextStyle(fontSize: 12, color: cs.onSurfaceVariant)),
             trailing: Icon(
               selected ? Icons.check_circle_rounded : Icons.radio_button_unchecked,
-              color: selected ? _kAccent : Colors.grey[400],
+              color: selected ? coral : cs.onSurfaceVariant,
             ),
           ),
         );
@@ -427,11 +430,12 @@ class _CreateGroupScreenState extends State<CreateGroupScreen> {
   }
 
   Widget _buildBottomBar() {
+    final cs = Theme.of(context).colorScheme;
     return SafeArea(
       child: Container(
         padding: const EdgeInsets.fromLTRB(14, 10, 14, 14),
         decoration: BoxDecoration(
-          color: Colors.white,
+          color: cs.surface,
           boxShadow: [BoxShadow(color: Colors.black.withOpacity(0.06), blurRadius: 8, offset: const Offset(0, -2))],
         ),
         child: Row(
@@ -441,9 +445,9 @@ class _CreateGroupScreenState extends State<CreateGroupScreen> {
                 controller: _groupNameController,
                 decoration: InputDecoration(
                   hintText: "Group name",
-                  hintStyle: TextStyle(color: Colors.grey[500], fontSize: 14),
+                  hintStyle: TextStyle(color: cs.onSurfaceVariant, fontSize: 14),
                   filled: true,
-                  fillColor: _kBg,
+                  fillColor: AppThemeTokens.of(context).surface2,
                   contentPadding: const EdgeInsets.symmetric(vertical: 0, horizontal: 14),
                   border: OutlineInputBorder(borderRadius: BorderRadius.circular(12), borderSide: BorderSide.none),
                 ),
@@ -453,16 +457,16 @@ class _CreateGroupScreenState extends State<CreateGroupScreen> {
             ElevatedButton(
               onPressed: _isCreating ? null : _createGroup,
               style: ElevatedButton.styleFrom(
-                backgroundColor: _kNavy,
-                foregroundColor: Colors.white,
+                backgroundColor: cs.primary,
+                foregroundColor: cs.onPrimary,
                 elevation: 0,
                 padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 16),
                 shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
               ),
               child: _isCreating
-                  ? const SizedBox(
+                  ? SizedBox(
                       width: 18, height: 18,
-                      child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white),
+                      child: CircularProgressIndicator(strokeWidth: 2, color: cs.onPrimary),
                     )
                   : const Text("Create", style: TextStyle(fontWeight: FontWeight.w600)),
             ),

@@ -18,6 +18,7 @@ import 'package:url_launcher/url_launcher.dart';
 
 import '../services/message_api_service.dart';
 import 'media_viewer_screen.dart';
+import '../../theme_service.dart'; // 🎨 THEME FIX — AppThemeTokens
 
 class GroupMediaScreen extends StatefulWidget {
   final String groupId;
@@ -36,9 +37,6 @@ class _MediaFilter {
 }
 
 class _GroupMediaScreenState extends State<GroupMediaScreen> with SingleTickerProviderStateMixin {
-  static const _kNavy = Color(0xFF030F27);
-  static const _kAccent = Color(0xFFEE0979);
-
   late final TabController _tabController;
   final Map<String, List<dynamic>> _cache = {}; // filter -> raw GroupMedia items
   bool _loading = true;
@@ -114,25 +112,25 @@ class _GroupMediaScreenState extends State<GroupMediaScreen> with SingleTickerPr
   @override
   Widget build(BuildContext context) {
     final items = _cache[_filter] ?? const [];
+    final cs = Theme.of(context).colorScheme;
     return Scaffold(
-      backgroundColor: Colors.grey[100],
       appBar: AppBar(
-        backgroundColor: _kNavy,
-        foregroundColor: Colors.white,
+        backgroundColor: cs.primary,
+        foregroundColor: cs.onPrimary,
         elevation: 0,
         title: const Text("Media, links and docs", style: TextStyle(fontWeight: FontWeight.w700, fontSize: 16)),
         bottom: TabBar(
           controller: _tabController,
-          indicatorColor: _kAccent,
-          labelColor: Colors.white,
-          unselectedLabelColor: Colors.white60,
+          indicatorColor: AppThemeTokens.of(context).coral,
+          labelColor: cs.onPrimary,
+          unselectedLabelColor: cs.onPrimary.withOpacity(0.6),
           tabs: const [Tab(text: "All"), Tab(text: "Photos"), Tab(text: "Videos"), Tab(text: "Files")],
         ),
       ),
       body: RefreshIndicator(
         onRefresh: () => _load(forceRefresh: true),
         child: _loading
-            ? const Center(child: CircularProgressIndicator(color: _kNavy))
+            ? Center(child: CircularProgressIndicator(color: cs.primary))
             : _error != null
                 ? _buildErrorState()
                 : items.isEmpty
@@ -146,20 +144,21 @@ class _GroupMediaScreenState extends State<GroupMediaScreen> with SingleTickerPr
     return ListView(children: [
       Padding(
         padding: const EdgeInsets.all(32),
-        child: Center(child: Text(_error!, style: const TextStyle(color: Colors.red, fontSize: 13), textAlign: TextAlign.center)),
+        child: Center(child: Text(_error!, style: TextStyle(color: Theme.of(context).colorScheme.error, fontSize: 13), textAlign: TextAlign.center)),
       ),
     ]);
   }
 
   Widget _buildEmptyState() {
+    final cs = Theme.of(context).colorScheme;
     return ListView(children: [
       Padding(
         padding: const EdgeInsets.only(top: 100),
         child: Center(
           child: Column(children: [
-            Icon(Icons.perm_media_outlined, size: 48, color: Colors.grey[400]),
+            Icon(Icons.perm_media_outlined, size: 48, color: cs.onSurfaceVariant),
             const SizedBox(height: 12),
-            Text("Ab tak koi media share nahi hua", style: TextStyle(color: Colors.grey[500], fontSize: 13.5)),
+            Text("Ab tak koi media share nahi hua", style: TextStyle(color: cs.onSurfaceVariant, fontSize: 13.5)),
           ]),
         ),
       ),
@@ -234,13 +233,13 @@ class _GroupMediaScreenState extends State<GroupMediaScreen> with SingleTickerPr
           CachedNetworkImage(
             imageUrl: thumb,
             fit: BoxFit.cover,
-            placeholder: (_, __) => Container(color: Colors.grey[300]),
-            errorWidget: (_, __, ___) => Container(color: Colors.grey[300], child: const Icon(Icons.broken_image_outlined, color: Colors.grey)),
+            placeholder: (_, __) => Container(color: AppThemeTokens.of(context).surface2),
+            errorWidget: (_, __, ___) => Container(color: AppThemeTokens.of(context).surface2, child: Icon(Icons.broken_image_outlined, color: Theme.of(context).colorScheme.onSurfaceVariant)),
           )
         else
-          Container(color: Colors.grey[300]),
+          Container(color: AppThemeTokens.of(context).surface2),
         if (isVideo)
-          const Center(child: Icon(Icons.play_circle_fill_rounded, color: Colors.white, size: 32)),
+          const Center(child: Icon(Icons.play_circle_fill_rounded, color: Colors.white, size: 32)), // 🎨 video thumbnail overlay — fixed white/black jaan-boojh kar (media overlay convention, media_viewer_screen.dart jaisa)
       ]),
     );
   }
@@ -249,16 +248,17 @@ class _GroupMediaScreenState extends State<GroupMediaScreen> with SingleTickerPr
     final fileUrl = _str(it, 'file_url');
     final fileType = _str(it, 'file_type') ?? 'file';
     final sizeBytes = it is Map ? it['file_size'] : null;
+    final cs = Theme.of(context).colorScheme;
     return ListTile(
-      leading: CircleAvatar(backgroundColor: Colors.grey[200], child: Icon(_iconForType(fileType), color: _kNavy)),
+      leading: CircleAvatar(backgroundColor: AppThemeTokens.of(context).surface2, child: Icon(_iconForType(fileType), color: cs.primary)),
       title: Text(
         _fileNameFromUrl(fileUrl) ?? "File",
         maxLines: 1,
         overflow: TextOverflow.ellipsis,
         style: const TextStyle(fontSize: 13.5, fontWeight: FontWeight.w600),
       ),
-      subtitle: sizeBytes is num ? Text(_fmtBytes(sizeBytes.toInt()), style: TextStyle(fontSize: 11.5, color: Colors.grey[600])) : null,
-      trailing: const Icon(Icons.open_in_new_rounded, size: 18, color: Colors.grey),
+      subtitle: sizeBytes is num ? Text(_fmtBytes(sizeBytes.toInt()), style: TextStyle(fontSize: 11.5, color: cs.onSurfaceVariant)) : null,
+      trailing: Icon(Icons.open_in_new_rounded, size: 18, color: cs.onSurfaceVariant),
       onTap: fileUrl != null ? () => _openUrl(fileUrl) : null,
     );
   }

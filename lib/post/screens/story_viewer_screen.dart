@@ -21,14 +21,26 @@
 //   - own-story "N viewers" — tappable, opens a sheet listing who viewed
 //     (backend endpoint for this is flagged unconfirmed — see
 //     StoryService.getStoryViewers())
+//
+// UI/UX PASS — the viewer itself stays a full-bleed black, immersive
+// surface (that's the right pattern here regardless of the app's
+// light/dark setting — same reasoning as the other full-screen media
+// viewers in singlepost.dart/comment_sheet.dart). What changed: a
+// frosted close button and viewers pill matching the rest of the app's
+// glass-chrome language, the LearnScroll brand purple on the viewers
+// sheet, and every user-facing string (viewer/viewers count, the
+// viewers sheet's title/empty/error states) is now localized via
+// AppLocalizations instead of hardcoded English.
 
 import 'dart:async';
+import 'dart:ui';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:cached_network_image/cached_network_image.dart';
 import 'package:video_player/video_player.dart';
 import '../models/story_model.dart' show StoryGroup, StoryModel, StoryViewerEntry;
 import '../services/story_service.dart';
+import '../../l10n/app_localizations.dart';
 
 const Duration _kImageStoryDuration = Duration(seconds: 5);
 // Drag distance (px) past which releasing dismisses instead of snapping back.
@@ -37,6 +49,7 @@ const double _kDismissDragThreshold = 120.0;
 // if it didn't travel _kDismissDragThreshold yet.
 const double _kDismissVelocityThreshold = 800.0;
 const double _kMaxDragOffset = 400.0;
+const Color _kStoryAccent = Color(0xFF8B7CFF); // LearnScroll brand purple
 
 class StoryViewerScreen extends StatefulWidget {
   /// All groups currently in the row — lets the viewer swipe from one
@@ -343,25 +356,25 @@ class _StoryViewerScreenState extends State<StoryViewerScreen> with TickerProvid
     if (story.mediaType == 'video') {
       final c = _videoController;
       if (c == null || !c.value.isInitialized) {
-        return const Center(child: CircularProgressIndicator(color: Colors.white));
+        return const Center(child: CircularProgressIndicator(color: _kStoryAccent));
       }
       return Center(child: AspectRatio(aspectRatio: c.value.aspectRatio, child: VideoPlayer(c)));
     }
     if ((story.mediaUrl ?? '').isEmpty) {
-      return Container(color: Colors.black, child: const Center(child: Icon(Icons.broken_image, color: Colors.white38, size: 48)));
+      return Container(color: Colors.black, child: const Center(child: Icon(Icons.broken_image_rounded, color: Colors.white38, size: 48)));
     }
     return CachedNetworkImage(
       imageUrl: story.mediaUrl!,
       fit: BoxFit.contain,
-      placeholder: (_, __) => const Center(child: CircularProgressIndicator(color: Colors.white)),
-      errorWidget: (_, __, ___) => const Center(child: Icon(Icons.broken_image, color: Colors.white38, size: 48)),
+      placeholder: (_, __) => const Center(child: CircularProgressIndicator(color: _kStoryAccent)),
+      errorWidget: (_, __, ___) => const Center(child: Icon(Icons.broken_image_rounded, color: Colors.white38, size: 48)),
     );
   }
 
   Widget _buildTopOverlay(StoryGroup group) {
     return SafeArea(
       child: Padding(
-        padding: const EdgeInsets.symmetric(horizontal: 10),
+        padding: const EdgeInsets.fromLTRB(10, 8, 10, 0),
         child: Column(
           children: [
             // Segmented progress bars — one per story in this user's group.
@@ -397,22 +410,26 @@ class _StoryViewerScreenState extends State<StoryViewerScreen> with TickerProvid
                   backgroundColor: Colors.white24,
                   backgroundImage: (group.userProfilePic ?? '').isNotEmpty ? CachedNetworkImageProvider(group.userProfilePic!) : null,
                   child: (group.userProfilePic ?? '').isEmpty
-                      ? Text(group.username.isNotEmpty ? group.username[0].toUpperCase() : '?', style: const TextStyle(color: Colors.white, fontSize: 13))
+                      ? Text(group.username.isNotEmpty ? group.username[0].toUpperCase() : '?', style: const TextStyle(color: Colors.white, fontSize: 13, fontWeight: FontWeight.bold))
                       : null,
                 ),
                 const SizedBox(width: 8),
                 Expanded(
-                  child: Text(group.username, style: const TextStyle(color: Colors.white, fontWeight: FontWeight.w700, fontSize: 13.5), overflow: TextOverflow.ellipsis),
+                  child: Text(
+                    group.username,
+                    style: const TextStyle(color: Colors.white, fontWeight: FontWeight.w700, fontSize: 13.5, shadows: [Shadow(color: Colors.black45, blurRadius: 4)]),
+                    overflow: TextOverflow.ellipsis,
+                  ),
                 ),
-                IconButton(icon: const Icon(Icons.close, color: Colors.white), onPressed: () => Navigator.of(context).maybePop()),
+                _FrostedCircleButton(icon: Icons.close_rounded, onTap: () => Navigator.of(context).maybePop()),
               ],
             ),
             if ((_story.caption ?? '').isNotEmpty)
               Align(
                 alignment: Alignment.centerLeft,
                 child: Padding(
-                  padding: const EdgeInsets.only(top: 6),
-                  child: Text(_story.caption!, style: const TextStyle(color: Colors.white, fontSize: 13)),
+                  padding: const EdgeInsets.only(top: 8),
+                  child: Text(_story.caption!, style: const TextStyle(color: Colors.white, fontSize: 13, shadows: [Shadow(color: Colors.black45, blurRadius: 4)])),
                 ),
               ),
           ],
@@ -426,6 +443,7 @@ class _StoryViewerScreenState extends State<StoryViewerScreen> with TickerProvid
   /// label (already on the model, no extra call needed just to show a
   /// number) — the list itself is fetched lazily, only when tapped.
   Widget _buildViewersRow() {
+    final l10n = AppLocalizations.of(context)!;
     return Positioned(
       left: 14,
       right: 14,
@@ -435,15 +453,23 @@ class _StoryViewerScreenState extends State<StoryViewerScreen> with TickerProvid
         child: GestureDetector(
           onTap: _openViewersSheet,
           behavior: HitTestBehavior.opaque,
-          child: Row(
-            children: [
-              const Icon(Icons.remove_red_eye_outlined, color: Colors.white, size: 18),
-              const SizedBox(width: 6),
-              Text(
-                '${_story.viewsCount} ${_story.viewsCount == 1 ? "viewer" : "viewers"}',
-                style: const TextStyle(color: Colors.white, fontWeight: FontWeight.w600, fontSize: 12.5),
+          child: ClipRRect(
+            borderRadius: BorderRadius.circular(20),
+            child: BackdropFilter(
+              filter: ImageFilter.blur(sigmaX: 10, sigmaY: 10),
+              child: Container(
+                padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 7),
+                decoration: BoxDecoration(color: Colors.white.withOpacity(0.14), borderRadius: BorderRadius.circular(20)),
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    const Icon(Icons.remove_red_eye_outlined, color: Colors.white, size: 17),
+                    const SizedBox(width: 6),
+                    Text(l10n.viewersCount(_story.viewsCount), style: const TextStyle(color: Colors.white, fontWeight: FontWeight.w700, fontSize: 12.5)),
+                  ],
+                ),
               ),
-            ],
+            ),
           ),
         ),
       ),
@@ -458,10 +484,36 @@ class _StoryViewerScreenState extends State<StoryViewerScreen> with TickerProvid
       context: context,
       backgroundColor: const Color(0xFF1C1C1E),
       isScrollControlled: true,
+      shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(22))),
       builder: (_) => _StoryViewersSheet(storyId: storyId),
     ).whenComplete(() {
       if (mounted) _togglePause(false);
     });
+  }
+}
+
+class _FrostedCircleButton extends StatelessWidget {
+  final IconData icon;
+  final VoidCallback onTap;
+  const _FrostedCircleButton({required this.icon, required this.onTap});
+
+  @override
+  Widget build(BuildContext context) {
+    return ClipRRect(
+      borderRadius: BorderRadius.circular(18),
+      child: BackdropFilter(
+        filter: ImageFilter.blur(sigmaX: 10, sigmaY: 10),
+        child: Material(
+          color: Colors.white.withOpacity(0.16),
+          shape: const CircleBorder(),
+          child: InkWell(
+            customBorder: const CircleBorder(),
+            onTap: onTap,
+            child: Padding(padding: const EdgeInsets.all(7), child: Icon(icon, color: Colors.white, size: 20)),
+          ),
+        ),
+      ),
+    );
   }
 }
 
@@ -478,6 +530,7 @@ class _StoryViewersSheetState extends State<_StoryViewersSheet> {
 
   @override
   Widget build(BuildContext context) {
+    final l10n = AppLocalizations.of(context)!;
     return SafeArea(
       child: SizedBox(
         height: MediaQuery.of(context).size.height * 0.55,
@@ -485,13 +538,13 @@ class _StoryViewersSheetState extends State<_StoryViewersSheet> {
           children: [
             const SizedBox(height: 10),
             Container(width: 36, height: 4, decoration: BoxDecoration(color: Colors.white24, borderRadius: BorderRadius.circular(2))),
-            const Padding(
-              padding: EdgeInsets.fromLTRB(16, 14, 16, 6),
+            Padding(
+              padding: const EdgeInsets.fromLTRB(16, 14, 16, 6),
               child: Row(
                 children: [
-                  Icon(Icons.remove_red_eye_outlined, color: Colors.white70, size: 18),
-                  SizedBox(width: 8),
-                  Text('Viewers', style: TextStyle(color: Colors.white, fontWeight: FontWeight.w700, fontSize: 15)),
+                  const Icon(Icons.remove_red_eye_outlined, color: _kStoryAccent, size: 18),
+                  const SizedBox(width: 8),
+                  Text(l10n.viewersTitle, style: const TextStyle(color: Colors.white, fontWeight: FontWeight.w700, fontSize: 15)),
                 ],
               ),
             ),
@@ -501,26 +554,34 @@ class _StoryViewersSheetState extends State<_StoryViewersSheet> {
                 future: _future,
                 builder: (context, snap) {
                   if (snap.connectionState != ConnectionState.done) {
-                    return const Center(child: CircularProgressIndicator(color: Colors.white));
+                    return const Center(child: CircularProgressIndicator(color: _kStoryAccent));
                   }
                   if (snap.hasError) {
                     // Most likely cause: the backend route this hits
                     // (`GET /post/stories/<id>/viewers/`) doesn't exist yet
                     // — see the flag comment on
                     // `StoryService.getStoryViewers()`.
-                    return const Center(
+                    return Center(
                       child: Padding(
-                        padding: EdgeInsets.all(24),
-                        child: Text("Couldn't load viewers.", style: TextStyle(color: Colors.white54)),
+                        padding: const EdgeInsets.all(24),
+                        child: Column(mainAxisSize: MainAxisSize.min, children: [
+                          const Icon(Icons.wifi_off_rounded, color: Colors.white24, size: 28),
+                          const SizedBox(height: 10),
+                          Text(l10n.couldntLoadViewers, style: const TextStyle(color: Colors.white54), textAlign: TextAlign.center),
+                        ]),
                       ),
                     );
                   }
                   final viewers = snap.data ?? [];
                   if (viewers.isEmpty) {
-                    return const Center(
+                    return Center(
                       child: Padding(
-                        padding: EdgeInsets.all(24),
-                        child: Text('No views yet.', style: TextStyle(color: Colors.white54)),
+                        padding: const EdgeInsets.all(24),
+                        child: Column(mainAxisSize: MainAxisSize.min, children: [
+                          const Icon(Icons.remove_red_eye_outlined, color: Colors.white24, size: 28),
+                          const SizedBox(height: 10),
+                          Text(l10n.noViewsYet, style: const TextStyle(color: Colors.white54)),
+                        ]),
                       ),
                     );
                   }

@@ -415,3 +415,117 @@ AppThemeTokens lsTokens(BuildContext context) => AppThemeTokens.of(context);
 /// `AppThemeTokens` se aata hai; `Scaffold` bina `backgroundColor` diye
 /// bhi theme ke `scaffoldBackgroundColor` se wahi color leta hai.
 Color lsBg(BuildContext context) => AppThemeTokens.of(context).background;
+
+// ============================================================
+// SHARED BOTTOM NAV  [Task 6 — "ek type ka navigation"]
+//
+// Pehle teen alag bottom-nav implementations thi, teeno alag dikhte the:
+//   - `home.dart`'s `_LsBottomNav`/`_LsNavItem` (private) — yehi asli
+//     LearnScroll gradient look, ab yahan public bana diya.
+//   - `liveclass/liveclass_home_shell.dart` — Flutter ka stock Material 3
+//     `NavigationBar` (pill indicator, alag typography/spacing).
+//   - `message/screens/app_bottom_nav.dart`'s `AppBottomNav` — stock
+//     `BottomNavigationBar` (Material 2 style); iske apne comment me hi
+//     likha tha "isn't a visual match for home.dart's actual bottom nav".
+// Ab teeno isi ek widget se banti hain — icons/labels/tap-behaviour har
+// jagah alag rehte hain (har shell ka apna nav-tree hai), sirf LOOK ek
+// jaisa ho gaya hai.
+// ============================================================
+
+class LsBottomNavItemData {
+  final IconData icon;
+  final IconData activeIcon;
+  final String label;
+  const LsBottomNavItemData({required this.icon, required this.activeIcon, required this.label});
+}
+
+class LsBottomNav extends StatelessWidget {
+  final List<LsBottomNavItemData> items;
+
+  /// Jis item ka icon/label highlight hona chahiye — `-1` agar koi bhi
+  /// nahi (jaise home.dart me Campus/Classes/Chat tap hote hi ek naya
+  /// screen push ho jaata hai, wo khud "current tab" nahi rehte).
+  final int activeIndex;
+  final ValueChanged<int> onTap;
+
+  const LsBottomNav({super.key, required this.items, required this.activeIndex, required this.onTap});
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      decoration: BoxDecoration(
+        // HTML: linear-gradient(0deg, var(--bg) 60%, transparent)
+        gradient: LinearGradient(
+          begin: Alignment.bottomCenter,
+          end: Alignment.topCenter,
+          colors: [lsBg(context), lsBg(context), lsBg(context).withOpacity(0)],
+          stops: const [0, .6, 1],
+        ),
+      ),
+      child: SafeArea(
+        top: false,
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(8, 12, 8, 8),
+          child: Row(
+            mainAxisAlignment: MainAxisAlignment.spaceAround,
+            children: [
+              for (int i = 0; i < items.length; i++)
+                _LsBottomNavItem(
+                  icon: items[i].icon,
+                  activeIcon: items[i].activeIcon,
+                  label: items[i].label,
+                  active: i == activeIndex,
+                  onTap: () => onTap(i),
+                ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _LsBottomNavItem extends StatelessWidget {
+  final IconData icon;
+  final IconData activeIcon;
+  final String label;
+  final bool active;
+  final VoidCallback onTap;
+  const _LsBottomNavItem({
+    required this.icon,
+    required this.activeIcon,
+    required this.label,
+    required this.active,
+    required this.onTap,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
+    final color = active ? cs.primary : cs.onSurfaceVariant;
+    return Expanded(
+      child: Semantics(
+        button: true,
+        selected: active,
+        label: label,
+        child: InkWell(
+          onTap: onTap,
+          borderRadius: BorderRadius.circular(12),
+          child: Padding(
+            padding: const EdgeInsets.symmetric(vertical: 4),
+            child: Column(mainAxisSize: MainAxisSize.min, children: [
+              Icon(active ? activeIcon : icon, size: 24, color: color),
+              const SizedBox(height: 4),
+              Text(
+                label,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: TextStyle(fontSize: 9.5, fontWeight: FontWeight.w600, color: color),
+              ),
+            ]),
+          ),
+        ),
+      ),
+    );
+  }
+}

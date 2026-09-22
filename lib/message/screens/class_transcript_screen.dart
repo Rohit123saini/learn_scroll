@@ -23,9 +23,7 @@ import 'package:audioplayers/audioplayers.dart';
 
 import '../models/study_room_models.dart';
 import '../services/ai_study_service.dart';
-
-const Color _kNavy = Color(0xFF030F27);
-const Color _kAccent = Color(0xFF3D7EFF);
+import '../../theme_service.dart'; // 🎨 THEME FIX — AppThemeTokens
 
 class ClassTranscriptScreen extends StatefulWidget {
   final String conversationId;
@@ -119,13 +117,13 @@ class _ClassTranscriptScreenState extends State<ClassTranscriptScreen> {
 
   @override
   Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
     return Scaffold(
-      backgroundColor: _kNavy,
       appBar: AppBar(
-        backgroundColor: _kNavy,
+        backgroundColor: cs.primary,
         elevation: 0,
-        title: const Text('Class Transcript', style: TextStyle(color: Colors.white)),
-        iconTheme: const IconThemeData(color: Colors.white),
+        title: Text('Class Transcript', style: TextStyle(color: cs.onPrimary)),
+        iconTheme: IconThemeData(color: cs.onPrimary),
       ),
       body: Column(
         children: [
@@ -134,14 +132,9 @@ class _ClassTranscriptScreenState extends State<ClassTranscriptScreen> {
             child: TextField(
               controller: _queryController,
               onChanged: _onQueryChanged,
-              style: const TextStyle(color: Colors.white),
-              decoration: InputDecoration(
+              decoration: const InputDecoration(
                 hintText: 'Search: "jump to where teacher explained..."',
-                hintStyle: const TextStyle(color: Colors.white38),
-                prefixIcon: const Icon(Icons.search, color: Colors.white54),
-                filled: true,
-                fillColor: Colors.white10,
-                border: OutlineInputBorder(borderRadius: BorderRadius.circular(12), borderSide: BorderSide.none),
+                prefixIcon: Icon(Icons.search),
               ),
             ),
           ),
@@ -152,25 +145,26 @@ class _ClassTranscriptScreenState extends State<ClassTranscriptScreen> {
   }
 
   Widget _buildBody() {
+    final cs = Theme.of(context).colorScheme;
     if (_loading) {
-      return const Center(child: CircularProgressIndicator(color: _kAccent));
+      return Center(child: CircularProgressIndicator(color: cs.primary));
     }
     if (_error != null) {
       return Center(
         child: Padding(
           padding: const EdgeInsets.all(24),
-          child: Text(_error!, style: const TextStyle(color: Colors.white54), textAlign: TextAlign.center),
+          child: Text(_error!, style: TextStyle(color: cs.onSurfaceVariant), textAlign: TextAlign.center),
         ),
       );
     }
     if (_segments.isEmpty) {
-      return const Center(
+      return Center(
         child: Padding(
-          padding: EdgeInsets.all(24),
+          padding: const EdgeInsets.all(24),
           child: Text(
             'Abhi is class ka transcript ready nahi hai — recording chalne ke\n'
             'thodi der baad (background me transcribe hota hai) yahan dikhega.',
-            style: TextStyle(color: Colors.white38),
+            style: TextStyle(color: cs.onSurfaceVariant),
             textAlign: TextAlign.center,
           ),
         ),
@@ -180,19 +174,19 @@ class _ClassTranscriptScreenState extends State<ClassTranscriptScreen> {
     return ListView.separated(
       padding: const EdgeInsets.symmetric(vertical: 8),
       itemCount: _segments.length,
-      separatorBuilder: (_, __) => const Divider(color: Colors.white12, height: 1),
+      separatorBuilder: (_, __) => Divider(color: cs.outlineVariant, height: 1),
       itemBuilder: (_, i) {
         final s = _segments[i];
         final isPlaying = _playingSegmentId == s.id;
         return ListTile(
           leading: CircleAvatar(
-            backgroundColor: _kAccent.withOpacity(0.2),
-            child: Text(s.timeLabel, style: const TextStyle(color: _kAccent, fontSize: 11, fontWeight: FontWeight.bold)),
+            backgroundColor: cs.primary.withOpacity(0.2),
+            child: Text(s.timeLabel, style: TextStyle(color: cs.primary, fontSize: 11, fontWeight: FontWeight.bold)),
           ),
-          title: Text(s.text, style: const TextStyle(color: Colors.white)),
-          subtitle: Text(s.speakerName, style: const TextStyle(color: Colors.white38, fontSize: 12)),
+          title: Text(s.text, style: TextStyle(color: cs.onSurface)),
+          subtitle: Text(s.speakerName, style: TextStyle(color: cs.onSurfaceVariant, fontSize: 12)),
           trailing: IconButton(
-            icon: Icon(isPlaying ? Icons.stop_circle : Icons.play_circle_outline, color: _kAccent),
+            icon: Icon(isPlaying ? Icons.stop_circle : Icons.play_circle_outline, color: cs.primary),
             onPressed: () => _togglePlay(s),
           ),
           onTap: () => _togglePlay(s),

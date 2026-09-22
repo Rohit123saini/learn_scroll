@@ -43,7 +43,7 @@ class AiStudyService {
   }) async {
     try {
       final res = await http.post(
-        Uri.parse("$_baseUrl/message/study-room/ai-tools/"),
+        Uri.parse("$_baseUrl/message/ai-study-room/"),
         headers: await _getHeaders(),
         body: jsonEncode({
           "mode": mode,

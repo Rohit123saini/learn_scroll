@@ -13,23 +13,28 @@
 // single lost/stolen phone can be revoked on its own, leaving the
 // code and every other device on it untouched.
 //
-// ⚠️ WIRING NOTE: same as parent_service.dart — plug in the app's real
-// HTTP client / base URL / auth-header helper instead of the
-// placeholders below. Add an entry point from wherever account/privacy
-// settings live, e.g.:
+// Entry point: profile screen → "more" sheet → Parent/Guardian Access
+// (profile/screens/profile.dart).
 //
-//   ListTile(
-//     leading: const Icon(Icons.family_restroom),
-//     title: const Text('Parent/Guardian Access'),
-//     onTap: () => Navigator.push(context, MaterialPageRoute(
-//       builder: (_) => const ManageParentAccessScreen())),
-//   )
+// 🌐 LANGUAGE FIX — every user-visible string now comes from AppLocalizations
+// (ARB keys `parentAccess*`; they existed in app_en/app_hi.arb but this screen
+// still used hardcoded Hinglish). Relative times use `timeago` (Hindi is
+// registered in LanguageService) and dates use `intl` with the app locale.
+// 🔧 FIX — the device-list Future was created INSIDE the StatefulBuilder, so it
+// was re-fetched on every rebuild of the sheet (theme/locale change etc.);
+// it now lives outside the builder.
+// 🔧 FIX — `setState` after `await` without a `mounted` check in `_fetchCodes`.
 
 import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:http/http.dart' as http;
-import 'package:shared_preferences/shared_preferences.dart';
+import 'package:intl/intl.dart' show DateFormat;
+import 'package:timeago/timeago.dart' as timeago;
+import '../../l10n/app_localizations.dart';
+import '../../services/auth_service.dart';
+import '../../utils/api.dart';
+import '../../theme_service.dart'; // 🎨 THEME FIX — AppThemeTokens
 
 class ParentCodeEntry {
   final String id;
@@ -85,12 +90,15 @@ class ManageParentAccessScreen extends StatefulWidget {
 }
 
 class _ManageParentAccessScreenState extends State<ManageParentAccessScreen> {
-  // TODO: replace with the app's real base URL / ApiClient.
-  static const String _baseUrl = 'https://YOUR_API_HOST/message';
+  // 🔧 FIX — placeholder `'https://YOUR_API_HOST/message'` tha, kabhi
+  // real network call kaam hi nahi karta tha. `message_api_service.dart`
+  // wahi `Api.baseUrl` use karta hai (`../../utils/api.dart`) — same
+  // single source, ab ye screen bhi real host pe hit karegi.
+  static String get _baseUrl => "${Api.baseUrl}/message";
 
   List<ParentCodeEntry> _codes = [];
   bool _loading = true;
-  String? _error;
+  bool _loadFailed = false; // rendered as l10n.parentAccessLoadFailed
 
   @override
   void initState() {
@@ -98,47 +106,57 @@ class _ManageParentAccessScreenState extends State<ManageParentAccessScreen> {
     _fetchCodes();
   }
 
+  // 🔧 FIX — pehle raw `access_token` seedha SharedPreferences se padha
+  // jaata tha (expiry check nahi), same bug jo `main.dart`/
+  // `message_api_service.dart` me tha. `AuthService.getValidToken()` use
+  // kar rahe hain ab — expired token pe auto-refresh, dead refresh token
+  // pe `null` (jisse ye screen graceful "Load failed" dikhayegi login
+  // redirect ki jagah — sahi hai kyunki ye screen khud login flow nahi
+  // handle karti).
   Future<Map<String, String>> _authHeaders() async {
-    final prefs = await SharedPreferences.getInstance();
-    final token = prefs.getString('access_token') ?? '';
+    final token = await AuthService.getValidToken() ?? '';
     return {
       'Content-Type': 'application/json',
-      'Authorization': 'Bearer $token', // adjust prefix if the app uses Token/JWT differently
+      'Authorization': 'Bearer $token',
     };
   }
 
   Future<void> _fetchCodes() async {
     setState(() {
       _loading = true;
-      _error = null;
+      _loadFailed = false;
     });
     try {
       final res = await http.get(Uri.parse('$_baseUrl/parent/codes/'), headers: await _authHeaders());
       if (res.statusCode != 200) throw Exception('Load failed');
       final list = jsonDecode(res.body) as List;
+      if (!mounted) return;
       setState(() => _codes = list.map((e) => ParentCodeEntry.fromJson(e)).toList());
     } catch (_) {
-      setState(() => _error = 'Codes load nahi ho paaye.');
+      if (!mounted) return;
+      setState(() => _loadFailed = true);
     } finally {
-      setState(() => _loading = false);
+      if (mounted) setState(() => _loading = false);
     }
   }
 
   Future<void> _generateCode() async {
+    // resolved before any `await` so it is safe to use afterwards
+    final l10n = AppLocalizations.of(context)!;
     final labelController = TextEditingController();
     final label = await showDialog<String>(
       context: context,
-      builder: (context) => AlertDialog(
-        title: const Text('Kiske liye hai ye code?'),
+      builder: (dialogContext) => AlertDialog(
+        title: Text(l10n.parentAccessLabelDialogTitle),
         content: TextField(
           controller: labelController,
-          decoration: const InputDecoration(hintText: 'e.g. Mom, Papa'),
+          decoration: InputDecoration(hintText: l10n.parentAccessLabelHint),
         ),
         actions: [
-          TextButton(onPressed: () => Navigator.pop(context), child: const Text('Cancel')),
+          TextButton(onPressed: () => Navigator.pop(dialogContext), child: Text(l10n.cancel)),
           TextButton(
-            onPressed: () => Navigator.pop(context, labelController.text),
-            child: const Text('Generate'),
+            onPressed: () => Navigator.pop(dialogContext, labelController.text),
+            child: Text(l10n.parentAccessGenerate),
           ),
         ],
       ),
@@ -158,17 +176,18 @@ class _ManageParentAccessScreenState extends State<ManageParentAccessScreen> {
     } catch (_) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('Code generate nahi ho paaya. Dobara try karo.')),
+          SnackBar(content: Text(l10n.parentAccessGenerateFailed)),
         );
       }
     }
   }
 
   void _showCodeDialog(String code) {
+    final l10n = AppLocalizations.of(context)!;
     showDialog(
       context: context,
-      builder: (context) => AlertDialog(
-        title: const Text('Ye code parent ke saath share karo'),
+      builder: (dialogContext) => AlertDialog(
+        title: Text(l10n.parentAccessShareCodeTitle),
         content: Row(
           mainAxisSize: MainAxisSize.min,
           children: [
@@ -177,34 +196,35 @@ class _ManageParentAccessScreenState extends State<ManageParentAccessScreen> {
               icon: const Icon(Icons.copy),
               onPressed: () {
                 Clipboard.setData(ClipboardData(text: code));
-                ScaffoldMessenger.of(context).showSnackBar(
-                  const SnackBar(content: Text('Copied')),
+                ScaffoldMessenger.of(dialogContext).showSnackBar(
+                  SnackBar(content: Text(l10n.parentAccessCodeCopied)),
                 );
               },
             ),
           ],
         ),
         actions: [
-          TextButton(onPressed: () => Navigator.pop(context), child: const Text('Done')),
+          TextButton(onPressed: () => Navigator.pop(dialogContext), child: Text(l10n.doneCta)),
         ],
       ),
     );
   }
 
   Future<void> _revokeCode(ParentCodeEntry entry) async {
+    final l10n = AppLocalizations.of(context)!;
+    final name = entry.label.isEmpty ? l10n.parentAccessUnnamed : entry.label;
     final confirmed = await showDialog<bool>(
       context: context,
-      builder: (context) => AlertDialog(
-        title: const Text('Access revoke karein?'),
+      builder: (dialogContext) => AlertDialog(
+        title: Text(l10n.parentAccessRevokeTitle),
         content: Text(
           entry.activeDevices > 1
-              ? '"${entry.label.isEmpty ? 'Ye' : entry.label}" se linked SAARE '
-                  '${entry.activeDevices} devices ka access turant band ho jaayega.'
-              : '"${entry.label.isEmpty ? 'Ye' : entry.label}" ka access turant band ho jaayega.',
+              ? l10n.parentAccessRevokeBodyMany(entry.activeDevices, name)
+              : l10n.parentAccessRevokeBodyOne(name),
         ),
         actions: [
-          TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('Cancel')),
-          TextButton(onPressed: () => Navigator.pop(context, true), child: const Text('Revoke')),
+          TextButton(onPressed: () => Navigator.pop(dialogContext, false), child: Text(l10n.cancel)),
+          TextButton(onPressed: () => Navigator.pop(dialogContext, true), child: Text(l10n.parentAccessRevoke)),
         ],
       ),
     );
@@ -221,7 +241,7 @@ class _ManageParentAccessScreenState extends State<ManageParentAccessScreen> {
     } catch (_) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('Revoke nahi ho paaya. Dobara try karo.')),
+          SnackBar(content: Text(l10n.parentAccessRevokeFailed)),
         );
       }
     }
@@ -251,6 +271,7 @@ class _ManageParentAccessScreenState extends State<ManageParentAccessScreen> {
   // (throttled 10/hour server-side) and auto re-mask it after a short
   // window so it doesn't stay exposed on screen indefinitely.
   Future<void> _revealCode(ParentCodeEntry entry) async {
+    final l10n = AppLocalizations.of(context)!;
     if (entry.revealedCode != null) {
       // Already revealed — tapping again just re-masks it, no API call.
       setState(() => entry.revealedCode = null);
@@ -264,7 +285,7 @@ class _ManageParentAccessScreenState extends State<ManageParentAccessScreen> {
       if (res.statusCode == 429) {
         if (mounted) {
           ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(content: Text('Bahut baar reveal kiya — thodi der baad try karo.')),
+            SnackBar(content: Text(l10n.parentAccessRevealRateLimited)),
           );
         }
         return;
@@ -280,7 +301,7 @@ class _ManageParentAccessScreenState extends State<ManageParentAccessScreen> {
     } catch (_) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('Code reveal nahi ho paaya.')),
+          SnackBar(content: Text(l10n.parentAccessRevealFailed)),
         );
       }
     }
@@ -290,6 +311,7 @@ class _ManageParentAccessScreenState extends State<ManageParentAccessScreen> {
   // device already verified against this code works again immediately —
   // no need to re-share the code with everyone on it.
   Future<void> _renewCode(ParentCodeEntry entry) async {
+    final l10n = AppLocalizations.of(context)!;
     try {
       final res = await http.post(
         Uri.parse('$_baseUrl/parent/codes/${entry.id}/renew/'),
@@ -299,46 +321,46 @@ class _ManageParentAccessScreenState extends State<ManageParentAccessScreen> {
       await _fetchCodes();
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('Access renew ho gaya.')),
+          SnackBar(content: Text(l10n.parentAccessRenewed)),
         );
       }
     } catch (_) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('Renew nahi ho paaya. Dobara try karo.')),
+          SnackBar(content: Text(l10n.parentAccessRenewFailed)),
         );
       }
     }
   }
 
-  // 🔧 NEW — "Expires in 12 days" / "Expired 3 din pehle" style label.
-  String _expiryLabel(DateTime? expiresAt, bool isExpired) {
+  // 🔧 NEW — "Expires in 12 days" / "Expired 3 days ago" style label (localized + plural-aware).
+  String _expiryLabel(AppLocalizations l10n, DateTime? expiresAt, bool isExpired) {
     if (expiresAt == null) return '';
     final diff = expiresAt.difference(DateTime.now());
     if (isExpired || diff.isNegative) {
       final agoDays = diff.inDays.abs();
-      return 'Expired ${agoDays < 1 ? 'aaj' : '$agoDays din pehle'}';
+      return agoDays < 1 ? l10n.parentAccessExpiredToday : l10n.parentAccessExpiredDaysAgo(agoDays);
     }
-    if (diff.inDays < 1) return 'Aaj expire ho raha hai';
-    if (diff.inDays <= 14) return '${diff.inDays} din me expire hoga';
-    return 'Expires ${expiresAt.day}/${expiresAt.month}/${expiresAt.year}';
+    if (diff.inDays < 1) return l10n.parentAccessExpiresToday;
+    if (diff.inDays <= 14) return l10n.parentAccessExpiresInDays(diff.inDays);
+    final date = DateFormat('d MMM y', Localizations.localeOf(context).toString()).format(expiresAt.toLocal());
+    return l10n.parentAccessExpiresOn(date);
   }
 
-  String _relativeTime(DateTime? dt) {
-    if (dt == null) return 'Kabhi use nahi hua';
-    final diff = DateTime.now().difference(dt);
-    if (diff.inMinutes < 1) return 'Abhi';
-    if (diff.inMinutes < 60) return '${diff.inMinutes} min pehle';
-    if (diff.inHours < 24) return '${diff.inHours} ghante pehle';
-    return '${diff.inDays} din pehle';
-  }
+  /// "5 minutes ago" / "5 मिनट पहले" — `timeago` locale follows the app language.
+  String _timeAgo(DateTime dt) =>
+      timeago.format(dt, locale: Localizations.localeOf(context).languageCode);
 
   // 🔧 NEW — bottom sheet: list of devices for one code, each with its
   // own "revoke" action that only kills that ONE device.
   void _openDevicesSheet(ParentCodeEntry entry) {
+    // 🔧 FIX — created ONCE, outside the builder (was re-created — and re-fetched —
+    // on every rebuild of the sheet).
+    Future<List<ParentDeviceEntry>> devicesFuture = _fetchDevices(entry.id);
+
     showModalBottomSheet(
       context: context,
-      backgroundColor: const Color(0xFF17171A),
+      backgroundColor: Theme.of(context).colorScheme.surface,
       isScrollControlled: true,
       shape: const RoundedRectangleBorder(
         borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
@@ -346,8 +368,8 @@ class _ManageParentAccessScreenState extends State<ManageParentAccessScreen> {
       builder: (sheetContext) {
         return StatefulBuilder(
           builder: (sheetContext, setSheetState) {
-            Future<List<ParentDeviceEntry>>? devicesFuture;
-            devicesFuture ??= _fetchDevices(entry.id);
+            final cs = Theme.of(sheetContext).colorScheme;
+            final l10n = AppLocalizations.of(sheetContext)!;
 
             return Padding(
               padding: EdgeInsets.only(
@@ -359,13 +381,13 @@ class _ManageParentAccessScreenState extends State<ManageParentAccessScreen> {
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
                   Text(
-                    entry.label.isEmpty ? 'Devices' : '${entry.label} — devices',
-                    style: const TextStyle(color: Colors.white, fontSize: 17, fontWeight: FontWeight.w700),
+                    entry.label.isEmpty ? l10n.parentAccessDevicesTitle : l10n.parentAccessDevicesTitleNamed(entry.label),
+                    style: TextStyle(color: cs.onSurface, fontSize: 17, fontWeight: FontWeight.w700),
                   ),
                   const SizedBox(height: 4),
-                  const Text(
-                    'Sirf ek device revoke karne se baaki devices ka access chalu rehta hai.',
-                    style: TextStyle(color: Colors.white38, fontSize: 12),
+                  Text(
+                    l10n.parentAccessDevicesHint,
+                    style: TextStyle(color: cs.onSurfaceVariant, fontSize: 12),
                   ),
                   const SizedBox(height: 16),
                   FutureBuilder<List<ParentDeviceEntry>>(
@@ -378,16 +400,16 @@ class _ManageParentAccessScreenState extends State<ManageParentAccessScreen> {
                         );
                       }
                       if (snapshot.hasError) {
-                        return const Padding(
-                          padding: EdgeInsets.symmetric(vertical: 24),
-                          child: Text('Devices load nahi ho paaye.', style: TextStyle(color: Colors.redAccent)),
+                        return Padding(
+                          padding: const EdgeInsets.symmetric(vertical: 24),
+                          child: Text(l10n.parentAccessDevicesLoadFailed, style: TextStyle(color: cs.error)),
                         );
                       }
                       final devices = snapshot.data ?? [];
                       if (devices.isEmpty) {
-                        return const Padding(
-                          padding: EdgeInsets.symmetric(vertical: 24),
-                          child: Text('Abhi koi device is code se verify nahi hua.', style: TextStyle(color: Colors.white38)),
+                        return Padding(
+                          padding: const EdgeInsets.symmetric(vertical: 24),
+                          child: Text(l10n.parentAccessNoDevices, style: TextStyle(color: cs.onSurfaceVariant)),
                         );
                       }
                       return ConstrainedBox(
@@ -398,49 +420,50 @@ class _ManageParentAccessScreenState extends State<ManageParentAccessScreen> {
                           separatorBuilder: (_, __) => const SizedBox(height: 8),
                           itemBuilder: (context, i) {
                             final d = devices[i];
+                            final lastActive = d.lastSeenAt == null ? l10n.parentAccessNeverUsed : _timeAgo(d.lastSeenAt!);
                             return Container(
                               padding: const EdgeInsets.all(12),
                               decoration: BoxDecoration(
-                                color: Colors.white.withOpacity(0.05),
+                                color: AppThemeTokens.of(context).surface2,
                                 borderRadius: BorderRadius.circular(10),
                               ),
                               child: Row(
                                 children: [
-                                  const Icon(Icons.phone_android, color: Colors.white38, size: 20),
+                                  Icon(Icons.phone_android, color: cs.onSurfaceVariant, size: 20),
                                   const SizedBox(width: 12),
                                   Expanded(
                                     child: Column(
                                       crossAxisAlignment: CrossAxisAlignment.start,
                                       children: [
                                         Text(
-                                          'Last active: ${_relativeTime(d.lastSeenAt)}',
-                                          style: const TextStyle(color: Colors.white, fontSize: 13),
+                                          l10n.parentAccessLastActive(lastActive),
+                                          style: TextStyle(color: cs.onSurface, fontSize: 13),
                                         ),
                                         if (d.createdAt != null)
                                           Text(
-                                            'Verified: ${_relativeTime(d.createdAt)}',
-                                            style: const TextStyle(color: Colors.white38, fontSize: 11),
+                                            l10n.parentAccessVerifiedAt(_timeAgo(d.createdAt!)),
+                                            style: TextStyle(color: cs.onSurfaceVariant, fontSize: 11),
                                           ),
                                       ],
                                     ),
                                   ),
                                   IconButton(
-                                    icon: const Icon(Icons.delete_outline, color: Colors.redAccent, size: 20),
-                                    tooltip: 'Sirf ye device revoke karo',
+                                    icon: Icon(Icons.delete_outline, color: cs.error, size: 20),
+                                    tooltip: l10n.parentAccessRevokeDeviceTooltip,
                                     onPressed: () async {
                                       final confirmed = await showDialog<bool>(
                                         context: sheetContext,
                                         builder: (dialogContext) => AlertDialog(
-                                          title: const Text('Ye device revoke karein?'),
-                                          content: const Text('Sirf ye ek device disconnect hoga, baaki chalte rahenge.'),
+                                          title: Text(l10n.parentAccessRevokeDeviceTitle),
+                                          content: Text(l10n.parentAccessRevokeDeviceBody),
                                           actions: [
                                             TextButton(
                                               onPressed: () => Navigator.pop(dialogContext, false),
-                                              child: const Text('Cancel'),
+                                              child: Text(l10n.cancel),
                                             ),
                                             TextButton(
                                               onPressed: () => Navigator.pop(dialogContext, true),
-                                              child: const Text('Revoke'),
+                                              child: Text(l10n.parentAccessRevoke),
                                             ),
                                           ],
                                         ),
@@ -455,7 +478,7 @@ class _ManageParentAccessScreenState extends State<ManageParentAccessScreen> {
                                       } catch (_) {
                                         if (sheetContext.mounted) {
                                           ScaffoldMessenger.of(sheetContext).showSnackBar(
-                                            const SnackBar(content: Text('Device revoke nahi ho paaya.')),
+                                            SnackBar(content: Text(l10n.parentAccessRevokeDeviceFailed)),
                                           );
                                         }
                                       }
@@ -480,38 +503,37 @@ class _ManageParentAccessScreenState extends State<ManageParentAccessScreen> {
 
   @override
   Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
+    final l10n = AppLocalizations.of(context)!;
     return Scaffold(
-      backgroundColor: const Color(0xFF0F0F11),
       appBar: AppBar(
-        backgroundColor: const Color(0xFF0F0F11),
-        title: const Text('Parent/Guardian Access'),
+        title: Text(l10n.parentAccessTitle),
       ),
       floatingActionButton: FloatingActionButton.extended(
         onPressed: _generateCode,
         icon: const Icon(Icons.add),
-        label: const Text('New Code'),
+        label: Text(l10n.parentAccessNewCode),
       ),
       body: RefreshIndicator(
         onRefresh: _fetchCodes,
         child: _loading
             ? const Center(child: CircularProgressIndicator())
             : ListView(
+                physics: const AlwaysScrollableScrollPhysics(), // pull-to-refresh also on the empty/error state
                 padding: const EdgeInsets.all(16),
                 children: [
-                  const Text(
-                    "Parent/guardian ko yahan se code do — unhe sirf attendance "
-                    "aur assignment status dikhega, koi chat message nahi. Code pe tap "
-                    "karke uske individual devices manage kar sakte ho.",
-                    style: TextStyle(color: Colors.white70, fontSize: 13),
+                  Text(
+                    l10n.parentAccessIntro,
+                    style: TextStyle(color: cs.onSurfaceVariant, fontSize: 13),
                   ),
                   const SizedBox(height: 16),
-                  if (_error != null)
-                    Text(_error!, style: const TextStyle(color: Colors.redAccent)),
-                  if (_codes.isEmpty && _error == null)
-                    const Padding(
-                      padding: EdgeInsets.only(top: 40),
+                  if (_loadFailed)
+                    Text(l10n.parentAccessLoadFailed, style: TextStyle(color: cs.error)),
+                  if (_codes.isEmpty && !_loadFailed)
+                    Padding(
+                      padding: const EdgeInsets.only(top: 40),
                       child: Center(
-                        child: Text('Abhi koi active code nahi hai.', style: TextStyle(color: Colors.white38)),
+                        child: Text(l10n.parentAccessEmpty, style: TextStyle(color: cs.onSurfaceVariant)),
                       ),
                     ),
                   ..._codes.map((c) => InkWell(
@@ -524,7 +546,7 @@ class _ManageParentAccessScreenState extends State<ManageParentAccessScreen> {
                           margin: const EdgeInsets.only(bottom: 12),
                           padding: const EdgeInsets.all(14),
                           decoration: BoxDecoration(
-                            color: Colors.white.withOpacity(0.05),
+                            color: AppThemeTokens.of(context).surface2,
                             borderRadius: BorderRadius.circular(12),
                           ),
                           child: Row(
@@ -534,14 +556,14 @@ class _ManageParentAccessScreenState extends State<ManageParentAccessScreen> {
                                   crossAxisAlignment: CrossAxisAlignment.start,
                                   children: [
                                     Text(
-                                      c.label.isEmpty ? 'Unnamed' : c.label,
-                                      style: const TextStyle(color: Colors.white, fontWeight: FontWeight.w600),
+                                      c.label.isEmpty ? l10n.parentAccessUnnamed : c.label,
+                                      style: TextStyle(color: cs.onSurface, fontWeight: FontWeight.w600),
                                     ),
                                     Row(
                                       children: [
                                         Text(
                                           c.revealedCode ?? c.maskedCode,
-                                          style: const TextStyle(color: Colors.white54, letterSpacing: 2),
+                                          style: TextStyle(color: cs.onSurfaceVariant, letterSpacing: 2),
                                         ),
                                         const SizedBox(width: 6),
                                         // 🔧 GAP FIX — reveal-once: full code sirf tap pe milta
@@ -552,7 +574,7 @@ class _ManageParentAccessScreenState extends State<ManageParentAccessScreen> {
                                           child: Icon(
                                             c.revealedCode != null ? Icons.visibility_off : Icons.visibility,
                                             size: 14,
-                                            color: Colors.white38,
+                                            color: cs.onSurfaceVariant,
                                           ),
                                         ),
                                       ],
@@ -560,13 +582,11 @@ class _ManageParentAccessScreenState extends State<ManageParentAccessScreen> {
                                     const SizedBox(height: 4),
                                     Row(
                                       children: [
-                                        Icon(Icons.phone_android, size: 13, color: Colors.white38),
+                                        Icon(Icons.phone_android, size: 13, color: cs.onSurfaceVariant),
                                         const SizedBox(width: 4),
                                         Text(
-                                          c.activeDevices == 1
-                                              ? '1 device · tap to manage'
-                                              : '${c.activeDevices} devices · tap to manage',
-                                          style: const TextStyle(color: Colors.white38, fontSize: 11),
+                                          l10n.parentAccessDevicesTap(c.activeDevices),
+                                          style: TextStyle(color: cs.onSurfaceVariant, fontSize: 11),
                                         ),
                                       ],
                                     ),
@@ -578,13 +598,13 @@ class _ManageParentAccessScreenState extends State<ManageParentAccessScreen> {
                                           Icon(
                                             c.isExpired ? Icons.error_outline : Icons.schedule,
                                             size: 13,
-                                            color: c.isExpired ? Colors.redAccent : Colors.white38,
+                                            color: c.isExpired ? cs.error : cs.onSurfaceVariant,
                                           ),
                                           const SizedBox(width: 4),
                                           Text(
-                                            _expiryLabel(c.expiresAt, c.isExpired),
+                                            _expiryLabel(l10n, c.expiresAt, c.isExpired),
                                             style: TextStyle(
-                                              color: c.isExpired ? Colors.redAccent : Colors.white38,
+                                              color: c.isExpired ? cs.error : cs.onSurfaceVariant,
                                               fontSize: 11,
                                             ),
                                           ),
@@ -599,11 +619,11 @@ class _ManageParentAccessScreenState extends State<ManageParentAccessScreen> {
                               if (c.isExpired)
                                 TextButton(
                                   onPressed: () => _renewCode(c),
-                                  child: const Text('Renew'),
+                                  child: Text(l10n.parentAccessRenew),
                                 ),
                               IconButton(
-                                icon: const Icon(Icons.delete_outline, color: Colors.redAccent),
-                                tooltip: 'Poora code revoke karo (saare devices)',
+                                icon: Icon(Icons.delete_outline, color: cs.error),
+                                tooltip: l10n.parentAccessRevokeAllTooltip,
                                 onPressed: () => _revokeCode(c),
                               ),
                             ],

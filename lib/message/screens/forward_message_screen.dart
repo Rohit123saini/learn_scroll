@@ -10,6 +10,7 @@ import 'package:cached_network_image/cached_network_image.dart';
 
 import '../models/message_models.dart';
 import '../services/message_api_service.dart';
+import '../../theme_service.dart'; // 🎨 THEME FIX — AppThemeTokens
 
 class ForwardMessageScreen extends StatefulWidget {
   // 🔧 FIX (Phase 3, §4.3) — pehle sirf `messageIds` liya jaata tha, jisse
@@ -127,14 +128,14 @@ class _ForwardMessageScreenState extends State<ForwardMessageScreen> {
   @override
   Widget build(BuildContext context) {
     final count = widget.messages.length;
+    final cs = Theme.of(context).colorScheme;
     return Scaffold(
-      backgroundColor: Colors.white,
       appBar: AppBar(
-        backgroundColor: const Color(0xFF030F27),
-        iconTheme: const IconThemeData(color: Colors.white),
+        backgroundColor: cs.primary,
+        iconTheme: IconThemeData(color: cs.onPrimary),
         title: Text(
           count == 1 ? "Forward message" : "Forward $count messages",
-          style: const TextStyle(color: Colors.white, fontSize: 16.5),
+          style: TextStyle(color: cs.onPrimary, fontSize: 16.5),
         ),
       ),
       body: Column(children: [
@@ -147,12 +148,8 @@ class _ForwardMessageScreenState extends State<ForwardMessageScreen> {
               controller: _captionController,
               maxLines: 3,
               minLines: 1,
-              decoration: InputDecoration(
+              decoration: const InputDecoration(
                 hintText: "Add a caption (optional)",
-                filled: true,
-                fillColor: const Color(0xFFF3F5FA),
-                contentPadding: const EdgeInsets.symmetric(vertical: 10, horizontal: 12),
-                border: OutlineInputBorder(borderRadius: BorderRadius.circular(10), borderSide: BorderSide.none),
               ),
             ),
           ),
@@ -160,13 +157,9 @@ class _ForwardMessageScreenState extends State<ForwardMessageScreen> {
           padding: const EdgeInsets.fromLTRB(14, 12, 14, 6),
           child: TextField(
             onChanged: (v) => setState(() => _search = v),
-            decoration: InputDecoration(
+            decoration: const InputDecoration(
               hintText: "Search chats",
-              prefixIcon: const Icon(Icons.search, size: 20),
-              filled: true,
-              fillColor: const Color(0xFFF3F5FA),
-              contentPadding: const EdgeInsets.symmetric(vertical: 0, horizontal: 12),
-              border: OutlineInputBorder(borderRadius: BorderRadius.circular(10), borderSide: BorderSide.none),
+              prefixIcon: Icon(Icons.search, size: 20),
             ),
           ),
         ),
@@ -183,20 +176,20 @@ class _ForwardMessageScreenState extends State<ForwardMessageScreen> {
                   child: ElevatedButton.icon(
                     onPressed: _isSending ? null : _send,
                     style: ElevatedButton.styleFrom(
-                      backgroundColor: const Color(0xFF030F27),
+                      backgroundColor: cs.primary,
                       shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
                     ),
                     icon: _isSending
-                        ? const SizedBox(
+                        ? SizedBox(
                             width: 18, height: 18,
-                            child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white),
+                            child: CircularProgressIndicator(strokeWidth: 2, color: cs.onPrimary),
                           )
-                        : const Icon(Icons.send, size: 18, color: Colors.white),
+                        : Icon(Icons.send, size: 18, color: cs.onPrimary),
                     label: Text(
                       _isSending
                           ? "Sending..."
                           : "Send to ${_selectedConversationIds.length} ${_selectedConversationIds.length == 1 ? 'chat' : 'chats'}",
-                      style: const TextStyle(color: Colors.white, fontWeight: FontWeight.w600),
+                      style: TextStyle(color: cs.onPrimary, fontWeight: FontWeight.w600),
                     ),
                   ),
                 ),
@@ -206,13 +199,14 @@ class _ForwardMessageScreenState extends State<ForwardMessageScreen> {
   }
 
   Widget _buildList() {
+    final cs = Theme.of(context).colorScheme;
     if (_isLoading) return const Center(child: CircularProgressIndicator());
     if (_error != null) {
       return Center(
         child: Padding(
           padding: const EdgeInsets.all(20),
           child: Column(mainAxisSize: MainAxisSize.min, children: [
-            Text(_error!, textAlign: TextAlign.center, style: const TextStyle(color: Colors.black54)),
+            Text(_error!, textAlign: TextAlign.center, style: TextStyle(color: cs.onSurfaceVariant)),
             const SizedBox(height: 10),
             TextButton(onPressed: _load, child: const Text("Retry")),
           ]),
@@ -221,7 +215,7 @@ class _ForwardMessageScreenState extends State<ForwardMessageScreen> {
     }
     final list = _filtered;
     if (list.isEmpty) {
-      return const Center(child: Text("No chats found", style: TextStyle(color: Colors.black45)));
+      return Center(child: Text("No chats found", style: TextStyle(color: cs.onSurfaceVariant)));
     }
     return ListView.builder(
       itemCount: list.length,
@@ -233,19 +227,19 @@ class _ForwardMessageScreenState extends State<ForwardMessageScreen> {
           leading: Stack(children: [
             CircleAvatar(
               radius: 21,
-              backgroundColor: Colors.grey[300],
+              backgroundColor: AppThemeTokens.of(context).surface2,
               backgroundImage: c.displayPhoto != null && c.displayPhoto!.isNotEmpty
                   ? CachedNetworkImageProvider(c.displayPhoto!)
                   : null,
               child: c.displayPhoto == null || c.displayPhoto!.isEmpty
-                  ? Icon(c.isGroup ? Icons.group : Icons.person, color: Colors.grey[600])
+                  ? Icon(c.isGroup ? Icons.group : Icons.person, color: cs.onSurfaceVariant)
                   : null,
             ),
           ]),
           title: Text(c.displayTitle, maxLines: 1, overflow: TextOverflow.ellipsis),
           trailing: Icon(
             selected ? Icons.check_circle : Icons.radio_button_unchecked,
-            color: selected ? const Color(0xFF3D7EFF) : Colors.grey[400],
+            color: selected ? cs.primary : cs.onSurfaceVariant,
           ),
         );
       },

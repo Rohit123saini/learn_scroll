@@ -1,96 +1,48 @@
-// lib/liveclass/screens/pass_management_screen.dart
+// ============================================================
+// LIVECLASS — PASS MANAGEMENT SCREEN (teacher side)
 //
-// Screen 7 (teacher side) — Passes management (see
-// LIVECLASS_SCREEN_ARCHITECTURE.md §7). Reached from Classroom Detail's
-// manage sheet, owner/admin only.
+// Backend surface used: GET/POST /passes/?classroom=, PATCH /passes/{id}/,
+// GET/POST/PATCH/DELETE /coupons/, GET /pass-gifts/.
 //
-// API: `passes/` CRUD, scoped by `?classroom=`.
-//   - Create: pass_type, title, price (coins), validity_days, optional
-//     max_classes cap.
-//   - Delete: refused server-side once the pass has ever been purchased —
-//     PATCH is_active=false (pause) instead. The pause action is always
-//     offered; delete is only offered while never-purchased is plausible,
-//     and any 400 from the backend is surfaced verbatim either way.
-//   - Update: server also refuses a PATCH that would retroactively shrink
-//     what an active paid holder already bought (price up,
-//     validity_days/max_classes/pass_type down) while purchases are
-//     active — again surfaced verbatim from the API error.
+// NOTE on pass edit limits (mirrors backend rules exactly so the UI
+// never offers an action the API will 400 on): once a pass has ever
+// been purchased, price can't be raised and validity_days/max_classes/
+// pass_type can't be reduced/changed while an active paid purchase is
+// outstanding — see ClassPassViewSet in views.py. This screen keeps
+// editing to the one safe, always-allowed toggle (`is_active`) rather
+// than exposing a full edit form that could 400 mid-save.
+// ============================================================
 
 import 'package:flutter/material.dart';
+import '../../l10n/app_localizations.dart';
 
+import '../../widgets/ls_ui.dart';
+import '../../widgets/error_widgets.dart';
+import '../api/liveclass_api.dart';
 import '../models/liveclass_models.dart';
-import '../services/liveclass_api_service.dart';
-import '../theme/liveclass_theme.dart';
 
-// FIX (design-system drift — production readiness audit): same gap as
-// explore_screen.dart — a fully hand-rolled hex-literal palette with no tie
-// back to liveclass_theme.dart, instead of aliasing the shared tokens like
-// every other manage-sheet screen in the module already does (see
-// classroom_purchases_screen.dart's matching fix). Aliased instead — zero
-// visual change, single source of truth going forward.
-const _kNavy = LiveClassColors.navy;
-const _kBg = LiveClassColors.bg;
-const _kGradient = LiveClassColors.gradient;
-
-String _passTypeLabel(String type) {
-  switch (type) {
-    case PassType.free:
-      return 'Free';
-    case PassType.daily:
-      return 'Daily';
-    case PassType.weekly:
-      return 'Weekly';
-    case PassType.monthly:
-      return 'Monthly';
-    case PassType.yearly:
-      return 'Yearly';
-    default:
-      return type;
-  }
-}
-
-String _coins(num n) => n == n.roundToDouble() ? n.toStringAsFixed(0) : n.toStringAsFixed(2);
-
-InputDecoration _inputDecoration(String hint) => InputDecoration(
-      hintText: hint,
-      border: OutlineInputBorder(borderRadius: BorderRadius.circular(10)),
-      contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
-      isDense: true,
-    );
-
-// ===========================================================================
-// SCREEN
-// ===========================================================================
 class PassManagementScreen extends StatefulWidget {
+  final LiveClassApi api;
   final int classroomId;
-  final String classroomTitle;
-  /// True right after a fresh classroom is created — auto-opens the "New
-  /// Pass" sheet on first frame so the teacher isn't left with a classroom
-  /// that has no pricing plan and is therefore unjoinable by any student.
-  final bool autoOpenCreate;
-  const PassManagementScreen({
-    super.key,
-    required this.classroomId,
-    this.classroomTitle = '',
-    this.autoOpenCreate = false,
-  });
+  const PassManagementScreen({super.key, required this.api, required this.classroomId});
 
   @override
   State<PassManagementScreen> createState() => _PassManagementScreenState();
 }
 
-class _PassManagementScreenState extends State<PassManagementScreen> {
-  List<ClassPass> _passes = [];
+class _PassManagementScreenState extends State<PassManagementScreen> with SingleTickerProviderStateMixin {
+  late final TabController _tabs = TabController(length: 3, vsync: this);
+
+  List<ClassPass> _passes = const [];
+  List<Coupon> _coupons = const [];
+  List<dynamic> _gifts = const [];
   bool _loading = true;
-  String? _error;
+  Object? _error;
 
   @override
   void initState() {
     super.initState();
     _load();
-    if (widget.autoOpenCreate) {
-      WidgetsBinding.instance.addPostFrameCallback((_) => _openEditor());
-    }
   }
 
   Future<void> _load() async {
@@ -99,426 +51,224 @@ class _PassManagementScreenState extends State<PassManagementScreen> {
       _error = null;
     });
     try {
-      final res = await LiveClassApi.passes.list(classroomId: widget.classroomId);
-      if (!mounted) return;
+      final results = await Future.wait([
+        widget.api.passes(widget.classroomId),
+        widget.api.coupons(classroomId: widget.classroomId),
+        widget.api.passGifts(),
+      ]);
       setState(() {
-        _passes = res.results;
+        _passes = (results[0] as List).map((e) => ClassPass.fromJson(e as Map<String, dynamic>)).toList();
+        _coupons = (results[1] as List).map((e) => Coupon.fromJson(e as Map<String, dynamic>)).toList();
+        _gifts = results[2] as List;
         _loading = false;
       });
     } catch (e) {
-      if (!mounted) return;
       setState(() {
+        _error = e;
         _loading = false;
-        _error = e is LiveClassApiException ? e.message : 'Could not load passes.';
       });
     }
-  }
-
-  void _snack(String msg) {
-    if (!mounted) return;
-    ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(msg)));
-  }
-
-  Future<void> _openEditor({ClassPass? existing}) async {
-    final wasEmpty = _passes.isEmpty;
-    final saved = await showModalBottomSheet<bool>(
-      context: context,
-      isScrollControlled: true,
-      backgroundColor: Colors.white,
-      shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(18))),
-      builder: (ctx) => _PassEditorSheet(classroomId: widget.classroomId, existing: existing),
-    );
-    if (saved == true) {
-      await _load();
-      // NOTE (UX): nudge on the very first pass only — most classrooms want
-      // more than one tier (e.g. a cheap "1 class trial" alongside a
-      // monthly), and nothing in the UI hinted that was possible/expected.
-      if (wasEmpty && existing == null && mounted) {
-        _snack('Pass created. You can add more tiers like daily/weekly/monthly if you like.');
-      }
-    }
-  }
-
-  Future<void> _togglePause(ClassPass pass) async {
-    try {
-      await LiveClassApi.passes.update(
-        pass.id,
-        ClassPass(
-          id: pass.id,
-          classroomId: pass.classroomId,
-          passType: pass.passType,
-          title: pass.title,
-          price: pass.price,
-          validityDays: pass.validityDays,
-          maxClasses: pass.maxClasses,
-          isActive: !pass.isActive,
-          // FIX (introduced alongside allowGifting itself): without this,
-          // toggling pause/resume here would silently reset a pass's
-          // gifting flag back to the default every time, since this
-          // rebuilds a whole new ClassPass rather than patching one field.
-          allowGifting: pass.allowGifting,
-        ),
-      );
-      _snack(pass.isActive ? 'Pass paused.' : 'Pass activated.');
-      _load();
-    } catch (e) {
-      _snack(e is LiveClassApiException ? e.message : 'Could not update.');
-    }
-  }
-
-  Future<void> _confirmDelete(ClassPass pass) async {
-    final ok = await showDialog<bool>(
-      context: context,
-      builder: (_) => AlertDialog(
-        title: const Text('Delete Pass?'),
-        content: const Text(
-            'If this pass has ever been purchased, the backend will refuse the delete — pause it instead in that case.'),
-        actions: [
-          TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('Cancel')),
-          TextButton(
-            onPressed: () => Navigator.pop(context, true),
-            child: const Text('Delete', style: TextStyle(color: Colors.red)),
-          ),
-        ],
-      ),
-    );
-    if (ok != true) return;
-    try {
-      await LiveClassApi.passes.delete(pass.id);
-      _snack('Pass deleted.');
-      _load();
-    } catch (e) {
-      _snack(e is LiveClassApiException ? e.message : 'Could not delete.');
-    }
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    // 🔴 FIX (design-system consistency audit — this screen was one of the
-    // 10 still on the pre-LiveClassCard pattern): AppBar, loading spinner,
-    // error state and empty state were all hand-rolled instead of using
-    // the shared liveClassAppBar/LiveClassLoading/LiveClassErrorState/
-    // LiveClassEmptyState widgets every other screen in the module now
-    // uses. Swapped in the shared widgets — the error/empty copy below is
-    // carried over unchanged, and LiveClassErrorState's own OutlinedButton
-    // retry replaces the old ElevatedButton one-for-one.
-    return Scaffold(
-      backgroundColor: _kBg,
-      appBar: liveClassAppBar(widget.classroomTitle.isNotEmpty ? 'Passes — ${widget.classroomTitle}' : 'Passes'),
-      floatingActionButton: FloatingActionButton.extended(
-        backgroundColor: _kNavy,
-        onPressed: () => _openEditor(),
-        icon: const Icon(Icons.add),
-        label: const Text('New Pass'),
-      ),
-      body: _loading
-          ? const LiveClassLoading()
-          : _error != null
-              ? LiveClassErrorState(message: _error!, onRetry: _load)
-              : RefreshIndicator(
-                  color: _kNavy,
-                  onRefresh: _load,
-                  child: _passes.isEmpty
-                      ? const LiveClassEmptyState(
-                          icon: Icons.confirmation_number_outlined,
-                          title: 'No pass created yet.',
-                          subtitle: 'Until at least one pass is active, no student can join this classroom.',
-                        )
-                      : ListView.builder(
-                          padding: const EdgeInsets.fromLTRB(16, 14, 16, 90),
-                          itemCount: _passes.length,
-                          itemBuilder: (_, i) => _passCard(_passes[i]),
-                        ),
-                ),
-    );
-  }
-
-  // 🔴 FIX (design-system consistency audit): hand-rolled Container was an
-  // exact match to LiveClassCard's defaults (white, radius 14, shadow
-  // black@0.04/blur 8/offset (0,2)) — same zero-visual-change swap already
-  // applied across the rest of the module.
-  Widget _passCard(ClassPass p) {
-    return LiveClassCard(
-      margin: const EdgeInsets.only(bottom: 12),
-      padding: const EdgeInsets.all(14),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Row(
-            children: [
-              Container(
-                width: 38,
-                height: 38,
-                decoration: BoxDecoration(gradient: _kGradient, borderRadius: BorderRadius.circular(10)),
-                child: const Icon(Icons.confirmation_number_rounded, color: Colors.white, size: 18),
-              ),
-              const SizedBox(width: 10),
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(p.title.isNotEmpty ? p.title : _passTypeLabel(p.passType),
-                        style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 14)),
-                    Text(_passTypeLabel(p.passType), style: TextStyle(fontSize: 11.5, color: Colors.grey.shade500)),
-                  ],
-                ),
-              ),
-              Container(
-                padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 3),
-                decoration: BoxDecoration(
-                  // FIX (deprecated-API audit): `withOpacity` →
-                  // `withValues(alpha:)`, same alpha (see
-                  // join_requests_screen.dart's matching fix).
-                  color: (p.isActive ? Colors.green : Colors.grey).withValues(alpha: 0.12),
-                  borderRadius: BorderRadius.circular(20),
-                ),
-                child: Text(p.isActive ? 'ACTIVE' : 'PAUSED',
-                    style: TextStyle(fontSize: 10, fontWeight: FontWeight.bold, color: p.isActive ? Colors.green.shade700 : Colors.grey.shade700)),
-              ),
-            ],
-          ),
-          const Divider(height: 22),
-          Row(
-            children: [
-              Expanded(child: _stat('Price', '${_coins(p.price)} coins')),
-              // FIX (translation-consistency audit): was '${p.validityDays}
-              // din' — Hindi for "days" — hardcoded next to all-English
-              // labels on the same card ('Price', 'Max Classes'). Switched
-              // to English so the card reads consistently in one language.
-              Expanded(child: _stat('Validity', '${p.validityDays} days')),
-              Expanded(child: _stat('Max Classes', p.maxClasses?.toString() ?? 'Unlimited')),
-            ],
-          ),
-          const SizedBox(height: 10),
-          Row(
-            children: [
-              TextButton.icon(
-                onPressed: () => _openEditor(existing: p),
-                icon: const Icon(Icons.edit_outlined, size: 16),
-                label: const Text('Edit'),
-              ),
-              TextButton.icon(
-                onPressed: () => _togglePause(p),
-                icon: Icon(p.isActive ? Icons.pause_circle_outline : Icons.play_circle_outline, size: 16),
-                label: Text(p.isActive ? 'Pause' : 'Activate'),
-              ),
-              TextButton.icon(
-                onPressed: () => _confirmDelete(p),
-                style: TextButton.styleFrom(foregroundColor: Colors.red.shade600),
-                icon: const Icon(Icons.delete_outline, size: 16),
-                label: const Text('Delete'),
-              ),
-            ],
-          ),
-        ],
-      ),
-    );
-  }
-
-  Widget _stat(String label, String value) {
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        Text(label, style: TextStyle(fontSize: 10.5, color: Colors.grey.shade500)),
-        const SizedBox(height: 2),
-        Text(value, style: const TextStyle(fontSize: 12.5, fontWeight: FontWeight.w600)),
-      ],
-    );
-  }
-}
-
-// ===========================================================================
-// Create/Edit bottom sheet
-// ===========================================================================
-class _PassEditorSheet extends StatefulWidget {
-  final int classroomId;
-  final ClassPass? existing;
-  const _PassEditorSheet({required this.classroomId, this.existing});
-
-  @override
-  State<_PassEditorSheet> createState() => _PassEditorSheetState();
-}
-
-class _PassEditorSheetState extends State<_PassEditorSheet> {
-  final _formKey = GlobalKey<FormState>();
-  late String _passType;
-  late final TextEditingController _titleCtrl;
-  late final TextEditingController _priceCtrl;
-  late final TextEditingController _validityCtrl;
-  late final TextEditingController _maxClassesCtrl;
-  bool _isActive = true;
-  // NEW (Pass 14 frontend catch-up §1.3) — per-pass "allow gifting" gate.
-  // See liveclass_models.dart's ClassPass.allowGifting note on the
-  // unconfirmed default.
-  bool _allowGifting = true;
-  bool _saving = false;
-
-  bool get _isEdit => widget.existing != null;
-
-  @override
-  void initState() {
-    super.initState();
-    final e = widget.existing;
-    _passType = e?.passType ?? PassType.monthly;
-    _titleCtrl = TextEditingController(text: e?.title ?? '');
-    _priceCtrl = TextEditingController(text: e != null ? _coins(e.price) : '');
-    _validityCtrl = TextEditingController(text: e?.validityDays.toString() ?? '30');
-    _maxClassesCtrl = TextEditingController(text: e?.maxClasses?.toString() ?? '');
-    _isActive = e?.isActive ?? true;
-    _allowGifting = e?.allowGifting ?? true;
   }
 
   @override
   void dispose() {
-    _titleCtrl.dispose();
-    _priceCtrl.dispose();
-    _validityCtrl.dispose();
-    _maxClassesCtrl.dispose();
+    _tabs.dispose();
     super.dispose();
   }
 
-  Future<void> _save() async {
-    if (!_formKey.currentState!.validate()) return;
-    final price = double.tryParse(_priceCtrl.text.trim()) ?? 0;
-    final validity = int.tryParse(_validityCtrl.text.trim()) ?? 0;
-    final maxClasses = _maxClassesCtrl.text.trim().isEmpty ? null : int.tryParse(_maxClassesCtrl.text.trim());
+  // ---------------- Passes ----------------
 
-    setState(() => _saving = true);
-    final draft = ClassPass(
-      id: widget.existing?.id ?? 0,
-      classroomId: widget.classroomId,
-      passType: _passType,
-      title: _titleCtrl.text.trim(),
-      price: price,
-      validityDays: validity,
-      maxClasses: maxClasses,
-      isActive: _isActive,
-      allowGifting: _allowGifting,
+  Future<void> _createPassDialog() async {
+    final t = AppLocalizations.of(context)!;
+    final titleCtrl = TextEditingController();
+    final priceCtrl = TextEditingController(text: '0');
+    final daysCtrl = TextEditingController(text: '30');
+    String passType = 'monthly';
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (context) => StatefulBuilder(builder: (context, setStateDialog) => AlertDialog(
+            title: Text(t.newPassTitle),
+            content: Column(mainAxisSize: MainAxisSize.min, children: [
+              TextField(controller: titleCtrl, decoration: InputDecoration(labelText: t.passTitleLabel)),
+              DropdownButton<String>(
+                value: passType,
+                items: const ['free', 'daily', 'weekly', 'monthly', 'yearly']
+                    .map((v) => DropdownMenuItem(value: v, child: Text(v)))
+                    .toList(),
+                onChanged: (v) => setStateDialog(() => passType = v ?? passType),
+              ),
+              TextField(controller: priceCtrl, keyboardType: TextInputType.number, decoration: InputDecoration(labelText: t.priceInCoinsLabel)),
+              TextField(controller: daysCtrl, keyboardType: TextInputType.number, decoration: InputDecoration(labelText: t.validityDaysLabel)),
+            ]),
+            actions: [
+              TextButton(onPressed: () => Navigator.pop(context, false), child: Text(t.cancelCta)),
+              TextButton(onPressed: () => Navigator.pop(context, true), child: Text(t.createCta)),
+            ],
+          )),
     );
+    if (ok != true) return;
     try {
-      if (_isEdit) {
-        await LiveClassApi.passes.update(widget.existing!.id, draft);
-      } else {
-        await LiveClassApi.passes.create(draft);
-      }
-      if (!mounted) return;
-      Navigator.pop(context, true);
-    } on LiveClassApiException catch (e) {
-      // Surfaces the "would shrink what active holders paid for" 400 verbatim.
-      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(e.message)));
-    } catch (_) {
-      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Could not save — please try again.')));
-    } finally {
-      if (mounted) setState(() => _saving = false);
+      await widget.api.createPass({
+        'classroom': widget.classroomId,
+        'pass_type': passType,
+        'title': titleCtrl.text.trim(),
+        'price': int.tryParse(priceCtrl.text) ?? 0,
+        'validity_days': int.tryParse(daysCtrl.text) ?? 30,
+      });
+      _load();
+    } catch (e) {
+      if (mounted) lsSnack(context, e.toString(), error: true);
+    }
+  }
+
+  Future<void> _togglePassActive(ClassPass p) async {
+    try {
+      await widget.api.updatePass(p.id, {'is_active': !p.isActive});
+      _load();
+    } catch (e) {
+      if (mounted) lsSnack(context, e.toString(), error: true);
+    }
+  }
+
+  // ---------------- Coupons ----------------
+
+  Future<void> _createCouponDialog() async {
+    final t = AppLocalizations.of(context)!;
+    final codeCtrl = TextEditingController();
+    final percentCtrl = TextEditingController();
+    final daysValidCtrl = TextEditingController(text: '30');
+    final maxUsesCtrl = TextEditingController();
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: Text(t.newCouponTitle),
+        content: Column(mainAxisSize: MainAxisSize.min, children: [
+          TextField(controller: codeCtrl, textCapitalization: TextCapitalization.characters, decoration: InputDecoration(labelText: t.couponCodeLabel)),
+          TextField(controller: percentCtrl, keyboardType: TextInputType.number, decoration: InputDecoration(labelText: t.discountPercentLabel)),
+          TextField(controller: daysValidCtrl, keyboardType: TextInputType.number, decoration: InputDecoration(labelText: t.validForDaysLabel)),
+          TextField(controller: maxUsesCtrl, keyboardType: TextInputType.number, decoration: InputDecoration(labelText: t.maxUsesOptionalLabel)),
+        ]),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(context, false), child: Text(t.cancelCta)),
+          TextButton(onPressed: () => Navigator.pop(context, true), child: Text(t.createCta)),
+        ],
+      ),
+    );
+    if (ok != true || codeCtrl.text.trim().isEmpty) return;
+    try {
+      final validDays = int.tryParse(daysValidCtrl.text) ?? 30;
+      await widget.api.createCoupon({
+        'classroom': widget.classroomId,
+        'code': codeCtrl.text.trim().toUpperCase(),
+        if (percentCtrl.text.trim().isNotEmpty) 'discount_percent': int.tryParse(percentCtrl.text),
+        'valid_until': DateTime.now().add(Duration(days: validDays)).toUtc().toIso8601String(),
+        if (maxUsesCtrl.text.trim().isNotEmpty) 'max_uses': int.tryParse(maxUsesCtrl.text),
+      });
+      _load();
+    } catch (e) {
+      if (mounted) lsSnack(context, e.toString(), error: true);
+    }
+  }
+
+  Future<void> _toggleCouponActive(Coupon c) async {
+    try {
+      await widget.api.updateCoupon(c.id, {'is_active': !c.isActive});
+      _load();
+    } catch (e) {
+      if (mounted) lsSnack(context, e.toString(), error: true);
+    }
+  }
+
+  Future<void> _deleteCoupon(Coupon c) async {
+    try {
+      await widget.api.deleteCoupon(c.id);
+      _load();
+    } catch (e) {
+      if (mounted) lsSnack(context, e.toString(), error: true);
     }
   }
 
   @override
   Widget build(BuildContext context) {
-    return Padding(
-      padding: EdgeInsets.only(left: 20, right: 20, top: 20, bottom: MediaQuery.of(context).viewInsets.bottom + 20),
-      child: Form(
-        key: _formKey,
-        child: SingleChildScrollView(
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Text(_isEdit ? 'Edit Pass' : 'New Pass', style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
-              const SizedBox(height: 16),
-              const Text('Pass Type', style: TextStyle(fontSize: 12.5, fontWeight: FontWeight.w600)),
-              const SizedBox(height: 6),
-              DropdownButtonFormField<String>(
-                value: _passType,
-                decoration: _inputDecoration(''),
-                items: const {
-                  PassType.free: 'Free',
-                  PassType.daily: 'Daily',
-                  PassType.weekly: 'Weekly',
-                  PassType.monthly: 'Monthly',
-                  PassType.yearly: 'Yearly',
-                }.entries.map((e) => DropdownMenuItem(value: e.key, child: Text(e.value))).toList(),
-                onChanged: (v) => setState(() => _passType = v!),
-              ),
-              const SizedBox(height: 12),
-              TextFormField(
-                controller: _titleCtrl,
-                decoration: _inputDecoration('Title (e.g. "1 Month Access")'),
-                validator: (v) => (v == null || v.trim().isEmpty) ? 'Title is required' : null,
-              ),
-              const SizedBox(height: 12),
-              Row(
-                children: [
-                  Expanded(
-                    child: TextFormField(
-                      controller: _priceCtrl,
-                      keyboardType: const TextInputType.numberWithOptions(decimal: true),
-                      decoration: _inputDecoration('Price (coins)'),
-                      validator: (v) {
-                        final n = double.tryParse((v ?? '').trim());
-                        if (n == null || n < 0) return 'Enter a valid price';
-                        return null;
-                      },
-                    ),
-                  ),
-                  const SizedBox(width: 10),
-                  Expanded(
-                    child: TextFormField(
-                      controller: _validityCtrl,
-                      keyboardType: TextInputType.number,
-                      decoration: _inputDecoration('Validity (days)'),
-                      validator: (v) {
-                        final n = int.tryParse((v ?? '').trim());
-                        if (n == null || n <= 0) return 'Enter valid days';
-                        return null;
-                      },
-                    ),
-                  ),
-                ],
-              ),
-              const SizedBox(height: 12),
-              TextFormField(
-                controller: _maxClassesCtrl,
-                keyboardType: TextInputType.number,
-                decoration: _inputDecoration('Max classes (optional — blank = unlimited)'),
-              ),
-              const SizedBox(height: 8),
-              SwitchListTile(
-                contentPadding: EdgeInsets.zero,
-                value: _isActive,
-                onChanged: (v) => setState(() => _isActive = v),
-                title: const Text('Active', style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600)),
-                activeColor: _kNavy,
-              ),
-              // NEW (Pass 14 frontend catch-up §1.3) — "allow gifting"
-              // toggle per ClassPass, see liveclass_models.dart's
-              // ClassPass.allowGifting note.
-              SwitchListTile(
-                contentPadding: EdgeInsets.zero,
-                value: _allowGifting,
-                onChanged: (v) => setState(() => _allowGifting = v),
-                title: const Text('Allow gifting', style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600)),
-                subtitle: Text('Students can send this pass as a gift to someone else', style: TextStyle(fontSize: 11.5, color: Colors.grey.shade600)),
-                activeColor: _kNavy,
-              ),
-              const SizedBox(height: 8),
-              SizedBox(
-                width: double.infinity,
-                child: ElevatedButton(
-                  style: ElevatedButton.styleFrom(backgroundColor: _kNavy, foregroundColor: Colors.white),
-                  onPressed: _saving ? null : _save,
-                  child: Padding(
-                    padding: const EdgeInsets.symmetric(vertical: 12),
-                    child: _saving
-                        ? const SizedBox(width: 18, height: 18, child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white))
-                        : Text(_isEdit ? 'Save Changes' : 'Create Pass'),
-                  ),
-                ),
-              ),
-            ],
+    final t = AppLocalizations.of(context)!;
+    final cs = Theme.of(context).colorScheme;
+
+    return Scaffold(
+      backgroundColor: lsBg(context),
+      appBar: lsAppBar(context, title: t.managePassesTitle),
+      floatingActionButton: _tabs.index == 0
+          ? FloatingActionButton(onPressed: _createPassDialog, child: const Icon(Icons.add_rounded))
+          : _tabs.index == 1
+              ? FloatingActionButton(onPressed: _createCouponDialog, child: const Icon(Icons.add_rounded))
+              : null,
+      body: Column(children: [
+        TabBar(
+          controller: _tabs,
+          onTap: (_) => setState(() {}),
+          labelColor: cs.primary,
+          unselectedLabelColor: cs.onSurfaceVariant,
+          tabs: [Tab(text: t.passesTitle), Tab(text: t.couponsTab), Tab(text: t.giftsTitle)],
+        ),
+        Expanded(
+          child: RefreshIndicator(
+            onRefresh: _load,
+            child: _loading
+                ? const Center(child: CircularProgressIndicator())
+                : _error != null
+                    ? ErrorStateWidget(title: t.couldNotLoadPasses, retryLabel: t.retry, onRetry: _load)
+                    : TabBarView(controller: _tabs, children: [
+                        _passes.isEmpty
+                            ? EmptyStateWidget(title: t.noPassesYet, icon: Icons.confirmation_number_outlined)
+                            : ListView(children: _passes.map((p) => LsCard(
+                                  margin: const EdgeInsets.fromLTRB(kLsPad, 10, kLsPad, 0),
+                                  child: Row(children: [
+                                    Expanded(
+                                      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                                        Text(p.title.isEmpty ? p.passType : p.title, style: LsType.head(context, size: 13.5)),
+                                        const SizedBox(height: 3),
+                                        Text('${p.price.toStringAsFixed(0)} ${t.coinsUnit} · ${p.validityDays}${t.daysAbbrev}',
+                                            style: TextStyle(fontSize: 11.5, color: cs.onSurfaceVariant)),
+                                      ]),
+                                    ),
+                                    Switch(value: p.isActive, onChanged: (_) => _togglePassActive(p)),
+                                  ]),
+                                )).toList()),
+                        _coupons.isEmpty
+                            ? EmptyStateWidget(title: t.noCouponsYet, icon: Icons.local_offer_outlined)
+                            : ListView(children: _coupons.map((c) => LsCard(
+                                  margin: const EdgeInsets.fromLTRB(kLsPad, 10, kLsPad, 0),
+                                  child: Row(children: [
+                                    Expanded(
+                                      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                                        Text(c.code, style: LsType.head(context, size: 13.5)),
+                                        const SizedBox(height: 3),
+                                        Text(
+                                          c.discountPercent != null
+                                              ? t.discountPercentValueLabel(c.discountPercent!)
+                                              : t.discountAmountValueLabel((c.discountAmount ?? 0).toStringAsFixed(0)),
+                                          style: TextStyle(fontSize: 11.5, color: cs.onSurfaceVariant),
+                                        ),
+                                        Text(t.couponUsageLabel(c.usedCount, c.maxUses?.toString() ?? '∞'),
+                                            style: TextStyle(fontSize: 10.5, color: cs.onSurfaceVariant)),
+                                      ]),
+                                    ),
+                                    Switch(value: c.isActive, onChanged: (_) => _toggleCouponActive(c)),
+                                    IconButton(icon: Icon(Icons.delete_outline_rounded, color: cs.error, size: 20), onPressed: () => _deleteCoupon(c)),
+                                  ]),
+                                )).toList()),
+                        _gifts.isEmpty
+                            ? EmptyStateWidget(title: t.noGiftsYet, icon: Icons.card_giftcard_outlined)
+                            : ListView(children: _gifts.map((g) {
+                                final m = g as Map<String, dynamic>;
+                                return LsCard(
+                                  margin: const EdgeInsets.fromLTRB(kLsPad, 10, kLsPad, 0),
+                                  child: LsMetaRow(icon: Icons.card_giftcard_rounded, label: m['status']?.toString() ?? '', value: m['gift_message']?.toString() ?? ''),
+                                );
+                              }).toList()),
+                      ]),
           ),
         ),
-      ),
+      ]),
     );
   }
 }

@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import '../models/study_room_models.dart';
 import '../services/ai_study_service.dart';
+import '../../theme_service.dart'; // 🎨 THEME FIX — AppThemeTokens
 
 /// 🔥 NAYA — Feature 5: Revision Deck screen.
 ///
@@ -89,21 +90,28 @@ class _RevisionDeckScreenState extends State<RevisionDeckScreen> {
   @override
   Widget build(BuildContext context) {
     final hasDeck = _deck != null && !_deck!.isEmpty;
+    final cs = Theme.of(context).colorScheme;
 
+    // 🎨 THEME FIX — outer chrome (Scaffold/AppBar) ab theme se aata hai.
+    // NOTE: flashcard/quiz cards ka vibrant indigo/purple/green gradient
+    // jaan-boojh kar waisa hi rakha hai — ye is screen ki apni "revision
+    // deck" visual identity hai (Duolingo/Anki-jaisi bold flashcards),
+    // theme mode se independent — inhe muted kar dena inn cards ko kam
+    // sundar banata, home.dart jaisa banane ka matlab flat/boring karna
+    // nahi hai.
     return DefaultTabController(
       length: 2,
       child: Scaffold(
-        backgroundColor: const Color(0xFF14141F),
         appBar: AppBar(
-          backgroundColor: const Color(0xFF1E1E2C),
-          title: const Text('Revision Deck', style: TextStyle(color: Colors.white)),
-          iconTheme: const IconThemeData(color: Colors.white),
+          backgroundColor: cs.primary,
+          title: Text('Revision Deck', style: TextStyle(color: cs.onPrimary)),
+          iconTheme: IconThemeData(color: cs.onPrimary),
           bottom: hasDeck
-              ? const TabBar(
-                  indicatorColor: Colors.tealAccent,
-                  labelColor: Colors.tealAccent,
-                  unselectedLabelColor: Colors.white54,
-                  tabs: [
+              ? TabBar(
+                  indicatorColor: AppThemeTokens.of(context).success,
+                  labelColor: cs.onPrimary,
+                  unselectedLabelColor: cs.onPrimary.withOpacity(0.6),
+                  tabs: const [
                     Tab(icon: Icon(Icons.style_outlined), text: 'Flashcards'),
                     Tab(icon: Icon(Icons.quiz_outlined), text: 'Quiz'),
                   ],
@@ -124,16 +132,17 @@ class _RevisionDeckScreenState extends State<RevisionDeckScreen> {
   }
 
   Widget _buildBody(bool hasDeck) {
+    final success = AppThemeTokens.of(context).success;
     if (_loading) {
-      return const Center(child: CircularProgressIndicator(color: Colors.tealAccent));
+      return Center(child: CircularProgressIndicator(color: success));
     }
 
     if (_generating) {
-      return const Center(
+      return Center(
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
-            CircularProgressIndicator(color: Colors.tealAccent),
+            CircularProgressIndicator(color: success),
             SizedBox(height: 16),
             Text(
               'Class ke poore content se revision deck ban raha hai…',
@@ -165,7 +174,7 @@ class _RevisionDeckScreenState extends State<RevisionDeckScreen> {
               ],
               const SizedBox(height: 20),
               ElevatedButton.icon(
-                style: ElevatedButton.styleFrom(backgroundColor: Colors.tealAccent, foregroundColor: Colors.black),
+                style: ElevatedButton.styleFrom(backgroundColor: success, foregroundColor: Colors.black),
                 icon: const Icon(Icons.auto_awesome),
                 label: const Text('Generate Revision Deck'),
                 onPressed: _generate,
@@ -423,7 +432,7 @@ class _RevisionQuizCardState extends State<_RevisionQuizCard> {
                           color: Colors.white.withOpacity(0.05),
                           borderRadius: BorderRadius.circular(10),
                         ),
-                        child: const Text('Reveal Answer', style: TextStyle(color: Colors.tealAccent, fontWeight: FontWeight.w600, fontSize: 12.5)),
+                        child: Text('Reveal Answer', style: TextStyle(color: AppThemeTokens.of(context).success, fontWeight: FontWeight.w600, fontSize: 12.5)),
                       ),
                     ),
                   ),

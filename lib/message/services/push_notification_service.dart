@@ -2,6 +2,7 @@
 
 import 'dart:convert';
 import 'dart:developer' as developer;
+import 'dart:io' show Platform;
 import 'package:flutter/material.dart'; // 🔥 NAYA — MaterialPageRoute chahiye ongoing-call notification tap navigation ke liye (widgets.dart me nahi hai)
 import 'package:firebase_core/firebase_core.dart';
 import 'package:firebase_messaging/firebase_messaging.dart';
@@ -850,7 +851,7 @@ class PushNotificationService {
   ///
   Future<void> registerToken() async {
     try {
-      final authToken = await AuthService.getToken();
+      final authToken = await AuthService.getValidToken();
       if (authToken == null || authToken.isEmpty) {
         // User abhi login nahi hai — registration ka koi matlab nahi,
         // login ke baad dobara call karo.
@@ -865,12 +866,12 @@ class PushNotificationService {
       }
 
       final res = await http.post(
-        Uri.parse("${Api.baseUrl}/message/devices/register/"),
+        Uri.parse("${Api.baseUrl}/message/device-token/"),
         headers: {
           "Content-Type": "application/json",
           "Authorization": "Bearer $authToken",
         },
-        body: jsonEncode({"token": fcmToken, "platform": "android"}),
+        body: jsonEncode({"token": fcmToken, "platform": Platform.isIOS ? "ios" : "android"}),
       );
 
       if (res.statusCode >= 200 && res.statusCode < 300) {
@@ -888,9 +889,9 @@ class PushNotificationService {
     try {
       final fcmToken = await _fcm.getToken();
       if (fcmToken == null) return;
-      final authToken = await AuthService.getToken();
+      final authToken = await AuthService.getValidToken();
       await http.delete(
-        Uri.parse("${Api.baseUrl}/message/devices/register/"),
+        Uri.parse("${Api.baseUrl}/message/device-token/"),
         headers: {
           "Content-Type": "application/json",
           "Authorization": "Bearer $authToken",

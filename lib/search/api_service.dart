@@ -16,13 +16,32 @@ import 'models/search_result.dart';
 /// actually placed at `lib/search/api_service.dart`. One level up (same
 /// pattern `search/search.dart` itself already used) is correct.
 class SearchApiService {
-  /// People/friends search — `user_profile` app, endpoint unchanged.
-  /// `core`'s unified search has no user/friend source (see
-  /// `core_app_documentation.md` §6.2's source table), so this stays a
-  /// separate call from [searchEverything].
+  /// People search — `user_profile` app's dedicated `/profile/search/`
+  /// endpoint (full user base, plain substring match). `core`'s unified
+  /// search ALSO has a `user` source now (`core.search.USER_SOURCE`),
+  /// but this dedicated call is kept as the one [SearchFilter.people]
+  /// uses — no reason to route the full-user-base case through the
+  /// ranked-merge endpoint when this one already does the job directly.
+  /// [SearchFilter.friends] is the new one that goes through
+  /// [searchEverything] instead (`sources: ['friend']`) — see that
+  /// filter's own doc comment in `models/search_result.dart`.
+  ///
+  /// 🔥 FIX: this always returned `[]` — LearnScroll/settings.py sets a
+  /// project-wide `DEFAULT_PAGINATION_CLASS` (`common.pagination.
+  /// StandardPagination`), and `UserSearchView` (a plain `ListAPIView`,
+  /// no pagination override) goes through it like every other list view.
+  /// So the real shape of `data['data']` is a DRF page —
+  /// `{"count", "next", "previous", "results": [...]}` — NOT a flat
+  /// list. The old `data['data'] as List?` cast threw a TypeError on
+  /// every single call (a Map is not a List), which the outer try/catch
+  /// silently swallowed into `[]` — indistinguishable from "no users
+  /// matched", which is exactly why people search (and, downstream, the
+  /// "add friend" flow that depends on finding someone to follow) looked
+  /// broken. Handling both shapes below fixes it without needing a
+  /// backend change.
   static Future<List<dynamic>> searchUsers(String query) async {
     try {
-      final token = await AuthService.getToken();
+      final token = await AuthService.getValidToken();
       final url = Uri.parse('${Api.baseUrl}/profile/search/')
           .replace(queryParameters: {'search': query});
 
@@ -37,7 +56,9 @@ class SearchApiService {
       if (response.statusCode == 200) {
         final Map<String, dynamic> data = json.decode(response.body);
         if (data['status'] == true) {
-          return (data['data'] as List?) ?? [];
+          final inner = data['data'];
+          if (inner is List) return inner;
+          if (inner is Map && inner['results'] is List) return inner['results'] as List;
         }
       }
       return [];
@@ -82,7 +103,7 @@ class SearchApiService {
   /// real endpoint has nothing to do with it.
   static Future<List<String>> trendingHashtags({String? query}) async {
     try {
-      final token = await AuthService.getToken();
+      final token = await AuthService.getValidToken();
       // No `search` param — the real endpoint doesn't support one (see
       // docstring above). `limit: 50` (its hard cap) maximizes how many
       // trending tags are available for the caller to filter locally.
@@ -122,14 +143,15 @@ class SearchApiService {
   /// Unified cross-app search — `GET /core/search/?q=...&sources=...`
   /// (`core.views.SearchView`, Task 18). Omit `sources` to search every
   /// source `SearchView` currently scopes: `assigments`, `testseries`,
-  /// `message`, `campus_notice`. Never pass `post`/`class_material` —
-  /// they're backend stubs (§6.2) and would just come back empty.
+  /// `message`, `campus_notice`, `user`, `friend`. Never pass
+  /// `post`/`class_material` — they're backend stubs (§6.2) and would
+  /// just come back empty.
   static Future<List<SearchResultItem>> searchEverything(
     String query, {
     List<String>? sources,
   }) async {
     try {
-      final token = await AuthService.getToken();
+      final token = await AuthService.getValidToken();
       final params = <String, String>{'q': query};
       if (sources != null && sources.isNotEmpty) {
         params['sources'] = sources.join(',');

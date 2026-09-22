@@ -9,6 +9,7 @@ import 'complete_profile_screen.dart'; // ✅ Google signup ke baad phone lene k
 // 🔥 NAYA — dark mode + i18n. `theme_service.dart`/`language_service.dart`
 // jaisa hi pattern jo home.dart use karta hai (dekho ARCHITECTURE doc §3).
 import '../l10n/app_localizations.dart';
+import '../message/screens/parent_code_entry_screen.dart'; // Parent/Guardian Mode entry (Feature 8)
 import 'auth_widgets.dart';
 
 class LoginScreen extends StatefulWidget {
@@ -421,7 +422,23 @@ class _LoginScreenState extends State<LoginScreen> {
                           ),
                         ],
                       ),
-                      const SizedBox(height: 20),
+                      const SizedBox(height: 12),
+                      // Feature 8 — parents/guardians have no student login: they enter the
+                      // code their child shared (was unreachable from anywhere in the app).
+                      Center(
+                        child: TextButton(
+                          onPressed: () => Navigator.push(
+                            context,
+                            MaterialPageRoute(builder: (_) => const ParentCodeEntryScreen()),
+                          ),
+                          child: Text(
+                            l10n.parentLoginLink,
+                            textAlign: TextAlign.center,
+                            style: TextStyle(color: cs.onSurfaceVariant, fontSize: 13),
+                          ),
+                        ),
+                      ),
+                      const SizedBox(height: 8),
                     ],
                   ),
                 ),

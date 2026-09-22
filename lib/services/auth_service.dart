@@ -3,7 +3,7 @@ import 'dart:convert';
 import 'package:http/http.dart' as http;
 import 'package:shared_preferences/shared_preferences.dart';
 
-import '../../utils/api.dart';
+import '../utils/api.dart';
 
 class AuthService {
   // 🔧 CONFIRMED (login app ka urls.py + views.py dekh liye) — path ab

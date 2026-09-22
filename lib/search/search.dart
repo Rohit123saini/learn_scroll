@@ -13,7 +13,8 @@ import '../l10n/app_localizations.dart';
 /// results (Instagram-style "All" tab), recent searches.
 ///
 /// Covers everything the backend actually supports today: people
-/// (`/profile/search/`) + notices/assignments/tests/messages
+/// (`/profile/search/`, full user base incl. exact user-id search) +
+/// friends/connections, notices, assignments, tests, messages
 /// (`/core/search/`, `core.views.SearchView`). `post` and class
 /// "documents" (`liveclass.ClassMaterial`) are NOT here — both are
 /// documented STUBS on the backend (`core_app_documentation.md` §6.2 —
@@ -108,6 +109,16 @@ class _SearchScreenState extends State<SearchScreen> {
     _debounce = Timer(const Duration(milliseconds: 450), () => _runSearch(query));
   }
 
+  /// Sources requested for the "All" tab's unified `/core/search/` call.
+  /// Deliberately omits `user` — [SearchFilter.people] already covers
+  /// the full user base via the dedicated `/profile/search/` call below,
+  /// so asking the unified endpoint to ALSO rank every user by name
+  /// would just be wasted backend work for results `_buildBody` never
+  /// renders (its `sectionOrder` list doesn't include `user`). `friend`
+  /// stays in, though — that's a new, narrower section "All" doesn't
+  /// get anywhere else.
+  static const _allTabSources = ['campus_notice', 'assigments', 'testseries', 'message', 'friend'];
+
   Future<void> _runSearch(String rawQuery) async {
     final query = rawQuery.trim();
     if (query.isEmpty) {
@@ -128,10 +139,13 @@ class _SearchScreenState extends State<SearchScreen> {
       case SearchFilter.people:
         people = await SearchApiService.searchUsers(query);
         break;
+      case SearchFilter.friends:
+        results = await SearchApiService.searchEverything(query, sources: const ['friend']);
+        break;
       case SearchFilter.all:
         final both = await Future.wait([
           SearchApiService.searchUsers(query),
-          SearchApiService.searchEverything(query),
+          SearchApiService.searchEverything(query, sources: _allTabSources),
         ]);
         people = both[0] as List<dynamic>;
         results = both[1] as List<SearchResultItem>;
@@ -252,6 +266,15 @@ class _SearchScreenState extends State<SearchScreen> {
         return l10n.searchSectionTests;
       case 'message':
         return l10n.searchSectionMessages;
+      case 'friend':
+        // No l10n key for this yet (new source, this pass) — plain
+        // string rather than guessing an ARB key name that doesn't
+        // exist and breaking the build. Wire a real
+        // `l10n.searchSectionFriends` in when the ARB files are
+        // updated; every other call site here already falls back to
+        // the raw source string for anything unrecognized, so this is
+        // just a nicer version of that same fallback.
+        return 'Friends';
       default:
         return source;
     }
@@ -326,6 +349,10 @@ class _SearchScreenState extends State<SearchScreen> {
     final chips = <MapEntry<SearchFilter, String>>[
       MapEntry(SearchFilter.all, l10n.searchFilterAll),
       MapEntry(SearchFilter.people, l10n.searchFilterPeople),
+      // No l10n key yet for this new filter — see _sectionLabel's
+      // 'friend' case for the same reasoning (plain string rather than
+      // a guessed ARB key that would break the build).
+      const MapEntry(SearchFilter.friends, 'Friends'),
       MapEntry(SearchFilter.notices, l10n.searchFilterNotices),
       MapEntry(SearchFilter.assignments, l10n.searchFilterAssignments),
       MapEntry(SearchFilter.tests, l10n.searchFilterTests),
@@ -394,7 +421,7 @@ class _SearchScreenState extends State<SearchScreen> {
 
     // "All" — sectioned, Instagram-style.
     final grouped = _groupBySource(_results);
-    final sectionOrder = ['campus_notice', 'assigments', 'testseries', 'message'];
+    final sectionOrder = ['friend', 'campus_notice', 'assigments', 'testseries', 'message'];
     return ListView(
       padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
       children: [
@@ -546,6 +573,14 @@ class _SearchScreenState extends State<SearchScreen> {
   }
 
   Widget _buildResultTile(SearchResultItem item, ColorScheme cs, AppLocalizations l10n) {
+    // 'friend' rows are User rows underneath — `item.extra` has the
+    // exact same shape (username/first_name/last_name/profile_photo)
+    // `_buildPersonTile` already reads for the People list, so reuse it
+    // here instead of duplicating its avatar-loading + profile-nav
+    // logic in a second, icon-only tile.
+    if (item.source == 'friend') {
+      return _buildPersonTile(item.extra, cs);
+    }
     return Container(
       margin: const EdgeInsets.only(bottom: 8),
       decoration: BoxDecoration(

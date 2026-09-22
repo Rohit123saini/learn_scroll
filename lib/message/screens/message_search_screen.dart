@@ -30,9 +30,7 @@ import 'package:timeago/timeago.dart' as timeago;
 import '../models/message_models.dart';
 import '../services/message_api_service.dart';
 import 'chat_screen.dart';
-
-const Color _kNavy = Color(0xFF030F27);
-const Color _kAccent = Color(0xFF3D7EFF);
+import '../../theme_service.dart'; // 🎨 THEME FIX — AppThemeTokens
 
 class MessageSearchScreen extends StatefulWidget {
   /// Null = global search (saari conversations me).
@@ -142,7 +140,7 @@ class _MessageSearchScreenState extends State<MessageSearchScreen> {
     final updated = await showModalBottomSheet<SearchFilterModel>(
       context: context,
       isScrollControlled: true,
-      backgroundColor: Colors.white,
+      backgroundColor: Theme.of(context).colorScheme.surface,
       shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(18))),
       builder: (_) => _SearchFiltersSheet(initial: _filters),
     );
@@ -162,7 +160,7 @@ class _MessageSearchScreenState extends State<MessageSearchScreen> {
       showDialog(
         context: context,
         barrierDismissible: false,
-        builder: (_) => const Center(child: CircularProgressIndicator(color: _kAccent)),
+        builder: (_) => Center(child: CircularProgressIndicator(color: Theme.of(context).colorScheme.primary)),
       );
       try {
         final conversation = await MessageApiService.getConversation(preview.id);
@@ -188,31 +186,31 @@ class _MessageSearchScreenState extends State<MessageSearchScreen> {
 
   @override
   Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
     return Scaffold(
-      backgroundColor: Colors.grey[50],
       appBar: AppBar(
-        backgroundColor: _kNavy,
+        backgroundColor: cs.primary,
         elevation: 0,
         titleSpacing: 0,
         title: Container(
           height: 40,
           margin: const EdgeInsets.only(right: 8),
-          decoration: BoxDecoration(color: Colors.white.withOpacity(0.12), borderRadius: BorderRadius.circular(10)),
+          decoration: BoxDecoration(color: cs.onPrimary.withOpacity(0.12), borderRadius: BorderRadius.circular(10)),
           child: TextField(
             controller: _queryController,
             focusNode: _focusNode,
             onChanged: _onQueryChanged,
             textInputAction: TextInputAction.search,
-            style: const TextStyle(color: Colors.white, fontSize: 14.5),
-            cursorColor: Colors.white,
+            style: TextStyle(color: cs.onPrimary, fontSize: 14.5),
+            cursorColor: cs.onPrimary,
             decoration: InputDecoration(
               hintText: _isGlobal ? "Search all chats" : "Search in this chat",
-              hintStyle: const TextStyle(color: Colors.white54, fontSize: 14.5),
+              hintStyle: TextStyle(color: cs.onPrimary.withOpacity(0.6), fontSize: 14.5),
               border: InputBorder.none,
               contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
               suffixIcon: _queryController.text.isNotEmpty
                   ? IconButton(
-                      icon: const Icon(Icons.close, color: Colors.white70, size: 18),
+                      icon: Icon(Icons.close, color: cs.onPrimary.withOpacity(0.7), size: 18),
                       onPressed: () {
                         _queryController.clear();
                         _debounce?.cancel();
@@ -230,7 +228,7 @@ class _MessageSearchScreenState extends State<MessageSearchScreen> {
         actions: [
           IconButton(
             icon: Stack(clipBehavior: Clip.none, children: [
-              const Icon(Icons.tune, color: Colors.white),
+              Icon(Icons.tune, color: cs.onPrimary),
               if (!_filters.isEmpty)
                 Positioned(
                   right: -1,
@@ -238,7 +236,7 @@ class _MessageSearchScreenState extends State<MessageSearchScreen> {
                   child: Container(
                     width: 8,
                     height: 8,
-                    decoration: const BoxDecoration(color: _kAccent, shape: BoxShape.circle),
+                    decoration: BoxDecoration(color: AppThemeTokens.of(context).coral, shape: BoxShape.circle),
                   ),
                 ),
             ]),
@@ -281,7 +279,7 @@ class _MessageSearchScreenState extends State<MessageSearchScreen> {
   Widget _chip(String label, VoidCallback onRemove) {
     return Chip(
       label: Text(label, style: const TextStyle(fontSize: 11.5)),
-      backgroundColor: _kAccent.withOpacity(0.1),
+      backgroundColor: AppThemeTokens.of(context).coral.withOpacity(0.1),
       deleteIcon: const Icon(Icons.close, size: 14),
       onDeleted: () => setState(() {
         onRemove();
@@ -296,14 +294,15 @@ class _MessageSearchScreenState extends State<MessageSearchScreen> {
   String _fmtDate(DateTime d) => "${d.day}/${d.month}/${d.year}";
 
   Widget _buildBody() {
+    final cs = Theme.of(context).colorScheme;
     if (_loading) {
-      return const Center(child: CircularProgressIndicator(color: _kAccent));
+      return Center(child: CircularProgressIndicator(color: cs.primary));
     }
     if (_error != null) {
       return Center(
         child: Padding(
           padding: const EdgeInsets.symmetric(horizontal: 32),
-          child: Text(_error!, textAlign: TextAlign.center, style: TextStyle(color: Colors.grey[600], fontSize: 13)),
+          child: Text(_error!, textAlign: TextAlign.center, style: TextStyle(color: cs.onSurfaceVariant, fontSize: 13)),
         ),
       );
     }
@@ -311,7 +310,7 @@ class _MessageSearchScreenState extends State<MessageSearchScreen> {
       return Center(
         child: Text(
           "Type at least 2 characters to search",
-          style: TextStyle(color: Colors.grey[500], fontSize: 13),
+          style: TextStyle(color: cs.onSurfaceVariant, fontSize: 13),
         ),
       );
     }
@@ -319,14 +318,14 @@ class _MessageSearchScreenState extends State<MessageSearchScreen> {
       return Center(
         child: Text(
           "No messages found",
-          style: TextStyle(color: Colors.grey[500], fontSize: 13),
+          style: TextStyle(color: cs.onSurfaceVariant, fontSize: 13),
         ),
       );
     }
     return ListView.separated(
       padding: const EdgeInsets.symmetric(vertical: 6),
       itemCount: _results.length,
-      separatorBuilder: (_, __) => Divider(height: 1, color: Colors.grey[200], indent: 72),
+      separatorBuilder: (_, __) => Divider(height: 1, color: cs.outlineVariant, indent: 72),
       itemBuilder: (context, i) => _buildResultTile(_results[i]),
     );
   }
@@ -336,20 +335,22 @@ class _MessageSearchScreenState extends State<MessageSearchScreen> {
     final preview = result.conversationPreview;
     final senderName = msg.sender?.displayName ?? 'Unknown';
     final senderPhoto = msg.sender?.profilePhoto;
+    final cs = Theme.of(context).colorScheme;
+    final coral = AppThemeTokens.of(context).coral;
 
     return ListTile(
       leading: CircleAvatar(
         radius: 22,
-        backgroundColor: Colors.grey[300],
+        backgroundColor: AppThemeTokens.of(context).surface2,
         backgroundImage: (senderPhoto != null && senderPhoto.isNotEmpty) ? CachedNetworkImageProvider(senderPhoto) : null,
         child: (senderPhoto == null || senderPhoto.isEmpty)
-            ? Text(senderName.isNotEmpty ? senderName[0].toUpperCase() : '?', style: const TextStyle(color: Colors.black54, fontWeight: FontWeight.w600))
+            ? Text(senderName.isNotEmpty ? senderName[0].toUpperCase() : '?', style: TextStyle(color: cs.onSurfaceVariant, fontWeight: FontWeight.w600))
             : null,
       ),
       title: Row(children: [
         Expanded(child: Text(senderName, style: const TextStyle(fontSize: 13.5, fontWeight: FontWeight.w600), maxLines: 1, overflow: TextOverflow.ellipsis)),
         const SizedBox(width: 6),
-        Text(_fmtTime(msg.createdAt), style: TextStyle(fontSize: 10.5, color: Colors.grey[500])),
+        Text(_fmtTime(msg.createdAt), style: TextStyle(fontSize: 10.5, color: cs.onSurfaceVariant)),
       ]),
       subtitle: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
@@ -358,12 +359,12 @@ class _MessageSearchScreenState extends State<MessageSearchScreen> {
             Padding(
               padding: const EdgeInsets.only(top: 2, bottom: 2),
               child: Row(children: [
-                Icon(preview.type == 'group' ? Icons.group : Icons.person, size: 12, color: _kAccent),
+                Icon(preview.type == 'group' ? Icons.group : Icons.person, size: 12, color: coral),
                 const SizedBox(width: 3),
-                Flexible(child: Text(preview.name, style: const TextStyle(fontSize: 11, color: _kAccent, fontWeight: FontWeight.w600), maxLines: 1, overflow: TextOverflow.ellipsis)),
+                Flexible(child: Text(preview.name, style: TextStyle(fontSize: 11, color: coral, fontWeight: FontWeight.w600), maxLines: 1, overflow: TextOverflow.ellipsis)),
               ]),
             ),
-          Text(_snippetFor(msg), maxLines: 2, overflow: TextOverflow.ellipsis, style: TextStyle(fontSize: 12.5, color: Colors.grey[700])),
+          Text(_snippetFor(msg), maxLines: 2, overflow: TextOverflow.ellipsis, style: TextStyle(fontSize: 12.5, color: cs.onSurfaceVariant)),
         ],
       ),
       onTap: () => _onResultTap(result),
@@ -470,6 +471,8 @@ class _SearchFiltersSheetState extends State<_SearchFiltersSheet> {
 
   @override
   Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
+    final coral = AppThemeTokens.of(context).coral;
     return Padding(
       padding: EdgeInsets.only(bottom: MediaQuery.of(context).viewInsets.bottom),
       child: SafeArea(
@@ -483,14 +486,14 @@ class _SearchFiltersSheetState extends State<_SearchFiltersSheet> {
                 child: Container(
                   width: 40,
                   height: 4,
-                  decoration: BoxDecoration(color: Colors.grey[300], borderRadius: BorderRadius.circular(2)),
+                  decoration: BoxDecoration(color: cs.outlineVariant, borderRadius: BorderRadius.circular(2)),
                 ),
               ),
               const SizedBox(height: 14),
               const Text("Filters", style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
               const SizedBox(height: 16),
 
-              Text("Media type", style: TextStyle(fontSize: 12.5, fontWeight: FontWeight.w600, color: Colors.grey[700])),
+              Text("Media type", style: TextStyle(fontSize: 12.5, fontWeight: FontWeight.w600, color: cs.onSurfaceVariant)),
               const SizedBox(height: 8),
               Wrap(
                 spacing: 8,
@@ -500,8 +503,8 @@ class _SearchFiltersSheetState extends State<_SearchFiltersSheet> {
                   return ChoiceChip(
                     label: Text(t),
                     selected: selected,
-                    selectedColor: _kAccent.withOpacity(0.15),
-                    labelStyle: TextStyle(color: selected ? _kAccent : Colors.black87, fontWeight: selected ? FontWeight.w600 : FontWeight.normal),
+                    selectedColor: coral.withOpacity(0.15),
+                    labelStyle: TextStyle(color: selected ? coral : cs.onSurface, fontWeight: selected ? FontWeight.w600 : FontWeight.normal),
                     onSelected: (_) => setState(() {
                       _draft = selected ? _draft.copyWith(clearMediaType: true) : _draft.copyWith(mediaType: t);
                     }),
@@ -514,14 +517,14 @@ class _SearchFiltersSheetState extends State<_SearchFiltersSheet> {
                 contentPadding: EdgeInsets.zero,
                 title: const Text("Has media only", style: TextStyle(fontSize: 13.5)),
                 value: _draft.hasMedia ?? false,
-                activeColor: _kAccent,
+                activeColor: coral,
                 onChanged: (v) => setState(() {
                   _draft = v ? _draft.copyWith(hasMedia: true) : _draft.copyWith(clearHasMedia: true);
                 }),
               ),
               const SizedBox(height: 4),
 
-              Text("Date range", style: TextStyle(fontSize: 12.5, fontWeight: FontWeight.w600, color: Colors.grey[700])),
+              Text("Date range", style: TextStyle(fontSize: 12.5, fontWeight: FontWeight.w600, color: cs.onSurfaceVariant)),
               const SizedBox(height: 8),
               Row(children: [
                 Expanded(
@@ -540,7 +543,7 @@ class _SearchFiltersSheetState extends State<_SearchFiltersSheet> {
               ]),
               const SizedBox(height: 18),
 
-              Text("Sender", style: TextStyle(fontSize: 12.5, fontWeight: FontWeight.w600, color: Colors.grey[700])),
+              Text("Sender", style: TextStyle(fontSize: 12.5, fontWeight: FontWeight.w600, color: cs.onSurfaceVariant)),
               const SizedBox(height: 8),
               TextField(
                 controller: _senderController,
@@ -567,7 +570,7 @@ class _SearchFiltersSheetState extends State<_SearchFiltersSheet> {
                 Container(
                   margin: const EdgeInsets.only(top: 6),
                   constraints: const BoxConstraints(maxHeight: 160),
-                  decoration: BoxDecoration(border: Border.all(color: Colors.grey[300]!), borderRadius: BorderRadius.circular(10)),
+                  decoration: BoxDecoration(border: Border.all(color: cs.outlineVariant), borderRadius: BorderRadius.circular(10)),
                   child: ListView.builder(
                     shrinkWrap: true,
                     itemCount: _senderSuggestions.length,
@@ -601,9 +604,9 @@ class _SearchFiltersSheetState extends State<_SearchFiltersSheet> {
                 const SizedBox(width: 12),
                 Expanded(
                   child: ElevatedButton(
-                    style: ElevatedButton.styleFrom(backgroundColor: _kNavy, padding: const EdgeInsets.symmetric(vertical: 13)),
+                    style: ElevatedButton.styleFrom(backgroundColor: cs.primary, padding: const EdgeInsets.symmetric(vertical: 13)),
                     onPressed: () => Navigator.pop(context, _draft),
-                    child: const Text("Apply", style: TextStyle(color: Colors.white)),
+                    child: Text("Apply", style: TextStyle(color: cs.onPrimary)),
                   ),
                 ),
               ]),

@@ -69,7 +69,7 @@ DateTime? _date(dynamic v) {
 class Campus {
   final String id;
   final String name;
-  final String type; // school | college | institute
+  final String type; // school | college | coaching
   final bool isActive;
   final bool feeModuleEnabled;
   final int attendanceAlertThresholdPercent;
@@ -216,6 +216,31 @@ class Subject {
         departmentId: j['department']?.toString(),
         name: (j['name'] ?? '').toString(),
         code: (j['code'] ?? '').toString(),
+      );
+}
+
+/// `RoomSerializer` — `campus/urls.py` ke `rooms` route se aata hai.
+/// Timetable entries isse optionally reference karte hain
+/// (`TimetableEntry.roomId`); virtual room ho to physical location nahi
+/// hoti, isliye `isVirtual` flag hai.
+class Room {
+  final String id;
+  final String campusId;
+  final String name;
+  final bool isVirtual;
+
+  const Room({
+    required this.id,
+    required this.campusId,
+    required this.name,
+    this.isVirtual = false,
+  });
+
+  factory Room.fromJson(Map<String, dynamic> j) => Room(
+        id: j['id'].toString(),
+        campusId: j['campus'].toString(),
+        name: (j['name'] ?? '').toString(),
+        isVirtual: j['is_virtual'] as bool? ?? false,
       );
 }
 
@@ -380,6 +405,93 @@ class StudentEnrollment {
         rollNumber: (j['roll_number'] ?? '').toString(),
         status: (j['status'] ?? 'active').toString(),
       );
+}
+
+/// `CampusParentLinkSerializer` — read-only from the API (§19). The ONLY
+/// write path is `POST /parent-links/verify/`, jo yahan model ke bahar
+/// (`CampusService.verifyParentLink`) plain dict leta hai, koi serializer
+/// nahi. Token khud campus app me kabhi banta/dikhta nahi — `message`
+/// app ke existing `ParentAccessCode` flow se aata hai (§10); campus sirf
+/// usko resolve/verify karta hai.
+class CampusParentLink {
+  final String id;
+  final String campusId;
+  final String studentId;
+  final MinimalUser? student;
+  final String parentId;
+  final MinimalUser? parent;
+  final DateTime? createdAt;
+
+  /// `active_enrollment` — [Task 4 gap-fix] child ka is campus me abhi ka
+  /// enrollment (attendance-summary/report-card ke liye zaroori
+  /// `enrollment` id + display context). `null` = student is campus me
+  /// currently kisi active section me enrolled nahi (transferred/
+  /// graduated/abhi tak enroll hi nahi hua) — screen ko "no active
+  /// enrollment" state dikhana chahiye, error nahi.
+  final ParentChildEnrollment? activeEnrollment;
+
+  const CampusParentLink({
+    required this.id,
+    required this.campusId,
+    required this.studentId,
+    required this.parentId,
+    this.student,
+    this.parent,
+    this.createdAt,
+    this.activeEnrollment,
+  });
+
+  factory CampusParentLink.fromJson(Map<String, dynamic> j) => CampusParentLink(
+        id: j['id'].toString(),
+        campusId: j['campus'].toString(),
+        studentId: j['student'].toString(),
+        student: j['student_detail'] is Map
+            ? MinimalUser.fromJson(Map<String, dynamic>.from(j['student_detail'] as Map))
+            : null,
+        parentId: j['parent'].toString(),
+        parent: j['parent_detail'] is Map
+            ? MinimalUser.fromJson(Map<String, dynamic>.from(j['parent_detail'] as Map))
+            : null,
+        createdAt: _date(j['created_at']),
+        activeEnrollment: j['active_enrollment'] is Map
+            ? ParentChildEnrollment.fromJson(Map<String, dynamic>.from(j['active_enrollment'] as Map))
+            : null,
+      );
+}
+
+/// `CampusParentLinkSerializer.get_active_enrollment()` ka chhota,
+/// read-only shape — sirf wahi fields jo parent overview screen ko
+/// chahiye (§ backend serializer's own FIX note).
+class ParentChildEnrollment {
+  final String id;
+  final String sectionId;
+  final String sectionName;
+  final String? schoolClassId;
+  final String schoolClassName;
+  final String? departmentId;
+  final String sessionId;
+
+  const ParentChildEnrollment({
+    required this.id,
+    required this.sectionId,
+    required this.sectionName,
+    required this.schoolClassName,
+    required this.sessionId,
+    this.schoolClassId,
+    this.departmentId,
+  });
+
+  factory ParentChildEnrollment.fromJson(Map<String, dynamic> j) => ParentChildEnrollment(
+        id: j['id'].toString(),
+        sectionId: j['section_id'].toString(),
+        sectionName: j['section_name']?.toString() ?? '',
+        schoolClassId: j['school_class_id']?.toString(),
+        schoolClassName: j['school_class_name']?.toString() ?? '',
+        departmentId: j['department_id']?.toString(),
+        sessionId: j['session_id'].toString(),
+      );
+
+  String get label => schoolClassName.isNotEmpty ? '$schoolClassName · $sectionName' : sectionName;
 }
 
 // ------------------------------------------------------------
@@ -650,6 +762,472 @@ class CampusLiveSession {
 }
 
 // ------------------------------------------------------------
+// Phase 6 — assigmentss & syllabus
+// ------------------------------------------------------------
+
+/// `assigmentsViewSet` ka response — `campus.assigments` model DEPRECATED
+/// hai (read-only history), asli data `assigments` app (unified) me hai,
+/// par response shape jaan-boojh kar OLD shape rakha gaya hai
+/// (`_serialize_campus_assigments()`), isliye ye model waisa hi hai jaisa
+/// pehle hota. **`posted_by` sirf ek id hai — koi `*_detail` nested object
+/// nahi backend deta**, isliye yahan `MinimalUser` nahi, sirf `String?`.
+class CampusAssignment {
+  final String id;
+  final String sectionId;
+  final String subjectId;
+  final String? postedById;
+  final String title;
+  final String description;
+  final String? attachmentUrl;
+  final DateTime? dueDate;
+  final String sessionId;
+
+  const CampusAssignment({
+    required this.id,
+    required this.sectionId,
+    required this.subjectId,
+    required this.title,
+    required this.sessionId,
+    this.postedById,
+    this.description = '',
+    this.attachmentUrl,
+    this.dueDate,
+  });
+
+  factory CampusAssignment.fromJson(Map<String, dynamic> j) => CampusAssignment(
+        id: j['id'].toString(),
+        sectionId: j['section'].toString(),
+        subjectId: j['subject'].toString(),
+        postedById: j['posted_by']?.toString(),
+        title: (j['title'] ?? '').toString(),
+        description: (j['description'] ?? '').toString(),
+        attachmentUrl: j['attachment']?.toString(),
+        dueDate: _date(j['due_date']),
+        sessionId: j['session'].toString(),
+      );
+}
+
+/// `assigmentsSubmissionViewSet` — same OLD-shape posture as above.
+/// ⚠️ `status` ab `submitted`/`late`/`missing` ke alawa unified model se
+/// `checked`/`partially_checked` bhi ho sakta hai (structured-question
+/// grading path) — purana 3-state UI assumption yahan galat hoga, isliye
+/// koi bhi status string blind trust karo, enum me lock mat karo.
+class CampusAssignmentSubmission {
+  final String id;
+  final String assignmentId;
+  final String studentId;
+  final MinimalUser? student;
+  final DateTime? submittedAt;
+  final String? fileUrl;
+  final String status; // submitted | late | missing | checked | partially_checked
+  final String? grade;
+  final String feedback;
+
+  const CampusAssignmentSubmission({
+    required this.id,
+    required this.assignmentId,
+    required this.studentId,
+    this.student,
+    this.submittedAt,
+    this.fileUrl,
+    this.status = 'missing',
+    this.grade,
+    this.feedback = '',
+  });
+
+  bool get isSubmitted => status != 'missing';
+  bool get isGraded => grade != null && grade!.isNotEmpty;
+
+  factory CampusAssignmentSubmission.fromJson(Map<String, dynamic> j) => CampusAssignmentSubmission(
+        id: j['id'].toString(),
+        assignmentId: j['assigments'].toString(),
+        studentId: j['student'].toString(),
+        student: j['student_detail'] is Map
+            ? MinimalUser.fromJson(Map<String, dynamic>.from(j['student_detail'] as Map))
+            : null,
+        submittedAt: _date(j['submitted_at']),
+        fileUrl: j['file']?.toString(),
+        status: (j['status'] ?? 'missing').toString(),
+        grade: j['grade']?.toString(),
+        feedback: (j['feedback'] ?? '').toString(),
+      );
+}
+
+class SyllabusUnit {
+  final String id;
+  final String subjectId;
+  final String sectionId;
+  final String sessionId;
+  final String title;
+  final int order;
+
+  const SyllabusUnit({
+    required this.id,
+    required this.subjectId,
+    required this.sectionId,
+    required this.sessionId,
+    required this.title,
+    this.order = 0,
+  });
+
+  factory SyllabusUnit.fromJson(Map<String, dynamic> j) => SyllabusUnit(
+        id: j['id'].toString(),
+        subjectId: j['subject'].toString(),
+        sectionId: j['section'].toString(),
+        sessionId: j['session'].toString(),
+        title: (j['title'] ?? '').toString(),
+        order: (j['order'] as num?)?.toInt() ?? 0,
+      );
+}
+
+/// Har `SyllabusUnit` ke saath ek `SyllabusProgress` row auto ban jaati hai
+/// (unit create hote hi `get_or_create`, §19) — is app se sirf
+/// `mark-covered` action call hota hai, koi generic create/update/delete
+/// nahi (405).
+class SyllabusProgress {
+  final String id;
+  final String syllabusUnitId;
+  final DateTime? coveredOn;
+  final String? coveredById;
+
+  const SyllabusProgress({
+    required this.id,
+    required this.syllabusUnitId,
+    this.coveredOn,
+    this.coveredById,
+  });
+
+  bool get isCovered => coveredOn != null;
+
+  factory SyllabusProgress.fromJson(Map<String, dynamic> j) => SyllabusProgress(
+        id: j['id'].toString(),
+        syllabusUnitId: j['syllabus_unit'].toString(),
+        coveredOn: _date(j['covered_on']),
+        coveredById: j['covered_by']?.toString(),
+      );
+}
+
+// ------------------------------------------------------------
+// Phase 7 — results
+// ------------------------------------------------------------
+
+class ExamTerm {
+  final String id;
+  final String sessionId;
+  final String name;
+  final DateTime? startDate;
+  final DateTime? endDate;
+
+  const ExamTerm({
+    required this.id,
+    required this.sessionId,
+    required this.name,
+    this.startDate,
+    this.endDate,
+  });
+
+  factory ExamTerm.fromJson(Map<String, dynamic> j) => ExamTerm(
+        id: j['id'].toString(),
+        sessionId: j['session'].toString(),
+        name: (j['name'] ?? '').toString(),
+        startDate: _date(j['start_date']),
+        endDate: _date(j['end_date']),
+      );
+}
+
+class ResultEntry {
+  final String id;
+  final String enrollmentId;
+  final String subjectId;
+  final String examTermId;
+  final double marksObtained;
+  final double maxMarks;
+  final String remarks;
+  final String? enteredById;
+
+  const ResultEntry({
+    required this.id,
+    required this.enrollmentId,
+    required this.subjectId,
+    required this.examTermId,
+    required this.marksObtained,
+    required this.maxMarks,
+    this.remarks = '',
+    this.enteredById,
+  });
+
+  factory ResultEntry.fromJson(Map<String, dynamic> j) => ResultEntry(
+        id: j['id'].toString(),
+        enrollmentId: j['enrollment'].toString(),
+        subjectId: j['subject'].toString(),
+        examTermId: j['exam_term'].toString(),
+        marksObtained: (j['marks_obtained'] as num?)?.toDouble() ?? 0,
+        maxMarks: (j['max_marks'] as num?)?.toDouble() ?? 0,
+        remarks: (j['remarks'] ?? '').toString(),
+        enteredById: j['entered_by']?.toString(),
+      );
+}
+
+class ReportCardSubjectRow {
+  final String subjectId;
+  final String subjectName;
+  final double marksObtained;
+  final double maxMarks;
+  final String remarks;
+
+  const ReportCardSubjectRow({
+    required this.subjectId,
+    required this.subjectName,
+    required this.marksObtained,
+    required this.maxMarks,
+    this.remarks = '',
+  });
+
+  factory ReportCardSubjectRow.fromJson(Map<String, dynamic> j) => ReportCardSubjectRow(
+        subjectId: j['subject'].toString(),
+        subjectName: (j['subject_name'] ?? '').toString(),
+        marksObtained: (j['marks_obtained'] as num?)?.toDouble() ?? 0,
+        maxMarks: (j['max_marks'] as num?)?.toDouble() ?? 0,
+        remarks: (j['remarks'] ?? '').toString(),
+      );
+}
+
+/// `GET /results/report-card/?enrollment=&exam_term=` ka poora response.
+class ReportCard {
+  final String enrollmentId;
+  final String examTermId;
+  final List<ReportCardSubjectRow> subjects;
+  final double totalObtained;
+  final double totalMax;
+  final double percentage;
+
+  const ReportCard({
+    required this.enrollmentId,
+    required this.examTermId,
+    required this.subjects,
+    required this.totalObtained,
+    required this.totalMax,
+    required this.percentage,
+  });
+
+  factory ReportCard.fromJson(Map<String, dynamic> j) => ReportCard(
+        enrollmentId: j['enrollment'].toString(),
+        examTermId: j['exam_term'].toString(),
+        subjects: (j['subjects'] as List? ?? const [])
+            .map((e) => ReportCardSubjectRow.fromJson(Map<String, dynamic>.from(e as Map)))
+            .toList(),
+        totalObtained: (j['total_obtained'] as num?)?.toDouble() ?? 0,
+        totalMax: (j['total_max'] as num?)?.toDouble() ?? 0,
+        percentage: (j['percentage'] as num?)?.toDouble() ?? 0,
+      );
+}
+
+// ------------------------------------------------------------
+// Phase 8 — optional / future-ready modules
+// ------------------------------------------------------------
+
+/// `qr_token` hamesha server-generated hai (§19) — client kabhi nahi bhejta.
+/// Actual QR-image render abhi wire nahi hai (koi QR-drawing package
+/// confirm nahi kar paya is pass me) — screen token ko text/copyable form
+/// me dikhati hai; scanning hardware integration khud backend pe bhi
+/// "future work" flag hai.
+class DigitalIDCard {
+  final String id;
+  final String userId;
+  final MinimalUser? user;
+  final String campusId;
+  final String qrToken;
+  final DateTime? issuedAt;
+  final DateTime? validUntil;
+
+  const DigitalIDCard({
+    required this.id,
+    required this.userId,
+    required this.campusId,
+    required this.qrToken,
+    this.user,
+    this.issuedAt,
+    this.validUntil,
+  });
+
+  factory DigitalIDCard.fromJson(Map<String, dynamic> j) => DigitalIDCard(
+        id: j['id'].toString(),
+        userId: j['user'].toString(),
+        user: j['user_detail'] is Map
+            ? MinimalUser.fromJson(Map<String, dynamic>.from(j['user_detail'] as Map))
+            : null,
+        campusId: j['campus'].toString(),
+        qrToken: (j['qr_token'] ?? '').toString(),
+        issuedAt: _date(j['issued_at']),
+        validUntil: _date(j['valid_until']),
+      );
+}
+
+/// Ek fee ki DEFINITION — payment nahi (§8). `schoolClassId == null` matlab
+/// campus-wide fee.
+class FeeStructure {
+  final String id;
+  final String campusId;
+  final String? schoolClassId;
+  final String sessionId;
+  final String title;
+  final double amount;
+  final DateTime? dueDate;
+  final bool isActive;
+
+  const FeeStructure({
+    required this.id,
+    required this.campusId,
+    required this.sessionId,
+    required this.title,
+    required this.amount,
+    this.schoolClassId,
+    this.dueDate,
+    this.isActive = true,
+  });
+
+  factory FeeStructure.fromJson(Map<String, dynamic> j) => FeeStructure(
+        id: j['id'].toString(),
+        campusId: j['campus'].toString(),
+        schoolClassId: j['school_class']?.toString(),
+        sessionId: j['session'].toString(),
+        title: (j['title'] ?? '').toString(),
+        amount: (j['amount'] as num?)?.toDouble() ?? 0,
+        dueDate: _date(j['due_date']),
+        isActive: j['is_active'] as bool? ?? true,
+      );
+}
+
+/// Ek student ka ek `FeeStructure` ke against obligation. `amountPaid` aur
+/// `status` dono server-computed hain (`recompute_status()`,
+/// `amount_paid` @property) — kabhi client se set nahi karna, dobara fetch
+/// karke hi latest dikhana.
+class FeeInvoice {
+  final String id;
+  final String enrollmentId;
+  final String feeStructureId;
+  final double amountDue;
+  final double amountPaid;
+  final String status; // pending | partial | paid | overdue | waived
+  final DateTime? createdAt;
+
+  const FeeInvoice({
+    required this.id,
+    required this.enrollmentId,
+    required this.feeStructureId,
+    required this.amountDue,
+    this.amountPaid = 0,
+    this.status = 'pending',
+    this.createdAt,
+  });
+
+  double get remaining => (amountDue - amountPaid).clamp(0, amountDue);
+  bool get isSettled => status == 'paid' || status == 'waived';
+
+  factory FeeInvoice.fromJson(Map<String, dynamic> j) => FeeInvoice(
+        id: j['id'].toString(),
+        enrollmentId: j['enrollment'].toString(),
+        feeStructureId: j['fee_structure'].toString(),
+        amountDue: (j['amount_due'] as num?)?.toDouble() ?? 0,
+        amountPaid: (j['amount_paid'] as num?)?.toDouble() ?? 0,
+        status: (j['status'] ?? 'pending').toString(),
+        createdAt: _date(j['created_at']),
+      );
+}
+
+/// Ek money-movement event. `paymentMode: wallet` self-serve path se aata
+/// hai (coin wallet se debit — FEE-2), baaki (`cash`/`cheque`/
+/// `bank_transfer`/`other`) office-staff `record` se.
+class FeePayment {
+  final String id;
+  final String invoiceId;
+  final double amount;
+  final String? paidById;
+  final String payerRole; // student | parent | admin
+  final String paymentMode; // wallet | cash | cheque | bank_transfer | other
+  final String status; // pending | success | failed | refunded
+  final String gatewayReference;
+  final String? recordedById;
+  final String notes;
+  final DateTime? createdAt;
+
+  const FeePayment({
+    required this.id,
+    required this.invoiceId,
+    required this.amount,
+    required this.payerRole,
+    required this.paymentMode,
+    required this.status,
+    this.paidById,
+    this.gatewayReference = '',
+    this.recordedById,
+    this.notes = '',
+    this.createdAt,
+  });
+
+  bool get isSuccess => status == 'success';
+  bool get isRefundable => isSuccess && paymentMode == 'wallet';
+
+  factory FeePayment.fromJson(Map<String, dynamic> j) => FeePayment(
+        id: j['id'].toString(),
+        invoiceId: j['invoice'].toString(),
+        amount: (j['amount'] as num?)?.toDouble() ?? 0,
+        paidById: j['paid_by']?.toString(),
+        payerRole: (j['payer_role'] ?? '').toString(),
+        paymentMode: (j['payment_mode'] ?? '').toString(),
+        status: (j['status'] ?? 'pending').toString(),
+        gatewayReference: (j['gateway_reference'] ?? '').toString(),
+        recordedById: j['recorded_by']?.toString(),
+        notes: (j['notes'] ?? '').toString(),
+        createdAt: _date(j['created_at']),
+      );
+}
+
+/// `GET /analytics-snapshots/latest/?campus=` ka `data` field — backend
+/// jaan-boojh kar minimal hai (§12: teacher-workload waghera abhi nahi
+/// compute hote), isliye yahan bhi sirf inhi 4 numbers ka structured wrapper
+/// hai; kal koi naya key aaye to `raw` se mil jaayega.
+class CampusAnalyticsSnapshot {
+  final String id;
+  final String campusId;
+  final String sessionId;
+  final DateTime? computedAt;
+  final double avgAttendancePercent;
+  final double avgMarksObtained;
+  final double syllabusCompletionPercent;
+  final int activeEnrollments;
+  final Map<String, dynamic> raw;
+
+  const CampusAnalyticsSnapshot({
+    required this.id,
+    required this.campusId,
+    required this.sessionId,
+    this.computedAt,
+    this.avgAttendancePercent = 0,
+    this.avgMarksObtained = 0,
+    this.syllabusCompletionPercent = 0,
+    this.activeEnrollments = 0,
+    this.raw = const {},
+  });
+
+  factory CampusAnalyticsSnapshot.fromJson(Map<String, dynamic> j) {
+    final data = j['data'] is Map ? Map<String, dynamic>.from(j['data'] as Map) : <String, dynamic>{};
+    double asDouble(dynamic v) => v is num ? v.toDouble() : 0;
+    return CampusAnalyticsSnapshot(
+      id: j['id'].toString(),
+      campusId: j['campus'].toString(),
+      sessionId: j['session'].toString(),
+      computedAt: _date(j['computed_at']),
+      avgAttendancePercent: asDouble(data['avg_attendance_percent']),
+      avgMarksObtained: asDouble(data['avg_marks_obtained']),
+      syllabusCompletionPercent: asDouble(data['syllabus_completion_percent']),
+      activeEnrollments: (data['active_enrollments'] as num?)?.toInt() ?? 0,
+      raw: data,
+    );
+  }
+}
+
+// ------------------------------------------------------------
 // Derived: mera access
 // ------------------------------------------------------------
 
@@ -719,6 +1297,30 @@ class CampusAccess {
   bool get canPostCampusNotice => isManagement;
   bool get canManageStaff => role == CampusRole.admin;
   bool get canViewCampusAnalytics => isManagement;
+
+  /// "Main" (logged-in user) ka apna `login.User` id — na `Campus`, na
+  /// `CampusAccess` khud ise seedha carry karta (server `request.user` se
+  /// derive karta hai), isliye yahan staff row ya apni hi enrollment se
+  /// nikala hai. Digital ID card jaisi "apna record banao" cheezon ke liye
+  /// chahiye, jahan `user` field client ko khud bharna padta hai (§19).
+  /// Pure parent (na staff na student) ke liye `null` — parent dashboard
+  /// abhi is app ka hissa nahi hai.
+  String? get myUserId => staff?.userId ?? (myEnrollments.isNotEmpty ? myEnrollments.first.studentId : null);
+
+  /// Structural setup — sessions/departments/classes/sections/subjects/rooms.
+  /// Backend §13: admin aur principal-HOD dono ko same treat karta hai
+  /// (`is_campus_admin_or_principal`), isliye `isManagement` hi sahi check
+  /// hai — `canManageStaff` jaanbujh kar sirf `admin` tak seemit hai, ye
+  /// alag hai.
+  bool get canManageCampusSetup => isManagement;
+
+  /// Staff/enrollment/parent-link add karne se pehle ye bhi check karo —
+  /// campus jab tak platform-approved nahi hai, ye teenon 403 dete hain
+  /// (creator ka apna pehla staff row iska apvaad hai, wo already ban chuka
+  /// hota hai `POST /campuses/` ke waqt). Structural setup (sessions/
+  /// classes/sections/subjects/rooms) is check se azaad hai — waha gate
+  /// nahi lagta.
+  bool get canGrowMembership => canManageCampusSetup && campus.isApproved;
   bool get canCreateAssignment => role.canTeach || isManagement;
   bool get canScheduleLiveClass => role.canTeach || isManagement;
 

@@ -64,6 +64,20 @@ class _AssignmentDetailScreenState extends State<AssignmentDetailScreen> {
   final Map<String, TextEditingController> _textAnswers = {};
   final Map<String, File> _answerFiles = {};
 
+  // ---------------- grading (self-review of your own submission) ----------------
+  //
+  // Only meaningful for personal/self-assignments: there's no roster for
+  // this `source`, so the only person who could ever end up on this
+  // screen with something to grade is the same person who posted it.
+  // `IsassignmentsStaffOrOwner` still enforces that server-side — these
+  // controls just being visible doesn't mean the call will succeed for
+  // someone who isn't allowed to grade this particular submission.
+  final TextEditingController _gradeCtrl = TextEditingController();
+  final TextEditingController _gradeFeedbackCtrl = TextEditingController();
+  bool _gradeSeeded = false;
+  bool _savingGrade = false;
+  bool _publishing = false;
+
   @override
   void initState() {
     super.initState();
@@ -79,6 +93,8 @@ class _AssignmentDetailScreenState extends State<AssignmentDetailScreen> {
     for (final c in _textAnswers.values) {
       c.dispose();
     }
+    _gradeCtrl.dispose();
+    _gradeFeedbackCtrl.dispose();
     super.dispose();
   }
 
@@ -100,6 +116,11 @@ class _AssignmentDetailScreenState extends State<AssignmentDetailScreen> {
         _loading = false;
         _failed = false;
         _seedListAnswers();
+        if (!_gradeSeeded && submission != null) {
+          _gradeCtrl.text = submission.grade;
+          _gradeFeedbackCtrl.text = submission.feedback;
+          _gradeSeeded = true;
+        }
       });
     } catch (e) {
       if (!mounted) return;
@@ -137,6 +158,10 @@ class _AssignmentDetailScreenState extends State<AssignmentDetailScreen> {
   bool get _isSubmitted => _submission != null && _submission!.isSubmitted;
 
   // ---------------- file pickers ----------------
+  //
+  // Dono pickers ab apni har failure UI ko batati hain (silent catch pehle
+  // user ko bina kisi feedback ke chhod deta tha — tap karo, kuch na ho,
+  // aur pata hi na chale ke fail hua ya user ne khud cancel kiya).
 
   Future<void> _pickFreeformFile() async {
     final f = await _pickAnyFile();
@@ -147,19 +172,49 @@ class _AssignmentDetailScreenState extends State<AssignmentDetailScreen> {
     try {
       const XTypeGroup all = XTypeGroup(label: 'all');
       final XFile? f = await openFile(acceptedTypeGroups: [all]);
-      if (f == null) return null;
+      if (f == null) return null; // user ne cancel kiya — koi error nahi
       return File(f.path);
     } catch (e) {
+      if (mounted) lsSnack(context, AppLocalizations.of(context)!.assignmentPickFailed, error: true);
       return null;
     }
   }
 
+  /// Camera *ya* gallery — pehle sirf camera thi, jo un devices/emulators pe
+  /// bhi zaroorat se zyada restrictive hai jahan camera hi nahi hota, ya
+  /// jab student ke paas already li gayi photo ho.
   Future<void> _pickAnswerPhoto(String questionId) async {
+    final l10n = AppLocalizations.of(context)!;
+    final source = await showModalBottomSheet<ImageSource>(
+      context: context,
+      backgroundColor: Theme.of(context).colorScheme.surface,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(18)),
+      ),
+      builder: (ctx) => SafeArea(
+        child: Column(mainAxisSize: MainAxisSize.min, children: [
+          ListTile(
+            leading: const Icon(Icons.photo_camera_outlined),
+            title: Text(l10n.assignmentPickFromCamera),
+            onTap: () => Navigator.pop(ctx, ImageSource.camera),
+          ),
+          ListTile(
+            leading: const Icon(Icons.photo_library_outlined),
+            title: Text(l10n.assignmentPickFromGallery),
+            onTap: () => Navigator.pop(ctx, ImageSource.gallery),
+          ),
+        ]),
+      ),
+    );
+    if (source == null || !mounted) return; // user ne sheet dismiss kar diya
+
     try {
       final picker = ImagePicker();
-      final XFile? img = await picker.pickImage(source: ImageSource.camera, imageQuality: 85);
+      final XFile? img = await picker.pickImage(source: source, imageQuality: 85);
       if (img != null && mounted) setState(() => _answerFiles[questionId] = File(img.path));
-    } catch (_) {}
+    } catch (e) {
+      if (mounted) lsSnack(context, l10n.assignmentPickFailed, error: true);
+    }
   }
 
   // ---------------- submit ----------------
@@ -293,7 +348,16 @@ class _AssignmentDetailScreenState extends State<AssignmentDetailScreen> {
       }
       await OpenFilex.open(savePath);
     } catch (e) {
-      if (mounted) lsSnack(context, l10n.openFailed(e.toString()), error: true);
+      // Raw exception text (stack-trace-ish Dio/IO errors) seedha user ko
+      // dikhana production me kharab UX + minor info-leak dono hai —
+      // isliye ek chhota, jaani-pehchaani set of causes friendly text me
+      // map karte hain, aur sirf genuinely-unknown case me hi raw message
+      // (already localized wrapper string ke andar) dikhate hain.
+      if (!mounted) return;
+      final msg = e is DioException
+          ? (e.response?.statusCode == 404 ? l10n.assignmentFileNotFound : l10n.assignmentNoInternet)
+          : e.toString();
+      lsSnack(context, l10n.openFailed(msg), error: true);
     }
   }
 
@@ -318,6 +382,86 @@ class _AssignmentDetailScreenState extends State<AssignmentDetailScreen> {
       bottomNavigationBar:
           (_assignment != null && !_isSubmitted && !_loading) ? _buildSubmitBar(cs, l10n) : null,
     );
+  }
+
+  // ---------------- grading / review / share actions ----------------
+
+  Future<void> _saveGrade() async {
+    final l10n = AppLocalizations.of(context)!;
+    if (_submission == null) return;
+    setState(() => _savingGrade = true);
+    try {
+      final updated = await AssignmentService.gradeFreeform(
+        submissionId: _submission!.id,
+        grade: _gradeCtrl.text.trim(),
+        feedback: _gradeFeedbackCtrl.text.trim(),
+      );
+      if (!mounted) return;
+      setState(() => _submission = updated);
+      lsSnack(context, l10n.assignmentGradeSaved);
+    } catch (e) {
+      if (mounted) lsSnack(context, l10n.assignmentGradeFailed, error: true);
+    } finally {
+      if (mounted) setState(() => _savingGrade = false);
+    }
+  }
+
+  /// `review_answer` returns just the single updated answer (see
+  /// `assignment_service.dart`'s docstring on `reviewAnswer`) — the
+  /// overall submission `status` (checked / partially_checked) can only
+  /// change as a side effect, so we always re-fetch the whole submission
+  /// afterwards rather than trying to patch one answer into local state.
+  Future<void> _reviewAnswer(String questionId, int marksAwarded, String feedback) async {
+    final l10n = AppLocalizations.of(context)!;
+    if (_submission == null) return;
+    try {
+      await AssignmentService.reviewAnswer(
+        submissionId: _submission!.id,
+        questionId: questionId,
+        marksAwarded: marksAwarded,
+        feedback: feedback,
+      );
+      final refreshed = await AssignmentService.getSubmission(_submission!.id);
+      if (!mounted) return;
+      setState(() => _submission = refreshed);
+      lsSnack(context, l10n.assignmentReviewSaved);
+    } catch (e) {
+      if (mounted) lsSnack(context, l10n.assignmentReviewFailed, error: true);
+    }
+  }
+
+  Future<void> _togglePublish() async {
+    final l10n = AppLocalizations.of(context)!;
+    if (_submission == null || _publishing) return;
+    setState(() => _publishing = true);
+    try {
+      if (_submission!.publicSlug.isEmpty) {
+        await AssignmentService.publishSubmission(_submission!.id);
+      } else {
+        await AssignmentService.unpublishSubmission(_submission!.id);
+      }
+      final refreshed = await AssignmentService.getSubmission(_submission!.id);
+      if (!mounted) return;
+      setState(() => _submission = refreshed);
+      if (refreshed.publicSlug.isNotEmpty) {
+        // Ye ek pure JSON API endpoint hai (`PublicSubmissionView`), ek
+        // asli rendered webpage nahi — koi web wrapper is backend zip me
+        // nahi hai. Share karte waqt yahi seedha bata dete hain, warna
+        // link kholne wale ko sirf raw JSON dikhega aur confuse hoga.
+        await Clipboard.setData(ClipboardData(text: AssignmentService.publicUrlFor(refreshed.publicSlug)));
+        if (mounted) lsSnack(context, l10n.assignmentLinkCopied);
+      }
+    } catch (e) {
+      if (mounted) {
+        lsSnack(
+          context,
+          _submission!.publicSlug.isEmpty ? l10n.assignmentPublishFailed : l10n.assignmentUnpublishFailed,
+          error: true,
+        );
+      }
+    } finally {
+      if (mounted) setState(() => _publishing = false);
+    }
   }
 
   Widget _buildBody(ColorScheme cs, AppLocalizations l10n) {
@@ -637,6 +781,26 @@ class _AssignmentDetailScreenState extends State<AssignmentDetailScreen> {
             ]),
           ),
         ],
+        const SizedBox(height: 12),
+        Divider(height: 1, color: cs.outlineVariant),
+        const SizedBox(height: 10),
+        Row(children: [
+          Icon(s.publicSlug.isEmpty ? Icons.lock_outline_rounded : Icons.public_rounded,
+              size: 15, color: cs.onSurfaceVariant),
+          const SizedBox(width: 7),
+          Expanded(
+            child: Text(
+              s.publicSlug.isEmpty ? l10n.assignmentNotShared : l10n.assignmentSharePublicNote,
+              style: TextStyle(fontSize: 11, color: cs.onSurfaceVariant),
+            ),
+          ),
+          const SizedBox(width: 8),
+          LsOutlineButton(
+            label: s.publicSlug.isEmpty ? l10n.assignmentShareResult : l10n.assignmentUnshareResult,
+            icon: s.publicSlug.isEmpty ? Icons.share_outlined : Icons.link_off_rounded,
+            onPressed: _publishing ? null : _togglePublish,
+          ),
+        ]),
       ]),
     ));
 
@@ -661,6 +825,7 @@ class _AssignmentDetailScreenState extends State<AssignmentDetailScreen> {
           ],
         ]),
       ));
+      widgets.add(_buildGradePanel(cs, l10n));
       return widgets;
     }
 
@@ -671,9 +836,45 @@ class _AssignmentDetailScreenState extends State<AssignmentDetailScreen> {
         answer: s.answers[i],
         question: _questionById(a, s.answers[i].questionId),
         onOpenAttachment: _openAttachment,
+        onReview: (marksAwarded, feedback) => _reviewAnswer(s.answers[i].questionId, marksAwarded, feedback),
       ));
     }
     return widgets;
+  }
+
+  /// Free-form assignments never auto-grade — the only way `grade` /
+  /// `feedback` ever get set is this panel calling `grade_freeform`
+  /// (`GradeFreeformSerializer`). Shown always (not just pre-grading) so
+  /// the same person can revisit and adjust their own self-assigned mark.
+  Widget _buildGradePanel(ColorScheme cs, AppLocalizations l10n) {
+    return LsCard(
+      margin: const EdgeInsets.fromLTRB(kLsPad, 0, kLsPad, 14),
+      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        Text(l10n.assignmentGradeSectionTitle, style: LsType.head(context, size: 13)),
+        const SizedBox(height: 10),
+        TextField(
+          controller: _gradeCtrl,
+          // Backend `GradeFreeformSerializer.grade` is `CharField(max_length=10)`
+          // — enforcing the same limit here avoids a 400 on save.
+          maxLength: 10,
+          decoration: InputDecoration(labelText: l10n.assignmentGrade),
+        ),
+        const SizedBox(height: 10),
+        TextField(
+          controller: _gradeFeedbackCtrl,
+          minLines: 2,
+          maxLines: 4,
+          decoration: InputDecoration(hintText: l10n.assignmentFeedbackHint),
+        ),
+        const SizedBox(height: 12),
+        LsPrimaryButton(
+          label: l10n.save,
+          icon: Icons.check_rounded,
+          loading: _savingGrade,
+          onPressed: _savingGrade ? null : _saveGrade,
+        ),
+      ]),
+    );
   }
 }
 
@@ -945,21 +1146,61 @@ class _OptionTile extends StatelessWidget {
 // ANSWER RESULT CARD (read-only mode)
 // ============================================================
 
-class _AnswerResultCard extends StatelessWidget {
+class _AnswerResultCard extends StatefulWidget {
   final int index;
   final AssignmentAnswer answer;
   final AssignmentQuestion? question;
   final Future<void> Function(String url, String name) onOpenAttachment;
+  final Future<void> Function(int marksAwarded, String feedback) onReview;
 
   const _AnswerResultCard({
     required this.index,
     required this.answer,
     required this.question,
     required this.onOpenAttachment,
+    required this.onReview,
   });
 
   @override
+  State<_AnswerResultCard> createState() => _AnswerResultCardState();
+}
+
+class _AnswerResultCardState extends State<_AnswerResultCard> {
+  late final TextEditingController _marksCtrl =
+      TextEditingController(text: '${widget.answer.marksAwarded ?? 0}');
+  late final TextEditingController _feedbackCtrl = TextEditingController(text: widget.answer.reviewerFeedback);
+  bool _saving = false;
+
+  @override
+  void dispose() {
+    _marksCtrl.dispose();
+    _feedbackCtrl.dispose();
+    super.dispose();
+  }
+
+  Future<void> _save() async {
+    // Backend note: `AnswerReviewSerializer` itself only checks
+    // `marks_awarded >= 0`; the upper bound (`<= question.marks`) is only
+    // enforced later, inside `assigmentsAnswer.mark_answer()`, as a plain
+    // Python `ValueError` that `views.py`'s `review_answer` action never
+    // catches — an out-of-range value wouldn't come back as a clean 400,
+    // it would 500. Clamping client-side avoids relying on that at all.
+    final parsed = int.tryParse(_marksCtrl.text.trim()) ?? 0;
+    final maxMarks = widget.answer.questionMarks;
+    final marks = parsed < 0 ? 0 : (parsed > maxMarks ? maxMarks : parsed);
+    if (marks != parsed) _marksCtrl.text = '$marks';
+    setState(() => _saving = true);
+    try {
+      await widget.onReview(marks, _feedbackCtrl.text.trim());
+    } finally {
+      if (mounted) setState(() => _saving = false);
+    }
+  }
+
+  @override
   Widget build(BuildContext context) {
+    final answer = widget.answer;
+    final question = widget.question;
     final cs = Theme.of(context).colorScheme;
     final t = lsTokens(context);
     final l10n = AppLocalizations.of(context)!;
@@ -980,11 +1221,17 @@ class _AnswerResultCard extends StatelessWidget {
       statusLabel = l10n.assignmentReviewed;
     }
 
+    // `review_answer` sirf text-type questions pe allowed hai (`views.py`
+    // baaki sab types ke liye 400 deta hai) — so the inline review form
+    // only ever appears here, never for mcq/msq/list (jo waise bhi
+    // auto-graded hone ki wajah se kabhi `awaitingReview` hote hi nahi).
+    final canReview = answer.awaitingReview && question?.type == AssignmentQuestionType.text;
+
     return LsCard(
       margin: const EdgeInsets.fromLTRB(kLsPad, 0, kLsPad, 14),
       child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
         Row(children: [
-          Text(l10n.questionShort(index + 1),
+          Text(l10n.questionShort(widget.index + 1),
               style: TextStyle(fontSize: 10.5, fontWeight: FontWeight.w700, color: cs.primary)),
           const Spacer(),
           LsStatusChip(label: statusLabel, color: statusColor),
@@ -1017,7 +1264,7 @@ class _AnswerResultCard extends StatelessWidget {
           LsOutlineButton(
             label: l10n.assignmentOpenSubmittedFile,
             icon: Icons.image_outlined,
-            onPressed: () => onOpenAttachment(answer.answerAttachment!, 'answer'),
+            onPressed: () => widget.onOpenAttachment(answer.answerAttachment!, 'answer'),
           ),
         ],
         if (answer.reviewerFeedback.isNotEmpty) ...[
@@ -1031,6 +1278,39 @@ class _AnswerResultCard extends StatelessWidget {
             ),
           ]),
         ],
+        if (canReview) ...[
+          const SizedBox(height: 12),
+          Divider(height: 1, color: cs.outlineVariant),
+          const SizedBox(height: 10),
+          Text(l10n.assignmentReviewAnswerTitle,
+              style: TextStyle(fontSize: 11, fontWeight: FontWeight.w700, color: cs.onSurfaceVariant)),
+          const SizedBox(height: 8),
+          Row(children: [
+            SizedBox(
+              width: 90,
+              child: TextField(
+                controller: _marksCtrl,
+                keyboardType: TextInputType.number,
+                decoration: InputDecoration(labelText: l10n.assignmentMarksAwarded),
+              ),
+            ),
+            const SizedBox(width: 10),
+            Expanded(
+              child: TextField(
+                controller: _feedbackCtrl,
+                decoration: InputDecoration(hintText: l10n.assignmentFeedbackHint),
+              ),
+            ),
+          ]),
+          const SizedBox(height: 10),
+          LsPrimaryButton(
+            label: l10n.save,
+            icon: Icons.check_rounded,
+            expanded: false,
+            loading: _saving,
+            onPressed: _saving ? null : _save,
+          ),
+        ],
       ]),
     );
   }
@@ -1040,11 +1320,11 @@ class _AnswerResultCard extends StatelessWidget {
   /// isliye teeno shapes ko tolerantly handle kiya hai — koi bhi unexpected
   /// shape aaye to raw toString, crash nahi.
   String _readableAnswer(AppLocalizations l10n) {
-    final data = answer.answerData;
+    final data = widget.answer.answerData;
     if (data == null) return l10n.answerNotAnswered;
 
     String labelFor(String id) {
-      final q = question;
+      final q = widget.question;
       if (q == null) return id;
       for (final o in q.options) {
         if (o.id == id) return o.text;

@@ -62,7 +62,8 @@ class StoryModel {
       caption: json['caption']?.toString(),
       createdAt: DateTime.tryParse(json['created_at']?.toString() ?? ''),
       expiresAt: DateTime.tryParse(json['expires_at']?.toString() ?? ''),
-      isViewed: (json['is_viewed'] as bool?) ?? (json['viewed'] as bool?) ?? false,
+      // Backend `StorySerializer.is_viewed_by_me` (older guesses kept as fallbacks).
+      isViewed: (json['is_viewed_by_me'] as bool?) ?? (json['is_viewed'] as bool?) ?? (json['viewed'] as bool?) ?? false,
       // Same key `story_service.dart`'s markViewed() response already
       // reads (`views_count`) — the list endpoint is expected to echo it
       // per-story too, same convention `PostModel.viewsCount` uses.

@@ -240,3 +240,12 @@ class PostModel {
     return media.first.file;
   }
 }
+
+/// One page of `getMyPostsPage` — posts plus whether the backend's DRF
+/// pagination says there's another page (`next != null`), so the caller
+/// can drive real infinite-scroll instead of guessing from page length.
+class PostsPage {
+  final List<PostModel> posts;
+  final bool hasMore;
+  const PostsPage({required this.posts, required this.hasMore});
+}

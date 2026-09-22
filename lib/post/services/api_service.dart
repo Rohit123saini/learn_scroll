@@ -31,7 +31,7 @@ class ApiService {
     List<Map<String, dynamic>>? pollOptions, // 🔥 NAYA — poll post support
     DateTime? scheduledAt, // 🔥 NAYA — new_post.dart isko already pass kar raha tha, param yahan missing tha
   }) async {
-    final token = await AuthService.getToken();
+    final token = await AuthService.getValidToken();
     if (token == null) throw Exception('User not logged in');
     var uri = Uri.parse('${Api.baseUrl}/post/create/');
     var request = http.MultipartRequest('POST', uri);
@@ -114,7 +114,7 @@ class ApiService {
     String? mediaType,
     DateTime? scheduledAt,
   }) async {
-    final token = await AuthService.getToken();
+    final token = await AuthService.getValidToken();
     if (token == null) throw Exception('User not logged in');
     final totalSize = await file.length();
     final totalChunks = (totalSize / _chunkSize).ceil();
@@ -157,7 +157,7 @@ class ApiService {
     required int chunkIndex,
     required List<int> chunkBytes,
   }) async {
-    final token = await AuthService.getToken();
+    final token = await AuthService.getValidToken();
     if (token == null) throw Exception('User not logged in');
     final uri = Uri.parse('${Api.baseUrl}/post/comment/chunked/chunk/');
     var request = http.MultipartRequest('POST', uri);
@@ -180,7 +180,7 @@ class ApiService {
   }
 
   Future<Map<String, dynamic>> completePostChunkedUpload(String uploadId) async {
-    final token = await AuthService.getToken();
+    final token = await AuthService.getValidToken();
     if (token == null) throw Exception('User not logged in');
     final uri = Uri.parse('${Api.baseUrl}/post/chunked/complete/');
     final response = await http.post(
@@ -199,7 +199,7 @@ class ApiService {
   // 🔥 NAYA — resume support: batata hai is upload_id ke kaunse chunks already
   // server pe save ho chuke hain. Comment aur post dono flow ke liye generic hai.
   Future<Map<String, dynamic>> getChunkedUploadStatus(String uploadId) async {
-    final token = await AuthService.getToken();
+    final token = await AuthService.getValidToken();
     if (token == null) throw Exception('User not logged in');
     final uri = Uri.parse('${Api.baseUrl}/post/chunked/status/$uploadId/');
     final response = await http.get(uri, headers: {'Authorization': 'Bearer $token'});
@@ -368,7 +368,7 @@ class ApiService {
   // license: 'CC0', tags}.
   Future<List<Map<String, dynamic>>> searchFreesoundMusic(String query, {int page = 1}) async {
     try {
-      final token = await AuthService.getToken();
+      final token = await AuthService.getValidToken();
       final url = Uri.parse('${Api.baseUrl}/post/music/search/')
           .replace(queryParameters: {'q': query, 'page': '$page'});
       final response = await http.get(
@@ -401,7 +401,7 @@ class ApiService {
   // reaction = change. Caller should optimistically update UI and roll
   // back on failure — see `singlepost.dart`'s `_handleReaction`.
   Future<Map<String, dynamic>> toggleReaction(String postId, String reaction) async {
-    final token = await AuthService.getToken();
+    final token = await AuthService.getValidToken();
     if (token == null) throw Exception('User not logged in');
     final url = Uri.parse('${Api.baseUrl}/post/like/$postId/reaction/');
     final response = await http.post(
@@ -417,7 +417,7 @@ class ApiService {
   // --- YE NAYA METHOD ADD HUA HAI, ISKI WAJAH SE ERROR AA RAHA THA ---
   Future<Map<String, dynamic>> getPostById(String postId) async {
     try {
-      final token = await AuthService.getToken();
+      final token = await AuthService.getValidToken();
       final url = Uri.parse("${Api.baseUrl}/post/details/$postId/");
 
       final response = await http.get(

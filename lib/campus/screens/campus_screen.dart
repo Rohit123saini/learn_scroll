@@ -8,7 +8,15 @@ import '../models/campus_models.dart';
 import '../services/campus_service.dart';
 import 'attendance_mark_screen.dart';
 import 'attendance_summary_screen.dart';
+import 'analytics_screen.dart';
+import 'campus_create_screen.dart';
+import 'campus_setup_screen.dart';
+import 'digital_id_card_screen.dart';
+import 'fee_office_screen.dart';
+import 'my_fees_screen.dart';
 import 'notices_screen.dart';
+import 'parent_link_screen.dart';
+import 'section_academics_screen.dart';
 import 'section_students_screen.dart';
 import 'timetable_screen.dart';
 
@@ -161,6 +169,36 @@ class _CampusScreenState extends State<CampusScreen> {
                       ))
                   .toList(),
             ),
+          // Naya campus koi bhi bana sakta hai (§19) — sirf multi-campus
+          // logon tak seemit nahi, isliye ye hamesha dikhta hai (empty-state
+          // ka apna CTA alag hai — pehli baar wale ke liye).
+          IconButton(
+            tooltip: l10n.campusNoneCreateCta,
+            icon: const Icon(Icons.add_business_outlined),
+            onPressed: _createCampus,
+          ),
+          // Parent-link verify/list — campus-agnostic (ek parent ke bachche
+          // alag-alag campuses me ho sakte hain), isliye ye kisi selected
+          // campus pe depend nahi karta — hamesha dikhta hai.
+          IconButton(
+            tooltip: l10n.parentLinkScreenTitle,
+            icon: const Icon(Icons.family_restroom_outlined),
+            onPressed: () => Navigator.push(
+              context,
+              MaterialPageRoute(builder: (_) => const ParentLinkScreen()),
+            ),
+          ),
+          if (_selected != null && _access != null)
+            IconButton(
+              tooltip: l10n.idCardTitle,
+              icon: const Icon(Icons.badge_outlined),
+              onPressed: () => Navigator.push(
+                context,
+                MaterialPageRoute(
+                  builder: (_) => DigitalIdCardScreen(campusId: _selected!.id, access: _access!),
+                ),
+              ),
+            ),
         ],
       ),
       body: RefreshIndicator(
@@ -192,6 +230,8 @@ class _CampusScreenState extends State<CampusScreen> {
           icon: Icons.school_outlined,
           title: l10n.campusNoneTitle,
           subtitle: l10n.campusNoneSubtitle,
+          actionLabel: l10n.campusNoneCreateCta,
+          onAction: _createCampus,
         ),
       ]);
     }
@@ -265,12 +305,42 @@ class _CampusScreenState extends State<CampusScreen> {
         ),
       Padding(
         padding: const EdgeInsets.fromLTRB(14, 0, 14, 12),
-        child: LsOutlineButton(
-          label: l10n.campusTimetableTitle,
-          icon: Icons.calendar_view_week_rounded,
-          onPressed: () => _openTimetable(access.myEnrollments.first.sectionId),
-        ),
+        child: Row(children: [
+          Expanded(
+            child: LsOutlineButton(
+              label: l10n.campusTimetableTitle,
+              icon: Icons.calendar_view_week_rounded,
+              onPressed: () => _openTimetable(access.myEnrollments.first.sectionId),
+            ),
+          ),
+          const SizedBox(width: 8),
+          Expanded(
+            child: LsOutlineButton(
+              label: l10n.assignmentsTitle,
+              icon: Icons.assignment_outlined,
+              onPressed: () => _openAcademics(
+                access,
+                access.myEnrollments.first.sectionId,
+                myEnrollment: access.myEnrollments.first,
+              ),
+            ),
+          ),
+        ]),
       ),
+      if (access.campus.feeModuleEnabled)
+        Padding(
+          padding: const EdgeInsets.fromLTRB(14, 0, 14, 12),
+          child: LsOutlineButton(
+            label: l10n.myFeesTitle,
+            icon: Icons.toll_outlined,
+            onPressed: () => Navigator.push(
+              context,
+              MaterialPageRoute(
+                builder: (_) => MyFeesScreen(campusId: access.campus.id, myEnrollments: access.myEnrollments),
+              ),
+            ),
+          ),
+        ),
     ];
   }
 
@@ -286,6 +356,20 @@ class _CampusScreenState extends State<CampusScreen> {
         .toList();
 
     return [
+      if (!access.isManagement)
+        Padding(
+          padding: const EdgeInsets.fromLTRB(14, 0, 14, 10),
+          child: LsOutlineButton(
+            label: l10n.feeOfficeTitle,
+            icon: Icons.point_of_sale_outlined,
+            onPressed: () => Navigator.push(
+              context,
+              MaterialPageRoute(
+                builder: (_) => FeeOfficeScreen(campusId: access.campus.id, access: access),
+              ),
+            ),
+          ),
+        ),
       LsSectionHead(title: l10n.campusMySectionsTitle),
       for (final sectionId in classTeacherOf)
         _SectionCard(
@@ -295,6 +379,7 @@ class _CampusScreenState extends State<CampusScreen> {
           onMarkAttendance: () => _openMarkAttendance(access, sectionId, null),
           onRoster: () => _openRoster(sectionId),
           onTimetable: () => _openTimetable(sectionId),
+          onAcademics: () => _openAcademics(access, sectionId),
           markLabel: l10n.campusMarkAttendance,
           rosterLabel: l10n.campusStudents,
         ),
@@ -306,6 +391,7 @@ class _CampusScreenState extends State<CampusScreen> {
           onMarkAttendance: () => _openMarkAttendance(access, pair.first, pair.last),
           onRoster: () => _openRoster(pair.first),
           onTimetable: () => _openTimetable(pair.first),
+          onAcademics: () => _openAcademics(access, pair.first),
           markLabel: l10n.campusMarkAttendance,
           rosterLabel: l10n.campusStudents,
         ),
@@ -343,11 +429,49 @@ class _CampusScreenState extends State<CampusScreen> {
               value: '${_subjectsById.length}',
             ),
             const SizedBox(height: 12),
-            LsPrimaryButton(
-              label: l10n.campusPostNotice,
-              icon: Icons.campaign_outlined,
-              onPressed: _openNotices,
-            ),
+            Row(children: [
+              Expanded(
+                child: LsPrimaryButton(
+                  label: l10n.campusPostNotice,
+                  icon: Icons.campaign_outlined,
+                  onPressed: _openNotices,
+                ),
+              ),
+              const SizedBox(width: 8),
+              Expanded(
+                child: LsOutlineButton(
+                  label: l10n.campusManageSetupCta,
+                  icon: Icons.settings_outlined,
+                  onPressed: access.canManageCampusSetup ? _openCampusSetup : null,
+                ),
+              ),
+            ]),
+            const SizedBox(height: 8),
+            Row(children: [
+              Expanded(
+                child: LsOutlineButton(
+                  label: l10n.analyticsTitle,
+                  icon: Icons.insights_outlined,
+                  onPressed: () => Navigator.push(
+                    context,
+                    MaterialPageRoute(builder: (_) => AnalyticsScreen(campusId: access.campus.id)),
+                  ),
+                ),
+              ),
+              const SizedBox(width: 8),
+              Expanded(
+                child: LsOutlineButton(
+                  label: l10n.feeOfficeTitle,
+                  icon: Icons.point_of_sale_outlined,
+                  onPressed: () => Navigator.push(
+                    context,
+                    MaterialPageRoute(
+                      builder: (_) => FeeOfficeScreen(campusId: access.campus.id, access: access),
+                    ),
+                  ),
+                ),
+              ),
+            ]),
           ]),
         ),
       ),
@@ -363,6 +487,7 @@ class _CampusScreenState extends State<CampusScreen> {
           onMarkAttendance: () => _openMarkAttendance(access, sectionId, null),
           onRoster: () => _openRoster(sectionId),
           onTimetable: () => _openTimetable(sectionId),
+          onAcademics: () => _openAcademics(access, sectionId),
           markLabel: l10n.campusMarkAttendance,
           rosterLabel: l10n.campusStudents,
         ),
@@ -397,6 +522,21 @@ class _CampusScreenState extends State<CampusScreen> {
         ),
       );
 
+  void _openAcademics(CampusAccess access, String sectionId, {StudentEnrollment? myEnrollment}) {
+    Navigator.push(
+      context,
+      MaterialPageRoute(
+        builder: (_) => SectionAcademicsScreen(
+          sectionId: sectionId,
+          sectionLabel: _labelFor(sectionId),
+          subjects: _subjectsById.values.toList(),
+          access: access,
+          myEnrollment: myEnrollment,
+        ),
+      ),
+    );
+  }
+
   void _openTimetable(String sectionId) => Navigator.push(
         context,
         MaterialPageRoute(
@@ -408,6 +548,28 @@ class _CampusScreenState extends State<CampusScreen> {
           ),
         ),
       );
+
+  Future<void> _createCampus() async {
+    final created = await Navigator.push<Campus>(
+      context,
+      MaterialPageRoute(builder: (_) => const CampusCreateScreen()),
+    );
+    // `created` ka `verification_status` hamesha "pending" hota hai — turant
+    // access load karne ki koshish `staff`/`enrollments` calls me kuch nahi
+    // dega, par `_bootstrap` khud hi is naye campus ko list me le aayega aur
+    // pending banner dikha dega. Poora bootstrap dobara chalana isliye
+    // safe/simple hai — is screen pe ye kabhi-kabhi hota hai, hot-path nahi.
+    if (created != null) _bootstrap();
+  }
+
+  void _openCampusSetup() {
+    final access = _access;
+    if (access == null) return;
+    Navigator.push(
+      context,
+      MaterialPageRoute(builder: (_) => CampusSetupScreen(access: access)),
+    ).then((_) => _selectCampus(access.campus)); // roles/rooms/staff badal sakte hain — refresh
+  }
 
   void _openNotices() {
     final access = _access;
@@ -525,6 +687,7 @@ class _SectionCard extends StatelessWidget {
   final VoidCallback onMarkAttendance;
   final VoidCallback onRoster;
   final VoidCallback onTimetable;
+  final VoidCallback onAcademics;
 
   const _SectionCard({
     required this.label,
@@ -535,10 +698,12 @@ class _SectionCard extends StatelessWidget {
     required this.onMarkAttendance,
     required this.onRoster,
     required this.onTimetable,
+    required this.onAcademics,
   });
 
   @override
   Widget build(BuildContext context) {
+    final l10n = AppLocalizations.of(context)!;
     return Padding(
       padding: const EdgeInsets.fromLTRB(14, 0, 14, 10),
       child: LsCard(
@@ -568,6 +733,12 @@ class _SectionCard extends StatelessWidget {
               icon: const Icon(Icons.groups_2_outlined, size: 20),
             ),
             IconButton.filledTonal(
+              tooltip: l10n.assignmentsTitle,
+              onPressed: onAcademics,
+              icon: const Icon(Icons.assignment_outlined, size: 20),
+            ),
+            IconButton.filledTonal(
+              tooltip: l10n.campusTimetableTitle,
               onPressed: onTimetable,
               icon: const Icon(Icons.calendar_view_week_rounded, size: 20),
             ),

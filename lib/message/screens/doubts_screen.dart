@@ -28,10 +28,7 @@ import '../models/message_models.dart';
 import '../services/doubts_api_service.dart';
 import '../services/chat_socket_service.dart';
 import '../../services/auth_service.dart';
-
-const _kNavy = Color(0xFF030F27);
-const _kAccent = Color(0xFFEE0979);
-const _kBg = Color(0xFFF6F7FB);
+import '../../theme_service.dart'; // 🎨 THEME FIX — AppThemeTokens
 
 enum _StatusFilter { all, unanswered, answered }
 
@@ -238,7 +235,7 @@ class _DoubtsScreenState extends State<DoubtsScreen> {
     final answerText = await showModalBottomSheet<String>(
       context: context,
       isScrollControlled: true,
-      backgroundColor: Colors.white,
+      backgroundColor: Theme.of(context).colorScheme.surface,
       shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(18))),
       builder: (ctx) => Padding(
         padding: EdgeInsets.only(
@@ -246,12 +243,12 @@ class _DoubtsScreenState extends State<DoubtsScreen> {
           bottom: 18 + MediaQuery.of(ctx).viewInsets.bottom,
         ),
         child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children: [
-          const Text("Answer this doubt", style: TextStyle(fontWeight: FontWeight.w700, fontSize: 15, color: _kNavy)),
+          Text("Answer this doubt", style: TextStyle(fontWeight: FontWeight.w700, fontSize: 15, color: Theme.of(ctx).colorScheme.primary)),
           const SizedBox(height: 10),
           Container(
             padding: const EdgeInsets.all(10),
-            decoration: BoxDecoration(color: _kBg, borderRadius: BorderRadius.circular(10)),
-            child: Text(d.text, style: const TextStyle(fontSize: 13.5, color: Colors.black87)),
+            decoration: BoxDecoration(color: AppThemeTokens.of(ctx).surface2, borderRadius: BorderRadius.circular(10)),
+            child: Text(d.text, style: TextStyle(fontSize: 13.5, color: Theme.of(ctx).colorScheme.onSurface)),
           ),
           const SizedBox(height: 14),
           TextField(
@@ -262,7 +259,7 @@ class _DoubtsScreenState extends State<DoubtsScreen> {
             decoration: InputDecoration(
               hintText: "Type your answer…",
               filled: true,
-              fillColor: _kBg,
+              fillColor: AppThemeTokens.of(ctx).surface2,
               border: OutlineInputBorder(borderRadius: BorderRadius.circular(10), borderSide: BorderSide.none),
             ),
           ),
@@ -270,7 +267,7 @@ class _DoubtsScreenState extends State<DoubtsScreen> {
           SizedBox(
             width: double.infinity,
             child: ElevatedButton(
-              style: ElevatedButton.styleFrom(backgroundColor: _kAccent, foregroundColor: Colors.white, padding: const EdgeInsets.symmetric(vertical: 13)),
+              style: ElevatedButton.styleFrom(backgroundColor: AppThemeTokens.of(ctx).coral, foregroundColor: Colors.white, padding: const EdgeInsets.symmetric(vertical: 13)),
               onPressed: () {
                 final v = ctrl.text.trim();
                 if (v.isEmpty) return;
@@ -301,7 +298,7 @@ class _DoubtsScreenState extends State<DoubtsScreen> {
     final created = await showModalBottomSheet<DoubtQuestionModel>(
       context: context,
       isScrollControlled: true,
-      backgroundColor: Colors.white,
+      backgroundColor: Theme.of(context).colorScheme.surface,
       shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(18))),
       builder: (ctx) => StatefulBuilder(
         builder: (ctx, setSheetState) => Padding(
@@ -310,7 +307,7 @@ class _DoubtsScreenState extends State<DoubtsScreen> {
             bottom: 18 + MediaQuery.of(ctx).viewInsets.bottom,
           ),
           child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children: [
-            const Text("Ask a doubt", style: TextStyle(fontWeight: FontWeight.w700, fontSize: 15, color: _kNavy)),
+            Text("Ask a doubt", style: TextStyle(fontWeight: FontWeight.w700, fontSize: 15, color: Theme.of(ctx).colorScheme.primary)),
             const SizedBox(height: 12),
             TextField(
               controller: ctrl,
@@ -320,7 +317,7 @@ class _DoubtsScreenState extends State<DoubtsScreen> {
               decoration: InputDecoration(
                 hintText: "Type your doubt…",
                 filled: true,
-                fillColor: _kBg,
+                fillColor: AppThemeTokens.of(ctx).surface2,
                 border: OutlineInputBorder(borderRadius: BorderRadius.circular(10), borderSide: BorderSide.none),
               ),
             ),
@@ -333,14 +330,14 @@ class _DoubtsScreenState extends State<DoubtsScreen> {
                 title: const Text("Ask anonymously", style: TextStyle(fontSize: 13.5)),
                 subtitle: Text(
                   "Your name is hidden from everyone, including the teacher, unless they choose to reveal it.",
-                  style: TextStyle(fontSize: 11, color: Colors.grey[600]),
+                  style: TextStyle(fontSize: 11, color: Theme.of(ctx).colorScheme.onSurfaceVariant),
                 ),
               ),
             const SizedBox(height: 8),
             SizedBox(
               width: double.infinity,
               child: ElevatedButton(
-                style: ElevatedButton.styleFrom(backgroundColor: _kAccent, foregroundColor: Colors.white, padding: const EdgeInsets.symmetric(vertical: 13)),
+                style: ElevatedButton.styleFrom(backgroundColor: AppThemeTokens.of(ctx).coral, foregroundColor: Colors.white, padding: const EdgeInsets.symmetric(vertical: 13)),
                 onPressed: () async {
                   final v = ctrl.text.trim();
                   if (v.isEmpty) return;
@@ -371,15 +368,15 @@ class _DoubtsScreenState extends State<DoubtsScreen> {
 
   @override
   Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
     return Scaffold(
-      backgroundColor: _kBg,
       appBar: AppBar(
-        backgroundColor: _kNavy,
-        iconTheme: const IconThemeData(color: Colors.white),
-        title: Text("Doubts · ${widget.groupName}", style: const TextStyle(color: Colors.white, fontSize: 16)),
+        backgroundColor: cs.primary,
+        iconTheme: IconThemeData(color: cs.onPrimary),
+        title: Text("Doubts · ${widget.groupName}", style: TextStyle(color: cs.onPrimary, fontSize: 16)),
       ),
       floatingActionButton: FloatingActionButton.extended(
-        backgroundColor: _kAccent,
+        backgroundColor: AppThemeTokens.of(context).coral,
         onPressed: _openAskSheet,
         icon: const Icon(Icons.help_outline_rounded, color: Colors.white),
         label: const Text("Ask a doubt", style: TextStyle(color: Colors.white)),
@@ -397,9 +394,9 @@ class _DoubtsScreenState extends State<DoubtsScreen> {
         ),
         Expanded(
           child: _loading
-              ? const Center(child: CircularProgressIndicator(color: _kNavy))
+              ? Center(child: CircularProgressIndicator(color: cs.primary))
               : _loadError != null
-                  ? Center(child: Padding(padding: const EdgeInsets.all(24), child: Text(_loadError!, style: const TextStyle(color: Colors.red))))
+                  ? Center(child: Padding(padding: const EdgeInsets.all(24), child: Text(_loadError!, style: TextStyle(color: cs.error))))
                   : _doubts.isEmpty
                       ? _buildEmpty()
                       : RefreshIndicator(
@@ -414,9 +411,9 @@ class _DoubtsScreenState extends State<DoubtsScreen> {
                               itemCount: _doubts.length + (_nextPage != null ? 1 : 0),
                               itemBuilder: (ctx, i) {
                                 if (i >= _doubts.length) {
-                                  return const Padding(
-                                    padding: EdgeInsets.all(16),
-                                    child: Center(child: CircularProgressIndicator(strokeWidth: 2, color: _kNavy)),
+                                  return Padding(
+                                    padding: const EdgeInsets.all(16),
+                                    child: Center(child: CircularProgressIndicator(strokeWidth: 2, color: cs.primary)),
                                   );
                                 }
                                 return _buildDoubtCard(_doubts[i]);
@@ -431,27 +428,29 @@ class _DoubtsScreenState extends State<DoubtsScreen> {
 
   Widget _filterChip(String label, _StatusFilter f) {
     final selected = _filter == f;
+    final cs = Theme.of(context).colorScheme;
     return ChoiceChip(
-      label: Text(label, style: TextStyle(fontSize: 12.5, color: selected ? Colors.white : _kNavy)),
+      label: Text(label, style: TextStyle(fontSize: 12.5, color: selected ? cs.onPrimary : cs.onSurface)),
       selected: selected,
-      selectedColor: _kNavy,
-      backgroundColor: Colors.white,
-      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20), side: BorderSide(color: Colors.grey.shade300)),
+      selectedColor: cs.primary,
+      backgroundColor: cs.surface,
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20), side: BorderSide(color: cs.outlineVariant)),
       onSelected: (_) => _changeFilter(f),
     );
   }
 
   Widget _buildEmpty() {
+    final cs = Theme.of(context).colorScheme;
     return ListView(children: [
       const SizedBox(height: 80),
-      Icon(Icons.help_outline_rounded, size: 46, color: Colors.grey[400]),
+      Icon(Icons.help_outline_rounded, size: 46, color: cs.onSurfaceVariant),
       const SizedBox(height: 12),
       Center(
         child: Text(
           _filter == _StatusFilter.answered
               ? "No answered doubts yet."
               : "No doubts here yet — be the first to ask.",
-          style: TextStyle(color: Colors.grey[600], fontSize: 13),
+          style: TextStyle(color: cs.onSurfaceVariant, fontSize: 13),
         ),
       ),
     ]);
@@ -461,12 +460,15 @@ class _DoubtsScreenState extends State<DoubtsScreen> {
     final busy = _busyIds.contains(d.id);
     final canReveal = _isTeacher && d.isAnonymous && !d.isRevealed;
     final showRevealHint = _isTeacher && d.isAnonymous && d.author == null && !d.isRevealed;
+    final cs = Theme.of(context).colorScheme;
+    final coral = AppThemeTokens.of(context).coral;
+    final success = AppThemeTokens.of(context).success;
 
     return Container(
       margin: const EdgeInsets.only(bottom: 10),
       padding: const EdgeInsets.all(12),
       decoration: BoxDecoration(
-        color: Colors.white,
+        color: cs.surface,
         borderRadius: BorderRadius.circular(14),
         boxShadow: [BoxShadow(color: Colors.black.withOpacity(0.04), blurRadius: 8, offset: const Offset(0, 2))],
       ),
@@ -480,12 +482,12 @@ class _DoubtsScreenState extends State<DoubtsScreen> {
               width: 46,
               padding: const EdgeInsets.symmetric(vertical: 8),
               decoration: BoxDecoration(
-                color: d.upvotedByMe ? _kAccent.withOpacity(0.12) : _kBg,
+                color: d.upvotedByMe ? coral.withOpacity(0.12) : AppThemeTokens.of(context).surface2,
                 borderRadius: BorderRadius.circular(10),
               ),
               child: Column(children: [
-                Icon(Icons.arrow_upward_rounded, size: 18, color: d.upvotedByMe ? _kAccent : Colors.grey[500]),
-                Text('${d.upvotesCount}', style: TextStyle(fontSize: 12.5, fontWeight: FontWeight.w700, color: d.upvotedByMe ? _kAccent : _kNavy)),
+                Icon(Icons.arrow_upward_rounded, size: 18, color: d.upvotedByMe ? coral : cs.onSurfaceVariant),
+                Text('${d.upvotesCount}', style: TextStyle(fontSize: 12.5, fontWeight: FontWeight.w700, color: d.upvotedByMe ? coral : cs.onSurface)),
               ]),
             ),
           ),
@@ -493,54 +495,54 @@ class _DoubtsScreenState extends State<DoubtsScreen> {
           Expanded(
             child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
               Row(children: [
-                Icon(d.isAnonymous ? Icons.visibility_off_rounded : Icons.person_rounded, size: 13, color: Colors.grey[500]),
+                Icon(d.isAnonymous ? Icons.visibility_off_rounded : Icons.person_rounded, size: 13, color: cs.onSurfaceVariant),
                 const SizedBox(width: 4),
                 Expanded(
                   child: Text(
                     d.displayName(_myUserId ?? ''),
-                    style: TextStyle(fontSize: 11.5, fontWeight: FontWeight.w600, color: Colors.grey[600]),
+                    style: TextStyle(fontSize: 11.5, fontWeight: FontWeight.w600, color: cs.onSurfaceVariant),
                     overflow: TextOverflow.ellipsis,
                   ),
                 ),
                 if (d.isAnswered)
                   Container(
                     padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
-                    decoration: BoxDecoration(color: Colors.green.withOpacity(0.12), borderRadius: BorderRadius.circular(20)),
-                    child: const Text("Answered", style: TextStyle(fontSize: 10, color: Colors.green, fontWeight: FontWeight.w700)),
+                    decoration: BoxDecoration(color: success.withOpacity(0.12), borderRadius: BorderRadius.circular(20)),
+                    child: Text("Answered", style: TextStyle(fontSize: 10, color: success, fontWeight: FontWeight.w700)),
                   ),
               ]),
               const SizedBox(height: 6),
-              Text(d.text, style: const TextStyle(fontSize: 14, color: _kNavy)),
+              Text(d.text, style: TextStyle(fontSize: 14, color: cs.onSurface)),
               if (canReveal)
                 Padding(
                   padding: const EdgeInsets.only(top: 6),
                   child: InkWell(
                     onTap: busy ? null : () => _revealAuthor(d),
                     child: Row(mainAxisSize: MainAxisSize.min, children: [
-                      Icon(Icons.remove_red_eye_outlined, size: 14, color: _kAccent),
+                      Icon(Icons.remove_red_eye_outlined, size: 14, color: coral),
                       const SizedBox(width: 4),
-                      Text("Reveal who asked", style: TextStyle(fontSize: 11.5, color: _kAccent, fontWeight: FontWeight.w600)),
+                      Text("Reveal who asked", style: TextStyle(fontSize: 11.5, color: coral, fontWeight: FontWeight.w600)),
                     ]),
                   ),
                 )
               else if (showRevealHint)
                 Padding(
                   padding: const EdgeInsets.only(top: 4),
-                  child: Text("Identity hidden until revealed", style: TextStyle(fontSize: 10.5, color: Colors.grey[500])),
+                  child: Text("Identity hidden until revealed", style: TextStyle(fontSize: 10.5, color: cs.onSurfaceVariant)),
                 ),
               if (d.isAnswered) ...[
                 const SizedBox(height: 8),
                 Container(
                   width: double.infinity,
                   padding: const EdgeInsets.all(10),
-                  decoration: BoxDecoration(color: _kBg, borderRadius: BorderRadius.circular(10)),
+                  decoration: BoxDecoration(color: AppThemeTokens.of(context).surface2, borderRadius: BorderRadius.circular(10)),
                   child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
                     Text(
                       d.answeredBy?.displayName ?? 'Teacher',
-                      style: const TextStyle(fontSize: 11.5, fontWeight: FontWeight.w700, color: _kNavy),
+                      style: TextStyle(fontSize: 11.5, fontWeight: FontWeight.w700, color: cs.primary),
                     ),
                     const SizedBox(height: 3),
-                    Text(d.answerText, style: const TextStyle(fontSize: 13, color: Colors.black87)),
+                    Text(d.answerText, style: TextStyle(fontSize: 13, color: cs.onSurface)),
                   ]),
                 ),
               ] else if (_isTeacher) ...[
@@ -549,8 +551,8 @@ class _DoubtsScreenState extends State<DoubtsScreen> {
                   alignment: Alignment.centerRight,
                   child: TextButton.icon(
                     onPressed: busy ? null : () => _answerDoubt(d),
-                    icon: const Icon(Icons.reply_rounded, size: 16, color: _kAccent),
-                    label: const Text("Answer", style: TextStyle(color: _kAccent, fontWeight: FontWeight.w600)),
+                    icon: Icon(Icons.reply_rounded, size: 16, color: coral),
+                    label: Text("Answer", style: TextStyle(color: coral, fontWeight: FontWeight.w600)),
                   ),
                 ),
               ],

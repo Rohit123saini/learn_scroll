@@ -18,6 +18,7 @@ import 'package:timeago/timeago.dart' as timeago;
 
 import '../models/message_models.dart';
 import '../services/message_api_service.dart';
+import '../../theme_service.dart'; // 🎨 THEME FIX — AppThemeTokens
 
 class MessageInfoScreen extends StatefulWidget {
   final String messageId;
@@ -32,9 +33,6 @@ class MessageInfoScreen extends StatefulWidget {
 }
 
 class _MessageInfoScreenState extends State<MessageInfoScreen> {
-  static const _kNavy = Color(0xFF030F27);
-  static const _kAccent = Color(0xFFEE0979);
-
   bool _loading = true;
   String? _error;
   List<MessageReadStatusModel> _statuses = [];
@@ -75,18 +73,19 @@ class _MessageInfoScreenState extends State<MessageInfoScreen> {
     final deliveredOnly = _statuses.where((s) => !s.isRead && s.isDelivered).toList();
     final pending = _statuses.where((s) => !s.isRead && !s.isDelivered).toList();
 
+    final cs = Theme.of(context).colorScheme;
+    final tokens = AppThemeTokens.of(context);
     return Scaffold(
-      backgroundColor: Colors.grey[100],
       appBar: AppBar(
-        backgroundColor: _kNavy,
-        foregroundColor: Colors.white,
+        backgroundColor: cs.primary,
+        foregroundColor: cs.onPrimary,
         elevation: 0,
         title: const Text("Message info", style: TextStyle(fontWeight: FontWeight.w700, fontSize: 16)),
       ),
       body: _loading
-          ? const Center(child: CircularProgressIndicator(color: _kNavy))
+          ? Center(child: CircularProgressIndicator(color: cs.primary))
           : _error != null
-              ? Center(child: Padding(padding: const EdgeInsets.all(24), child: Text(_error!, style: const TextStyle(color: Colors.red), textAlign: TextAlign.center)))
+              ? Center(child: Padding(padding: const EdgeInsets.all(24), child: Text(_error!, style: TextStyle(color: cs.error), textAlign: TextAlign.center)))
               : RefreshIndicator(
                   onRefresh: _load,
                   child: ListView(
@@ -97,7 +96,7 @@ class _MessageInfoScreenState extends State<MessageInfoScreen> {
                           padding: const EdgeInsets.fromLTRB(16, 4, 16, 16),
                           child: Container(
                             padding: const EdgeInsets.all(12),
-                            decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(10)),
+                            decoration: BoxDecoration(color: cs.surface, borderRadius: BorderRadius.circular(10)),
                             child: Text(widget.messagePreview!, maxLines: 3, overflow: TextOverflow.ellipsis, style: const TextStyle(fontSize: 13.5)),
                           ),
                         ),
@@ -110,7 +109,7 @@ class _MessageInfoScreenState extends State<MessageInfoScreen> {
                       if (_statuses.isEmpty)
                         Padding(
                           padding: const EdgeInsets.only(top: 60),
-                          child: Center(child: Text("Koi status abhi tak nahi hai", style: TextStyle(color: Colors.grey[500], fontSize: 13.5))),
+                          child: Center(child: Text("Koi status abhi tak nahi hai", style: TextStyle(color: cs.onSurfaceVariant, fontSize: 13.5))),
                         ),
                     ],
                   ),
@@ -119,28 +118,32 @@ class _MessageInfoScreenState extends State<MessageInfoScreen> {
   }
 
   Widget _sectionHeader(IconData icon, String title, int count) {
+    final cs = Theme.of(context).colorScheme;
+    final tokens = AppThemeTokens.of(context);
     return Padding(
       padding: const EdgeInsets.fromLTRB(16, 14, 16, 6),
       child: Row(children: [
-        Icon(icon, size: 16, color: _kAccent),
+        Icon(icon, size: 16, color: tokens.coral),
         const SizedBox(width: 6),
-        Text("$title ($count)", style: const TextStyle(fontWeight: FontWeight.w700, fontSize: 12.5, color: _kNavy)),
+        Text("$title ($count)", style: TextStyle(fontWeight: FontWeight.w700, fontSize: 12.5, color: cs.primary)),
       ]),
     );
   }
 
   Widget _personTile(MessageReadStatusModel s, DateTime? timestamp) {
     final u = s.user;
+    final cs = Theme.of(context).colorScheme;
+    final tokens = AppThemeTokens.of(context);
     return ListTile(
       dense: true,
       leading: CircleAvatar(
         radius: 18,
-        backgroundColor: Colors.grey[200],
+        backgroundColor: tokens.surface2,
         backgroundImage: (u.profilePhoto != null && u.profilePhoto!.isNotEmpty) ? CachedNetworkImageProvider(u.profilePhoto!) : null,
-        child: (u.profilePhoto == null || u.profilePhoto!.isEmpty) ? Icon(Icons.person_rounded, color: Colors.grey[500], size: 18) : null,
+        child: (u.profilePhoto == null || u.profilePhoto!.isEmpty) ? Icon(Icons.person_rounded, color: cs.onSurfaceVariant, size: 18) : null,
       ),
       title: Text(u.displayName, style: const TextStyle(fontWeight: FontWeight.w600, fontSize: 13.5)),
-      subtitle: timestamp != null ? Text(timeago.format(timestamp), style: TextStyle(fontSize: 11.5, color: Colors.grey[600])) : null,
+      subtitle: timestamp != null ? Text(timeago.format(timestamp), style: TextStyle(fontSize: 11.5, color: cs.onSurfaceVariant)) : null,
     );
   }
 }

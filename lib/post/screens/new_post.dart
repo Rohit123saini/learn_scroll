@@ -17,6 +17,7 @@ import '../services/api_service.dart';
 import '../../search/api_service.dart' as SearchApi;
 import 'quick_post.dart';
 import 'media_edit_screen.dart';
+import '../../l10n/app_localizations.dart';
 
 /// ═══════════════════════════════════════════════════════════════════
 /// NEW POST — Advanced Full Composer
@@ -47,18 +48,28 @@ class NewPost extends StatefulWidget {
 
 class _NewPostState extends State<NewPost> with TickerProviderStateMixin {
   // ─── Design Tokens (matched to ProfileScreen's navy brand identity) ───
-  static const Color _navy = Color(0xFF0B142B); // heading text — deep navy, not flat black
-  static const Color _primary = Color(0xFF030F27); // same navy as ProfileScreen's bgColor — brand anchor
-  static const Color _primaryDark = Color(0xFF010914); // pressed/depth state for the primary
-  static const Color _primarySoft = Color(0xFFE9EBF3); // soft navy tint for chips/icon badges
-  static const Color _accent = Color(0xFFC9A24B); // warm gold — small premium highlight, used sparingly
-  static const Color _bg = Colors.white;
-  static const Color _surface = Colors.white;
-  static const Color _border = Color(0xFFE1E4EC); // soft cool-gray hairline, matches navy undertone
-  static const Color _muted = Color(0xFF6B7280); // secondary text
+  // ─── Design Tokens — pulled from theme_service.dart's ColorScheme so
+  // this composer follows the app's light/dark setting and matches the
+  // brand purple/orange used in home.dart, instead of a separate
+  // hardcoded navy/gold palette. Same identifiers as before so every
+  // existing reference below (_navy, _primary, ...) keeps working
+  // unchanged — only their definitions became theme-aware getters.
+  Color get _navy => Theme.of(context).colorScheme.onSurface;
+  Color get _primary => Theme.of(context).colorScheme.primary;
+  Color get _primaryDark => Color.lerp(Theme.of(context).colorScheme.primary, Colors.black, 0.2)!;
+  Color get _primarySoft => Theme.of(context).colorScheme.primary.withOpacity(0.12);
+  Color get _accent => Theme.of(context).colorScheme.secondary;
+  Color get _bg => Theme.of(context).colorScheme.background;
+  Color get _surface => Theme.of(context).colorScheme.surface;
+  Color get _border => Theme.of(context).colorScheme.outlineVariant;
+  Color get _muted => Theme.of(context).colorScheme.onSurfaceVariant;
   static const Color _success = Color(0xFF2ECC71);
   static const Color _warning = Color(0xFFF5A623);
-  static const Color _error = Color(0xFFED4956);
+  Color get _error => Theme.of(context).colorScheme.error;
+  // Same reasoning as the color getters above — an instance getter means
+  // every method below can just write `_l10n.xxx` without needing its own
+  // local `final l10n = AppLocalizations.of(context)!;` line.
+  AppLocalizations get _l10n => AppLocalizations.of(context)!;
 
   // ─── Controllers & Keys ───
   final _formKey = GlobalKey<FormState>();
@@ -144,10 +155,10 @@ class _NewPostState extends State<NewPost> with TickerProviderStateMixin {
     'Remote / Work from Home',
   ];
 
-  final List<Map<String, dynamic>> _visibilityOptions = const [
-    {'key': 'public', 'label': 'Public', 'icon': Icons.public_rounded, 'desc': 'Anyone can see'},
-    {'key': 'connections', 'label': 'Connections', 'icon': Icons.people_alt_rounded, 'desc': 'Only your network'},
-    {'key': 'private', 'label': 'Only me', 'icon': Icons.lock_outline_rounded, 'desc': 'Just you'},
+  List<Map<String, dynamic>> get _visibilityOptions => [
+    {'key': 'public', 'label': _l10n.visibilityPublic, 'icon': Icons.public_rounded, 'desc': _l10n.visibilityAnyoneCanSee},
+    {'key': 'connections', 'label': _l10n.visibilityConnections, 'icon': Icons.people_alt_rounded, 'desc': _l10n.visibilityOnlyYourNetwork},
+    {'key': 'private', 'label': _l10n.visibilityOnlyMe, 'icon': Icons.lock_outline_rounded, 'desc': _l10n.visibilityJustYou},
   ];
 
   // ─── Getters ───
@@ -168,7 +179,7 @@ class _NewPostState extends State<NewPost> with TickerProviderStateMixin {
     for (final o in _visibilityOptions) {
       if (o['key'] == key) return o['label'] as String;
     }
-    return 'Public';
+    return _l10n.visibilityPublic;
   }
 
   IconData _visibilityIconFor(String key) {
@@ -260,7 +271,7 @@ class _NewPostState extends State<NewPost> with TickerProviderStateMixin {
         _loadingCategories = false;
       });
     } catch (e) {
-      _showError('Failed to load categories: $e');
+      _showError(_l10n.failedToLoadCategories(e.toString()));
       setState(() => _loadingCategories = false);
     }
   }
@@ -272,20 +283,20 @@ class _NewPostState extends State<NewPost> with TickerProviderStateMixin {
   // files" step entirely.
   Future<void> _pickImages() async {
     if (_attachments.length >= _maxAttachments) {
-      _showError('Max $_maxAttachments files allowed');
+      _showError(_l10n.maxFilesAllowed(_maxAttachments));
       return;
     }
     try {
       final files = await _picker.pickMultiImage(imageQuality: 90);
       if (files.isNotEmpty) _addMediaFiles(files, 'image');
     } catch (e) {
-      _showError('Could not select images from gallery: $e');
+      _showError(_l10n.couldNotSelectImages(e.toString()));
     }
   }
 
   Future<void> _pickVideos() async {
     if (_attachments.length >= _maxAttachments) {
-      _showError('Max $_maxAttachments files allowed');
+      _showError(_l10n.maxFilesAllowed(_maxAttachments));
       return;
     }
     try {
@@ -294,13 +305,13 @@ class _NewPostState extends State<NewPost> with TickerProviderStateMixin {
       final video = await _picker.pickVideo(source: ImageSource.gallery);
       if (video != null) _addMediaFiles([video], 'video');
     } catch (e) {
-      _showError('Could not select video from gallery: $e');
+      _showError(_l10n.couldNotSelectVideo(e.toString()));
     }
   }
 
   Future<void> _pickDocuments() async {
     if (_attachments.length >= _maxAttachments) {
-      _showError('Max $_maxAttachments files allowed');
+      _showError(_l10n.maxFilesAllowed(_maxAttachments));
       return;
     }
     try {
@@ -311,7 +322,7 @@ class _NewPostState extends State<NewPost> with TickerProviderStateMixin {
       final files = await openFiles(acceptedTypeGroups: [typeGroup]);
       _addMediaFiles(files, 'document');
     } catch (e) {
-      _showError('Could not select documents: $e');
+      _showError(_l10n.couldNotSelectDocuments(e.toString()));
     }
   }
 
@@ -319,7 +330,7 @@ class _NewPostState extends State<NewPost> with TickerProviderStateMixin {
   // so a direct-from-camera video clip is one tap away, not buried anywhere.
   void _showCameraOptions() {
     if (_attachments.length >= _maxAttachments) {
-      _showError('Max $_maxAttachments files allowed');
+      _showError(_l10n.maxFilesAllowed(_maxAttachments));
       return;
     }
     HapticFeedback.mediumImpact();
@@ -329,7 +340,7 @@ class _NewPostState extends State<NewPost> with TickerProviderStateMixin {
       builder: (ctx) => BackdropFilter(
         filter: ImageFilter.blur(sigmaX: 8, sigmaY: 8),
         child: Container(
-          decoration: const BoxDecoration(
+          decoration: BoxDecoration(
             color: _surface,
             borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
           ),
@@ -346,7 +357,7 @@ class _NewPostState extends State<NewPost> with TickerProviderStateMixin {
                 ),
               ),
               const SizedBox(height: 18),
-              const Text('Use Camera', style: TextStyle(fontSize: 18, fontWeight: FontWeight.w800, color: _navy)),
+              Text(_l10n.useCameraLabel, style: TextStyle(fontSize: 18, fontWeight: FontWeight.w800, color: _navy)),
               const SizedBox(height: 12),
               ListTile(
                 contentPadding: const EdgeInsets.symmetric(horizontal: 4),
@@ -358,8 +369,8 @@ class _NewPostState extends State<NewPost> with TickerProviderStateMixin {
                   ),
                   child: const Icon(Icons.camera_alt_rounded, color: Color(0xFF10B981), size: 20),
                 ),
-                title: const Text('Take Photo', style: TextStyle(fontSize: 14.5, fontWeight: FontWeight.w700, color: _navy)),
-                subtitle: const Text('Capture a photo right now', style: TextStyle(fontSize: 11.5, color: _muted)),
+                title: Text(_l10n.takePhotoLabel, style: TextStyle(fontSize: 14.5, fontWeight: FontWeight.w700, color: _navy)),
+                subtitle: Text(_l10n.capturePhotoNow, style: TextStyle(fontSize: 11.5, color: _muted)),
                 shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
                 onTap: () {
                   Navigator.pop(ctx);
@@ -376,8 +387,8 @@ class _NewPostState extends State<NewPost> with TickerProviderStateMixin {
                   ),
                   child: const Icon(Icons.videocam_rounded, color: Color(0xFFEF4444), size: 20),
                 ),
-                title: const Text('Record Video', style: TextStyle(fontSize: 14.5, fontWeight: FontWeight.w700, color: _navy)),
-                subtitle: const Text('Shoot a quick video clip', style: TextStyle(fontSize: 11.5, color: _muted)),
+                title: Text(_l10n.recordVideo, style: TextStyle(fontSize: 14.5, fontWeight: FontWeight.w700, color: _navy)),
+                subtitle: Text(_l10n.shootQuickVideoClip, style: TextStyle(fontSize: 11.5, color: _muted)),
                 shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
                 onTap: () {
                   Navigator.pop(ctx);
@@ -393,7 +404,7 @@ class _NewPostState extends State<NewPost> with TickerProviderStateMixin {
 
   Future<void> _pickCameraPhoto() async {
     if (_attachments.length >= _maxAttachments) {
-      _showError('Max $_maxAttachments files allowed');
+      _showError(_l10n.maxFilesAllowed(_maxAttachments));
       return;
     }
     try {
@@ -405,13 +416,13 @@ class _NewPostState extends State<NewPost> with TickerProviderStateMixin {
         });
       }
     } catch (e) {
-      _showError('Camera error: $e');
+      _showError(_l10n.cameraError(e.toString()));
     }
   }
 
   Future<void> _pickCameraVideo() async {
     if (_attachments.length >= _maxAttachments) {
-      _showError('Max $_maxAttachments files allowed');
+      _showError(_l10n.maxFilesAllowed(_maxAttachments));
       return;
     }
     try {
@@ -426,7 +437,7 @@ class _NewPostState extends State<NewPost> with TickerProviderStateMixin {
         });
       }
     } catch (e) {
-      _showError('Camera error: $e');
+      _showError(_l10n.cameraError(e.toString()));
     }
   }
 
@@ -440,7 +451,7 @@ class _NewPostState extends State<NewPost> with TickerProviderStateMixin {
       _updatePostType();
     });
     if (files.length > remaining) {
-      _showError('Only $remaining more file(s) could be added');
+      _showError(_l10n.onlyNMoreFilesCouldBeAdded(remaining));
     }
   }
 
@@ -469,7 +480,7 @@ class _NewPostState extends State<NewPost> with TickerProviderStateMixin {
         _updatePostType();
       });
       final restoreIndex = index.clamp(0, _attachments.length);
-      _showUndoSnack('Attachment removed', () {
+      _showUndoSnack(_l10n.attachmentRemoved, () {
         if (!mounted) return;
         setState(() {
           att.removing = false;
@@ -492,29 +503,29 @@ class _NewPostState extends State<NewPost> with TickerProviderStateMixin {
       context: context,
       builder: (ctx) => AlertDialog(
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
-        title: const Text('Caption', style: TextStyle(fontWeight: FontWeight.w800, fontSize: 16)),
+        title: Text(_l10n.captionLabel, style: const TextStyle(fontWeight: FontWeight.w800, fontSize: 16)),
         content: TextField(
           controller: controller,
           autofocus: true,
           maxLength: 120,
           maxLines: 2,
           decoration: InputDecoration(
-            hintText: 'Write something about this media...',
+            hintText: _l10n.writeSomethingAboutMedia,
             border: OutlineInputBorder(borderRadius: BorderRadius.circular(12)),
             focusedBorder: OutlineInputBorder(
               borderRadius: BorderRadius.circular(12),
-              borderSide: const BorderSide(color: _primary, width: 1.5),
+              borderSide: BorderSide(color: _primary, width: 1.5),
             ),
           ),
         ),
         actions: [
           TextButton(
             onPressed: () => Navigator.pop(ctx),
-            child: const Text('Cancel', style: TextStyle(color: _muted, fontWeight: FontWeight.w700)),
+            child: Text(_l10n.cancel, style: TextStyle(color: _muted, fontWeight: FontWeight.w700)),
           ),
           TextButton(
             onPressed: () => Navigator.pop(ctx, controller.text.trim()),
-            child: const Text('Save', style: TextStyle(color: _primary, fontWeight: FontWeight.w700)),
+            child: Text(_l10n.save, style: TextStyle(color: _primary, fontWeight: FontWeight.w700)),
           ),
         ],
       ),
@@ -565,7 +576,7 @@ class _NewPostState extends State<NewPost> with TickerProviderStateMixin {
       _pollOptions.removeAt(index);
     });
     final restoreIndex = index.clamp(0, _pollOptions.length);
-    _showUndoSnack('Poll option removed', () {
+    _showUndoSnack(_l10n.pollOptionRemoved, () {
       if (!mounted || _pollOptions.length >= _maxPollOptions) return;
       setState(() {
         _pollOptions.insert(restoreIndex, _PollOption(TextEditingController(text: removedText)));
@@ -582,11 +593,11 @@ class _NewPostState extends State<NewPost> with TickerProviderStateMixin {
     final tomorrowMorning = atHour(now.add(const Duration(days: 1)), 9);
     final tomorrowEvening = atHour(now.add(const Duration(days: 1)), 19);
     final picks = <Map<String, dynamic>>[
-      {'label': 'In 1 hour', 'time': now.add(const Duration(hours: 1))},
+      {'label': _l10n.scheduleInOneHour, 'time': now.add(const Duration(hours: 1))},
       if (tonight.isAfter(now.add(const Duration(minutes: 30))))
-        {'label': 'This evening', 'time': tonight},
-      {'label': 'Tomorrow morning', 'time': tomorrowMorning},
-      {'label': 'Tomorrow evening', 'time': tomorrowEvening},
+        {'label': _l10n.scheduleThisEvening, 'time': tonight},
+      {'label': _l10n.scheduleTomorrowMorning, 'time': tomorrowMorning},
+      {'label': _l10n.scheduleTomorrowEvening, 'time': tomorrowEvening},
     ];
     return picks;
   }
@@ -629,7 +640,7 @@ class _NewPostState extends State<NewPost> with TickerProviderStateMixin {
 
     final combined = DateTime(date.year, date.month, date.day, time.hour, time.minute);
     if (combined.isBefore(now)) {
-      _showError('Select a future time');
+      _showError(_l10n.selectFutureTime);
       return;
     }
     HapticFeedback.mediumImpact();
@@ -651,7 +662,7 @@ class _NewPostState extends State<NewPost> with TickerProviderStateMixin {
       builder: (ctx) => BackdropFilter(
         filter: ImageFilter.blur(sigmaX: 8, sigmaY: 8),
         child: Container(
-          decoration: const BoxDecoration(
+          decoration: BoxDecoration(
             color: _surface,
             borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
           ),
@@ -668,10 +679,10 @@ class _NewPostState extends State<NewPost> with TickerProviderStateMixin {
                 ),
               ),
               const SizedBox(height: 20),
-              const Text('Add Location', style: TextStyle(fontSize: 18, fontWeight: FontWeight.w700)),
+              Text(_l10n.addLocationSheetTitle, style: const TextStyle(fontSize: 18, fontWeight: FontWeight.w700)),
               const SizedBox(height: 16),
               ..._locationSuggestions.map((loc) => ListTile(
-                    leading: const Icon(Icons.location_on_rounded, color: _primary),
+                    leading: Icon(Icons.location_on_rounded, color: _primary),
                     title: Text(loc, style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w500)),
                     trailing: _location == loc ? const Icon(Icons.check_rounded, color: _success) : null,
                     shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
@@ -683,8 +694,8 @@ class _NewPostState extends State<NewPost> with TickerProviderStateMixin {
                     },
                   )),
               ListTile(
-                leading: const Icon(Icons.not_listed_location_rounded, color: _muted),
-                title: const Text('Clear location', style: TextStyle(color: _muted)),
+                leading: Icon(Icons.not_listed_location_rounded, color: _muted),
+                title: Text(_l10n.clearLocationLabel, style: TextStyle(color: _muted)),
                 onTap: () {
                   setState(() => _location = null);
                   _scheduleAutoSave();
@@ -788,7 +799,7 @@ class _NewPostState extends State<NewPost> with TickerProviderStateMixin {
       _lastSavedAt = savedAtRaw != null ? DateTime.tryParse(savedAtRaw) : null;
     });
     _restoringDraft = false;
-    _showSuccess('Draft restored');
+    _showSuccess(_l10n.draftRestored);
   }
 
   Future<void> _clearDraft() async {
@@ -803,10 +814,10 @@ class _NewPostState extends State<NewPost> with TickerProviderStateMixin {
   String _draftSavedLabel() {
     if (_lastSavedAt == null) return '';
     final diff = DateTime.now().difference(_lastSavedAt!);
-    if (diff.inSeconds < 10) return 'Draft saved just now';
-    if (diff.inMinutes < 1) return 'Draft saved ${diff.inSeconds}s ago';
-    if (diff.inHours < 1) return 'Draft saved ${diff.inMinutes}m ago';
-    return 'Draft saved ${_formatSchedule(_lastSavedAt!)}';
+    if (diff.inSeconds < 10) return _l10n.draftSavedJustNow;
+    if (diff.inMinutes < 1) return _l10n.draftSavedSecondsAgo(diff.inSeconds);
+    if (diff.inHours < 1) return _l10n.draftSavedMinutesAgo(diff.inMinutes);
+    return _l10n.draftSavedAt(_formatSchedule(_lastSavedAt!));
   }
 
   // ─── @mentions / #hashtags autocomplete ───
@@ -966,19 +977,19 @@ class _NewPostState extends State<NewPost> with TickerProviderStateMixin {
       context: context,
       builder: (ctx) => AlertDialog(
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
-        title: const Text('Clear everything?', style: TextStyle(fontWeight: FontWeight.w800)),
-        content: const Text(
-          'Title, content, media, poll and the saved draft will all be cleared together. This cannot be undone.',
-          style: TextStyle(fontSize: 13.5, height: 1.4),
+        title: Text(_l10n.clearEverythingTitle, style: const TextStyle(fontWeight: FontWeight.w800)),
+        content: Text(
+          _l10n.clearEverythingBody,
+          style: const TextStyle(fontSize: 13.5, height: 1.4),
         ),
         actions: [
           TextButton(
             onPressed: () => Navigator.pop(ctx, false),
-            child: const Text('Cancel', style: TextStyle(color: _muted, fontWeight: FontWeight.w700)),
+            child: Text(_l10n.cancel, style: TextStyle(color: _muted, fontWeight: FontWeight.w700)),
           ),
           TextButton(
             onPressed: () => Navigator.pop(ctx, true),
-            child: const Text('Clear all', style: TextStyle(color: _error, fontWeight: FontWeight.w700)),
+            child: Text(_l10n.clearAllButton, style: TextStyle(color: _error, fontWeight: FontWeight.w700)),
           ),
         ],
       ),
@@ -1017,7 +1028,7 @@ class _NewPostState extends State<NewPost> with TickerProviderStateMixin {
     if (_fabAnimController.status == AnimationStatus.completed) {
       _fabAnimController.reverse();
     }
-    if (mounted) _showSuccess('Everything cleared');
+    if (mounted) _showSuccess(_l10n.everythingCleared);
   }
 
   // ─── Submit ───
@@ -1025,12 +1036,12 @@ class _NewPostState extends State<NewPost> with TickerProviderStateMixin {
     HapticFeedback.mediumImpact();
     if (!_formKey.currentState!.validate()) return;
     if (_contentController.text.trim().isEmpty && _attachments.isEmpty && !_hasPoll) {
-      _showError('Add some content first');
+      _showError(_l10n.addSomeContentFirst);
       return;
     }
     if (_category == null) {
       setState(() => _categoryError = true);
-      _showError('Select a category');
+      _showError(_l10n.selectCategoryError);
       await Future.delayed(const Duration(milliseconds: 80));
       if (mounted && _detailsCardKey.currentContext != null) {
         Scrollable.ensureVisible(
@@ -1043,17 +1054,17 @@ class _NewPostState extends State<NewPost> with TickerProviderStateMixin {
       return;
     }
     if (_hasPoll && _pollOptions.length < 2) {
-      _showError('Poll needs at least 2 options');
+      _showError(_l10n.pollNeedsTwoOptions);
       return;
     }
     if (_hasPoll && _pollOptions.any((o) => o.controller.text.trim().isEmpty)) {
-      _showError('Fill in all poll options');
+      _showError(_l10n.fillAllPollOptions);
       return;
     }
     if (_hasPoll) {
       final texts = _pollOptions.map((o) => o.controller.text.trim().toLowerCase()).toList();
       if (texts.toSet().length != texts.length) {
-        _showError('Poll options cannot be the same');
+        _showError(_l10n.pollOptionsMustDiffer);
         return;
       }
     }
@@ -1129,8 +1140,8 @@ class _NewPostState extends State<NewPost> with TickerProviderStateMixin {
 
       final message = result['message'] ??
           (_scheduledDateTime != null
-              ? 'Post scheduled for ${_formatSchedule(_scheduledDateTime!)}!'
-              : 'Post created successfully!');
+              ? _l10n.postScheduledFor(_formatSchedule(_scheduledDateTime!))
+              : _l10n.postCreatedSuccess);
 
       HapticFeedback.mediumImpact();
       setState(() {
@@ -1187,12 +1198,12 @@ class _NewPostState extends State<NewPost> with TickerProviderStateMixin {
                     width: 76,
                     height: 76,
                     decoration: const BoxDecoration(color: Colors.white, shape: BoxShape.circle),
-                    child: const Icon(Icons.check_rounded, color: _primary, size: 42),
+                    child: Icon(Icons.check_rounded, color: _primary, size: 42),
                   ),
                 ),
                 const SizedBox(height: 18),
-                const Text(
-                  'Posted!',
+                Text(
+                  _l10n.postedExclaim,
                   style: TextStyle(color: Colors.white, fontWeight: FontWeight.w800, fontSize: 18, letterSpacing: 0.2),
                 ),
               ],
@@ -1230,7 +1241,7 @@ class _NewPostState extends State<NewPost> with TickerProviderStateMixin {
         margin: const EdgeInsets.all(16),
         elevation: 6,
         action: SnackBarAction(
-          label: 'DISMISS',
+          label: _l10n.dismissLabel,
           textColor: Colors.white,
           onPressed: () => ScaffoldMessenger.of(context).hideCurrentSnackBar(),
         ),
@@ -1253,7 +1264,7 @@ class _NewPostState extends State<NewPost> with TickerProviderStateMixin {
           elevation: 6,
           duration: const Duration(seconds: 4),
           action: SnackBarAction(
-            label: 'UNDO',
+            label: _l10n.undoLabel,
             textColor: _accent,
             onPressed: () {
               HapticFeedback.selectionClick();
@@ -1450,9 +1461,9 @@ class _NewPostState extends State<NewPost> with TickerProviderStateMixin {
                             Text(
                               _isLoading
                                   ? (_chunkUploadProgress != null
-                                      ? 'Uploading ${(_chunkUploadProgress! * 100).toStringAsFixed(0)}%'
-                                      : 'Posting...')
-                                  : (_scheduledDateTime != null ? 'Schedule' : 'Share'),
+                                      ? _l10n.uploadingPercent((_chunkUploadProgress! * 100).toStringAsFixed(0))
+                                      : _l10n.posting)
+                                  : (_scheduledDateTime != null ? _l10n.scheduleLabel : _l10n.share),
                               style: const TextStyle(
                                 color: Colors.white,
                                 fontWeight: FontWeight.w700,
@@ -1483,19 +1494,19 @@ class _NewPostState extends State<NewPost> with TickerProviderStateMixin {
       context: context,
       builder: (ctx) => AlertDialog(
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
-        title: const Text('Discard post?', style: TextStyle(fontWeight: FontWeight.w800)),
-        content: const Text(
-          "What you've written hasn't been saved yet. If you close now, it will be lost.",
-          style: TextStyle(fontSize: 13.5, height: 1.4),
+        title: Text(_l10n.discardPostTitle, style: const TextStyle(fontWeight: FontWeight.w800)),
+        content: Text(
+          _l10n.unsavedCloseWarning,
+          style: const TextStyle(fontSize: 13.5, height: 1.4),
         ),
         actions: [
           TextButton(
             onPressed: () => Navigator.pop(ctx, false),
-            child: const Text('Keep editing', style: TextStyle(color: _muted, fontWeight: FontWeight.w700)),
+            child: Text(_l10n.keepEditing, style: TextStyle(color: _muted, fontWeight: FontWeight.w700)),
           ),
           TextButton(
             onPressed: () => Navigator.pop(ctx, true),
-            child: const Text('Discard', style: TextStyle(color: _error, fontWeight: FontWeight.w700)),
+            child: Text(_l10n.discard, style: TextStyle(color: _error, fontWeight: FontWeight.w700)),
           ),
         ],
       ),
@@ -1515,7 +1526,7 @@ class _NewPostState extends State<NewPost> with TickerProviderStateMixin {
       preferredSize: const Size.fromHeight(kToolbarHeight),
       child: Container(
         decoration: BoxDecoration(
-          gradient: const LinearGradient(
+          gradient: LinearGradient(
             begin: Alignment.topLeft,
             end: Alignment.bottomRight,
             colors: [_primary, _primaryDark],
@@ -1537,11 +1548,11 @@ class _NewPostState extends State<NewPost> with TickerProviderStateMixin {
           // _handleClose instead of TargetProfile's plain Navigator.maybePop.
           leading: IconButton(
             icon: const Icon(Icons.close_rounded, color: Colors.white),
-            tooltip: 'Close',
+            tooltip: _l10n.closeLabel,
             onPressed: _handleClose,
           ),
-          title: const Text(
-            'New post',
+          title: Text(
+            _l10n.newPostTitle,
             style: TextStyle(color: Colors.white, fontWeight: FontWeight.w800, fontSize: 18, letterSpacing: -0.2),
           ),
           actions: [
@@ -1561,8 +1572,8 @@ class _NewPostState extends State<NewPost> with TickerProviderStateMixin {
                     padding: const EdgeInsets.symmetric(horizontal: 8),
                   ),
                   icon: const Icon(Icons.delete_sweep_rounded, size: 17),
-                  label: const Text(
-                    'Clear all',
+                  label: Text(
+                    _l10n.clearAllButton,
                     style: TextStyle(fontWeight: FontWeight.w700, fontSize: 14),
                   ),
                 ),
@@ -1586,7 +1597,7 @@ class _NewPostState extends State<NewPost> with TickerProviderStateMixin {
           child: Container(
             padding: const EdgeInsets.all(16),
             decoration: BoxDecoration(
-              gradient: const LinearGradient(
+              gradient: LinearGradient(
                 begin: Alignment.topLeft,
                 end: Alignment.bottomRight,
                 colors: [_primary, _primaryDark],
@@ -1626,20 +1637,20 @@ class _NewPostState extends State<NewPost> with TickerProviderStateMixin {
                     borderRadius: BorderRadius.circular(12),
                     border: Border.all(color: _accent.withOpacity(0.4), width: 1),
                   ),
-                  child: const Icon(Icons.bolt_rounded, color: _accent, size: 22),
+                  child: Icon(Icons.bolt_rounded, color: _accent, size: 22),
                 ),
                 const SizedBox(width: 14),
-                const Expanded(
+                Expanded(
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
                       Text(
-                        'Quick Post',
+                        _l10n.quickPostTitle,
                         style: TextStyle(color: Colors.white, fontWeight: FontWeight.w800, fontSize: 14.5, letterSpacing: 0.1),
                       ),
                       SizedBox(height: 3),
                       Text(
-                        'Just want to write text? Fast compose here',
+                        _l10n.quickPostBannerSubtitle,
                         style: TextStyle(color: Colors.white70, fontSize: 12.5),
                       ),
                     ],
@@ -1714,7 +1725,7 @@ class _NewPostState extends State<NewPost> with TickerProviderStateMixin {
         ],
         Text(
           text.toUpperCase(),
-          style: const TextStyle(fontSize: 11, fontWeight: FontWeight.w800, color: _muted, letterSpacing: 0.8),
+          style: TextStyle(fontSize: 11, fontWeight: FontWeight.w800, color: _muted, letterSpacing: 0.8),
         ),
       ],
     );
@@ -1735,7 +1746,7 @@ class _NewPostState extends State<NewPost> with TickerProviderStateMixin {
           Row(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              const CircleAvatar(
+              CircleAvatar(
                 radius: 16,
                 backgroundColor: _primarySoft,
                 child: Icon(Icons.person_rounded, color: _primary, size: 18),
@@ -1796,7 +1807,7 @@ class _NewPostState extends State<NewPost> with TickerProviderStateMixin {
               child: Text(
                 _visibilityDescription,
                 key: ValueKey(_visibility),
-                style: const TextStyle(fontSize: 11, color: _muted, fontWeight: FontWeight.w500),
+                style: TextStyle(fontSize: 11, color: _muted, fontWeight: FontWeight.w500),
               ),
             ),
           ),
@@ -1815,8 +1826,8 @@ class _NewPostState extends State<NewPost> with TickerProviderStateMixin {
                   const SizedBox(width: 6),
                   Expanded(
                     child: Text(
-                      '${_draftSavedLabel()} · cached on this device',
-                      style: const TextStyle(fontSize: 11, color: _muted, fontWeight: FontWeight.w600),
+                      _l10n.draftCachedOnDevice(_draftSavedLabel()),
+                      style: TextStyle(fontSize: 11, color: _muted, fontWeight: FontWeight.w600),
                     ),
                   ),
                 ],
@@ -1824,22 +1835,22 @@ class _NewPostState extends State<NewPost> with TickerProviderStateMixin {
             ),
           ],
           const SizedBox(height: 16),
-          const Divider(height: 1, color: _border),
+          Divider(height: 1, color: _border),
           const SizedBox(height: 16),
           // Title
           TextFormField(
             controller: _titleController,
-            style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w700, color: _navy),
+            style: TextStyle(fontSize: 16, fontWeight: FontWeight.w700, color: _navy),
             decoration: InputDecoration(
-              hintText: 'Add a title (optional)',
+              hintText: _l10n.addTitleOptional,
               hintStyle: TextStyle(color: _muted.withOpacity(0.6), fontWeight: FontWeight.w600, fontSize: 16),
               border: InputBorder.none,
               isDense: true,
               contentPadding: EdgeInsets.zero,
               suffixIcon: _titleController.text.isNotEmpty
                   ? IconButton(
-                      icon: const Icon(Icons.clear_rounded, size: 18, color: _muted),
-                      tooltip: 'Clear title',
+                      icon: Icon(Icons.clear_rounded, size: 18, color: _muted),
+                      tooltip: _l10n.clearTitleTooltip,
                       onPressed: () => setState(() => _titleController.clear()),
                     )
                   : null,
@@ -1858,8 +1869,8 @@ class _NewPostState extends State<NewPost> with TickerProviderStateMixin {
               fontWeight: _isBold ? FontWeight.w700 : FontWeight.w400,
               fontStyle: _isItalic ? FontStyle.italic : FontStyle.normal,
             ),
-            decoration: const InputDecoration(
-              hintText: "What's on your mind? Use #hashtags to boost reach",
+            decoration: InputDecoration(
+              hintText: _l10n.whatsOnYourMindHashtags,
               hintStyle: TextStyle(color: _muted, fontSize: 15),
               border: InputBorder.none,
               isDense: true,
@@ -1867,7 +1878,7 @@ class _NewPostState extends State<NewPost> with TickerProviderStateMixin {
             ),
             validator: (val) {
               if ((val == null || val.trim().isEmpty) && _attachments.isEmpty && !_hasPoll) {
-                return 'Content, media or poll is required';
+                return _l10n.contentMediaPollRequired;
               }
               return null;
             },
@@ -1888,8 +1899,8 @@ class _NewPostState extends State<NewPost> with TickerProviderStateMixin {
                         ),
                         const SizedBox(width: 8),
                         Text(
-                          _activeTokenType == '@' ? 'Searching people…' : 'Searching hashtags…',
-                          style: const TextStyle(fontSize: 11.5, color: _muted, fontWeight: FontWeight.w500),
+                          _activeTokenType == '@' ? _l10n.searchingPeople : _l10n.searchingHashtags,
+                          style: TextStyle(fontSize: 11.5, color: _muted, fontWeight: FontWeight.w500),
                         ),
                       ],
                     )
@@ -1906,7 +1917,7 @@ class _NewPostState extends State<NewPost> with TickerProviderStateMixin {
                             size: 13,
                             color: _primary,
                           ),
-                          label: Text(value, style: const TextStyle(fontSize: 12.5, fontWeight: FontWeight.w600, color: _navy)),
+                          label: Text(value, style: TextStyle(fontSize: 12.5, fontWeight: FontWeight.w600, color: _navy)),
                           backgroundColor: _primarySoft,
                           side: BorderSide.none,
                           shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
@@ -1924,7 +1935,7 @@ class _NewPostState extends State<NewPost> with TickerProviderStateMixin {
             children: [
               if (_location != null)
                 Chip(
-                  avatar: const Icon(Icons.location_on_rounded, size: 14, color: _primary),
+                  avatar: Icon(Icons.location_on_rounded, size: 14, color: _primary),
                   label: Text(_location!, style: const TextStyle(fontSize: 11)),
                   backgroundColor: _primarySoft,
                   side: BorderSide.none,
@@ -2057,7 +2068,7 @@ class _NewPostState extends State<NewPost> with TickerProviderStateMixin {
                     : (_categoryLabel(_category) ?? ''),
                 maxLines: 1,
                 overflow: TextOverflow.ellipsis,
-                style: const TextStyle(fontSize: 11, fontWeight: FontWeight.w700, color: _primary),
+                style: TextStyle(fontSize: 11, fontWeight: FontWeight.w700, color: _primary),
               ),
             ),
           ],
@@ -2094,7 +2105,7 @@ class _NewPostState extends State<NewPost> with TickerProviderStateMixin {
           Row(
             mainAxisAlignment: MainAxisAlignment.spaceBetween,
             children: [
-              _sectionLabel('${_attachments.length} Attachment${_attachments.length > 1 ? 's' : ''}',
+              _sectionLabel(_l10n.attachmentsCount(_attachments.length),
                   icon: Icons.attach_file_rounded),
               TextButton.icon(
                 onPressed: () => setState(() {
@@ -2102,7 +2113,7 @@ class _NewPostState extends State<NewPost> with TickerProviderStateMixin {
                   _updatePostType();
                 }),
                 icon: Icon(Icons.delete_outline_rounded, size: 16, color: _error),
-                label: const Text('Clear', style: TextStyle(color: _error, fontWeight: FontWeight.w600)),
+                label: Text(_l10n.clearButton, style: TextStyle(color: _error, fontWeight: FontWeight.w600)),
                 style: TextButton.styleFrom(visualDensity: VisualDensity.compact),
               ),
             ],
@@ -2224,7 +2235,7 @@ class _NewPostState extends State<NewPost> with TickerProviderStateMixin {
                     right: -8,
                     child: Semantics(
                       button: true,
-                      label: 'Remove attachment',
+                      label: _l10n.removeAttachmentLabel,
                       child: GestureDetector(
                         onTap: () => _removeAttachment(index),
                         child: Container(
@@ -2263,7 +2274,7 @@ class _NewPostState extends State<NewPost> with TickerProviderStateMixin {
                       right: 6,
                       child: Semantics(
                         button: true,
-                        label: isImage ? 'Edit image' : 'Edit video',
+                        label: isImage ? _l10n.editImageLabel : _l10n.editVideoLabel,
                         child: GestureDetector(
                           onTap: () => _editAttachment(index),
                           child: Container(
@@ -2299,14 +2310,14 @@ class _NewPostState extends State<NewPost> with TickerProviderStateMixin {
           Row(
             mainAxisAlignment: MainAxisAlignment.spaceBetween,
             children: [
-              _sectionLabel('Poll', icon: Icons.poll_rounded, color: _accent),
+              _sectionLabel(_l10n.pollLabel, icon: Icons.poll_rounded, color: _accent),
               IconButton(
                 onPressed: _removePoll,
                 icon: const Icon(Icons.delete_outline_rounded),
                 color: _error,
                 iconSize: 20,
                 visualDensity: VisualDensity.compact,
-                tooltip: 'Remove poll',
+                tooltip: _l10n.removePollTooltip,
               ),
             ],
           ),
@@ -2318,12 +2329,12 @@ class _NewPostState extends State<NewPost> with TickerProviderStateMixin {
                 controller: _pollOptions[index].controller,
                 onChanged: (_) => _scheduleAutoSave(),
                 decoration: InputDecoration(
-                  hintText: 'Option ${index + 1}',
+                  hintText: _l10n.pollOptionNumber(index + 1),
                   prefixIcon: Icon(Icons.radio_button_unchecked_rounded, size: 18, color: _muted.withOpacity(0.5)),
                   suffixIcon: _pollOptions.length > 2
                       ? IconButton(
-                          icon: const Icon(Icons.close_rounded, size: 18, color: _muted),
-                          tooltip: 'Remove option',
+                          icon: Icon(Icons.close_rounded, size: 18, color: _muted),
+                          tooltip: _l10n.removeOptionTooltip,
                           onPressed: () => _removePollOption(index),
                         )
                       : null,
@@ -2333,7 +2344,7 @@ class _NewPostState extends State<NewPost> with TickerProviderStateMixin {
                   enabledBorder:
                       OutlineInputBorder(borderRadius: BorderRadius.circular(12), borderSide: BorderSide.none),
                   focusedBorder:
-                      OutlineInputBorder(borderRadius: BorderRadius.circular(12), borderSide: const BorderSide(color: _primary)),
+                      OutlineInputBorder(borderRadius: BorderRadius.circular(12), borderSide: BorderSide(color: _primary)),
                   contentPadding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
                 ),
               ),
@@ -2343,7 +2354,7 @@ class _NewPostState extends State<NewPost> with TickerProviderStateMixin {
             TextButton.icon(
               onPressed: _addPoll,
               icon: const Icon(Icons.add_rounded, size: 18),
-              label: const Text('Add option'),
+              label: Text(_l10n.addOptionLabel),
               style: TextButton.styleFrom(
                 foregroundColor: _primary,
                 alignment: Alignment.centerLeft,
@@ -2358,10 +2369,10 @@ class _NewPostState extends State<NewPost> with TickerProviderStateMixin {
   // ─── Add Media Card ───
   Widget _buildAddMediaCard() {
     final items = [
-      {'icon': Icons.image_rounded, 'label': 'Photos', 'color': _primary, 'onTap': _pickImages},
-      {'icon': Icons.videocam_rounded, 'label': 'Videos', 'color': _error, 'onTap': _pickVideos},
-      {'icon': Icons.description_rounded, 'label': 'Files', 'color': _warning, 'onTap': _pickDocuments},
-      {'icon': Icons.camera_alt_rounded, 'label': 'Camera', 'color': _success, 'onTap': _showCameraOptions},
+      {'icon': Icons.image_rounded, 'label': _l10n.photosLabel, 'color': _primary, 'onTap': _pickImages},
+      {'icon': Icons.videocam_rounded, 'label': _l10n.videosLabel, 'color': _error, 'onTap': _pickVideos},
+      {'icon': Icons.description_rounded, 'label': _l10n.filesLabel, 'color': _warning, 'onTap': _pickDocuments},
+      {'icon': Icons.camera_alt_rounded, 'label': _l10n.camera, 'color': _success, 'onTap': _showCameraOptions},
     ];
     return Container(
       padding: const EdgeInsets.all(14),
@@ -2414,13 +2425,13 @@ class _NewPostState extends State<NewPost> with TickerProviderStateMixin {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          _sectionLabel('Post Details', icon: Icons.tune_rounded),
+          _sectionLabel(_l10n.postDetailsLabel, icon: Icons.tune_rounded),
           const SizedBox(height: 16),
           _loadingCategories
               ? const _ShimmerLoader(height: 60)
               : _categorySelectorTile(
-                  label: 'CATEGORY *',
-                  placeholder: 'Select a category',
+                  label: _l10n.categoryRequiredLabel,
+                  placeholder: _l10n.selectCategoryError,
                   valueLabel: _categoryLabel(_category),
                   icon: _iconForCategory(_category),
                   hasError: _categoryError,
@@ -2428,8 +2439,8 @@ class _NewPostState extends State<NewPost> with TickerProviderStateMixin {
                 ),
           if (_categoryError) ...[
             const SizedBox(height: 6),
-            const Text(
-              'Selecting a category is required',
+            Text(
+              _l10n.categoryRequiredError,
               style: TextStyle(fontSize: 11.5, fontWeight: FontWeight.w600, color: _error),
             ),
           ],
@@ -2499,8 +2510,8 @@ class _NewPostState extends State<NewPost> with TickerProviderStateMixin {
                       duration: const Duration(milliseconds: 220),
                       opacity: _subcategoriesForSelectedCategory.isEmpty ? 0 : 1,
                       child: _categorySelectorTile(
-                        label: 'SUBCATEGORY',
-                        placeholder: 'Select a subcategory',
+                        label: _l10n.subcategoryRequiredLabel,
+                        placeholder: _l10n.selectSubcategoryError,
                         valueLabel: _subcategoryLabel(_subcategory),
                         icon: Icons.subdirectory_arrow_right_rounded,
                         onTap: _showSubcategoryPicker,
@@ -2636,7 +2647,7 @@ class _NewPostState extends State<NewPost> with TickerProviderStateMixin {
                 ],
               ),
             ),
-            const Icon(Icons.chevron_right_rounded, color: _muted, size: 20),
+            Icon(Icons.chevron_right_rounded, color: _muted, size: 20),
           ],
         ),
       ),
@@ -2650,6 +2661,7 @@ class _NewPostState extends State<NewPost> with TickerProviderStateMixin {
   // only shows once there are enough items to make it worth it.
   Widget _buildPickerSheet({
     required String title,
+    required String searchHint,
     required List<Map<String, String>> entries,
     required Widget Function(Map<String, String> entry) tileBuilder,
   }) {
@@ -2661,7 +2673,7 @@ class _NewPostState extends State<NewPost> with TickerProviderStateMixin {
       filter: ImageFilter.blur(sigmaX: 8, sigmaY: 8),
       child: Container(
         constraints: BoxConstraints(maxHeight: MediaQuery.of(context).size.height * 0.75),
-        decoration: const BoxDecoration(
+        decoration: BoxDecoration(
           color: _surface,
           borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
         ),
@@ -2681,9 +2693,9 @@ class _NewPostState extends State<NewPost> with TickerProviderStateMixin {
             Row(
               children: [
                 Expanded(
-                  child: Text(title, style: const TextStyle(fontSize: 18, fontWeight: FontWeight.w800, color: _navy)),
+                  child: Text(title, style: TextStyle(fontSize: 18, fontWeight: FontWeight.w800, color: _navy)),
                 ),
-                Text('${entries.length}', style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w700, color: _muted)),
+                Text('${entries.length}', style: TextStyle(fontSize: 12, fontWeight: FontWeight.w700, color: _muted)),
               ],
             ),
             if (showSearch) ...[
@@ -2693,16 +2705,16 @@ class _NewPostState extends State<NewPost> with TickerProviderStateMixin {
                 onChanged: (v) => queryNotifier.value = v.trim().toLowerCase(),
                 style: const TextStyle(fontSize: 13.5),
                 decoration: InputDecoration(
-                  hintText: 'Search $title'.replaceFirst('Select ', ''),
-                  hintStyle: const TextStyle(fontSize: 13, color: _muted),
-                  prefixIcon: const Icon(Icons.search_rounded, size: 20, color: _muted),
+                  hintText: _l10n.searchWithin(searchHint),
+                  hintStyle: TextStyle(fontSize: 13, color: _muted),
+                  prefixIcon: Icon(Icons.search_rounded, size: 20, color: _muted),
                   suffixIcon: ValueListenableBuilder<String>(
                     valueListenable: queryNotifier,
                     builder: (ctx, q, _) => q.isEmpty
                         ? const SizedBox.shrink()
                         : IconButton(
-                            icon: const Icon(Icons.clear_rounded, size: 18, color: _muted),
-                            tooltip: 'Clear search',
+                            icon: Icon(Icons.clear_rounded, size: 18, color: _muted),
+                            tooltip: _l10n.clearSearchTooltip,
                             onPressed: () {
                               searchController.clear();
                               queryNotifier.value = '';
@@ -2713,9 +2725,9 @@ class _NewPostState extends State<NewPost> with TickerProviderStateMixin {
                   filled: true,
                   fillColor: const Color(0xFFF8FAFC),
                   contentPadding: const EdgeInsets.symmetric(vertical: 12),
-                  border: OutlineInputBorder(borderRadius: BorderRadius.circular(12), borderSide: const BorderSide(color: _border)),
-                  enabledBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(12), borderSide: const BorderSide(color: _border)),
-                  focusedBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(12), borderSide: const BorderSide(color: _primary, width: 1.5)),
+                  border: OutlineInputBorder(borderRadius: BorderRadius.circular(12), borderSide: BorderSide(color: _border)),
+                  enabledBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(12), borderSide: BorderSide(color: _border)),
+                  focusedBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(12), borderSide: BorderSide(color: _primary, width: 1.5)),
                 ),
               ),
             ],
@@ -2736,7 +2748,7 @@ class _NewPostState extends State<NewPost> with TickerProviderStateMixin {
                           children: [
                             Icon(Icons.search_off_rounded, size: 30, color: _muted.withOpacity(0.5)),
                             const SizedBox(height: 8),
-                            Text('No match for "$query"', style: const TextStyle(fontSize: 12.5, color: _muted, fontWeight: FontWeight.w600)),
+                            Text(_l10n.noMatchForQuery(query), style: TextStyle(fontSize: 12.5, color: _muted, fontWeight: FontWeight.w600)),
                           ],
                         ),
                       ),
@@ -2763,7 +2775,8 @@ class _NewPostState extends State<NewPost> with TickerProviderStateMixin {
       isScrollControlled: true,
       backgroundColor: Colors.transparent,
       builder: (ctx) => _buildPickerSheet(
-        title: 'Select Category',
+        title: _l10n.selectCategoryTitle,
+        searchHint: _l10n.categoryNoun,
         entries: _categories,
         tileBuilder: (c) {
           final key = c['key'];
@@ -2778,10 +2791,10 @@ class _NewPostState extends State<NewPost> with TickerProviderStateMixin {
               ),
               child: Icon(_iconForCategory(key), size: 18, color: selected ? Colors.white : _primary),
             ),
-            title: Text(c['label'] ?? '', style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w600, color: _navy)),
+            title: Text(c['label'] ?? '', style: TextStyle(fontSize: 14, fontWeight: FontWeight.w600, color: _navy)),
             subtitle: Text(
               '${(_categorySubcategoryMap[key] ?? const <String>[]).length} subcategories',
-              style: const TextStyle(fontSize: 11, color: _muted),
+              style: TextStyle(fontSize: 11, color: _muted),
             ),
             trailing: selected ? const Icon(Icons.check_circle_rounded, color: _success) : null,
             shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
@@ -2821,13 +2834,14 @@ class _NewPostState extends State<NewPost> with TickerProviderStateMixin {
       isScrollControlled: true,
       backgroundColor: Colors.transparent,
       builder: (ctx) => _buildPickerSheet(
-        title: 'Select Subcategory',
+        title: _l10n.selectSubcategoryTitle,
+        searchHint: _l10n.subcategoryNoun,
         entries: subs,
         tileBuilder: (s) {
           final selected = _subcategory == s['key'];
           return ListTile(
             contentPadding: const EdgeInsets.symmetric(horizontal: 4),
-            title: Text(s['label'] ?? '', style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w600, color: _navy)),
+            title: Text(s['label'] ?? '', style: TextStyle(fontSize: 14, fontWeight: FontWeight.w600, color: _navy)),
             trailing: selected ? const Icon(Icons.check_circle_rounded, color: _success) : null,
             shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
             onTap: () {
@@ -2853,7 +2867,7 @@ class _NewPostState extends State<NewPost> with TickerProviderStateMixin {
         children: [
           Row(
             children: [
-              Expanded(child: _sectionLabel('Schedule', icon: Icons.schedule_rounded)),
+              Expanded(child: _sectionLabel(_l10n.scheduleLabel, icon: Icons.schedule_rounded)),
               Switch.adaptive(
                 value: _scheduledDateTime != null,
                 activeColor: _primary,
@@ -2870,14 +2884,14 @@ class _NewPostState extends State<NewPost> with TickerProviderStateMixin {
           ),
           if (_scheduledDateTime == null) ...[
             const SizedBox(height: 12),
-            const Divider(height: 1, color: _border),
+            Divider(height: 1, color: _border),
             const SizedBox(height: 12),
             Wrap(
               spacing: 8,
               runSpacing: 8,
               children: _scheduleQuickPicks.map((pick) {
                 return ActionChip(
-                  avatar: const Icon(Icons.bolt_rounded, size: 14, color: _accent),
+                  avatar: Icon(Icons.bolt_rounded, size: 14, color: _accent),
                   label: Text(pick['label'] as String, style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w700)),
                   backgroundColor: _primarySoft,
                   side: BorderSide.none,
@@ -2890,7 +2904,7 @@ class _NewPostState extends State<NewPost> with TickerProviderStateMixin {
           ],
           if (_scheduledDateTime != null) ...[
             const SizedBox(height: 12),
-            const Divider(height: 1, color: _border),
+            Divider(height: 1, color: _border),
             const SizedBox(height: 14),
             InkWell(
               onTap: _pickScheduleDateTime,
@@ -2904,7 +2918,7 @@ class _NewPostState extends State<NewPost> with TickerProviderStateMixin {
                 ),
                 child: Row(
                   children: [
-                    const Icon(Icons.event_available_rounded, size: 20, color: _primary),
+                    Icon(Icons.event_available_rounded, size: 20, color: _primary),
                     const SizedBox(width: 12),
                     Expanded(
                       child: Column(
@@ -2912,17 +2926,17 @@ class _NewPostState extends State<NewPost> with TickerProviderStateMixin {
                         children: [
                           Text(
                             _formatSchedule(_scheduledDateTime!),
-                            style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w700, color: _navy),
+                            style: TextStyle(fontSize: 14, fontWeight: FontWeight.w700, color: _navy),
                           ),
                           const SizedBox(height: 2),
-                          const Text(
-                            'Auto-publish at scheduled time',
+                          Text(
+                            _l10n.autoPublishSubtitle,
                             style: TextStyle(fontSize: 11, color: _muted),
                           ),
                         ],
                       ),
                     ),
-                    const Icon(Icons.edit_rounded, size: 18, color: _primary),
+                    Icon(Icons.edit_rounded, size: 18, color: _primary),
                   ],
                 ),
               ),
@@ -2946,17 +2960,17 @@ class _NewPostState extends State<NewPost> with TickerProviderStateMixin {
             Container(
               padding: const EdgeInsets.all(10),
               decoration: BoxDecoration(color: _primarySoft, borderRadius: BorderRadius.circular(12)),
-              child: const Icon(Icons.location_on_rounded, color: _primary, size: 20),
+              child: Icon(Icons.location_on_rounded, color: _primary, size: 20),
             ),
             const SizedBox(width: 14),
             Expanded(
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  _sectionLabel('Location'),
+                  _sectionLabel(_l10n.locationLabel),
                   const SizedBox(height: 4),
                   Text(
-                    _location ?? 'Add location tag',
+                    _location ?? _l10n.addLocationTagPlaceholder,
                     style: TextStyle(
                       fontSize: 13.5,
                       fontWeight: FontWeight.w600,
@@ -3062,6 +3076,7 @@ class _ShimmerLoaderState extends State<_ShimmerLoader> with SingleTickerProvide
 
   @override
   Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
     return AnimatedBuilder(
       animation: _controller,
       builder: (context, child) {
@@ -3070,7 +3085,7 @@ class _ShimmerLoaderState extends State<_ShimmerLoader> with SingleTickerProvide
           decoration: BoxDecoration(
             borderRadius: BorderRadius.circular(14),
             gradient: LinearGradient(
-              colors: const [Color(0xFFE2E8F0), Color(0xFFF1F5F9), Color(0xFFE2E8F0)],
+              colors: [cs.surfaceVariant, cs.surface, cs.surfaceVariant],
               stops: [0.0, _controller.value, 1.0],
               begin: const Alignment(-1, 0),
               end: const Alignment(1, 0),

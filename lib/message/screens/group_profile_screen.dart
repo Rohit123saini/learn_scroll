@@ -61,10 +61,8 @@ import '../../services/auth_service.dart';
 import 'conversations_screen.dart';
 import 'group_media_screen.dart'; // 🔥 NAYA — shared media/links/docs gallery
 import 'doubts_screen.dart'; // 🔥 NAYA — "Doubts" tab entry point
+import '../../theme_service.dart'; // 🎨 THEME FIX — AppThemeTokens
 
-const _kNavy = Color(0xFF030F27);
-const _kAccent = Color(0xFFEE0979);
-const _kBg = Color(0xFFF6F7FB);
 
 class GroupProfileScreen extends StatefulWidget {
   final String groupId;
@@ -551,14 +549,14 @@ class _GroupProfileScreenState extends State<GroupProfileScreen> {
       builder: (ctx) => SafeArea(
         child: Column(mainAxisSize: MainAxisSize.min, children: [
           ListTile(
-            leading: const Icon(Icons.photo_camera_rounded, color: _kAccent),
+            leading: Icon(Icons.photo_camera_rounded, color: AppThemeTokens.of(ctx).coral),
             title: const Text("Change group photo"),
             onTap: () => Navigator.pop(ctx, 'change'),
           ),
           if (_photoUrl != null && _photoUrl!.isNotEmpty)
             ListTile(
-              leading: const Icon(Icons.delete_outline_rounded, color: Colors.red),
-              title: const Text("Remove photo", style: TextStyle(color: Colors.red)),
+              leading: Icon(Icons.delete_outline_rounded, color: Theme.of(ctx).colorScheme.error),
+              title: Text("Remove photo", style: TextStyle(color: Theme.of(ctx).colorScheme.error)),
               onTap: () => Navigator.pop(ctx, 'remove'),
             ),
         ]),
@@ -624,23 +622,23 @@ class _GroupProfileScreenState extends State<GroupProfileScreen> {
       builder: (ctx) => SafeArea(
         child: Column(mainAxisSize: MainAxisSize.min, children: [
           ListTile(
-            leading: const Icon(Icons.shield_rounded, color: _kAccent),
+            leading: Icon(Icons.shield_rounded, color: AppThemeTokens.of(ctx).coral),
             title: Text(role == 'admin' ? "Remove as admin" : "Make group admin"),
             onTap: () => Navigator.pop(ctx, role == 'admin' ? 'demote_admin' : 'make_admin'),
           ),
           ListTile(
-            leading: const Icon(Icons.verified_user_outlined, color: _kNavy),
+            leading: Icon(Icons.verified_user_outlined, color: Theme.of(ctx).colorScheme.primary),
             title: Text(role == 'moderator' ? "Remove as moderator" : "Make moderator"),
             onTap: () => Navigator.pop(ctx, role == 'moderator' ? 'demote_mod' : 'make_mod'),
           ),
           ListTile(
-            leading: const Icon(Icons.person_remove_rounded, color: Colors.red),
-            title: const Text("Remove from group", style: TextStyle(color: Colors.red)),
+            leading: Icon(Icons.person_remove_rounded, color: Theme.of(ctx).colorScheme.error),
+            title: Text("Remove from group", style: TextStyle(color: Theme.of(ctx).colorScheme.error)),
             onTap: () => Navigator.pop(ctx, 'remove'),
           ),
           ListTile(
-            leading: const Icon(Icons.block_rounded, color: Colors.red),
-            title: const Text("Ban from group", style: TextStyle(color: Colors.red)),
+            leading: Icon(Icons.block_rounded, color: Theme.of(ctx).colorScheme.error),
+            title: Text("Ban from group", style: TextStyle(color: Theme.of(ctx).colorScheme.error)),
             onTap: () => Navigator.pop(ctx, 'ban'),
           ),
         ]),
@@ -691,7 +689,7 @@ class _GroupProfileScreenState extends State<GroupProfileScreen> {
         content: const Text("Aap is group se nikal jaoge, dobara add hone ke liye kisi member ko invite karna padega."),
         actions: [
           TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text("Cancel")),
-          TextButton(onPressed: () => Navigator.pop(ctx, true), child: const Text("Leave", style: TextStyle(color: Colors.red))),
+          TextButton(onPressed: () => Navigator.pop(ctx, true), child: Text("Leave", style: TextStyle(color: Theme.of(ctx).colorScheme.error))),
         ],
       ),
     );
@@ -717,7 +715,7 @@ class _GroupProfileScreenState extends State<GroupProfileScreen> {
         content: const Text("Ye poora group, saare messages aur media permanently delete ho jaayenge — ye undo nahi ho sakta."),
         actions: [
           TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text("Cancel")),
-          TextButton(onPressed: () => Navigator.pop(ctx, true), child: const Text("Delete", style: TextStyle(color: Colors.red))),
+          TextButton(onPressed: () => Navigator.pop(ctx, true), child: Text("Delete", style: TextStyle(color: Theme.of(ctx).colorScheme.error))),
         ],
       ),
     );
@@ -740,18 +738,18 @@ class _GroupProfileScreenState extends State<GroupProfileScreen> {
 
   @override
   Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
     return Scaffold(
-      backgroundColor: _kBg,
       appBar: AppBar(
-        backgroundColor: _kNavy,
+        backgroundColor: cs.primary,
         elevation: 0,
-        foregroundColor: Colors.white,
+        foregroundColor: cs.onPrimary,
         title: const Text("Group info", style: TextStyle(fontWeight: FontWeight.w700)),
       ),
       body: _loading
-          ? const Center(child: CircularProgressIndicator(color: _kNavy))
+          ? Center(child: CircularProgressIndicator(color: cs.primary))
           : _loadError != null
-              ? Center(child: Padding(padding: const EdgeInsets.all(24), child: Text(_loadError!, style: const TextStyle(color: Colors.red))))
+              ? Center(child: Padding(padding: const EdgeInsets.all(24), child: Text(_loadError!, style: TextStyle(color: cs.error))))
               : RefreshIndicator(
                   onRefresh: _load,
                   child: ListView(
@@ -787,20 +785,27 @@ class _GroupProfileScreenState extends State<GroupProfileScreen> {
   // dialog/screen nahi. Har field ka apna save/cancel state hai taaki
   // dono ek saath bhi edit ho sakein.
   Widget _buildHeader() {
+    final cs = Theme.of(context).colorScheme;
+    final coral = AppThemeTokens.of(context).coral;
+    // 🎨 THEME FIX — pehle hardcoded navy gradient tha, ab theme ke primary
+    // color se derive hota hai (light me purple, dark me lighter purple) —
+    // header ab dono theme modes me sahi dikhta hai, gradient look bhi
+    // barkarar hai (primary → thoda darkened primary).
+    final gradientEnd = Color.lerp(cs.primary, Colors.black, 0.22)!;
     return Container(
       width: double.infinity,
       decoration: BoxDecoration(
-        gradient: const LinearGradient(
+        gradient: LinearGradient(
           begin: Alignment.topLeft,
           end: Alignment.bottomRight,
-          colors: [_kNavy, Color(0xFF10214F)],
+          colors: [cs.primary, gradientEnd],
         ),
         borderRadius: const BorderRadius.only(
           bottomLeft: Radius.circular(28),
           bottomRight: Radius.circular(28),
         ),
         boxShadow: [
-          BoxShadow(color: _kNavy.withOpacity(0.25), blurRadius: 18, offset: const Offset(0, 8)),
+          BoxShadow(color: cs.primary.withOpacity(0.25), blurRadius: 18, offset: const Offset(0, 8)),
         ],
       ),
       padding: const EdgeInsets.fromLTRB(24, 28, 24, 26),
@@ -817,16 +822,16 @@ class _GroupProfileScreenState extends State<GroupProfileScreen> {
                 padding: const EdgeInsets.all(3),
                 decoration: BoxDecoration(
                   shape: BoxShape.circle,
-                  border: Border.all(color: Colors.white.withOpacity(0.85), width: 2.5),
+                  border: Border.all(color: cs.onPrimary.withOpacity(0.85), width: 2.5),
                   boxShadow: [
                     BoxShadow(color: Colors.black.withOpacity(0.25), blurRadius: 14, offset: const Offset(0, 6)),
                   ],
                 ),
                 child: CircleAvatar(
                   radius: 46,
-                  backgroundColor: Colors.white.withOpacity(0.12),
+                  backgroundColor: cs.onPrimary.withOpacity(0.12),
                   backgroundImage: (_photoUrl != null && _photoUrl!.isNotEmpty) ? CachedNetworkImageProvider(_photoUrl!) : null,
-                  child: (_photoUrl == null || _photoUrl!.isEmpty) ? const Icon(Icons.group_rounded, size: 42, color: Colors.white70) : null,
+                  child: (_photoUrl == null || _photoUrl!.isEmpty) ? Icon(Icons.group_rounded, size: 42, color: cs.onPrimary.withOpacity(0.7)) : null,
                 ),
               ),
               if (_isAdminOrMod)
@@ -836,10 +841,10 @@ class _GroupProfileScreenState extends State<GroupProfileScreen> {
                   child: Container(
                     padding: const EdgeInsets.all(6),
                     decoration: BoxDecoration(
-                      color: _kAccent,
+                      color: coral,
                       shape: BoxShape.circle,
-                      border: Border.all(color: _kNavy, width: 2),
-                      boxShadow: [BoxShadow(color: _kAccent.withOpacity(0.5), blurRadius: 8)],
+                      border: Border.all(color: cs.primary, width: 2),
+                      boxShadow: [BoxShadow(color: coral.withOpacity(0.5), blurRadius: 8)],
                     ),
                     child: const Icon(Icons.camera_alt_rounded, size: 14, color: Colors.white),
                   ),
@@ -862,8 +867,8 @@ class _GroupProfileScreenState extends State<GroupProfileScreen> {
           maxLines: 1,
           textAlign: TextAlign.center,
           emptyPlaceholder: null,
-          viewStyle: const TextStyle(fontSize: 20, fontWeight: FontWeight.w800, color: Colors.white, height: 1.25),
-          editStyle: const TextStyle(fontSize: 20, fontWeight: FontWeight.w800, color: Colors.white, height: 1.25),
+          viewStyle: TextStyle(fontSize: 20, fontWeight: FontWeight.w800, color: cs.onPrimary, height: 1.25),
+          editStyle: TextStyle(fontSize: 20, fontWeight: FontWeight.w800, color: cs.onPrimary, height: 1.25),
           displayText: _name,
           hintText: "Group name",
         ),
@@ -875,19 +880,19 @@ class _GroupProfileScreenState extends State<GroupProfileScreen> {
           Container(
             padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
             decoration: BoxDecoration(
-              color: Colors.white.withOpacity(0.12),
+              color: cs.onPrimary.withOpacity(0.12),
               borderRadius: BorderRadius.circular(20),
-              border: Border.all(color: Colors.white.withOpacity(0.18)),
+              border: Border.all(color: cs.onPrimary.withOpacity(0.18)),
             ),
             child: Row(mainAxisSize: MainAxisSize.min, children: [
               Icon(
                 _myRole == 'admin' ? Icons.shield_rounded : (_myRole == 'moderator' ? Icons.verified_user_rounded : Icons.person_rounded),
-                size: 13, color: Colors.white70,
+                size: 13, color: cs.onPrimary.withOpacity(0.7),
               ),
               const SizedBox(width: 5),
               Text(
                 _myRole == 'admin' ? "You're an admin" : (_myRole == 'moderator' ? "You're a moderator" : "Member"),
-                style: const TextStyle(fontSize: 11, fontWeight: FontWeight.w600, color: Colors.white70),
+                style: TextStyle(fontSize: 11, fontWeight: FontWeight.w600, color: cs.onPrimary.withOpacity(0.7)),
               ),
             ]),
           ),
@@ -908,8 +913,8 @@ class _GroupProfileScreenState extends State<GroupProfileScreen> {
           minLines: 1,
           textAlign: TextAlign.center,
           emptyPlaceholder: _isAdminOrMod ? "Add group description" : null,
-          viewStyle: TextStyle(fontSize: 13, color: Colors.white.withOpacity(0.75), height: 1.4),
-          editStyle: TextStyle(fontSize: 13, color: Colors.white.withOpacity(0.95), height: 1.4),
+          viewStyle: TextStyle(fontSize: 13, color: cs.onPrimary.withOpacity(0.75), height: 1.4),
+          editStyle: TextStyle(fontSize: 13, color: cs.onPrimary.withOpacity(0.95), height: 1.4),
           displayText: _description,
           hintText: "Group description",
         ),
@@ -942,6 +947,11 @@ class _GroupProfileScreenState extends State<GroupProfileScreen> {
     TextAlign textAlign = TextAlign.start,
   }) {
     final hasText = displayText.trim().isNotEmpty;
+    // 🎨 THEME FIX — ye field hamesha header ke gradient (theme primary)
+    // background ke upar render hota hai, isliye onPrimary + coral accent
+    // use kar rahe hain — dono theme mode me sahi contrast milta hai.
+    final cs = Theme.of(context).colorScheme;
+    final coral = AppThemeTokens.of(context).coral;
 
     return AnimatedSwitcher(
       duration: const Duration(milliseconds: 220),
@@ -959,9 +969,9 @@ class _GroupProfileScreenState extends State<GroupProfileScreen> {
                 Container(
                   padding: EdgeInsets.symmetric(horizontal: 14, vertical: maxLines > 1 ? 8 : 4),
                   decoration: BoxDecoration(
-                    color: Colors.white.withOpacity(0.14),
+                    color: cs.onPrimary.withOpacity(0.14),
                     borderRadius: BorderRadius.circular(14),
-                    border: Border.all(color: _kAccent.withOpacity(0.7), width: 1.4),
+                    border: Border.all(color: coral.withOpacity(0.7), width: 1.4),
                   ),
                   child: TextField(
                     controller: controller,
@@ -970,7 +980,7 @@ class _GroupProfileScreenState extends State<GroupProfileScreen> {
                     minLines: minLines,
                     textAlign: textAlign,
                     style: editStyle,
-                    cursorColor: _kAccent,
+                    cursorColor: coral,
                     enabled: !isSaving,
                     textInputAction: maxLines > 1 ? TextInputAction.newline : TextInputAction.done,
                     onSubmitted: maxLines > 1 ? null : (_) => onSave(),
@@ -978,7 +988,7 @@ class _GroupProfileScreenState extends State<GroupProfileScreen> {
                       isDense: true,
                       border: InputBorder.none,
                       hintText: hintText,
-                      hintStyle: editStyle.copyWith(color: Colors.white38),
+                      hintStyle: editStyle.copyWith(color: cs.onPrimary.withOpacity(0.4)),
                     ),
                   ),
                 ),
@@ -986,15 +996,15 @@ class _GroupProfileScreenState extends State<GroupProfileScreen> {
                 Row(mainAxisSize: MainAxisSize.min, children: [
                   _InlinePillButton(
                     icon: Icons.close_rounded,
-                    color: Colors.white70,
-                    background: Colors.white.withOpacity(0.1),
+                    color: cs.onPrimary.withOpacity(0.8),
+                    background: cs.onPrimary.withOpacity(0.1),
                     onTap: isSaving ? null : onCancel,
                   ),
                   const SizedBox(width: 10),
                   _InlinePillButton(
                     icon: Icons.check_rounded,
                     color: Colors.white,
-                    background: _kAccent,
+                    background: coral,
                     isLoading: isSaving,
                     onTap: isSaving ? null : onSave,
                   ),
@@ -1008,7 +1018,7 @@ class _GroupProfileScreenState extends State<GroupProfileScreen> {
               child: Container(
                 padding: EdgeInsets.symmetric(horizontal: canEdit ? 10 : 0, vertical: 4),
                 decoration: canEdit
-                    ? BoxDecoration(borderRadius: BorderRadius.circular(10), color: Colors.white.withOpacity(0.0))
+                    ? BoxDecoration(borderRadius: BorderRadius.circular(10), color: cs.onPrimary.withOpacity(0.0))
                     : null,
                 child: Row(mainAxisSize: MainAxisSize.min, children: [
                   Flexible(
@@ -1019,12 +1029,12 @@ class _GroupProfileScreenState extends State<GroupProfileScreen> {
                       overflow: TextOverflow.ellipsis,
                       style: hasText
                           ? viewStyle
-                          : viewStyle.copyWith(fontStyle: FontStyle.italic, color: Colors.white38),
+                          : viewStyle.copyWith(fontStyle: FontStyle.italic, color: cs.onPrimary.withOpacity(0.4)),
                     ),
                   ),
                   if (canEdit) ...[
                     const SizedBox(width: 6),
-                    Icon(Icons.edit_rounded, size: 13, color: Colors.white.withOpacity(0.45)),
+                    Icon(Icons.edit_rounded, size: 13, color: cs.onPrimary.withOpacity(0.45)),
                   ],
                 ]),
               ),
@@ -1037,6 +1047,7 @@ class _GroupProfileScreenState extends State<GroupProfileScreen> {
   // full-bleed white bars ki jagah. Optional `label` upar ek small caps
   // section heading ke tor pe (jaise "PRIVACY", "PERMISSIONS") dikhta hai.
   Widget _cardShell({required Widget child, String? label, EdgeInsetsGeometry? padding}) {
+    final cs = Theme.of(context).colorScheme;
     return Padding(
       padding: const EdgeInsets.only(top: 14),
       child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
@@ -1049,7 +1060,7 @@ class _GroupProfileScreenState extends State<GroupProfileScreen> {
                 fontSize: 11.5,
                 fontWeight: FontWeight.w700,
                 letterSpacing: 0.6,
-                color: Colors.grey[500],
+                color: cs.onSurfaceVariant,
               ),
             ),
           ),
@@ -1058,7 +1069,7 @@ class _GroupProfileScreenState extends State<GroupProfileScreen> {
           margin: const EdgeInsets.symmetric(horizontal: 12),
           padding: padding ?? const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
           decoration: BoxDecoration(
-            color: Colors.white,
+            color: cs.surface,
             borderRadius: BorderRadius.circular(16),
             boxShadow: [
               BoxShadow(color: Colors.black.withOpacity(0.045), blurRadius: 10, offset: const Offset(0, 3)),
@@ -1074,7 +1085,7 @@ class _GroupProfileScreenState extends State<GroupProfileScreen> {
     return _cardShell(
       label: 'Privacy',
       child: Row(children: [
-        Icon(_isPrivate ? Icons.lock_rounded : Icons.public_rounded, color: _kNavy, size: 20),
+        Icon(_isPrivate ? Icons.lock_rounded : Icons.public_rounded, color: Theme.of(context).colorScheme.primary, size: 20),
         const SizedBox(width: 12),
         Expanded(
           child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
@@ -1083,7 +1094,7 @@ class _GroupProfileScreenState extends State<GroupProfileScreen> {
               _isPrivate
                   ? "Sirf admin/moderator members list aur invite link access kar sakte hain"
                   : "Har member invite link bhej sakta hai aur members list dekh sakta hai",
-              style: TextStyle(fontSize: 11.5, color: Colors.grey[600]),
+              style: TextStyle(fontSize: 11.5, color: Theme.of(context).colorScheme.onSurfaceVariant),
             ),
           ]),
         ),
@@ -1092,7 +1103,7 @@ class _GroupProfileScreenState extends State<GroupProfileScreen> {
         if (_isAdminOrMod)
           Switch(
             value: _isPrivate,
-            activeColor: _kAccent,
+            activeColor: AppThemeTokens.of(context).coral,
             onChanged: _savingSettings ? null : _togglePrivacy,
           ),
       ]),
@@ -1108,10 +1119,10 @@ class _GroupProfileScreenState extends State<GroupProfileScreen> {
     return _cardShell(
       label: 'Permissions',
       child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-        const Text("Messaging", style: TextStyle(fontWeight: FontWeight.w700, fontSize: 13.5, color: _kNavy)),
+        Text("Messaging", style: TextStyle(fontWeight: FontWeight.w700, fontSize: 13.5, color: Theme.of(context).colorScheme.primary)),
         const SizedBox(height: 10),
         Row(children: [
-          Icon(Icons.forum_outlined, color: _kNavy, size: 19),
+          Icon(Icons.forum_outlined, color: Theme.of(context).colorScheme.primary, size: 19),
           const SizedBox(width: 12),
           const Expanded(child: Text("Who can send messages", style: TextStyle(fontSize: 13.5))),
           DropdownButton<String>(
@@ -1126,7 +1137,7 @@ class _GroupProfileScreenState extends State<GroupProfileScreen> {
         ]),
         const Divider(height: 22),
         Row(children: [
-          Icon(Icons.timer_outlined, color: _kNavy, size: 19),
+          Icon(Icons.timer_outlined, color: Theme.of(context).colorScheme.primary, size: 19),
           const SizedBox(width: 12),
           const Expanded(child: Text("Daily message limit per member", style: TextStyle(fontSize: 13.5))),
           DropdownButton<int?>(
@@ -1147,17 +1158,17 @@ class _GroupProfileScreenState extends State<GroupProfileScreen> {
           padding: const EdgeInsets.only(top: 6),
           child: Text(
             "Admins & moderators are always exempt from the daily limit.",
-            style: TextStyle(fontSize: 11, color: Colors.grey[500]),
+            style: TextStyle(fontSize: 11, color: Theme.of(context).colorScheme.onSurfaceVariant),
           ),
         ),
 
         const Divider(height: 26),
 
         // ---------------- CALLS ----------------
-        const Text("Calls", style: TextStyle(fontWeight: FontWeight.w700, fontSize: 13.5, color: _kNavy)),
+        Text("Calls", style: TextStyle(fontWeight: FontWeight.w700, fontSize: 13.5, color: Theme.of(context).colorScheme.primary)),
         const SizedBox(height: 10),
         Row(children: [
-          Icon(Icons.call_outlined, color: _kNavy, size: 19),
+          Icon(Icons.call_outlined, color: Theme.of(context).colorScheme.primary, size: 19),
           const SizedBox(width: 12),
           const Expanded(child: Text("Who can start a call", style: TextStyle(fontSize: 13.5))),
           DropdownButton<String>(
@@ -1174,10 +1185,10 @@ class _GroupProfileScreenState extends State<GroupProfileScreen> {
         const Divider(height: 26),
 
         // ---------------- STUDY ROOM ----------------
-        const Text("Study room", style: TextStyle(fontWeight: FontWeight.w700, fontSize: 13.5, color: _kNavy)),
+        Text("Study room", style: TextStyle(fontWeight: FontWeight.w700, fontSize: 13.5, color: Theme.of(context).colorScheme.primary)),
         const SizedBox(height: 10),
         Row(children: [
-          Icon(Icons.school_outlined, color: _kNavy, size: 19),
+          Icon(Icons.school_outlined, color: Theme.of(context).colorScheme.primary, size: 19),
           const SizedBox(width: 12),
           const Expanded(child: Text("Who can start the study room", style: TextStyle(fontSize: 13.5))),
           DropdownButton<String>(
@@ -1195,22 +1206,22 @@ class _GroupProfileScreenState extends State<GroupProfileScreen> {
             padding: const EdgeInsets.only(top: 10),
             child: Text(
               "This group is private — messages, calls and the study room default to admins & moderators only until you change them here.",
-              style: TextStyle(fontSize: 11, color: Colors.grey[500]),
+              style: TextStyle(fontSize: 11, color: Theme.of(context).colorScheme.onSurfaceVariant),
             ),
           ),
 
         const Divider(height: 26),
 
         // ---------------- DOUBT QUEUE ----------------
-        const Text("Doubts", style: TextStyle(fontWeight: FontWeight.w700, fontSize: 13.5, color: _kNavy)),
+        Text("Doubts", style: TextStyle(fontWeight: FontWeight.w700, fontSize: 13.5, color: Theme.of(context).colorScheme.primary)),
         const SizedBox(height: 10),
         Row(children: [
-          Icon(Icons.visibility_off_outlined, color: _kNavy, size: 19),
+          Icon(Icons.visibility_off_outlined, color: Theme.of(context).colorScheme.primary, size: 19),
           const SizedBox(width: 12),
           const Expanded(child: Text("Allow anonymous doubts", style: TextStyle(fontSize: 13.5))),
           Switch(
             value: _allowAnonymousDoubts,
-            activeColor: _kAccent,
+            activeColor: AppThemeTokens.of(context).coral,
             onChanged: _savingSettings ? null : _updateAllowAnonymousDoubts,
           ),
         ]),
@@ -1218,7 +1229,7 @@ class _GroupProfileScreenState extends State<GroupProfileScreen> {
           padding: const EdgeInsets.only(top: 6),
           child: Text(
             "When on, students can post a doubt without their name being shown to the teacher unless it's revealed.",
-            style: TextStyle(fontSize: 11, color: Colors.grey[500]),
+            style: TextStyle(fontSize: 11, color: Theme.of(context).colorScheme.onSurfaceVariant),
           ),
         ),
       ]),
@@ -1237,10 +1248,10 @@ class _GroupProfileScreenState extends State<GroupProfileScreen> {
     return _cardShell(
       padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 2),
       child: ListTile(
-        leading: const Icon(Icons.help_outline_rounded, color: _kAccent, size: 20),
+        leading: Icon(Icons.help_outline_rounded, color: AppThemeTokens.of(context).coral, size: 20),
         title: const Text("Doubts", style: TextStyle(fontWeight: FontWeight.w600, fontSize: 14)),
         subtitle: const Text("Ask, upvote and answer classroom doubts", style: TextStyle(fontSize: 11.5)),
-        trailing: const Icon(Icons.chevron_right_rounded, color: Colors.grey),
+        trailing: Icon(Icons.chevron_right_rounded, color: Theme.of(context).colorScheme.onSurfaceVariant),
         onTap: () {
           Navigator.push(
             context,
@@ -1261,9 +1272,9 @@ class _GroupProfileScreenState extends State<GroupProfileScreen> {
     return _cardShell(
       padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 2),
       child: ListTile(
-        leading: const Icon(Icons.perm_media_rounded, color: _kAccent, size: 20),
+        leading: Icon(Icons.perm_media_rounded, color: AppThemeTokens.of(context).coral, size: 20),
         title: const Text("Media, links and docs", style: TextStyle(fontWeight: FontWeight.w600, fontSize: 14)),
-        trailing: const Icon(Icons.chevron_right_rounded, color: Colors.grey),
+        trailing: Icon(Icons.chevron_right_rounded, color: Theme.of(context).colorScheme.onSurfaceVariant),
         onTap: () {
           Navigator.push(context, MaterialPageRoute(builder: (_) => GroupMediaScreen(groupId: widget.groupId)));
         },
@@ -1275,15 +1286,15 @@ class _GroupProfileScreenState extends State<GroupProfileScreen> {
     return _cardShell(
       padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
       child: Row(children: [
-        const Icon(Icons.link_rounded, color: _kAccent, size: 20),
+        Icon(Icons.link_rounded, color: AppThemeTokens.of(context).coral, size: 20),
         const SizedBox(width: 12),
         Expanded(
           child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
             const Text("Invite link", style: TextStyle(fontWeight: FontWeight.w600, fontSize: 14)),
-            Text(_inviteLink, style: TextStyle(fontSize: 12, color: Colors.grey[600]), overflow: TextOverflow.ellipsis),
+            Text(_inviteLink, style: TextStyle(fontSize: 12, color: Theme.of(context).colorScheme.onSurfaceVariant), overflow: TextOverflow.ellipsis),
           ]),
         ),
-        IconButton(icon: const Icon(Icons.copy_rounded, size: 19, color: _kNavy), onPressed: _copyInviteLink),
+        IconButton(icon: Icon(Icons.copy_rounded, size: 19, color: Theme.of(context).colorScheme.primary), onPressed: _copyInviteLink),
       ]),
     );
   }
@@ -1296,7 +1307,7 @@ class _GroupProfileScreenState extends State<GroupProfileScreen> {
     if (_loadingRequests) {
       return _cardShell(
         padding: const EdgeInsets.all(16),
-        child: const Center(child: SizedBox(width: 18, height: 18, child: CircularProgressIndicator(strokeWidth: 2, color: _kNavy))),
+        child: Center(child: SizedBox(width: 18, height: 18, child: CircularProgressIndicator(strokeWidth: 2, color: Theme.of(context).colorScheme.primary))),
       );
     }
     if (_joinRequests.isEmpty) return const SizedBox.shrink();
@@ -1307,27 +1318,27 @@ class _GroupProfileScreenState extends State<GroupProfileScreen> {
         Padding(
           padding: const EdgeInsets.fromLTRB(4, 6, 4, 4),
           child: Row(children: [
-            const Text("Join requests", style: TextStyle(fontWeight: FontWeight.w700, fontSize: 13.5, color: _kNavy)),
+            Text("Join requests", style: TextStyle(fontWeight: FontWeight.w700, fontSize: 13.5, color: Theme.of(context).colorScheme.primary)),
             const SizedBox(width: 8),
             Container(
               padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
-              decoration: BoxDecoration(color: _kAccent.withOpacity(0.12), borderRadius: BorderRadius.circular(20)),
-              child: Text('${_joinRequests.length}', style: const TextStyle(fontSize: 11.5, fontWeight: FontWeight.w700, color: _kAccent)),
+              decoration: BoxDecoration(color: AppThemeTokens.of(context).coral.withOpacity(0.12), borderRadius: BorderRadius.circular(20)),
+              child: Text('${_joinRequests.length}', style: TextStyle(fontSize: 11.5, fontWeight: FontWeight.w700, color: AppThemeTokens.of(context).coral)),
             ),
           ]),
         ),
         ..._joinRequests.map((r) => ListTile(
               leading: CircleAvatar(
                 radius: 18,
-                backgroundColor: Colors.grey[200],
+                backgroundColor: Theme.of(context).colorScheme.onSurfaceVariant,
                 backgroundImage: (r['avatar'] != null && (r['avatar'] as String).isNotEmpty) ? CachedNetworkImageProvider(r['avatar']) : null,
-                child: (r['avatar'] == null || (r['avatar'] as String).isEmpty) ? Icon(Icons.person_rounded, color: Colors.grey[500], size: 18) : null,
+                child: (r['avatar'] == null || (r['avatar'] as String).isEmpty) ? Icon(Icons.person_rounded, color: Theme.of(context).colorScheme.onSurfaceVariant, size: 18) : null,
               ),
               title: Text(r['name'] as String, style: const TextStyle(fontWeight: FontWeight.w600, fontSize: 13.5)),
-              subtitle: (r['username'] as String).isNotEmpty ? Text('@${r['username']}', style: TextStyle(fontSize: 11, color: Colors.grey[600])) : null,
+              subtitle: (r['username'] as String).isNotEmpty ? Text('@${r['username']}', style: TextStyle(fontSize: 11, color: Theme.of(context).colorScheme.onSurfaceVariant)) : null,
               trailing: Row(mainAxisSize: MainAxisSize.min, children: [
-                IconButton(icon: const Icon(Icons.check_circle_rounded, color: Colors.green), onPressed: () => _respondToJoinRequest(r['request_id'], true)),
-                IconButton(icon: const Icon(Icons.cancel_rounded, color: Colors.red), onPressed: () => _respondToJoinRequest(r['request_id'], false)),
+                IconButton(icon: Icon(Icons.check_circle_rounded, color: AppThemeTokens.of(context).success), onPressed: () => _respondToJoinRequest(r['request_id'], true)),
+                IconButton(icon: Icon(Icons.cancel_rounded, color: Theme.of(context).colorScheme.error), onPressed: () => _respondToJoinRequest(r['request_id'], false)),
               ]),
             )),
       ]),
@@ -1340,12 +1351,12 @@ class _GroupProfileScreenState extends State<GroupProfileScreen> {
       return _cardShell(
         padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 16),
         child: Row(children: [
-          Icon(Icons.visibility_off_rounded, color: Colors.grey[500], size: 18),
+          Icon(Icons.visibility_off_rounded, color: Theme.of(context).colorScheme.onSurfaceVariant, size: 18),
           const SizedBox(width: 10),
           Expanded(
             child: Text(
               "Ye private group hai — members list sirf admin/moderator ko dikhti hai",
-              style: TextStyle(fontSize: 12.5, color: Colors.grey[600]),
+              style: TextStyle(fontSize: 12.5, color: Theme.of(context).colorScheme.onSurfaceVariant),
             ),
           ),
         ]),
@@ -1359,13 +1370,13 @@ class _GroupProfileScreenState extends State<GroupProfileScreen> {
           padding: const EdgeInsets.fromLTRB(4, 6, 4, 6),
           child: Row(children: [
             Expanded(
-              child: Text("${_members.length} Members", style: const TextStyle(fontWeight: FontWeight.w700, fontSize: 13.5, color: _kNavy)),
+              child: Text("${_members.length} Members", style: TextStyle(fontWeight: FontWeight.w700, fontSize: 13.5, color: Theme.of(context).colorScheme.primary)),
             ),
             if (_canAddMembers)
               TextButton.icon(
                 onPressed: _openAddMembers,
-                icon: const Icon(Icons.person_add_alt_1_rounded, size: 17, color: _kAccent),
-                label: const Text("Add", style: TextStyle(color: _kAccent, fontWeight: FontWeight.w600)),
+                icon: Icon(Icons.person_add_alt_1_rounded, size: 17, color: AppThemeTokens.of(context).coral),
+                label: Text("Add", style: TextStyle(color: AppThemeTokens.of(context).coral, fontWeight: FontWeight.w600)),
               ),
           ]),
         ),
@@ -1381,23 +1392,23 @@ class _GroupProfileScreenState extends State<GroupProfileScreen> {
               onTap: (_isAdmin && !isMe) ? () => _showMemberActions(m) : null,
               leading: CircleAvatar(
                 radius: 20,
-                backgroundColor: Colors.grey[200],
+                backgroundColor: Theme.of(context).colorScheme.onSurfaceVariant,
                 backgroundImage: (m['avatar'] != null && (m['avatar'] as String).isNotEmpty) ? CachedNetworkImageProvider(m['avatar']) : null,
-                child: (m['avatar'] == null || (m['avatar'] as String).isEmpty) ? Icon(Icons.person_rounded, color: Colors.grey[500]) : null,
+                child: (m['avatar'] == null || (m['avatar'] as String).isEmpty) ? Icon(Icons.person_rounded, color: Theme.of(context).colorScheme.onSurfaceVariant) : null,
               ),
               title: Text("${m['name']}${isMe ? ' (You)' : ''}", style: const TextStyle(fontWeight: FontWeight.w600, fontSize: 14)),
-              subtitle: (m['username'] as String).isNotEmpty ? Text('@${m['username']}', style: TextStyle(fontSize: 11.5, color: Colors.grey[600])) : null,
+              subtitle: (m['username'] as String).isNotEmpty ? Text('@${m['username']}', style: TextStyle(fontSize: 11.5, color: Theme.of(context).colorScheme.onSurfaceVariant)) : null,
               trailing: role == 'member'
                   ? null
                   : Container(
                       padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
                       decoration: BoxDecoration(
-                        color: role == 'admin' ? _kAccent.withOpacity(0.12) : _kNavy.withOpacity(0.08),
+                        color: role == 'admin' ? AppThemeTokens.of(context).coral.withOpacity(0.12) : Theme.of(context).colorScheme.primary.withOpacity(0.08),
                         borderRadius: BorderRadius.circular(20),
                       ),
                       child: Text(
                         role == 'admin' ? "Admin" : "Moderator",
-                        style: TextStyle(fontSize: 10.5, fontWeight: FontWeight.w700, color: role == 'admin' ? _kAccent : _kNavy),
+                        style: TextStyle(fontSize: 10.5, fontWeight: FontWeight.w700, color: role == 'admin' ? AppThemeTokens.of(context).coral : Theme.of(context).colorScheme.primary),
                       ),
                     ),
             );
@@ -1412,16 +1423,16 @@ class _GroupProfileScreenState extends State<GroupProfileScreen> {
       padding: const EdgeInsets.symmetric(vertical: 4),
       child: Column(children: [
         ListTile(
-          leading: const Icon(Icons.exit_to_app_rounded, color: Colors.red),
-          title: const Text("Leave group", style: TextStyle(color: Colors.red, fontWeight: FontWeight.w600)),
+          leading: Icon(Icons.exit_to_app_rounded, color: Theme.of(context).colorScheme.error),
+          title: Text("Leave group", style: TextStyle(color: Theme.of(context).colorScheme.error, fontWeight: FontWeight.w600)),
           onTap: _busy ? null : _leaveGroup,
         ),
         // 🔥 Sirf ADMIN — moderator ko bhi ye button nahi dikhta (backend
         // `destroy()` bhi strictly role == 'admin' hi allow karta hai).
         if (_isAdmin)
           ListTile(
-            leading: const Icon(Icons.delete_forever_rounded, color: Colors.red),
-            title: const Text("Delete group", style: TextStyle(color: Colors.red, fontWeight: FontWeight.w600)),
+            leading: Icon(Icons.delete_forever_rounded, color: Theme.of(context).colorScheme.error),
+            title: Text("Delete group", style: TextStyle(color: Theme.of(context).colorScheme.error, fontWeight: FontWeight.w600)),
             onTap: _busy ? null : _deleteGroup,
           ),
       ]),
@@ -1538,10 +1549,10 @@ class _AddMembersSheetState extends State<_AddMembersSheet> {
       padding: EdgeInsets.only(bottom: MediaQuery.of(context).viewInsets.bottom),
       child: Container(
         height: MediaQuery.of(context).size.height * 0.75,
-        decoration: const BoxDecoration(color: Colors.white, borderRadius: BorderRadius.vertical(top: Radius.circular(20))),
+        decoration: BoxDecoration(color: Theme.of(context).colorScheme.surface, borderRadius: const BorderRadius.vertical(top: Radius.circular(20))),
         child: Column(children: [
           const SizedBox(height: 10),
-          Container(width: 40, height: 4, decoration: BoxDecoration(color: Colors.grey[300], borderRadius: BorderRadius.circular(4))),
+          Container(width: 40, height: 4, decoration: BoxDecoration(color: Theme.of(context).colorScheme.onSurfaceVariant, borderRadius: BorderRadius.circular(4))),
           Padding(
             padding: const EdgeInsets.fromLTRB(16, 14, 16, 8),
             child: TextField(
@@ -1551,15 +1562,15 @@ class _AddMembersSheetState extends State<_AddMembersSheet> {
                 hintText: "Search users to add",
                 prefixIcon: const Icon(Icons.search_rounded),
                 filled: true,
-                fillColor: _kBg,
+                fillColor: AppThemeTokens.of(context).surface2,
                 border: OutlineInputBorder(borderRadius: BorderRadius.circular(12), borderSide: BorderSide.none),
               ),
             ),
           ),
-          if (_error != null) Padding(padding: const EdgeInsets.symmetric(horizontal: 16), child: Text(_error!, style: const TextStyle(color: Colors.red, fontSize: 12))),
+          if (_error != null) Padding(padding: const EdgeInsets.symmetric(horizontal: 16), child: Text(_error!, style: TextStyle(color: Theme.of(context).colorScheme.error, fontSize: 12))),
           Expanded(
             child: _searching
-                ? const Center(child: CircularProgressIndicator(color: _kNavy))
+                ? Center(child: CircularProgressIndicator(color: Theme.of(context).colorScheme.primary))
                 : ListView.builder(
                     itemCount: _results.length,
                     itemBuilder: (context, i) {
@@ -1574,7 +1585,7 @@ class _AddMembersSheetState extends State<_AddMembersSheet> {
                         onChanged: (v) => setState(() => v == true ? _picked.add(id) : _picked.remove(id)),
                         title: Text(name.isNotEmpty ? name : (u['username']?.toString() ?? 'User')),
                         subtitle: Text('@${u['username'] ?? ''}'),
-                        activeColor: _kAccent,
+                        activeColor: AppThemeTokens.of(context).coral,
                       );
                     },
                   ),
@@ -1586,7 +1597,7 @@ class _AddMembersSheetState extends State<_AddMembersSheet> {
                 width: double.infinity,
                 child: ElevatedButton(
                   onPressed: (_picked.isEmpty || _adding) ? null : _confirmAdd,
-                  style: ElevatedButton.styleFrom(backgroundColor: _kNavy, foregroundColor: Colors.white, padding: const EdgeInsets.symmetric(vertical: 14)),
+                  style: ElevatedButton.styleFrom(backgroundColor: Theme.of(context).colorScheme.primary, foregroundColor: Colors.white, padding: EdgeInsets.symmetric(vertical: 14)),
                   child: _adding
                       ? const SizedBox(width: 18, height: 18, child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white))
                       : Text(_picked.isEmpty ? "Add members" : "Add ${_picked.length} member${_picked.length > 1 ? 's' : ''}"),

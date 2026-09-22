@@ -21,10 +21,13 @@ import 'app_bottom_nav.dart'; // 🔥 NAYA
 import 'message_search_screen.dart'; // 🔥 NAYA (Phase 4, §2.1/§4.2) — global message search
 import 'focus_mode_screen.dart'; // 🔥 NAYA (Feature 12) — Smart DND / Focus Mode setup screen
 
-const _kNavy = Color(0xFF030F27);
-const _kAccent = Color(0xFFEE0979);
-const _kBg = Color(0xFFF6F7FB);
-const _kAnnouncement = Color(0xFFFF8F00); // 🔥 NAYA (Feature 11) — teacher/staff announcement highlight color
+import '../../theme_service.dart'; // 🎨 THEME FIX — AppThemeTokens (home.dart jaisa hi shared design system)
+
+// 🎨 THEME FIX — pehle ye sab hardcoded `const Color(...)` the (navy header,
+// off-white bg, pink accent, amber banner) — kisi bhi theme mode me same hi
+// rehte, isliye dark mode me bhi safed background aata tha. Ab sab
+// `Theme.of(context)`/`AppThemeTokens.of(context)` se aate hain, home.dart
+// jaisa hi (light/dark dono me sahi contrast).
 
 class ConversationsScreen extends StatefulWidget {
   const ConversationsScreen({super.key});
@@ -33,6 +36,21 @@ class ConversationsScreen extends StatefulWidget {
 }
 
 class _ConversationsScreenState extends State<ConversationsScreen> {
+  // 🎨 THEME FIX — home.dart jaisa hi shared design-system se colors.
+  // `_navy` ab literally navy nahi — AppBar/header ka brand-primary color
+  // hai (light me #5B3DF6, dark me #8B7CFF), taaki header dark mode me
+  // bhi sahi dikhe. `_accent` = coral/accent token (unread badges), `_warn`
+  // = amber-jaisa warning token (Focus Mode banner).
+  Color get _navy => Theme.of(context).colorScheme.primary;
+  Color get _onNavy => Theme.of(context).colorScheme.onPrimary;
+  Color get _accent => Theme.of(context).colorScheme.secondary;
+  Color get _warn => AppThemeTokens.of(context).warning;
+  Color get _muted => Theme.of(context).colorScheme.onSurfaceVariant;
+  Color get _border => Theme.of(context).colorScheme.outlineVariant;
+  Color get _surface => Theme.of(context).colorScheme.surface;
+  Color get _ink => Theme.of(context).colorScheme.onSurface;
+  Color get _errorColor => Theme.of(context).colorScheme.error;
+
   List<ConversationModel> _conversations = [];
   bool _isLoading = true;
   String? _error;
@@ -351,7 +369,7 @@ class _ConversationsScreenState extends State<ConversationsScreen> {
           TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('Cancel')),
           TextButton(
             onPressed: () => Navigator.pop(ctx, true),
-            child: const Text('Delete', style: TextStyle(color: Colors.red)),
+            child: Text('Delete', style: TextStyle(color: Theme.of(ctx).colorScheme.error)),
           ),
         ],
       ),
@@ -469,7 +487,8 @@ class _ConversationsScreenState extends State<ConversationsScreen> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      backgroundColor: _kBg,
+      // 🎨 THEME FIX — was hardcoded `_kBg` (always off-white, even in dark
+      // mode). Falls back to the theme's own scaffoldBackgroundColor now.
       appBar: _isSelectMode ? _buildSelectionAppBar() : _buildDefaultAppBar(),
       body: Column(
         children: [
@@ -483,7 +502,7 @@ class _ConversationsScreenState extends State<ConversationsScreen> {
             child: _isSearchExpanded && _searchController.text.trim().isNotEmpty
                 ? _buildSearchResults()
                 : RefreshIndicator(
-                    color: _kNavy,
+                    color: _navy,
                     onRefresh: () => _loadConversations(),
                     child: _buildBody(),
                   ),
@@ -496,16 +515,16 @@ class _ConversationsScreenState extends State<ConversationsScreen> {
 
   AppBar _buildDefaultAppBar() {
     return AppBar(
-      backgroundColor: _kNavy,
+      backgroundColor: _navy,
       elevation: 0,
-      title: const Text(
+      title: Text(
         "Chats",
-        style: TextStyle(color: Colors.white, fontWeight: FontWeight.w700, fontSize: 20),
+        style: TextStyle(color: _onNavy, fontWeight: FontWeight.w700, fontSize: 20),
       ),
-      iconTheme: const IconThemeData(color: Colors.white),
+      iconTheme: IconThemeData(color: _onNavy),
       actions: [
         IconButton(
-          icon: Icon(_isSearchExpanded ? Icons.close : Icons.search_rounded, color: Colors.white),
+          icon: Icon(_isSearchExpanded ? Icons.close : Icons.search_rounded, color: _onNavy),
           tooltip: _isSearchExpanded ? 'Close search' : 'Search people to start a chat',
           onPressed: _toggleSearch,
         ),
@@ -514,7 +533,7 @@ class _ConversationsScreenState extends State<ConversationsScreen> {
         // search hai, saari existing conversations ke andar (global
         // `search_all`). Alag icon isliye taaki dono confuse na ho.
         IconButton(
-          icon: const Icon(Icons.manage_search_rounded, color: Colors.white),
+          icon: Icon(Icons.manage_search_rounded, color: _onNavy),
           tooltip: 'Search messages',
           onPressed: () {
             Navigator.push(
@@ -524,7 +543,7 @@ class _ConversationsScreenState extends State<ConversationsScreen> {
           },
         ),
         IconButton(
-          icon: const Icon(Icons.group_add_rounded, color: Colors.white),
+          icon: Icon(Icons.group_add_rounded, color: _onNavy),
           tooltip: 'New group',
           onPressed: () async {
             await Navigator.push(
@@ -540,7 +559,7 @@ class _ConversationsScreenState extends State<ConversationsScreen> {
         IconButton(
           icon: Icon(
             (_focusStatus?.active ?? false) ? Icons.bolt_rounded : Icons.bolt_outlined,
-            color: (_focusStatus?.active ?? false) ? _kAnnouncement : Colors.white,
+            color: (_focusStatus?.active ?? false) ? _warn : _onNavy,
           ),
           tooltip: 'Focus mode',
           onPressed: _openFocusModeScreen,
@@ -567,20 +586,20 @@ class _ConversationsScreenState extends State<ConversationsScreen> {
       onTap: _openFocusModeScreen,
       child: Container(
         width: double.infinity,
-        color: _kAnnouncement.withOpacity(0.12),
+        color: _warn.withOpacity(0.12),
         padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
         child: Row(children: [
-          const Icon(Icons.bolt_rounded, size: 18, color: _kAnnouncement),
+          Icon(Icons.bolt_rounded, size: 18, color: _warn),
           const SizedBox(width: 8),
           Expanded(
             child: Text(
               onlyTeachers
                   ? 'Focus mode: $remainingText · only teacher pings'
                   : 'Focus mode: $remainingText · everything muted',
-              style: const TextStyle(fontSize: 12.5, fontWeight: FontWeight.w600, color: Color(0xFF8A5300)),
+              style: TextStyle(fontSize: 12.5, fontWeight: FontWeight.w600, color: _warn),
             ),
           ),
-          const Icon(Icons.chevron_right_rounded, size: 18, color: _kAnnouncement),
+          Icon(Icons.chevron_right_rounded, size: 18, color: _warn),
         ]),
       ),
     );
@@ -593,32 +612,32 @@ class _ConversationsScreenState extends State<ConversationsScreen> {
     final allPinned = _selectedIds.isNotEmpty &&
         _selectedIds.every((id) => _pinnedOverride[id] ?? false);
     return AppBar(
-      backgroundColor: _kNavy,
+      backgroundColor: _navy,
       elevation: 0,
       leading: IconButton(
-        icon: const Icon(Icons.close_rounded, color: Colors.white),
+        icon: Icon(Icons.close_rounded, color: _onNavy),
         tooltip: 'Cancel',
         onPressed: _exitSelectMode,
       ),
       title: Text(
         '$count selected',
-        style: const TextStyle(color: Colors.white, fontWeight: FontWeight.w700, fontSize: 18),
+        style: TextStyle(color: _onNavy, fontWeight: FontWeight.w700, fontSize: 18),
       ),
-      iconTheme: const IconThemeData(color: Colors.white),
+      iconTheme: IconThemeData(color: _onNavy),
       actions: [
         if (count == 1)
           IconButton(
-            icon: const Icon(Icons.edit_rounded, color: Colors.white),
+            icon: Icon(Icons.edit_rounded, color: _onNavy),
             tooltip: 'Rename',
             onPressed: _renameSelected,
           ),
         IconButton(
-          icon: Icon(allPinned ? Icons.push_pin : Icons.push_pin_outlined, color: Colors.white),
+          icon: Icon(allPinned ? Icons.push_pin : Icons.push_pin_outlined, color: _onNavy),
           tooltip: allPinned ? 'Unpin' : 'Pin',
           onPressed: count == 0 ? null : _togglePinSelected,
         ),
         IconButton(
-          icon: const Icon(Icons.delete_outline_rounded, color: Colors.white),
+          icon: Icon(Icons.delete_outline_rounded, color: _onNavy),
           tooltip: 'Delete',
           onPressed: count == 0 ? null : _confirmDeleteSelected,
         ),
@@ -629,11 +648,11 @@ class _ConversationsScreenState extends State<ConversationsScreen> {
 
   Widget _buildSearchField() {
     return Container(
-      color: _kNavy,
+      color: _navy,
       padding: const EdgeInsets.fromLTRB(12, 0, 12, 12),
       child: Container(
         decoration: BoxDecoration(
-          color: Colors.white,
+          color: _surface,
           borderRadius: BorderRadius.circular(24),
           boxShadow: [
             BoxShadow(color: Colors.black.withOpacity(0.12), blurRadius: 8, offset: const Offset(0, 3)),
@@ -645,19 +664,19 @@ class _ConversationsScreenState extends State<ConversationsScreen> {
           onChanged: _onSearchChanged,
           decoration: InputDecoration(
             hintText: "Search users to chat",
-            hintStyle: TextStyle(color: Colors.grey[500], fontSize: 14),
-            prefixIcon: Icon(Icons.search_rounded, color: Colors.grey[500]),
+            hintStyle: TextStyle(color: _muted, fontSize: 14),
+            prefixIcon: Icon(Icons.search_rounded, color: _muted),
             suffixIcon: _isSearching
-                ? const Padding(
-                    padding: EdgeInsets.all(14),
+                ? Padding(
+                    padding: const EdgeInsets.all(14),
                     child: SizedBox(
                       width: 16, height: 16,
-                      child: CircularProgressIndicator(strokeWidth: 2, color: _kNavy),
+                      child: CircularProgressIndicator(strokeWidth: 2, color: _navy),
                     ),
                   )
                 : (_searchController.text.isNotEmpty
                     ? IconButton(
-                        icon: Icon(Icons.close_rounded, color: Colors.grey[500]),
+                        icon: Icon(Icons.close_rounded, color: _muted),
                         onPressed: () {
                           _searchController.clear();
                           setState(() => _searchResults = []);
@@ -677,7 +696,7 @@ class _ConversationsScreenState extends State<ConversationsScreen> {
   Widget _buildSearchResults() {
     if (_searchError != null) {
       return Center(
-        child: Text("Search fail: $_searchError", style: const TextStyle(color: Colors.red)),
+        child: Text("Search fail: $_searchError", style: TextStyle(color: _errorColor)),
       );
     }
     if (_searchResults.isEmpty && !_isSearching) {
@@ -690,17 +709,17 @@ class _ConversationsScreenState extends State<ConversationsScreen> {
         final user = _searchResults[index];
         return ListTile(
           onTap: _isOpeningChat ? null : () => _openUserChat(user),
-          tileColor: Colors.white,
+          tileColor: _surface,
           contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
-          leading: _avatar(user['avatar']?.toString(), radius: 24, isGroup: false),
+          leading: _avatar(context, user['avatar']?.toString(), radius: 24, isGroup: false),
           title: Text(_displayName(user), style: const TextStyle(fontWeight: FontWeight.w600, fontSize: 15)),
-          subtitle: Text('@${user['username'] ?? ''}', style: TextStyle(fontSize: 12, color: Colors.grey[600])),
+          subtitle: Text('@${user['username'] ?? ''}', style: TextStyle(fontSize: 12, color: _muted)),
           trailing: _isOpeningChat
-              ? const SizedBox(
+              ? SizedBox(
                   width: 18, height: 18,
-                  child: CircularProgressIndicator(strokeWidth: 2, color: _kNavy),
+                  child: CircularProgressIndicator(strokeWidth: 2, color: _navy),
                 )
-              : Icon(Icons.chevron_right_rounded, color: Colors.grey[400]),
+              : Icon(Icons.chevron_right_rounded, color: _muted),
         );
       },
     );
@@ -708,25 +727,25 @@ class _ConversationsScreenState extends State<ConversationsScreen> {
 
   Widget _buildBody() {
     if (_isLoading) {
-      return const Center(child: CircularProgressIndicator(color: _kNavy));
+      return Center(child: CircularProgressIndicator(color: _navy));
     }
     if (_error != null) {
       return ListView(children: [
         const SizedBox(height: 100),
-        Icon(Icons.wifi_off_rounded, size: 52, color: Colors.grey[400]),
+        Icon(Icons.wifi_off_rounded, size: 52, color: _muted),
         const SizedBox(height: 12),
         Center(
           child: Padding(
             padding: const EdgeInsets.symmetric(horizontal: 32),
             child: Text("Failed to load: $_error",
-                textAlign: TextAlign.center, style: TextStyle(color: Colors.grey[600])),
+                textAlign: TextAlign.center, style: TextStyle(color: _muted)),
           ),
         ),
         const SizedBox(height: 8),
         Center(
           child: TextButton(
             onPressed: () => _loadConversations(),
-            child: const Text("Retry", style: TextStyle(color: _kNavy, fontWeight: FontWeight.bold)),
+            child: Text("Retry", style: TextStyle(color: _navy, fontWeight: FontWeight.bold)),
           ),
         ),
       ]);
@@ -738,7 +757,7 @@ class _ConversationsScreenState extends State<ConversationsScreen> {
         const SizedBox(height: 6),
         Center(
           child: Text("Tap search above to start chatting",
-              style: TextStyle(color: Colors.grey[400], fontSize: 12)),
+              style: TextStyle(color: _muted, fontSize: 12)),
         ),
       ]);
     }
@@ -746,7 +765,7 @@ class _ConversationsScreenState extends State<ConversationsScreen> {
     return ListView.separated(
       padding: const EdgeInsets.only(top: 4),
       itemCount: sorted.length,
-      separatorBuilder: (_, __) => Divider(height: 1, indent: 84, color: Colors.grey[200]),
+      separatorBuilder: (_, __) => Divider(height: 1, indent: 84, color: _border),
       itemBuilder: (context, index) {
         final convo = sorted[index];
         return _ConversationTile(
@@ -767,29 +786,30 @@ class _ConversationsScreenState extends State<ConversationsScreen> {
     return Column(children: [
       Container(
         width: 88, height: 88,
-        decoration: BoxDecoration(color: _kNavy.withOpacity(0.06), shape: BoxShape.circle),
-        child: Icon(icon, size: 40, color: _kNavy.withOpacity(0.5)),
+        decoration: BoxDecoration(color: _navy.withOpacity(0.06), shape: BoxShape.circle),
+        child: Icon(icon, size: 40, color: _navy.withOpacity(0.5)),
       ),
       const SizedBox(height: 14),
-      Text(text, style: TextStyle(color: Colors.grey[600], fontSize: 14, fontWeight: FontWeight.w500)),
+      Text(text, style: TextStyle(color: _muted, fontSize: 14, fontWeight: FontWeight.w500)),
     ]);
   }
 }
 
-Widget _avatar(String? photo, {required double radius, required bool isGroup}) {
+Widget _avatar(BuildContext context, String? photo, {required double radius, required bool isGroup}) {
   final hasPhoto = photo != null && photo.isNotEmpty;
+  final cs = Theme.of(context).colorScheme;
   return Container(
     padding: const EdgeInsets.all(2),
     decoration: BoxDecoration(
       shape: BoxShape.circle,
-      border: Border.all(color: Colors.grey[200]!, width: 1),
+      border: Border.all(color: cs.outlineVariant, width: 1),
     ),
     child: CircleAvatar(
       radius: radius,
-      backgroundColor: Colors.grey[200],
+      backgroundColor: AppThemeTokens.of(context).surface2,
       backgroundImage: hasPhoto ? CachedNetworkImageProvider(photo) : null,
       child: !hasPhoto
-          ? Icon(isGroup ? Icons.group_rounded : Icons.person_rounded, color: Colors.grey[500])
+          ? Icon(isGroup ? Icons.group_rounded : Icons.person_rounded, color: cs.onSurfaceVariant)
           : null,
     ),
   );
@@ -818,15 +838,17 @@ class _ConversationTile extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final hasUnread = conversation.unreadCount > 0;
+    final cs = Theme.of(context).colorScheme;
+    final tokens = AppThemeTokens.of(context);
     return InkWell(
       onTap: onTap,
       onLongPress: onLongPress,
       child: Container(
         color: isSelected
-            ? _kAccent.withOpacity(0.08)
-            : (isAnnouncement ? _kAnnouncement.withOpacity(0.07) : Colors.white), // 🔥 NAYA — Slack-jaisi pinned-lane tint
+            ? tokens.coral.withOpacity(0.08)
+            : (isAnnouncement ? tokens.warning.withOpacity(0.07) : cs.surface), // 🔥 NAYA — Slack-jaisi pinned-lane tint
         decoration: isAnnouncement && !isSelected
-            ? const BoxDecoration(border: Border(left: BorderSide(color: _kAnnouncement, width: 3)))
+            ? BoxDecoration(border: Border(left: BorderSide(color: tokens.warning, width: 3)))
             : null,
         padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
         child: Row(
@@ -837,12 +859,12 @@ class _ConversationTile extends StatelessWidget {
                 padding: const EdgeInsets.only(right: 10),
                 child: Icon(
                   isSelected ? Icons.check_circle_rounded : Icons.circle_outlined,
-                  color: isSelected ? _kAccent : Colors.grey[400],
+                  color: isSelected ? tokens.coral : cs.onSurfaceVariant,
                   size: 24,
                 ),
               )
             else
-              _avatar(conversation.displayPhoto, radius: 27, isGroup: conversation.isGroup),
+              _avatar(context, conversation.displayPhoto, radius: 27, isGroup: conversation.isGroup),
             if (isSelectMode) const SizedBox(width: 2),
             const SizedBox(width: 12),
             Expanded(
@@ -852,12 +874,12 @@ class _ConversationTile extends StatelessWidget {
                   Row(
                     children: [
                       if (isPinned) ...[
-                        Icon(Icons.push_pin, size: 13, color: Colors.grey[500]),
+                        Icon(Icons.push_pin, size: 13, color: cs.onSurfaceVariant),
                         const SizedBox(width: 4),
                       ],
                       if (isAnnouncement) ...[
                         // 🔥 NAYA (Feature 11) — teacher/staff badge
-                        const Icon(Icons.campaign_rounded, size: 14, color: _kAnnouncement),
+                        Icon(Icons.campaign_rounded, size: 14, color: tokens.warning),
                         const SizedBox(width: 4),
                       ],
                       Expanded(
@@ -868,7 +890,7 @@ class _ConversationTile extends StatelessWidget {
                           style: TextStyle(
                             fontWeight: hasUnread ? FontWeight.bold : FontWeight.w600,
                             fontSize: 15.5,
-                            color: Colors.black87,
+                            color: cs.onSurface,
                           ),
                         ),
                       ),
@@ -887,11 +909,11 @@ class _ConversationTile extends StatelessWidget {
                         maxLines: 1,
                         overflow: TextOverflow.ellipsis,
                         text: TextSpan(
-                          style: TextStyle(fontSize: 13.5, color: Colors.grey[600]),
+                          style: TextStyle(fontSize: 13.5, color: cs.onSurfaceVariant),
                           children: [
-                            const TextSpan(
+                            TextSpan(
                               text: "Draft: ",
-                              style: TextStyle(color: Color(0xFFE53935), fontStyle: FontStyle.italic, fontWeight: FontWeight.w600),
+                              style: TextStyle(color: cs.error, fontStyle: FontStyle.italic, fontWeight: FontWeight.w600),
                             ),
                             TextSpan(text: draft.trim(), style: const TextStyle(fontStyle: FontStyle.italic)),
                           ],
@@ -903,7 +925,7 @@ class _ConversationTile extends StatelessWidget {
                       maxLines: 1,
                       overflow: TextOverflow.ellipsis,
                       style: TextStyle(
-                        color: hasUnread ? Colors.black87 : Colors.grey[600],
+                        color: hasUnread ? cs.onSurface : cs.onSurfaceVariant,
                         fontWeight: hasUnread ? FontWeight.w600 : FontWeight.normal,
                         fontSize: 13.5,
                       ),
@@ -922,7 +944,7 @@ class _ConversationTile extends StatelessWidget {
                     timeago.format(conversation.lastMessageAt!, locale: 'en_short'),
                     style: TextStyle(
                       fontSize: 11.5,
-                      color: hasUnread ? _kAccent : Colors.grey[500],
+                      color: hasUnread ? tokens.coral : cs.onSurfaceVariant,
                       fontWeight: hasUnread ? FontWeight.w600 : FontWeight.normal,
                     ),
                   ),
@@ -931,11 +953,11 @@ class _ConversationTile extends StatelessWidget {
                   Container(
                     constraints: const BoxConstraints(minWidth: 20),
                     padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
-                    decoration: BoxDecoration(color: _kAccent, borderRadius: BorderRadius.circular(12)),
+                    decoration: BoxDecoration(color: tokens.coral, borderRadius: BorderRadius.circular(12)),
                     child: Text(
                       conversation.unreadCount > 99 ? '99+' : conversation.unreadCount.toString(),
                       textAlign: TextAlign.center,
-                      style: const TextStyle(color: Colors.white, fontSize: 11, fontWeight: FontWeight.bold),
+                      style: TextStyle(color: cs.onSecondary, fontSize: 11, fontWeight: FontWeight.bold),
                     ),
                   )
                 else

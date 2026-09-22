@@ -192,6 +192,10 @@ class _NoticesScreenState extends State<NoticesScreen> {
 // Compose sheet
 // ------------------------------------------------------------
 
+/// Notice compose sheet me audience type — `_ComposeSheetState._audience`.
+/// `department` `_Audience` yahi naya hai (§ notices_screen.dart FIX note).
+enum _Audience { campus, department, section }
+
 class _ComposeSheet extends StatefulWidget {
   final CampusAccess access;
   final Map<String, String> sectionLabels;
@@ -206,8 +210,14 @@ class _ComposeSheetState extends State<_ComposeSheet> {
   final _title = TextEditingController();
   final _body = TextEditingController();
 
-  /// null = poore campus ka notice. Sirf management ke liye available.
+  /// `_Audience.campus` → koi scope FK nahi (poora campus).
+  /// `_Audience.department` → `_departmentId` bhejta hai.
+  /// `_Audience.section` → `_sectionId` bhejta hai (purana default flow).
+  _Audience _audience = _Audience.campus;
   String? _sectionId;
+  String? _departmentId;
+  List<Department> _departments = const [];
+  bool _loadingDepartments = false;
   bool _pin = false;
   bool _sending = false;
   String? _error;
@@ -217,9 +227,30 @@ class _ComposeSheetState extends State<_ComposeSheet> {
     super.initState();
     // Class teacher (jo management nahi hai) ka default apni pehli section.
     // Uske paas "poore campus" ka option hai hi nahi — backend 403 dega.
+    // Department bhi sirf management ke paas hai (Setup ki tarah).
     if (!widget.access.canPostCampusNotice &&
         widget.access.classTeacherSectionIds.isNotEmpty) {
+      _audience = _Audience.section;
       _sectionId = widget.access.classTeacherSectionIds.first;
+    } else if (widget.access.canPostCampusNotice) {
+      _loadDepartments();
+    }
+  }
+
+  Future<void> _loadDepartments() async {
+    setState(() => _loadingDepartments = true);
+    try {
+      final rows = await CampusService.departments(widget.access.campus.id);
+      if (!mounted) return;
+      setState(() {
+        _departments = rows;
+        _loadingDepartments = false;
+      });
+    } catch (_) {
+      // Departments list sirf ek convenience picker hai — fail ho to bhi
+      // "Whole campus" / "Section" se notice post karna block nahi hona
+      // chahiye. Dropdown bas khaali rahega.
+      if (mounted) setState(() => _loadingDepartments = false);
     }
   }
 
@@ -242,6 +273,10 @@ class _ComposeSheetState extends State<_ComposeSheet> {
       setState(() => _error = l10n.noticeEmptyError);
       return;
     }
+    if (_audience == _Audience.department && _departmentId == null) {
+      setState(() => _error = l10n.noticeSelectDepartmentError);
+      return;
+    }
 
     setState(() {
       _sending = true;
@@ -253,7 +288,15 @@ class _ComposeSheetState extends State<_ComposeSheet> {
         sessionId: session.id,
         title: _title.text.trim(),
         body: _body.text.trim(),
-        sectionId: _sectionId,
+        // 🔥 FIX: pehle sirf `sectionId` bhejta tha — "Whole campus" ya
+        // "Section" ke alawa koi audience possible hi nahi thi. Backend
+        // (`Notice.department` FK) aur `CampusService.postNotice` dono
+        // pehle se `departmentId` accept karte the; compose UI hi is
+        // teesre scope ko kabhi build/select hi nahi karti thi — isliye
+        // Setup me department bana sakte the par notice me kabhi use
+        // nahi kar paate the.
+        departmentId: _audience == _Audience.department ? _departmentId : null,
+        sectionId: _audience == _Audience.section ? _sectionId : null,
         pinUntil: _pin ? DateTime.now().add(const Duration(days: 7)) : null,
       );
       if (mounted) Navigator.pop(context, true);
@@ -272,19 +315,31 @@ class _ComposeSheetState extends State<_ComposeSheet> {
     final cs = Theme.of(context).colorScheme;
     final l10n = AppLocalizations.of(context)!;
 
-    // Kis-kis scope pe post kar sakta hoon — management ko campus + har
-    // section, class teacher ko sirf apni sections.
+    // Kis-kis scope pe post kar sakta hoon — management ko campus +
+    // department + har section, class teacher ko sirf apni sections.
+    // Ek hi dropdown, values ko prefix se tag kiya hai (`sec:`/`dep:`)
+    // taaki teeno scope types ek hi control me fit ho jaye.
     final options = <DropdownMenuItem<String?>>[
       if (widget.access.canPostCampusNotice)
         DropdownMenuItem(value: null, child: Text(l10n.noticeScopeWholeCampus)),
+      if (widget.access.canPostCampusNotice)
+        ..._departments.map((d) => DropdownMenuItem<String?>(
+              value: 'dep:${d.id}',
+              child: Text('${l10n.noticeScopeDepartment}: ${d.name}'),
+            )),
       ...(widget.access.canPostCampusNotice
               ? widget.sectionLabels.keys
               : widget.access.classTeacherSectionIds)
           .map((id) => DropdownMenuItem<String?>(
-                value: id,
+                value: 'sec:$id',
                 child: Text(widget.sectionLabels[id] ?? l10n.noticeScopeSection),
               )),
     ];
+    final currentValue = switch (_audience) {
+      _Audience.campus => null,
+      _Audience.department => _departmentId != null ? 'dep:$_departmentId' : null,
+      _Audience.section => _sectionId != null ? 'sec:$_sectionId' : null,
+    };
 
     return Padding(
       padding: EdgeInsets.only(
@@ -308,14 +363,37 @@ class _ComposeSheetState extends State<_ComposeSheet> {
           ),
           const SizedBox(height: 16),
           DropdownButtonFormField<String?>(
-            value: _sectionId,
+            value: currentValue,
             items: options,
             isExpanded: true,
             decoration: InputDecoration(
               labelText: l10n.noticeAudienceLabel,
               border: const OutlineInputBorder(),
+              suffixIcon: _loadingDepartments
+                  ? const Padding(
+                      padding: EdgeInsets.all(12),
+                      child: SizedBox(
+                          width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2)),
+                    )
+                  : null,
             ),
-            onChanged: _sending ? null : (v) => setState(() => _sectionId = v),
+            onChanged: _sending
+                ? null
+                : (v) => setState(() {
+                      if (v == null) {
+                        _audience = _Audience.campus;
+                        _sectionId = null;
+                        _departmentId = null;
+                      } else if (v.startsWith('dep:')) {
+                        _audience = _Audience.department;
+                        _departmentId = v.substring(4);
+                        _sectionId = null;
+                      } else if (v.startsWith('sec:')) {
+                        _audience = _Audience.section;
+                        _sectionId = v.substring(4);
+                        _departmentId = null;
+                      }
+                    }),
           ),
           const SizedBox(height: 12),
           TextField(

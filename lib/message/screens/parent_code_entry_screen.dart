@@ -2,15 +2,16 @@
 //
 // Feature 8 — entry point for "Parent Mode". No student login needed:
 // a parent types in the code their child generated and shared with them.
-// Add a text button to this from LoginScreen, e.g.:
 //
-//   TextButton(
-//     onPressed: () => Navigator.push(context,
-//       MaterialPageRoute(builder: (_) => const ParentCodeEntryScreen())),
-//     child: const Text("Parent/Guardian? View your child's progress"),
-//   )
+// Reachable from LoginScreen (`l10n.parentLoginLink` text button). If this device
+// already holds a valid parent session it skips straight to the dashboard.
+//
+// 🌐 LANGUAGE FIX — all text from AppLocalizations (was hardcoded Hinglish).
+// 🔧 FIX — `setState` after `await` without a `mounted` check (crash if the
+// parent backed out while the code was being verified).
 
 import 'package:flutter/material.dart';
+import '../../l10n/app_localizations.dart';
 import '../services/parent_service.dart';
 import 'parent_dashboard_screen.dart';
 
@@ -24,7 +25,24 @@ class ParentCodeEntryScreen extends StatefulWidget {
 class _ParentCodeEntryScreenState extends State<ParentCodeEntryScreen> {
   final _codeController = TextEditingController();
   bool _loading = false;
-  String? _error;
+  bool _emptyCode = false;
+  ParentModeError? _error;
+
+  @override
+  void initState() {
+    super.initState();
+    _resumeExistingSession();
+  }
+
+  /// A parent who already verified a code on this device shouldn't have to type it again.
+  Future<void> _resumeExistingSession() async {
+    final hasSession = await ParentService.instance.hasActiveSession();
+    if (!hasSession || !mounted) return;
+    Navigator.pushReplacement(
+      context,
+      MaterialPageRoute(builder: (_) => const ParentDashboardScreen()),
+    );
+  }
 
   @override
   void dispose() {
@@ -35,12 +53,16 @@ class _ParentCodeEntryScreenState extends State<ParentCodeEntryScreen> {
   Future<void> _submit() async {
     final code = _codeController.text.trim();
     if (code.isEmpty) {
-      setState(() => _error = 'Code daalo');
+      setState(() {
+        _emptyCode = true;
+        _error = null;
+      });
       return;
     }
 
     setState(() {
       _loading = true;
+      _emptyCode = false;
       _error = null;
     });
 
@@ -52,9 +74,11 @@ class _ParentCodeEntryScreenState extends State<ParentCodeEntryScreen> {
         MaterialPageRoute(builder: (_) => const ParentDashboardScreen()),
       );
     } on ParentModeException catch (e) {
-      setState(() => _error = e.message);
+      if (!mounted) return;
+      setState(() => _error = e.error);
     } catch (_) {
-      setState(() => _error = 'Kuch galat ho gaya. Dobara try karo.');
+      if (!mounted) return;
+      setState(() => _error = ParentModeError.generic);
     } finally {
       if (mounted) setState(() => _loading = false);
     }
@@ -62,39 +86,38 @@ class _ParentCodeEntryScreenState extends State<ParentCodeEntryScreen> {
 
   @override
   Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
+    final l10n = AppLocalizations.of(context)!;
+    final errorText = _emptyCode
+        ? l10n.parentEntryCodeRequired
+        : (_error != null ? ParentModeException(_error!).localized(l10n) : null);
+
     return Scaffold(
-      backgroundColor: const Color(0xFF0F0F11),
-      appBar: AppBar(
-        backgroundColor: const Color(0xFF0F0F11),
-        title: const Text('Parent Mode'),
-      ),
-      body: Padding(
+      appBar: AppBar(title: Text(l10n.parentModeTitle)),
+      body: SingleChildScrollView(
         padding: const EdgeInsets.all(24),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            const Text(
-              "Apne bachche ka progress dekhein",
-              style: TextStyle(color: Colors.white, fontSize: 20, fontWeight: FontWeight.bold),
+            Text(
+              l10n.parentEntryHeading,
+              style: TextStyle(color: cs.onSurface, fontSize: 20, fontWeight: FontWeight.bold),
             ),
             const SizedBox(height: 8),
-            const Text(
-              "Sirf attendance aur assignment status dikhega — chat message nahi. "
-              "Aapke bachche ne jo code diya hai wo neeche daalein.",
-              style: TextStyle(color: Colors.white70, fontSize: 14),
+            Text(
+              l10n.parentEntryBody,
+              style: TextStyle(color: cs.onSurfaceVariant, fontSize: 14),
             ),
             const SizedBox(height: 32),
             TextField(
               controller: _codeController,
               textCapitalization: TextCapitalization.characters,
-              style: const TextStyle(color: Colors.white, fontSize: 20, letterSpacing: 4),
+              onSubmitted: (_) => _loading ? null : _submit(),
+              style: TextStyle(color: cs.onSurface, fontSize: 20, letterSpacing: 4),
               decoration: InputDecoration(
-                hintText: 'e.g. 7F3K9QRT',
-                hintStyle: const TextStyle(color: Colors.white38),
-                filled: true,
-                fillColor: Colors.white.withOpacity(0.06),
-                border: OutlineInputBorder(borderRadius: BorderRadius.circular(12)),
-                errorText: _error,
+                hintText: l10n.parentEntryCodeHint,
+                hintStyle: TextStyle(color: cs.onSurfaceVariant),
+                errorText: errorText,
               ),
             ),
             const SizedBox(height: 24),
@@ -107,7 +130,7 @@ class _ParentCodeEntryScreenState extends State<ParentCodeEntryScreen> {
                         height: 20, width: 20,
                         child: CircularProgressIndicator(strokeWidth: 2),
                       )
-                    : const Text('View Progress'),
+                    : Text(l10n.parentEntryViewProgress),
               ),
             ),
           ],

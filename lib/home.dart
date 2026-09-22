@@ -42,6 +42,8 @@ import 'post/services/story_service.dart';
 import 'post/models/story_model.dart';
 import 'post/widgets/story_caption_sheet.dart';
 import 'liveclass/screens/classroom_detail_screen.dart';
+import 'liveclass/liveclass_bootstrap.dart';
+import 'post/screens/post_list_screen.dart';
 
 // ⚠️ PATHS — ye file `lib/home.dart` hai (lib/home/ folder ke andar NAHI),
 // exactly jaisa `main.dart` ka `import 'home.dart';` batata hai. Isliye har
@@ -121,7 +123,7 @@ const String _prodNativeAdPlacementId = 'REPLACE_WITH_PROD_PLACEMENT_ID';
 //   .feed-title     → _buildFeedTitle()
 //   .post-card      → _buildPostCard()
 //   .interstitial   → _buildFeedInterstitial()   (Task 6)
-//   .bottomnav      → _LsBottomNav
+//   .bottomnav      → LsBottomNav (widgets/ls_ui.dart, shared)
 // ============================================================
 
 // `kLsPad` (18) aur `kLsRadius` ab `widgets/ls_ui.dart` me hain — wahi
@@ -146,7 +148,7 @@ class HomeScreen extends StatefulWidget {
   /// ⚠️ Ye indices jaan-boojh kar same rakhe gaye hain — dusri screens
   /// (conversations_screen.dart waghera) `HomeScreen(initialIndex: 2)` se
   /// profile pe jump karti hain. Naya bottom nav 5 items dikhata hai par
-  /// Classes/Chat push-routes hain, tab nahi — details _LsBottomNav me.
+  /// Classes/Chat push-routes hain, tab nahi — details LsBottomNav call site me.
   final int initialIndex;
   const HomeScreen({super.key, this.initialIndex = 0});
   @override
@@ -948,7 +950,7 @@ class _HomeScreenState extends State<HomeScreen> {
                       }
                       Navigator.push(
                         context,
-                        MaterialPageRoute(builder: (_) => ClassroomDetailScreen(classroomId: classroomId)),
+                        MaterialPageRoute(builder: (_) => ClassroomDetailScreen(api: LiveClass.api, classroomId: classroomId)),
                       );
                     },
                     child: Container(
@@ -1497,7 +1499,7 @@ class _HomeScreenState extends State<HomeScreen> {
                         }
                         Navigator.push(
                           context,
-                          MaterialPageRoute(builder: (_) => ClassroomDetailScreen(classroomId: classroomId)),
+                          MaterialPageRoute(builder: (_) => ClassroomDetailScreen(api: LiveClass.api, classroomId: classroomId)),
                         );
                       },
                       child: Container(
@@ -1862,8 +1864,12 @@ class _HomeScreenState extends State<HomeScreen> {
               spacing: 6,
               runSpacing: 2,
               children: post.hashtags
-                  .map((t) => Text('#$t',
-                      style: TextStyle(fontSize: 12, color: cs.primary, fontWeight: FontWeight.w600)))
+                  .map((t) => InkWell(
+                        onTap: () => Navigator.push(
+                            context, MaterialPageRoute(builder: (_) => PostListScreen.hashtag(t))),
+                        child: Text('#$t',
+                            style: TextStyle(fontSize: 12, color: cs.primary, fontWeight: FontWeight.w600)),
+                      ))
                   .toList(),
             ),
           ),
@@ -2047,21 +2053,35 @@ class _HomeScreenState extends State<HomeScreen> {
           ProfileScreen(onBackToHome: () => setState(() => _selectedIndex = 0)),
         ],
       ),
-      bottomNavigationBar: _LsBottomNav(
-        selectedIndex: _selectedIndex,
-        l10n: l10n,
-        onTab: (i) {
+      bottomNavigationBar: LsBottomNav(
+        items: [
+          LsBottomNavItemData(icon: Icons.home_outlined, activeIcon: Icons.home_rounded, label: l10n.homeTab),
+          LsBottomNavItemData(icon: Icons.school_outlined, activeIcon: Icons.school_rounded, label: l10n.campusTab),
+          LsBottomNavItemData(
+              icon: Icons.smart_display_outlined, activeIcon: Icons.smart_display_rounded, label: l10n.classesTab),
+          LsBottomNavItemData(
+              icon: Icons.chat_bubble_outline_rounded, activeIcon: Icons.chat_bubble_rounded, label: l10n.chatTab),
+          LsBottomNavItemData(icon: Icons.person_outline_rounded, activeIcon: Icons.person_rounded, label: l10n.profileTab),
+        ],
+        // Sirf Home(0)/Profile(2) `_selectedIndex` ke IndexedStack tabs hain —
+        // Campus/Classes/Chat tap hote hi apna screen push karte hain, isliye
+        // "active" kabhi unke liye highlight nahi hota (§ comment neeche).
+        activeIndex: _selectedIndex == 0 ? 0 : (_selectedIndex == 2 ? 4 : -1),
+        onTap: (i) {
           HapticFeedback.selectionClick();
-          setState(() => _selectedIndex = i);
-        },
-        onClasses: _openExplore,
-        onChat: _openChat,
-        // ✅ CAMPUS — ab CampusScreen wired hai, "coming soon" snackbar nahi.
-        onCampus: () {
-          Navigator.push(
-            context,
-            MaterialPageRoute(builder: (_) => const CampusScreen()),
-          );
+          switch (i) {
+            case 0:
+              setState(() => _selectedIndex = 0);
+            case 1:
+              // ✅ CAMPUS — ab CampusScreen wired hai, "coming soon" snackbar nahi.
+              Navigator.push(context, MaterialPageRoute(builder: (_) => const CampusScreen()));
+            case 2:
+              _openExplore();
+            case 3:
+              _openChat();
+            case 4:
+              setState(() => _selectedIndex = 2);
+          }
         },
       ),
     );
@@ -2081,137 +2101,6 @@ class _FeedSlot {
   const _FeedSlot.post(this.postIndex) : kind = _FeedSlotKind.post;
 }
 
-// ============================================================
-// `.bottomnav`
-//
-// HTML me 5 items hain: Home · Campus · Classes · Chat · Profile.
-// ⚠️ Inme se sirf Home (0) aur Profile (2) IndexedStack ke tabs hain —
-// Classes aur Chat apni-apni screen push karte hain, kyunki dono ke paas
-// already apna Scaffold + apna bottom nav hai (conversations_screen.dart
-// dekho); unhe tab banane se do nav bars stack ho jaate.
-// Search bar (upar) index 1 pe switch karta hai — HTML ke design me search
-// bottom nav me hai hi nahi, top bar me hai.
-//
-// ✅ CAMPUS — `onCampus` ab `CampusScreen` push karta hai
-// (campus/screens/campus_screen.dart). Tab yahan bhi Classes/Chat jaisa
-// hi hai: apna Scaffold push karta hai, IndexedStack me shaamil nahi hai.
-// ============================================================
-class _LsBottomNav extends StatelessWidget {
-  final int selectedIndex;
-  final AppLocalizations l10n;
-  final ValueChanged<int> onTab;
-  final VoidCallback onClasses;
-  final VoidCallback onChat;
-  final VoidCallback onCampus;
-
-  const _LsBottomNav({
-    required this.selectedIndex,
-    required this.l10n,
-    required this.onTab,
-    required this.onClasses,
-    required this.onChat,
-    required this.onCampus,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    final cs = Theme.of(context).colorScheme;
-    return Container(
-      decoration: BoxDecoration(
-        // HTML: linear-gradient(0deg, var(--bg) 60%, transparent)
-        gradient: LinearGradient(
-          begin: Alignment.bottomCenter,
-          end: Alignment.topCenter,
-          colors: [lsBg(context), lsBg(context), lsBg(context).withOpacity(0)],
-          stops: const [0, .6, 1],
-        ),
-      ),
-      child: SafeArea(
-        top: false,
-        child: Padding(
-          padding: const EdgeInsets.fromLTRB(8, 12, 8, 8),
-          child: Row(mainAxisAlignment: MainAxisAlignment.spaceAround, children: [
-            _LsNavItem(
-                icon: Icons.home_outlined,
-                activeIcon: Icons.home_rounded,
-                label: l10n.homeTab,
-                active: selectedIndex == 0,
-                onTap: () => onTab(0)),
-            _LsNavItem(
-                icon: Icons.school_outlined,
-                activeIcon: Icons.school_rounded,
-                label: l10n.campusTab,
-                active: false,
-                onTap: onCampus),
-            _LsNavItem(
-                icon: Icons.smart_display_outlined,
-                activeIcon: Icons.smart_display_rounded,
-                label: l10n.classesTab,
-                active: false,
-                onTap: onClasses),
-            _LsNavItem(
-                icon: Icons.chat_bubble_outline_rounded,
-                activeIcon: Icons.chat_bubble_rounded,
-                label: l10n.chatTab,
-                active: false,
-                onTap: onChat),
-            _LsNavItem(
-                icon: Icons.person_outline_rounded,
-                activeIcon: Icons.person_rounded,
-                label: l10n.profileTab,
-                active: selectedIndex == 2,
-                onTap: () => onTab(2)),
-          ]),
-        ),
-      ),
-    );
-  }
-}
-
-class _LsNavItem extends StatelessWidget {
-  final IconData icon;
-  final IconData activeIcon;
-  final String label;
-  final bool active;
-  final VoidCallback onTap;
-  const _LsNavItem({
-    required this.icon,
-    required this.activeIcon,
-    required this.label,
-    required this.active,
-    required this.onTap,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    final cs = Theme.of(context).colorScheme;
-    final color = active ? cs.primary : cs.onSurfaceVariant;
-    return Expanded(
-      child: Semantics(
-        button: true,
-        selected: active,
-        label: label,
-        child: InkWell(
-          onTap: onTap,
-          borderRadius: BorderRadius.circular(12),
-          child: Padding(
-            padding: const EdgeInsets.symmetric(vertical: 4),
-            child: Column(mainAxisSize: MainAxisSize.min, children: [
-              Icon(active ? activeIcon : icon, size: 24, color: color),
-              const SizedBox(height: 4),
-              Text(
-                label,
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
-                style: TextStyle(fontSize: 9.5, fontWeight: FontWeight.w600, color: color),
-              ),
-            ]),
-          ),
-        ),
-      ),
-    );
-  }
-}
 
 /// `.classroom-chip.add` ka dashed border — Flutter ke Border me dashed
 /// style nahi hai, isliye chhota painter.

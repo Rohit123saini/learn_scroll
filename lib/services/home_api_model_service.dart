@@ -307,9 +307,14 @@ class HomeFeedService {
   static Future<bool> toggleLike(String postId) async {
     final token = await AuthService.getValidToken();
     if (token == null) throw Exception('User not authenticated');
-    final url = Uri.parse("${Api.baseUrl}/post/$postId/like/");
-    final response =
-        await http.post(url, headers: {"Authorization": "Bearer $token"}).timeout(kApiTimeout);
+    // Backend me sirf reaction endpoint hai (`/post/like/<id>/reaction/`) —
+    // plain like = reaction "like" (dobara bhejne pe unlike, backend toggle).
+    final url = Uri.parse("${Api.baseUrl}/post/like/$postId/reaction/");
+    final response = await http
+        .post(url,
+            headers: {"Authorization": "Bearer $token", "Content-Type": "application/json"},
+            body: jsonEncode({"reaction": "like"}))
+        .timeout(kApiTimeout);
     return response.statusCode == 200 || response.statusCode == 201;
   }
 

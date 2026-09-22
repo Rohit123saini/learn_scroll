@@ -1,18 +1,26 @@
 // message/screens/app_bottom_nav.dart
 //
-// 🔥 NAYA — same bottom navigation bar jo HomeScreen me hai (Home / Search /
-// Profile), ab yahan ek "Chats" tab ke saath reuse ho rahi hai, taaki
-// conversation list bhi ek real tab jaisa feel de — bilkul WhatsApp/
-// Instagram jaisa (jaise Insta ka DM inbox apna khud ka top-level screen
-// hota hai lekin bottom bar wahi rehta hai).
+// Same bottom navigation bar jo HomeScreen me hai (Home / Search / Profile),
+// ab yahan ek "Chats" tab ke saath reuse ho rahi hai, taaki conversation
+// list bhi ek real tab jaisa feel de — bilkul WhatsApp/Instagram jaisa
+// (jaise Insta ka DM inbox apna khud ka top-level screen hota hai lekin
+// bottom bar wahi rehta hai).
 //
-// NOTE: import neeche '../../home/home.dart' se hai — ye home.dart ke
-// andar ke relative imports (jaise '../message/screens/conversations_screen.dart')
+// 🔥 FIX [Task 6] — pehle ye apna alag stock `BottomNavigationBar` banata
+// tha (Material 2 look), jo iske apne purane comment me hi documented tha:
+// "isn't a visual match for home.dart's actual bottom nav ... would need
+// `_LsNavItem`/`_LsBottomNav` exposed as a shared widget". Wahi ab
+// `widgets/ls_ui.dart` me public `LsBottomNav` ban chuka hai — yahan use
+// karo, pixel-for-pixel wahi gradient look home.dart jaisa.
+//
+// NOTE: import neeche '../../home.dart' se hai — ye home.dart ke andar ke
+// relative imports (jaise '../message/screens/conversations_screen.dart')
 // se inferred hai. Agar tumhare project me HomeScreen kisi aur path pe hai,
 // to bas ye ek import line update kar dena, baaki sab same rahega.
 
 import 'package:flutter/material.dart';
 import '../../home.dart';
+import '../../widgets/ls_ui.dart';
 
 enum AppTab { home, search, chats, profile }
 
@@ -37,34 +45,16 @@ class AppBottomNav extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return BottomNavigationBar(
-      currentIndex: current.index,
-      onTap: (i) => _handleTap(context, i),
-      backgroundColor: const Color(0xFF030F27),
-      selectedItemColor: Colors.white,
-      unselectedItemColor: Colors.white60,
-      type: BottomNavigationBarType.fixed,
+    return LsBottomNav(
       items: const [
-        BottomNavigationBarItem(
-          icon: Icon(Icons.home_outlined),
-          activeIcon: Icon(Icons.home),
-          label: "Home",
-        ),
-        BottomNavigationBarItem(
-          icon: Icon(Icons.search),
-          label: "Search",
-        ),
-        BottomNavigationBarItem(
-          icon: Icon(Icons.chat_bubble_outline),
-          activeIcon: Icon(Icons.chat_bubble),
-          label: "Chats",
-        ),
-        BottomNavigationBarItem(
-          icon: Icon(Icons.person_outline),
-          activeIcon: Icon(Icons.person),
-          label: "Profile",
-        ),
+        LsBottomNavItemData(icon: Icons.home_outlined, activeIcon: Icons.home_rounded, label: 'Home'),
+        LsBottomNavItemData(icon: Icons.search_rounded, activeIcon: Icons.search_rounded, label: 'Search'),
+        LsBottomNavItemData(
+            icon: Icons.chat_bubble_outline_rounded, activeIcon: Icons.chat_bubble_rounded, label: 'Chats'),
+        LsBottomNavItemData(icon: Icons.person_outline_rounded, activeIcon: Icons.person_rounded, label: 'Profile'),
       ],
+      activeIndex: current.index,
+      onTap: (i) => _handleTap(context, i),
     );
   }
 }

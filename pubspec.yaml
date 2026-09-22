@@ -92,6 +92,7 @@ dependencies:
   crypto: ^3.0.7
   speech_to_text: ^7.4.0
   timezone: ^0.11.1
+  flutter_tts: ^4.2.5
  
 dependency_overrides:
   # flutter_callkit_incoming: 2.0.4+2

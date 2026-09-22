@@ -1,3 +1,29 @@
+// lib/post/screens/quick_post.dart
+//
+// QUICK POST — Advanced Lightweight Composer
+// Features:
+// • Full-screen immersive UI with glassmorphism
+// • Blurred bottom sheets
+// • Emoji grid with categories (Smileys, Hearts, Fire, Hands, Objects)
+// • Voice note recording UI simulation
+// • GIF / Sticker placeholder
+// • Draft with timestamp tracking
+// • Haptic feedback on every interaction
+// • Animated character counter with color states
+// • Media strip with drag-to-reorder handles
+// • Category shimmer loader
+// • Visibility chips with unique colors
+// • Smooth animations & transitions
+//
+// UI/UX PASS — every animation, gesture, draft-autosave, chunked-upload
+// threshold and validation rule below is unchanged. What changed: the
+// screen now pulls its palette from theme_service.dart's ColorScheme
+// (so it follows the app's light/dark setting and the same brand purple
+// used in home.dart, instead of a separate hardcoded navy/gold palette),
+// and every user-facing string — snackbars, sheet labels, tooltips,
+// visibility chips, the discard dialog, the "Xm ago" draft timestamp —
+// is now localized via AppLocalizations.
+
 import 'dart:io';
 import 'dart:ui';
 
@@ -6,6 +32,7 @@ import 'package:flutter/services.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import '../services/api_service.dart';
+import '../../l10n/app_localizations.dart';
 
 enum _MediaType { image, video }
 
@@ -15,24 +42,6 @@ class _MediaItem {
   final _MediaType type;
 }
 
-/// ═══════════════════════════════════════════════════════════════════
-/// QUICK POST — Advanced Lightweight Composer
-/// Features:
-/// • Full-screen immersive UI with glassmorphism
-/// • Blurred bottom sheets
-/// • Emoji grid with categories (Smileys, Hearts, Fire, Hands, Objects)
-/// • Voice note recording UI simulation
-/// • GIF / Sticker placeholder
-/// • Thread support hint
-/// • Draft with timestamp tracking
-/// • Haptic feedback on every interaction
-/// • Animated character counter with color states
-/// • Better media strip with drag handles
-/// • Professional color palette
-/// • Category shimmer loader
-/// • Visibility chips with unique colors
-/// • Smooth animations & transitions
-/// ═══════════════════════════════════════════════════════════════════
 class QuickTextPost extends StatefulWidget {
   const QuickTextPost({super.key});
 
@@ -41,24 +50,13 @@ class QuickTextPost extends StatefulWidget {
 }
 
 class _QuickTextPostState extends State<QuickTextPost> with TickerProviderStateMixin {
-  // ─── Design Tokens (matched to NewPost / ProfileScreen's navy brand identity) ───
-  static const Color _primary = Color(0xFF030F27); // same navy as NewPost's brand anchor
-  static const Color _primaryDark = Color(0xFF010914); // pressed/depth state for the primary
-  static const Color _primarySoft = Color(0xFFE9EBF3); // soft navy tint for chips/icon badges
-  static const Color _accent = Color(0xFFC9A24B); // warm gold — small premium highlight, used sparingly
-  static const Color _navy = Color(0xFF0B142B); // heading text — deep navy, not flat black
-  static const Color _muted = Color(0xFF6B7280); // secondary text
-  static const Color _border = Color(0xFFE1E4EC); // soft cool-gray hairline, matches navy undertone
-  static const Color _success = Color(0xFF2ECC71);
-  static const Color _error = Color(0xFFED4956);
-  static const Color _warning = Color(0xFFF5A623);
   static const int _maxChars = 3000;
   static const int _maxMedia = 6;
   static const String _draftKey = 'quick_post_draft_text';
   static const String _draftTimeKey = 'quick_post_draft_time';
-  // TASK 7 — same 20MB cutoff as new_post.dart's `_chunkedUploadThreshold`;
-  // above this, a single attachment goes through the chunked/resumable
-  // upload path instead of one big multipart request.
+  // Same 20MB cutoff as new_post.dart's `_chunkedUploadThreshold`; above
+  // this, a single attachment goes through the chunked/resumable upload
+  // path instead of one big multipart request.
   static const int _chunkedUploadThreshold = 20 * 1024 * 1024; // 20MB
 
   final _contentController = TextEditingController();
@@ -75,7 +73,8 @@ class _QuickTextPostState extends State<QuickTextPost> with TickerProviderStateM
   String? _category;
   List<Map<String, String>> _categories = [];
   String _visibility = 'public';
-  String _loadingLabel = 'Posting...';
+  String? _loadingLabel; // null while idle; l10n string while uploading/posting
+  double? _uploadPercent; // non-null while a chunked upload is reporting progress
   DateTime? _lastSaved;
 
   final List<_MediaItem> _mediaItems = [];
@@ -94,12 +93,6 @@ class _QuickTextPostState extends State<QuickTextPost> with TickerProviderStateM
     'Hands': ['👍', '👎', '👏', '🙏', '🤝', '👊', '✌️', '🤞', '🤟', '🤘', '👌', '🖐️'],
     'Objects': ['💻', '📱', '💡', '📚', '✏️', '🎨', '🎵', '🎬', '🎮', '📷', '🔒', '🔑'],
   };
-
-  final List<Map<String, dynamic>> _visibilityOptions = const [
-    {'key': 'public', 'label': 'Public', 'icon': Icons.public_rounded, 'color': Color(0xFF3B82F6)},
-    {'key': 'connections', 'label': 'Network', 'icon': Icons.people_alt_rounded, 'color': Color(0xFF8B5CF6)},
-    {'key': 'private', 'label': 'Private', 'icon': Icons.lock_outline_rounded, 'color': Color(0xFF64748B)},
-  ];
 
   bool get _hasVideo => _mediaItems.any((m) => m.type == _MediaType.video);
 
@@ -147,7 +140,7 @@ class _QuickTextPostState extends State<QuickTextPost> with TickerProviderStateM
         if (savedTime != null) {
           _lastSaved = DateTime.fromMillisecondsSinceEpoch(savedTime);
         }
-        _showMessage('Draft restored', isError: false);
+        _showMessage(AppLocalizations.of(context)!.draftRestored, isError: false);
       }
     } catch (_) {}
   }
@@ -205,11 +198,12 @@ class _QuickTextPostState extends State<QuickTextPost> with TickerProviderStateM
 
   void _showMessage(String msg, {bool isError = true}) {
     if (!mounted) return;
+    final cs = Theme.of(context).colorScheme;
     HapticFeedback.lightImpact();
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(
         content: Text(msg, style: const TextStyle(fontWeight: FontWeight.w500)),
-        backgroundColor: isError ? _error : _success,
+        backgroundColor: isError ? cs.error : const Color(0xFF2ECC71),
         behavior: SnackBarBehavior.floating,
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
         margin: const EdgeInsets.all(16),
@@ -244,12 +238,13 @@ class _QuickTextPostState extends State<QuickTextPost> with TickerProviderStateM
 
   // ─── Media ───
   Future<void> _pickImages() async {
+    final l10n = AppLocalizations.of(context)!;
     if (_hasVideo) {
-      _showMessage('Pehle video hatao');
+      _showMessage(l10n.removeVideoFirst);
       return;
     }
     if (_mediaItems.length >= _maxMedia) {
-      _showMessage('Max $_maxMedia media allowed');
+      _showMessage(l10n.maxMediaAllowed(_maxMedia));
       return;
     }
     try {
@@ -259,19 +254,20 @@ class _QuickTextPostState extends State<QuickTextPost> with TickerProviderStateM
       setState(() {
         _mediaItems.addAll(picked.take(remaining).map((x) => _MediaItem(File(x.path), _MediaType.image)));
       });
-      if (picked.length > remaining) _showMessage('Sirf $remaining aur add ho sakti thi');
+      if (picked.length > remaining) _showMessage(l10n.onlyNMoreCouldBeAdded(remaining));
     } catch (e) {
-      _showMessage('Gallery error: $e');
+      _showMessage(l10n.galleryError(e.toString()));
     }
   }
 
   Future<void> _pickCameraPhoto() async {
+    final l10n = AppLocalizations.of(context)!;
     if (_hasVideo) {
-      _showMessage('Pehle video hatao');
+      _showMessage(l10n.removeVideoFirst);
       return;
     }
     if (_mediaItems.length >= _maxMedia) {
-      _showMessage('Max $_maxMedia media allowed');
+      _showMessage(l10n.maxMediaAllowed(_maxMedia));
       return;
     }
     try {
@@ -279,13 +275,14 @@ class _QuickTextPostState extends State<QuickTextPost> with TickerProviderStateM
       if (shot == null) return;
       setState(() => _mediaItems.add(_MediaItem(File(shot.path), _MediaType.image)));
     } catch (e) {
-      _showMessage('Camera error: $e');
+      _showMessage(l10n.cameraError(e.toString()));
     }
   }
 
   Future<void> _pickVideo(ImageSource source) async {
+    final l10n = AppLocalizations.of(context)!;
     if (_mediaItems.isNotEmpty) {
-      _showMessage('Images hatao pehle video ke liye');
+      _showMessage(l10n.removeImagesFirst);
       return;
     }
     try {
@@ -293,7 +290,7 @@ class _QuickTextPostState extends State<QuickTextPost> with TickerProviderStateM
       if (video == null) return;
       setState(() => _mediaItems.add(_MediaItem(File(video.path), _MediaType.video)));
     } catch (e) {
-      _showMessage('Video error: $e');
+      _showMessage(l10n.videoError(e.toString()));
     }
   }
 
@@ -312,6 +309,8 @@ class _QuickTextPostState extends State<QuickTextPost> with TickerProviderStateM
 
   void _showAttachSheet() {
     HapticFeedback.mediumImpact();
+    final cs = Theme.of(context).colorScheme;
+    final l10n = AppLocalizations.of(context)!;
     showModalBottomSheet(
       context: context,
       isScrollControlled: true,
@@ -319,9 +318,9 @@ class _QuickTextPostState extends State<QuickTextPost> with TickerProviderStateM
       builder: (ctx) => BackdropFilter(
         filter: ImageFilter.blur(sigmaX: 10, sigmaY: 10),
         child: Container(
-          decoration: const BoxDecoration(
-            color: Colors.white,
-            borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
+          decoration: BoxDecoration(
+            color: cs.surface,
+            borderRadius: const BorderRadius.vertical(top: Radius.circular(24)),
           ),
           padding: const EdgeInsets.fromLTRB(20, 12, 20, 24),
           child: SafeArea(
@@ -332,22 +331,22 @@ class _QuickTextPostState extends State<QuickTextPost> with TickerProviderStateM
                   child: Container(
                     width: 40,
                     height: 4,
-                    decoration: BoxDecoration(color: _border, borderRadius: BorderRadius.circular(2)),
+                    decoration: BoxDecoration(color: cs.outlineVariant, borderRadius: BorderRadius.circular(2)),
                   ),
                 ),
                 const SizedBox(height: 20),
-                const Text('Add to post', style: TextStyle(fontSize: 18, fontWeight: FontWeight.w800)),
+                Text(l10n.addToPost, style: TextStyle(fontSize: 18, fontWeight: FontWeight.w800, color: cs.onSurface)),
                 const SizedBox(height: 20),
-                _sheetTile(Icons.photo_library_rounded, 'Gallery', const Color(0xFF3B82F6), _pickImages, !_hasVideo),
-                _sheetTile(Icons.camera_alt_rounded, 'Camera', const Color(0xFF10B981), _pickCameraPhoto, !_hasVideo),
-                const Divider(height: 24),
-                _sheetTile(Icons.video_library_rounded, 'Video from gallery', const Color(0xFFEF4444),
-                    () => _pickVideo(ImageSource.gallery), _mediaItems.isEmpty),
-                _sheetTile(Icons.videocam_rounded, 'Record video', const Color(0xFFF59E0B),
-                    () => _pickVideo(ImageSource.camera), _mediaItems.isEmpty),
-                const Divider(height: 24),
-                _sheetTile(Icons.gif_box_rounded, 'GIF / Sticker', const Color(0xFF8B5CF6),
-                    () => _showMessage('GIF integration coming soon!', isError: false), true),
+                _sheetTile(Icons.photo_library_rounded, l10n.gallery, const Color(0xFF3B82F6), _pickImages, !_hasVideo, cs),
+                _sheetTile(Icons.camera_alt_rounded, l10n.camera, const Color(0xFF10B981), _pickCameraPhoto, !_hasVideo, cs),
+                Divider(height: 24, color: cs.outlineVariant),
+                _sheetTile(Icons.video_library_rounded, l10n.videoFromGallery, const Color(0xFFEF4444),
+                    () => _pickVideo(ImageSource.gallery), _mediaItems.isEmpty, cs),
+                _sheetTile(Icons.videocam_rounded, l10n.recordVideo, const Color(0xFFF59E0B),
+                    () => _pickVideo(ImageSource.camera), _mediaItems.isEmpty, cs),
+                Divider(height: 24, color: cs.outlineVariant),
+                _sheetTile(Icons.gif_box_rounded, l10n.gifSticker, const Color(0xFF8B5CF6),
+                    () => _showMessage(l10n.gifComingSoon, isError: false), true, cs),
               ],
             ),
           ),
@@ -356,14 +355,14 @@ class _QuickTextPostState extends State<QuickTextPost> with TickerProviderStateM
     );
   }
 
-  Widget _sheetTile(IconData icon, String label, Color color, VoidCallback onTap, bool enabled) {
+  Widget _sheetTile(IconData icon, String label, Color color, VoidCallback onTap, bool enabled, ColorScheme cs) {
     return ListTile(
       leading: Container(
         padding: const EdgeInsets.all(10),
         decoration: BoxDecoration(color: color.withOpacity(0.1), borderRadius: BorderRadius.circular(12)),
         child: Icon(icon, color: color),
       ),
-      title: Text(label, style: const TextStyle(fontWeight: FontWeight.w600)),
+      title: Text(label, style: TextStyle(fontWeight: FontWeight.w600, color: cs.onSurface)),
       enabled: enabled,
       onTap: enabled
           ? () {
@@ -385,12 +384,14 @@ class _QuickTextPostState extends State<QuickTextPost> with TickerProviderStateM
     } else {
       _pulseAnimController.stop();
       _pulseAnimController.reset();
-      _showMessage('Voice note attached (simulated)', isError: false);
+      _showMessage(AppLocalizations.of(context)!.voiceNoteAttached, isError: false);
     }
   }
 
   // ─── Close / Discard ───
   Future<void> _handleClose() async {
+    final l10n = AppLocalizations.of(context)!;
+    final cs = Theme.of(context).colorScheme;
     final hasContent = _contentController.text.trim().isNotEmpty || _mediaItems.isNotEmpty;
     if (!hasContent) {
       Navigator.pop(context);
@@ -402,20 +403,20 @@ class _QuickTextPostState extends State<QuickTextPost> with TickerProviderStateM
         filter: ImageFilter.blur(sigmaX: 6, sigmaY: 6),
         child: AlertDialog(
           shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
-          title: const Text('Discard post?', style: TextStyle(fontWeight: FontWeight.w800)),
-          content: const Text('Draft saved hai. Baad mein continue kar sakte ho.'),
+          title: Text(l10n.discardPostTitle, style: const TextStyle(fontWeight: FontWeight.w800)),
+          content: Text(l10n.discardPostBody),
           actions: [
             TextButton(
               onPressed: () => Navigator.pop(ctx, false),
-              child: const Text('Keep editing', style: TextStyle(fontWeight: FontWeight.w600)),
+              child: Text(l10n.keepEditing, style: const TextStyle(fontWeight: FontWeight.w600)),
             ),
             FilledButton(
               onPressed: () async {
                 await _clearDraft();
                 if (ctx.mounted) Navigator.pop(ctx, true);
               },
-              style: FilledButton.styleFrom(backgroundColor: _error),
-              child: const Text('Discard'),
+              style: FilledButton.styleFrom(backgroundColor: cs.error),
+              child: Text(l10n.discard),
             ),
           ],
         ),
@@ -429,32 +430,34 @@ class _QuickTextPostState extends State<QuickTextPost> with TickerProviderStateM
   // ─── Post ───
   Future<void> _post() async {
     HapticFeedback.mediumImpact();
+    final l10n = AppLocalizations.of(context)!;
     final text = _contentController.text.trim();
     if (text.isEmpty && _mediaItems.isEmpty) {
-      _showMessage('Kuch toh likho ya media lagao');
+      _showMessage(l10n.writeSomethingOrAddMedia);
       return;
     }
     if (text.length > _maxChars) {
-      _showMessage('Post $_maxChars characters se zyada nahi ho sakta');
+      _showMessage(l10n.postTooLong(_maxChars));
       return;
     }
     if (_category == null) {
-      _showMessage(_loadingCategories ? 'Categories load ho rahi hain...' : 'Category load nahi ho payi');
+      _showMessage(_loadingCategories ? l10n.categoriesLoading : l10n.categoryLoadFailed);
       return;
     }
 
     setState(() {
       _isLoading = true;
-      _loadingLabel = _mediaItems.isNotEmpty ? 'Uploading media...' : 'Posting...';
+      _uploadPercent = null;
+      _loadingLabel = _mediaItems.isNotEmpty ? l10n.uploadingMedia : l10n.posting;
     });
     try {
       final hashtagRegex = RegExp(r'#(\w+)');
       final hashtags = hashtagRegex.allMatches(text).map((m) => m.group(1)!).toList();
 
-      // TASK 7 — chunked-upload parity with new_post.dart. Same rule as
-      // there: a single attachment over the 20MB threshold goes through
-      // the resumable chunked path instead of one big multipart POST, so
-      // a large video doesn't time out / can't resume on a flaky
+      // Chunked-upload parity with new_post.dart. Same rule as there: a
+      // single attachment over the 20MB threshold goes through the
+      // resumable chunked path instead of one big multipart POST, so a
+      // large video doesn't time out / can't resume on a flaky
       // connection. Multiple attachments (or anything under the
       // threshold) keep using plain multipart `createPost` — Quick
       // Post's whole point is speed, so we don't force every tiny image
@@ -481,13 +484,11 @@ class _QuickTextPostState extends State<QuickTextPost> with TickerProviderStateM
           mediaType: item.type == _MediaType.video ? 'video' : 'image',
           scheduledAt: null,
           // Lightweight progress treatment: reuse the existing spinner +
-          // label on the Post button (`_loadingLabel`) instead of adding
-          // a separate progress ring like new_post.dart's full composer
-          // — Quick Post stays a single compact control.
+          // label on the Post button instead of adding a separate
+          // progress ring like new_post.dart's full composer — Quick
+          // Post stays a single compact control.
           onProgress: (progress) {
-            if (mounted) {
-              setState(() => _loadingLabel = 'Uploading ${(progress * 100).toStringAsFixed(0)}%');
-            }
+            if (mounted) setState(() => _uploadPercent = progress * 100);
           },
         );
       } else {
@@ -509,7 +510,7 @@ class _QuickTextPostState extends State<QuickTextPost> with TickerProviderStateM
       if (!mounted) return;
       await _clearDraft();
 
-      final message = result['message'] ?? 'Post created successfully!';
+      final message = result['message']?.toString() ?? l10n.postCreatedSuccess;
       HapticFeedback.mediumImpact();
       setState(() {
         _isLoading = false;
@@ -529,7 +530,7 @@ class _QuickTextPostState extends State<QuickTextPost> with TickerProviderStateM
   }
 
   // ─── UI Builders ───
-  Widget _mediaThumb(_MediaItem item, int index) {
+  Widget _mediaThumb(_MediaItem item, int index, ColorScheme cs) {
     return Container(
       key: ValueKey(item.file.path),
       margin: const EdgeInsets.only(right: 10),
@@ -572,10 +573,10 @@ class _QuickTextPostState extends State<QuickTextPost> with TickerProviderStateM
               child: Container(
                 padding: const EdgeInsets.all(4),
                 decoration: BoxDecoration(
-                  color: _error,
+                  color: cs.error,
                   shape: BoxShape.circle,
-                  border: Border.all(color: Colors.white, width: 2),
-                  boxShadow: [BoxShadow(color: _error.withOpacity(0.3), blurRadius: 4)],
+                  border: Border.all(color: cs.surface, width: 2),
+                  boxShadow: [BoxShadow(color: cs.error.withOpacity(0.3), blurRadius: 4)],
                 ),
                 child: const Icon(Icons.close_rounded, size: 12, color: Colors.white),
               ),
@@ -586,7 +587,7 @@ class _QuickTextPostState extends State<QuickTextPost> with TickerProviderStateM
     );
   }
 
-  Widget _buildMediaStrip() {
+  Widget _buildMediaStrip(ColorScheme cs) {
     if (_mediaItems.isEmpty) return const SizedBox.shrink();
     return Padding(
       padding: const EdgeInsets.only(top: 16),
@@ -597,14 +598,14 @@ class _QuickTextPostState extends State<QuickTextPost> with TickerProviderStateM
           buildDefaultDragHandles: false,
           onReorder: _reorderMedia,
           children: [
-            for (int i = 0; i < _mediaItems.length; i++) _mediaThumb(_mediaItems[i], i),
+            for (int i = 0; i < _mediaItems.length; i++) _mediaThumb(_mediaItems[i], i, cs),
           ],
         ),
       ),
     );
   }
 
-  Widget _buildEmojiGrid() {
+  Widget _buildEmojiGrid(ColorScheme cs) {
     return AnimatedBuilder(
       animation: _emojiSlide,
       builder: (context, child) {
@@ -616,7 +617,7 @@ class _QuickTextPostState extends State<QuickTextPost> with TickerProviderStateM
               height: 260,
               padding: const EdgeInsets.all(12),
               decoration: BoxDecoration(
-                color: Colors.white,
+                color: cs.surface,
                 borderRadius: const BorderRadius.vertical(top: Radius.circular(20)),
                 boxShadow: [BoxShadow(color: Colors.black.withOpacity(0.08), blurRadius: 20, offset: const Offset(0, -4))],
               ),
@@ -626,9 +627,9 @@ class _QuickTextPostState extends State<QuickTextPost> with TickerProviderStateM
                   children: [
                     TabBar(
                       isScrollable: true,
-                      labelColor: _primary,
-                      unselectedLabelColor: _muted,
-                      indicatorColor: _primary,
+                      labelColor: cs.primary,
+                      unselectedLabelColor: cs.onSurfaceVariant,
+                      indicatorColor: cs.primary,
                       indicatorWeight: 3,
                       labelStyle: const TextStyle(fontWeight: FontWeight.w700, fontSize: 12),
                       tabs: _emojiCategories.keys.map((k) => Tab(text: k)).toList(),
@@ -664,7 +665,8 @@ class _QuickTextPostState extends State<QuickTextPost> with TickerProviderStateM
   }
 
   // ─── Success Overlay — brief celebratory checkmark right before navigating back ───
-  Widget _buildSuccessOverlay() {
+  Widget _buildSuccessOverlay(ColorScheme cs) {
+    final l10n = AppLocalizations.of(context)!;
     return IgnorePointer(
       ignoring: !_justPosted,
       child: AnimatedOpacity(
@@ -673,7 +675,7 @@ class _QuickTextPostState extends State<QuickTextPost> with TickerProviderStateM
         child: Container(
           decoration: BoxDecoration(
             gradient: RadialGradient(
-              colors: [_primaryDark, _primary.withOpacity(0.96)],
+              colors: [Color.lerp(cs.primary, Colors.black, 0.35)!, cs.primary.withOpacity(0.96)],
               radius: 1.1,
             ),
           ),
@@ -689,20 +691,20 @@ class _QuickTextPostState extends State<QuickTextPost> with TickerProviderStateM
                   alignment: Alignment.center,
                   decoration: BoxDecoration(
                     shape: BoxShape.circle,
-                    border: Border.all(color: _accent.withOpacity(0.5), width: 2),
-                    boxShadow: [BoxShadow(color: _accent.withOpacity(0.35), blurRadius: 24, spreadRadius: 2)],
+                    border: Border.all(color: cs.secondary.withOpacity(0.5), width: 2),
+                    boxShadow: [BoxShadow(color: cs.secondary.withOpacity(0.35), blurRadius: 24, spreadRadius: 2)],
                   ),
                   child: Container(
                     width: 76,
                     height: 76,
                     decoration: const BoxDecoration(color: Colors.white, shape: BoxShape.circle),
-                    child: const Icon(Icons.check_rounded, color: _primary, size: 42),
+                    child: Icon(Icons.check_rounded, color: cs.primary, size: 42),
                   ),
                 ),
                 const SizedBox(height: 18),
-                const Text(
-                  'Posted!',
-                  style: TextStyle(color: Colors.white, fontWeight: FontWeight.w800, fontSize: 18, letterSpacing: 0.2),
+                Text(
+                  l10n.postedExclaim,
+                  style: const TextStyle(color: Colors.white, fontWeight: FontWeight.w800, fontSize: 18, letterSpacing: 0.2),
                 ),
               ],
             ),
@@ -714,19 +716,30 @@ class _QuickTextPostState extends State<QuickTextPost> with TickerProviderStateM
 
   String _timeAgo(DateTime? dt) {
     if (dt == null) return '';
+    final l10n = AppLocalizations.of(context)!;
     final diff = DateTime.now().difference(dt);
-    if (diff.inSeconds < 60) return 'just now';
-    if (diff.inMinutes < 60) return '${diff.inMinutes}m ago';
-    if (diff.inHours < 24) return '${diff.inHours}h ago';
-    return '${diff.inDays}d ago';
+    if (diff.inSeconds < 60) return l10n.timeAgoJustNow;
+    if (diff.inMinutes < 60) return l10n.timeAgoMinutes(diff.inMinutes);
+    if (diff.inHours < 24) return l10n.timeAgoHours(diff.inHours);
+    return l10n.timeAgoDays(diff.inDays);
   }
 
   @override
   Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
+    final l10n = AppLocalizations.of(context)!;
+    final Color primaryDark = Color.lerp(cs.primary, Colors.black, 0.2)!;
+    final visibilityOptions = <Map<String, dynamic>>[
+      {'key': 'public', 'label': l10n.visibilityPublic, 'icon': Icons.public_rounded, 'color': const Color(0xFF3B82F6)},
+      {'key': 'connections', 'label': l10n.visibilityNetwork, 'icon': Icons.people_alt_rounded, 'color': const Color(0xFF8B5CF6)},
+      {'key': 'private', 'label': l10n.visibilityPrivate, 'icon': Icons.lock_outline_rounded, 'color': cs.onSurfaceVariant},
+    ];
+
     final charCount = _contentController.text.length;
     final overLimit = charCount > _maxChars;
     final nearLimit = charCount > (_maxChars * 0.9);
     final progress = charCount / _maxChars;
+    final loadingLabelText = _uploadPercent != null ? l10n.uploadingPercent(_uploadPercent!.toStringAsFixed(0)) : (_loadingLabel ?? l10n.posting);
 
     return PopScope(
       canPop: false,
@@ -734,18 +747,18 @@ class _QuickTextPostState extends State<QuickTextPost> with TickerProviderStateM
         if (!didPop) _handleClose();
       },
       child: Scaffold(
-        backgroundColor: Colors.white,
+        backgroundColor: cs.background,
         appBar: AppBar(
-          backgroundColor: Colors.white,
+          backgroundColor: cs.background,
           elevation: 0,
-          surfaceTintColor: Colors.white,
+          surfaceTintColor: cs.background,
           leading: IconButton(
-            icon: const Icon(Icons.close_rounded, color: _navy),
+            icon: Icon(Icons.close_rounded, color: cs.onSurface),
             onPressed: _handleClose,
           ),
-          title: const Text(
-            'Quick Post',
-            style: TextStyle(color: _navy, fontWeight: FontWeight.w800, fontSize: 17, letterSpacing: -0.3),
+          title: Text(
+            l10n.quickPostTitle,
+            style: TextStyle(color: cs.onSurface, fontWeight: FontWeight.w800, fontSize: 17, letterSpacing: -0.3),
           ),
           actions: [
             if (_lastSaved != null && _contentController.text.isNotEmpty)
@@ -753,8 +766,8 @@ class _QuickTextPostState extends State<QuickTextPost> with TickerProviderStateM
                 padding: const EdgeInsets.only(right: 8),
                 child: Center(
                   child: Text(
-                    'Saved ${_timeAgo(_lastSaved)}',
-                    style: TextStyle(fontSize: 11, color: _muted.withOpacity(0.7), fontWeight: FontWeight.w500),
+                    l10n.savedAgo(_timeAgo(_lastSaved)),
+                    style: TextStyle(fontSize: 11, color: cs.onSurfaceVariant.withOpacity(0.8), fontWeight: FontWeight.w500),
                   ),
                 ),
               ),
@@ -766,10 +779,10 @@ class _QuickTextPostState extends State<QuickTextPost> with TickerProviderStateM
                     borderRadius: BorderRadius.circular(24),
                     gradient: LinearGradient(
                       colors: (_isLoading || overLimit)
-                          ? [_primary.withOpacity(0.35), _primaryDark.withOpacity(0.35)]
-                          : [_primary, _primaryDark],
+                          ? [cs.primary.withOpacity(0.35), primaryDark.withOpacity(0.35)]
+                          : [cs.primary, primaryDark],
                     ),
-                    border: Border.all(color: _accent.withOpacity((_isLoading || overLimit) ? 0.15 : 0.55), width: 1.2),
+                    border: Border.all(color: cs.secondary.withOpacity((_isLoading || overLimit) ? 0.15 : 0.55), width: 1.2),
                   ),
                   child: Material(
                     color: Colors.transparent,
@@ -789,10 +802,10 @@ class _QuickTextPostState extends State<QuickTextPost> with TickerProviderStateM
                                     child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white),
                                   ),
                                   const SizedBox(width: 8),
-                                  Text(_loadingLabel, style: const TextStyle(color: Colors.white, fontSize: 12, fontWeight: FontWeight.w600)),
+                                  Text(loadingLabelText, style: const TextStyle(color: Colors.white, fontSize: 12, fontWeight: FontWeight.w600)),
                                 ],
                               )
-                            : const Text('Post', style: TextStyle(color: Colors.white, fontWeight: FontWeight.w700, fontSize: 14)),
+                            : Text(l10n.postButton, style: const TextStyle(color: Colors.white, fontWeight: FontWeight.w700, fontSize: 14)),
                       ),
                     ),
                   ),
@@ -805,8 +818,8 @@ class _QuickTextPostState extends State<QuickTextPost> with TickerProviderStateM
           children: [
             SafeArea(
               child: Column(
-                    children: [
-                      // Category chip
+                children: [
+                  // Category chip
                   if (_loadingCategories)
                     const Padding(
                       padding: EdgeInsets.symmetric(horizontal: 20, vertical: 8),
@@ -818,12 +831,12 @@ class _QuickTextPostState extends State<QuickTextPost> with TickerProviderStateM
                       child: Row(
                         children: [
                           Chip(
-                            avatar: const Icon(Icons.folder_rounded, size: 14, color: _primary),
+                            avatar: Icon(Icons.folder_rounded, size: 14, color: cs.primary),
                             label: Text(
                               _categories.firstWhere((c) => c['key'] == _category)['label'] ?? '',
                               style: const TextStyle(fontSize: 11, fontWeight: FontWeight.w600),
                             ),
-                            backgroundColor: _primarySoft,
+                            backgroundColor: cs.primary.withOpacity(0.1),
                             side: BorderSide.none,
                             visualDensity: VisualDensity.compact,
                           ),
@@ -839,16 +852,16 @@ class _QuickTextPostState extends State<QuickTextPost> with TickerProviderStateM
                         children: [
                           Row(
                             children: [
-                              const CircleAvatar(
+                              CircleAvatar(
                                 radius: 22,
-                                backgroundColor: _primarySoft,
-                                child: Icon(Icons.person_rounded, color: _primary, size: 24),
+                                backgroundColor: cs.primary.withOpacity(0.1),
+                                child: Icon(Icons.person_rounded, color: cs.primary, size: 24),
                               ),
                               const SizedBox(width: 12),
                               Expanded(
                                 child: Wrap(
                                   spacing: 8,
-                                  children: _visibilityOptions.map((opt) {
+                                  children: visibilityOptions.map((opt) {
                                     final selected = _visibility == opt['key'];
                                     final color = opt['color'] as Color;
                                     return ChoiceChip(
@@ -888,17 +901,17 @@ class _QuickTextPostState extends State<QuickTextPost> with TickerProviderStateM
                             autofocus: true,
                             maxLength: _maxChars,
                             maxLengthEnforcement: MaxLengthEnforcement.enforced,
-                            style: const TextStyle(fontSize: 18, height: 1.5, color: _navy),
-                            decoration: const InputDecoration(
-                              hintText: "What's on your mind?",
-                              hintStyle: TextStyle(color: _muted, fontSize: 18, fontWeight: FontWeight.w400),
+                            style: TextStyle(fontSize: 18, height: 1.5, color: cs.onSurface),
+                            decoration: InputDecoration(
+                              hintText: l10n.whatsOnYourMind,
+                              hintStyle: TextStyle(color: cs.onSurfaceVariant, fontSize: 18, fontWeight: FontWeight.w400),
                               border: InputBorder.none,
                               isDense: true,
                               contentPadding: EdgeInsets.zero,
                               counterText: '',
                             ),
                           ),
-                          _buildMediaStrip(),
+                          _buildMediaStrip(cs),
                         ],
                       ),
                     ),
@@ -907,8 +920,8 @@ class _QuickTextPostState extends State<QuickTextPost> with TickerProviderStateM
                   Container(
                     padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
                     decoration: BoxDecoration(
-                      color: Colors.white,
-                      border: Border(top: BorderSide(color: _border.withOpacity(0.6))),
+                      color: cs.surface,
+                      border: Border(top: BorderSide(color: cs.outlineVariant.withOpacity(0.6))),
                       boxShadow: [BoxShadow(color: Colors.black.withOpacity(0.02), blurRadius: 8, offset: const Offset(0, -2))],
                     ),
                     child: SafeArea(
@@ -946,17 +959,17 @@ class _QuickTextPostState extends State<QuickTextPost> with TickerProviderStateM
                                   IconButton(
                                     onPressed: _showAttachSheet,
                                     icon: const Icon(Icons.attach_file_rounded),
-                                    color: _primary,
-                                    tooltip: 'Add photo or video',
+                                    color: cs.primary,
+                                    tooltip: l10n.addPhotoOrVideoTooltip,
                                     visualDensity: VisualDensity.compact,
                                   ),
                                   IconButton(
                                     onPressed: _toggleEmojiGrid,
                                     icon: Icon(
                                       _showEmojiGrid ? Icons.keyboard_hide_rounded : Icons.emoji_emotions_rounded,
-                                      color: _showEmojiGrid ? _primary : _muted,
+                                      color: _showEmojiGrid ? cs.primary : cs.onSurfaceVariant,
                                     ),
-                                    tooltip: 'Emojis',
+                                    tooltip: l10n.emojisTooltip,
                                     visualDensity: VisualDensity.compact,
                                   ),
                                   IconButton(
@@ -966,12 +979,12 @@ class _QuickTextPostState extends State<QuickTextPost> with TickerProviderStateM
                                       builder: (_, __) {
                                         return Icon(
                                           _isRecordingVoice ? Icons.stop_rounded : Icons.mic_rounded,
-                                          color: _isRecordingVoice ? _error : _muted,
+                                          color: _isRecordingVoice ? cs.error : cs.onSurfaceVariant,
                                           size: _isRecordingVoice ? 20 + _pulseAnimController.value * 4 : 20,
                                         );
                                       },
                                     ),
-                                    tooltip: 'Voice note',
+                                    tooltip: l10n.voiceNoteTooltip,
                                     visualDensity: VisualDensity.compact,
                                   ),
                                 ],
@@ -986,13 +999,13 @@ class _QuickTextPostState extends State<QuickTextPost> with TickerProviderStateM
                                       child: CircularProgressIndicator(
                                         value: progress.clamp(0.0, 1.0),
                                         strokeWidth: 2.5,
-                                        backgroundColor: _border,
+                                        backgroundColor: cs.outlineVariant,
                                         valueColor: AlwaysStoppedAnimation(
                                           overLimit
-                                              ? _error
+                                              ? cs.error
                                               : nearLimit
-                                                  ? _warning
-                                                  : _primary,
+                                                  ? const Color(0xFFF5A623)
+                                                  : cs.primary,
                                         ),
                                       ),
                                     ),
@@ -1003,10 +1016,10 @@ class _QuickTextPostState extends State<QuickTextPost> with TickerProviderStateM
                                       fontSize: 12,
                                       fontWeight: FontWeight.w700,
                                       color: overLimit
-                                          ? _error
+                                          ? cs.error
                                           : nearLimit
-                                              ? _warning
-                                              : _muted,
+                                              ? const Color(0xFFF5A623)
+                                              : cs.onSurfaceVariant,
                                     ),
                                   ),
                                 ],
@@ -1018,11 +1031,11 @@ class _QuickTextPostState extends State<QuickTextPost> with TickerProviderStateM
                     ),
                   ),
                   // Emoji grid
-                  if (_showEmojiGrid) _buildEmojiGrid(),
+                  if (_showEmojiGrid) _buildEmojiGrid(cs),
                 ],
               ),
             ),
-            _buildSuccessOverlay(),
+            _buildSuccessOverlay(cs),
           ],
         ),
       ),
@@ -1056,6 +1069,7 @@ class _ShimmerLoaderState extends State<_ShimmerLoader> with SingleTickerProvide
 
   @override
   Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
     return AnimatedBuilder(
       animation: _controller,
       builder: (context, child) {
@@ -1064,7 +1078,7 @@ class _ShimmerLoaderState extends State<_ShimmerLoader> with SingleTickerProvide
           decoration: BoxDecoration(
             borderRadius: BorderRadius.circular(12),
             gradient: LinearGradient(
-              colors: const [Color(0xFFE2E8F0), Color(0xFFF1F5F9), Color(0xFFE2E8F0)],
+              colors: [cs.surfaceVariant, cs.surface, cs.surfaceVariant],
               stops: [0.0, _controller.value, 1.0],
               begin: const Alignment(-1, 0),
               end: const Alignment(1, 0),

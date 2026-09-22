@@ -9,7 +9,8 @@
 
 import 'dart:convert';
 import 'package:http/http.dart' as http;
-import 'package:shared_preferences/shared_preferences.dart';
+import '../../utils/api.dart';
+import '../../services/auth_service.dart';
 
 class TranslateException implements Exception {
   final String message;
@@ -39,8 +40,7 @@ class TranslateService {
   TranslateService._();
   static final TranslateService instance = TranslateService._();
 
-  // TODO: replace with the app's real base URL / ApiClient.
-  static const String _baseUrl = 'https://YOUR_API_HOST/message';
+  static String get _baseUrl => '${Api.baseUrl}/message';
 
   // In-memory cache for this app session — avoids re-hitting the network
   // if the user toggles a translated bubble off/on repeatedly. The
@@ -51,11 +51,10 @@ class TranslateService {
   String _cacheKey(String messageId, String targetLang) => '$messageId:$targetLang';
 
   Future<Map<String, String>> _authHeaders() async {
-    final prefs = await SharedPreferences.getInstance();
-    final token = prefs.getString('access_token') ?? '';
+    final token = await AuthService.getValidToken() ?? '';
     return {
       'Content-Type': 'application/json',
-      'Authorization': 'Bearer $token', // adjust prefix if the app uses Token/JWT differently
+      'Authorization': 'Bearer $token',
     };
   }
 

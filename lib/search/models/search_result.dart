@@ -4,10 +4,11 @@ import 'package:flutter/material.dart';
 /// see `core_app_documentation.md` §6.2 for the exact response-dict shape:
 /// `{source, id, title, snippet, created_at, rank, similarity, extra}`.
 ///
-/// `source` is always one of `core`'s registered `SOURCES` keys — right
-/// now that's `assigments` | `testseries` | `message` | `campus_notice`.
-/// `post` / `class_material` are documented STUBS on the backend (no
-/// model wired yet), so they never come back here — don't request them.
+/// `source` is one of `core`'s registered `SOURCES` keys — as of this
+/// pass that's `assigments` | `testseries` | `message` | `campus_notice`
+/// | `user` | `friend`. `post` / `class_material` are documented STUBS
+/// on the backend (no model wired yet), so they never come back here —
+/// don't request them.
 class SearchResultItem {
   final String source;
   final String id;
@@ -46,16 +47,22 @@ class SearchResultItem {
 }
 
 /// The filter chips on the search screen. `all`/`people` are UI-only —
-/// `all` means "don't send ?sources, and also call people-search";
-/// `people` is served entirely by `/profile/search/` (core search has
-/// no user/friend source, see §6.2's source table).
-enum SearchFilter { all, people, notices, assignments, tests, messages }
+/// `all` means "don't send ?sources for the name-search sources, plus
+/// call people-search separately"; `people` is served entirely by
+/// `/profile/search/` (kept as its own dedicated call since it already
+/// covers the full user base with no extra backend work needed — see
+/// `SearchApiService.searchUsers`). `friends` IS a real `/core/search/`
+/// source (`core.search.FRIEND_SOURCE`) — search scoped to people the
+/// caller follows or is followed by.
+enum SearchFilter { all, people, friends, notices, assignments, tests, messages }
 
 extension SearchFilterX on SearchFilter {
   /// `?sources=` value for `/core/search/`. Null for `all`/`people`
   /// (handled specially by the caller — see class docstring above).
   String? get backendSource {
     switch (this) {
+      case SearchFilter.friends:
+        return 'friend';
       case SearchFilter.notices:
         return 'campus_notice';
       case SearchFilter.assignments:
@@ -78,6 +85,8 @@ extension SearchFilterX on SearchFilter {
         return Icons.apps_rounded;
       case SearchFilter.people:
         return Icons.person_search_rounded;
+      case SearchFilter.friends:
+        return Icons.group_rounded;
       case SearchFilter.notices:
         return Icons.campaign_rounded;
       case SearchFilter.assignments:
@@ -102,6 +111,10 @@ IconData iconForSource(String source) {
       return Icons.task_alt_rounded;
     case 'message':
       return Icons.chat_bubble_outline_rounded;
+    case 'friend':
+      return Icons.group_rounded;
+    case 'user':
+      return Icons.person_search_rounded;
     default:
       return Icons.search_rounded;
   }

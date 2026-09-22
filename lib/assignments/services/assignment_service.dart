@@ -18,6 +18,10 @@ import 'assignment_models.dart';
 //   POST   {mount}/submissions/                      create (personal flow)
 //   PATCH  {mount}/submissions/{id}/submit_freeform/
 //   POST   {mount}/submissions/{id}/submit_structured/
+//   PATCH  {mount}/submissions/{id}/grade/                    free-form grade
+//   POST   {mount}/submissions/{id}/answer/{qid}/review/      text-answer review
+//   POST   {mount}/submissions/{id}/publish/                  mint public link
+//   POST   {mount}/submissions/{id}/unpublish/                revoke public link
 //   GET    {mount}/public/{slug}/                    (auth-free)
 //
 // Har call `AuthService.getValidToken()` use karti hai (getToken() nahi) —
@@ -26,11 +30,11 @@ import 'assignment_models.dart';
 // fail hoti rehti hai.
 // ============================================================
 
-/// 🔧 CONFIRM WITH BACKEND — `assigments.urls` root URLconf me kahan mount
-/// hai. urls.py ka apna docstring example `path("api/assigments/", ...)`
-/// dikhata hai, par is app ke baaki endpoints (`/post/...`,
-/// `/liveclass/...`) bina `/api` prefix ke chalte hain — isliye default
-/// yahan `/assigments` rakha hai. Galat ho to sirf ye ek line badalni hai.
+/// CONFIRMED WITH BACKEND — `ASSIGNMENT_APP_MASTER.md` root-URLconf
+/// snippet (both the deployment-plan section and the endpoint table)
+/// mounts this app at `path("api/assigments/", include("assigments.urls"))`
+/// — i.e. `/api/assigments/...`, not `/assigments/...`. Kept as a single
+/// constant so a future re-mount is still a one-line change.
 const String kAssignmentsMount = '/assigments';
 
 class AssignmentApiException implements Exception {
@@ -161,6 +165,176 @@ class AssignmentService {
     return joined;
   }
 
+  // ---------------- create (posting your own assignment) ----------------
+
+  /// `POST {mount}/assigmentss/` — the *only* create entry point this app
+  /// exposes to a mobile client (`assigmentsViewSet.perform_create()` hard-
+  /// wires `source=personal`; campus/liveclass assignments are created by
+  /// those apps' own bridge, never through here). This is a genuinely
+  /// **self-assignment**: nothing here adds other students to a roster, so
+  /// realistically only the creator will ever see/submit it (see
+  /// `assigmentsViewSet.get_queryset()` — non-staff users only see
+  /// assignments they posted, or personal ones they hold a submission
+  /// for).
+  ///
+  /// `attachment` + `hasStructuredQuestions=true` together are
+  /// deliberately NOT supported here: `assigmentsCreateSerializer.questions`
+  /// is a nested list, and DRF cannot parse a nested list out of a
+  /// multipart/form-data body (no such syntax exists) — the exact same
+  /// limitation `submit_structured`'s own backend docstring documents for
+  /// `answers`, just with no server-side JSON-string workaround written
+  /// for THIS endpoint. Callers must not pass both; the create screen
+  /// enforces this by disabling the attachment picker once structured
+  /// mode is on.
+  static Future<AssignmentModel> createAssignment({
+    required String title,
+    String description = '',
+    DateTime? dueDate,
+    int? totalMarks,
+    required bool hasStructuredQuestions,
+    File? attachment,
+    List<Map<String, dynamic>> questions = const [],
+    // ---- publishing + projects (migration 0003) — all optional, so
+    // existing callers that only pass the classic fields keep working.
+    String kind = 'assignment', // 'assignment' | 'project'
+    List<String> tags = const [],
+    String difficulty = '',
+    List<String> submissionTypes = const [],
+    List<Map<String, dynamic>> rubric = const [],
+  }) async {
+    assert(!(attachment != null && hasStructuredQuestions),
+        'attachment + structured questions cannot both be sent — see method docstring.');
+    assert(!(rubric.isNotEmpty && hasStructuredQuestions),
+        'a rubric grades free-form hand-ins; it cannot combine with structured questions.');
+
+    final url = Uri.parse('$_base/assigmentss/');
+    final fields = <String, String>{
+      'title': title,
+      'description': description,
+      'has_structured_questions': hasStructuredQuestions.toString(),
+      'kind': kind,
+      if (difficulty.isNotEmpty) 'difficulty': difficulty,
+      if (dueDate != null) 'due_date': _dateOnly(dueDate),
+      // total_marks is read-only / server-computed once has_structured_
+      // questions is true (sum of question marks) — only meaningful to
+      // send for the free-form, manually-scaled case. Rubric-graded
+      // projects are server-computed too (sum of rubric max_marks).
+      if (!hasStructuredQuestions && rubric.isEmpty && totalMarks != null) 'total_marks': '$totalMarks',
+    };
+
+    if (attachment != null) {
+      final token = await AuthService.getValidToken();
+      if (token == null || token.isEmpty) throw AssignmentApiException('NOT_AUTHENTICATED');
+      final req = http.MultipartRequest('POST', url)..headers['Authorization'] = 'Bearer $token';
+      req.fields.addAll(fields);
+      if (tags.isNotEmpty) req.fields['tags'] = jsonEncode(tags);
+      if (submissionTypes.isNotEmpty) req.fields['submission_types'] = jsonEncode(submissionTypes);
+      if (rubric.isNotEmpty) req.fields['rubric'] = jsonEncode(rubric);
+      req.files.add(await http.MultipartFile.fromPath('attachment', attachment.path));
+      final streamed = await req.send().timeout(const Duration(seconds: 60));
+      final r = await http.Response.fromStream(streamed);
+      if (r.statusCode != 200 && r.statusCode != 201) _fail(r);
+      return AssignmentModel.fromJson(
+          Map<String, dynamic>.from(jsonDecode(utf8.decode(r.bodyBytes)) as Map));
+    }
+
+    final body = <String, dynamic>{
+      ...fields,
+      'has_structured_questions': hasStructuredQuestions, // real bool for JSON, not the stringified field above
+      if (hasStructuredQuestions) 'questions': questions,
+      if (tags.isNotEmpty) 'tags': tags,
+      if (submissionTypes.isNotEmpty) 'submission_types': submissionTypes,
+      if (rubric.isNotEmpty) 'rubric': rubric,
+    };
+    final r = await http.post(url, headers: await _headers(), body: jsonEncode(body)).timeout(_timeout);
+    if (r.statusCode != 200 && r.statusCode != 201) _fail(r);
+    return AssignmentModel.fromJson(Map<String, dynamic>.from(jsonDecode(utf8.decode(r.bodyBytes)) as Map));
+  }
+
+  // ---------------- publishing / explore (migration 0003) ----------------
+
+  /// `POST {mount}/assigmentss/{id}/publish/` — poster publishes a personal
+  /// assignment/project. `visibility`: `'public'` (listed in Explore) or
+  /// `'link'` (unlisted, share link only). Re-publishing keeps the same slug.
+  static Future<AssignmentModel> publishAssignment(String assignmentId, {String visibility = 'public'}) async {
+    final r = await http
+        .post(Uri.parse('$_base/assigmentss/$assignmentId/publish/'),
+            headers: await _headers(), body: jsonEncode({'visibility': visibility}))
+        .timeout(_timeout);
+    if (r.statusCode != 200 && r.statusCode != 201) _fail(r);
+    return AssignmentModel.fromJson(Map<String, dynamic>.from(jsonDecode(utf8.decode(r.bodyBytes)) as Map));
+  }
+
+  /// `POST {mount}/assigmentss/{id}/unpublish/`.
+  static Future<AssignmentModel> unpublishAssignment(String assignmentId) async {
+    final r = await http
+        .post(Uri.parse('$_base/assigmentss/$assignmentId/unpublish/'), headers: await _headers())
+        .timeout(_timeout);
+    if (r.statusCode != 200) _fail(r);
+    return AssignmentModel.fromJson(Map<String, dynamic>.from(jsonDecode(utf8.decode(r.bodyBytes)) as Map));
+  }
+
+  /// `POST {mount}/assigmentss/{id}/join/` — idempotent: creates (or returns)
+  /// the caller's own submission row so `submit_freeform`/`submit_structured`
+  /// can be called right after. Personal, published assignments only.
+  static Future<AssignmentSubmission> joinAssignment(String assignmentId) async {
+    final r = await http
+        .post(Uri.parse('$_base/assigmentss/$assignmentId/join/'), headers: await _headers())
+        .timeout(_timeout);
+    if (r.statusCode != 200 && r.statusCode != 201) _fail(r);
+    return AssignmentSubmission.fromJson(
+        Map<String, dynamic>.from(jsonDecode(utf8.decode(r.bodyBytes)) as Map));
+  }
+
+  /// `GET {mount}/assigmentss/explore/` — browse public assignments/projects.
+  /// `ordering`: `'new'` (default) or `'popular'`.
+  static Future<List<AssignmentModel>> exploreAssignments({
+    String? search,
+    String? tag,
+    String? kind, // 'assignment' | 'project'
+    String? difficulty,
+    String ordering = 'new',
+    String? pageUrl,
+  }) async {
+    final uri = pageUrl != null
+        ? Uri.parse(pageUrl)
+        : Uri.parse('$_base/assigmentss/explore/').replace(queryParameters: {
+            if (search != null && search.isNotEmpty) 'search': search,
+            if (tag != null && tag.isNotEmpty) 'tag': tag,
+            if (kind != null && kind.isNotEmpty) 'kind': kind,
+            if (difficulty != null && difficulty.isNotEmpty) 'difficulty': difficulty,
+            'ordering': ordering,
+          });
+    final r = await http.get(uri, headers: await _headers()).timeout(_timeout);
+    if (r.statusCode != 200) _fail(r);
+    return _asList(jsonDecode(utf8.decode(r.bodyBytes)))
+        .map((e) => AssignmentModel.fromJson(Map<String, dynamic>.from(e as Map)))
+        .toList();
+  }
+
+  /// `POST {mount}/assigmentss/{id}/questions-import/` — CSV with the answer
+  /// key (only while `has_structured_questions` is on and no one has started).
+  static Future<Map<String, dynamic>> questionsImportCsv(String assignmentId, File csv) async {
+    final token = await AuthService.getValidToken();
+    if (token == null || token.isEmpty) throw AssignmentApiException('NOT_AUTHENTICATED');
+    final req = http.MultipartRequest(
+      'POST',
+      Uri.parse('$_base/assigmentss/$assignmentId/questions-import/'),
+    )..headers['Authorization'] = 'Bearer $token';
+    req.files.add(await http.MultipartFile.fromPath('file', csv.path));
+    final streamed = await req.send().timeout(const Duration(seconds: 60));
+    final r = await http.Response.fromStream(streamed);
+    if (r.statusCode != 200 && r.statusCode != 201) _fail(r);
+    return Map<String, dynamic>.from(jsonDecode(utf8.decode(r.bodyBytes)) as Map);
+  }
+
+  /// Full, absolute URL for a published ASSIGNMENT's public page (`p/{slug}/`
+  /// — distinct from `publicUrlFor`, which is a student's finished SUBMISSION).
+  static String publicAssignmentUrlFor(String slug) => '$_base/p/$slug/';
+
+  static String _dateOnly(DateTime d) =>
+      '${d.year.toString().padLeft(4, '0')}-${d.month.toString().padLeft(2, '0')}-${d.day.toString().padLeft(2, '0')}';
+
   // ---------------- writes ----------------
 
   /// Personal assignment ke liye submission row banata hai. Campus/
@@ -184,6 +358,9 @@ class AssignmentService {
     required String submissionId,
     required String writtenContent,
     File? file,
+    // Project hand-in link (repo / live demo / design file). http(s) only —
+    // backend rejects anything else with a clean 400.
+    String linkUrl = '',
   }) async {
     final token = await AuthService.getValidToken();
     if (token == null || token.isEmpty) throw AssignmentApiException('NOT_AUTHENTICATED');
@@ -194,6 +371,7 @@ class AssignmentService {
     )..headers['Authorization'] = 'Bearer $token';
 
     req.fields['written_content'] = writtenContent;
+    if (linkUrl.isNotEmpty) req.fields['link_url'] = linkUrl;
     if (file != null) {
       req.files.add(await http.MultipartFile.fromPath('file', file.path));
     }
@@ -246,6 +424,104 @@ class AssignmentService {
     return AssignmentSubmission.fromJson(
         Map<String, dynamic>.from(jsonDecode(utf8.decode(r.bodyBytes)) as Map));
   }
+
+  // ---------------- grading / review (posted_by / staff only — server-enforced) ----------------
+  //
+  // These four exist so a self-assignment's creator can actually close the
+  // loop on their own submission (free-form grade, and reviewing any
+  // `text`-type structured answers, which auto-grade never touches).
+  // `IsassignmentsStaffOrOwner` enforces the "who" server-side — a call
+  // from anyone else 403s, which callers should treat as a normal
+  // AssignmentApiException, not a special case to detect client-side.
+
+  /// `PATCH {mount}/submissions/{id}/grade/` — free-form path only
+  /// (`GradeFreeformSerializer`). Returns the updated submission.
+  static Future<AssignmentSubmission> gradeFreeform({
+    required String submissionId,
+    required String grade,
+    String feedback = '',
+  }) async {
+    final r = await http
+        .patch(Uri.parse('$_base/submissions/$submissionId/grade/'),
+            headers: await _headers(), body: jsonEncode({'grade': grade, 'feedback': feedback}))
+        .timeout(_timeout);
+    if (r.statusCode != 200) _fail(r);
+    return AssignmentSubmission.fromJson(
+        Map<String, dynamic>.from(jsonDecode(utf8.decode(r.bodyBytes)) as Map));
+  }
+
+  /// `PATCH {mount}/submissions/{id}/grade-rubric/` — project grading:
+  /// `{"scores": {criterion: marks}, "feedback": ""}`. Returns the updated submission.
+  static Future<AssignmentSubmission> gradeRubric({
+    required String submissionId,
+    required Map<String, int> scores,
+    String feedback = '',
+  }) async {
+    final r = await http
+        .patch(Uri.parse('$_base/submissions/$submissionId/grade-rubric/'),
+            headers: await _headers(), body: jsonEncode({'scores': scores, 'feedback': feedback}))
+        .timeout(_timeout);
+    if (r.statusCode != 200) _fail(r);
+    return AssignmentSubmission.fromJson(
+        Map<String, dynamic>.from(jsonDecode(utf8.decode(r.bodyBytes)) as Map));
+  }
+
+  /// `POST {mount}/submissions/{id}/answer/{qid}/review/` — structured
+  /// path, `text`-type questions only (the view 400s for any other type).
+  ///
+  /// ⚠️ Returns a single `assigmentsAnswerSerializer` object, NOT the whole
+  /// submission (`views.py`'s `review_answer` — `Response(
+  /// assigmentsAnswerSerializer(answer).data)`). Callers must re-fetch the
+  /// submission afterwards (`AssignmentService.getSubmission`) to see the
+  /// possibly-updated overall `status` (checked / partially_checked).
+  static Future<AssignmentAnswer> reviewAnswer({
+    required String submissionId,
+    required String questionId,
+    required int marksAwarded,
+    String feedback = '',
+  }) async {
+    final r = await http
+        .post(Uri.parse('$_base/submissions/$submissionId/answer/$questionId/review/'),
+            headers: await _headers(), body: jsonEncode({'marks_awarded': marksAwarded, 'feedback': feedback}))
+        .timeout(_timeout);
+    if (r.statusCode != 200 && r.statusCode != 201) _fail(r);
+    return AssignmentAnswer.fromJson(
+        Map<String, dynamic>.from(jsonDecode(utf8.decode(r.bodyBytes)) as Map));
+  }
+
+  /// `POST {mount}/submissions/{id}/publish/` — mints a fresh public slug.
+  ///
+  /// ⚠️ Returns `{"public_slug": "..."}` only (`views.py` — not the full
+  /// submission shape every other write here returns). Returns the bare
+  /// slug string; callers re-fetch the submission for the rest of its
+  /// updated state if they need it.
+  static Future<String> publishSubmission(String submissionId) async {
+    final r = await http
+        .post(Uri.parse('$_base/submissions/$submissionId/publish/'), headers: await _headers())
+        .timeout(_timeout);
+    if (r.statusCode != 200 && r.statusCode != 201) _fail(r);
+    final decoded = jsonDecode(utf8.decode(r.bodyBytes));
+    return (decoded is Map ? decoded['public_slug'] : null)?.toString() ?? '';
+  }
+
+  /// `POST {mount}/submissions/{id}/unpublish/` — `views.py` returns a bare
+  /// 204 No Content, so there is no body to decode here at all.
+  static Future<void> unpublishSubmission(String submissionId) async {
+    final r = await http
+        .post(Uri.parse('$_base/submissions/$submissionId/unpublish/'), headers: await _headers())
+        .timeout(_timeout);
+    if (r.statusCode != 200 && r.statusCode != 201 && r.statusCode != 204) _fail(r);
+  }
+
+  /// Full, absolute URL for a published submission's public page.
+  ///
+  /// ⚠️ This is a plain JSON API endpoint (`PublicSubmissionView` —
+  /// `generics.RetrieveAPIView`), not a rendered web page. This backend
+  /// zip doesn't ship a web front-end for it, so whoever opens this link
+  /// in a browser today will see raw JSON, not a nice results page —
+  /// callers surfacing this to a student should say so rather than imply
+  /// it's a polished share link.
+  static String publicUrlFor(String slug) => '$_base/public/$slug/';
 
   // ---------------- answer_data shapes ----------------
   //

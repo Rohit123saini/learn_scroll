@@ -1,147 +1,178 @@
 {
   "@@locale": "en",
-
   "appTitle": "LearnScroll",
-  "@appTitle": {"description": "App name, shown in OS task switcher etc."},
-
+  "@appTitle": {
+    "description": "App name, shown in OS task switcher etc."
+  },
   "inviteEarn": "Invite & Earn",
-  "@inviteEarn": {"description": "Home screen invite banner title"},
-
+  "@inviteEarn": {
+    "description": "Home screen invite banner title"
+  },
   "inviteEarnSub": "Invite friends and earn rewards",
-  "@inviteEarnSub": {"description": "Home screen invite banner subtitle"},
-
+  "@inviteEarnSub": {
+    "description": "Home screen invite banner subtitle"
+  },
   "inviteEarnSubCoins": "Invite friends and earn {coins} coins",
   "@inviteEarnSubCoins": {
     "description": "Home screen invite banner subtitle with coins count",
     "placeholders": {
-      "coins": {"type": "int"}
+      "coins": {
+        "type": "int"
+      }
     }
   },
-
   "inviteCta": "Invite",
-  "@inviteCta": {"description": "Invite button text"},
-
+  "@inviteCta": {
+    "description": "Invite button text"
+  },
   "searchHint": "Search courses, tests, notices...",
-  "@searchHint": {"description": "Placeholder text in the home screen search bar"},
-
+  "@searchHint": {
+    "description": "Placeholder text in the home screen search bar"
+  },
   "liveNow": "Live Now",
-  "@liveNow": {"description": "Section header for live classes/streams"},
-
+  "@liveNow": {
+    "description": "Section header for live classes/streams"
+  },
   "liveBadge": "LIVE",
-  "@liveBadge": {"description": "Badge text for live stream"},
-
+  "@liveBadge": {
+    "description": "Badge text for live stream"
+  },
   "liveNowCardSubtitle": "{teacher} · {viewers} watching",
   "@liveNowCardSubtitle": {
     "description": "Subtitle for live class card",
     "placeholders": {
-      "teacher": {"type": "String"},
-      "viewers": {"type": "int"}
+      "teacher": {
+        "type": "String"
+      },
+      "viewers": {
+        "type": "int"
+      }
     }
   },
-
   "seeAll": "See all",
-  "@seeAll": {"description": "Link to view the full list of a section"},
-
+  "@seeAll": {
+    "description": "Link to view the full list of a section"
+  },
   "join": "Join",
-  "@join": {"description": "Button to join a live class/session"},
-
+  "@join": {
+    "description": "Button to join a live class/session"
+  },
   "yourFeed": "Your Feed",
-  "@yourFeed": {"description": "Home feed tab label"},
-
+  "@yourFeed": {
+    "description": "Home feed tab label"
+  },
   "following": "Following",
-  "@following": {"description": "Feed tab label for followed creators/content"},
-
+  "@following": {
+    "description": "Feed tab label for followed creators/content"
+  },
   "addFriends": "Add Friends",
-  "@addFriends": {"description": "Button/section to add friends"},
-
+  "@addFriends": {
+    "description": "Button/section to add friends"
+  },
   "startClass": "Start Class",
-  "@startClass": {"description": "Button to start/host a class"},
-
+  "@startClass": {
+    "description": "Button to start/host a class"
+  },
   "startTestSeries": "Start Test Series",
-  "@startTestSeries": {"description": "Button to start a test series"},
-
+  "@startTestSeries": {
+    "description": "Button to start a test series"
+  },
   "assignments": "Assignments",
-  "@assignments": {"description": "Section/nav label for assignments"},
-
+  "@assignments": {
+    "description": "Section/nav label for assignments"
+  },
   "testSeries": "Test Series",
-  "@testSeries": {"description": "Section/nav label for test series"},
-
+  "@testSeries": {
+    "description": "Section/nav label for test series"
+  },
   "notices": "Notices",
-  "@notices": {"description": "Section/nav label for notices"},
-
+  "@notices": {
+    "description": "Section/nav label for notices"
+  },
   "wallet": "Wallet",
-  "@wallet": {"description": "Section/nav label for wallet"},
-
+  "@wallet": {
+    "description": "Section/nav label for wallet"
+  },
   "yourClassrooms": "Your Classrooms",
-  "@yourClassrooms": {"description": "Section label for user classrooms"},
-
+  "@yourClassrooms": {
+    "description": "Section label for user classrooms"
+  },
   "joinClassroom": "+ Join",
-  "@joinClassroom": {"description": "Chip label to join classrooms"},
-
+  "@joinClassroom": {
+    "description": "Chip label to join classrooms"
+  },
   "jumpBackIn": "Jump Back In",
-  "@jumpBackIn": {"description": "Title for interstitial widget"},
-
+  "@jumpBackIn": {
+    "description": "Title for interstitial widget"
+  },
   "themeToggleTooltip": "Toggle dark mode",
-  "@themeToggleTooltip": {"description": "Tooltip for theme toggle"},
-
+  "@themeToggleTooltip": {
+    "description": "Tooltip for theme toggle"
+  },
   "languageToggleTooltip": "Change language",
-  "@languageToggleTooltip": {"description": "Tooltip for language toggle"},
-
+  "@languageToggleTooltip": {
+    "description": "Tooltip for language toggle"
+  },
   "notificationsTooltip": "Notifications",
-  "@notificationsTooltip": {"description": "Tooltip for notifications icon"},
-
+  "@notificationsTooltip": {
+    "description": "Tooltip for notifications icon"
+  },
   "newPostTooltip": "Create new post",
-  "@newPostTooltip": {"description": "Tooltip for compose icon"},
-
+  "@newPostTooltip": {
+    "description": "Tooltip for compose icon"
+  },
   "navHome": "Home",
-  "@navHome": {"description": "Bottom nav label"},
-
+  "@navHome": {
+    "description": "Bottom nav label"
+  },
   "navDiscover": "Discover",
-  "@navDiscover": {"description": "Bottom nav label"},
-
+  "@navDiscover": {
+    "description": "Bottom nav label"
+  },
   "navCreate": "Create",
-  "@navCreate": {"description": "Bottom nav label (center action button)"},
-
+  "@navCreate": {
+    "description": "Bottom nav label (center action button)"
+  },
   "navNotifications": "Alerts",
-  "@navNotifications": {"description": "Bottom nav label"},
-
+  "@navNotifications": {
+    "description": "Bottom nav label"
+  },
   "navProfile": "Profile",
-  "@navProfile": {"description": "Bottom nav label"},
-
+  "@navProfile": {
+    "description": "Bottom nav label"
+  },
   "save": "Save",
   "saveFailed": "Failed to update bookmark state",
-  "like": "Like",
   "comment": "Comment",
   "share": "Share",
-
   "commentsCount": "{count} comments",
   "@commentsCount": {
     "description": "Number of comments",
     "placeholders": {
-      "count": {"type": "int"}
+      "count": {
+        "type": "int"
+      }
     }
   },
-
   "sessionExpiredRedirecting": "Session expired. Redirecting to login...",
   "feedErrorTitle": "Couldn't load feed",
   "feedErrorSubtitle": "Check your internet connection and try again.",
   "retry": "Retry",
   "feedEmptyTitle": "No posts yet",
   "feedEmptySubtitle": "Follow creators or search subjects to fill your feed.",
-  
   "featureComingSoon": "{feature} is coming soon!",
   "@featureComingSoon": {
     "description": "Fallback text for unhandled options",
     "placeholders": {
-      "feature": {"type": "String"}
+      "feature": {
+        "type": "String"
+      }
     }
   },
-
   "authOr": "OR",
   "authGoogleCredentialsFailed": "Could not get Google credentials. Please try again.",
   "authGoogleSignedIn": "Signed in with Google",
   "authGoogleSignInFailed": "Google sign-in failed. Please try again.",
-
   "loginSuccessful": "Login Successful!",
   "loginWelcomeBack": "Welcome Back",
   "loginSubtitle": "Sign in to continue your journey",
@@ -154,7 +185,6 @@
   "loginContinueWithGoogle": "Continue with Google",
   "loginNoAccount": "Don't have an account? ",
   "loginSignUp": "Sign Up",
-
   "signupSuccessful": "Signup Successful!",
   "signupUsernameExists": "User already exists with this username",
   "signupEmailExists": "Account already exists with this email",
@@ -185,7 +215,6 @@
   "signupConfirmPasswordRequired": "Confirm password is required",
   "signupPasswordsNoMatch": "Passwords do not match",
   "signupButton": "Sign Up",
-
   "forgotOtpSentSuccess": "OTP sent successfully!",
   "forgotOtpRequired": "Please enter the OTP",
   "forgotPasswordUpdated": "Password updated successfully!",
@@ -206,562 +235,896 @@
   "forgotSendOtp": "Send OTP",
   "forgotVerifyOtp": "Verify OTP",
   "forgotUpdatePassword": "Update Password",
-
   "completeProfileTitle": "One Last Step",
   "completeProfileSubtitle": "Please add your phone number to finish setting up your account",
   "completeProfilePhone": "Phone Number",
   "completeProfilePhoneRequired": "Phone number is required",
   "completeProfilePhoneInvalid": "Enter a valid mobile number",
   "completeProfileContinue": "Continue",
-
   "cancel": "Cancel",
-  "@cancel": {"description": "Generic cancel button"},
-
+  "@cancel": {
+    "description": "Generic cancel button"
+  },
   "somethingWentWrong": "Something went wrong",
-  "@somethingWentWrong": {"description": "Generic error fallback message"},
-
+  "@somethingWentWrong": {
+    "description": "Generic error fallback message"
+  },
   "testSubmit": "Submit",
-  "@testSubmit": {"description": "Button to submit a test attempt"},
-
+  "@testSubmit": {
+    "description": "Button to submit a test attempt"
+  },
   "testSubmitFailed": "Failed to submit test",
-  "@testSubmitFailed": {"description": "Shown when test submission fails"},
-
+  "@testSubmitFailed": {
+    "description": "Shown when test submission fails"
+  },
   "testExitTitle": "Exit Test?",
-  "@testExitTitle": {"description": "Title of the exit-test confirmation dialog"},
-
+  "@testExitTitle": {
+    "description": "Title of the exit-test confirmation dialog"
+  },
   "testExitBody": "Your progress will be lost if you exit now.",
-  "@testExitBody": {"description": "Body of the exit-test confirmation dialog"},
-
+  "@testExitBody": {
+    "description": "Body of the exit-test confirmation dialog"
+  },
   "testExitConfirm": "Exit",
-  "@testExitConfirm": {"description": "Confirm button on the exit-test dialog"},
-
+  "@testExitConfirm": {
+    "description": "Confirm button on the exit-test dialog"
+  },
   "testPaletteTitle": "Question Palette",
-  "@testPaletteTitle": {"description": "Title for the question-navigator palette"},
-
+  "@testPaletteTitle": {
+    "description": "Title for the question-navigator palette"
+  },
   "testAnsweredOf": "{answered}/{total} answered",
   "@testAnsweredOf": {
     "description": "Count of answered questions out of total",
     "placeholders": {
-      "answered": {"type": "int"},
-      "total": {"type": "int"}
+      "answered": {
+        "type": "int"
+      },
+      "total": {
+        "type": "int"
+      }
     }
   },
-
   "testSeriesErrorTitle": "Couldn't load test",
-  "@testSeriesErrorTitle": {"description": "Error title when a test/test-series fails to load"},
-
+  "@testSeriesErrorTitle": {
+    "description": "Error title when a test/test-series fails to load"
+  },
   "testNoQuestions": "No questions found",
-  "@testNoQuestions": {"description": "Empty state when a test has no questions"},
-
+  "@testNoQuestions": {
+    "description": "Empty state when a test has no questions"
+  },
   "questionOf": "Question {number} of {total}",
   "@questionOf": {
     "description": "Current question position out of total questions",
     "placeholders": {
-      "number": {"type": "int"},
-      "total": {"type": "int"}
+      "number": {
+        "type": "int"
+      },
+      "total": {
+        "type": "int"
+      }
     }
   },
-
   "questionShort": "Q{number}",
   "@questionShort": {
     "description": "Short question number label, used in palette/breakdown lists",
     "placeholders": {
-      "number": {"type": "int"}
+      "number": {
+        "type": "int"
+      }
     }
   },
-
   "marksShort": "{marks} marks",
   "@marksShort": {
     "description": "Marks value for a question",
     "placeholders": {
-      "marks": {"type": "num"}
+      "marks": {
+        "type": "num"
+      }
     }
   },
-
   "answerHintSelectOne": "Select one option",
-  "@answerHintSelectOne": {"description": "Instruction for single-choice questions"},
-
+  "@answerHintSelectOne": {
+    "description": "Instruction for single-choice questions"
+  },
   "answerHintSelectMultiple": "Select all that apply",
-  "@answerHintSelectMultiple": {"description": "Instruction for multiple-choice questions"},
-
+  "@answerHintSelectMultiple": {
+    "description": "Instruction for multiple-choice questions"
+  },
   "answerHintMatch": "Match the following",
-  "@answerHintMatch": {"description": "Instruction for match-the-following questions"},
-
+  "@answerHintMatch": {
+    "description": "Instruction for match-the-following questions"
+  },
   "answerHintArrange": "Arrange in the correct order",
-  "@answerHintArrange": {"description": "Instruction for arrange/ordering questions"},
-
+  "@answerHintArrange": {
+    "description": "Instruction for arrange/ordering questions"
+  },
   "answerHintText": "Type your answer",
-  "@answerHintText": {"description": "Instruction for free-text answer questions"},
-
+  "@answerHintText": {
+    "description": "Instruction for free-text answer questions"
+  },
   "testTypeAnswerHint": "Type your answer here...",
-  "@testTypeAnswerHint": {"description": "Placeholder text inside the free-text answer field"},
-
+  "@testTypeAnswerHint": {
+    "description": "Placeholder text inside the free-text answer field"
+  },
   "testAttachPhoto": "Attach Photo",
-  "@testAttachPhoto": {"description": "Button to attach a photo answer"},
-
+  "@testAttachPhoto": {
+    "description": "Button to attach a photo answer"
+  },
   "testMatchSelect": "Select a match",
-  "@testMatchSelect": {"description": "Placeholder/hint for a match-the-following dropdown"},
-
+  "@testMatchSelect": {
+    "description": "Placeholder/hint for a match-the-following dropdown"
+  },
   "testPrevious": "Previous",
-  "@testPrevious": {"description": "Button to go to the previous question"},
-
+  "@testPrevious": {
+    "description": "Button to go to the previous question"
+  },
   "testNext": "Next",
-  "@testNext": {"description": "Button to go to the next question"},
-
+  "@testNext": {
+    "description": "Button to go to the next question"
+  },
   "testRateTitle": "Rate this Test Series",
-  "@testRateTitle": {"description": "Title of the rate-test-series card"},
-
+  "@testRateTitle": {
+    "description": "Title of the rate-test-series card"
+  },
   "testRateSubtitle": "Let us know how it was",
-  "@testRateSubtitle": {"description": "Subtitle of the rate-test-series card"},
-
+  "@testRateSubtitle": {
+    "description": "Subtitle of the rate-test-series card"
+  },
   "testReviewHint": "Write a review (optional)",
-  "@testReviewHint": {"description": "Placeholder for the review text field"},
-
+  "@testReviewHint": {
+    "description": "Placeholder for the review text field"
+  },
   "testSubmitReview": "Submit Review",
-  "@testSubmitReview": {"description": "Button to submit a rating/review"},
-
+  "@testSubmitReview": {
+    "description": "Button to submit a rating/review"
+  },
   "testReviewThanks": "Thanks for your feedback!",
-  "@testReviewThanks": {"description": "Shown after a review is submitted successfully"},
-
+  "@testReviewThanks": {
+    "description": "Shown after a review is submitted successfully"
+  },
   "testAskQueryTitle": "Have a Question?",
-  "@testAskQueryTitle": {"description": "Title of the ask-a-query card"},
-
+  "@testAskQueryTitle": {
+    "description": "Title of the ask-a-query card"
+  },
   "testAskQuerySubtitle": "Ask about this test series",
-  "@testAskQuerySubtitle": {"description": "Subtitle of the ask-a-query card"},
-
+  "@testAskQuerySubtitle": {
+    "description": "Subtitle of the ask-a-query card"
+  },
   "testQueryHint": "Type your question here...",
-  "@testQueryHint": {"description": "Placeholder for the query text field"},
-
+  "@testQueryHint": {
+    "description": "Placeholder for the query text field"
+  },
   "testQueryAnonymous": "Ask anonymously",
-  "@testQueryAnonymous": {"description": "Checkbox label to send the query anonymously"},
-
+  "@testQueryAnonymous": {
+    "description": "Checkbox label to send the query anonymously"
+  },
   "testSendQuery": "Send",
-  "@testSendQuery": {"description": "Button to send a query"},
-
+  "@testSendQuery": {
+    "description": "Button to send a query"
+  },
   "testQueryEmpty": "Please enter your question",
-  "@testQueryEmpty": {"description": "Validation message when the query field is empty"},
-
+  "@testQueryEmpty": {
+    "description": "Validation message when the query field is empty"
+  },
   "testQuerySent": "Your question has been sent",
-  "@testQuerySent": {"description": "Shown after a query is sent successfully"},
-
+  "@testQuerySent": {
+    "description": "Shown after a query is sent successfully"
+  },
   "testResultTitle": "Test Result",
-  "@testResultTitle": {"description": "Title of the test result screen"},
-
+  "@testResultTitle": {
+    "description": "Title of the test result screen"
+  },
   "testFinalScore": "Final Score",
-  "@testFinalScore": {"description": "Label for a manually finalized score"},
-
+  "@testFinalScore": {
+    "description": "Label for a manually finalized score"
+  },
   "testAutoScore": "Auto Score",
-  "@testAutoScore": {"description": "Label for an automatically calculated score"},
-
+  "@testAutoScore": {
+    "description": "Label for an automatically calculated score"
+  },
   "testTotalMarks": "Total Marks",
-  "@testTotalMarks": {"description": "Label for the total marks of a test"},
-
+  "@testTotalMarks": {
+    "description": "Label for the total marks of a test"
+  },
   "testPercentage": "Percentage",
-  "@testPercentage": {"description": "Label for the score percentage"},
-
+  "@testPercentage": {
+    "description": "Label for the score percentage"
+  },
   "testAwaitingCheckNote": "Some answers are awaiting manual checking",
-  "@testAwaitingCheckNote": {"description": "Note shown when part of the test still needs manual grading"},
-
+  "@testAwaitingCheckNote": {
+    "description": "Note shown when part of the test still needs manual grading"
+  },
   "testSubmittedOn": "Submitted On",
-  "@testSubmittedOn": {"description": "Label for the submission date/time"},
-
+  "@testSubmittedOn": {
+    "description": "Label for the submission date/time"
+  },
   "testCheckedOn": "Checked On",
-  "@testCheckedOn": {"description": "Label for the date/time a test was checked"},
-
+  "@testCheckedOn": {
+    "description": "Label for the date/time a test was checked"
+  },
   "testAttemptNumber": "Attempt Number",
-  "@testAttemptNumber": {"description": "Label for the attempt number"},
-
+  "@testAttemptNumber": {
+    "description": "Label for the attempt number"
+  },
   "testRateSeries": "Rate this Series",
-  "@testRateSeries": {"description": "Button to open the rate-test-series card"},
-
+  "@testRateSeries": {
+    "description": "Button to open the rate-test-series card"
+  },
   "testAskQuery": "Ask a Question",
-  "@testAskQuery": {"description": "Button to open the ask-a-query card"},
-
+  "@testAskQuery": {
+    "description": "Button to open the ask-a-query card"
+  },
   "testBreakdown": "Question Breakdown",
-  "@testBreakdown": {"description": "Title for the per-question result breakdown section"},
-
+  "@testBreakdown": {
+    "description": "Title for the per-question result breakdown section"
+  },
   "testAwaitingReview": "Awaiting Review",
-  "@testAwaitingReview": {"description": "Status label for a question awaiting manual review"},
-
+  "@testAwaitingReview": {
+    "description": "Status label for a question awaiting manual review"
+  },
   "answerCorrect": "Correct",
-  "@answerCorrect": {"description": "Status label for a correctly answered question"},
-
+  "@answerCorrect": {
+    "description": "Status label for a correctly answered question"
+  },
   "answerIncorrect": "Incorrect",
-  "@answerIncorrect": {"description": "Status label for an incorrectly answered question"},
-
+  "@answerIncorrect": {
+    "description": "Status label for an incorrectly answered question"
+  },
   "assignmentReviewed": "Reviewed",
-  "@assignmentReviewed": {"description": "Status label for a reviewed assignment answer"},
-
+  "@assignmentReviewed": {
+    "description": "Status label for a reviewed assignment answer"
+  },
   "assignmentMarksOf": "{awarded}/{max} marks",
   "@assignmentMarksOf": {
     "description": "Marks awarded out of the maximum for a question",
     "placeholders": {
-      "awarded": {"type": "num"},
-      "max": {"type": "num"}
+      "awarded": {
+        "type": "num"
+      },
+      "max": {
+        "type": "num"
+      }
     }
   },
-
   "testYourAnswer": "Your Answer",
-  "@testYourAnswer": {"description": "Label for the user's submitted answer"},
-
+  "@testYourAnswer": {
+    "description": "Label for the user's submitted answer"
+  },
   "answerNotAnswered": "Not answered",
-  "@answerNotAnswered": {"description": "Shown when a question was left unanswered"},
-
+  "@answerNotAnswered": {
+    "description": "Shown when a question was left unanswered"
+  },
   "homeTab": "Home",
-  "@homeTab": {"description": "Bottom nav label for the home tab"},
-
+  "@homeTab": {
+    "description": "Bottom nav label for the home tab"
+  },
   "campusTab": "Campus",
-  "@campusTab": {"description": "Bottom nav label for the campus tab"},
-
+  "@campusTab": {
+    "description": "Bottom nav label for the campus tab"
+  },
   "classesTab": "Classes",
-  "@classesTab": {"description": "Bottom nav label for the classes tab"},
-
+  "@classesTab": {
+    "description": "Bottom nav label for the classes tab"
+  },
   "chatTab": "Chat",
-  "@chatTab": {"description": "Bottom nav label for the chat tab"},
-
+  "@chatTab": {
+    "description": "Bottom nav label for the chat tab"
+  },
   "profileTab": "Profile",
-  "@profileTab": {"description": "Bottom nav label for the profile tab"},
-
+  "@profileTab": {
+    "description": "Bottom nav label for the profile tab"
+  },
   "confirm": "Confirm",
-  "@confirm": {"description": "Generic confirm button"},
-
-  "openFailed": "Failed to open file",
-  "@openFailed": {"description": "Shown when opening a file/attachment fails"},
-
+  "@confirm": {
+    "description": "Generic confirm button"
+  },
   "assignmentsTabPending": "Pending",
-  "@assignmentsTabPending": {"description": "Assignments tab label for pending assignments"},
-
+  "@assignmentsTabPending": {
+    "description": "Assignments tab label for pending assignments"
+  },
   "assignmentsTabSubmitted": "Submitted",
-  "@assignmentsTabSubmitted": {"description": "Assignments tab label for submitted assignments"},
-
+  "@assignmentsTabSubmitted": {
+    "description": "Assignments tab label for submitted assignments"
+  },
   "assignmentsTabChecked": "Checked",
-  "@assignmentsTabChecked": {"description": "Assignments tab label for checked assignments"},
-
+  "@assignmentsTabChecked": {
+    "description": "Assignments tab label for checked assignments"
+  },
   "assignmentsErrorTitle": "Couldn't load assignments",
-  "@assignmentsErrorTitle": {"description": "Error title when assignments fail to load"},
-
+  "@assignmentsErrorTitle": {
+    "description": "Error title when assignments fail to load"
+  },
   "assignmentsEmptyTitle": "No assignments yet",
-  "@assignmentsEmptyTitle": {"description": "Empty state title for the assignments list"},
-
+  "@assignmentsEmptyTitle": {
+    "description": "Empty state title for the assignments list"
+  },
   "assignmentsEmptySubtitle": "Assignments from your classrooms will show up here.",
-  "@assignmentsEmptySubtitle": {"description": "Empty state subtitle for the assignments list"},
-
+  "@assignmentsEmptySubtitle": {
+    "description": "Empty state subtitle for the assignments list"
+  },
   "assignmentPostedBy": "Posted by {postedBy}",
   "@assignmentPostedBy": {
     "description": "Who posted an assignment",
     "placeholders": {
-      "postedBy": {"type": "String"}
+      "postedBy": {
+        "type": "String"
+      }
     }
   },
-
   "assignmentGradeValue": "Grade: {grade}",
   "@assignmentGradeValue": {
     "description": "Displayed grade value for an assignment submission",
     "placeholders": {
-      "grade": {"type": "String"}
+      "grade": {
+        "type": "String"
+      }
     }
   },
-
   "assignmentTotalMarks": "Total Marks: {totalMarks}",
   "@assignmentTotalMarks": {
     "description": "Total marks value for an assignment",
     "placeholders": {
-      "totalMarks": {"type": "num"}
+      "totalMarks": {
+        "type": "num"
+      }
     }
   },
-
   "assignmentNoDueDate": "No due date",
-  "@assignmentNoDueDate": {"description": "Shown when an assignment has no due date"},
-
+  "@assignmentNoDueDate": {
+    "description": "Shown when an assignment has no due date"
+  },
   "assignmentDueOn": "Due on {date}",
   "@assignmentDueOn": {
     "description": "Due date label for an assignment",
     "placeholders": {
-      "date": {"type": "String"}
+      "date": {
+        "type": "String"
+      }
     }
   },
-
   "assignmentOverdue": "Overdue",
-  "@assignmentOverdue": {"description": "Status label for an overdue assignment"},
-
+  "@assignmentOverdue": {
+    "description": "Status label for an overdue assignment"
+  },
   "assignmentDueToday": "Due today",
-  "@assignmentDueToday": {"description": "Status label for an assignment due today"},
-
+  "@assignmentDueToday": {
+    "description": "Status label for an assignment due today"
+  },
   "assignmentDueTomorrow": "Due tomorrow",
-  "@assignmentDueTomorrow": {"description": "Status label for an assignment due tomorrow"},
-
+  "@assignmentDueTomorrow": {
+    "description": "Status label for an assignment due tomorrow"
+  },
   "assignmentDaysLeft": "{days} days left",
   "@assignmentDaysLeft": {
     "description": "Number of days left before an assignment is due",
     "placeholders": {
-      "days": {"type": "int"}
+      "days": {
+        "type": "int"
+      }
     }
   },
-
   "assignmentStatusChecked": "Checked",
-  "@assignmentStatusChecked": {"description": "Status label for a fully checked assignment"},
-
+  "@assignmentStatusChecked": {
+    "description": "Status label for a fully checked assignment"
+  },
   "assignmentStatusPartiallyChecked": "Partially Checked",
-  "@assignmentStatusPartiallyChecked": {"description": "Status label for a partially checked assignment"},
-
+  "@assignmentStatusPartiallyChecked": {
+    "description": "Status label for a partially checked assignment"
+  },
   "assignmentStatusSubmitted": "Submitted",
-  "@assignmentStatusSubmitted": {"description": "Status label for a submitted assignment"},
-
+  "@assignmentStatusSubmitted": {
+    "description": "Status label for a submitted assignment"
+  },
   "assignmentStatusLate": "Late",
-  "@assignmentStatusLate": {"description": "Status label for a late assignment submission"},
-
+  "@assignmentStatusLate": {
+    "description": "Status label for a late assignment submission"
+  },
   "assignmentStatusMissing": "Missing",
-  "@assignmentStatusMissing": {"description": "Status label for a missing assignment"},
-
+  "@assignmentStatusMissing": {
+    "description": "Status label for a missing assignment"
+  },
   "assignmentNothingToSubmit": "There's nothing to submit",
-  "@assignmentNothingToSubmit": {"description": "Shown when trying to submit an assignment with no answers/attachments"},
-
+  "@assignmentNothingToSubmit": {
+    "description": "Shown when trying to submit an assignment with no answers/attachments"
+  },
   "assignmentSubmitConfirmTitle": "Submit Assignment?",
-  "@assignmentSubmitConfirmTitle": {"description": "Title of the submit-assignment confirmation dialog"},
-
+  "@assignmentSubmitConfirmTitle": {
+    "description": "Title of the submit-assignment confirmation dialog"
+  },
   "assignmentSubmitConfirmUnanswered": "{unanswered} questions are unanswered. Submit anyway?",
   "@assignmentSubmitConfirmUnanswered": {
     "description": "Confirmation body when some assignment questions are unanswered",
     "placeholders": {
-      "unanswered": {"type": "int"}
+      "unanswered": {
+        "type": "int"
+      }
     }
   },
-
   "assignmentSubmitConfirmBody": "Are you sure you want to submit this assignment?",
-  "@assignmentSubmitConfirmBody": {"description": "Confirmation body when all assignment questions are answered"},
-
+  "@assignmentSubmitConfirmBody": {
+    "description": "Confirmation body when all assignment questions are answered"
+  },
   "assignmentSubmitSuccess": "Assignment submitted successfully",
-  "@assignmentSubmitSuccess": {"description": "Shown after an assignment is submitted successfully"},
-
+  "@assignmentSubmitSuccess": {
+    "description": "Shown after an assignment is submitted successfully"
+  },
   "assignmentSubmitFailed": "Failed to submit assignment",
-  "@assignmentSubmitFailed": {"description": "Shown when submitting an assignment fails"},
-
+  "@assignmentSubmitFailed": {
+    "description": "Shown when submitting an assignment fails"
+  },
   "assignmentDueLabel": "Due",
-  "@assignmentDueLabel": {"description": "Label for the due-date field on an assignment"},
-
+  "@assignmentDueLabel": {
+    "description": "Label for the due-date field on an assignment"
+  },
   "assignmentTotalMarksLabel": "Total Marks",
-  "@assignmentTotalMarksLabel": {"description": "Label for the total-marks field on an assignment/test series"},
-
+  "@assignmentTotalMarksLabel": {
+    "description": "Label for the total-marks field on an assignment/test series"
+  },
   "assignmentQuestionsLabel": "Questions",
-  "@assignmentQuestionsLabel": {"description": "Label for the questions-count field on an assignment"},
-
+  "@assignmentQuestionsLabel": {
+    "description": "Label for the questions-count field on an assignment"
+  },
   "assignmentOpenAttachment": "Open Attachment",
-  "@assignmentOpenAttachment": {"description": "Button to open an assignment's attachment"},
-
+  "@assignmentOpenAttachment": {
+    "description": "Button to open an assignment's attachment"
+  },
   "assignmentLateNotice": "This assignment was submitted late",
-  "@assignmentLateNotice": {"description": "Notice shown when an assignment was submitted after the due date"},
-
+  "@assignmentLateNotice": {
+    "description": "Notice shown when an assignment was submitted after the due date"
+  },
   "assignmentYourAnswer": "Your Answer",
-  "@assignmentYourAnswer": {"description": "Label for the student's submitted answer on an assignment"},
-
+  "@assignmentYourAnswer": {
+    "description": "Label for the student's submitted answer on an assignment"
+  },
   "assignmentAnswerHint": "Type your answer here...",
-  "@assignmentAnswerHint": {"description": "Placeholder text inside the assignment answer field"},
-
+  "@assignmentAnswerHint": {
+    "description": "Placeholder text inside the assignment answer field"
+  },
   "assignmentNoQuestions": "No questions found",
-  "@assignmentNoQuestions": {"description": "Empty state when an assignment has no questions"},
-
+  "@assignmentNoQuestions": {
+    "description": "Empty state when an assignment has no questions"
+  },
   "assignmentAttachFile": "Attach File",
-  "@assignmentAttachFile": {"description": "Button to attach a file to an assignment answer"},
-
+  "@assignmentAttachFile": {
+    "description": "Button to attach a file to an assignment answer"
+  },
   "assignmentRemoveFile": "Remove File",
-  "@assignmentRemoveFile": {"description": "Tooltip/button to remove an attached file"},
-
+  "@assignmentRemoveFile": {
+    "description": "Tooltip/button to remove an attached file"
+  },
   "assignmentAnsweredOf": "{answered}/{total} answered",
   "@assignmentAnsweredOf": {
     "description": "Count of answered assignment questions out of total",
     "placeholders": {
-      "answered": {"type": "int"},
-      "total": {"type": "int"}
+      "answered": {
+        "type": "int"
+      },
+      "total": {
+        "type": "int"
+      }
     }
   },
-
   "assignmentSubmit": "Submit",
-  "@assignmentSubmit": {"description": "Button to submit an assignment"},
-
+  "@assignmentSubmit": {
+    "description": "Button to submit an assignment"
+  },
   "assignmentResult": "Result",
-  "@assignmentResult": {"description": "Section title for assignment result"},
-
+  "@assignmentResult": {
+    "description": "Section title for assignment result"
+  },
   "assignmentMarksAwarded": "Marks Awarded",
-  "@assignmentMarksAwarded": {"description": "Label for marks awarded on an assignment"},
-
+  "@assignmentMarksAwarded": {
+    "description": "Label for marks awarded on an assignment"
+  },
   "assignmentGrade": "Grade",
-  "@assignmentGrade": {"description": "Label for the grade of an assignment submission"},
-
+  "@assignmentGrade": {
+    "description": "Label for the grade of an assignment submission"
+  },
   "assignmentSubmittedOn": "Submitted On",
-  "@assignmentSubmittedOn": {"description": "Label for the submission date/time of an assignment"},
-
+  "@assignmentSubmittedOn": {
+    "description": "Label for the submission date/time of an assignment"
+  },
   "assignmentCheckedOn": "Checked On",
-  "@assignmentCheckedOn": {"description": "Label for the date/time an assignment was checked"},
-
+  "@assignmentCheckedOn": {
+    "description": "Label for the date/time an assignment was checked"
+  },
   "assignmentPartiallyCheckedNote": "Some answers are awaiting manual checking",
-  "@assignmentPartiallyCheckedNote": {"description": "Note shown when part of an assignment still needs manual grading"},
-
+  "@assignmentPartiallyCheckedNote": {
+    "description": "Note shown when part of an assignment still needs manual grading"
+  },
   "assignmentTeacherFeedback": "Teacher's Feedback",
-  "@assignmentTeacherFeedback": {"description": "Section title for teacher feedback on an assignment"},
-
+  "@assignmentTeacherFeedback": {
+    "description": "Section title for teacher feedback on an assignment"
+  },
   "assignmentNoWrittenAnswer": "No written answer provided",
-  "@assignmentNoWrittenAnswer": {"description": "Shown when a student did not provide a written answer"},
-
+  "@assignmentNoWrittenAnswer": {
+    "description": "Shown when a student did not provide a written answer"
+  },
   "assignmentOpenSubmittedFile": "Open Submitted File",
-  "@assignmentOpenSubmittedFile": {"description": "Button to open a file the student submitted"},
-
+  "@assignmentOpenSubmittedFile": {
+    "description": "Button to open a file the student submitted"
+  },
   "assignmentAwaitingReview": "Awaiting Review",
-  "@assignmentAwaitingReview": {"description": "Status label for an assignment answer awaiting manual review"},
-
+  "@assignmentAwaitingReview": {
+    "description": "Status label for an assignment answer awaiting manual review"
+  },
   "assignmentAttachPhoto": "Attach Photo",
-  "@assignmentAttachPhoto": {"description": "Button to attach a photo to an assignment answer"},
-
+  "@assignmentAttachPhoto": {
+    "description": "Button to attach a photo to an assignment answer"
+  },
+  "assignmentPickFromCamera": "Take a photo",
+  "@assignmentPickFromCamera": {
+    "description": "Option to take a new photo with the camera when attaching an answer photo"
+  },
+  "assignmentPickFromGallery": "Choose from gallery",
+  "@assignmentPickFromGallery": {
+    "description": "Option to pick an existing photo from the gallery when attaching an answer photo"
+  },
+  "assignmentPickFailed": "Couldn't pick that file. Please try again.",
+  "@assignmentPickFailed": {
+    "description": "Shown when picking a file/photo for an assignment answer fails"
+  },
+  "assignmentFileNotFound": "This file is no longer available.",
+  "@assignmentFileNotFound": {
+    "description": "Shown when a requested assignment attachment returns a 404"
+  },
+  "assignmentNoInternet": "Check your internet connection and try again.",
+  "@assignmentNoInternet": {
+    "description": "Shown when opening an assignment attachment fails due to a network error"
+  },
+  "assignmentCreateTitle": "Create Assignment",
+  "@assignmentCreateTitle": {
+    "description": "Title of the create-assignment screen, and its submit button label"
+  },
+  "assignmentTitleLabel": "Title",
+  "@assignmentTitleLabel": {
+    "description": "Label for the assignment title field on the create screen"
+  },
+  "assignmentDescriptionLabel": "Description",
+  "@assignmentDescriptionLabel": {
+    "description": "Label for the assignment description field on the create screen"
+  },
+  "assignmentDescriptionHint": "What should students do? Add instructions here…",
+  "@assignmentDescriptionHint": {
+    "description": "Placeholder text for the assignment description field"
+  },
+  "assignmentPickDueDate": "Pick a due date",
+  "@assignmentPickDueDate": {
+    "description": "Button to open the due-date picker on the create screen"
+  },
+  "assignmentClearDueDate": "Clear",
+  "@assignmentClearDueDate": {
+    "description": "Button to clear a chosen due date on the create screen"
+  },
+  "assignmentStructuredToggleLabel": "Structured questions",
+  "@assignmentStructuredToggleLabel": {
+    "description": "Label for the switch that turns on question-based (auto-graded) mode"
+  },
+  "assignmentStructuredToggleHint": "Turn this on for auto-graded multiple-choice or ordered-list questions instead of one written answer.",
+  "@assignmentStructuredToggleHint": {
+    "description": "Explanation shown under the structured-questions switch"
+  },
+  "assignmentTotalMarksHint": "Optional — leave blank for no fixed scale",
+  "@assignmentTotalMarksHint": {
+    "description": "Placeholder for the optional total-marks field on a free-form assignment"
+  },
+  "assignmentAddQuestion": "Add question",
+  "@assignmentAddQuestion": {
+    "description": "Button to add a new question while creating a structured assignment"
+  },
+  "assignmentQuestionTypeLabel": "Question type",
+  "@assignmentQuestionTypeLabel": {
+    "description": "Label for the question-type dropdown in the question editor"
+  },
+  "assignmentQuestionTypeText": "Written answer",
+  "@assignmentQuestionTypeText": {
+    "description": "Question type option: a free-text written answer"
+  },
+  "assignmentQuestionTypeMcq": "Multiple choice (one answer)",
+  "@assignmentQuestionTypeMcq": {
+    "description": "Question type option: single-select multiple choice"
+  },
+  "assignmentQuestionTypeMsq": "Multiple choice (multiple answers)",
+  "@assignmentQuestionTypeMsq": {
+    "description": "Question type option: multi-select multiple choice"
+  },
+  "assignmentQuestionTypeList": "Ordered list",
+  "@assignmentQuestionTypeList": {
+    "description": "Question type option: arrange options in the correct order"
+  },
+  "assignmentQuestionTextHint": "Type your question…",
+  "@assignmentQuestionTextHint": {
+    "description": "Placeholder for a question's text field in the question editor"
+  },
+  "assignmentQuestionMarksLabel": "Marks",
+  "@assignmentQuestionMarksLabel": {
+    "description": "Label for a question's marks field in the question editor"
+  },
+  "assignmentAddOption": "Add option",
+  "@assignmentAddOption": {
+    "description": "Button to add an answer option to a question being created"
+  },
+  "assignmentOptionHint": "Option text",
+  "@assignmentOptionHint": {
+    "description": "Placeholder for an option's text field in the question editor"
+  },
+  "assignmentRemoveOption": "Remove option",
+  "@assignmentRemoveOption": {
+    "description": "Tooltip for the button that removes an option in the question editor"
+  },
+  "assignmentRemoveQuestion": "Remove question",
+  "@assignmentRemoveQuestion": {
+    "description": "Tooltip for the button that removes a whole question in the question editor"
+  },
+  "assignmentCreateValidationTitle": "Please enter a title",
+  "@assignmentCreateValidationTitle": {
+    "description": "Validation message when the title field is empty on submit"
+  },
+  "assignmentCreateValidationQuestion": "Every question needs question text, marks, and (if applicable) a marked correct answer",
+  "@assignmentCreateValidationQuestion": {
+    "description": "Validation message for an incomplete question while creating a structured assignment"
+  },
+  "assignmentCreateValidationOptions": "Add at least 2 options to this question",
+  "@assignmentCreateValidationOptions": {
+    "description": "Validation message when a choice/ordered-list question has fewer than 2 options"
+  },
+  "assignmentCreateValidationCorrect": "Mark at least one correct option for this question",
+  "@assignmentCreateValidationCorrect": {
+    "description": "Validation message when no correct option is marked on an MCQ/MSQ question"
+  },
+  "assignmentCreateSuccess": "Assignment created",
+  "@assignmentCreateSuccess": {
+    "description": "Snackbar shown after successfully creating an assignment"
+  },
+  "assignmentCreateFailed": "Couldn't create the assignment. Please try again.",
+  "@assignmentCreateFailed": {
+    "description": "Snackbar shown when creating an assignment fails"
+  },
+  "assignmentGradeSectionTitle": "Grade this submission",
+  "@assignmentGradeSectionTitle": {
+    "description": "Heading for the free-form self-grading panel on a submitted assignment"
+  },
+  "assignmentFeedbackHint": "Feedback (optional)",
+  "@assignmentFeedbackHint": {
+    "description": "Placeholder for a feedback text field, used both when grading and when reviewing a single answer"
+  },
+  "assignmentGradeSaved": "Grade saved",
+  "@assignmentGradeSaved": {
+    "description": "Snackbar shown after successfully saving a free-form grade"
+  },
+  "assignmentGradeFailed": "Couldn't save the grade. Please try again.",
+  "@assignmentGradeFailed": {
+    "description": "Snackbar shown when saving a free-form grade fails"
+  },
+  "assignmentReviewAnswerTitle": "Review this answer",
+  "@assignmentReviewAnswerTitle": {
+    "description": "Heading for the inline marks/feedback form on an awaiting-review text answer"
+  },
+  "assignmentReviewSaved": "Review saved",
+  "@assignmentReviewSaved": {
+    "description": "Snackbar shown after successfully saving a single answer's review"
+  },
+  "assignmentReviewFailed": "Couldn't save the review. Please try again.",
+  "@assignmentReviewFailed": {
+    "description": "Snackbar shown when saving a single answer's review fails"
+  },
+  "assignmentNotShared": "Not shared — only you can see this result",
+  "@assignmentNotShared": {
+    "description": "Status text shown when a submission has not been published to a public link"
+  },
+  "assignmentSharePublicNote": "Anyone with the link can view this result",
+  "@assignmentSharePublicNote": {
+    "description": "Status text shown when a submission has been published to a public link"
+  },
+  "assignmentShareResult": "Share",
+  "@assignmentShareResult": {
+    "description": "Button to publish a submission and copy its public link"
+  },
+  "assignmentUnshareResult": "Stop sharing",
+  "@assignmentUnshareResult": {
+    "description": "Button to unpublish a previously-shared submission"
+  },
+  "assignmentLinkCopied": "Link copied — anyone with it can view your result",
+  "@assignmentLinkCopied": {
+    "description": "Snackbar shown after publishing a submission and copying its public link to the clipboard"
+  },
+  "assignmentPublishFailed": "Couldn't share this result. Please try again.",
+  "@assignmentPublishFailed": {
+    "description": "Snackbar shown when publishing a submission fails"
+  },
+  "assignmentUnpublishFailed": "Couldn't stop sharing this result. Please try again.",
+  "@assignmentUnpublishFailed": {
+    "description": "Snackbar shown when unpublishing a submission fails"
+  },
   "testSeriesTabAll": "All",
-  "@testSeriesTabAll": {"description": "Test series tab label for all series"},
-
+  "@testSeriesTabAll": {
+    "description": "Test series tab label for all series"
+  },
   "testSeriesTabFree": "Free",
-  "@testSeriesTabFree": {"description": "Test series tab label for free series"},
-
+  "@testSeriesTabFree": {
+    "description": "Test series tab label for free series"
+  },
   "testSeriesTabPaid": "Paid",
-  "@testSeriesTabPaid": {"description": "Test series tab label for paid series"},
-
+  "@testSeriesTabPaid": {
+    "description": "Test series tab label for paid series"
+  },
   "testSeriesEmptyTitle": "No test series yet",
-  "@testSeriesEmptyTitle": {"description": "Empty state title for the test series list"},
-
+  "@testSeriesEmptyTitle": {
+    "description": "Empty state title for the test series list"
+  },
   "testSeriesEmptySubtitle": "Test series from your classrooms will show up here.",
-  "@testSeriesEmptySubtitle": {"description": "Empty state subtitle for the test series list"},
-
+  "@testSeriesEmptySubtitle": {
+    "description": "Empty state subtitle for the test series list"
+  },
   "testSeriesCoins": "{coins} coins",
   "@testSeriesCoins": {
     "description": "Price of a test series in coins",
     "placeholders": {
-      "coins": {"type": "int"}
+      "coins": {
+        "type": "int"
+      }
     }
   },
-
   "testSeriesFree": "Free",
-  "@testSeriesFree": {"description": "Chip label for a free test series"},
-
+  "@testSeriesFree": {
+    "description": "Chip label for a free test series"
+  },
   "testSeriesBy": "By {creator}",
   "@testSeriesBy": {
     "description": "Creator of a test series",
     "placeholders": {
-      "creator": {"type": "String"}
+      "creator": {
+        "type": "String"
+      }
     }
   },
-
   "testSeriesMarks": "{marks} marks",
   "@testSeriesMarks": {
     "description": "Total marks of a test series",
     "placeholders": {
-      "marks": {"type": "num"}
+      "marks": {
+        "type": "num"
+      }
     }
   },
-
   "testSeriesDuration": "{minutes} min",
   "@testSeriesDuration": {
     "description": "Duration of a test series in minutes",
     "placeholders": {
-      "minutes": {"type": "int"}
+      "minutes": {
+        "type": "int"
+      }
     }
   },
-
   "testSeriesAttempts": "{attempts} attempts",
   "@testSeriesAttempts": {
     "description": "Number of attempts allowed for a test series",
     "placeholders": {
-      "attempts": {"type": "int"}
+      "attempts": {
+        "type": "int"
+      }
     }
   },
-
   "testSeriesStart": "Start",
-  "@testSeriesStart": {"description": "Button to start a test series attempt"},
-
+  "@testSeriesStart": {
+    "description": "Button to start a test series attempt"
+  },
   "testSeriesResume": "Resume",
-  "@testSeriesResume": {"description": "Button to resume an in-progress test series attempt"},
-
+  "@testSeriesResume": {
+    "description": "Button to resume an in-progress test series attempt"
+  },
   "testSeriesViewResult": "View Result",
-  "@testSeriesViewResult": {"description": "Button to view a completed test series attempt's result"},
-
+  "@testSeriesViewResult": {
+    "description": "Button to view a completed test series attempt's result"
+  },
   "testSeriesNoRatings": "No ratings yet",
-  "@testSeriesNoRatings": {"description": "Shown when a test series has no ratings"},
-
+  "@testSeriesNoRatings": {
+    "description": "Shown when a test series has no ratings"
+  },
   "testSeriesRating": "{rating} ({reviewCount} reviews)",
   "@testSeriesRating": {
     "description": "Average rating and review count for a test series",
     "placeholders": {
-      "rating": {"type": "String"},
-      "reviewCount": {"type": "int"}
+      "rating": {
+        "type": "String"
+      },
+      "reviewCount": {
+        "type": "int"
+      }
     }
   },
-
   "testStatusChecked": "Checked",
-  "@testStatusChecked": {"description": "Status label for a fully checked test attempt"},
-
+  "@testStatusChecked": {
+    "description": "Status label for a fully checked test attempt"
+  },
   "testStatusPartiallyChecked": "Partially Checked",
-  "@testStatusPartiallyChecked": {"description": "Status label for a partially checked test attempt"},
-
+  "@testStatusPartiallyChecked": {
+    "description": "Status label for a partially checked test attempt"
+  },
   "testStatusSubmitted": "Submitted",
-  "@testStatusSubmitted": {"description": "Status label for a submitted test attempt"},
-
+  "@testStatusSubmitted": {
+    "description": "Status label for a submitted test attempt"
+  },
   "testStatusInProgress": "In Progress",
-  "@testStatusInProgress": {"description": "Status label for a test attempt in progress"},
-
+  "@testStatusInProgress": {
+    "description": "Status label for a test attempt in progress"
+  },
   "testSeriesPayTitle": "Unlock Test Series",
-  "@testSeriesPayTitle": {"description": "Title of the pay-to-unlock confirmation dialog"},
-
+  "@testSeriesPayTitle": {
+    "description": "Title of the pay-to-unlock confirmation dialog"
+  },
   "testSeriesPayBody": "This test series costs {coins} coins. Continue?",
   "@testSeriesPayBody": {
     "description": "Body of the pay-to-unlock confirmation dialog",
     "placeholders": {
-      "coins": {"type": "int"}
+      "coins": {
+        "type": "int"
+      }
     }
   },
-
   "testSeriesNotEnoughCoins": "You don't have enough coins for this test series",
-  "@testSeriesNotEnoughCoins": {"description": "Shown when a user tries to buy a test series without enough coins"},
-
+  "@testSeriesNotEnoughCoins": {
+    "description": "Shown when a user tries to buy a test series without enough coins"
+  },
   "testSeriesQuestionsLabel": "Questions",
-  "@testSeriesQuestionsLabel": {"description": "Label for the questions-count field on a test series"},
-
+  "@testSeriesQuestionsLabel": {
+    "description": "Label for the questions-count field on a test series"
+  },
   "testSeriesDurationLabel": "Duration",
-  "@testSeriesDurationLabel": {"description": "Label for the duration field on a test series"},
-
+  "@testSeriesDurationLabel": {
+    "description": "Label for the duration field on a test series"
+  },
   "testSeriesNoTimeLimit": "No time limit",
-  "@testSeriesNoTimeLimit": {"description": "Shown when a test series has no time limit"},
-
+  "@testSeriesNoTimeLimit": {
+    "description": "Shown when a test series has no time limit"
+  },
   "testSeriesAttemptsLabel": "Attempts",
-  "@testSeriesAttemptsLabel": {"description": "Label for the attempts-allowed field on a test series"},
-
+  "@testSeriesAttemptsLabel": {
+    "description": "Label for the attempts-allowed field on a test series"
+  },
   "testSeriesYourAttempt": "Your Attempt",
-  "@testSeriesYourAttempt": {"description": "Label for the user's own attempt on a test series"},
-
+  "@testSeriesYourAttempt": {
+    "description": "Label for the user's own attempt on a test series"
+  },
   "testSeriesTimerNotice": "This test has a time limit of {minutes} minutes",
   "@testSeriesTimerNotice": {
     "description": "Notice shown before starting a timed test",
     "placeholders": {
-      "minutes": {"type": "int"}
+      "minutes": {
+        "type": "int"
+      }
     }
   },
-
   "testSeriesReviews": "Reviews",
-  "@testSeriesReviews": {"description": "Section title for test series reviews"},
-
+  "@testSeriesReviews": {
+    "description": "Section title for test series reviews"
+  },
   "testSeriesNoReviews": "No reviews yet",
-  "@testSeriesNoReviews": {"description": "Shown when a test series has no reviews"},
-
+  "@testSeriesNoReviews": {
+    "description": "Shown when a test series has no reviews"
+  },
   "testTimeUp": "Time's up!",
-  "@testTimeUp": {"description": "Shown when a timed test's duration runs out"},
-
+  "@testTimeUp": {
+    "description": "Shown when a timed test's duration runs out"
+  },
   "testSubmitConfirmTitle": "Submit Test?",
-  "@testSubmitConfirmTitle": {"description": "Title of the submit-test confirmation dialog"},
-
+  "@testSubmitConfirmTitle": {
+    "description": "Title of the submit-test confirmation dialog"
+  },
   "testSubmitConfirmUnanswered": "{unanswered} questions are unanswered. Submit anyway?",
   "@testSubmitConfirmUnanswered": {
     "description": "Confirmation body when some test questions are unanswered",
     "placeholders": {
-      "unanswered": {"type": "int"}
+      "unanswered": {
+        "type": "int"
+      }
     }
   },
-
   "testSubmitConfirmBody": "Are you sure you want to submit this test?",
-  "@testSubmitConfirmBody": {"description": "Confirmation body when all test questions are answered"},
-
+  "@testSubmitConfirmBody": {
+    "description": "Confirmation body when all test questions are answered"
+  },
   "viewAll": "View all",
   "settingsTitle": "Settings",
   "settingsLanguageSection": "Language",
@@ -772,7 +1135,6 @@
   "settingsAccountSection": "Account",
   "settingsLogout": "Log out",
   "settingsLogoutConfirm": "You'll need to sign in again to use the app.",
-
   "roleAdmin": "Campus admin",
   "rolePrincipalHod": "Principal / HOD",
   "roleClassTeacher": "Class teacher",
@@ -782,7 +1144,6 @@
   "roleParent": "Parent",
   "roleManagement": "Management",
   "roleNone": "Member",
-
   "campusSwitchTooltip": "Switch campus",
   "campusLoadFailed": "Couldn't load your campus",
   "campusNoneTitle": "You're not part of a campus yet",
@@ -791,7 +1152,6 @@
   "campusPendingBody": "This campus is under review. Once it's approved you can add staff and students.",
   "campusRejectedTitle": "Campus not approved",
   "campusRejectedBody": "This campus was not approved. Contact support if you think this is a mistake.",
-
   "campusMyClassTitle": "My class",
   "campusMySectionsTitle": "My sections",
   "campusAllSectionsTitle": "All sections",
@@ -811,14 +1171,17 @@
   "campusNoMatches": "No students match that search",
   "campusStudentCount": "{count, plural, =1{1 student} other{{count} students}}",
   "@campusStudentCount": {
-    "placeholders": { "count": { "type": "int" } }
+    "placeholders": {
+      "count": {
+        "type": "int"
+      }
+    }
   },
   "campusRosterLoadFailed": "Couldn't load the student list",
   "campusRosterEmptyTitle": "No students in this section",
   "campusRosterEmptySubtitle": "Students appear here once they're enrolled for the current session.",
   "campusNoAttendancePermissionTitle": "You can't mark this attendance",
   "campusNoAttendancePermissionBody": "Only the class teacher or the assigned subject teacher can mark attendance for this section.",
-
   "campusNoticesTitle": "Notices",
   "campusNoticesLoadFailed": "Couldn't load notices",
   "campusNoNotices": "No notices yet",
@@ -831,12 +1194,12 @@
   "noticeSendLabel": "Post notice",
   "noticeEmptyError": "Add a title and a message before posting.",
   "noticeNoSessionError": "No active academic session for this campus.",
+  "noticeSelectDepartmentError": "Pick which department this notice is for.",
   "noticeScopeWholeCampus": "Whole campus",
   "noticeScopeCampus": "Campus",
   "noticeScopeClass": "Class",
   "noticeScopeDepartment": "Department",
   "noticeScopeSection": "Section",
-
   "attendanceWholeDay": "Whole day",
   "attendanceSubjectLabel": "Subject",
   "attendancePresent": "Present",
@@ -849,153 +1212,3613 @@
   "attendanceAlreadyMarked": "Attendance for this day is already marked. Pick another date to make changes.",
   "attendanceSaveLabel": "Save for {count} students",
   "@attendanceSaveLabel": {
-    "placeholders": { "count": { "type": "int" } }
+    "placeholders": {
+      "count": {
+        "type": "int"
+      }
+    }
   },
   "attendanceSaving": "Saving {done} of {total}",
   "@attendanceSaving": {
-    "placeholders": { "done": { "type": "int" }, "total": { "type": "int" } }
+    "placeholders": {
+      "done": {
+        "type": "int"
+      },
+      "total": {
+        "type": "int"
+      }
+    }
   },
   "attendanceSavedAll": "Attendance saved for {count} students",
   "@attendanceSavedAll": {
-    "placeholders": { "count": { "type": "int" } }
+    "placeholders": {
+      "count": {
+        "type": "int"
+      }
+    }
   },
   "attendanceSavedPartial": "Saved {saved}, {failed} didn't go through",
   "@attendanceSavedPartial": {
-    "placeholders": { "saved": { "type": "int" }, "failed": { "type": "int" } }
+    "placeholders": {
+      "saved": {
+        "type": "int"
+      },
+      "failed": {
+        "type": "int"
+      }
+    }
   },
   "attendanceFailedCount": "{count, plural, =1{1 student didn't save} other{{count} students didn't save}}",
   "@attendanceFailedCount": {
-    "placeholders": { "count": { "type": "int" } }
+    "placeholders": {
+      "count": {
+        "type": "int"
+      }
+    }
   },
   "attendanceBelowThreshold": "Attendance is below the {percent}% your campus expects.",
   "@attendanceBelowThreshold": {
-    "placeholders": { "percent": { "type": "int" } }
+    "placeholders": {
+      "percent": {
+        "type": "int"
+      }
+    }
   },
-
   "timeMinutesAgo": "{count}m ago",
   "@timeMinutesAgo": {
-    "placeholders": { "count": { "type": "int" } }
+    "placeholders": {
+      "count": {
+        "type": "int"
+      }
+    }
   },
   "timeHoursAgo": "{count}h ago",
   "@timeHoursAgo": {
-    "placeholders": { "count": { "type": "int" } }
+    "placeholders": {
+      "count": {
+        "type": "int"
+      }
+    }
   },
   "timeDaysAgo": "{count}d ago",
   "@timeDaysAgo": {
-    "placeholders": { "count": { "type": "int" } }
+    "placeholders": {
+      "count": {
+        "type": "int"
+      }
+    }
   },
-
   "searchFilterAll": "All",
-  "@searchFilterAll": {"description": "Search screen filter chip — show all result types"},
-
+  "@searchFilterAll": {
+    "description": "Search screen filter chip — show all result types"
+  },
   "searchFilterPeople": "People",
-  "@searchFilterPeople": {"description": "Search screen filter chip — people/friends only"},
-
+  "@searchFilterPeople": {
+    "description": "Search screen filter chip — people/friends only"
+  },
   "searchFilterNotices": "Notices",
-  "@searchFilterNotices": {"description": "Search screen filter chip — campus notices only"},
-
+  "@searchFilterNotices": {
+    "description": "Search screen filter chip — campus notices only"
+  },
   "searchFilterAssignments": "Assignments",
-  "@searchFilterAssignments": {"description": "Search screen filter chip — assignments only"},
-
+  "@searchFilterAssignments": {
+    "description": "Search screen filter chip — assignments only"
+  },
   "searchFilterTests": "Test Series",
-  "@searchFilterTests": {"description": "Search screen filter chip — test series only"},
-
+  "@searchFilterTests": {
+    "description": "Search screen filter chip — test series only"
+  },
   "searchFilterMessages": "Messages",
-  "@searchFilterMessages": {"description": "Search screen filter chip — messages only"},
-
+  "@searchFilterMessages": {
+    "description": "Search screen filter chip — messages only"
+  },
   "searchSectionPeople": "People",
-  "@searchSectionPeople": {"description": "Search results section header — people"},
-
+  "@searchSectionPeople": {
+    "description": "Search results section header — people"
+  },
   "searchSectionNotices": "Campus Notices",
-  "@searchSectionNotices": {"description": "Search results section header — campus notices"},
-
+  "@searchSectionNotices": {
+    "description": "Search results section header — campus notices"
+  },
   "searchSectionAssignments": "Assignments",
-  "@searchSectionAssignments": {"description": "Search results section header — assignments"},
-
+  "@searchSectionAssignments": {
+    "description": "Search results section header — assignments"
+  },
   "searchSectionTests": "Test Series",
-  "@searchSectionTests": {"description": "Search results section header — test series"},
-
+  "@searchSectionTests": {
+    "description": "Search results section header — test series"
+  },
   "searchSectionMessages": "Messages",
-  "@searchSectionMessages": {"description": "Search results section header — messages"},
-
+  "@searchSectionMessages": {
+    "description": "Search results section header — messages"
+  },
   "searchRecentTitle": "Recent",
-  "@searchRecentTitle": {"description": "Header above the list of recent searches"},
-
+  "@searchRecentTitle": {
+    "description": "Header above the list of recent searches"
+  },
   "searchRecentClear": "Clear all",
-  "@searchRecentClear": {"description": "Button to clear all recent searches"},
-
+  "@searchRecentClear": {
+    "description": "Button to clear all recent searches"
+  },
   "searchEmptyPrompt": "Search for people, classes, notices, assignments and tests",
-  "@searchEmptyPrompt": {"description": "Prompt shown on the search screen before the user types anything"},
-
+  "@searchEmptyPrompt": {
+    "description": "Prompt shown on the search screen before the user types anything"
+  },
   "searchNoResultsFor": "No results for \"{query}\"",
   "@searchNoResultsFor": {
     "description": "Shown when a search returns nothing",
-    "placeholders": {"query": {"type": "String"}}
+    "placeholders": {
+      "query": {
+        "type": "String"
+      }
+    }
   },
-
   "searchDetailUnavailable": "Full detail view for this result isn't wired up yet",
-  "@searchDetailUnavailable": {"description": "Shown in a result's detail sheet for sources without a deep-link screen yet"},
-
+  "@searchDetailUnavailable": {
+    "description": "Shown in a result's detail sheet for sources without a deep-link screen yet"
+  },
   "couldNotOpenClassroom": "Could not open this classroom.",
-  "@couldNotOpenClassroom": {"description": "Shown when tapping a classroom row fails to open it"},
-
+  "@couldNotOpenClassroom": {
+    "description": "Shown when tapping a classroom row fails to open it"
+  },
   "couldNotOpenClass": "Could not open this class.",
-  "@couldNotOpenClass": {"description": "Shown when tapping a live class card fails to open it"},
-
+  "@couldNotOpenClass": {
+    "description": "Shown when tapping a live class card fails to open it"
+  },
   "camera": "Camera",
-  "@camera": {"description": "Option to take a photo with the camera, for a story upload"},
-
+  "@camera": {
+    "description": "Option to take a photo with the camera, for a story upload"
+  },
   "recordVideo": "Record video",
-  "@recordVideo": {"description": "Option to record a video with the camera, for a story upload"},
-
+  "@recordVideo": {
+    "description": "Option to record a video with the camera, for a story upload"
+  },
   "chooseFromGallery": "Choose from gallery",
-  "@chooseFromGallery": {"description": "Option to pick media from the photo gallery, for a story upload"},
-
+  "@chooseFromGallery": {
+    "description": "Option to pick media from the photo gallery, for a story upload"
+  },
   "yourStory": "Your Story",
-  "@yourStory": {"description": "Label on the current user's own story ring"},
-
+  "@yourStory": {
+    "description": "Label on the current user's own story ring"
+  },
   "couldNotUploadStory": "Could not upload your story.",
-  "@couldNotUploadStory": {"description": "Shown when a story upload fails"},
-
+  "@couldNotUploadStory": {
+    "description": "Shown when a story upload fails"
+  },
   "noClassroomsWithReferrals": "None of your classrooms have referrals turned on yet.",
-  "@noClassroomsWithReferrals": {"description": "Shown when the user has no classroom eligible for a referral link"},
-
+  "@noClassroomsWithReferrals": {
+    "description": "Shown when the user has no classroom eligible for a referral link"
+  },
   "couldNotCreateReferralLink": "Could not create your referral link.",
-  "@couldNotCreateReferralLink": {"description": "Shown when generating a classroom referral link fails"},
-
+  "@couldNotCreateReferralLink": {
+    "description": "Shown when generating a classroom referral link fails"
+  },
   "open": "Open",
-  "@open": {"description": "Button to open a downloaded file (e.g. a PDF)"},
-
+  "@open": {
+    "description": "Button to open a downloaded file (e.g. a PDF)"
+  },
   "inviteEarnedSoFar": "You've earned ₹{earned} so far — ₹{pending} on the way",
   "@inviteEarnedSoFar": {
     "description": "Invite & earn strip subtitle showing commission earned and pending",
-    "placeholders": {"earned": {"type": "int"}, "pending": {"type": "int"}}
+    "placeholders": {
+      "earned": {
+        "type": "int"
+      },
+      "pending": {
+        "type": "int"
+      }
+    }
   },
-
   "inviteShareClassroomLink": "Share a classroom's link — earn a daily % commission for as long as they stay enrolled",
-  "@inviteShareClassroomLink": {"description": "Default invite & earn strip subtitle, shown before the user has earned anything"},
-
+  "@inviteShareClassroomLink": {
+    "description": "Default invite & earn strip subtitle, shown before the user has earned anything"
+  },
   "referralCommissionEarned": "You'll earn {percent}% of the daily fee for every student you refer to \"{name}\".",
   "@referralCommissionEarned": {
     "description": "Confirmation shown after generating a referral link for a classroom",
-    "placeholders": {"percent": {"type": "String"}, "name": {"type": "String"}}
+    "placeholders": {
+      "percent": {
+        "type": "String"
+      },
+      "name": {
+        "type": "String"
+      }
+    }
   },
-
   "openFailed": "Open failed: {error}",
   "@openFailed": {
     "description": "Shown when opening a downloaded file fails",
-    "placeholders": {"error": {"type": "String"}}
+    "placeholders": {
+      "error": {
+        "type": "String"
+      }
+    }
   },
-
   "failedWithError": "Failed: {error}",
   "@failedWithError": {
     "description": "Generic failure message with the underlying error appended",
-    "placeholders": {"error": {"type": "String"}}
+    "placeholders": {
+      "error": {
+        "type": "String"
+      }
+    }
   },
-
   "filesSelectedCount": "{count} selected",
   "@filesSelectedCount": {
     "description": "Count of files currently selected for upload",
-    "placeholders": {"count": {"type": "int"}}
+    "placeholders": {
+      "count": {
+        "type": "int"
+      }
+    }
+  },
+  "noCommentsYet": "No comments yet",
+  "@noCommentsYet": {
+    "description": "Comment sheet empty state title"
+  },
+  "beFirstToComment": "Be the first to share what you think",
+  "@beFirstToComment": {
+    "description": "Comment sheet empty state subtitle"
+  },
+  "addCommentHint": "Add a comment…",
+  "@addCommentHint": {
+    "description": "Comment input field placeholder"
+  },
+  "replyingTo": "Replying to @{name}",
+  "@replyingTo": {
+    "description": "Shown above the comment input while replying to someone",
+    "placeholders": {
+      "name": {
+        "type": "String"
+      }
+    }
+  },
+  "like": "Like",
+  "@like": {
+    "description": "Like action label on a comment"
+  },
+  "reply": "Reply",
+  "@reply": {
+    "description": "Reply action label on a comment"
+  },
+  "viewReplies": "{count} replies",
+  "@viewReplies": {
+    "description": "Button to expand a comment's replies",
+    "placeholders": {
+      "count": {
+        "type": "int"
+      }
+    }
+  },
+  "hideReplies": "Hide replies",
+  "@hideReplies": {
+    "description": "Button to collapse a comment's replies"
+  },
+  "loadingReplies": "Loading…",
+  "@loadingReplies": {
+    "description": "Shown while a comment's replies are loading"
+  },
+  "edited": "edited",
+  "@edited": {
+    "description": "Marker next to an edited comment"
+  },
+  "you": "you",
+  "@you": {
+    "description": "Marker next to the current user's own comment"
+  },
+  "editComment": "Edit comment",
+  "@editComment": {
+    "description": "Title/hint for the edit-comment dialog"
+  },
+  "commentEdited": "Comment updated",
+  "@commentEdited": {
+    "description": "Snackbar shown after a comment is edited"
+  },
+  "editFailed": "Couldn't edit: {error}",
+  "@editFailed": {
+    "description": "Snackbar shown when editing a comment fails",
+    "placeholders": {
+      "error": {
+        "type": "String"
+      }
+    }
+  },
+  "deleteComment": "Delete comment?",
+  "@deleteComment": {
+    "description": "Title of the delete-comment confirmation dialog"
+  },
+  "deleteCommentBody": "This can't be undone.",
+  "@deleteCommentBody": {
+    "description": "Body of the delete-comment confirmation dialog"
+  },
+  "delete": "Delete",
+  "@delete": {
+    "description": "Generic delete action label"
+  },
+  "deleteFailed": "Couldn't delete: {error}",
+  "@deleteFailed": {
+    "description": "Snackbar shown when deleting a comment fails",
+    "placeholders": {
+      "error": {
+        "type": "String"
+      }
+    }
+  },
+  "hideComment": "Hide comment",
+  "@hideComment": {
+    "description": "Action to hide someone else's comment on your own post"
+  },
+  "commentHidden": "Comment hidden",
+  "@commentHidden": {
+    "description": "Snackbar shown after hiding a comment"
+  },
+  "hideFailed": "Couldn't hide: {error}",
+  "@hideFailed": {
+    "description": "Snackbar shown when hiding a comment fails",
+    "placeholders": {
+      "error": {
+        "type": "String"
+      }
+    }
+  },
+  "attachCameraPhoto": "Camera photo",
+  "@attachCameraPhoto": {
+    "description": "Attach-menu option to take a photo"
+  },
+  "attachCameraVideo": "Camera video",
+  "@attachCameraVideo": {
+    "description": "Attach-menu option to record a video"
+  },
+  "attachGalleryPhoto": "Gallery photo",
+  "@attachGalleryPhoto": {
+    "description": "Attach-menu option to pick a photo from the gallery"
+  },
+  "attachGalleryVideo": "Gallery video",
+  "@attachGalleryVideo": {
+    "description": "Attach-menu option to pick a video from the gallery"
+  },
+  "attachDocument": "Document",
+  "@attachDocument": {
+    "description": "Attach-menu option to pick a document file"
+  },
+  "fileTooLargeTitle": "File too large",
+  "@fileTooLargeTitle": {
+    "description": "Title of the file-too-large dialog"
+  },
+  "fileTooLargeBody": "This file is {size}MB — the limit is 200MB. Please choose a smaller file.",
+  "@fileTooLargeBody": {
+    "description": "Body of the file-too-large dialog/snackbar",
+    "placeholders": {
+      "size": {
+        "type": "String"
+      }
+    }
+  },
+  "uploadingPercent": "Uploading {percent}%",
+  "@uploadingPercent": {
+    "description": "Upload progress label",
+    "placeholders": {
+      "percent": {
+        "type": "String"
+      }
+    }
+  },
+  "compressing": "Compressing…",
+  "@compressing": {
+    "description": "Shown before upload progress is known"
+  },
+  "openFileFailed": "Couldn't open file: {error}",
+  "@openFileFailed": {
+    "description": "Snackbar shown when opening a downloaded comment attachment fails",
+    "placeholders": {
+      "error": {
+        "type": "String"
+      }
+    }
+  },
+  "ok": "OK",
+  "@ok": {
+    "description": "Generic OK button label"
+  },
+  "addCaptionHint": "Add a caption…",
+  "@addCaptionHint": {
+    "description": "Hint text on the story caption input"
+  },
+  "download": "Download",
+  "@download": {
+    "description": "Generic download button label"
+  },
+  "downloadedFile": "Downloaded: {fileName}",
+  "@downloadedFile": {
+    "description": "Snackbar shown after a file finishes downloading",
+    "placeholders": {
+      "fileName": {
+        "type": "String"
+      }
+    }
+  },
+  "downloadFailed": "Download failed: {error}",
+  "@downloadFailed": {
+    "description": "Snackbar shown when a file download fails",
+    "placeholders": {
+      "error": {
+        "type": "String"
+      }
+    }
+  },
+  "reactionUpdateFailed": "Couldn't update your reaction — check your connection",
+  "@reactionUpdateFailed": {
+    "description": "Snackbar shown when a post reaction fails to sync"
+  },
+  "loadingDocument": "Loading document…",
+  "@loadingDocument": {
+    "description": "Shown while a document is being prepared for viewing"
+  },
+  "previewNotSupported": "Preview not supported for this file",
+  "@previewNotSupported": {
+    "description": "Shown when a document type has no inline preview"
+  },
+  "directDownloadOpen": "Direct download & open",
+  "@directDownloadOpen": {
+    "description": "Button to download and open a document with no inline preview"
+  },
+  "openDownloadedFile": "Open downloaded file",
+  "@openDownloadedFile": {
+    "description": "Button to open a document already downloaded locally"
+  },
+  "viewersCount": "{count, plural, =1{1 viewer} other{{count} viewers}}",
+  "@viewersCount": {
+    "description": "Tappable viewer count under your own story",
+    "placeholders": {
+      "count": {
+        "type": "int"
+      }
+    }
+  },
+  "viewersTitle": "Viewers",
+  "@viewersTitle": {
+    "description": "Title of the story viewers list sheet"
+  },
+  "couldntLoadViewers": "Couldn't load viewers.",
+  "@couldntLoadViewers": {
+    "description": "Shown when the story viewers list fails to load"
+  },
+  "noViewsYet": "No views yet.",
+  "@noViewsYet": {
+    "description": "Shown when a story has no viewers yet"
+  },
+  "tsSourceIndividual": "Individual",
+  "@tsSourceIndividual": {
+    "description": "Source filter chip / badge: a test series created by an individual creator"
+  },
+  "tsSourceCampus": "Campus",
+  "@tsSourceCampus": {
+    "description": "Source filter chip / badge: a test series published by a campus"
+  },
+  "tsSourceLiveClass": "Live Class",
+  "@tsSourceLiveClass": {
+    "description": "Source filter chip / badge: a test series attached to a live class"
+  },
+  "tsSearchHint": "Search test series",
+  "@tsSearchHint": {
+    "description": "Hint text of the search field on the test series list"
+  },
+  "tsNoSearchResults": "No test series match your search",
+  "@tsNoSearchResults": {
+    "description": "Empty state when a search on the test series list has no matches"
+  },
+  "tsLoadMoreFailed": "Couldn't load more. Tap to retry.",
+  "@tsLoadMoreFailed": {
+    "description": "Footer button shown when loading the next page of test series fails"
+  },
+  "tsErrOffline": "No internet connection. Check your network and try again.",
+  "@tsErrOffline": {
+    "description": "Test series error: device is offline / network unreachable"
+  },
+  "tsErrTimeout": "The server took too long to respond. Please try again.",
+  "@tsErrTimeout": {
+    "description": "Test series error: request timed out"
+  },
+  "tsErrUnauthorized": "Your session has expired. Please log in again.",
+  "@tsErrUnauthorized": {
+    "description": "Test series error: 401 / expired login session"
+  },
+  "tsErrForbidden": "You don't have access to this test.",
+  "@tsErrForbidden": {
+    "description": "Test series error: 403 forbidden"
+  },
+  "tsErrNotFound": "This test is no longer available.",
+  "@tsErrNotFound": {
+    "description": "Test series error: 404 not found"
+  },
+  "tsErrRateLimited": "Too many requests. Please wait a moment and try again.",
+  "@tsErrRateLimited": {
+    "description": "Test series error: 429 too many requests"
+  },
+  "tsErrServer": "Something went wrong on our side. Please try again shortly.",
+  "@tsErrServer": {
+    "description": "Test series error: 5xx server error"
+  },
+  "tsAttemptAgain": "Attempt Again",
+  "@tsAttemptAgain": {
+    "description": "Primary button on test series detail when the student can start another attempt"
+  },
+  "tsUnlimited": "Unlimited",
+  "@tsUnlimited": {
+    "description": "Attempts value when a test series allows unlimited attempts"
+  },
+  "tsAttemptsUsedOf": "{used} of {allowed} used",
+  "@tsAttemptsUsedOf": {
+    "description": "Attempts row on test series detail, e.g. '1 of 2 used'",
+    "placeholders": {
+      "used": {
+        "type": "int"
+      },
+      "allowed": {
+        "type": "int"
+      }
+    }
+  },
+  "tsAttemptHistory": "Your Attempts",
+  "@tsAttemptHistory": {
+    "description": "Section title listing all of the student's attempts on a test series"
+  },
+  "tsAttemptRow": "Attempt {n}",
+  "@tsAttemptRow": {
+    "description": "Row title in the attempt history list",
+    "placeholders": {
+      "n": {
+        "type": "int"
+      }
+    }
+  },
+  "tsSeriesArchived": "This test series is archived and can't be started.",
+  "@tsSeriesArchived": {
+    "description": "Banner shown on an archived test series the student has not attempted"
+  },
+  "tsViewAllReviews": "View All Reviews ({count})",
+  "@tsViewAllReviews": {
+    "description": "Button under the review preview that opens the full reviews screen",
+    "placeholders": {
+      "count": {
+        "type": "int"
+      }
+    }
+  },
+  "tsReviewsTitle": "Reviews",
+  "@tsReviewsTitle": {
+    "description": "App bar title of the full reviews screen"
+  },
+  "tsPendingSynced": "Your pending test was submitted.",
+  "@tsPendingSynced": {
+    "description": "Snack shown when a test that could not be submitted earlier was sent successfully"
+  },
+  "tsQuestionUnsupported": "This question type isn't supported in your app version. Please update the app.",
+  "@tsQuestionUnsupported": {
+    "description": "Shown in place of an input for a question type this app version does not know"
+  },
+  "tsQuestionImage": "Question image",
+  "@tsQuestionImage": {
+    "description": "Accessibility label of an image attached to a question"
+  },
+  "tsMarkForReview": "Mark for Review",
+  "@tsMarkForReview": {
+    "description": "Tooltip of the flag button in the test player"
+  },
+  "tsUnmarkReview": "Remove Review Mark",
+  "@tsUnmarkReview": {
+    "description": "Tooltip of the flag button when the question is already marked"
+  },
+  "tsLegendAnswered": "Answered",
+  "@tsLegendAnswered": {
+    "description": "Question palette legend: answered question"
+  },
+  "tsLegendNotAnswered": "Not answered",
+  "@tsLegendNotAnswered": {
+    "description": "Question palette legend: unanswered question"
+  },
+  "tsLegendMarked": "Marked",
+  "@tsLegendMarked": {
+    "description": "Question palette legend: question marked for review"
+  },
+  "tsOrderNotArranged": "Not arranged yet — drag to set the order",
+  "@tsOrderNotArranged": {
+    "description": "Note above an ordering question until the student rearranges it at least once"
+  },
+  "tsSubmitConfirmMarked": "{count, plural, =1{1 question is marked for review.} other{{count} questions are marked for review.}}",
+  "@tsSubmitConfirmMarked": {
+    "description": "Extra line in the submit confirmation dialog when questions are marked for review",
+    "placeholders": {
+      "count": {
+        "type": "int"
+      }
+    }
+  },
+  "tsTimeLeftWarning": "{minutes, plural, =1{1 min left} other{{minutes} min left}}",
+  "@tsTimeLeftWarning": {
+    "description": "Snack shown when 10, 5 and 1 minutes remain in a timed test",
+    "placeholders": {
+      "minutes": {
+        "type": "int"
+      }
+    }
+  },
+  "tsTimeUpLocked": "Time's up. Submitting your answers…",
+  "@tsTimeUpLocked": {
+    "description": "Banner shown while answers are auto-submitted after the timer ends"
+  },
+  "tsSubmitPendingTitle": "Couldn't submit yet",
+  "@tsSubmitPendingTitle": {
+    "description": "Title of the banner shown when auto-submit failed and the submission is queued"
+  },
+  "tsSubmitPendingBody": "Your answers are saved safely on this device. Check your connection and retry.",
+  "@tsSubmitPendingBody": {
+    "description": "Body of the queued-submission banner"
+  },
+  "tsRetrySubmit": "Retry",
+  "@tsRetrySubmit": {
+    "description": "Button on the queued-submission banner"
+  },
+  "tsExitBody": "Your answers are saved. You can resume this test later.",
+  "@tsExitBody": {
+    "description": "Exit confirmation body for an untimed test (answers are autosaved)"
+  },
+  "tsExitBodyTimerRunning": "Your answers are saved, but the timer keeps running. You can resume from the test page.",
+  "@tsExitBodyTimerRunning": {
+    "description": "Exit confirmation body for a timed test (timer does not pause)"
+  },
+  "tsDraftRestored": "Your previous answers were restored.",
+  "@tsDraftRestored": {
+    "description": "Snack shown when locally saved answers are restored on resume"
+  },
+  "tsSemanticsTimer": "Time remaining {time}",
+  "@tsSemanticsTimer": {
+    "description": "Screen reader label of the countdown timer",
+    "placeholders": {
+      "time": {
+        "type": "String"
+      }
+    }
+  },
+  "tsFromCamera": "Camera",
+  "@tsFromCamera": {
+    "description": "Photo source option in the attach-photo sheet"
+  },
+  "tsFromGallery": "Gallery",
+  "@tsFromGallery": {
+    "description": "Photo source option in the attach-photo sheet"
+  },
+  "tsRemovePhoto": "Remove Photo",
+  "@tsRemovePhoto": {
+    "description": "Tooltip to remove an attached photo from a text answer"
+  },
+  "tsPhotoTooLarge": "Photo is larger than {mb} MB. Please choose a smaller one.",
+  "@tsPhotoTooLarge": {
+    "description": "Error when the chosen photo exceeds the size limit",
+    "placeholders": {
+      "mb": {
+        "type": "int"
+      }
+    }
+  },
+  "tsPhotoError": "Couldn't open the camera or gallery. Check app permissions in Settings.",
+  "@tsPhotoError": {
+    "description": "Error when picking a photo fails (usually a denied permission)"
+  },
+  "tsPhotoMissing": "An attached photo is no longer available. Please attach it again.",
+  "@tsPhotoMissing": {
+    "description": "Shown when a photo saved in a restored draft no longer exists on the device"
+  },
+  "tsCorrectAnswer": "Correct Answer",
+  "@tsCorrectAnswer": {
+    "description": "Label of the correct answer block in the result breakdown"
+  },
+  "tsYourPhoto": "Your Attached Photo",
+  "@tsYourPhoto": {
+    "description": "Label for the student's uploaded photo in the result breakdown"
+  },
+  "tsSummaryCorrect": "Correct: {count}",
+  "@tsSummaryCorrect": {
+    "description": "Result summary chip: number of correct answers",
+    "placeholders": {
+      "count": {
+        "type": "int"
+      }
+    }
+  },
+  "tsSummaryIncorrect": "Incorrect: {count}",
+  "@tsSummaryIncorrect": {
+    "description": "Result summary chip: number of incorrect answers",
+    "placeholders": {
+      "count": {
+        "type": "int"
+      }
+    }
+  },
+  "tsSummarySkipped": "Skipped: {count}",
+  "@tsSummarySkipped": {
+    "description": "Result summary chip: number of unanswered questions",
+    "placeholders": {
+      "count": {
+        "type": "int"
+      }
+    }
+  },
+  "tsSummaryAwaiting": "Awaiting review: {count}",
+  "@tsSummaryAwaiting": {
+    "description": "Result summary chip: answers waiting for manual checking",
+    "placeholders": {
+      "count": {
+        "type": "int"
+      }
+    }
+  },
+  "languageSectionTitle": "Language",
+  "@languageSectionTitle": {
+    "description": "Language section header in settings"
+  },
+  "themeSectionTitle": "Theme",
+  "@themeSectionTitle": {
+    "description": "Theme section header in settings"
+  },
+  "notificationSettingsTitle": "Notification settings",
+  "notificationSettingsLoadFailed": "Couldn't load notification settings",
+  "notifChannelsSectionTitle": "Channels",
+  "notifChannelPush": "Push notifications",
+  "notifChannelEmail": "Email",
+  "notifChannelSms": "SMS",
+  "notifChannelWhatsapp": "WhatsApp",
+  "notifDigestSectionTitle": "Email digest",
+  "notifDigestOff": "Off",
+  "notifDigestDaily": "Daily",
+  "notifDigestWeekly": "Weekly",
+  "notifCategoriesSectionTitle": "Notify me about",
+  "notifCategoriesHint": "Turning a category off still shows it in your notification list — it just won't send a push, email, SMS or WhatsApp alert.",
+  "notifCategoryLiveClasses": "Live classes & sessions",
+  "notifCategoryAssignmentsTests": "Assignments & tests",
+  "notifCategoryMessagesCalls": "Messages & calls",
+  "notifCategorySocial": "Posts & reviews",
+  "notifCategoryPayments": "Payments & wallet",
+  "notifCategoryCampus": "Campus notices",
+  "languageEnglish": "English",
+  "languageHindi": "Hindi",
+  "languageSystemDefault": "System default",
+  "themeLight": "Light",
+  "themeDark": "Dark",
+  "themeSystem": "System default",
+  "liveClassesTitle": "Live Classes",
+  "@liveClassesTitle": {
+    "description": "Classrooms browse screen title"
+  },
+  "searchClassroomsHint": "Search classrooms",
+  "filterAll": "All",
+  "filterMine": "Mine",
+  "couldNotLoadClassrooms": "Couldn't load classrooms",
+  "checkConnectionRetry": "Check your connection and try again",
+  "noClassroomsFound": "No classrooms found",
+  "tryDifferentSearch": "Try a different search or filter",
+  "enrolledCountLabel": "{count} enrolled",
+  "@enrolledCountLabel": {
+    "description": "Enrolled student count on a classroom card",
+    "placeholders": {
+      "count": {
+        "type": "int"
+      }
+    }
+  },
+  "classroomDetailTitle": "Classroom",
+  "upcomingSessionsTitle": "Upcoming Sessions",
+  "noUpcomingSessions": "No upcoming sessions",
+  "materialsTitle": "Materials",
+  "noMaterialsYet": "No materials yet",
+  "viewScheduleCta": "View schedule",
+  "requestToJoinCta": "Request to join",
+  "choosePassTitle": "Choose a pass",
+  "passSubtitle": "{price} coins - valid {days} days",
+  "@passSubtitle": {
+    "description": "Pass option subtitle: price in coins and validity in days",
+    "placeholders": {
+      "price": {
+        "type": "String"
+      },
+      "days": {
+        "type": "int"
+      }
+    }
+  },
+  "couponCodeOptional": "Coupon code (optional)",
+  "messageToTeacherOptional": "Message to teacher (optional)",
+  "sendRequestCta": "Send request",
+  "liveSessionTitle": "Live Session",
+  "couldNotJoinSession": "Couldn't join the session",
+  "recordingBadge": "REC",
+  "@recordingBadge": {
+    "description": "Short badge shown while a session recording is in progress"
+  },
+  "raiseHandCta": "Raise hand",
+  "typeMessageHint": "Type a message",
+  "dashboardTitle": "Home",
+  "couldNotLoadDashboard": "Couldn't load your dashboard",
+  "viewerCountLabel": "{count} watching",
+  "@viewerCountLabel": {
+    "placeholders": {
+      "count": {
+        "type": "int"
+      }
+    }
+  },
+  "myProgressTitle": "My Progress",
+  "attendanceLabel": "Attendance",
+  "streakLabel": "Day streak",
+  "certificatesLabel": "Certificates",
+  "myEarningsTitle": "My Earnings",
+  "totalEarnedLabel": "Total earned",
+  "walletTitle": "Wallet",
+  "couldNotLoadWallet": "Couldn't load your wallet",
+  "coinBalanceLabel": "Coin balance",
+  "buyCoinsCta": "Buy coins",
+  "buyCoinsTitle": "Buy coins",
+  "withdrawCta": "Withdraw",
+  "cancelCta": "Cancel",
+  "continueCta": "Continue",
+  "orderStartedMessage": "Order started - complete payment to add coins",
+  "transactionsTitle": "Transactions",
+  "noTransactionsYet": "No transactions yet",
+  "withdrawalsTitle": "Withdrawals",
+  "coinsUnit": "coins",
+  "actionCta": "Take action",
+  "answerCta": "Answer",
+  "answerDoubtTitle": "Answer doubt",
+  "askCta": "Ask",
+  "askDoubtTitle": "Ask a doubt",
+  "assignRoomHint": "Room",
+  "assignmentsTitle": "Assignments",
+  "breakoutRoomsTitle": "Breakout Rooms",
+  "certificatesReportCardsTitle": "Certificates & Report Cards",
+  "certificatesTab": "Certificates",
+  "chatReportsTab": "Chat Reports",
+  "classroomInfoTitle": "Classroom Info",
+  "classroomReferralSummaryTitle": "Classroom Referral Summary",
+  "classroomReportsTab": "Classroom Reports",
+  "closeBreakoutCta": "Close rooms",
+  "commissionEarnedLabel": "Commission earned",
+  "couldNotLoadAssignments": "Couldn't load assignments",
+  "couldNotLoadModerationData": "Couldn't load moderation data",
+  "couldNotLoadPasses": "Couldn't load passes",
+  "couldNotLoadRecordings": "Couldn't load recordings",
+  "couldNotLoadReferrals": "Couldn't load referrals",
+  "createCta": "Create",
+  "daysAbbrev": "d",
+  "@daysAbbrev": {
+    "description": "Abbreviation for days, e.g. '30d'"
+  },
+  "dismissCta": "Dismiss",
+  "doneCta": "Done",
+  "doubtsTab": "Doubts",
+  "enterReferralCodeHint": "Enter referral code",
+  "generateParentCodeCta": "Generate parent code",
+  "giftsTitle": "Gifts",
+  "gradeCta": "Grade",
+  "gradeSubmissionTitle": "Grade submission",
+  "holidaysTab": "Holidays",
+  "homeworkLabel": "Homework",
+  "issueCertificateCta": "Issue certificate",
+  "mainRoomLabel": "Main room",
+  "managePassesTitle": "Manage Passes",
+  "marksLabel": "Marks",
+  "moderationTitle": "Moderation",
+  "newPassTitle": "New pass",
+  "noAssignmentsYet": "No assignments yet",
+  "noCertificatesYet": "No certificates yet",
+  "noChatReportsPending": "No chat reports pending",
+  "noClassroomReportsPending": "No classroom reports pending",
+  "noDoubtsYet": "No doubts asked yet",
+  "noGiftsYet": "No gifts yet",
+  "noHolidaysListed": "No holidays listed",
+  "noNoticesYet": "No notices yet",
+  "noParentQueriesYet": "No parent queries yet",
+  "noParticipantsYet": "No participants yet",
+  "noPassesYet": "No passes yet",
+  "noRecordingsYet": "No recordings yet",
+  "noReferralsYet": "No referrals yet",
+  "noReportCardsYet": "No report cards yet",
+  "noSubmissionsYet": "No submissions yet",
+  "noticesTab": "Notices",
+  "parentCodeGeneratedTitle": "Parent access code",
+  "parentObserverConnectedMessage": "Connected — you can now watch the class",
+  "parentQueriesTitle": "Parent Queries",
+  "participantsTab": "Participants",
+  "passTitleLabel": "Pass title",
+  "passesTitle": "Passes",
+  "peopleYouReferredTitle": "People you referred",
+  "priceInCoinsLabel": "Price (coins)",
+  "recordingsPendingNote": "{count} recording(s) still processing",
+  "@recordingsPendingNote": {
+    "placeholders": {
+      "count": {
+        "type": "int"
+      }
+    }
+  },
+  "recordingsTitle": "Recordings",
+  "redeemCta": "Redeem",
+  "referAndEarnTitle": "Refer & Earn",
+  "referralRedeemedMessage": "Referral code redeemed",
+  "replyCta": "Reply",
+  "replyToParentTitle": "Reply to parent",
+  "reportCardsTab": "Report Cards",
+  "roomNumberLabel": "Room {n}",
+  "@roomNumberLabel": {
+    "placeholders": {
+      "n": {
+        "type": "int"
+      }
+    }
+  },
+  "roomsActiveLabel": "{count} rooms active",
+  "@roomsActiveLabel": {
+    "placeholders": {
+      "count": {
+        "type": "int"
+      }
+    }
+  },
+  "roomsCountLabel": "{n} rooms",
+  "@roomsCountLabel": {
+    "placeholders": {
+      "n": {
+        "type": "int"
+      }
+    }
+  },
+  "saveCta": "Save",
+  "sendCta": "Send",
+  "timesRedeemedLabel": "Redeemed {count} times",
+  "@timesRedeemedLabel": {
+    "placeholders": {
+      "count": {
+        "type": "int"
+      }
+    }
+  },
+  "validityDaysLabel": "Validity (days)",
+  "yourReferralCodeLabel": "Your referral code",
+  "submitAnswerTitle": "Submit your answer",
+  "submitCta": "Submit",
+  "newCouponTitle": "New coupon",
+  "couponCodeLabel": "Coupon code",
+  "discountPercentLabel": "Discount %",
+  "validForDaysLabel": "Valid for (days)",
+  "maxUsesOptionalLabel": "Max uses (optional)",
+  "couponsTab": "Coupons",
+  "noCouponsYet": "No coupons yet",
+  "discountPercentValueLabel": "{percent}% off",
+  "@discountPercentValueLabel": {
+    "placeholders": {
+      "percent": {
+        "type": "int"
+      }
+    }
+  },
+  "discountAmountValueLabel": "{amount} coins off",
+  "@discountAmountValueLabel": {
+    "placeholders": {
+      "amount": {
+        "type": "String"
+      }
+    }
+  },
+  "couponUsageLabel": "Used {used} / {max}",
+  "@couponUsageLabel": {
+    "placeholders": {
+      "used": {
+        "type": "int"
+      },
+      "max": {
+        "type": "String"
+      }
+    }
+  },
+  "wishlistTitle": "Wishlist",
+  "couldNotLoadWishlist": "Couldn't load your wishlist",
+  "wishlistEmptyTitle": "Your wishlist is empty",
+  "wishlistEmptySubtitle": "Tap the heart on a classroom to save it here",
+  "attachFileOptionalCta": "Attach file (optional)",
+  "draftRestored": "Draft restored",
+  "@draftRestored": {
+    "description": "Snackbar shown when a saved Quick Post draft is restored"
+  },
+  "removeVideoFirst": "Remove the video first",
+  "@removeVideoFirst": {
+    "description": "Shown when trying to add a photo while a video is already attached"
+  },
+  "maxMediaAllowed": "Max {count} media allowed",
+  "@maxMediaAllowed": {
+    "description": "Shown when the media attachment limit is reached",
+    "placeholders": {
+      "count": {
+        "type": "int"
+      }
+    }
+  },
+  "onlyNMoreCouldBeAdded": "Only {count} more could be added",
+  "@onlyNMoreCouldBeAdded": {
+    "description": "Shown when a multi-select picked more images than the remaining slots",
+    "placeholders": {
+      "count": {
+        "type": "int"
+      }
+    }
+  },
+  "galleryError": "Gallery error: {error}",
+  "@galleryError": {
+    "description": "Shown when picking from the gallery fails",
+    "placeholders": {
+      "error": {
+        "type": "String"
+      }
+    }
+  },
+  "cameraError": "Camera error: {error}",
+  "@cameraError": {
+    "description": "Shown when taking a camera photo fails",
+    "placeholders": {
+      "error": {
+        "type": "String"
+      }
+    }
+  },
+  "removeImagesFirst": "Remove images first for video",
+  "@removeImagesFirst": {
+    "description": "Shown when trying to add a video while photos are already attached"
+  },
+  "videoError": "Video error: {error}",
+  "@videoError": {
+    "description": "Shown when picking/recording a video fails",
+    "placeholders": {
+      "error": {
+        "type": "String"
+      }
+    }
+  },
+  "addToPost": "Add to post",
+  "@addToPost": {
+    "description": "Title of the Quick Post attach-media sheet"
+  },
+  "gallery": "Gallery",
+  "@gallery": {
+    "description": "Option to pick a photo from the gallery"
+  },
+  "videoFromGallery": "Video from gallery",
+  "@videoFromGallery": {
+    "description": "Option to pick a video from the gallery"
+  },
+  "gifSticker": "GIF / Sticker",
+  "@gifSticker": {
+    "description": "Option to attach a GIF or sticker"
+  },
+  "gifComingSoon": "GIF integration coming soon!",
+  "@gifComingSoon": {
+    "description": "Shown when tapping the GIF/Sticker option"
+  },
+  "voiceNoteAttached": "Voice note attached (simulated)",
+  "@voiceNoteAttached": {
+    "description": "Shown after toggling off the simulated voice recorder"
+  },
+  "discardPostTitle": "Discard post?",
+  "@discardPostTitle": {
+    "description": "Title of the discard-draft confirmation dialog"
+  },
+  "discardPostBody": "Your draft is saved. You can continue later.",
+  "@discardPostBody": {
+    "description": "Body of the discard-draft confirmation dialog"
+  },
+  "keepEditing": "Keep editing",
+  "@keepEditing": {
+    "description": "Button to dismiss the discard-draft dialog and keep writing"
+  },
+  "discard": "Discard",
+  "@discard": {
+    "description": "Button to discard the current draft"
+  },
+  "writeSomethingOrAddMedia": "Write something or add media",
+  "@writeSomethingOrAddMedia": {
+    "description": "Shown when trying to post with no text and no media"
+  },
+  "postTooLong": "Post can't be longer than {count} characters",
+  "@postTooLong": {
+    "description": "Shown when the post text exceeds the character limit",
+    "placeholders": {
+      "count": {
+        "type": "int"
+      }
+    }
+  },
+  "categoriesLoading": "Categories are loading…",
+  "@categoriesLoading": {
+    "description": "Shown when trying to post before categories have loaded"
+  },
+  "categoryLoadFailed": "Couldn't load a category",
+  "@categoryLoadFailed": {
+    "description": "Shown when trying to post and category loading failed"
+  },
+  "uploadingMedia": "Uploading media…",
+  "@uploadingMedia": {
+    "description": "Post button label while media is uploading"
+  },
+  "posting": "Posting…",
+  "@posting": {
+    "description": "Post button label while a text-only post is submitting"
+  },
+  "postCreatedSuccess": "Post created successfully!",
+  "@postCreatedSuccess": {
+    "description": "Fallback success message after creating a post"
+  },
+  "whatsOnYourMind": "What's on your mind?",
+  "@whatsOnYourMind": {
+    "description": "Hint text on the Quick Post text field"
+  },
+  "addPhotoOrVideoTooltip": "Add photo or video",
+  "@addPhotoOrVideoTooltip": {
+    "description": "Tooltip on the attach-media button"
+  },
+  "emojisTooltip": "Emojis",
+  "@emojisTooltip": {
+    "description": "Tooltip on the emoji-grid toggle button"
+  },
+  "voiceNoteTooltip": "Voice note",
+  "@voiceNoteTooltip": {
+    "description": "Tooltip on the voice-note record button"
+  },
+  "visibilityPublic": "Public",
+  "@visibilityPublic": {
+    "description": "Post visibility option: everyone"
+  },
+  "visibilityNetwork": "Network",
+  "@visibilityNetwork": {
+    "description": "Post visibility option: connections only"
+  },
+  "visibilityPrivate": "Private",
+  "@visibilityPrivate": {
+    "description": "Post visibility option: only me"
+  },
+  "quickPostTitle": "Quick Post",
+  "@quickPostTitle": {
+    "description": "Title of the Quick Post composer screen"
+  },
+  "savedAgo": "Saved {time}",
+  "@savedAgo": {
+    "description": "Draft autosave indicator, e.g. 'Saved 2m ago'",
+    "placeholders": {
+      "time": {
+        "type": "String"
+      }
+    }
+  },
+  "postButton": "Post",
+  "@postButton": {
+    "description": "Button label to publish a post"
+  },
+  "postedExclaim": "Posted!",
+  "@postedExclaim": {
+    "description": "Success overlay text right after publishing"
+  },
+  "timeAgoJustNow": "just now",
+  "@timeAgoJustNow": {
+    "description": "Relative time: less than a minute ago"
+  },
+  "timeAgoMinutes": "{count}m ago",
+  "@timeAgoMinutes": {
+    "description": "Relative time in minutes",
+    "placeholders": {
+      "count": {
+        "type": "int"
+      }
+    }
+  },
+  "timeAgoHours": "{count}h ago",
+  "@timeAgoHours": {
+    "description": "Relative time in hours",
+    "placeholders": {
+      "count": {
+        "type": "int"
+      }
+    }
+  },
+  "timeAgoDays": "{count}d ago",
+  "@timeAgoDays": {
+    "description": "Relative time in days",
+    "placeholders": {
+      "count": {
+        "type": "int"
+      }
+    }
+  },
+  "addLocationSheetTitle": "Add Location",
+  "addLocationTagPlaceholder": "Add location tag",
+  "addOptionLabel": "Add option",
+  "addSomeContentFirst": "Add some content first",
+  "addTitleOptional": "Add a title (optional)",
+  "attachmentRemoved": "Attachment removed",
+  "attachmentsCount": "{count, plural, =1{1 Attachment} other{{count} Attachments}}",
+  "@attachmentsCount": {
+    "placeholders": {
+      "count": {
+        "type": "int"
+      }
+    }
+  },
+  "autoPublishSubtitle": "Auto-publish at scheduled time",
+  "captionLabel": "Caption",
+  "capturePhotoNow": "Capture a photo right now",
+  "categoryNoun": "category",
+  "categoryRequiredError": "Selecting a category is required",
+  "categoryRequiredLabel": "CATEGORY *",
+  "clearAllButton": "Clear all",
+  "clearButton": "Clear",
+  "clearEverythingBody": "Title, content, media, poll and the saved draft will all be cleared together. This cannot be undone.",
+  "clearEverythingTitle": "Clear everything?",
+  "clearLocationLabel": "Clear location",
+  "clearSearchTooltip": "Clear search",
+  "clearTitleTooltip": "Clear title",
+  "closeLabel": "Close",
+  "contentMediaPollRequired": "Content, media or poll is required",
+  "couldNotSelectDocuments": "Could not select documents: {error}",
+  "@couldNotSelectDocuments": {
+    "placeholders": {
+      "error": {
+        "type": "String"
+      }
+    }
+  },
+  "couldNotSelectImages": "Could not select images from gallery: {error}",
+  "@couldNotSelectImages": {
+    "placeholders": {
+      "error": {
+        "type": "String"
+      }
+    }
+  },
+  "couldNotSelectVideo": "Could not select video from gallery: {error}",
+  "@couldNotSelectVideo": {
+    "placeholders": {
+      "error": {
+        "type": "String"
+      }
+    }
+  },
+  "dismissLabel": "DISMISS",
+  "draftCachedOnDevice": "{label} · cached on this device",
+  "@draftCachedOnDevice": {
+    "placeholders": {
+      "label": {
+        "type": "String"
+      }
+    }
+  },
+  "draftSavedAt": "Draft saved {time}",
+  "@draftSavedAt": {
+    "placeholders": {
+      "time": {
+        "type": "String"
+      }
+    }
+  },
+  "draftSavedJustNow": "Draft saved just now",
+  "draftSavedMinutesAgo": "Draft saved {count}m ago",
+  "@draftSavedMinutesAgo": {
+    "placeholders": {
+      "count": {
+        "type": "int"
+      }
+    }
+  },
+  "draftSavedSecondsAgo": "Draft saved {count}s ago",
+  "@draftSavedSecondsAgo": {
+    "placeholders": {
+      "count": {
+        "type": "int"
+      }
+    }
+  },
+  "editImageLabel": "Edit image",
+  "editVideoLabel": "Edit video",
+  "everythingCleared": "Everything cleared",
+  "failedToLoadCategories": "Failed to load categories: {error}",
+  "@failedToLoadCategories": {
+    "placeholders": {
+      "error": {
+        "type": "String"
+      }
+    }
+  },
+  "filesLabel": "Files",
+  "fillAllPollOptions": "Fill in all poll options",
+  "locationLabel": "Location",
+  "maxFilesAllowed": "Max {count} files allowed",
+  "@maxFilesAllowed": {
+    "placeholders": {
+      "count": {
+        "type": "int"
+      }
+    }
+  },
+  "pdfPagesCount": "{count} pages",
+  "@pdfPagesCount": {
+    "placeholders": {
+      "count": {
+        "type": "int"
+      }
+    }
+  },
+  "fileSizeKb": "{count} KB",
+  "@fileSizeKb": {
+    "placeholders": {
+      "count": {
+        "type": "int"
+      }
+    }
+  },
+  "newPostTitle": "New post",
+  "noMatchForQuery": "No match for \"{query}\"",
+  "@noMatchForQuery": {
+    "placeholders": {
+      "query": {
+        "type": "String"
+      }
+    }
+  },
+  "onlyNMoreFilesCouldBeAdded": "Only {count} more file(s) could be added",
+  "@onlyNMoreFilesCouldBeAdded": {
+    "placeholders": {
+      "count": {
+        "type": "int"
+      }
+    }
+  },
+  "photosLabel": "Photos",
+  "pollLabel": "Poll",
+  "pollNeedsTwoOptions": "Poll needs at least 2 options",
+  "pollOptionNumber": "Option {number}",
+  "@pollOptionNumber": {
+    "placeholders": {
+      "number": {
+        "type": "int"
+      }
+    }
+  },
+  "pollOptionRemoved": "Poll option removed",
+  "pollOptionsMustDiffer": "Poll options cannot be the same",
+  "postDetailsLabel": "Post Details",
+  "postScheduledFor": "Post scheduled for {time}!",
+  "@postScheduledFor": {
+    "placeholders": {
+      "time": {
+        "type": "String"
+      }
+    }
+  },
+  "quickPostBannerSubtitle": "Just want to write text? Fast compose here",
+  "removeAttachmentLabel": "Remove attachment",
+  "removeOptionTooltip": "Remove option",
+  "removePollTooltip": "Remove poll",
+  "scheduleInOneHour": "In 1 hour",
+  "scheduleLabel": "Schedule",
+  "scheduleThisEvening": "This evening",
+  "scheduleTomorrowEvening": "Tomorrow evening",
+  "scheduleTomorrowMorning": "Tomorrow morning",
+  "searchWithin": "Search {title}",
+  "@searchWithin": {
+    "placeholders": {
+      "title": {
+        "type": "String"
+      }
+    }
+  },
+  "searchingHashtags": "Searching hashtags…",
+  "searchingPeople": "Searching people…",
+  "selectCategoryError": "Select a category",
+  "selectCategoryTitle": "Select Category",
+  "selectFutureTime": "Select a future time",
+  "selectSubcategoryError": "Select a subcategory",
+  "selectSubcategoryTitle": "Select Subcategory",
+  "shootQuickVideoClip": "Shoot a quick video clip",
+  "subcategoryNoun": "subcategory",
+  "subcategoryRequiredLabel": "SUBCATEGORY",
+  "takePhotoLabel": "Take Photo",
+  "undoLabel": "UNDO",
+  "unsavedCloseWarning": "What you've written hasn't been saved yet. If you close now, it will be lost.",
+  "useCameraLabel": "Use Camera",
+  "videosLabel": "Videos",
+  "visibilityAnyoneCanSee": "Anyone can see",
+  "visibilityConnections": "Connections",
+  "visibilityJustYou": "Just you",
+  "visibilityOnlyMe": "Only me",
+  "visibilityOnlyYourNetwork": "Only your network",
+  "whatsOnYourMindHashtags": "What's on your mind? Use #hashtags to boost reach",
+  "writeSomethingAboutMedia": "Write something about this media...",
+  "addMediaLabel": "Add Media",
+  "addPhotosVideosMinTwo": "Add photos/videos — at least 2",
+  "addTextLabel": "Add Text",
+  "addingMusicProgress": "Adding music…",
+  "aspectPortrait": "4:5 Portrait",
+  "aspectReel": "9:16 Reel",
+  "aspectSquare": "1:1 Square",
+  "aspectWide": "16:9 Wide",
+  "autoBeatSyncLabel": "Auto (Beat Sync)",
+  "autoEditTitle": "Auto Edit",
+  "autoModeDescription": "Auto: energy-aware cuts, transitions & Ken Burns, BPM detected.",
+  "backgroundMusicPlaceholder": "Choose background music",
+  "beatSyncSetupFailed": "Setting up the beat-synced cut failed.",
+  "blendingTransitionsProgress": "Blending transitions…",
+  "canvasColorGradeTooltip": "Canvas & color grade",
+  "canvasGradeSummary": "{aspect} · {grade} grade — tap the tune icon to change",
+  "@canvasGradeSummary": {
+    "placeholders": {
+      "aspect": {
+        "type": "String"
+      },
+      "grade": {
+        "type": "String"
+      }
+    }
+  },
+  "canvasLabel": "Canvas",
+  "captionFontNotReady": "Still preparing the caption font — try again in a moment, or this text will be skipped when rendering.",
+  "captionForClipHint": "Caption for this clip",
+  "cc0OnlyNotice": "Only copyright-free (CC0) music is shown",
+  "changeMusicButton": "Change Music",
+  "chooseMusicFromDevice": "Choose from device",
+  "clipLengthLabel": "Clip length",
+  "clipNumberDuration": "Clip {number} · {duration}s",
+  "@clipNumberDuration": {
+    "placeholders": {
+      "number": {
+        "type": "int"
+      },
+      "duration": {
+        "type": "String"
+      }
+    }
+  },
+  "clipSetupFailed": "Setting up the clips failed.",
+  "clipTextDialogTitle": "Clip text",
+  "colorGradeLabel": "Color grade",
+  "couldntAddMusicTrack": "Couldn't add the music track to the montage.",
+  "couldntAddTrack": "Couldn't add that track — try again.",
+  "couldntBlendTransitions": "Couldn't blend the transitions between clips.",
+  "couldntDownloadTrack": "Couldn't download that track (server said {code}). Try again.",
+  "@couldntDownloadTrack": {
+    "placeholders": {
+      "code": {
+        "type": "int"
+      }
+    }
+  },
+  "couldntProcessClip": "Couldn't process clip {number} — it may be corrupted or an unsupported format. Try removing or replacing it.",
+  "@couldntProcessClip": {
+    "placeholders": {
+      "number": {
+        "type": "int"
+      }
+    }
+  },
+  "couldntTrimTrack": "Couldn't trim that track — try a different clip length.",
+  "doneLabel": "Done",
+  "emptySearchPrompt": "Search for something...",
+  "exportButton": "Export",
+  "gradeBw": "B&W",
+  "gradeMoody": "Moody",
+  "gradeNone": "None",
+  "gradeVibrant": "Vibrant",
+  "gradeVintage": "Vintage",
+  "gradeWarm": "Warm",
+  "hitRegenerateHint": "Hit Regenerate to re-render with the new canvas/grade.",
+  "inPointSeconds": "In-point: {seconds}s",
+  "@inPointSeconds": {
+    "placeholders": {
+      "seconds": {
+        "type": "String"
+      }
+    }
+  },
+  "kenBurnsLabel": "Ken Burns",
+  "lastClipLabel": "Last clip",
+  "manualModeDescription": "Manual: clips evenly split, you set everything yourself.",
+  "manualSetupLabel": "Manual Setup",
+  "nextMusicButton": "Next: Music",
+  "noInternetConnectionRetry": "No internet connection — check your connection and try again.",
+  "placingCutsProgress": "Placing cuts on the beat…",
+  "preparingClipOfTotal": "Preparing clip {current} of {total}…",
+  "@preparingClipOfTotal": {
+    "placeholders": {
+      "current": {
+        "type": "int"
+      },
+      "total": {
+        "type": "int"
+      }
+    }
+  },
+  "preparingOfTotal": "Preparing {current} of {total}…",
+  "@preparingOfTotal": {
+    "placeholders": {
+      "current": {
+        "type": "int"
+      },
+      "total": {
+        "type": "int"
+      }
+    }
+  },
+  "readingMusicProgress": "Reading music…",
+  "regenerateButton": "Regenerate",
+  "renderingMontageFailed": "Rendering the montage failed.",
+  "retryButton": "Retry",
+  "scoringClipProgress": "Scoring clip {current} of {total}…",
+  "@scoringClipProgress": {
+    "placeholders": {
+      "current": {
+        "type": "int"
+      },
+      "total": {
+        "type": "int"
+      }
+    }
+  },
+  "searchDidntGoThrough": "Search didn't go through — try again.",
+  "searchFreesoundHint": "Search Freesound (e.g. lofi, guitar)",
+  "settingUpClipsProgress": "Setting up clips…",
+  "someMediaNotOptimized": "Some media couldn't be optimized, but was added as-is.",
+  "sourceLengthUnknown": "Source length unknown — in-point disabled",
+  "speedLabel": "Speed: {value}x",
+  "@speedLabel": {
+    "placeholders": {
+      "value": {
+        "type": "String"
+      }
+    }
+  },
+  "startPointLabel": "Start point",
+  "textAddedCheckLabel": "Text ✓",
+  "transCircle": "Circle",
+  "transDissolve": "Dissolve",
+  "transFlash": "Flash",
+  "transGlitch": "Glitch",
+  "transRadial": "Radial",
+  "transRgbSplit": "RGB Split",
+  "transShake": "Shake",
+  "transSlide": "Slide",
+  "transSmoothSlide": "Smooth Slide",
+  "transSqueeze": "Squeeze",
+  "transWipe": "Wipe",
+  "transZoom": "Zoom",
+  "trimSpeedLabel": "Trim & Speed",
+  "useThisSoundButton": "Use this sound",
+  "addClipLabel": "Add Clip",
+  "addMorePhotosVideosHint": "Add more photos/videos — they'll all be joined into one video",
+  "addPhotoLabel": "Add Photo",
+  "addPhotosTabLabel": "Add Photos",
+  "addStickerTitle": "Add Sticker",
+  "adjustTabLabel": "Adjust",
+  "analyzingLabel": "Analyzing…",
+  "applyLabel": "Apply",
+  "autoEnhanceFailed": "Auto-enhance failed: {error}",
+  "@autoEnhanceFailed": {
+    "placeholders": {
+      "error": {
+        "type": "String"
+      }
+    }
+  },
+  "autoEnhanceLabel": "Auto-Enhance",
+  "autoPlacedOnFaceHint": "Auto-placed on the detected face — drag/pinch/rotate after.",
+  "batteryLabel": "Battery",
+  "boomerangBakeFailed": "Couldn't create the Boomerang effect.",
+  "boomerangOnHint": "Boomerang ON — forward + reverse loop",
+  "boomerangTabLabel": "Boomerang",
+  "brightnessLabel": "Brightness",
+  "brushLabel": "Brush",
+  "chooseCoverFrame": "Choose cover frame",
+  "clearDrawingTooltip": "Clear drawing",
+  "clip1ThisMediaLabel": "Clip 1 (this photo/video)",
+  "clip2TransitionLabel": "Transition into clip 2",
+  "clipNormalizeFailed": "Couldn't process clip {number}.",
+  "@clipNormalizeFailed": {
+    "placeholders": {
+      "number": {
+        "type": "int"
+      }
+    }
+  },
+  "clipPinchZoomPan": "Clip {number} — pinch to zoom, drag to pan",
+  "@clipPinchZoomPan": {
+    "placeholders": {
+      "number": {
+        "type": "int"
+      }
+    }
+  },
+  "clipPreparingOfTotal": "Preparing clip {current}/{total}…",
+  "@clipPreparingOfTotal": {
+    "placeholders": {
+      "current": {
+        "type": "int"
+      },
+      "total": {
+        "type": "int"
+      }
+    }
+  },
+  "clipSelectFailed": "Couldn't select that clip: {error}",
+  "@clipSelectFailed": {
+    "placeholders": {
+      "error": {
+        "type": "String"
+      }
+    }
+  },
+  "clipsJoinFailed": "Couldn't join the clips together.",
+  "clipsTabLabel": "Clips",
+  "clipsWillMakeVideoWith": "{count} clips will make up the video (with this photo/video)",
+  "@clipsWillMakeVideoWith": {
+    "placeholders": {
+      "count": {
+        "type": "int"
+      }
+    }
+  },
+  "color2GradientHint": "Color 2 (gradient) — tap a swatch above",
+  "contrastLabel": "Contrast",
+  "coverPreviewUnavailable": "Cover preview isn't available",
+  "coverTabLabel": "Cover",
+  "cropFailed": "Crop failed.",
+  "dateLabel": "Date",
+  "deleteLabel": "Delete",
+  "downloadFailedCode": "Download failed ({code})",
+  "@downloadFailedCode": {
+    "placeholders": {
+      "code": {
+        "type": "int"
+      }
+    }
+  },
+  "drawTabLabel": "Draw",
+  "editLabel": "Edit",
+  "editSaveFailed": "Couldn't save the edit: {error}",
+  "@editSaveFailed": {
+    "placeholders": {
+      "error": {
+        "type": "String"
+      }
+    }
+  },
+  "eraserApplyFailed": "Couldn't apply the eraser: {error}",
+  "@eraserApplyFailed": {
+    "placeholders": {
+      "error": {
+        "type": "String"
+      }
+    }
+  },
+  "eraserHint": "Paint over a blemish/watermark, then tap Apply. Best for small spots on plain backgrounds.",
+  "eraserTabLabel": "Eraser",
+  "erasingLabel": "Erasing…",
+  "exportWithMusicFailedTryWithout": "Export with music failed — try again without music",
+  "extraClipsWillJoinEnd": "{count, plural, =1{1 extra clip will be added at the end} other{{count} extra clips will be added at the end}}",
+  "@extraClipsWillJoinEnd": {
+    "placeholders": {
+      "count": {
+        "type": "int"
+      }
+    }
+  },
+  "faceFiltersTitle": "Face Filters",
+  "filtersTabLabel": "Filters",
+  "flipHorizontalTooltip": "Flip horizontal",
+  "flipVerticalTooltip": "Flip vertical",
+  "fontLabel": "Font",
+  "fxBakeFailed": "Couldn't apply the effect.",
+  "fxTabLabel": "FX",
+  "keepOriginalAudioToo": "Also keep the video's original audio",
+  "lengthStaysAsTrimSet": "Its length stays whatever is set in the Trim tab",
+  "liveStickersTitle": "Live Stickers",
+  "loadingEllipsis": "Loading...",
+  "mediaAddFailed": "Couldn't add that photo/video: {error}",
+  "@mediaAddFailed": {
+    "placeholders": {
+      "error": {
+        "type": "String"
+      }
+    }
+  },
+  "montageExportFailed": "Couldn't export the montage: {error}",
+  "@montageExportFailed": {
+    "placeholders": {
+      "error": {
+        "type": "String"
+      }
+    }
+  },
+  "musicAddFailed": "Couldn't add the music: {error}",
+  "@musicAddFailed": {
+    "placeholders": {
+      "error": {
+        "type": "String"
+      }
+    }
+  },
+  "musicAttachFailed": "Couldn't attach the music.",
+  "musicMixFailed": "Couldn't mix in the music.",
+  "musicSelectFailed": "Couldn't select that music: {error}",
+  "@musicSelectFailed": {
+    "placeholders": {
+      "error": {
+        "type": "String"
+      }
+    }
+  },
+  "musicTabLabel": "Music",
+  "musicTrackLabel": "Music track",
+  "myStickersTitle": "My Stickers",
+  "nextClipTransitionLabel": "Transition into the next clip",
+  "noExtraClipsYet": "No extra clips yet — add some to join one after another",
+  "noFaceDetectedNote": "(no face detected — placed centered)",
+  "orLabel": "or",
+  "photoSelectFailed": "Couldn't select that photo: {error}",
+  "@photoSelectFailed": {
+    "placeholders": {
+      "error": {
+        "type": "String"
+      }
+    }
+  },
+  "primaryClipFxFailed": "Couldn't apply effects to the main clip.",
+  "primaryClipTrimFailed": "Couldn't trim the main clip.",
+  "redoTooltip": "Redo",
+  "removeBackToEditing": "Remove — back to editing",
+  "removeMusicTooltip": "Remove music",
+  "resetTooltip": "Reset",
+  "resetZoomLabel": "Reset zoom",
+  "rotateLabel": "Rotate",
+  "rotateRightLabel": "Rotate right",
+  "saturationLabel": "Saturation",
+  "searchFailedRetry": "Search failed — try again",
+  "speedAdjustFailed": "Couldn't adjust the speed.",
+  "speedTabLabel": "Speed",
+  "startFromLabel": "Start from",
+  "stickersTabLabel": "Stickers",
+  "styleLabel": "Style",
+  "tapAddStickerHint": "Tap Add Sticker, then drag/pinch/rotate it on the photo",
+  "tapAddTextHint": "Tap Add Text, then drag/pinch/rotate it on the photo",
+  "tapToEnableBoomerang": "Tap to enable Boomerang",
+  "textTabLabel": "Text",
+  "timeLabel": "Time",
+  "transformFailed": "Couldn't apply that: {error}",
+  "@transformFailed": {
+    "placeholders": {
+      "error": {
+        "type": "String"
+      }
+    }
+  },
+  "transitionChainFailed": "Couldn't chain the transitions together.",
+  "transitionsBlendingProgress": "Blending transitions…",
+  "trimTabLabel": "Trim",
+  "undoTooltip": "Undo",
+  "useLabel": "Use",
+  "useThisLabel": "Use This",
+  "videoControllerNotReady": "The video isn't ready yet.",
+  "videoLoadFailed": "Couldn't load the video: {error}",
+  "@videoLoadFailed": {
+    "placeholders": {
+      "error": {
+        "type": "String"
+      }
+    }
+  },
+  "videoTrimExportFailed": "Couldn't export the trimmed video.",
+  "videoTrimSaveFailed": "Couldn't save the trimmed video: {error}",
+  "@videoTrimSaveFailed": {
+    "placeholders": {
+      "error": {
+        "type": "String"
+      }
+    }
+  },
+  "focusHistoryTitle": "Focus Mode — History",
+  "@focusHistoryTitle": {
+    "description": "App bar title of the focus session history screen"
+  },
+  "focusHistoryLoadFailed": "Couldn't load history.",
+  "@focusHistoryLoadFailed": {
+    "description": "Error shown when focus session history fails to load"
+  },
+  "focusHistoryEmpty": "No focus sessions yet.",
+  "@focusHistoryEmpty": {
+    "description": "Empty state of the focus session history list"
+  },
+  "focusHistoryMinutes": "{minutes} min",
+  "@focusHistoryMinutes": {
+    "description": "Focus session length under an hour",
+    "placeholders": {
+      "minutes": {
+        "type": "int"
+      }
+    }
+  },
+  "focusHistoryHours": "{hours}h",
+  "@focusHistoryHours": {
+    "description": "Focus session length in whole hours",
+    "placeholders": {
+      "hours": {
+        "type": "int"
+      }
+    }
+  },
+  "focusHistoryHoursMinutes": "{hours}h {minutes}m",
+  "@focusHistoryHoursMinutes": {
+    "description": "Focus session length in hours and minutes",
+    "placeholders": {
+      "hours": {
+        "type": "int"
+      },
+      "minutes": {
+        "type": "int"
+      }
+    }
+  },
+  "focusRuleNobody": "Full silence",
+  "@focusRuleNobody": {
+    "description": "Focus session rule: nobody can message you"
+  },
+  "focusRuleTeachersOnly": "Teachers only",
+  "@focusRuleTeachersOnly": {
+    "description": "Focus session rule: only teachers can message you"
+  },
+  "focusHistoryMeta": "{duration} · {rule}",
+  "@focusHistoryMeta": {
+    "description": "Subtitle of a focus history row: length and rule",
+    "placeholders": {
+      "duration": {
+        "type": "String"
+      },
+      "rule": {
+        "type": "String"
+      }
+    }
+  },
+  "focusHistoryMetaEndedEarly": "{duration} · {rule} · ended early",
+  "@focusHistoryMetaEndedEarly": {
+    "description": "Subtitle of a focus history row for a session that was ended early",
+    "placeholders": {
+      "duration": {
+        "type": "String"
+      },
+      "rule": {
+        "type": "String"
+      }
+    }
+  },
+  "parentAccessTitle": "Parent/Guardian Access",
+  "@parentAccessTitle": {
+    "description": "App bar title of the parent access management screen"
+  },
+  "parentAccessNewCode": "New Code",
+  "@parentAccessNewCode": {
+    "description": "Extended FAB label that creates a parent access code"
+  },
+  "parentAccessIntro": "Give the code to your parent/guardian from here — they will only see attendance and assignment status, never chat messages. Tap a code to manage its individual devices.",
+  "@parentAccessIntro": {
+    "description": "Explanation banner at the top of the parent access screen"
+  },
+  "parentAccessEmpty": "No active codes yet.",
+  "@parentAccessEmpty": {
+    "description": "Empty state when the student has no parent codes"
+  },
+  "parentAccessLoadFailed": "Couldn't load codes.",
+  "@parentAccessLoadFailed": {
+    "description": "Error when the list of parent codes fails to load"
+  },
+  "parentAccessLabelDialogTitle": "Who is this code for?",
+  "@parentAccessLabelDialogTitle": {
+    "description": "Dialog title asking for a label for a new parent code"
+  },
+  "parentAccessLabelHint": "e.g. Mom, Dad",
+  "@parentAccessLabelHint": {
+    "description": "Hint in the parent code label field"
+  },
+  "parentAccessGenerate": "Generate",
+  "@parentAccessGenerate": {
+    "description": "Button that generates a parent code"
+  },
+  "parentAccessGenerateFailed": "Couldn't generate the code. Please try again.",
+  "@parentAccessGenerateFailed": {
+    "description": "Snackbar when parent code generation fails"
+  },
+  "parentAccessShareCodeTitle": "Share this code with your parent",
+  "@parentAccessShareCodeTitle": {
+    "description": "Title of the dialog showing a freshly generated parent code"
+  },
+  "parentAccessCodeCopied": "Copied",
+  "@parentAccessCodeCopied": {
+    "description": "Snackbar after copying a parent code"
+  },
+  "parentAccessRevokeTitle": "Revoke access?",
+  "@parentAccessRevokeTitle": {
+    "description": "Title of the revoke-code confirmation dialog"
+  },
+  "parentAccessRevokeBodyMany": "All {count} devices linked to \"{name}\" will lose access immediately.",
+  "@parentAccessRevokeBodyMany": {
+    "description": "Revoke confirmation when a code has several devices",
+    "placeholders": {
+      "count": {
+        "type": "int"
+      },
+      "name": {
+        "type": "String"
+      }
+    }
+  },
+  "parentAccessRevokeBodyOne": "Access for \"{name}\" will be revoked immediately.",
+  "@parentAccessRevokeBodyOne": {
+    "description": "Revoke confirmation when a code has at most one device",
+    "placeholders": {
+      "name": {
+        "type": "String"
+      }
+    }
+  },
+  "parentAccessRevoke": "Revoke",
+  "@parentAccessRevoke": {
+    "description": "Confirm button for revoking access"
+  },
+  "parentAccessRevokeFailed": "Couldn't revoke access. Please try again.",
+  "@parentAccessRevokeFailed": {
+    "description": "Snackbar when revoking a code fails"
+  },
+  "parentAccessRevealRateLimited": "Revealed too many times — try again in a while.",
+  "@parentAccessRevealRateLimited": {
+    "description": "Snackbar when the reveal-code endpoint is throttled"
+  },
+  "parentAccessRevealFailed": "Couldn't reveal the code.",
+  "@parentAccessRevealFailed": {
+    "description": "Snackbar when revealing a code fails"
+  },
+  "parentAccessRenew": "Renew",
+  "@parentAccessRenew": {
+    "description": "Button that extends an expired parent code"
+  },
+  "parentAccessRenewed": "Access renewed.",
+  "@parentAccessRenewed": {
+    "description": "Snackbar after a parent code is renewed"
+  },
+  "parentAccessRenewFailed": "Couldn't renew. Please try again.",
+  "@parentAccessRenewFailed": {
+    "description": "Snackbar when renewing a code fails"
+  },
+  "parentAccessUnnamed": "Unnamed",
+  "@parentAccessUnnamed": {
+    "description": "Fallback name for a parent code without a label"
+  },
+  "parentAccessDevicesTap": "{count, plural, =1{1 device · tap to manage} other{{count} devices · tap to manage}}",
+  "@parentAccessDevicesTap": {
+    "description": "Device count under a code in the list",
+    "placeholders": {
+      "count": {
+        "type": "int"
+      }
+    }
+  },
+  "parentAccessRevokeAllTooltip": "Revoke entire code (all devices)",
+  "@parentAccessRevokeAllTooltip": {
+    "description": "Tooltip of the delete button on a code row"
+  },
+  "parentAccessExpiredToday": "Expired today",
+  "@parentAccessExpiredToday": {
+    "description": "Expiry label for a code that expired today"
+  },
+  "parentAccessExpiredDaysAgo": "{count, plural, =1{Expired 1 day ago} other{Expired {count} days ago}}",
+  "@parentAccessExpiredDaysAgo": {
+    "description": "Expiry label for a code that expired earlier",
+    "placeholders": {
+      "count": {
+        "type": "int"
+      }
+    }
+  },
+  "parentAccessExpiresToday": "Expires today",
+  "@parentAccessExpiresToday": {
+    "description": "Expiry label for a code that expires later today"
+  },
+  "parentAccessExpiresInDays": "{count, plural, =1{Expires in 1 day} other{Expires in {count} days}}",
+  "@parentAccessExpiresInDays": {
+    "description": "Expiry label for a code expiring within 14 days",
+    "placeholders": {
+      "count": {
+        "type": "int"
+      }
+    }
+  },
+  "parentAccessExpiresOn": "Expires {date}",
+  "@parentAccessExpiresOn": {
+    "description": "Expiry label with a formatted date",
+    "placeholders": {
+      "date": {
+        "type": "String"
+      }
+    }
+  },
+  "parentAccessNeverUsed": "Never used",
+  "@parentAccessNeverUsed": {
+    "description": "Relative-time fallback when a device was never active"
+  },
+  "parentAccessDevicesTitle": "Devices",
+  "@parentAccessDevicesTitle": {
+    "description": "Devices sheet title when the code has no label"
+  },
+  "parentAccessDevicesTitleNamed": "{name} — devices",
+  "@parentAccessDevicesTitleNamed": {
+    "description": "Devices sheet title for a labelled code",
+    "placeholders": {
+      "name": {
+        "type": "String"
+      }
+    }
+  },
+  "parentAccessDevicesHint": "Revoking a single device keeps access for the other devices.",
+  "@parentAccessDevicesHint": {
+    "description": "Helper text in the devices sheet"
+  },
+  "parentAccessDevicesLoadFailed": "Couldn't load devices.",
+  "@parentAccessDevicesLoadFailed": {
+    "description": "Error when the device list fails to load"
+  },
+  "parentAccessNoDevices": "No device has been verified with this code yet.",
+  "@parentAccessNoDevices": {
+    "description": "Empty state of the devices sheet"
+  },
+  "parentAccessLastActive": "Last active: {time}",
+  "@parentAccessLastActive": {
+    "description": "Device row: last activity time",
+    "placeholders": {
+      "time": {
+        "type": "String"
+      }
+    }
+  },
+  "parentAccessVerifiedAt": "Verified: {time}",
+  "@parentAccessVerifiedAt": {
+    "description": "Device row: verification time",
+    "placeholders": {
+      "time": {
+        "type": "String"
+      }
+    }
+  },
+  "parentAccessRevokeDeviceTooltip": "Revoke only this device",
+  "@parentAccessRevokeDeviceTooltip": {
+    "description": "Tooltip of the per-device revoke button"
+  },
+  "parentAccessRevokeDeviceTitle": "Revoke this device?",
+  "@parentAccessRevokeDeviceTitle": {
+    "description": "Title of the single-device revoke dialog"
+  },
+  "parentAccessRevokeDeviceBody": "Only this one device will be disconnected; the others stay connected.",
+  "@parentAccessRevokeDeviceBody": {
+    "description": "Body of the single-device revoke dialog"
+  },
+  "parentAccessRevokeDeviceFailed": "Couldn't revoke the device.",
+  "@parentAccessRevokeDeviceFailed": {
+    "description": "Snackbar when revoking a single device fails"
+  },
+  "chatYou": "You",
+  "@chatYou": {
+    "description": "Sender label for your own messages in a chat"
+  },
+  "chatUnknown": "Unknown",
+  "@chatUnknown": {
+    "description": "Fallback name for an unknown chat participant"
+  },
+  "chatSomeone": "Someone",
+  "@chatSomeone": {
+    "description": "Fallback name when the sender is not known"
+  },
+  "chatGenericError": "Error",
+  "@chatGenericError": {
+    "description": "Fallback error text from the chat socket"
+  },
+  "chatScrollToMessageFailed": "Couldn't scroll to that message (it may be too old)",
+  "@chatScrollToMessageFailed": {
+    "description": "Snackbar when jumping to a message fails"
+  },
+  "chatLoadMessagesFailed": "Failed to load messages: {error}",
+  "@chatLoadMessagesFailed": {
+    "description": "Error loading the chat history",
+    "placeholders": {
+      "error": {
+        "type": "String"
+      }
+    }
+  },
+  "chatLoadOlderFailed": "Failed to load older messages: {error}",
+  "@chatLoadOlderFailed": {
+    "description": "Error loading older messages when scrolling up",
+    "placeholders": {
+      "error": {
+        "type": "String"
+      }
+    }
+  },
+  "chatLoadFailed": "Failed to load: {error}",
+  "@chatLoadFailed": {
+    "description": "Generic load error in chat sheets",
+    "placeholders": {
+      "error": {
+        "type": "String"
+      }
+    }
+  },
+  "chatPinnedBanner": "{count, plural, =1{Pinned message} other{{count} pinned messages}}",
+  "@chatPinnedBanner": {
+    "description": "Pinned message banner under the app bar",
+    "placeholders": {
+      "count": {
+        "type": "int"
+      }
+    }
+  },
+  "chatAttachment": "📎 Attachment",
+  "@chatAttachment": {
+    "description": "Preview text for a message that only has an attachment"
+  },
+  "chatPinnedMessagesTitle": "Pinned messages",
+  "@chatPinnedMessagesTitle": {
+    "description": "Title of the pinned messages sheet"
+  },
+  "chatNoPinned": "No pinned messages",
+  "@chatNoPinned": {
+    "description": "Empty state of the pinned messages sheet"
+  },
+  "chatPinnedBy": "Pinned by {name}",
+  "@chatPinnedBy": {
+    "description": "Who pinned a message",
+    "placeholders": {
+      "name": {
+        "type": "String"
+      }
+    }
+  },
+  "chatPin": "Pin",
+  "@chatPin": {
+    "description": "Message action: pin"
+  },
+  "chatUnpin": "Unpin",
+  "@chatUnpin": {
+    "description": "Message action: unpin"
+  },
+  "chatWallpaperSetFailed": "Couldn't set wallpaper: {error}",
+  "@chatWallpaperSetFailed": {
+    "description": "Error setting a chat wallpaper",
+    "placeholders": {
+      "error": {
+        "type": "String"
+      }
+    }
+  },
+  "chatWallpaperRemoveTitle": "Remove wallpaper?",
+  "@chatWallpaperRemoveTitle": {
+    "description": "Title of the remove-wallpaper dialog"
+  },
+  "chatWallpaperRemoveBody": "This chat will go back to the default background.",
+  "@chatWallpaperRemoveBody": {
+    "description": "Body of the remove-wallpaper dialog"
+  },
+  "chatRemove": "Remove",
+  "@chatRemove": {
+    "description": "Confirm button in the remove-wallpaper dialog"
+  },
+  "chatWallpaperRemoveFailed": "Couldn't remove wallpaper: {error}",
+  "@chatWallpaperRemoveFailed": {
+    "description": "Error removing a chat wallpaper",
+    "placeholders": {
+      "error": {
+        "type": "String"
+      }
+    }
+  },
+  "chatChangeWallpaper": "Change wallpaper",
+  "@chatChangeWallpaper": {
+    "description": "Wallpaper sheet option when a wallpaper is already set"
+  },
+  "chatSetWallpaper": "Set wallpaper",
+  "@chatSetWallpaper": {
+    "description": "Wallpaper sheet option when no wallpaper is set"
+  },
+  "chatRemoveWallpaper": "Remove wallpaper",
+  "@chatRemoveWallpaper": {
+    "description": "Wallpaper sheet option that removes the wallpaper"
+  },
+  "chatWallpaperMenu": "Chat wallpaper",
+  "@chatWallpaperMenu": {
+    "description": "3-dot menu item that opens the wallpaper options"
+  },
+  "chatSettingWallpaper": "Setting wallpaper…",
+  "@chatSettingWallpaper": {
+    "description": "Progress text while a wallpaper is being applied"
+  },
+  "chatFilterText": "Text",
+  "@chatFilterText": {
+    "description": "Chat filter label: text messages"
+  },
+  "chatFilterMedia": "Media",
+  "@chatFilterMedia": {
+    "description": "Chat filter label: media"
+  },
+  "chatFilterDocs": "Docs",
+  "@chatFilterDocs": {
+    "description": "Chat filter label: documents"
+  },
+  "chatFilterLinks": "Links",
+  "@chatFilterLinks": {
+    "description": "Chat filter label: links"
+  },
+  "chatFilterTitle": "Filter messages",
+  "@chatFilterTitle": {
+    "description": "Filter sheet title and 3-dot menu item"
+  },
+  "chatFilterAllMessages": "All messages",
+  "@chatFilterAllMessages": {
+    "description": "Filter sheet option: everything"
+  },
+  "chatFilterImageVideo": "Image / Video",
+  "@chatFilterImageVideo": {
+    "description": "Filter sheet option: images and videos"
+  },
+  "chatFilterDocsFiles": "Docs / Files",
+  "@chatFilterDocsFiles": {
+    "description": "Filter sheet option: documents and files"
+  },
+  "chatFilterUrlLinks": "URL / Links",
+  "@chatFilterUrlLinks": {
+    "description": "Filter sheet option: links"
+  },
+  "chatFilterActive": "Filter: {label}",
+  "@chatFilterActive": {
+    "description": "3-dot menu item while a filter is active",
+    "placeholders": {
+      "label": {
+        "type": "String"
+      }
+    }
+  },
+  "chatFilterResultCount": "{label} • {count, plural, =1{1 message} other{{count} messages}}",
+  "@chatFilterResultCount": {
+    "description": "Banner above the filtered message list",
+    "placeholders": {
+      "label": {
+        "type": "String"
+      },
+      "count": {
+        "type": "int"
+      }
+    }
+  },
+  "chatNoFilteredMessages": "No {label} messages in this chat",
+  "@chatNoFilteredMessages": {
+    "description": "Empty state when a filter has no results",
+    "placeholders": {
+      "label": {
+        "type": "String"
+      }
+    }
+  },
+  "chatNotificationsMuted": "Notifications muted",
+  "@chatNotificationsMuted": {
+    "description": "Snackbar after muting"
+  },
+  "chatNotificationsUnmuted": "Notifications unmuted",
+  "@chatNotificationsUnmuted": {
+    "description": "Snackbar after unmuting"
+  },
+  "chatUpdateFailed": "Failed to update: {error}",
+  "@chatUpdateFailed": {
+    "description": "Generic update error in chat settings",
+    "placeholders": {
+      "error": {
+        "type": "String"
+      }
+    }
+  },
+  "chatMuteGroup": "Mute group",
+  "@chatMuteGroup": {
+    "description": "3-dot menu item (group chats)"
+  },
+  "chatUnmuteGroup": "Unmute group",
+  "@chatUnmuteGroup": {
+    "description": "3-dot menu item (group chats)"
+  },
+  "chatMuteNotifications": "Mute notifications",
+  "@chatMuteNotifications": {
+    "description": "3-dot menu item (1:1 chats)"
+  },
+  "chatUnmuteNotifications": "Unmute notifications",
+  "@chatUnmuteNotifications": {
+    "description": "3-dot menu item (1:1 chats)"
+  },
+  "chatThisUser": "this user",
+  "@chatThisUser": {
+    "description": "Fallback name in the block dialog"
+  },
+  "chatBlockTitle": "Block user?",
+  "@chatBlockTitle": {
+    "description": "Title of the block confirmation dialog"
+  },
+  "chatBlockBody": "{name} won't be able to call or message you, and you won't see their messages either.",
+  "@chatBlockBody": {
+    "description": "Body of the block confirmation dialog",
+    "placeholders": {
+      "name": {
+        "type": "String"
+      }
+    }
+  },
+  "chatBlock": "Block",
+  "@chatBlock": {
+    "description": "Confirm button of the block dialog"
+  },
+  "chatUserBlocked": "User blocked.",
+  "@chatUserBlocked": {
+    "description": "Snackbar after blocking"
+  },
+  "chatBlockFailed": "Block failed: {error}",
+  "@chatBlockFailed": {
+    "description": "Error when blocking fails",
+    "placeholders": {
+      "error": {
+        "type": "String"
+      }
+    }
+  },
+  "chatUserUnblocked": "User unblocked.",
+  "@chatUserUnblocked": {
+    "description": "Snackbar after unblocking"
+  },
+  "chatUnblockFailed": "Unblock failed: {error}",
+  "@chatUnblockFailed": {
+    "description": "Error when unblocking fails",
+    "placeholders": {
+      "error": {
+        "type": "String"
+      }
+    }
+  },
+  "chatBlockUser": "Block user",
+  "@chatBlockUser": {
+    "description": "3-dot menu item"
+  },
+  "chatUnblockUser": "Unblock user",
+  "@chatUnblockUser": {
+    "description": "3-dot menu item"
+  },
+  "chatBlockedBanner": "You've blocked this user. Unblock to send messages.",
+  "@chatBlockedBanner": {
+    "description": "Composer replacement when the other user is blocked"
+  },
+  "chatUnblock": "Unblock",
+  "@chatUnblock": {
+    "description": "Button in the blocked banner"
+  },
+  "chatDisappearingOff": "Off",
+  "@chatDisappearingOff": {
+    "description": "Disappearing messages duration: off"
+  },
+  "chatDisappear1Month": "1 Month",
+  "@chatDisappear1Month": {
+    "description": "Disappearing messages duration"
+  },
+  "chatDisappear6Months": "6 Months",
+  "@chatDisappear6Months": {
+    "description": "Disappearing messages duration"
+  },
+  "chatDisappear1Year": "1 Year",
+  "@chatDisappear1Year": {
+    "description": "Disappearing messages duration"
+  },
+  "chatDisappearingTitle": "Disappearing messages",
+  "@chatDisappearingTitle": {
+    "description": "Title of the disappearing messages sheet and menu item"
+  },
+  "chatDisappearingSubtitle": "New messages will automatically disappear from the chat after the selected time.",
+  "@chatDisappearingSubtitle": {
+    "description": "Helper text in the disappearing messages sheet"
+  },
+  "chatDisappearingTurnedOff": "Disappearing messages turned off",
+  "@chatDisappearingTurnedOff": {
+    "description": "Snackbar / system message when turned off"
+  },
+  "chatDisappearingNewMessages": "New messages will disappear after {duration}",
+  "@chatDisappearingNewMessages": {
+    "description": "Snackbar after enabling disappearing messages",
+    "placeholders": {
+      "duration": {
+        "type": "String"
+      }
+    }
+  },
+  "chatDisappearingSetTo": "Disappearing messages set to {duration}",
+  "@chatDisappearingSetTo": {
+    "description": "System message when another member changes the timer",
+    "placeholders": {
+      "duration": {
+        "type": "String"
+      }
+    }
+  },
+  "chatDisappearingMenu": "Disappearing: {duration}",
+  "@chatDisappearingMenu": {
+    "description": "3-dot menu item showing the current timer",
+    "placeholders": {
+      "duration": {
+        "type": "String"
+      }
+    }
+  },
+  "chatPermissionsTitle": "Message permissions",
+  "@chatPermissionsTitle": {
+    "description": "Title of the group message permissions sheet and menu item"
+  },
+  "chatPermissionsSubtitle": "Decide who can send messages in this group.",
+  "@chatPermissionsSubtitle": {
+    "description": "Helper text in the permissions sheet"
+  },
+  "chatPermEveryone": "Everyone",
+  "@chatPermEveryone": {
+    "description": "Permission option: everyone can send"
+  },
+  "chatPermEveryoneSub": "All members can chat",
+  "@chatPermEveryoneSub": {
+    "description": "Subtitle of the everyone option"
+  },
+  "chatPermAdminsOnly": "Only admins & moderators",
+  "@chatPermAdminsOnly": {
+    "description": "Permission option: admins and moderators only"
+  },
+  "chatPermAdminsOnlySub": "Everyone else can only read, not send messages",
+  "@chatPermAdminsOnlySub": {
+    "description": "Subtitle of the admins-only option"
+  },
+  "chatDailyLimitTitle": "Daily message limit (members)",
+  "@chatDailyLimitTitle": {
+    "description": "Label of the daily limit field"
+  },
+  "chatDailyLimitHelp": "Regular members can send only this many messages per day (admins/moderators are always unlimited). Leave empty for no limit.",
+  "@chatDailyLimitHelp": {
+    "description": "Help text of the daily limit field"
+  },
+  "chatDailyLimitHint": "e.g. 4",
+  "@chatDailyLimitHint": {
+    "description": "Hint of the daily limit field"
+  },
+  "chatDailyLimitSuffix": "msgs / day",
+  "@chatDailyLimitSuffix": {
+    "description": "Suffix of the daily limit field"
+  },
+  "chatPermUpdatedAdminsOnly": "Now only admins & moderators can send messages.",
+  "@chatPermUpdatedAdminsOnly": {
+    "description": "Snackbar after restricting the group"
+  },
+  "chatPermUpdatedEveryone": "Now all members can send messages.",
+  "@chatPermUpdatedEveryone": {
+    "description": "Snackbar after opening the group"
+  },
+  "chatUpdateFailedDetail": "Update failed: {error}",
+  "@chatUpdateFailedDetail": {
+    "description": "Error updating group permissions",
+    "placeholders": {
+      "error": {
+        "type": "String"
+      }
+    }
+  },
+  "chatAdminsOnlyBanner": "Only admins and moderators can send messages in this group.",
+  "@chatAdminsOnlyBanner": {
+    "description": "Composer replacement in an admins-only group"
+  },
+  "chatDailyLimitReached": "Daily limit reached",
+  "@chatDailyLimitReached": {
+    "description": "Dialog title when the daily message limit is hit"
+  },
+  "chatNoLongerMember": "You're no longer a member",
+  "@chatNoLongerMember": {
+    "description": "Dialog title when the user was removed from the group"
+  },
+  "chatMessageNotAllowed": "Messages not allowed",
+  "@chatMessageNotAllowed": {
+    "description": "Dialog title when sending is not permitted"
+  },
+  "chatGroupInfo": "Group info",
+  "@chatGroupInfo": {
+    "description": "3-dot menu item"
+  },
+  "chatChangeGroupPhoto": "Change group photo",
+  "@chatChangeGroupPhoto": {
+    "description": "3-dot menu item"
+  },
+  "chatUploadingPhoto": "Uploading photo...",
+  "@chatUploadingPhoto": {
+    "description": "Snackbar while uploading the group photo"
+  },
+  "chatGroupPhotoUpdated": "Group photo updated ✅",
+  "@chatGroupPhotoUpdated": {
+    "description": "Snackbar after the group photo changed"
+  },
+  "chatPhotoUpdateFailed": "Photo update failed: {error}",
+  "@chatPhotoUpdateFailed": {
+    "description": "Error updating the group photo",
+    "placeholders": {
+      "error": {
+        "type": "String"
+      }
+    }
+  },
+  "chatJoinRequestsTitle": "Join requests",
+  "@chatJoinRequestsTitle": {
+    "description": "Title of the join requests sheet and menu item"
+  },
+  "chatJoinRequestsCount": "Join requests ({count})",
+  "@chatJoinRequestsCount": {
+    "description": "3-dot menu item with a pending count",
+    "placeholders": {
+      "count": {
+        "type": "int"
+      }
+    }
+  },
+  "chatNoPendingRequests": "No pending requests",
+  "@chatNoPendingRequests": {
+    "description": "Empty state of the join requests sheet"
+  },
+  "chatApprove": "Approve",
+  "@chatApprove": {
+    "description": "Approve a join request"
+  },
+  "chatApproveFailed": "Approve failed: {error}",
+  "@chatApproveFailed": {
+    "description": "Error approving a join request",
+    "placeholders": {
+      "error": {
+        "type": "String"
+      }
+    }
+  },
+  "chatReject": "Reject",
+  "@chatReject": {
+    "description": "Reject a join request"
+  },
+  "chatRejectFailed": "Reject failed: {error}",
+  "@chatRejectFailed": {
+    "description": "Error rejecting a join request",
+    "placeholders": {
+      "error": {
+        "type": "String"
+      }
+    }
+  },
+  "chatLeaveGroup": "Leave group",
+  "@chatLeaveGroup": {
+    "description": "3-dot menu item"
+  },
+  "chatLeaveGroupTitle": "Leave group?",
+  "@chatLeaveGroupTitle": {
+    "description": "Title of the leave dialog"
+  },
+  "chatLeaveGroupBody": "You'll no longer receive messages from \"{name}\".",
+  "@chatLeaveGroupBody": {
+    "description": "Body of the leave dialog",
+    "placeholders": {
+      "name": {
+        "type": "String"
+      }
+    }
+  },
+  "chatLeave": "Leave",
+  "@chatLeave": {
+    "description": "Confirm button of the leave dialog"
+  },
+  "chatLeaveFailed": "Leave failed: {error}",
+  "@chatLeaveFailed": {
+    "description": "Error leaving a group",
+    "placeholders": {
+      "error": {
+        "type": "String"
+      }
+    }
+  },
+  "chatDeleteGroup": "Delete group",
+  "@chatDeleteGroup": {
+    "description": "3-dot menu item"
+  },
+  "chatDeleteGroupTitle": "Delete group?",
+  "@chatDeleteGroupTitle": {
+    "description": "Title of the delete group dialog"
+  },
+  "chatDeleteGroupBody": "\"{name}\" will be deleted permanently — for all members, along with all messages and media. This can't be undone.",
+  "@chatDeleteGroupBody": {
+    "description": "Body of the delete group dialog",
+    "placeholders": {
+      "name": {
+        "type": "String"
+      }
+    }
+  },
+  "chatDeleteFailed": "Delete failed: {error}",
+  "@chatDeleteFailed": {
+    "description": "Error deleting a group or a message",
+    "placeholders": {
+      "error": {
+        "type": "String"
+      }
+    }
+  },
+  "chatGroupDeletedByAdmin": "This group was deleted by the admin.",
+  "@chatGroupDeletedByAdmin": {
+    "description": "Notice when the group was deleted remotely"
+  },
+  "chatSearchInChat": "Search in chat",
+  "@chatSearchInChat": {
+    "description": "3-dot menu item"
+  },
+  "chatStudyRoom": "Study Room",
+  "@chatStudyRoom": {
+    "description": "Study room menu item, card title and message preview"
+  },
+  "chatAudioCall": "Audio Call",
+  "@chatAudioCall": {
+    "description": "App bar / menu action"
+  },
+  "chatVideoCall": "Video Call",
+  "@chatVideoCall": {
+    "description": "App bar / menu action"
+  },
+  "chatCallFailed": "Call failed: {error}",
+  "@chatCallFailed": {
+    "description": "Error starting a call",
+    "placeholders": {
+      "error": {
+        "type": "String"
+      }
+    }
+  },
+  "chatStudyRoomCardSubtitle": "Whiteboard, timer and live call — all in one place.",
+  "@chatStudyRoomCardSubtitle": {
+    "description": "Subtitle of the study room card in the chat"
+  },
+  "chatTapToJoin": "Tap to Join",
+  "@chatTapToJoin": {
+    "description": "Call to action on the study room card"
+  },
+  "chatCreatePoll": "Create poll",
+  "@chatCreatePoll": {
+    "description": "Title of the create poll dialog"
+  },
+  "chatPollQuestion": "Question",
+  "@chatPollQuestion": {
+    "description": "Poll question field label"
+  },
+  "chatAllowMultipleAnswers": "Allow multiple answers",
+  "@chatAllowMultipleAnswers": {
+    "description": "Poll toggle"
+  },
+  "chatPollNeedsQuestionAndTwo": "A question and at least 2 options are required",
+  "@chatPollNeedsQuestionAndTwo": {
+    "description": "Validation message for a new poll"
+  },
+  "chatSendPoll": "Send poll",
+  "@chatSendPoll": {
+    "description": "Button that posts the poll"
+  },
+  "chatPollVotes": "{count, plural, =1{1 vote} other{{count} votes}}",
+  "@chatPollVotes": {
+    "description": "Vote count under a poll",
+    "placeholders": {
+      "count": {
+        "type": "int"
+      }
+    }
+  },
+  "chatPollVotesClosed": "{count, plural, =1{1 vote} other{{count} votes}} • Closed",
+  "@chatPollVotesClosed": {
+    "description": "Vote count under a closed poll",
+    "placeholders": {
+      "count": {
+        "type": "int"
+      }
+    }
+  },
+  "chatScheduleMessageTitle": "Schedule message",
+  "@chatScheduleMessageTitle": {
+    "description": "Attach option and dialog title"
+  },
+  "chatMessageFieldLabel": "Message",
+  "@chatMessageFieldLabel": {
+    "description": "Label of the message field in the schedule dialog"
+  },
+  "chatViewScheduled": "View scheduled",
+  "@chatViewScheduled": {
+    "description": "Button that opens scheduled messages"
+  },
+  "chatPickFutureTime": "Pick a future time",
+  "@chatPickFutureTime": {
+    "description": "Validation message when the picked time is in the past"
+  },
+  "chatMessageScheduled": "Message scheduled",
+  "@chatMessageScheduled": {
+    "description": "Snackbar after scheduling"
+  },
+  "chatScheduledMessagesTitle": "Scheduled messages",
+  "@chatScheduledMessagesTitle": {
+    "description": "Title of the scheduled messages sheet and menu item"
+  },
+  "chatNoScheduled": "No scheduled messages",
+  "@chatNoScheduled": {
+    "description": "Empty state of scheduled messages"
+  },
+  "chatLastSeen": "last seen {when}",
+  "@chatLastSeen": {
+    "description": "Subtitle in the app bar. {when} is chatLastSeenToday / Yesterday / On",
+    "placeholders": {
+      "when": {
+        "type": "String"
+      }
+    }
+  },
+  "chatLastSeenToday": "today at {time}",
+  "@chatLastSeenToday": {
+    "description": "Part of last seen",
+    "placeholders": {
+      "time": {
+        "type": "String"
+      }
+    }
+  },
+  "chatLastSeenYesterday": "yesterday at {time}",
+  "@chatLastSeenYesterday": {
+    "description": "Part of last seen",
+    "placeholders": {
+      "time": {
+        "type": "String"
+      }
+    }
+  },
+  "chatLastSeenOn": "on {date}",
+  "@chatLastSeenOn": {
+    "description": "Part of last seen",
+    "placeholders": {
+      "date": {
+        "type": "String"
+      }
+    }
+  },
+  "chatUploadFailed": "Upload failed: {error}",
+  "@chatUploadFailed": {
+    "description": "Error uploading an attachment",
+    "placeholders": {
+      "error": {
+        "type": "String"
+      }
+    }
+  },
+  "chatStickerFailed": "Couldn't send sticker: {error}",
+  "@chatStickerFailed": {
+    "description": "Error sending a sticker",
+    "placeholders": {
+      "error": {
+        "type": "String"
+      }
+    }
+  },
+  "chatMicPermission": "Microphone permission is needed to send voice notes",
+  "@chatMicPermission": {
+    "description": "Snackbar when the mic permission is missing"
+  },
+  "chatLocationPermissionDenied": "Location permission denied",
+  "@chatLocationPermissionDenied": {
+    "description": "Snackbar when the location permission is denied"
+  },
+  "chatLocationShareFailed": "Location share failed: {error}",
+  "@chatLocationShareFailed": {
+    "description": "Error sharing the location",
+    "placeholders": {
+      "error": {
+        "type": "String"
+      }
+    }
+  },
+  "chatPhotoGallery": "Photo Gallery",
+  "@chatPhotoGallery": {
+    "description": "Attach sheet option"
+  },
+  "chatVideoGallery": "Video Gallery",
+  "@chatVideoGallery": {
+    "description": "Attach sheet option"
+  },
+  "chatAudio": "Audio",
+  "@chatAudio": {
+    "description": "Attach sheet option"
+  },
+  "chatFile": "File",
+  "@chatFile": {
+    "description": "Attach sheet option and generic file label"
+  },
+  "chatPresentation": "Presentation",
+  "@chatPresentation": {
+    "description": "Attach sheet option and generic presentation label"
+  },
+  "chatForward": "Forward",
+  "@chatForward": {
+    "description": "Message action"
+  },
+  "chatReact": "React",
+  "@chatReact": {
+    "description": "Message action"
+  },
+  "chatInfo": "Info",
+  "@chatInfo": {
+    "description": "Message action"
+  },
+  "chatSelect": "Select",
+  "@chatSelect": {
+    "description": "Message action"
+  },
+  "chatSaveToDevice": "Save to device",
+  "@chatSaveToDevice": {
+    "description": "Message action"
+  },
+  "chatDeleteForMe": "Delete for me",
+  "@chatDeleteForMe": {
+    "description": "Message action"
+  },
+  "chatDeleteForEveryone": "Delete for everyone",
+  "@chatDeleteForEveryone": {
+    "description": "Message action"
+  },
+  "chatMessageForwarded": "{count, plural, =1{Message forwarded} other{{count} messages forwarded}}",
+  "@chatMessageForwarded": {
+    "description": "Snackbar after forwarding",
+    "placeholders": {
+      "count": {
+        "type": "int"
+      }
+    }
+  },
+  "chatSelectedCount": "{count} selected",
+  "@chatSelectedCount": {
+    "description": "App bar title in selection mode",
+    "placeholders": {
+      "count": {
+        "type": "int"
+      }
+    }
+  },
+  "chatEditMessageTitle": "Edit message",
+  "@chatEditMessageTitle": {
+    "description": "Title of the edit message dialog"
+  },
+  "chatEditFailed": "Edit failed: {error}",
+  "@chatEditFailed": {
+    "description": "Error editing a message",
+    "placeholders": {
+      "error": {
+        "type": "String"
+      }
+    }
+  },
+  "chatMessageDeleted": "This message was deleted",
+  "@chatMessageDeleted": {
+    "description": "Placeholder for a message deleted for everyone"
+  },
+  "chatAlreadySaved": "Already saved in gallery ✅",
+  "@chatAlreadySaved": {
+    "description": "Snackbar when the file is already in the gallery"
+  },
+  "chatDownloading": "Downloading...",
+  "@chatDownloading": {
+    "description": "Snackbar while downloading"
+  },
+  "chatSavedToGallery": "Saved to gallery ✅",
+  "@chatSavedToGallery": {
+    "description": "Snackbar after saving media to the gallery"
+  },
+  "chatDownloadedToFolder": "Downloaded ✅ — in the Download/LearnScroll folder",
+  "@chatDownloadedToFolder": {
+    "description": "Snackbar after downloading a file"
+  },
+  "chatDownloadFailed": "Download failed: {error}",
+  "@chatDownloadFailed": {
+    "description": "Error downloading a file",
+    "placeholders": {
+      "error": {
+        "type": "String"
+      }
+    }
+  },
+  "chatSayHi": "Say hi 👋",
+  "@chatSayHi": {
+    "description": "Empty chat title"
+  },
+  "chatSendToStart": "Send a message to start the conversation",
+  "@chatSendToStart": {
+    "description": "Empty chat subtitle"
+  },
+  "chatMessageHint": "Message...",
+  "@chatMessageHint": {
+    "description": "Composer hint"
+  },
+  "chatRecording": "Recording...",
+  "@chatRecording": {
+    "description": "Shown while a voice note is being recorded"
+  },
+  "chatPreviewPhoto": "📷 Photo",
+  "@chatPreviewPhoto": {
+    "description": "Reply/last-message preview for a photo"
+  },
+  "chatPreviewVideo": "🎥 Video",
+  "@chatPreviewVideo": {
+    "description": "Reply/last-message preview for a video"
+  },
+  "chatPreviewAudio": "🎵 Audio",
+  "@chatPreviewAudio": {
+    "description": "Reply/last-message preview for audio"
+  },
+  "chatPreviewFile": "📄 File",
+  "@chatPreviewFile": {
+    "description": "Reply/last-message preview for a file"
+  },
+  "chatPreviewPresentation": "📊 Presentation",
+  "@chatPreviewPresentation": {
+    "description": "Reply/last-message preview for a presentation"
+  },
+  "chatPreviewLocation": "📍 Location",
+  "@chatPreviewLocation": {
+    "description": "Reply/last-message preview for a location"
+  },
+  "chatPreviewStudyRoom": "🧑‍🎓 Study Room",
+  "@chatPreviewStudyRoom": {
+    "description": "Reply/last-message preview for a study room"
+  },
+  "chatPreviewPoll": "📊 Poll",
+  "@chatPreviewPoll": {
+    "description": "Reply/last-message preview for a poll"
+  },
+  "chatToday": "Today",
+  "@chatToday": {
+    "description": "Date separator between messages"
+  },
+  "chatYesterday": "Yesterday",
+  "@chatYesterday": {
+    "description": "Date separator between messages"
+  },
+  "chatAnnouncement": "Announcement",
+  "@chatAnnouncement": {
+    "description": "Label on an announcement message"
+  },
+  "chatUploadingPercent": "{percent}% uploading...",
+  "@chatUploadingPercent": {
+    "description": "Upload progress inside a message bubble",
+    "placeholders": {
+      "percent": {
+        "type": "int"
+      }
+    }
+  },
+  "chatUploadingPhotosPercent": "{percent}% • {count, plural, =1{1 photo} other{{count} photos}}",
+  "@chatUploadingPhotosPercent": {
+    "description": "Upload progress for a photo album bubble",
+    "placeholders": {
+      "percent": {
+        "type": "int"
+      },
+      "count": {
+        "type": "int"
+      }
+    }
+  },
+  "chatPhotosCount": "{count, plural, =1{1 photo} other{{count} photos}}",
+  "@chatPhotosCount": {
+    "description": "Photo count on an album bubble",
+    "placeholders": {
+      "count": {
+        "type": "int"
+      }
+    }
+  },
+  "chatLocationShared": "Location shared",
+  "@chatLocationShared": {
+    "description": "Label on a location message"
+  },
+  "chatItemsCount": "{count, plural, =1{1 item} other{{count} items}}",
+  "@chatItemsCount": {
+    "description": "Selected files count in the send preview",
+    "placeholders": {
+      "count": {
+        "type": "int"
+      }
+    }
+  },
+  "chatSendingAudio": "Sending audio...",
+  "@chatSendingAudio": {
+    "description": "Audio bubble while uploading"
+  },
+  "chatAudioMessage": "Audio message",
+  "@chatAudioMessage": {
+    "description": "Audio bubble label"
+  },
+  "chatAudioPlayFailed": "Couldn't play audio: {error}",
+  "@chatAudioPlayFailed": {
+    "description": "Error playing audio",
+    "placeholders": {
+      "error": {
+        "type": "String"
+      }
+    }
+  },
+  "chatTranscribe": "Transcribe",
+  "@chatTranscribe": {
+    "description": "Button that transcribes an audio message"
+  },
+  "chatTranscribing": "Transcribing...",
+  "@chatTranscribing": {
+    "description": "Shown while transcribing"
+  },
+  "chatTranscript": "Transcript",
+  "@chatTranscript": {
+    "description": "Heading of an audio transcript"
+  },
+  "chatTranscribeFailed": "Couldn't transcribe: {error}",
+  "@chatTranscribeFailed": {
+    "description": "Error transcribing audio",
+    "placeholders": {
+      "error": {
+        "type": "String"
+      }
+    }
+  },
+  "chatVideoLoadFailed": "Couldn't load video: {error}",
+  "@chatVideoLoadFailed": {
+    "description": "Error loading a video",
+    "placeholders": {
+      "error": {
+        "type": "String"
+      }
+    }
+  },
+  "parentModeTitle": "Parent Mode",
+  "@parentModeTitle": {
+    "description": "App bar title of the parent/guardian screens"
+  },
+  "parentEntryHeading": "See your child's progress",
+  "@parentEntryHeading": {
+    "description": "Heading on the parent code-entry screen"
+  },
+  "parentEntryBody": "You'll only see attendance and assignment status — never chat messages. Enter the code your child gave you below.",
+  "@parentEntryBody": {
+    "description": "Explanation under the heading on the parent code-entry screen"
+  },
+  "parentEntryCodeHint": "e.g. 7F3K9QRT",
+  "@parentEntryCodeHint": {
+    "description": "Hint inside the parent code text field"
+  },
+  "parentEntryCodeRequired": "Enter the code",
+  "@parentEntryCodeRequired": {
+    "description": "Validation error when the parent code field is empty"
+  },
+  "parentEntryViewProgress": "View Progress",
+  "@parentEntryViewProgress": {
+    "description": "Button that verifies the parent code"
+  },
+  "parentLoginLink": "Parent/Guardian? View your child's progress",
+  "@parentLoginLink": {
+    "description": "Link on the login screen that opens Parent Mode"
+  },
+  "parentErrInvalidCode": "Invalid or expired code. Please check it again.",
+  "@parentErrInvalidCode": {
+    "description": "Parent code verification failed (404)"
+  },
+  "parentErrTooManyAttempts": "Too many attempts — please try again in a while.",
+  "@parentErrTooManyAttempts": {
+    "description": "Parent code verification rate-limited (429)"
+  },
+  "parentErrGeneric": "Something went wrong. Please try again.",
+  "@parentErrGeneric": {
+    "description": "Generic parent-mode error"
+  },
+  "parentErrSessionExpired": "Your session has expired. Enter the code again.",
+  "@parentErrSessionExpired": {
+    "description": "Parent session token missing or expired"
+  },
+  "parentErrAccessRevoked": "Access has been revoked. Ask your child for a new code.",
+  "@parentErrAccessRevoked": {
+    "description": "Parent access was revoked by the student"
+  },
+  "parentErrDashboardLoad": "Couldn't load the dashboard. Please try again.",
+  "@parentErrDashboardLoad": {
+    "description": "Parent dashboard failed to load"
+  },
+  "parentDashNoClassrooms": "No classrooms found yet.",
+  "@parentDashNoClassrooms": {
+    "description": "Empty state of the parent dashboard"
+  },
+  "parentDashSubtitle": "Attendance and assignment status — chat content is never shown here.",
+  "@parentDashSubtitle": {
+    "description": "Privacy note under the student name on the parent dashboard"
+  },
+  "parentDashStreak": "Current Streak",
+  "@parentDashStreak": {
+    "description": "Attendance streak label"
+  },
+  "parentDashStreakDays": "{count, plural, =1{1 day} other{{count} days}}",
+  "@parentDashStreakDays": {
+    "description": "Attendance streak value",
+    "placeholders": {
+      "count": {
+        "type": "int"
+      }
+    }
+  },
+  "parentDashTotalClasses": "Total Classes",
+  "@parentDashTotalClasses": {
+    "description": "Total classes attended label"
+  },
+  "parentDashAssignmentsPending": "Assignments Pending",
+  "@parentDashAssignmentsPending": {
+    "description": "Pending assignments label"
+  },
+  "parentDashSubmitted": "Submitted",
+  "@parentDashSubmitted": {
+    "description": "Submitted assignments label"
+  },
+  "parentDashSignOut": "Sign out",
+  "@parentDashSignOut": {
+    "description": "Tooltip of the parent sign-out icon"
+  },
+  "parentDashEnterNewCode": "Enter a new code",
+  "@parentDashEnterNewCode": {
+    "description": "Button shown when the parent session expired or was revoked"
+  },
+  "focusModeTitle": "Focus mode",
+  "@focusModeTitle": {
+    "description": "App bar title of the focus mode screen"
+  },
+  "focusModeHistoryTooltip": "History",
+  "@focusModeHistoryTooltip": {
+    "description": "Tooltip of the history icon on the focus mode screen"
+  },
+  "focusModeChangeDuration": "Change duration",
+  "@focusModeChangeDuration": {
+    "description": "Section title while a focus session is active"
+  },
+  "focusModeHowLong": "How long?",
+  "@focusModeHowLong": {
+    "description": "Section title for choosing the focus duration"
+  },
+  "focusModeCustomDuration": "Custom duration",
+  "@focusModeCustomDuration": {
+    "description": "Button and sheet title for a custom focus duration"
+  },
+  "focusModeWhoCanReach": "Who can still reach you?",
+  "@focusModeWhoCanReach": {
+    "description": "Section title for the exception rule"
+  },
+  "focusModeRuleTeachersTitle": "Only teachers & staff",
+  "@focusModeRuleTeachersTitle": {
+    "description": "Exception rule: teachers only"
+  },
+  "focusModeRuleTeachersSub": "Messages and calls from group admins/moderators still come through; everyone else stays silent.",
+  "@focusModeRuleTeachersSub": {
+    "description": "Explanation of the teachers-only rule"
+  },
+  "focusModeRuleNobodyTitle": "Nobody — full silence",
+  "@focusModeRuleNobodyTitle": {
+    "description": "Exception rule: nobody"
+  },
+  "focusModeRuleNobodySub": "For exam time — no notification will come through, not even from teachers.",
+  "@focusModeRuleNobodySub": {
+    "description": "Explanation of the nobody rule"
+  },
+  "focusModeUpdate": "Update focus mode",
+  "@focusModeUpdate": {
+    "description": "Primary button while a session is active"
+  },
+  "focusModeStart": "Start focus mode",
+  "@focusModeStart": {
+    "description": "Primary button to start a session"
+  },
+  "focusModeEndNow": "End focus mode now",
+  "@focusModeEndNow": {
+    "description": "Button to end the active session"
+  },
+  "focusModeActiveLeft": "Focus mode is active — {time} left",
+  "@focusModeActiveLeft": {
+    "description": "Banner with the remaining time",
+    "placeholders": {
+      "time": {
+        "type": "String"
+      }
+    }
+  },
+  "focusModeFailed": "Couldn't update focus mode. Please try again.",
+  "@focusModeFailed": {
+    "description": "Error when starting/stopping a focus session fails"
+  },
+  "focusModeSet": "Set",
+  "@focusModeSet": {
+    "description": "Confirm button of the custom duration sheet"
+  },
+  "focusModeHours": "Hours",
+  "@focusModeHours": {
+    "description": "Hours stepper label"
+  },
+  "focusModeMinutes": "Minutes",
+  "@focusModeMinutes": {
+    "description": "Minutes stepper label"
+  },
+  "chatTyping": "typing...",
+  "@chatTyping": {
+    "description": "Presence subtitle while the other person is typing"
+  },
+  "chatOnline": "online",
+  "@chatOnline": {
+    "description": "Presence subtitle when the other person is online"
+  },
+  "enterClassCta": "Enter class",
+  "requestPendingCta": "Request pending",
+  "endClassCta": "End class",
+  "endClassConfirm": "End this class for everyone?",
+  "removedFromSession": "You were removed from this session.",
+  "waitlistedNotice": "The class is full — you are on the waitlist and will be let in automatically.",
+  "waitingForTeacher": "Waiting for the teacher to start video…",
+  "savedPostsTitle": "Saved posts",
+  "explorePostsTitle": "Explore",
+  "noPostsHere": "No posts here yet",
+  "postsLoadFailed": "Couldn't load posts",
+  "deletePostCta": "Delete post",
+  "deletePostConfirm": "Delete this post? This can’t be undone.",
+  "postDeleted": "Post deleted",
+  "postDeleteFailed": "Couldn't delete the post",
+  "allCaughtUp": "You're all caught up",
+  "back": "Back",
+  "bioLabel": "Bio",
+  "changePhotoTooltip": "Change photo",
+  "discardChangesTitle": "Discard changes?",
+  "discardChangesMessage": "You have unsaved changes. Are you sure you want to go back?",
+  "downloading": "Downloading…",
+  "editProfileButton": "Edit profile",
+  "follow": "Follow",
+  "followBack": "Follow Back",
+  "followersStat": "Followers",
+  "messageButton": "Message",
+  "moreOptions": "More options",
+  "mediaTabLabel": "Media ({count})",
+  "@mediaTabLabel": {
+    "placeholders": {
+      "count": {
+        "type": "int"
+      }
+    }
+  },
+  "documentsTabLabel": "Documents ({count})",
+  "@documentsTabLabel": {
+    "placeholders": {
+      "count": {
+        "type": "int"
+      }
+    }
+  },
+  "noDocumentsYetTitle": "No documents yet",
+  "noDocumentsYetSubtitle": "Documents you share will appear here.",
+  "noMediaYetTitle": "No media yet",
+  "noMediaYetSubtitle": "Photos and videos you post will appear here.",
+  "noNameYet": "No name yet",
+  "noProfileFound": "Profile not found",
+  "photoPostLabel": "Photo",
+  "videoPostLabel": "Video",
+  "postsLoadErrorTitle": "Couldn't load posts",
+  "postsLoadErrorSubtitle": "Check your connection and pull down to retry.",
+  "postsStat": "Posts",
+  "privateAccountBadge": "Private",
+  "privateAccountMessage": "This account is private. Follow to see their posts.",
+  "privateAccountPendingMessage": "Follow request sent. Wait for approval to see posts.",
+  "profileLoadErrorTitle": "Couldn't load profile",
+  "profileUpdatedSuccess": "Profile updated successfully",
+  "requestedLabel": "Requested",
+  "shareProfileButton": "Share profile",
+  "shareProfileMessage": "Check out {username} on LearnScroll: {url}",
+  "@shareProfileMessage": {
+    "placeholders": {
+      "username": {
+        "type": "String"
+      },
+      "url": {
+        "type": "String"
+      }
+    }
+  },
+  "showingSavedProfileData": "Showing saved data — pull down to refresh",
+  "verifiedAccount": "Verified account",
+  "coinsBalance": "{coins} coins",
+  "@coinsBalance": {
+    "placeholders": {
+      "coins": {
+        "type": "num"
+      }
+    }
+  },
+  "chatOpenFailed": "Couldn't open chat: {error}",
+  "@chatOpenFailed": {
+    "placeholders": {
+      "error": {
+        "type": "String"
+      }
+    }
+  },
+  "analyticsTitle": "Analytics",
+  "analyticsActiveEnrollments": "Active enrollments",
+  "analyticsAvgAttendance": "Average attendance",
+  "analyticsAvgMarks": "Average marks",
+  "analyticsSyllabusCompletion": "Syllabus completion",
+  "analyticsNoSnapshot": "No analytics yet",
+  "analyticsNoSnapshotHint": "Analytics are computed periodically. Check back later.",
+  "analyticsComputedAt": "Computed {date}",
+  "@analyticsComputedAt": {
+    "placeholders": {
+      "date": {
+        "type": "String"
+      }
+    }
+  },
+  "assignmentDueDateLabel": "Due date",
+  "assignmentFeedbackLabel": "Feedback",
+  "assignmentGradeLabel": "Grade",
+  "assignmentNoSubmissions": "No submissions yet",
+  "assignmentNotSubmitted": "Not submitted",
+  "assignmentSubmitCta": "Submit",
+  "assignmentsAdd": "Add assignment",
+  "assignmentsEmpty": "No assignments yet",
+  "campusCreateTitle": "Create campus",
+  "campusCreateNameLabel": "Campus name",
+  "campusCreateNameRequired": "Enter a campus name",
+  "campusCreateTypeLabel": "Campus type",
+  "campusCreateTypeSchool": "School",
+  "campusCreateTypeCollege": "College",
+  "campusCreateTypeCoaching": "Coaching",
+  "campusCreateThresholdLabel": "Attendance threshold",
+  "campusCreateThresholdHint": "Students below this attendance percentage are flagged.",
+  "campusCreateFeeModuleLabel": "Enable fee module",
+  "campusCreateFeeModuleHint": "Track fee structures, invoices and payments for this campus.",
+  "campusCreateSubmit": "Create",
+  "campusCreateSuccess": "Campus created",
+  "campusManageSetupCta": "Manage setup",
+  "campusNoneCreateCta": "Create a campus",
+  "campusSetupTitle": "Campus setup",
+  "classDepartmentLabel": "Department",
+  "classDepartmentNone": "No department",
+  "classNameHint": "e.g. Class 10",
+  "classNameLabel": "Class name",
+  "classNoSessionsError": "Create an academic session first",
+  "classSectionsCta": "Sections",
+  "classSessionLabel": "Academic session",
+  "classTeacherAssign": "Assign class teacher",
+  "classTeacherAssignedSuccess": "Class teacher assigned",
+  "classTeacherNotAssigned": "No class teacher assigned",
+  "classTeacherTitle": "Class teacher",
+  "departmentNameLabel": "Department name",
+  "examTermNameLabel": "Exam term name",
+  "examTermPickLabel": "Exam term",
+  "sectionDetailTitle": "{className} · {sectionName}",
+  "@sectionDetailTitle": {
+    "placeholders": {
+      "className": {
+        "type": "String"
+      },
+      "sectionName": {
+        "type": "String"
+      }
+    }
+  },
+  "sectionNameHint": "e.g. A",
+  "sectionNameLabel": "Section name",
+  "sessionCurrentBadge": "Current",
+  "sessionDateOrderError": "End date must be after the start date",
+  "sessionDatesRequiredError": "Pick a start and an end date",
+  "sessionEndDateLabel": "End date",
+  "sessionNameHint": "e.g. 2026–27",
+  "sessionNameLabel": "Session name",
+  "sessionSetCurrentLabel": "Set as current",
+  "sessionSetCurrentSuccess": "{name} is now the current session",
+  "@sessionSetCurrentSuccess": {
+    "placeholders": {
+      "name": {
+        "type": "String"
+      }
+    }
+  },
+  "sessionStartDateLabel": "Start date",
+  "setupClassesAdd": "Add class",
+  "setupClassesEmpty": "No classes yet",
+  "setupClassesTitle": "Classes",
+  "setupDepartmentsAdd": "Add department",
+  "setupDepartmentsEmpty": "No departments yet",
+  "setupDepartmentsTitle": "Departments",
+  "setupExamTermsAdd": "Add exam term",
+  "setupExamTermsEmpty": "No exam terms yet",
+  "setupExamTermsTitle": "Exam terms",
+  "setupFeeStructuresAdd": "Add fee structure",
+  "setupFeeStructuresEmpty": "No fee structures yet",
+  "setupFeeStructuresTitle": "Fee structures",
+  "setupLoadFailed": "Couldn't load this list",
+  "setupRoomsAdd": "Add room",
+  "setupRoomsEmpty": "No rooms yet",
+  "setupRoomsTitle": "Rooms",
+  "setupSectionsAdd": "Add section",
+  "setupSectionsEmpty": "No sections yet",
+  "setupSectionsTitle": "Sections · {className}",
+  "@setupSectionsTitle": {
+    "placeholders": {
+      "className": {
+        "type": "String"
+      }
+    }
+  },
+  "setupSessionsAdd": "Add session",
+  "setupSessionsEmpty": "No sessions yet",
+  "setupSessionsTitle": "Academic sessions",
+  "setupStaffAdd": "Add staff",
+  "setupStaffEmpty": "No staff yet",
+  "setupStaffPendingApproval": "Staff you add may need the user's approval before they appear as active.",
+  "setupStaffTitle": "Staff",
+  "setupSubjectsAdd": "Add subject",
+  "setupSubjectsEmpty": "No subjects yet",
+  "setupSubjectsTitle": "Subjects",
+  "roomNameLabel": "Room name",
+  "roomVirtualHint": "Virtual rooms are online classrooms with no physical location.",
+  "roomVirtualLabel": "Virtual",
+  "staffPickLabel": "Staff member",
+  "staffRoleLabel": "Role",
+  "staffUserIdHint": "Enter the user's ID",
+  "staffUserIdLabel": "User ID",
+  "subjectCodeLabel": "Subject code",
+  "subjectDepartmentLabel": "Department",
+  "subjectNameLabel": "Subject name",
+  "subjectPickLabel": "Subject",
+  "subjectTeacherApprove": "Approve",
+  "subjectTeacherApproved": "Approved",
+  "subjectTeacherAssign": "Assign subject teacher",
+  "subjectTeacherReject": "Reject",
+  "subjectTeacherRejected": "Rejected",
+  "subjectTeacherRequest": "Request assignment",
+  "subjectTeacherRequested": "Request sent — waiting for approval",
+  "subjectTeacherStatusApproved": "Approved",
+  "subjectTeacherStatusPending": "Pending",
+  "subjectTeacherStatusRejected": "Rejected",
+  "subjectTeachersEmpty": "No subject teachers yet",
+  "subjectTeachersTitle": "Subject teachers",
+  "enrollRollNumberLabel": "Roll number",
+  "enrollStatusActive": "Active",
+  "enrollStatusGraduated": "Graduated",
+  "enrollStatusLabel": "Status",
+  "enrollStatusTransferred": "Transferred",
+  "enrollStudentIdHint": "Enter the student's user ID",
+  "enrollStudentIdLabel": "Student ID",
+  "enrollmentAddedSuccess": "Student enrolled",
+  "enrollmentsAdd": "Enroll student",
+  "enrollmentsEmpty": "No students enrolled yet",
+  "enrollmentsTitle": "Enrollments",
+  "feeAmountDueLabel": "Due",
+  "feeAmountLabel": "Amount",
+  "feeAmountPaidLabel": "Paid",
+  "feeCampusWide": "Campus-wide",
+  "feeGenerateInvoices": "Generate invoices",
+  "feeInsufficientCoinsBody": "You need {coins} coins to pay this fee. Add coins to your wallet and try again.",
+  "@feeInsufficientCoinsBody": {
+    "placeholders": {
+      "coins": {
+        "type": "num"
+      }
+    }
+  },
+  "feeInsufficientCoinsTitle": "Not enough coins",
+  "feeInvoicesGenerated": "{created} invoices created, {existing} already existed",
+  "@feeInvoicesGenerated": {
+    "placeholders": {
+      "created": {
+        "type": "int"
+      },
+      "existing": {
+        "type": "int"
+      }
+    }
+  },
+  "feeModuleDisabledNote": "The fee module is turned off for this campus.",
+  "feeNoPayments": "No payments recorded",
+  "feeNotesLabel": "Notes",
+  "feeOfficeTitle": "Fee office",
+  "feePayCta": "Pay with coins",
+  "feePaySuccess": "Payment successful",
+  "feePaymentHistory": "Payment history",
+  "feePaymentModeLabel": "Payment mode",
+  "feeRecordPayment": "Record payment",
+  "feeRefund": "Refund",
+  "feeStatusOverdue": "Overdue",
+  "feeStatusPaid": "Paid",
+  "feeStatusPartial": "Partially paid",
+  "feeStatusPending": "Pending",
+  "feeStatusWaived": "Waived",
+  "feeTitleLabel": "Fee title",
+  "feeWalletCoinsNote": "Fees are paid from your LearnScroll coin wallet.",
+  "myFeesEmpty": "No fees to show",
+  "myFeesTitle": "My fees",
+  "idCardTitle": "Digital ID card",
+  "idCardAllIssued": "Everyone has an ID card",
+  "idCardIssueForOthers": "Issue for others",
+  "idCardIssueOwn": "Issue my ID card",
+  "idCardIssuedOn": "Issued on",
+  "idCardNotIssued": "No ID card issued yet",
+  "idCardValidUntil": "Valid until",
+  "parentLinkCampusIdHint": "Campus ID shared by the school",
+  "parentLinkCampusIdLabel": "Campus ID",
+  "parentLinkLoadFailed": "Couldn't load linked children",
+  "parentLinkMyChildrenTitle": "My children",
+  "parentLinkNoChildren": "No children linked yet",
+  "parentLinkScreenTitle": "Link a child",
+  "parentLinkSubmit": "Link",
+  "parentLinkSuccess": "Child linked successfully",
+  "parentLinkTokenHint": "Verification code from the school",
+  "parentLinkTokenLabel": "Verification code",
+  "parentLinkVerifyHint": "Enter the campus ID and the code you received to link your child.",
+  "parentLinkVerifyTitle": "Verify and link",
+  "parentLinkedOn": "Linked on {date}",
+  "parentOverviewNoEnrollment": "This child isn't currently enrolled in an active section at this campus.",
+  "parentOverviewReportCard": "Report card",
+  "parentOverviewNoNotices": "No notices for this class yet.",
+  "parentOverviewLoadFailed": "Couldn't load this child's details",
+  "@parentLinkedOn": {
+    "placeholders": {
+      "date": {
+        "type": "String"
+      }
+    }
+  },
+  "reportCardPercentage": "Percentage",
+  "reportCardTitle": "Report card",
+  "reportCardView": "Report cards",
+  "resultMarksInvalid": "Enter valid marks",
+  "resultMaxLabel": "Max",
+  "resultObtainedLabel": "Obtained",
+  "resultsManage": "Enter results",
+  "resultsTitle": "Results",
+  "syllabusAdd": "Add unit",
+  "syllabusCoveredOn": "Covered on {date}",
+  "@syllabusCoveredOn": {
+    "placeholders": {
+      "date": {
+        "type": "String"
+      }
+    }
+  },
+  "syllabusEmpty": "No syllabus units yet",
+  "syllabusMarkCovered": "Mark as covered",
+  "syllabusTitle": "Syllabus",
+  "syllabusUnitOrderLabel": "Order",
+  "syllabusUnitTitleLabel": "Unit title",
+  "noUsersHere": "No one here yet",
+  "usersLoadFailed": "Couldn't load the list",
+  "mutualFriendsCount": "{count} mutual",
+  "@mutualFriendsCount": {
+    "placeholders": {
+      "count": {
+        "type": "int"
+      }
+    }
   }
 }

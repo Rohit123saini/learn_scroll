@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:google_fonts/google_fonts.dart';
 import 'package:intl/intl.dart';
 
 import '../../l10n/app_localizations.dart';
@@ -9,6 +10,7 @@ import '../../widgets/skeletons.dart';
 import '../services/assignment_models.dart';
 import '../services/assignment_service.dart';
 import 'assignment_detail_screen.dart';
+import 'create_assignment_screen.dart';
 
 // ============================================================
 // ASSIGNMENTS — LIST SCREEN
@@ -96,6 +98,15 @@ class _AssignmentsScreenState extends State<AssignmentsScreen> {
       backgroundColor: lsBg(context),
       appBar: lsAppBar(context, title: l10n.assignments),
       body: Column(children: [
+        _StatsStrip(
+          all: _all,
+          selectedIndex: _filter,
+          onSelected: (i) {
+            HapticFeedback.selectionClick();
+            setState(() => _filter = i);
+          },
+        ),
+        const SizedBox(height: 4),
         LsFilterChips(
           labels: [l10n.assignmentsTabPending, l10n.assignmentsTabSubmitted, l10n.assignmentsTabChecked],
           selectedIndex: _filter,
@@ -107,6 +118,19 @@ class _AssignmentsScreenState extends State<AssignmentsScreen> {
         const SizedBox(height: 6),
         Expanded(child: _buildBody(cs, l10n)),
       ]),
+      floatingActionButton: FloatingActionButton(
+        onPressed: () async {
+          final created = await Navigator.push<bool>(
+            context,
+            MaterialPageRoute(builder: (_) => const CreateAssignmentScreen()),
+          );
+          // Naya self-assignment turant Pending tab me dikhna chahiye —
+          // list ka join fresh chahiye, isliye seedha reload.
+          if (created == true) _load();
+        },
+        tooltip: l10n.assignmentCreateTitle,
+        child: const Icon(Icons.add),
+      ),
     );
   }
 
@@ -159,6 +183,82 @@ class _AssignmentsScreenState extends State<AssignmentsScreen> {
   }
 }
 
+/// Home ke `.quick-grid` wala hi visual recipe (48px, radius 15, tinted bg
+/// `.12`/`.24` opacity) — bas icon ki jagah yahan ek count number hai,
+/// kyunki ye tap-to-navigate action tile nahi, tap-to-filter stat tile hai.
+/// Home jaisa consistent look, par apna alag purpose.
+class _StatsStrip extends StatelessWidget {
+  final List<AssignmentWithSubmission> all;
+  final int selectedIndex;
+  final ValueChanged<int> onSelected;
+  const _StatsStrip({required this.all, required this.selectedIndex, required this.onSelected});
+
+  @override
+  Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
+    final t = lsTokens(context);
+    final l10n = AppLocalizations.of(context)!;
+    final isDark = Theme.of(context).brightness == Brightness.dark;
+    // Home ki _buildQuickActionsGrid() me isi naam se yahi do values hain.
+    final bgOpacity = isDark ? 0.24 : 0.12;
+
+    final tiles = [
+      (count: all.where((a) => a.isPending).length, label: l10n.assignmentsTabPending, color: t.danger),
+      (count: all.where((a) => a.isSubmitted).length, label: l10n.assignmentsTabSubmitted, color: cs.primary),
+      (count: all.where((a) => a.isChecked).length, label: l10n.assignmentsTabChecked, color: t.success),
+    ];
+
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(kLsPad, 10, kLsPad, 4),
+      child: Row(
+        children: List.generate(tiles.length, (i) {
+          final tile = tiles[i];
+          final active = i == selectedIndex;
+          return Expanded(
+            child: Padding(
+              padding: EdgeInsets.only(right: i == tiles.length - 1 ? 0 : 10),
+              child: Semantics(
+                button: true,
+                selected: active,
+                label: '${tile.label}: ${tile.count}',
+                child: GestureDetector(
+                  behavior: HitTestBehavior.opaque,
+                  onTap: () {
+                    HapticFeedback.selectionClick();
+                    onSelected(i);
+                  },
+                  child: Column(children: [
+                    Container(
+                      width: 48,
+                      height: 48,
+                      alignment: Alignment.center,
+                      decoration: BoxDecoration(
+                        color: tile.color.withOpacity(bgOpacity),
+                        borderRadius: BorderRadius.circular(15),
+                        border: active ? Border.all(color: tile.color, width: 1.4) : null,
+                      ),
+                      child: Text('${tile.count}',
+                          style: GoogleFonts.sora(fontSize: 17, fontWeight: FontWeight.w700, color: tile.color)),
+                    ),
+                    const SizedBox(height: 6),
+                    Text(
+                      tile.label,
+                      textAlign: TextAlign.center,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(fontSize: 9.5, fontWeight: FontWeight.w600, color: cs.onSurface),
+                    ),
+                  ]),
+                ),
+              ),
+            ),
+          );
+        }),
+      ),
+    );
+  }
+}
+
 class _AssignmentCard extends StatelessWidget {
   final AssignmentWithSubmission item;
   final VoidCallback onTap;
@@ -179,20 +279,23 @@ class _AssignmentCard extends StatelessWidget {
       onTap: onTap,
       child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
         Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
+          // Home ki quick-action tile jaisa hi recipe (48px, radius 15,
+          // `.12`/`.24` tint) — icon-container ka size/opacity ab poore app
+          // me ek jaisa hai, sirf ye card apna status-color use karta hai.
           Container(
-            width: 42,
-            height: 42,
+            width: 48,
+            height: 48,
             decoration: BoxDecoration(
-              color: statusColor.withOpacity(Theme.of(context).brightness == Brightness.dark ? .22 : .12),
-              borderRadius: BorderRadius.circular(13),
+              color: statusColor.withOpacity(Theme.of(context).brightness == Brightness.dark ? .24 : .12),
+              borderRadius: BorderRadius.circular(15),
             ),
             child: Icon(
               a.hasStructuredQuestions ? Icons.fact_check_outlined : Icons.description_outlined,
-              size: 20,
+              size: 22,
               color: statusColor,
             ),
           ),
-          const SizedBox(width: 11),
+          const SizedBox(width: 12),
           Expanded(
             child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
               Text(a.title,

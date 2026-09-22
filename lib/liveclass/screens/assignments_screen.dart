@@ -1,43 +1,49 @@
-// lib/liveclass/screens/assignments_screen.dart
+// ============================================================
+// LIVECLASS — ASSIGNMENTS SCREEN (classroom scope)
 //
-// Screen §12 (list half) — Assignments. GET/POST assignments/, DELETE
-// assignments/{id}/. Teacher creates (title, description, attachment,
-// due_date, max_score); tapping a card opens SubmissionGradingScreen, which
-// shows either "submit" (student) or the grading queue (teacher).
+// Since the assignment merge, an assignment is ONE unified record
+// (`assigments` app, UUID id) whether it was posted personally, by a campus
+// section or by a live classroom. This screen is therefore only the
+// *classroom-scoped entry point*; the actual assignment experience
+// (view, submit free-form / structured, grade, review, publish) is the
+// unified `AssignmentDetailScreen`, so both places behave identically.
 //
-// Restyled onto the shared LiveClass design system (liveclass_theme.dart)
-// so it matches Certificates/Holidays/Coin Wallet instead of falling back
-// to plain Material defaults. Logic/API calls unchanged.
+// Backend surface used here:
+//   GET  /liveclass/assigmentss/?classroom=<id>      → unified assignments (list)
+//   POST /liveclass/assigmentss/  {classroom,title,description,due_date}
+//                                                     → post one (manager only)
+//   GET  /liveclass/submissions/?classroom=<id>&assigments=<uuid>
+//                                                     → grading queue / own rows
+// (`assigmentss` is the backend's own spelling — kept as-is.)
+//
+// Was: ids were parsed as `int` (they are UUIDs → crashed on tap), submissions
+// were POSTed to `/liveclass/submissions/` and graded via a POST `…/grade/`
+// (both removed server-side in the merge).
+// ============================================================
 
-import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
+import '../../l10n/app_localizations.dart';
 
-import '../models/liveclass_models.dart';
-import '../services/liveclass_api_service.dart';
-import '../theme/liveclass_theme.dart';
-import '../utils/liveclass_upload_limits.dart';
-import 'submission_grading_screen.dart';
+import '../../assignments/screens/assignment_detail_screen.dart';
+import '../../assignments/services/assignment_models.dart';
+import '../../widgets/ls_ui.dart';
+import '../../widgets/error_widgets.dart';
+import '../api/liveclass_api.dart';
 
 class AssignmentsScreen extends StatefulWidget {
+  final LiveClassApi api;
   final int classroomId;
-  final int? sessionId;
-  final bool canManage; // teacher/co-teacher/moderator
-
-  const AssignmentsScreen({
-    super.key,
-    required this.classroomId,
-    this.sessionId,
-    required this.canManage,
-  });
+  final bool isTeacher;
+  const AssignmentsScreen({super.key, required this.api, required this.classroomId, this.isTeacher = false});
 
   @override
   State<AssignmentsScreen> createState() => _AssignmentsScreenState();
 }
 
 class _AssignmentsScreenState extends State<AssignmentsScreen> {
-  List<Assignment> _assignments = [];
+  List<Map<String, dynamic>> _assignments = const [];
   bool _loading = true;
-  String? _error;
+  Object? _error;
 
   @override
   void initState() {
@@ -51,351 +57,237 @@ class _AssignmentsScreenState extends State<AssignmentsScreen> {
       _error = null;
     });
     try {
-      final res = await LiveClassApi.assignments.list(widget.classroomId);
+      final data = await widget.api.assignments(classroomId: widget.classroomId);
       if (!mounted) return;
-      setState(() => _assignments = res.results);
-    } on LiveClassApiException catch (e) {
+      setState(() {
+        _assignments = data.whereType<Map>().map((e) => Map<String, dynamic>.from(e)).toList();
+        _loading = false;
+      });
+    } catch (e) {
       if (!mounted) return;
-      setState(() => _error = e.message);
-    } finally {
-      if (mounted) setState(() => _loading = false);
+      setState(() {
+        _error = e;
+        _loading = false;
+      });
     }
   }
 
-  void _snack(String msg) {
-    if (!mounted) return;
-    ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(msg)));
-  }
-
-  Future<void> _confirmDelete(Assignment a) async {
-    final ok = await showDialog<bool>(
-      context: context,
-      builder: (ctx) => AlertDialog(
-        title: const Text('Delete assignment?'),
-        content: Text('"${a.title}" and its submissions will be removed.'),
-        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
-        actions: [
-          TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('Cancel')),
-          TextButton(
-            onPressed: () => Navigator.pop(ctx, true),
-            style: TextButton.styleFrom(foregroundColor: LiveClassColors.danger),
-            child: const Text('Delete'),
-          ),
-        ],
-      ),
-    );
-    if (ok != true) return;
-    final previous = List<Assignment>.from(_assignments);
-    setState(() => _assignments.removeWhere((x) => x.id == a.id));
-    try {
-      await LiveClassApi.assignments.delete(a.id);
-    } on LiveClassApiException catch (e) {
-      if (!mounted) return;
-      setState(() => _assignments = previous);
-      _snack(e.message);
+  Future<void> _open(Map<String, dynamic> m) async {
+    final id = m['id']?.toString() ?? '';
+    if (id.isEmpty) return;
+    if (widget.isTeacher) {
+      await Navigator.of(context).push(MaterialPageRoute(
+        builder: (_) => _SubmissionsScreen(
+          api: widget.api,
+          classroomId: widget.classroomId,
+          assignmentId: id,
+          title: m['title']?.toString() ?? '',
+        ),
+      ));
+    } else {
+      await Navigator.of(context).push(MaterialPageRoute(
+        builder: (_) => AssignmentDetailScreen(assignmentId: id),
+      ));
     }
+    if (mounted) _load();
   }
 
-  Future<void> _openCreateSheet() async {
-    // FIX (memory leak): these three controllers used to be created here
-    // and never disposed — every open+close of this sheet leaked three
-    // TextEditingControllers for the lifetime of the app. try/finally
-    // guarantees disposal on every exit path (submitted, cancelled, or
-    // dismissed).
+  Future<void> _create() async {
+    final t = AppLocalizations.of(context)!;
     final titleCtrl = TextEditingController();
     final descCtrl = TextEditingController();
-    final scoreCtrl = TextEditingController(text: '100');
-    try {
-      await _showCreateSheet(titleCtrl, descCtrl, scoreCtrl);
-    } finally {
-      titleCtrl.dispose();
-      descCtrl.dispose();
-      scoreCtrl.dispose();
-    }
-  }
-
-  Future<void> _showCreateSheet(
-    TextEditingController titleCtrl,
-    TextEditingController descCtrl,
-    TextEditingController scoreCtrl,
-  ) async {
-    DateTime? dueDate;
-    PlatformFile? attachment;
-    bool saving = false;
-
-    await showModalBottomSheet(
+    DateTime? due;
+    final ok = await showDialog<bool>(
       context: context,
-      isScrollControlled: true,
-      backgroundColor: Colors.white,
-      shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(LiveClassRadius.sheet))),
       builder: (ctx) => StatefulBuilder(
-        builder: (ctx, setSheet) => Padding(
-          padding: EdgeInsets.only(
-            left: 20,
-            right: 20,
-            top: 20,
-            bottom: MediaQuery.of(ctx).viewInsets.bottom + 20,
-          ),
-          child: SingleChildScrollView(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.stretch,
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                Center(
-                  child: Container(
-                    width: 36,
-                    height: 4,
-                    margin: const EdgeInsets.only(bottom: 16),
-                    decoration: BoxDecoration(color: Colors.grey.shade300, borderRadius: BorderRadius.circular(2)),
-                  ),
-                ),
-                const Text('New Assignment', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16, color: LiveClassColors.navy)),
-                const SizedBox(height: 16),
-                TextField(controller: titleCtrl, decoration: liveClassInputDecoration('e.g. Week 3 problem set', label: 'Title')),
-                const SizedBox(height: 12),
-                TextField(
-                  controller: descCtrl,
-                  maxLines: 3,
-                  decoration: liveClassInputDecoration('What should students do?', label: 'Description'),
-                ),
-                const SizedBox(height: 12),
-                TextField(
-                  controller: scoreCtrl,
-                  keyboardType: TextInputType.number,
-                  decoration: liveClassInputDecoration('100', label: 'Max score'),
-                ),
-                const SizedBox(height: 12),
-                OutlinedButton.icon(
-                  onPressed: () async {
-                    final now = DateTime.now();
-                    final date = await showDatePicker(
-                      context: ctx,
-                      initialDate: now.add(const Duration(days: 3)),
-                      firstDate: now,
-                      lastDate: now.add(const Duration(days: 365)),
-                    );
-                    if (date == null) return;
-                    if (!ctx.mounted) return;
-                    final time = await showTimePicker(context: ctx, initialTime: const TimeOfDay(hour: 23, minute: 59));
-                    setSheet(() => dueDate = DateTime(date.year, date.month, date.day, time?.hour ?? 23, time?.minute ?? 59));
-                  },
-                  style: OutlinedButton.styleFrom(
-                    alignment: Alignment.centerLeft,
-                    padding: const EdgeInsets.symmetric(vertical: 13, horizontal: 14),
-                    side: BorderSide(color: Colors.grey.shade300),
-                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(LiveClassRadius.chip)),
-                  ),
-                  icon: Icon(Icons.event_rounded, color: dueDate == null ? Colors.grey.shade600 : LiveClassColors.navy),
-                  label: Text(
-                    dueDate == null ? 'Set due date' : liveClassFmtDateTime(dueDate!, ctx),
-                    style: TextStyle(color: dueDate == null ? Colors.grey.shade600 : LiveClassColors.navy, fontWeight: FontWeight.w600),
-                  ),
-                ),
-                const SizedBox(height: 12),
-                OutlinedButton.icon(
-                  onPressed: () async {
-                    // FIX (file upload size/type audit): no extension
-                    // restriction and no size check at all before — a
-                    // teacher could attach anything of any size, only
-                    // discovering the backend's real 50MB/safelist
-                    // rejection after a full, potentially very slow
-                    // upload attempt (Assignment.attachment's
-                    // MaxFileSizeValidator(50) + DOCUMENT_MEDIA_EXTENSIONS
-                    // in models.py). Scoping the picker itself to the
-                    // allowed extensions AND re-checking size/type on the
-                    // result catches this immediately, locally.
-                    final res = await FilePicker.platform.pickFiles(
-                      type: FileType.custom,
-                      allowedExtensions: LiveClassUploadLimits.documentExtensions,
-                    );
-                    if (res == null || res.files.isEmpty) return;
-                    final picked = res.files.first;
-                    final error = LiveClassUploadLimits.checkPlatformFile(
-                      picked,
-                      maxMB: LiveClassUploadLimits.assignmentAttachmentMaxMB,
-                      allowedExtensions: LiveClassUploadLimits.documentExtensions,
-                    );
-                    if (error != null) {
-                      if (ctx.mounted) ScaffoldMessenger.of(ctx).showSnackBar(SnackBar(content: Text(error)));
-                      return;
-                    }
-                    setSheet(() => attachment = picked);
-                  },
-                  style: OutlinedButton.styleFrom(
-                    alignment: Alignment.centerLeft,
-                    padding: const EdgeInsets.symmetric(vertical: 13, horizontal: 14),
-                    side: BorderSide(color: Colors.grey.shade300),
-                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(LiveClassRadius.chip)),
-                  ),
-                  icon: Icon(Icons.attach_file_rounded, color: attachment == null ? Colors.grey.shade600 : LiveClassColors.navy),
-                  label: Text(
-                    attachment?.name ?? 'Attach file (optional)',
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: TextStyle(color: attachment == null ? Colors.grey.shade600 : LiveClassColors.navy, fontWeight: FontWeight.w600),
-                  ),
-                ),
-                const SizedBox(height: 20),
-                SizedBox(
-                  width: double.infinity,
-                  child: ElevatedButton(
-                    style: ElevatedButton.styleFrom(
-                      backgroundColor: LiveClassColors.navy,
-                      foregroundColor: Colors.white,
-                      padding: const EdgeInsets.symmetric(vertical: 14),
-                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(LiveClassRadius.chip)),
-                    ),
-                    onPressed: saving
-                        ? null
-                        : () async {
-                            if (titleCtrl.text.trim().isEmpty || dueDate == null) {
-                              ScaffoldMessenger.of(ctx)
-                                  .showSnackBar(const SnackBar(content: Text('Title and due date are required')));
-                              return;
-                            }
-                            final maxScore = int.tryParse(scoreCtrl.text.trim()) ?? 100;
-                            setSheet(() => saving = true);
-                            try {
-                              final a = await LiveClassApi.assignments.create(
-                                Assignment(
-                                  id: 0,
-                                  classroomId: widget.classroomId,
-                                  sessionId: widget.sessionId,
-                                  title: titleCtrl.text.trim(),
-                                  description: descCtrl.text.trim(),
-                                  dueDate: dueDate!,
-                                  maxScore: maxScore,
-                                  createdAt: DateTime.now(),
-                                ),
-                                attachmentPath: attachment?.path,
-                              );
-                              if (mounted) {
-                                setState(() => _assignments = [a, ..._assignments]);
-                                Navigator.pop(ctx);
-                              }
-                            } on LiveClassApiException catch (e) {
-                              setSheet(() => saving = false);
-                              ScaffoldMessenger.of(ctx).showSnackBar(SnackBar(content: Text(e.message)));
-                            }
-                          },
-                    child: saving
-                        ? const SizedBox(
-                            height: 18, width: 18, child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white))
-                        : const Text('Create'),
-                  ),
-                ),
-              ],
+        builder: (ctx, setD) => AlertDialog(
+          title: Text(t.createCta),
+          content: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children: [
+            TextField(controller: titleCtrl, decoration: InputDecoration(labelText: t.assignmentTitleLabel)),
+            const SizedBox(height: 8),
+            TextField(controller: descCtrl, maxLines: 3),
+            const SizedBox(height: 8),
+            OutlinedButton.icon(
+              icon: const Icon(Icons.event_rounded, size: 16),
+              label: Text(due == null ? t.assignmentNoDueDate : '${t.assignmentDueLabel}: ${due!.toIso8601String().substring(0, 10)}'),
+              onPressed: () async {
+                final now = DateTime.now();
+                final d = await showDatePicker(
+                  context: ctx,
+                  initialDate: now.add(const Duration(days: 7)),
+                  firstDate: now,
+                  lastDate: now.add(const Duration(days: 365 * 2)),
+                );
+                if (d != null) setD(() => due = d);
+              },
             ),
-          ),
+          ]),
+          actions: [
+            TextButton(onPressed: () => Navigator.pop(ctx, false), child: Text(t.cancelCta)),
+            TextButton(onPressed: () => Navigator.pop(ctx, true), child: Text(t.createCta)),
+          ],
         ),
       ),
     );
+    if (ok != true || titleCtrl.text.trim().isEmpty) return;
+    try {
+      await widget.api.createAssignment({
+        'classroom': widget.classroomId,
+        'title': titleCtrl.text.trim(),
+        'description': descCtrl.text.trim(),
+        if (due != null) 'due_date': due!.toIso8601String().substring(0, 10),
+      });
+      _load();
+    } catch (e) {
+      if (mounted) lsSnack(context, e.toString(), error: true);
+    }
   }
-
-  // FIX (i18n / timezone audit — see utils/liveclass_datetime.dart / the
-  // matching fix already applied in doubts_screen.dart, holidays_screen.dart,
-  // submission_grading_screen.dart etc.): this used to be a hand-rolled
-  // formatter reading `.day`/`.month`/`.hour` straight off `a.dueDate`, which
-  // comes from the API as a UTC DateTime (see liveclass_models.dart's
-  // parsing) — with no `.toLocal()` call, and against the deprecated,
-  // English-only `kLiveClassMonths` array. A due date set for 11:59 PM IST
-  // rendered hours off (and only in English) for every viewer. Every call
-  // site below now goes through the shared, locale + timezone-safe
-  // `liveClassFmtDateTime()` helper this file already imports from
-  // liveclass_theme.dart instead.
 
   @override
   Widget build(BuildContext context) {
+    final t = AppLocalizations.of(context)!;
+    final cs = Theme.of(context).colorScheme;
+
     return Scaffold(
-      backgroundColor: LiveClassColors.bg,
-      appBar: liveClassAppBar('Assignments'),
-      floatingActionButton: widget.canManage
-          ? FloatingActionButton.extended(
-              backgroundColor: LiveClassColors.navy,
-              onPressed: _openCreateSheet,
-              icon: const Icon(Icons.add_rounded),
-              label: const Text('New'),
-            )
+      backgroundColor: lsBg(context),
+      appBar: lsAppBar(context, title: t.assignmentsTitle),
+      floatingActionButton: widget.isTeacher
+          ? FloatingActionButton(onPressed: _create, child: const Icon(Icons.add_rounded))
           : null,
       body: RefreshIndicator(
-        color: LiveClassColors.navy,
         onRefresh: _load,
         child: _loading
-            ? const LiveClassLoading()
+            ? const Center(child: CircularProgressIndicator())
             : _error != null
-                ? LiveClassErrorState(message: _error!, onRetry: _load)
+                ? ErrorStateWidget(title: t.couldNotLoadAssignments, retryLabel: t.retry, onRetry: _load)
                 : _assignments.isEmpty
-                    ? const LiveClassEmptyState(
-                        icon: Icons.assignment_outlined,
-                        title: 'No assignments yet',
-                        subtitle: 'Assignments you create will show up here.',
-                      )
-                    : ListView.builder(
-                        padding: EdgeInsets.fromLTRB(16, 14, 16, widget.canManage ? 90 : 24),
-                        itemCount: _assignments.length,
-                        itemBuilder: (ctx, i) {
-                          final a = _assignments[i];
-                          final overdue = DateTime.now().isAfter(a.dueDate);
-                          return LiveClassCard(
-                            onTap: () => Navigator.push(
-                              context,
-                              MaterialPageRoute(
-                                builder: (_) => SubmissionGradingScreen(assignment: a, canManage: widget.canManage),
+                    ? EmptyStateWidget(title: t.noAssignmentsYet, icon: Icons.assignment_outlined)
+                    : ListView(
+                        children: _assignments.map((m) {
+                          final due = m['due_date']?.toString();
+                          return LsCard(
+                            margin: const EdgeInsets.fromLTRB(kLsPad, 10, kLsPad, 0),
+                            onTap: () => _open(m),
+                            child: Row(children: [
+                              Expanded(
+                                child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                                  Text(m['title']?.toString() ?? '', style: LsType.head(context, size: 13.5)),
+                                  if (due != null && due.isNotEmpty)
+                                    Padding(
+                                      padding: const EdgeInsets.only(top: 3),
+                                      child: Text(
+                                        '${t.assignmentDueLabel}: ${due.length >= 10 ? due.substring(0, 10) : due}',
+                                        style: TextStyle(fontSize: 11.5, color: cs.onSurfaceVariant),
+                                      ),
+                                    ),
+                                ]),
                               ),
-                            ),
-                            child: Row(
-                              children: [
-                                LiveClassIconBadge(icon: Icons.assignment_rounded, size: 44),
-                                const SizedBox(width: 12),
-                                Expanded(
-                                  child: Column(
-                                    crossAxisAlignment: CrossAxisAlignment.start,
-                                    children: [
-                                      Text(a.title, maxLines: 1, overflow: TextOverflow.ellipsis,
-                                          style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 14)),
-                                      const SizedBox(height: 4),
-                                      Row(
-                                        children: [
-                                          Icon(Icons.event_rounded, size: 13, color: overdue ? LiveClassColors.danger : Colors.grey.shade500),
-                                          const SizedBox(width: 4),
-                                          Text(
-                                            'Due ${liveClassFmtDateTime(a.dueDate, ctx)}',
-                                            style: TextStyle(
-                                              fontSize: 11.5,
-                                              color: overdue ? LiveClassColors.danger : Colors.grey.shade500,
-                                              fontWeight: overdue ? FontWeight.w600 : FontWeight.normal,
-                                            ),
-                                          ),
-                                        ],
-                                      ),
-                                      const SizedBox(height: 6),
-                                      Row(
-                                        children: [
-                                          if (overdue) ...[
-                                            const LiveClassStatusChip(label: 'PAST DUE', color: LiveClassColors.danger, background: LiveClassColors.dangerBg),
-                                            const SizedBox(width: 6),
-                                          ],
-                                          Container(
-                                            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
-                                            decoration: BoxDecoration(color: Colors.grey.shade100, borderRadius: BorderRadius.circular(8)),
-                                            child: Text('Max ${a.maxScore}', style: TextStyle(fontSize: 10.5, fontWeight: FontWeight.w600, color: Colors.grey.shade700)),
-                                          ),
-                                        ],
-                                      ),
-                                    ],
-                                  ),
-                                ),
-                                const SizedBox(width: 6),
-                                widget.canManage
-                                    ? IconButton(
-                                        icon: const Icon(Icons.delete_outline_rounded, color: LiveClassColors.danger),
-                                        onPressed: () => _confirmDelete(a),
-                                      )
-                                    : Icon(Icons.chevron_right_rounded, color: Colors.grey.shade400),
-                              ],
-                            ),
+                              Icon(Icons.chevron_right_rounded, color: cs.onSurfaceVariant),
+                            ]),
                           );
-                        },
+                        }).toList(),
+                      ),
+      ),
+    );
+  }
+}
+
+/// Teacher view: every student's submission for one assignment. Tapping a row
+/// opens the unified detail screen on that submission, which is where the
+/// server-enforced grading / review controls live.
+class _SubmissionsScreen extends StatefulWidget {
+  final LiveClassApi api;
+  final int classroomId;
+  final String assignmentId;
+  final String title;
+  const _SubmissionsScreen({required this.api, required this.classroomId, required this.assignmentId, required this.title});
+
+  @override
+  State<_SubmissionsScreen> createState() => _SubmissionsScreenState();
+}
+
+class _SubmissionsScreenState extends State<_SubmissionsScreen> {
+  List<Map<String, dynamic>> _rows = const [];
+  bool _loading = true;
+  Object? _error;
+
+  @override
+  void initState() {
+    super.initState();
+    _load();
+  }
+
+  Future<void> _load() async {
+    setState(() {
+      _loading = true;
+      _error = null;
+    });
+    try {
+      final data = await widget.api.submissions(classroomId: widget.classroomId, assignmentId: widget.assignmentId);
+      if (!mounted) return;
+      setState(() {
+        _rows = data.whereType<Map>().map((e) => Map<String, dynamic>.from(e)).toList();
+        _loading = false;
+      });
+    } catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _error = e;
+        _loading = false;
+      });
+    }
+  }
+
+  String _statusLabel(AppLocalizations t, String s) => switch (s) {
+        'checked' => t.assignmentStatusChecked,
+        'partially_checked' => t.assignmentStatusPartiallyChecked,
+        'submitted' => t.assignmentStatusSubmitted,
+        'late' => t.assignmentStatusLate,
+        _ => t.assignmentStatusMissing,
+      };
+
+  @override
+  Widget build(BuildContext context) {
+    final t = AppLocalizations.of(context)!;
+    final cs = Theme.of(context).colorScheme;
+    return Scaffold(
+      backgroundColor: lsBg(context),
+      appBar: lsAppBar(context, title: widget.title),
+      body: RefreshIndicator(
+        onRefresh: _load,
+        child: _loading
+            ? const Center(child: CircularProgressIndicator())
+            : _error != null
+                ? ErrorStateWidget(title: t.assignmentsErrorTitle, retryLabel: t.retry, onRetry: _load)
+                : _rows.isEmpty
+                    ? EmptyStateWidget(title: t.assignmentsEmptyTitle, icon: Icons.inbox_outlined)
+                    : ListView(
+                        children: _rows.map((r) {
+                          final roll = r['roll_number']?.toString() ?? '';
+                          final enrol = r['enrollment_no']?.toString() ?? '';
+                          final who = roll.isNotEmpty ? roll : (enrol.isNotEmpty ? enrol : '#${r['student'] ?? ''}');
+                          final marks = r['total_marks_awarded'];
+                          return LsCard(
+                            margin: const EdgeInsets.fromLTRB(kLsPad, 10, kLsPad, 0),
+                            onTap: () async {
+                              await Navigator.of(context).push(MaterialPageRoute(
+                                builder: (_) => AssignmentDetailScreen(
+                                  assignmentId: widget.assignmentId,
+                                  initialSubmission: AssignmentSubmission.fromJson(r),
+                                ),
+                              ));
+                              if (mounted) _load();
+                            },
+                            child: Row(children: [
+                              Expanded(child: Text(who, style: LsType.head(context, size: 13.5))),
+                              Text(
+                                marks != null ? '${_statusLabel(t, r['status']?.toString() ?? '')} · $marks' : _statusLabel(t, r['status']?.toString() ?? ''),
+                                style: TextStyle(fontSize: 12, color: cs.onSurfaceVariant),
+                              ),
+                              Icon(Icons.chevron_right_rounded, color: cs.onSurfaceVariant),
+                            ]),
+                          );
+                        }).toList(),
                       ),
       ),
     );

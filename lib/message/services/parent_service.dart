@@ -1,14 +1,8 @@
 // message/services/parent_service.dart
 //
-// Feature 8 — Parent/Guardian Mode, Flutter side.
+// Feature 8 — Parent/Guardian Mode, Flutter side (the PARENT's device).
 //
-// ⚠️ WIRING NOTE: this file wasn't given the app's actual networking
-// setup (no api_client.dart / base-URL constant was in the uploaded
-// files), so `_baseUrl` below is a placeholder — swap it for whatever
-// this app already uses to hit `/message/...` from other services
-// (push_notification_service.dart, call_manager.dart, etc.), so this
-// stays consistent with the rest of the app instead of a second,
-// diverging HTTP setup.
+// Networking: shares `Api.baseUrl` (../../utils/api.dart) with the rest of the app.
 //
 // Storage note: parent mode intentionally uses ITS OWN SharedPreferences
 // keys (`parent_token`, `parent_student_name`, `parent_label`) — never
@@ -16,10 +10,18 @@
 // be able to hold BOTH a normal student login AND a parent session at
 // the same time without either overwriting the other (e.g. a parent who
 // is also a student on the platform, viewing a sibling's progress).
+//
+// 🌐 LANGUAGE FIX — this service used to throw exceptions carrying hardcoded
+// Hinglish sentences ("Invalid ya expired code…"), and it has no BuildContext, so
+// they could never follow the app language. It now throws a typed
+// [ParentModeError]; the UI turns it into text with
+// `error.localized(AppLocalizations.of(context)!)` (ARB keys `parentErr*`).
 
 import 'dart:convert';
 import 'package:http/http.dart' as http;
 import 'package:shared_preferences/shared_preferences.dart';
+import '../../l10n/app_localizations.dart';
+import '../../utils/api.dart';
 
 class ParentAttendanceStats {
   final int currentStreak;
@@ -100,19 +102,52 @@ class ParentDashboard {
   }
 }
 
+/// Everything that can go wrong in parent mode. Turned into user-facing text by the UI.
+enum ParentModeError {
+  invalidCode,
+  tooManyAttempts,
+  generic,
+  sessionExpired,
+  accessRevoked,
+  dashboardLoadFailed,
+}
+
 class ParentModeException implements Exception {
-  final String message;
-  ParentModeException(this.message);
+  final ParentModeError error;
+  ParentModeException(this.error);
+
+  /// The saved session is gone (missing token or revoked) — retrying is pointless,
+  /// the parent has to enter a fresh code.
+  bool get needsNewCode =>
+      error == ParentModeError.sessionExpired || error == ParentModeError.accessRevoked;
+
+  String localized(AppLocalizations l10n) {
+    switch (error) {
+      case ParentModeError.invalidCode:
+        return l10n.parentErrInvalidCode;
+      case ParentModeError.tooManyAttempts:
+        return l10n.parentErrTooManyAttempts;
+      case ParentModeError.sessionExpired:
+        return l10n.parentErrSessionExpired;
+      case ParentModeError.accessRevoked:
+        return l10n.parentErrAccessRevoked;
+      case ParentModeError.dashboardLoadFailed:
+        return l10n.parentErrDashboardLoad;
+      case ParentModeError.generic:
+        return l10n.parentErrGeneric;
+    }
+  }
+
   @override
-  String toString() => message;
+  String toString() => 'ParentModeException(${error.name})';
 }
 
 class ParentService {
   ParentService._();
   static final ParentService instance = ParentService._();
 
-  // TODO: replace with the app's real base URL / ApiClient.
-  static const String _baseUrl = 'https://YOUR_API_HOST/message';
+  static String get _baseUrl => "${Api.baseUrl}/message";
+  static const _timeout = Duration(seconds: 20);
 
   static const _kParentToken = 'parent_token';
   static const _kParentStudentName = 'parent_student_name';
@@ -121,25 +156,35 @@ class ParentService {
   /// Redeem a code the student shared. Stores the returned token locally
   /// on success (separate from the student's own `access_token`).
   Future<void> verifyCode(String code) async {
-    final res = await http.post(
-      Uri.parse('$_baseUrl/parent/verify/'),
-      headers: {'Content-Type': 'application/json'},
-      body: jsonEncode({'code': code.trim().toUpperCase()}),
-    );
-
-    if (res.statusCode == 404) {
-      throw ParentModeException('Invalid ya expired code. Dobara check karo.');
-    }
-    if (res.statusCode == 429) {
-      throw ParentModeException('Bahut attempts ho gaye — thodi der baad try karo.');
-    }
-    if (res.statusCode != 200) {
-      throw ParentModeException('Kuch galat ho gaya. Dobara try karo.');
+    final http.Response res;
+    try {
+      res = await http
+          .post(
+            Uri.parse('$_baseUrl/parent/verify/'),
+            headers: {'Content-Type': 'application/json'},
+            body: jsonEncode({'code': code.trim().toUpperCase()}),
+          )
+          .timeout(_timeout);
+    } on Exception {
+      // no internet / timeout / DNS — all "try again" for the parent
+      throw ParentModeException(ParentModeError.generic);
     }
 
-    final data = jsonDecode(res.body) as Map<String, dynamic>;
+    if (res.statusCode == 404) throw ParentModeException(ParentModeError.invalidCode);
+    if (res.statusCode == 429) throw ParentModeException(ParentModeError.tooManyAttempts);
+    if (res.statusCode != 200) throw ParentModeException(ParentModeError.generic);
+
+    final Map<String, dynamic> data;
+    try {
+      data = jsonDecode(res.body) as Map<String, dynamic>;
+    } on Exception {
+      throw ParentModeException(ParentModeError.generic);
+    }
+    final token = data['parent_token'];
+    if (token is! String || token.isEmpty) throw ParentModeException(ParentModeError.generic);
+
     final prefs = await SharedPreferences.getInstance();
-    await prefs.setString(_kParentToken, data['parent_token']);
+    await prefs.setString(_kParentToken, token);
     await prefs.setString(_kParentStudentName, data['student_name'] ?? '');
     await prefs.setString(_kParentLabel, data['label'] ?? '');
   }
@@ -154,23 +199,34 @@ class ParentService {
     final prefs = await SharedPreferences.getInstance();
     final token = prefs.getString(_kParentToken);
     if (token == null || token.isEmpty) {
-      throw ParentModeException('Session expire ho gaya. Code dobara daalo.');
+      throw ParentModeException(ParentModeError.sessionExpired);
     }
 
-    final res = await http.get(
-      Uri.parse('$_baseUrl/parent/dashboard/'),
-      headers: {'X-Parent-Token': token},
-    );
+    final http.Response res;
+    try {
+      res = await http
+          .get(
+            Uri.parse('$_baseUrl/parent/dashboard/'),
+            headers: {'X-Parent-Token': token},
+          )
+          .timeout(_timeout);
+    } on Exception {
+      throw ParentModeException(ParentModeError.dashboardLoadFailed);
+    }
 
     if (res.statusCode == 403 || res.statusCode == 401) {
       await signOut();
-      throw ParentModeException('Access revoke ho gaya hai. Student se naya code lo.');
+      throw ParentModeException(ParentModeError.accessRevoked);
     }
     if (res.statusCode != 200) {
-      throw ParentModeException('Dashboard load nahi ho paaya. Dobara try karo.');
+      throw ParentModeException(ParentModeError.dashboardLoadFailed);
     }
 
-    return ParentDashboard.fromJson(jsonDecode(res.body));
+    try {
+      return ParentDashboard.fromJson(jsonDecode(res.body));
+    } on Exception {
+      throw ParentModeException(ParentModeError.dashboardLoadFailed);
+    }
   }
 
   Future<String?> cachedStudentName() async {

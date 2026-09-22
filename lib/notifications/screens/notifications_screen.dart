@@ -12,8 +12,9 @@ import 'package:timeago/timeago.dart' as timeago;
 
 import '../models/notification_model.dart';
 import '../services/notification_service.dart';
-import '../../../widgets/ls_ui.dart';
-import '../../../widgets/error_widgets.dart';
+import '../../widgets/ls_ui.dart';
+import '../../widgets/error_widgets.dart';
+import 'notification_settings_screen.dart';
 // import '../../../widgets/skeletons.dart'; // agar generic list-skeleton chahiye to add karo
 
 const double _kScrollThreshold = 700; // home.dart wala hi 700px convention (Task 10.5)
@@ -151,6 +152,16 @@ class _NotificationsScreenState extends State<NotificationsScreen> {
         context,
         title: 'Notifications',
         actions: [
+          // 🔥 FIX [Task 5] — settings gear here is the quick path straight
+          // from the notification list; also reachable from main Settings.
+          IconButton(
+            icon: const Icon(Icons.settings_outlined),
+            tooltip: 'Notification settings',
+            onPressed: () => Navigator.push(
+              context,
+              MaterialPageRoute(builder: (_) => const NotificationSettingsScreen()),
+            ),
+          ),
           TextButton(
             onPressed: _items.any((n) => !n.isRead) ? _onMarkAllRead : null,
             child: const Text('Mark all read'),
