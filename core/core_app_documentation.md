@@ -14,12 +14,12 @@
 > **Reconciliation pass (older):** `classroom_chat_bridge.py` firse check kiya gaya — **§6 ka "10 public/semi-public entry points" claim ab STALE hai.** File me ab campus (`campus` app) ↔ chat-Group/video-room bridge ke **2 naye functions** hain, jo is doc me pehle kahin mention nahi the:
 > - `create_section_group(section, actor)` — `create_classroom_group()`'s `campus.Section` counterpart (`campus/bridge.py::create_section_group` isko ab top-level import ke through seedha call karta hai). Members = ACTIVE `StudentEnrollment` + APPROVED `SubjectTeacherassigments` (promoted to MODERATOR), creator/ADMIN = section ka `ClassTeacherassigments`. Idempotent, `ValueError` agar `actor` class-teacher na ho — same contract-shape jo `create_classroom_group()` already follow karta hai.
 > - `provision_video_room(live_session, actor)` — `campus.CampusLiveSession.room_id` ke liye ek deterministic room-name string (`f"campus_live_session_{live_session.id}"`) banata hai. **LiveKit JWT yahan mint NAHI hoti** — har participant apna token join-time pe, apni identity ke saath, alag se banata hai (`message.livekit_utils.generate_livekit_token`, jo abhi tak `campus/views.py` na aane ki wajah se wire nahi hai — flagged, guess nahi kiya gaya).
-> - Module ka apna docstring ab khud ko **12 public entry points** bolta hai (pehle 10): 8 liveclass-facing sync functions (1-8) + `get_groups_for_classrooms()` (message-facing) + naye `create_section_group()`/`provision_video_room()` (campus-facing, functions 10/11) + `resolve_parent_from_token()` — jo iss pass me **#9 se #12 pe renumber ho gaya** hai, taaki campus-facing pair (10/11) module ke andar contiguous rahe, beech me insert na ho.
+> - Module ka apna docstring ab khud ko **12 public entry points** bolta hai (pehle 10): 8 tuitionclass-facing sync functions (1-8) + `get_groups_for_classrooms()` (message-facing) + naye `create_section_group()`/`provision_video_room()` (campus-facing, functions 10/11) + `resolve_parent_from_token()` — jo iss pass me **#9 se #12 pe renumber ho gaya** hai, taaki campus-facing pair (10/11) module ke andar contiguous rahe, beech me insert na ho.
 > - Iske saath `campus.models` (`ClassTeacherassigments`, `StudentEnrollment`, `SubjectTeacherassigments`) is file ki dependency list me bhi add ho gaya hai — pehle sirf `message.models`/`message.services` documented tha.
 > §1, §2, §6, aur §8 (dependency graph) neeche update kar diye gaye hain.
 
 > **Reconciliation pass (latest — this update):** `models.py` aur nayi migration file (`0004_alter_notification_notif_type.py`) ke against check kiya — **`NotifType` enum ka documentation bahut peeche reh gaya tha**, fix kar diya:
-> - **§3's `NotifType` list sirf 31 values document karti thi ("28 original liveclass + 3 message-app types") — real enum me ab 55 values hain.** Missing the: task 11 ka `post` app block (`POST_LIKED`/`POST_COMMENTED`, 2), pura campus block (9), testseries/assigments/campus-gamification block (8), aur is pass (TASK 1) ke 5 naye `FOLLOW_*`/`*_FROM_FOLLOWED` values (`user_profile`'s Follow feature). §3 ab poori 55-value list, grouped by source app, ke saath update hai.
+> - **§3's `NotifType` list sirf 31 values document karti thi ("28 original tuitionclass + 3 message-app types") — real enum me ab 55 values hain.** Missing the: task 11 ka `post` app block (`POST_LIKED`/`POST_COMMENTED`, 2), pura campus block (9), testseries/assigments/campus-gamification block (8), aur is pass (TASK 1) ke 5 naye `FOLLOW_*`/`*_FROM_FOLLOWED` values (`user_profile`'s Follow feature). §3 ab poori 55-value list, grouped by source app, ke saath update hai.
 > - **`CAMPUS_APP_TYPES`, `TESTSERIES_APP_TYPES`, aur naya `FOLLOW_APP_TYPES` — teeno frozensets is doc me pehle kabhi mention nahi hue the**, sirf `MESSAGE_APP_TYPES` document tha. `views.py`/`serializers.py` ke apne-apne app ka notification-routing in par depend karta hai (same "ek jagah se dono import karein" pattern jo `MESSAGE_APP_TYPES` ke liye already tha) — §3 me sab add kiye.
 > - **Naya migration `core/migrations/0004_alter_notification_notif_type.py` — is doc me pehle mention nahi tha.** State-only `AlterField` (`choices=` par, koi DB column/constraint change nahi, isliye Postgres/SQLite par zero SQL issue hoti) — sirf Django ke migration-state ko model se sync rakhne ke liye, taaki `makemigrations --check` CI me drift na pakde. `TESTSERIES_CREATED_BY_FOLLOWED` (30 chars) ab `max_length=30` ke bilkul limit par hai, zero headroom bacha — agla naya value isse lamba hua to `max_length` bhi isi migration-shape me bump karna padega.
 
@@ -39,12 +39,12 @@
 
 ## 1. `core` app kyu bana?
 
-Pehle notifications aur classroom↔chat coupling `liveclass` app ke andar bikhri hui thi. `core` app do cheezein centralize karta hai:
+Pehle notifications aur classroom↔chat coupling `tuitionclass` app ke andar bikhri hui thi. `core` app do cheezein centralize karta hai:
 
 1. **Notification system** (task 42-48) — `Notification` + `NotificationPreference` models, unko banane ka service (`create_notification`), burst events ke liye batching (`create_batched_notification`), aur inhe expose karne wale REST endpoints.
-2. **Classroom ↔ Chat bridge** (task 28) — `liveclass` app (classrooms) aur `message` app (chat groups) ke beech ka SAARA coupling isi ek file (`classroom_chat_bridge.py`) se guzarta hai, taaki dono apps ek dusre ke internal models seedhe import na karein. **Naya (is pass) — ye ab `campus` app ↔ chat-Group/video-room bridge bhi hai**: `campus/bridge.py` isi file ke `create_section_group()`/`provision_video_room()` (§6) ke through campus ke section-level chat groups aur live-session video rooms banata hai, same "kisi ke internal model seedha import mat karo" pattern se.
+2. **Classroom ↔ Chat bridge** (task 28) — `tuitionclass` app (classrooms) aur `message` app (chat groups) ke beech ka SAARA coupling isi ek file (`classroom_chat_bridge.py`) se guzarta hai, taaki dono apps ek dusre ke internal models seedhe import na karein. **Naya (is pass) — ye ab `campus` app ↔ chat-Group/video-room bridge bhi hai**: `campus/bridge.py` isi file ke `create_section_group()`/`provision_video_room()` (§6) ke through campus ke section-level chat groups aur live-session video rooms banata hai, same "kisi ke internal model seedha import mat karo" pattern se.
 
-**Design principle jo har jagah repeat hoti hai:** `core` ek neutral, app-agnostic layer hai — `liveclass`, `message`, `campus`, aur future Phase 5 (Posts/Follow/Like) sab isi se hokar guzarte hain, ye kisi ek app ka internal detail nahi jaanta.
+**Design principle jo har jagah repeat hoti hai:** `core` ek neutral, app-agnostic layer hai — `tuitionclass`, `message`, `campus`, aur future Phase 5 (Posts/Follow/Like) sab isi se hokar guzarte hain, ye kisi ek app ka internal detail nahi jaanta.
 
 ---
 
@@ -52,12 +52,12 @@ Pehle notifications aur classroom↔chat coupling `liveclass` app ke andar bikhr
 
 | File | Kya karta hai |
 |---|---|
-| `models.py` | `Notification`, `NotificationPreference` — dono models `liveclass` se yahan move hue (task 42). `NotifType` enum ab **56 values** hai (§3) — pehle is doc me sirf 31 documented the. |
+| `models.py` | `Notification`, `NotificationPreference` — dono models `tuitionclass` se yahan move hue (task 42). `NotifType` enum ab **56 values** hai (§3) — pehle is doc me sirf 31 documented the. |
 | `migrations/` | **Koi migration file iss upload ka hissa kabhi nahi rahi** — is doc me pehle kuch specific filenames (`0001_move_notification_models.py`, `0002_widen_message_and_add_data.py`, `0004_alter_notification_notif_type.py`) fact ki tarah likhi gayi thi, jo galat tha (verify nahi ho saki). Jo pakka hai (model docstrings se): `notif_type`'s `choices=` badalne par is codebase ka convention state-only `AlterField` migration generate karna hai (`makemigrations --check` ko CI me drift-free rakhne ke liye) — koi DB-level operation nahi. Naye `PARENT_DEVICE_PENDING` value ke liye ye migration **abhi generate nahi hui hai** (§9, naya open item). |
 | `services.py` | `create_notification()` + `create_bulk_notifications()` — sirf bell-row(s) banate hain, push kabhi nahi bhejte |
 | `notification_batching.py` | `create_batched_notification()` — burst events (5 likes ek saath) ko ek notification me collapse karta hai. ✅ **Real implementation ab uploaded hai — see §5** (pehle yahan broken-content warning thi). |
-| `classroom_chat_bridge.py` | `liveclass` ↔ `message` app ke beech ka pura coupling, **campus ke saath bhi** — 8 liveclass sync functions + `get_groups_for_classrooms()` (bulk helper) + `create_section_group()`/`provision_video_room()` (campus ↔ chat/video bridge) + **naya `generate_campus_session_token()`** (Task 14, per-participant LiveKit join token) + `resolve_parent_from_token()` (Task 5, parent-portal auth, ab **#14**) — **14 total public entry points — see §6/§6.1** |
-| `search.py` | Unified cross-app "search everything" (Postgres FTS + trigram, `message/search_utils.py` ka extension). **4 sources registered**: `message`, `campus.Notice` (Task F-4), aur `assigments`/`testseries` (Task 18) — `post`/`liveclass.ClassMaterial` abhi bhi STUB hain (model uploads na hone ki wajah se). Pure ranking/merging layer hai — koi bhi permission-scoping khud nahi karta, caller (`core/views.py::SearchView`) ka pehle se scoped queryset leta hai. §6.2 dekho. |
+| `classroom_chat_bridge.py` | `tuitionclass` ↔ `message` app ke beech ka pura coupling, **campus ke saath bhi** — 8 tuitionclass sync functions + `get_groups_for_classrooms()` (bulk helper) + `create_section_group()`/`provision_video_room()` (campus ↔ chat/video bridge) + **naya `generate_campus_session_token()`** (Task 14, per-participant LiveKit join token) + `resolve_parent_from_token()` (Task 5, parent-portal auth, ab **#14**) — **14 total public entry points — see §6/§6.1** |
+| `search.py` | Unified cross-app "search everything" (Postgres FTS + trigram, `message/search_utils.py` ka extension). **4 sources registered**: `message`, `campus.Notice` (Task F-4), aur `assigments`/`testseries` (Task 18) — `post`/`tuitionclass.ClassMaterial` abhi bhi STUB hain (model uploads na hone ki wajah se). Pure ranking/merging layer hai — koi bhi permission-scoping khud nahi karta, caller (`core/views.py::SearchView`) ka pehle se scoped queryset leta hai. §6.2 dekho. |
 | `serializers.py` | Real DRF `ModelSerializer`s (`NotificationSerializer`, `NotificationPreferenceSerializer`), replacing this doc's own original `to_dict` suggestion — see §7 |
 | `views.py` | `NotificationViewSet` (list/retrieve/destroy + custom actions) + `NotificationPreferenceView` + **`SearchView`** (Task 18, unified search endpoint) — **`SearchView` ab sab 4 registered sources (`assigments`/`testseries`/`message`/`campus_notice`, Task 13) ke liye khud apna scoped queryset banata hai**, see §6.2/§7 |
 | `urls.py` | Router wiring (`notifications/`) + `notification-preferences/me/` + **`search/`** (Task 18, `SearchView.as_view()`) — root urlconf me `include("core.urls")` karna hai |
@@ -84,13 +84,13 @@ Ye section pehle assume karta tha ki `core/models.py` khaali hai aur design sugg
 | `notif_type` | CharField(**max_length=30**, not 32) | `NotifType` choices (neeche, ab **poori confirmed list**) |
 | `title` | CharField(**max_length=150**, not 255) | |
 | `message` | TextField, blank ok | Task 44 me `CharField(255)` se widen kiya gaya — message-app chat text length-capped nahi hai, `CharField(255)` Postgres pe hard-fail karta longer message pe. Iske liye `AlterField` migration chahiye hoti (varchar→text Postgres pe table-rewrite-free hai) — actual migration file kabhi upload ka hissa nahi rahi, isliye specific filename yahan claim nahi ki jaa rahi. |
-| `classroom` | FK → `liveclass.Classroom` | nullable, `SET_NULL` — sirf liveclass-specific types ke liye |
-| `session` | FK → `liveclass.ClassSession` | nullable, `SET_NULL` |
-| `data` | JSONField (dict, `default=dict`) | task 44: generic free-form context (e.g. `conversation_id`, deep-linking) jo liveclass FKs me fit nahi hota — additive column, same 0002 migration |
+| `classroom` | FK → `tuitionclass.Classroom` | nullable, `SET_NULL` — sirf tuitionclass-specific types ke liye |
+| `session` | FK → `tuitionclass.ClassSession` | nullable, `SET_NULL` |
+| `data` | JSONField (dict, `default=dict`) | task 44: generic free-form context (e.g. `conversation_id`, deep-linking) jo tuitionclass FKs me fit nahi hota — additive column, same 0002 migration |
 | `is_read` | BooleanField | koi standalone `db_index=True` nahi — composite `Meta.indexes` cover karte hain (neeche, ab **do** hain) |
 | `read_at` | DateTimeField | nullable, sirf `mark_read()` se set hota hai |
 | `created_at` | auto (`auto_now_add`) | indexed (dono composite indexes ka part), `ordering = ["-created_at"]` |
-| — | **no `updated_at`** | Original liveclass model me bhi nahi tha — `mark_read()` hi iski sirf mutation hai, alag `updated_at` redundant hoti (batching cache khud apna staleness track karta hai, is model pe nahi) |
+| — | **no `updated_at`** | Original tuitionclass model me bhi nahi tha — `mark_read()` hi iski sirf mutation hai, alag `updated_at` redundant hoti (batching cache khud apna staleness track karta hai, is model pe nahi) |
 
 **⚠️ NEW (production hardening pass, koi schema-breaking change nahi — sirf 2 additive index) — pehle iss doc me nahi tha:**
 
@@ -103,15 +103,15 @@ Ye section pehle assume karta tha ki `core/models.py` khaali hai aur design sugg
 Do additive indexes + ek convenience manager ke alawa kuch aur nahi badla — field list, `db_table`, choices, sab wahi hai jo neeche/upar describe hai.
 
 **`Meta.db_table` — DELIBERATELY pinned, ab implementation-confirmed:**
-- `Notification` → `db_table = "liveclass_notification"`
-- `NotificationPreference` → `db_table = "liveclass_notificationpreference"`
+- `Notification` → `db_table = "tuitionclass_notification"`
+- `NotificationPreference` → `db_table = "tuitionclass_notificationpreference"`
 
-Ye task 42 ke move (`liveclass`→`core`) ko ek `SeparateDatabaseAndState`-style migration banata hai — sirf Django ORM state move hota hai, physical Postgres table na move hoti hai, na rename, na row-copy. Actual migration file kabhi is doc ki source list ka hissa nahi rahi, isliye koi specific filename yahan claim nahi ki jaa rahi — sirf `db_table` pinning ka intent (model se hi confirmed) document hai. **In values ko badalne se pehle real DB confirm karo** (§9).
+Ye task 42 ke move (`tuitionclass`→`core`) ko ek `SeparateDatabaseAndState`-style migration banata hai — sirf Django ORM state move hota hai, physical Postgres table na move hoti hai, na rename, na row-copy. Actual migration file kabhi is doc ki source list ka hissa nahi rahi, isliye koi specific filename yahan claim nahi ki jaa rahi — sirf `db_table` pinning ka intent (model se hi confirmed) document hai. **In values ko badalne se pehle real DB confirm karo** (§9).
 
 **`NotifType` enum — ✅ AB POORI CONFIRMED LIST HAI, 55 VALUES (pichli pass ne sirf 31 document kiye the):**
 
 ```
-# --- Original liveclass block (28) ---
+# --- Original tuitionclass block (28) ---
 JOIN_REQUEST_RECEIVED, JOIN_REQUEST_ACCEPTED, JOIN_REQUEST_REJECTED,
 PASS_REFUNDED, SESSION_REMINDER, assigments_GRADED, QUERY_ANSWERED,
 CERTIFICATE_ISSUED, WAITLIST_PROMOTED, CLASSROOM_FLAGGED, NOTICE_POSTED,
@@ -205,7 +205,7 @@ create_notification(recipient, notif_type, title, message="", *, classroom=None,
 - Har real call-site pe **do calls saath saath** hoti hain:
   ```python
   create_notification(student, "pass_auto_renewed", title, message, classroom=classroom)
-  send_notification(student, title, message, channel="push", data={...})   # separate, liveclass.notifications
+  send_notification(student, title, message, channel="push", data={...})   # separate, tuitionclass.notifications
   ```
 - **Task 44 ka pending kaam:** `message/push_utils.py` ke andar `send_chat_message_push` / `send_incoming_call_push` / `send_mention_push` abhi sirf push bhejte hain, bell-row nahi banate. In sab call-sites pe `create_notification(...)` ka matching call add karna hai (details `message/views_PATCH_bell_rows_for_push.md` me — agar wo file exist nahi karti, isse pehle bana lena).
 
@@ -252,7 +252,7 @@ create_batched_notification(
 ```
 
 - `target_id` **hamesha zaroori hai** — single-target types (jaise "follow") ke liye bhi recipient ka apna id pass karo (per-recipient ek batch).
-- Deliberately **decoupled** kisi specific push function se — caller (liveclass/message/future Posts app) apna `send_push_fn` pass karta hai.
+- Deliberately **decoupled** kisi specific push function se — caller (tuitionclass/message/future Posts app) apna `send_push_fn` pass karta hai.
 - Agar cache kehta hai row hai par DB me nahi milti (user ne beech me delete kar diya), to gracefully fresh batch start ho jata hai (exception nahi).
 
 ### ✅ RESOLVED — real implementation ab uploaded hai (pehle yahan 🔴 CRITICAL warning thi)
@@ -282,13 +282,13 @@ Is doc ka §5 pehle bolta tha ki `push_utils.py` kabhi upload nahi hua aur uske 
 
 ---
 
-## 6. `classroom_chat_bridge.py` — Liveclass ↔ Message bridge
+## 6. `classroom_chat_bridge.py` — Tuitionclass ↔ Message bridge
 
-**Golden rule:** `liveclass/signals.py`, `liveclass/views.py`, aur `notify_session_live` task — koi bhi seedha `message.models` / `message.services` import NAHI karta. Sab is ek file se guzarta hai.
+**Golden rule:** `tuitionclass/signals.py`, `tuitionclass/views.py`, aur `notify_session_live` task — koi bhi seedha `message.models` / `message.services` import NAHI karta. Sab is ek file se guzarta hai.
 
-✅ **Poora `classroom_chat_bridge.py` ab uploaded hai** (pehle sirf indirect evidence se contract infer kiya gaya tha) — file me total **14 public/semi-public entry points** hain: 8 liveclass sync functions + `get_groups_for_classrooms()` (bulk helper) + `create_section_group()`/`provision_video_room()` (campus bridge) + **`generate_campus_session_token()`** (**NEW is pass, Task 14 — see naya subsection neeche**) + `resolve_parent_from_token()` (Task 5).
+✅ **Poora `classroom_chat_bridge.py` ab uploaded hai** (pehle sirf indirect evidence se contract infer kiya gaya tha) — file me total **14 public/semi-public entry points** hain: 8 tuitionclass sync functions + `get_groups_for_classrooms()` (bulk helper) + `create_section_group()`/`provision_video_room()` (campus bridge) + **`generate_campus_session_token()`** (**NEW is pass, Task 14 — see naya subsection neeche**) + `resolve_parent_from_token()` (Task 5).
 
-✅ **FIXED (docstring bug):** module ka apna docstring pehle khud ko "9 functions" bolta tha bina clarify kiye ki `get_groups_for_classrooms()` us ginti me kyun nahi hai — koi functional bug nahi tha (code sahi kaam kar raha tha), sirf ambiguous/stale documentation thi jo naye reader ko confuse kar sakti thi. Ab docstring explicit hai: "9 functions" sirf un ko refer karta hai jinhe `liveclass` khud call karta hai (functions 1-9, neeche numbered); `get_groups_for_classrooms()` module ka **10wa** entry point hai — ek bulk/"GAP FIX" twin of `_get_group_for_classroom()`, parent dashboard ke liye add kiya gaya (neeche dekho), aur `liveclass` nahi balki `message/views_parent.py` seedha isko call karta hai, isliye wo "9 liveclass-facing functions" ki ginti se bahar tha. Dono counts (9 liveclass-facing + 1 message-facing = 10 total) module docstring me khud explicit hain.
+✅ **FIXED (docstring bug):** module ka apna docstring pehle khud ko "9 functions" bolta tha bina clarify kiye ki `get_groups_for_classrooms()` us ginti me kyun nahi hai — koi functional bug nahi tha (code sahi kaam kar raha tha), sirf ambiguous/stale documentation thi jo naye reader ko confuse kar sakti thi. Ab docstring explicit hai: "9 functions" sirf un ko refer karta hai jinhe `tuitionclass` khud call karta hai (functions 1-9, neeche numbered); `get_groups_for_classrooms()` module ka **10wa** entry point hai — ek bulk/"GAP FIX" twin of `_get_group_for_classroom()`, parent dashboard ke liye add kiya gaya (neeche dekho), aur `tuitionclass` nahi balki `message/views_parent.py` seedha isko call karta hai, isliye wo "9 tuitionclass-facing functions" ki ginti se bahar tha. Dono counts (9 tuitionclass-facing + 1 message-facing = 10 total) module docstring me khud explicit hain.
 
 ⚠️ **Numbering do baar shift ho chuki hai:** pehle campus-facing pair (`create_section_group()`/`provision_video_room()`, #10/#11) add hone par `resolve_parent_from_token()` ko #9 se #12 renumber kiya gaya tha (12 total). **Is pass — Task 14 — ek aur naya function (`generate_campus_session_token()`) #13 pe insert hua**, isliye `resolve_parent_from_token()` **#12 se #14 pe** dobara renumber ho gaya, taaki naya function bhi contiguous rahe. Naya total: **14 public entry points**. Koi behavior change nahi — sirf docstring ki apni internal numbering hilii hai.
 
@@ -300,7 +300,7 @@ Is doc ka §5 pehle bolta tha ki `push_utils.py` kabhi upload nahi hua aur uske 
 - **Public** (no leading underscore) — `message/views_parent.py` isko seedha import karta hai: `from core.classroom_chat_bridge import get_groups_for_classrooms`. Isse `message` app par `core` ki ek public-function dependency ban gayi hai — abhi tak §8 ka dependency graph isko show nahi karta tha, update kar diya gaya hai.
 
 **Kyu:**
-1. `liveclass` ko `message` app ke internal shape (Group ka structure, GroupMember role enum) se decouple rakhta hai.
+1. `tuitionclass` ko `message` app ke internal shape (Group ka structure, GroupMember role enum) se decouple rakhta hai.
 2. Kal ko chat-backend badle (naya Group model / alag app) to sirf ye ek file badalni padegi.
 
 **Error-handling pattern:** Har function **best-effort** hai — agar classroom ke paas `chat_group_enabled=False` hai (group kabhi bana hi nahi), sab sync functions chup-chaap **no-op** ho jaate hain, exception nahi throw karte (kyunki ye zyadatar signal handlers se call hote hain — inhe fail nahi hone dena). **Do exceptions is pattern se:** `create_classroom_group()` (explicit teacher action, signal nahi — REAL errors raise karta hai) aur `resolve_parent_from_token()` (§6.1 — ye ek live room ka access-gate hai, "fail open" yahan galat hoga, isliye kabhi exception nahi UGALTA lekin kabhi silently allow bhi nahi karta — har unexpected error `None` = deny).
@@ -315,7 +315,7 @@ Is doc ka §5 pehle bolta tha ki `push_utils.py` kabhi upload nahi hua aur uske 
 
 | # | Function | Kab call hoti hai | Behavior |
 |---|---|---|---|
-| 1 | `create_classroom_group(classroom, actor)` | Teacher ka explicit "Create Group" action (`POST /liveclass/classrooms/<id>/create_group/`) | **Idempotent** — group already hai to wahi return. `actor` teacher na ho to `ValueError`. Members = teacher + saare ACCEPTED join-requests wale students + saare `ClassroomStaff`. Staff ko `GroupMember.Role.MODERATOR` pe promote karta hai (`create_group()` sirf ADMIN/MEMBER deta hai). Poora kaam ek `transaction.atomic()` block me. Success pe `post_welcome_message()` bhi call hoti hai. **Sirf ye function real errors raise karta hai.** |
+| 1 | `create_classroom_group(classroom, actor)` | Teacher ka explicit "Create Group" action (`POST /tuitionclass/classrooms/<id>/create_group/`) | **Idempotent** — group already hai to wahi return. `actor` teacher na ho to `ValueError`. Members = teacher + saare ACCEPTED join-requests wale students + saare `ClassroomStaff`. Staff ko `GroupMember.Role.MODERATOR` pe promote karta hai (`create_group()` sirf ADMIN/MEMBER deta hai). Poora kaam ek `transaction.atomic()` block me. Success pe `post_welcome_message()` bhi call hoti hai. **Sirf ye function real errors raise karta hai.** |
 | 2 | `sync_membership_on_join_accept(classroom, student)` | Join request ACCEPT hone pe, **ya** session-waitlist se promote hone pe (dono call-sites yahi function reuse karte hain) | Student ko group me add karta hai (`add_members_to_group`, `actor=None` = system call). No-op agar group hi nahi. |
 | 3 | `sync_membership_on_removal(classroom, student, reason="")` | Kick / ban / refund | Student ko group se remove karta hai. `reason` sirf logging ke liye. |
 | 4 | `promote_to_moderator(classroom, user)` | Naya co-teacher/`ClassroomStaff` row bana | Pehle group me add karta hai (agar already member nahi), phir role `MODERATOR` set karta hai. |
@@ -326,7 +326,7 @@ Is doc ka §5 pehle bolta tha ki `push_utils.py` kabhi upload nahi hua aur uske 
 
 ### 10/11. Campus bridge functions — **NEW is pass, is doc me pehle bilkul mention nahi thi**
 
-`campus/bridge.py`'s own STATUS note flag karti thi ki `create_section_group`/`provision_video_room` campus se reference ho rahe the lekin yahan exist nahi karte the — is gap ko close karne ke liye add kiye gaye. Same "campus kabhi seedha `message`/`liveclass` models import nahi karta, `core.classroom_chat_bridge` hi ek darwaaza hai" pattern jo functions 1-8 already follow karte hain — sirf vocabulary campus ki hai (`StudentEnrollment`/`ClassTeacherassigments`/`SubjectTeacherassigments` instead of `ClassJoinRequest`/`ClassroomStaff`).
+`campus/bridge.py`'s own STATUS note flag karti thi ki `create_section_group`/`provision_video_room` campus se reference ho rahe the lekin yahan exist nahi karte the — is gap ko close karne ke liye add kiye gaye. Same "campus kabhi seedha `message`/`tuitionclass` models import nahi karta, `core.classroom_chat_bridge` hi ek darwaaza hai" pattern jo functions 1-8 already follow karte hain — sirf vocabulary campus ki hai (`StudentEnrollment`/`ClassTeacherassigments`/`SubjectTeacherassigments` instead of `ClassJoinRequest`/`ClassroomStaff`).
 
 | # | Function | Kab call hoti hai | Behavior |
 |---|---|---|---|
@@ -350,7 +350,7 @@ Function #11 (`provision_video_room`) ka apna docstring hamesha se ye exact gap 
 
 ### ✅ ASSUMPTIONS — RESOLVED (pehle 4 the, ab sab verified)
 
-Ye doc pehle bolta tha `liveclass/models.py`/`liveclass/views.py` upload nahi hue the, isliye field-names best-guess hain. **Ab resolve ho chuka hai** — real `classroom_chat_bridge.py` ka apna module docstring confirm karta hai ("✅ VERIFIED, Task 2 gap-fix pass"):
+Ye doc pehle bolta tha `tuitionclass/models.py`/`tuitionclass/views.py` upload nahi hue the, isliye field-names best-guess hain. **Ab resolve ho chuka hai** — real `classroom_chat_bridge.py` ka apna module docstring confirm karta hai ("✅ VERIFIED, Task 2 gap-fix pass"):
 
 1. ✅ `ClassJoinRequest(classroom, student, status)` — `ClassJoinRequest.Status.ACCEPTED` filter — **exact match, no change needed**.
 2. ✅ `ClassroomStaff(classroom, user, role)` — **exact match, no change needed**.
@@ -379,7 +379,7 @@ Functions 10/11 (upar) is cheez ko `campus` app se local-import karte hain:
 
 ## 6.1. `resolve_parent_from_token()` — Task 5, parent-portal auth (ab module ka **#14**, see §6)
 
-✅ **RESOLVED — implementation body ab uploaded hai.** Is doc ka pehla version yahan warn karta tha ki `classroom_chat_bridge.py` ke content me sirf 8 sync functions the, `resolve_parent_from_token` unme nahi tha, aur contract sirf indirectly (`liveclass/permissions.py`'s import + `test_parent_bridge.py`'s 11 tests se) infer kiya gaya tha. **Latest upload me poora function body maujood hai**, aur neeche ka pura "Confirmed contract" section ab function-body se line-by-line verify ho chuka hai — §9's corresponding open item (6) resolved kar diya gaya hai.
+✅ **RESOLVED — implementation body ab uploaded hai.** Is doc ka pehla version yahan warn karta tha ki `classroom_chat_bridge.py` ke content me sirf 8 sync functions the, `resolve_parent_from_token` unme nahi tha, aur contract sirf indirectly (`tuitionclass/permissions.py`'s import + `test_parent_bridge.py`'s 11 tests se) infer kiya gaya tha. **Latest upload me poora function body maujood hai**, aur neeche ka pura "Confirmed contract" section ab function-body se line-by-line verify ho chuka hai — §9's corresponding open item (6) resolved kar diya gaya hai.
 
 **Do naye details jo sirf real code se pata chale (tests se infer nahi ho sakte the):**
 - **Exact check order:** (1) `ParentToken.DoesNotExist` / koi bhi unexpected lookup error → deny; (2) token ka apna rolling inactivity window (`last_seen_at is None` ya `> INACTIVITY_TTL_DAYS` purana) → deny; (3) `parent_access_code.is_active == False` (revocation) → deny; (4) `parent_access_code.expires_at` (absolute expiry) → deny. Doc ka pehla version revocation-check ko access-code-expiry ke baad describe karta tha — real code me revocation check pehle aata hai, expiry check baad me (dono hi pass hone zaroori hain, to result same hai, bas exact order ye hai).
@@ -410,7 +410,7 @@ resolve_parent_from_token(token: str) -> resolution | None
 
 `core` ka "search everything" layer — messages, campus notices, (future) posts, (future) classroom materials, sab ek hi endpoint se. `message/search_utils.py` ne jo Postgres FTS (tsvector) + trigram-similarity strategy `Message` ke liye already establish ki thi, usi ka extension hai, generalized har us model ke liye jiske paas apna stored `search_vector` column nahi hai.
 
-**Kyu `core` me, `message` me nahi:** `core` already is project ka shared cross-app integration point hai (`Notification`'s seedhe `liveclass` FKs, `campus/bridge.py`'s "campus ka ONLY door core/message hai" golden rule — jo `core` khud ko kisi app me reach karne se restrict nahi karti). Yahan rakhne se `message`/`liveclass`/`campus`/`post` ko ek search-box ke liye ek-dusre ko seedha import nahi karna padta — sab sirf `core` se baat karte hain.
+**Kyu `core` me, `message` me nahi:** `core` already is project ka shared cross-app integration point hai (`Notification`'s seedhe `tuitionclass` FKs, `campus/bridge.py`'s "campus ka ONLY door core/message hai" golden rule — jo `core` khud ko kisi app me reach karne se restrict nahi karti). Yahan rakhne se `message`/`tuitionclass`/`campus`/`post` ko ek search-box ke liye ek-dusre ko seedha import nahi karna padta — sab sirf `core` se baat karte hain.
 
 **🔒 GOLDEN RULE jo ye file follow karti hai (`message/search_utils.py` jaisa hi):** har function neeche ek **already permission-scoped queryset** input leta hai. Ye module KABHI decide nahi karta ki kaun kya dekh sakta hai — wo decision (kaun si conversations ka participant hai, kaun se notices kisi student ke enrollment/parent-link/staff-profile se entitled hain, kaun se posts kisi blocked user ke nahi hain) hamesha us app ke apne view/queryset-building code me hi rehta hai, jaisa `message` ke liye pehle se hai. Ye logic yahan bhi partially reimplement karna (sirf `Notice` ke liye bhi) ek DOOSRI, independently-maintained copy ban jaati — do copies drift karti hain, aur ek search endpoint jo ek row leak kar de jo us app ka apna view deny karta — ye is feature ke exist hi na karne se bhi bura outcome hai. Isliye ye file **pure ranking/merging layer** hai, kabhi permission layer nahi.
 
@@ -420,10 +420,10 @@ resolve_parent_from_token(token: str) -> resolution | None
 |---|---|
 | `message` (chat messages) | ✅ WIRED — `message.search_utils.search_messages` ko seedha reuse karta hai (`Message` ke paas already stored `search_vector` + trigger hai). **Scoped queryset ab `SearchView` khud banata hai** (Task 13, `ConversationViewSet.search_all()` ka exact mirror — §7) — pehle ye source registered tha par `SearchView` uske liye koi queryset nahi banata tha. |
 | `campus_notice` (`campus.Notice`, `title`/`body`) | ✅ WIRED — `_search_generic_model()` ke through. **Scoped queryset ab `SearchView` khud banata hai** (Task 13, `NoticeViewSet.get_queryset()` ka exact mirror, `campus.views.get_my_campus_ids()` reuse karke — §7) — ye file khud campus/department/section visibility rules nahi jaanti/guess karti, golden rule upar ke mutabik. |
-| `assigments` (`assigments.assigments`, `title`/`description`) | ✅ **WIRED (Task 18, naya is pass me confirm hua)** — `_search_generic_model()` ke through. `SearchView` (§7) scoped queryset `assigmentsViewSet.get_queryset()` ko VERBATIM mirror karta hai: staff sab kuch dekhte hain, baaki sirf jo unhone khud post kiya ya jispe unki personal submission hai. Campus/liveclass-sourced assigmentss non-staff ke liye deliberately excluded hain yahan bhi (wo viewset khud unhe bahar rakhta hai). |
-| `testseries` (`testseries.TestSeries`, `title`/`description`) | ✅ **WIRED (Task 18, naya is pass me confirm hua)** — `_search_generic_model()` ke through. `SearchView` scoped queryset: individual/published (marketplace) + user ki khud-banayi + jo attempt ki + campus-context series un sections ke liye jinme user ACTIVE enrolled hai (`campus.StudentEnrollment` se — wahi roster-source jo `campus.bridge.create_testseries()` khud use karta hai). Liveclass-context series abhi included NAHI hain — liveclass side pe koi roster/entitlement resolver abhi nahi hai (`liveclass/bridge.py` me sirf assigments functions hain), isliye wo rows silently absent hain search results se, kabhi leak nahi hoti. |
+| `assigments` (`assigments.assigments`, `title`/`description`) | ✅ **WIRED (Task 18, naya is pass me confirm hua)** — `_search_generic_model()` ke through. `SearchView` (§7) scoped queryset `assigmentsViewSet.get_queryset()` ko VERBATIM mirror karta hai: staff sab kuch dekhte hain, baaki sirf jo unhone khud post kiya ya jispe unki personal submission hai. Campus/tuitionclass-sourced assigmentss non-staff ke liye deliberately excluded hain yahan bhi (wo viewset khud unhe bahar rakhta hai). |
+| `testseries` (`testseries.TestSeries`, `title`/`description`) | ✅ **WIRED (Task 18, naya is pass me confirm hua)** — `_search_generic_model()` ke through. `SearchView` scoped queryset: individual/published (marketplace) + user ki khud-banayi + jo attempt ki + campus-context series un sections ke liye jinme user ACTIVE enrolled hai (`campus.StudentEnrollment` se — wahi roster-source jo `campus.bridge.create_testseries()` khud use karta hai). Tuitionclass-context series abhi included NAHI hain — tuitionclass side pe koi roster/entitlement resolver abhi nahi hai (`tuitionclass/bridge.py` me sirf assigments functions hain), isliye wo rows silently absent hain search results se, kabhi leak nahi hoti. |
 | `post` (post app) | ❌ **STUB ONLY** — `post/models.py` kabhi kisi upload ka hissa nahi raha, isliye `Post`'s searchable field(s) ka naam pata nahi. Wire karne ke liye `SOURCES` me ek naya `SearchSource` add karna hai (`NOTICE_SOURCE` jaisi shape) jab wo model milega. |
-| `class_material` (`liveclass.ClassMaterial`) | ❌ **STUB ONLY**, same reason — class exist karti hai (ek pehli `liveclass/models.py` upload me confirm hui thi) par uski field-list kabhi nahi dekhi gayi. |
+| `class_material` (`tuitionclass.ClassMaterial`) | ❌ **STUB ONLY**, same reason — class exist karti hai (ek pehli `tuitionclass/models.py` upload me confirm hui thi) par uski field-list kabhi nahi dekhi gayi. |
 
 **Finish karne ke liye chahiye:** `post/models.py` (searchable field(s) + confirm karna ki `post` visibility kaise scope karta hai — shayad `user_profile.BlockUser`/`RestrictUser` se, taaki ye us logic ko duplicate na kare) aur `ClassMaterial` model definition (same do sawaal). Dono milne pe bas `SOURCES` me ek-ek `SearchSource` entry aur view-side scoped-queryset builder add karna hai — is file me aur kuch badalna nahi hai.
 
@@ -463,7 +463,7 @@ search_everything(
 
 | Method | Path | Kaam |
 |---|---|---|
-| GET | `notifications/` | List (paginated via `?limit=&offset=`, default 30, max 100). Response me `count`, `unread_count`, `results`. Optional `?source=message` / `?source=liveclass` filter. |
+| GET | `notifications/` | List (paginated via `?limit=&offset=`, default 30, max 100). Response me `count`, `unread_count`, `results`. Optional `?source=message` / `?source=tuitionclass` filter. |
 | GET | `notifications/{id}/` | Single notification |
 | DELETE | `notifications/{id}/` | Delete |
 | GET | `notifications/unread-count/` | `{"unread_count": N}` |
@@ -481,14 +481,14 @@ urlpatterns = [
 ]
 ```
 
-**⚠️ IMPORTANT cleanup jab wire kar do:** `liveclass/urls.py` me agar `notifications` router aur `notification-preferences/me/` already registered hain, to unhe **hata do**. Warna do endpoints ek hi table serve karenge — exactly wo split jo ye poora task remove karna chahta tha.
+**⚠️ IMPORTANT cleanup jab wire kar do:** `tuitionclass/urls.py` me agar `notifications` router aur `notification-preferences/me/` already registered hain, to unhe **hata do**. Warna do endpoints ek hi table serve karenge — exactly wo split jo ye poora task remove karna chahta tha.
 
 ### `NotificationSerializer` — ✅ **UPDATED: ab real DRF `ModelSerializer` hai, `to_dict` nahi**
 
-Ye doc pehle bolta tha ki `NotificationSerializer` deliberately plain `to_dict` staticmethod hai (`ModelSerializer` nahi). **Ab aisa nahi hai** — real `serializers.py` project ke already-established `ModelSerializer` convention (`liveclass/serializers.py` jaisa) follow karta hai, jaisa iss doc ka §7 pehle hi suggest karta tha. Behavior same hai, bas implementation ab real serializer class hai:
+Ye doc pehle bolta tha ki `NotificationSerializer` deliberately plain `to_dict` staticmethod hai (`ModelSerializer` nahi). **Ab aisa nahi hai** — real `serializers.py` project ke already-established `ModelSerializer` convention (`tuitionclass/serializers.py` jaisa) follow karta hai, jaisa iss doc ka §7 pehle hi suggest karta tha. Behavior same hai, bas implementation ab real serializer class hai:
 
 - `classroom_id = PrimaryKeyRelatedField(source="classroom", read_only=True)`, `session_id = PrimaryKeyRelatedField(source="session", read_only=True)` — FK ko id ke roop me expose karte hain bina nested object serialize kiye.
-- `source = SerializerMethodField()` — `get_source(obj)` return karta hai `"message"` agar `obj.notif_type` model ke `Notification.MESSAGE_APP_TYPES` (§3 dekho) me ho, warna `"liveclass"`. **Koi alag `_MESSAGE_APP_TYPES` set `views.py` ya `serializers.py` me nahi hai** — dono jagah `Notification.MESSAGE_APP_TYPES` seedha model se import hota hai, taaki naya message-app type add karte waqt sirf **ek** jagah (`models.py`) update karni pade.
+- `source = SerializerMethodField()` — `get_source(obj)` return karta hai `"message"` agar `obj.notif_type` model ke `Notification.MESSAGE_APP_TYPES` (§3 dekho) me ho, warna `"tuitionclass"`. **Koi alag `_MESSAGE_APP_TYPES` set `views.py` ya `serializers.py` me nahi hai** — dono jagah `Notification.MESSAGE_APP_TYPES` seedha model se import hota hai, taaki naya message-app type add karte waqt sirf **ek** jagah (`models.py`) update karni pade.
 - `Meta.fields = ["id", "notif_type", "title", "message", "classroom_id", "session_id", "data", "is_read", "read_at", "created_at", "source"]`, aur `read_only_fields = fields` — **poora serializer read-only hai**, kyunki rows sirf server-side (`create_notification()` / `create_batched_notification()`) se banti hain, koi bhi client-writable field nahi (mark-read actions bhi bina request body ke chalte hain, view-level actions se).
 
 ### `NotificationPreferenceSerializer` — **NEW subsection (pehle iss doc me detail nahi thi)**
@@ -527,14 +527,14 @@ Ye path root urlconf me diye gaye prefix pe depend karta hai — **jaise hi `cor
 ## 8. Cross-app dependency graph
 
 ```
-liveclass  ──uses──▶  core.services.create_notification
-liveclass  ──uses──▶  core.classroom_chat_bridge (8 sync functions)
+tuitionclass  ──uses──▶  core.services.create_notification
+tuitionclass  ──uses──▶  core.classroom_chat_bridge (8 sync functions)
                             │
                             ├──local-import──▶ message.models (Group, Message, MessageType, GroupMember)
                             └──local-import──▶ message.services (create_group, add_members_to_group,
                                                                    remove_group_member, update_group_member_role)
 
-liveclass.permissions.HasValidParentSessionToken ──uses──▶ core.classroom_chat_bridge.resolve_parent_from_token
+tuitionclass.permissions.HasValidParentSessionToken ──uses──▶ core.classroom_chat_bridge.resolve_parent_from_token
                             └──local-import──▶ message.models (ParentAccessCode, ParentToken)
 
 campus.bridge  ──uses──▶  core.classroom_chat_bridge.create_section_group / provision_video_room   [NEW]
@@ -547,12 +547,12 @@ message    ──(pending, task 44)──▶  core.services.create_notification 
 message.views_parent.StudentReportCardList  ──uses──▶  core.classroom_chat_bridge.get_groups_for_classrooms  [NEW]
                             └──local-import──▶ message.models (Group)
 
-core.models.Notification  ──FK (SET_NULL)──▶  liveclass.Classroom, liveclass.ClassSession
+core.models.Notification  ──FK (SET_NULL)──▶  tuitionclass.Classroom, tuitionclass.ClassSession
 
 core.search.search_everything  ──uses──▶  message.search_utils.search_messages
                             └── caller ──must pass──▶ already permission-scoped querysets for each
                                  source (message/campus.Notice/assigments/testseries/...) — core.search
-                                 itself never queries `campus`/`message`/`post`/`liveclass`/`assigments`/
+                                 itself never queries `campus`/`message`/`post`/`tuitionclass`/`assigments`/
                                  `testseries` models directly, only ranks/merges what the caller hands it.
 
 core.views.SearchView  ──uses──▶  core.search.search_everything   [Task 18, WIRED]
@@ -565,7 +565,7 @@ campus.views (join action, NOT uploaded this pass)  ──(unconfirmed)──▶
                             └──local-import──▶ message.livekit_utils.generate_livekit_token
 ```
 
-`liveclass` aur `message` **kabhi ek dusre ko seedha nahi jaante** — sab kuch `core.classroom_chat_bridge` se guzarta hai. Ye invariant future me bhi maintain karna hai.
+`tuitionclass` aur `message` **kabhi ek dusre ko seedha nahi jaante** — sab kuch `core.classroom_chat_bridge` se guzarta hai. Ye invariant future me bhi maintain karna hai.
 
 ---
 
@@ -573,17 +573,17 @@ campus.views (join action, NOT uploaded this pass)  ──(unconfirmed)──▶
 
 1. ✅ ~~`message/push_utils.py` chahiye, `notification_batching.py` ko usse align karna hai~~ — resolved: `push_utils.py` check ho chuka hai, aur nateeja "align/replace" nahi tha — dono jaanboojh kar alag mechanisms hain (§5 dekho), merge nahi karna.
 2. **Task 44 abhi bhi incomplete:** `message/push_utils.py` ke `send_chat_message_push` / `send_incoming_call_push` / `send_mention_push` me `create_notification()` call add karni hai (bell-row currently missing for these) — ye item alag hai item 1 se (jo batching-vs-debounce ka tha), aur abhi bhi open hai.
-3. **`liveclass/urls.py` cleanup** — purane `notifications` router + `notification-preferences/me/` path hatao jab `core.urls` wire ho jaye.
+3. **`tuitionclass/urls.py` cleanup** — purane `notifications` router + `notification-preferences/me/` path hatao jab `core.urls` wire ho jaye.
 4. **Root urlconf** me `path("core/", include("core.urls"))` (ya jo prefix decide karo) add karna hai — abhi tak nahi hua.
-5. **`db_table` names verify karo** DB me (`liveclass_notification`, `liveclass_notificationpreference`) migration chalane se pehle.
+5. **`db_table` names verify karo** DB me (`tuitionclass_notification`, `tuitionclass_notificationpreference`) migration chalane se pehle.
 6. ✅ ~~`classroom_chat_bridge.py` ke field-name assumptions + `resolve_parent_from_token()` ka function body~~ — dono resolved. Poora file ab uploaded hai, field-names verified the pehle se, function body ab bhi verified hai (§6.1).
 7. **`NotificationViewSetTests`** ka hardcoded URL path (`/core/notifications/...`) root urlconf wiring ke baad confirm karo.
 8. ✅ ~~`NotifType` enum incomplete~~ — resolved, poori 56-value list §3 me confirmed hai (naya `PARENT_DEVICE_PENDING` bhi is pass me shaamil hua — §3, migration open item #18 dekho).
 9. ✅ ~~`NotificationSerializer` plain `to_dict`~~ — resolved, real `ModelSerializer` implementation ho chuki hai (§7 dekho).
 10. ✅ ~~`notification_batching.py` uploaded content broken (self-import)~~ — resolved, real implementation ab hai (§5).
-11. ✅ ~~`classroom_chat_bridge.py`'s apna module docstring khud ko "9 functions" bolta hai lekin `get_groups_for_classrooms()` (10wa entry point) us count me nahi hai~~ — **resolved.** Module docstring ab explicitly clarify karta hai ki "9 functions" sirf `liveclass`-facing count hai (functions 1-9); `get_groups_for_classrooms()` module ka 10wa entry point hai, `message/views_parent.py` se seedha call hota hai, isliye us 9 ki ginti me nahi tha. Koi functional bug nahi tha, sirf docstring stale/ambiguous tha — ab dono counts (9 liveclass-facing + 1 message-facing = 10 total) explicit hain.
+11. ✅ ~~`classroom_chat_bridge.py`'s apna module docstring khud ko "9 functions" bolta hai lekin `get_groups_for_classrooms()` (10wa entry point) us count me nahi hai~~ — **resolved.** Module docstring ab explicitly clarify karta hai ki "9 functions" sirf `tuitionclass`-facing count hai (functions 1-9); `get_groups_for_classrooms()` module ka 10wa entry point hai, `message/views_parent.py` se seedha call hota hai, isliye us 9 ki ginti me nahi tha. Koi functional bug nahi tha, sirf docstring stale/ambiguous tha — ab dono counts (9 tuitionclass-facing + 1 message-facing = 10 total) explicit hain.
 12. **NEW open item:** `models.py`'s naye `NotificationQuerySet.for_user()`/`.unread()` manager methods abhi kahin bhi call-site pe use nahi ho rahe (`views.py`/`tests.py` purane `.filter(...)` style se hi likhe hain) — functional issue nahi (dono equivalent hain), bas ek available convenience hai jo abhi adopt nahi hui.
-13. ✅ ~~`search.py` expose karne ke liye koi `views.py`/`urls.py` endpoint nahi tha~~ — **resolved, is pass me confirm hua.** `core/views.py::SearchView` + `core/urls.py`'s `path("search/", ...)` dono ab wired hain (§6.2, §7). `post`/`liveclass.ClassMaterial` sources abhi bhi stub hain (§6.2) un models ke upload hone tak — ye hissa khula hai.
+13. ✅ ~~`search.py` expose karne ke liye koi `views.py`/`urls.py` endpoint nahi tha~~ — **resolved, is pass me confirm hua.** `core/views.py::SearchView` + `core/urls.py`'s `path("search/", ...)` dono ab wired hain (§6.2, §7). `post`/`tuitionclass.ClassMaterial` sources abhi bhi stub hain (§6.2) un models ke upload hone tak — ye hissa khula hai.
 14. ✅ ~~`SearchView`/`search_everything()` ke liye `tests.py` me koi test nahi hai~~ — **resolved, is pass me confirm hua.** `tests.py::SearchViewTests` (12 tests) success path, `q`/`sources` parsing, 400-on-short-query, aur `assigments`/`testseries` scoping regression sab cover karte hain (§7 dekho).
 15. ✅ ~~`SearchView` sirf `assigments`/`testseries` ke liye scoped queryset banata hai, `message`/`campus_notice` unscoped~~ — **resolved (Task 13, is pass).** `SearchView.get()` ab `message` (`ConversationViewSet.search_all()` mirror) aur `campus_notice` (`NoticeViewSet.get_queryset()` mirror) dono ke liye scoped queryset banata hai — sab 4 registered sources ab wired hain (§6.2, §7). `test_unregistered_sources_return_empty_not_error` ka scope isi wajah se narrow ho gaya — ab wo genuinely-unregistered `post` source ke liye hai, `message`/`campus_notice` ke liye nahi.
 16. **Still open (updated, this pass):** `classroom_chat_bridge.py`'s naya `generate_campus_session_token()` (#13, Task 14) ab per-participant LiveKit join-token mint kar sakta hai — bridge-side gap band ho gaya. Lekin koi endpoint jo "join this campus live session" pe ise actually call kare, wo abhi bhi wire nahi hai — `campus/views.py` (jahan wo `join` action rehna chahiye) is pass me bhi upload nahi hua. Room-naming (#11) → token-minting (#13, ab exist karta hai) → actual joinable-call endpoint tak ka path abhi bhi incomplete hai, sirf beech ka function ab available hai.
@@ -592,7 +592,7 @@ campus.views (join action, NOT uploaded this pass)  ──(unconfirmed)──▶
 
 ---
 
-## 10. Quick reference — kaun sa function kab call karo (liveclass signal handlers ke liye)
+## 10. Quick reference — kaun sa function kab call karo (tuitionclass signal handlers ke liye)
 
 | Event | Call karo |
 |---|---|
@@ -639,7 +639,7 @@ CONFIG_DRIFT_URL_SKIP = set()          # {"app_label.ViewClassName", ...}
 
 ```bash
 python manage.py check_config_drift
-python manage.py check_config_drift --apps user_profile core liveclass
+python manage.py check_config_drift --apps user_profile core tuitionclass
 python manage.py check_config_drift --strict   # CI ke liye — issue mile to nonzero exit
 ```
 

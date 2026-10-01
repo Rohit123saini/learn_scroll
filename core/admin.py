@@ -1,7 +1,7 @@
 # core/admin.py
 from django.contrib import admin
 
-from .models import Notification, NotificationPreference
+from .models import Notification, NotificationPreference, OnboardingProgress
 
 
 @admin.register(Notification)
@@ -21,3 +21,13 @@ class NotificationPreferenceAdmin(admin.ModelAdmin):
     search_fields = ("user__username",)
     autocomplete_fields = ["user"]
     readonly_fields = ("updated_at",)
+
+
+@admin.register(OnboardingProgress)
+class OnboardingProgressAdmin(admin.ModelAdmin):
+    # Task G18
+    list_display = ("user", "completed", "skipped", "completed_at", "created_at")
+    list_filter = ("completed", "skipped")
+    search_fields = ("user__username",)
+    autocomplete_fields = ["user"]
+    readonly_fields = ("created_at",)

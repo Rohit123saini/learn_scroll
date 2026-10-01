@@ -32,6 +32,7 @@ from rest_framework.test import APIClient
 from . import tasks
 from .models import (
     Question, TestAttempt, TestCertificate, TestLiveSession, TestRecording, TestSeries,
+    TestSeriesReview,
 )
 
 User = get_user_model()
@@ -427,6 +428,50 @@ class CertificationTests(_Base):
         pdf = _client(self.student).get(reverse("testseries-attempt-certificate-pdf", kwargs={"pk": attempt_id}))
         self.assertIn(pdf.status_code, (200, 501))  # 501 = reportlab not installed
 
+    def test_certificate_share_card_is_owner_only_png_with_referral_link(self, _notify):
+        """TASK G10 — the share-card endpoint renders (or 501s cleanly if
+        Pillow isn't installed, same optional-dependency contract as the
+        PDF), is scoped to the attempt's own student, and 403s a
+        differently-authenticated user — a reviewer/creator has no reason
+        to see (or leak) the student's own referral link."""
+        series = self._certified()
+        attempt_id = self.start(series).json()["id"]
+        self.submit(attempt_id, _answers(series, ["a", "a"]))
+
+        card = _client(self.student).get(
+            reverse("testseries-attempt-certificate-share-card", kwargs={"pk": attempt_id})
+        )
+        self.assertIn(card.status_code, (200, 501))  # 501 = Pillow not installed
+        if card.status_code == 200:
+            self.assertEqual(card["Content-Type"], "image/png")
+
+        forbidden = _client(self.other).get(
+            reverse("testseries-attempt-certificate-share-card", kwargs={"pk": attempt_id})
+        )
+        self.assertEqual(forbidden.status_code, 403)
+
+        # The teacher/creator is a permitted reviewer for certificate/-pdf
+        # (results_gate lets them through), but share-card is stricter —
+        # owner-only, since it's a personal referral link, not a result.
+        teacher_res = _client(self.teacher).get(
+            reverse("testseries-attempt-certificate-share-card", kwargs={"pk": attempt_id})
+        )
+        self.assertEqual(teacher_res.status_code, 403)
+
+    def test_revoked_certificate_share_card_is_blocked(self, _notify):
+        series = self._certified()
+        attempt_id = self.start(series).json()["id"]
+        self.submit(attempt_id, _answers(series, ["a", "a"]))
+        cert = TestCertificate.objects.get()
+        _client(self.teacher).post(
+            reverse("testseries-revoke-certificate", kwargs={"pk": series.id}),
+            {"code": cert.code, "reason": "Cheating"}, format="json",
+        )
+        res = _client(self.student).get(
+            reverse("testseries-attempt-certificate-share-card", kwargs={"pk": attempt_id})
+        )
+        self.assertEqual(res.status_code, 403)
+
     def test_unknown_code_is_404_and_revoked_certificate_is_flagged(self, _notify):
         self.assertEqual(
             _client().get(reverse("testseries-certificate-verify", kwargs={"code": "LS-NOPE-NOPE-NOPE"})).status_code, 404
@@ -515,12 +560,253 @@ class ResultReleaseAndAnalyticsTests(_Base):
         self.assertEqual(first["explanation"], "Because A.")
         self.assertEqual(first["correct_answer"], {"option_id": "a"})
 
+    def test_creator_analytics_aggregates_scores_pass_rate_and_missed_questions(self):
+        """Task 4 — teacher-side performance dashboard: average score/%,
+        pass rate, per-question wrong-rate, attempt volume over time."""
+        series = _series(self.teacher, questions=2, pass_percentage=50)
+        q2 = series.questions.get(order=2)
+
+        # student: Q1 right, Q2 wrong (negative marking) -> 4-1=3/8 = 37.5% -> fail
+        attempt_1 = self.start(series, self.student).json()["id"]
+        self.submit(attempt_1, _answers(series, ["a", "b"]), self.student)
+        # other: both right -> 8/8 = 100% -> pass
+        attempt_2 = self.start(series, self.other).json()["id"]
+        self.submit(attempt_2, _answers(series, ["a", "a"]), self.other)
+
+        url = reverse("testseries-analytics", kwargs={"pk": series.id})
+
+        # not the creator -> forbidden
+        self.assertEqual(_client(self.student).get(url).status_code, 403)
+
+        res = _client(self.teacher).get(url)
+        self.assertEqual(res.status_code, 200, res.content)
+        body = res.json()
+
+        self.assertEqual(body["total_attempts"], 2)
+        self.assertEqual(body["students_attempted"], 2)
+        self.assertEqual(body["submitted_count"], 2)
+        self.assertEqual(body["checked_count"], 2)  # all-MCQ series auto-checks fully
+        self.assertAlmostEqual(body["average_score"], 5.5)
+        self.assertAlmostEqual(body["average_percentage"], 68.75, delta=0.1)
+        self.assertEqual(body["pass_rate"], 50.0)
+
+        missed = body["most_missed_questions"]
+        self.assertEqual(missed[0]["question_id"], str(q2.id))
+        self.assertEqual(missed[0]["wrong_count"], 1)
+        self.assertEqual(missed[0]["attempts"], 2)
+        self.assertEqual(missed[0]["wrong_rate"], 50.0)
+
+        self.assertEqual(sum(row["count"] for row in body["attempts_over_time"]), 2)
+
     def test_solutions_can_be_switched_off(self):
         series = _series(self.teacher, show_solutions=False)
         attempt_id = self.start(series).json()["id"]
         self.submit(attempt_id, _answers(series, ["a", "a"]))
         res = _client(self.student).get(reverse("testseries-attempt-solutions", kwargs={"pk": attempt_id}))
         self.assertEqual(res.status_code, 403)
+
+
+# =====================================================================
+class WeakAreaPracticeTests(_Base):
+    """Task G8 — "Practice weak areas" CTA on the result screen."""
+
+    def practice(self, attempt_id, user=None):
+        return _client(user or self.student).post(
+            reverse("testseries-attempt-practice-weak-areas", kwargs={"pk": attempt_id})
+        )
+
+    def test_generates_a_practice_test_from_wrong_topics_only(self):
+        series = _series(self.teacher, questions=0, published=True)
+        q1 = _mcq(series, 1, correct="a", topic="Kinematics")
+        q2 = _mcq(series, 2, correct="a", topic="Optics")
+        q3 = _mcq(series, 3, correct="a", topic="Kinematics")
+        series.recompute_total_marks()
+        attempt_id = self.start(series).json()["id"]
+        # q1 wrong (Kinematics), q2 right (Optics), q3 wrong (Kinematics).
+        self.submit(attempt_id, _answers(series, ["b", "a", "b"]))
+
+        res = self.practice(attempt_id)
+        self.assertEqual(res.status_code, 201, res.content)
+        body = res.json()
+        self.assertEqual(body["question_count"], 2)  # only the 2 wrong ones
+        self.assertIsNotNone(body["practice_series_id"])
+        self.assertEqual(body["attempt"]["series"], body["practice_series_id"])
+
+        practice_series = TestSeries.objects.get(pk=body["practice_series_id"])
+        self.assertEqual(practice_series.creator_id, self.student.id)
+        self.assertFalse(practice_series.is_paid)
+        self.assertTrue(practice_series.status, TestSeries.Status.PUBLISHED)
+        topics = set(practice_series.questions.values_list("topic", flat=True))
+        self.assertEqual(topics, {"Kinematics"})
+        # Negative marking is switched off in practice mode.
+        self.assertTrue(all(q.negative_marks == 0 for q in practice_series.questions.all()))
+
+        # Owner (now the creator, via access.user_can_access_series) can
+        # immediately act on the returned attempt.
+        practice_attempt_id = body["attempt"]["id"]
+        submit_res = self.submit(practice_attempt_id, _answers(practice_series, ["a"] * 2))
+        self.assertEqual(submit_res.status_code, 200, submit_res.content)
+
+    def test_clean_sheet_returns_no_practice_series(self):
+        series = _series(self.teacher, questions=2)
+        attempt_id = self.start(series).json()["id"]
+        self.submit(attempt_id, _answers(series, ["a", "a"]))  # both correct
+        res = self.practice(attempt_id)
+        self.assertEqual(res.status_code, 200)
+        self.assertIsNone(res.json()["practice_series_id"])
+
+    def test_text_questions_are_never_included(self):
+        series = _series(self.teacher, questions=0)
+        Question.objects.create(
+            series=series, order=1, question_type="text", text="Explain X", marks=5,
+        )
+        _mcq(series, 2, correct="a", topic="Algebra")
+        series.recompute_total_marks()
+        attempt_id = self.start(series).json()["id"]
+        res = self.submit(
+            attempt_id,
+            {str(series.questions.get(order=1).id): {"text": "wrong-ish"},
+             str(series.questions.get(order=2).id): {"option_id": "b"}},
+        )
+        self.assertEqual(res.status_code, 200, res.content)
+
+        practice_res = self.practice(attempt_id)
+        self.assertEqual(practice_res.status_code, 201, practice_res.content)
+        practice_series = TestSeries.objects.get(pk=practice_res.json()["practice_series_id"])
+        self.assertEqual(practice_series.question_count, 1)
+        self.assertEqual(practice_series.questions.first().question_type, "mcq")
+
+    def test_only_the_owner_can_generate_from_their_attempt(self):
+        series = _series(self.teacher, questions=1)
+        attempt_id = self.start(series).json()["id"]
+        self.submit(attempt_id, _answers(series, ["b"]))
+        res = self.practice(attempt_id, user=self.other)
+        self.assertEqual(res.status_code, 403)
+
+    def test_cannot_generate_before_submitting(self):
+        series = _series(self.teacher, questions=1)
+        attempt_id = self.start(series).json()["id"]
+        res = self.practice(attempt_id)
+        self.assertEqual(res.status_code, 400)
+
+    def test_weakest_topic_prioritized_when_capped(self):
+        series = _series(self.teacher, questions=0)
+        # 3 misses on "Weak", 1 miss on "LessWeak".
+        for i in range(1, 4):
+            _mcq(series, i, correct="a", topic="Weak")
+        _mcq(series, 4, correct="a", topic="LessWeak")
+        series.recompute_total_marks()
+        original_max = TestSeries.MAX_PRACTICE_QUESTIONS
+        TestSeries.MAX_PRACTICE_QUESTIONS = 1
+        try:
+            attempt_id = self.start(series).json()["id"]
+            self.submit(attempt_id, _answers(series, ["b", "b", "b", "b"]))
+            res = self.practice(attempt_id)
+            self.assertEqual(res.status_code, 201, res.content)
+            practice_series = TestSeries.objects.get(pk=res.json()["practice_series_id"])
+            self.assertEqual(practice_series.question_count, 1)
+            self.assertEqual(practice_series.questions.first().topic, "Weak")
+        finally:
+            TestSeries.MAX_PRACTICE_QUESTIONS = original_max
+
+
+class DiscoveryAndSearchTests(_Base):
+    """Task G9 — search/filter on the list endpoint, plus the
+    "Trending"/"New from people you follow" rails."""
+
+    def list_series(self, params=None, user=None):
+        return _client(user or self.student).get(reverse("testseries-list"), params or {})
+
+    def test_filters_by_subject_difficulty_and_price(self):
+        physics_free = _series(
+            self.teacher, questions=1, title="Physics Basics", subject="Physics",
+            difficulty="easy", is_paid=False,
+        )
+        physics_paid = _series(
+            self.teacher, questions=1, title="Physics Advanced", subject="Physics",
+            difficulty="hard", is_paid=True, price_coins=20,
+        )
+        _series(self.teacher, questions=1, title="Chemistry Basics", subject="Chemistry", difficulty="easy")
+
+        by_subject = {r["id"] for r in self.list_series({"subject": "phys"}).json()["results"]}
+        self.assertEqual(by_subject, {str(physics_free.id), str(physics_paid.id)})
+
+        by_difficulty = {r["id"] for r in self.list_series({"difficulty": "hard"}).json()["results"]}
+        self.assertEqual(by_difficulty, {str(physics_paid.id)})
+
+        by_price = {r["id"] for r in self.list_series({"price": "free"}).json()["results"]}
+        self.assertIn(str(physics_free.id), by_price)
+        self.assertNotIn(str(physics_paid.id), by_price)
+
+    def test_free_text_search_matches_title_or_description(self):
+        target = _series(self.teacher, questions=1, title="Newton's Laws Mock Test", description="mechanics")
+        _series(self.teacher, questions=1, title="Unrelated", description="something else")
+        res = self.list_series({"search": "newton"})
+        ids = {r["id"] for r in res.json()["results"]}
+        self.assertEqual(ids, {str(target.id)})
+
+    def test_min_rating_filter(self):
+        rated = _series(self.teacher, questions=1)
+        unrated = _series(self.teacher, questions=1)
+        attempt_id = self.start(rated).json()["id"]
+        self.submit(attempt_id, _answers(rated, ["a"]))
+        TestSeriesReview.objects.create(series=rated, student=self.student, rating=5, attempt_id=attempt_id)
+
+        res = self.list_series({"min_rating": "4"})
+        ids = {r["id"] for r in res.json()["results"]}
+        self.assertIn(str(rated.id), ids)
+        self.assertNotIn(str(unrated.id), ids)
+
+    def test_ordering_price_low_to_high(self):
+        cheap = _series(self.teacher, questions=1, is_paid=True, price_coins=10, title="Cheap")
+        pricey = _series(self.teacher, questions=1, is_paid=True, price_coins=99, title="Pricey")
+        res = self.list_series({"ordering": "price_low", "price": "paid"})
+        ids = [r["id"] for r in res.json()["results"]]
+        self.assertLess(ids.index(str(cheap.id)), ids.index(str(pricey.id)))
+
+    def test_trending_ranks_by_recent_attempt_velocity(self):
+        popular = _series(self.teacher, questions=1, title="Popular")
+        quiet = _series(self.teacher, questions=1, title="Quiet")
+        for user in (self.student, self.other, _make_user("third")):
+            attempt_id = self.start(popular, user).json()["id"]
+            self.submit(attempt_id, _answers(popular, ["a"]), user)
+        attempt_id = self.start(quiet, self.student).json()["id"]
+        self.submit(attempt_id, _answers(quiet, ["a"]), self.student)
+
+        res = _client(self.student).get(reverse("testseries-trending"))
+        self.assertEqual(res.status_code, 200, res.content)
+        ids = [row["id"] for row in res.json()]
+        self.assertIn(str(popular.id), ids)
+        self.assertLess(ids.index(str(popular.id)), ids.index(str(quiet.id)))
+
+    def test_following_rail_shows_only_followed_creators_individual_series(self):
+        from user_profile.models import Follow
+
+        Follow.objects.create(follower=self.student, following=self.teacher, status=Follow.Status.ACCEPTED)
+        followed_series = _series(self.teacher, questions=1, title="From someone I follow")
+        _series(self.other, questions=1, title="From a stranger")  # not followed -> excluded
+        campus_series = _series(
+            self.teacher, questions=1, title="Campus series", source=TestSeries.Source.CAMPUS,
+        )  # individual-only rail -> excluded even though teacher IS followed
+
+        res = _client(self.student).get(reverse("testseries-following"))
+        self.assertEqual(res.status_code, 200, res.content)
+        ids = {row["id"] for row in res.json()}
+        self.assertEqual(ids, {str(followed_series.id)})
+
+    @override_settings(TESTSERIES_CONTEXT_ACCESS={
+        "section": "testseries.tests_advanced._resolver", "classroom": "testseries.tests_advanced._resolver",
+    })
+    def test_discovery_rails_respect_context_access(self):
+        """A non-member must never see a campus series on either rail,
+        even from a followed creator — same access rule as the plain list."""
+        series = _series(
+            self.teacher, questions=1, source=TestSeries.Source.CAMPUS,
+            context_type="section", context_id=uuid.uuid4(),
+        )
+        res = self.list_series({})
+        ids = {r["id"] for r in res.json()["results"]}
+        self.assertNotIn(str(series.id), ids)
 
 
 # =====================================================================

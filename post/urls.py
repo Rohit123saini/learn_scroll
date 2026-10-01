@@ -19,6 +19,19 @@ from django.conf import settings
 from django.urls import path, re_path
 
 from . import comment_view, views
+from .reels_views import ReelsFeedView
+from .highlight_views import (
+    HighlightAddStoryAPIView,
+    HighlightDetailAPIView,
+    HighlightListCreateAPIView,
+    HighlightRemoveStoryAPIView,
+    StoryArchiveAPIView,
+)
+from .close_friends_views import (
+    CloseFriendCandidatesAPIView,
+    CloseFriendDetailAPIView,
+    CloseFriendsAPIView,
+)
 from .comment_view import (
     CommentCreateAPIView,
     CommentDeleteAPIView,
@@ -37,14 +50,45 @@ from .views import (
     PostCreateAPIView,
     PostDeleteAPIView,
     PostDetailAPIView,
+    PostEditAPIView,
+    PostEventBulkAPIView,
     PostListAPIView,
     PostReactionAPIView,
+    PostRepostAPIView,
+    PostSeenBatchAPIView,
+    # TASK G6 — poll voting + "Ask a doubt" answers.
+    PostPollVoteAPIView,
+    PostAnswerListCreateAPIView,
+    PostAnswerMarkBestAPIView,
+    PostVideoProgressAPIView,
     PostSaveToggleAPIView,
+    PostShareAPIView,
+    PostVisibilityAPIView,
     SavedPostsListAPIView,
     StoryCreateAPIView,
     StoryListAPIView,
     StoryViewAPIView,
+    StoryReactAPIView,
+    StoryReplyAPIView,
+    StoryViewersAPIView,
+    StoryDetailAPIView,
+    StoryMentionCandidatesAPIView,
+    StoryPollVoteAPIView,
+    StoryQuestionAnswerAPIView,
+    StoryStickerResponsesAPIView,
     TrendingHashtagsAPIView,
+    # TASK 3 — feed personalization (production_readiness_tasks.md).
+    UserInterestsAPIView,
+    # Feed feedback controls (Part 1): Not interested + Mute account.
+    NotInterestedAPIView,
+    NotInterestedListAPIView,
+    MutedAccountsAPIView,
+    UnmuteAccountAPIView,
+    # Feed feedback controls (Part 2): Show fewer + Why am I seeing this.
+    ShowFewerAPIView,
+    FeedFeedbackListAPIView,
+    FeedFeedbackDeleteAPIView,
+    WhyAmISeeingThisAPIView,
     serve_media_with_range,
     # TASK 3/4 — dedicated post chunked-upload routes (see views.py's own
     # comment on why these are separate from the comment chunked-upload
@@ -65,18 +109,57 @@ urlpatterns = [
     # already; nothing existed to answer it. See category_taxonomy's own
     # docstring (views.py) for the subcategory-data caveat.
     path("categories/", category_taxonomy, name="post-categories"),
+    # TASK 3 — feed personalization chip picker. GET = current selection +
+    # taxonomy; PUT/POST = replace full selection.
+    path("interests/", UserInterestsAPIView.as_view(), name="user-interests"),
+    # Feed feedback controls (Part 1) - see NotInterestedAPIView / MutedAccountsAPIView.
+    path("<uuid:post_id>/not-interested/", NotInterestedAPIView.as_view(), name="post-not-interested"),
+    path("not-interested/", NotInterestedListAPIView.as_view(), name="post-not-interested-list"),
+    path("muted-accounts/", MutedAccountsAPIView.as_view(), name="post-muted-accounts"),
+    path("muted-accounts/<uuid:user_id>/", UnmuteAccountAPIView.as_view(), name="post-unmute-account"),
+    # Feed feedback controls (Part 2) - see ShowFewerAPIView / WhyAmISeeingThisAPIView.
+    path("<uuid:post_id>/show-fewer/", ShowFewerAPIView.as_view(), name="post-show-fewer"),
+    path("<uuid:post_id>/why/", WhyAmISeeingThisAPIView.as_view(), name="post-why"),
+    path("feedback/", FeedFeedbackListAPIView.as_view(), name="post-feedback-list"),
+    path("feedback/<uuid:feedback_id>/", FeedFeedbackDeleteAPIView.as_view(), name="post-feedback-delete"),
     # TASK 4 — Music tab (media_edit_screen.dart / auto_edit_screen.dart)
     # search, proxied server-side so FREESOUND_API_KEY never ships in the app.
     path("music/search/", freesound_music_search, name="post-music-search"),
     # NEW — checklist item 57 ("create/list/delete Post") had no delete
     # route anywhere before this; soft-delete, author-or-staff.
     path("<uuid:id>/delete/", PostDeleteAPIView.as_view(), name="post-delete"),
+    # NEW — post update/edit had no PATCH endpoint anywhere before this
+    # (see PostEditAPIView's docstring), and a separate one for visibility
+    # (Post.visibility was previously create-time-only).
+    path("<uuid:id>/edit/", PostEditAPIView.as_view(), name="post-edit"),
+    path("<uuid:id>/visibility/", PostVisibilityAPIView.as_view(), name="post-visibility"),
+    # NEW — internal "forward to chat" (checklist item 61). See
+    # PostShareAPIView / services.py's share_post_to_conversation for the
+    # send_message ImportError bug this replaces.
+    path("<uuid:id>/share/", PostShareAPIView.as_view(), name="post-share"),
     path("feed/", HomeFeedView.as_view(), name="home-feed"),
+    # Feed "seen" signal — batch (max 50), never bumps views_count.
+    path("feed/seen/", PostSeenBatchAPIView.as_view(), name="feed-seen"),
+    # C1-BE — bulk analytics events (impression / dwell / tap / skip), max 100 per
+    # request, throttle scope "post_events".
+    path("events/", PostEventBulkAPIView.as_view(), name="post-events"),
+    # Reels (vertical short videos): ranked pool, cursor + frozen snapshot, ?start=<post_id>.
+    path("reels/", ReelsFeedView.as_view(), name="reels-feed"),
     path("like/<uuid:post_id>/reaction/", PostReactionAPIView.as_view(), name="post-reaction"),
     # NEW — SujhaavFayda1 item 2: bulk counts polling for currently-loaded
     # feed posts (see PostCountsAPIView docstring for the WebSocket note).
     path("counts/", PostCountsAPIView.as_view(), name="post-counts"),
     path("<uuid:post_id>/save/", PostSaveToggleAPIView.as_view(), name="post-save-toggle"),
+    # NEW — Instagram-style repost. POST /post/<id>/repost/ (quick repost
+    # with an empty body, "repost with caption" with `repost_caption`).
+    path("<uuid:post_id>/repost/", PostRepostAPIView.as_view(), name="post-repost"),
+    # TASK G6 — poll voting (live results) + "Ask a doubt" answers.
+    path("<uuid:post_id>/poll/vote/", PostPollVoteAPIView.as_view(), name="post-poll-vote"),
+    path("<uuid:post_id>/answers/", PostAnswerListCreateAPIView.as_view(), name="post-answers"),
+    path("answers/<uuid:answer_id>/mark-best/", PostAnswerMarkBestAPIView.as_view(), name="post-answer-mark-best"),
+    # TASK G4 — feed video widget reports watch progress here so
+    # HomeFeedView/ExploreFeedAPIView can rank by video-completion-rate.
+    path("<uuid:post_id>/video-progress/", PostVideoProgressAPIView.as_view(), name="post-video-progress"),
     path("saved/", SavedPostsListAPIView.as_view(), name="saved-posts-list"),
 
     # TASK 3 — chunked (large-video) post upload. Fixes api_service.dart's
@@ -106,6 +189,27 @@ urlpatterns = [
     path("stories/", StoryListAPIView.as_view(), name="story-list"),
     path("stories/create/", StoryCreateAPIView.as_view(), name="story-create"),
     path("stories/<uuid:story_id>/view/", StoryViewAPIView.as_view(), name="story-view"),
+    path("stories/<uuid:story_id>/react/", StoryReactAPIView.as_view(), name="story-react"),
+    path("stories/<uuid:story_id>/reply/", StoryReplyAPIView.as_view(), name="story-reply"),
+    path("stories/<uuid:story_id>/viewers/", StoryViewersAPIView.as_view(), name="story-viewers"),
+    # stickers / mentions — STORIES UPGRADE, PART 2a
+    path("stories/mention-candidates/", StoryMentionCandidatesAPIView.as_view(), name="story-mention-candidates"),
+    # STORIES UPGRADE - PART 3b: highlights + the archive picker.
+    path("stories/archive/", StoryArchiveAPIView.as_view(), name="story-archive"),
+    path("highlights/", HighlightListCreateAPIView.as_view(), name="highlight-list"),
+    path("highlights/<uuid:highlight_id>/", HighlightDetailAPIView.as_view(), name="highlight-detail"),
+    path("highlights/<uuid:highlight_id>/stories/", HighlightAddStoryAPIView.as_view(), name="highlight-add-story"),
+    path("highlights/<uuid:highlight_id>/stories/<uuid:story_id>/", HighlightRemoveStoryAPIView.as_view(), name="highlight-remove-story"),
+    # poll / question stickers - STORIES UPGRADE, PART 2b
+    path("stories/<uuid:story_id>/stickers/<uuid:sticker_id>/vote/", StoryPollVoteAPIView.as_view(), name="story-poll-vote"),
+    path("stories/<uuid:story_id>/stickers/<uuid:sticker_id>/answer/", StoryQuestionAnswerAPIView.as_view(), name="story-question-answer"),
+    path("stories/<uuid:story_id>/stickers/<uuid:sticker_id>/responses/", StoryStickerResponsesAPIView.as_view(), name="story-sticker-responses"),
+    path("stories/<uuid:story_id>/", StoryDetailAPIView.as_view(), name="story-detail"),
+
+    # close friends — STORIES UPGRADE, PART 1
+    path("close-friends/", CloseFriendsAPIView.as_view(), name="close-friends"),
+    path("close-friends/candidates/", CloseFriendCandidatesAPIView.as_view(), name="close-friends-candidates"),
+    path("close-friends/<int:user_id>/", CloseFriendDetailAPIView.as_view(), name="close-friend-detail"),
 
     # comments
     path("comment/create/", CommentCreateAPIView.as_view(), name="comment-create"),

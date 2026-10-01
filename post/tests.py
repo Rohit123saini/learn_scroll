@@ -54,6 +54,50 @@ class PostCreateTests(APITestCase):
         self.assertEqual(post.user, self.user)
         self.assertEqual(post.content, "hello world")
 
+    def test_every_category_from_taxonomy_endpoint_creates_a_post(self):
+        # The composers send back whatever `key` /post/categories/ hands
+        # them — so create with each one, end to end.
+        taxonomy = self.client.get(reverse("post-categories")).data["data"]
+        keys = [c["key"] for c in taxonomy["categories"]]
+        self.assertEqual(keys, [k for k, _ in Post.CATEGORY_CHOICES])
+        for key in keys:
+            resp = self.client.post(
+                self.url, {"content": f"post in {key}", "category": key, "post_type": "text"}, format="multipart"
+            )
+            self.assertEqual(resp.status_code, status.HTTP_201_CREATED, (key, resp.data))
+            self.assertEqual(resp.data["data"]["category"], key)
+
+    def test_taxonomy_shape_matches_what_the_composers_parse(self):
+        data = self.client.get(reverse("post-categories")).data["data"]
+        self.assertIsInstance(data["subcategories"], list)
+        self.assertEqual(set(data["category_subcategory_map"]), {k for k, _ in Post.CATEGORY_CHOICES})
+        for c in data["categories"]:
+            self.assertTrue(c["key"] and c["label"])
+
+    def test_category_is_normalised_case_insensitively(self):
+        for raw in ("Tech", " TECH ", "Technology"):
+            resp = self.client.post(
+                self.url, {"content": "x", "category": raw, "post_type": "text"}, format="multipart"
+            )
+            self.assertEqual(resp.status_code, status.HTTP_201_CREATED, (raw, resp.data))
+            self.assertEqual(resp.data["data"]["category"], "tech")
+
+    def test_invalid_category_is_a_400_with_a_field_error_not_a_500(self):
+        for raw in ("null", "banana"):
+            resp = self.client.post(
+                self.url, {"content": "x", "category": raw, "post_type": "text"}, format="multipart"
+            )
+            self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST, (raw, resp.data))
+            self.assertIn("category", resp.data["errors"])
+            self.assertIn("not a valid category", resp.data["message"])
+        self.assertEqual(Post.objects.count(), 0)
+
+    def test_chunked_init_rejects_invalid_category(self):
+        payload = {"file_name": "a.mp4", "total_chunks": 1, "total_size": 10, "category": "null"}
+        resp = self.client.post(reverse("post-chunked-init"), payload, format="json")
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST, resp.data)
+        self.assertIn("category", resp.data["errors"])
+
     def test_text_post_without_content_is_rejected(self):
         resp = self.client.post(self.url, {"post_type": "text", "category": "general"}, format="multipart")
         self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)

@@ -54,12 +54,13 @@ change case, with no special-casing needed for any of the three.
 """
 import logging
 
+from django.db import transaction
 from django.db.models import Count, F, Q
 from django.db.models.functions import Greatest
 from django.db.models.signals import post_delete, post_save
 from django.dispatch import receiver
 
-from .models import Post, PostLike, PostMedia
+from .models import CloseFriend, Post, PostLike, PostMedia, StoryPollVote, StoryQuestionAnswer, StorySticker
 
 logger = logging.getLogger(__name__)
 
@@ -235,10 +236,30 @@ def sync_post_reaction_counts_on_delete(sender, instance, **kwargs):
 # (`post.tasks.generate_video_thumbnail`) — it deliberately does not call
 # ffmpeg or touch storage itself. `post_save` runs synchronously inside
 # whatever request/transaction created this `PostMedia` row
-# (`PostCreateAPIView.post()`); running ffmpeg (a slow subprocess against
-# a real video file) inline here would block that request's response for
-# however long ffmpeg takes, on every single video upload. `.delay()`
-# just enqueues and returns immediately.
+# (`PostCreateAPIView.post()` AND `post_chunked_upload_complete()` — both
+# wrap their whole view in `@transaction.atomic`). Running ffmpeg (a slow
+# subprocess against a real video file) inline here would block that
+# request's response for however long ffmpeg takes, on every single video
+# upload. `.delay()` just enqueues and returns immediately.
+#
+# 🔧 FIX (video-upload thumbnail race): this used to call `.delay()`
+# directly from inside `post_save`, which itself runs INSIDE the calling
+# view's `@transaction.atomic` block — i.e. before that transaction has
+# committed. With a real async broker (CELERY_TASK_ALWAYS_EAGER=False,
+# the production default — see settings.py), a worker can pick up the
+# enqueued task and call `PostMedia.objects.get(id=instance.id)` before
+# the outer transaction commits. That row genuinely doesn't exist yet
+# from the worker's connection's point of view, so
+# `generate_video_thumbnail` hit its own `PostMedia.DoesNotExist` branch
+# (tasks.py) and just logged a warning and returned — no retry, no
+# thumbnail, no error surfaced anywhere the uploader could see. This was
+# intermittent by nature (a race against however fast the worker picks
+# the task up vs. however long the commit takes), which matches
+# "sometimes video upload has an issue" with no consistent repro. Fixed
+# by deferring the enqueue with `transaction.on_commit()`, so the task is
+# only ever handed to Celery after the row is actually committed and
+# visible to every connection — and only WHEN the transaction commits at
+# all (a rollback correctly means no orphaned task ever fires).
 # ----------------------------------------------------------------------
 @receiver(post_save, sender=PostMedia)
 def queue_video_thumbnail_on_create(sender, instance, created, **kwargs):
@@ -246,4 +267,49 @@ def queue_video_thumbnail_on_create(sender, instance, created, **kwargs):
         return
     from .tasks import generate_video_thumbnail
 
-    generate_video_thumbnail.delay(instance.id)
+    transaction.on_commit(lambda: generate_video_thumbnail.delay(instance.id))
+
+
+# ----------------------------------------------------------------------
+# STORIES UPGRADE - PART 1: a block ends any Close Friends relationship in
+# BOTH directions, so a blocked person can never keep seeing (or later
+# regain access to) a close-friends story just because an old row survived.
+# ----------------------------------------------------------------------
+def _drop_close_friends_on_block(sender, instance, created, **kwargs):
+    if not created:
+        return
+    CloseFriend.objects.filter(
+        Q(owner_id=instance.blocker_id, friend_id=instance.blocked_id)
+        | Q(owner_id=instance.blocked_id, friend_id=instance.blocker_id)
+    ).delete()
+    # STORIES UPGRADE - PART 2a: a block also removes every @mention tag
+    # between the two people, in both directions, on stories still alive.
+    # (The story itself stays; only the tag - and its tappable link to the
+    # blocked person's profile - goes away.)
+    StorySticker.objects.filter(kind=StorySticker.KIND_MENTION).filter(
+        Q(story__user_id=instance.blocker_id, mentioned_user_id=instance.blocked_id)
+        | Q(story__user_id=instance.blocked_id, mentioned_user_id=instance.blocker_id)
+    ).delete()
+    # STORIES UPGRADE - PART 2b: and every poll vote / question answer the two
+    # people sent to each other's stories, so a blocked person's replies do not
+    # keep showing up in the owner's results.
+    StoryPollVote.objects.filter(
+        Q(sticker__story__user_id=instance.blocker_id, user_id=instance.blocked_id)
+        | Q(sticker__story__user_id=instance.blocked_id, user_id=instance.blocker_id)
+    ).delete()
+    StoryQuestionAnswer.objects.filter(
+        Q(sticker__story__user_id=instance.blocker_id, user_id=instance.blocked_id)
+        | Q(sticker__story__user_id=instance.blocked_id, user_id=instance.blocker_id)
+    ).delete()
+
+
+def _connect_block_signal():
+    from user_profile.models import BlockUser
+
+    post_save.connect(
+        _drop_close_friends_on_block, sender=BlockUser,
+        dispatch_uid="post_drop_close_friends_on_block",
+    )
+
+
+_connect_block_signal()

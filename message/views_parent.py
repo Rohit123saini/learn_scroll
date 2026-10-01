@@ -79,13 +79,13 @@ report-card-style summary a parent sees?" — if it's chat content
 
 🔧 GAP FIX (Gap 2 — supersedes the Gap 1 shape below) — this dashboard
 used to loop over the student's chat Groups as the PRIMARY source, which
-made any liveclass Classroom invisible here whenever chat-group linking
+made any tuitionclass Classroom invisible here whenever chat-group linking
 hadn't happened for it (`chat_group_enabled=False` — either the teacher
 opted out, or it's an older classroom from before linking existed). A
 fully active classroom — homework, marks, report cards, attendance — was
 silently missing from a parent's view for no reason a parent could see.
 
-Fixed by making the student's `liveclass` Classrooms the PRIMARY loop
+Fixed by making the student's `tuitionclass` Classrooms the PRIMARY loop
 (via `is_enrolled()`-equivalent — active OR lapsed pass, same breadth
 `ClassroomParentCodeGenerateView`/`ReportCardViewSet` already use), with
 the chat-group's own `assigmentss` data attached as an OPTIONAL nested
@@ -95,14 +95,14 @@ classroom. No classroom ever disappears
 from the dashboard just because it has no chat group; it just has
 `chat_group: null` instead.
 
-This keeps the Gap 1 rule intact — liveclass homework and message-app
+This keeps the Gap 1 rule intact — tuitionclass homework and message-app
 assigmentss are still never summed into one number — just expressed via
 nesting (`homework` at the classroom's top level, `assigmentss` only
 inside its `chat_group`) instead of two parallel top-level lists.
 
 🔧 GAP FIX (Gap 3) — ALL attendance shown by this view now comes
-strictly from `liveclass`'s own session-attendance record (`ClassSession`
-+ `SessionParticipant`, via `liveclass.models.
+strictly from `tuitionclass`'s own session-attendance record (`ClassSession`
++ `SessionParticipant`, via `tuitionclass.models.
 compute_attendance_percent_bulk`). The message app's own
 `StudyRoomAttendance` self-check-in streak widget (`attendance_utils.
 compute_attendance_stats_bulk`) is a separate, unrelated feature — this
@@ -142,7 +142,7 @@ from .models import (
 # student` had their `related_name` renamed in `models.py`
 # (`assigmentss` -> `message_assigmentss`, `assigments_submissions` ->
 # `message_assigments_submissions`) to fix a reverse-accessor clash with
-# a separate `liveclass` app's own `assigments`/`assigmentsSubmission`
+# a separate `tuitionclass` app's own `assigments`/`assigmentsSubmission`
 # models pointing at the same `Group`/`User`. Confirmed NO code below
 # needs to change: every query here (`assigments_totals`,
 # `submitted_counts`) filters *forward* through the FK
@@ -153,33 +153,33 @@ from .models import (
 from .permissions import HasValidParentToken
 from .throttles import ParentCodeRevealThrottle, ParentCodeVerifyThrottle
 
-# 🔧 GAP FIX (Gap 1 — liveclass assigments vs message assigments collision):
-# `liveclass` has its own `Classroom` / `assigments` / `assigmentsSubmission`
+# 🔧 GAP FIX (Gap 1 — tuitionclass assigments vs message assigments collision):
+# `tuitionclass` has its own `Classroom` / `assigments` / `assigmentsSubmission`
 # / `StudentReportCard` models — a completely different domain object from
 # the `Group` / `assigments` / `assigmentsSubmission` imported above (this
 # app's own). They share class names because they model similar concepts,
 # but they are NOT the same rows and must never be summed or merged
 # together into one number on the parent dashboard. Imported here under a
-# `Liveclass*` alias so every reference below stays unambiguous about which
+# `Tuitionclass*` alias so every reference below stays unambiguous about which
 # app's assigments it means. This is the mirror image of the cross-app
-# import `liveclass/parent_link_views.py` already does in the other
+# import `tuitionclass/parent_link_views.py` already does in the other
 # direction (`from message.models import ParentAccessCode, ...`); neither
 # app's `models.py` imports the other, so this does not create an import
 # cycle.
-from liveclass.models import (
-    assigments as Liveclassassigments,
-    assigmentsSubmission as LiveclassassigmentsSubmission,
-    Classroom as LiveclassClassroom,
-    PassPurchase as LiveclassPassPurchase,
-    StudentReportCard as LiveclassStudentReportCard,
+from tuitionclass.models import (
+    assigments as Tuitionclassassigments,
+    assigmentsSubmission as TuitionclassassigmentsSubmission,
+    Classroom as TuitionclassClassroom,
+    PassPurchase as TuitionclassPassPurchase,
+    StudentReportCard as TuitionclassStudentReportCard,
     compute_attendance_percent_bulk,
 )
 
-# 🔧 GAP FIX (Gap 2) — the ONE place that knows how a liveclass Classroom
+# 🔧 GAP FIX (Gap 2) — the ONE place that knows how a tuitionclass Classroom
 # maps to a chat Group (see that module's own docstring, design principle
 # 1). Deliberately reused rather than re-deriving `chat_group_enabled` +
 # `linked_conversation_id` here, so this view can never drift out of sync
-# with how `liveclass/signals.py` itself determines "does this classroom
+# with how `tuitionclass/signals.py` itself determines "does this classroom
 # have a group".
 from core.classroom_chat_bridge import get_groups_for_classrooms
 
@@ -525,6 +525,7 @@ class ParentVerifyCodeView(APIView):
             parent_access_code=access_code,
             token=ParentToken.generate_token(),
             status=ParentToken.Status.PENDING,
+            fcm_token=(request.data.get('fcm_token') or '').strip()[:255],
         )
 
         # 🔧 GAP FIX (G-6, this pass) — closes the TODO that used to sit
@@ -601,7 +602,7 @@ class ParentDashboardView(APIView):
       ]
     }
 
-    🔧 GAP FIX (Gap 2) — `liveclass` Classroom is now the PRIMARY,
+    🔧 GAP FIX (Gap 2) — `tuitionclass` Classroom is now the PRIMARY,
     always-present source for every entry in `classrooms` (via
     `is_enrolled()`-equivalent: active OR lapsed pass — a lapsed pass
     should still show classwork history, same reasoning `Classroom.
@@ -613,7 +614,7 @@ class ParentDashboardView(APIView):
     before that existed) still shows up here in full, just with
     `chat_group: null`.
 
-    🔧 GAP FIX (Gap 1, still enforced) — `homework` (liveclass) and
+    🔧 GAP FIX (Gap 1, still enforced) — `homework` (tuitionclass) and
     `chat_group.assigmentss` (message-app) are two independently-sourced
     datasets from two different apps and are NEVER summed into one
     number — see the imports above for why. Keep any future per-app
@@ -621,9 +622,9 @@ class ParentDashboardView(APIView):
     entry the same way.
 
     🔧 GAP FIX (Gap 3) — the ONLY `attendance_percent` anywhere in this
-    payload (top-level and inside `latest_report_card`) is liveclass's
+    payload (top-level and inside `latest_report_card`) is tuitionclass's
     own session-attendance number (`ClassSession`/`SessionParticipant`
-    via `liveclass.models.compute_attendance_percent_bulk`). `chat_group`
+    via `tuitionclass.models.compute_attendance_percent_bulk`). `chat_group`
     deliberately carries no attendance field at all — the message app is
     chat/group-study only and has no classroom-attendance concept of its
     own; its unrelated `StudyRoomAttendance` self-check-in streak widget
@@ -640,11 +641,11 @@ class ParentDashboardView(APIView):
 
     @classmethod
     def _classrooms(cls, student):
-        # ---- PRIMARY SOURCE (Gap 2): liveclass Classroom, not chat Group ----
+        # ---- PRIMARY SOURCE (Gap 2): tuitionclass Classroom, not chat Group ----
         classroom_ids = list(
-            LiveclassClassroom.objects.filter(
+            TuitionclassClassroom.objects.filter(
                 passes__purchases__student=student,
-                passes__purchases__status=LiveclassPassPurchase.Status.SUCCESS,
+                passes__purchases__status=TuitionclassPassPurchase.Status.SUCCESS,
                 passes__purchases__is_active=True,
             )
             .distinct()
@@ -658,21 +659,21 @@ class ParentDashboardView(APIView):
         # per-classroom eligibility without a second query per classroom.
         classrooms_by_id = {
             c.id: c
-            for c in LiveclassClassroom.objects.filter(id__in=classroom_ids)
+            for c in TuitionclassClassroom.objects.filter(id__in=classroom_ids)
             .only('id', 'title', 'chat_group_enabled', 'linked_conversation_id')
         }
 
-        # ---- liveclass-side data: homework + attendance % + report card ----
+        # ---- tuitionclass-side data: homework + attendance % + report card ----
         # (unchanged from Gap 1 — see class docstring: this never merges
         # with the message-app assigments counts below.)
         homework_totals = dict(
-            Liveclassassigments.objects.filter(classroom_id__in=classroom_ids)
+            Tuitionclassassigments.objects.filter(classroom_id__in=classroom_ids)
             .values('classroom_id')
             .annotate(total=Count('id'))
             .values_list('classroom_id', 'total')
         )
         homework_submitted = dict(
-            LiveclassassigmentsSubmission.objects.filter(
+            TuitionclassassigmentsSubmission.objects.filter(
                 assigments__classroom_id__in=classroom_ids,
                 student=student,
             )
@@ -683,7 +684,7 @@ class ParentDashboardView(APIView):
         attendance_percent_by_classroom = compute_attendance_percent_bulk(classroom_ids, student)
 
         latest_report_card_by_classroom = {}
-        for report_card in LiveclassStudentReportCard.objects.filter(
+        for report_card in TuitionclassStudentReportCard.objects.filter(
             classroom_id__in=classroom_ids, student=student,
         ).order_by('classroom_id', '-id'):
             latest_report_card_by_classroom.setdefault(report_card.classroom_id, report_card)

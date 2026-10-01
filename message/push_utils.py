@@ -1,5 +1,6 @@
 # message/push_utils.py
 import os
+import json
 import logging
 
 import firebase_admin
@@ -16,8 +17,8 @@ from .models import DeviceToken, FocusSession, Message  # 🔥 NAYA — FocusSes
 # apna alag choke-point hai (core/services.py) — ye KABHI khud push nahi
 # bhejta, sirf DB row likhta hai, isliye yahan se call karna safe hai
 # (double-push ka risk nahi).
-from core.models import Notification
-from core.services import create_notification
+from core.models import Notification, NotificationPreference
+from core.services import build_push_payload, create_notification
 
 logger = logging.getLogger(__name__)
 
@@ -92,6 +93,56 @@ def _filter_recipients_for_restrict(recipient_ids, message_id):
     except Exception:
         logger.exception("restrict filter failed for message %s; sending unfiltered", message_id)
         return recipient_ids
+
+
+# 🔥 NAYA (M1-BE — Message requests) — pending request ke receiver ko normal
+# chat push/bell row NAHI milta (message ka text kisi anjaan ka hai, tray me
+# nahi dikhna chahiye). Unhe ek hi generic "Message request" push milta hai,
+# har (user, conversation) ke liye `MESSAGE_REQUEST_PUSH_TTL_SECONDS` me sirf
+# ek baar — baaki messages silent rehte hain. Declined receivers ko kuch nahi.
+# Returns (accepted_ids, pending_ids). Never raises: lookup fail ho to sab
+# recipients accepted maane jaate hain (fail-open, jaise restrict filter).
+MESSAGE_REQUEST_PUSH_TTL_SECONDS = int(os.getenv("MESSAGE_REQUEST_PUSH_TTL_SECONDS", "86400"))
+_REQUEST_PUSH_KEY = "msgreq:push:{user}:{conv}"
+
+
+def _split_recipients_for_message_request(recipient_ids, conversation_id):
+    if not recipient_ids or not conversation_id:
+        return recipient_ids, []
+    try:
+        from .message_requests import partition_recipients
+
+        return partition_recipients(conversation_id, recipient_ids)
+    except Exception:
+        logger.exception("message-request split failed for conversation %s; sending unfiltered", conversation_id)
+        return recipient_ids, []
+
+
+def send_message_request_push(recipient_ids, sender_name, conversation_id, message_id):
+    """Pending receivers ke liye data-only "Message request" push (message text NAHI bhejta)."""
+    fresh = [
+        str(uid) for uid in recipient_ids
+        if cache.add(
+            _REQUEST_PUSH_KEY.format(user=uid, conv=conversation_id), 1,
+            timeout=MESSAGE_REQUEST_PUSH_TTL_SECONDS,
+        )
+    ]
+    if not fresh:
+        return
+    _send_multicast(
+        _tokens_for_users(fresh),
+        notification=None,
+        data={
+            'type': 'message_request',
+            'title': 'Message request',
+            'conversation_id': str(conversation_id),
+            'message_id': str(message_id),
+            'sender_name': sender_name or '',
+            'text': f"{sender_name} wants to send you a message" if sender_name else "You have a new message request",
+        },
+        android_priority='high',
+        channel_id='chat_messages',
+    )
 
 
 # 🔥 UPDATED — Notification batching / digest, now WhatsApp-style
@@ -185,13 +236,43 @@ def _tokens_for_users(recipient_ids):
     )
 
 
-def _send_multicast(tokens, *, notification=None, data=None, android_priority='high', channel_id='chat_messages'):
+def _build_apns_config(notification, apns_alert):
+    if not apns_alert:
+        return messaging.APNSConfig(
+            headers={'apns-priority': '10'},
+            payload=messaging.APNSPayload(
+                aps=messaging.Aps(content_available=True, sound='default' if notification else None)
+            ),
+        )
+    image = apns_alert.get('image')
+    return messaging.APNSConfig(
+        headers={'apns-priority': '10'},
+        payload=messaging.APNSPayload(
+            aps=messaging.Aps(
+                alert=messaging.ApsAlert(title=apns_alert.get('title'), body=apns_alert.get('body')),
+                sound='default',
+                content_available=True,
+                mutable_content=True,  # lets an iOS service extension attach the image
+                category=apns_alert.get('category'),
+            ),
+        ),
+        fcm_options=messaging.APNSFCMOptions(image=image) if image else None,
+    )
+
+
+def _send_multicast(tokens, *, notification=None, data=None, android_priority='high', channel_id='chat_messages', apns_alert=None):
     """
     tokens: list[str]
     notification: messaging.Notification | None  -> None rakhne se ye
         DATA-ONLY message ban jaata hai (calls ke liye zaroori — data-only
         messages hi background/killed state me app ko jagate hain aur
         `firebaseBackgroundHandler` (Flutter) trigger karte hain).
+    apns_alert: N8-BE — optional {title, body, category, image}. Android
+        stays data-only (client builds the local notification with image +
+        action buttons), but iOS cannot show anything from a silent
+        data-only push, so this adds a visible APNs alert (+ mutable-content
+        and the image via fcm_options) to the iOS side ONLY. None (the
+        default) keeps the old behaviour byte-for-byte.
     channel_id: 🔥 NAYA (Feature 11) — Android notification channel.
         Flutter side (`push_notification_service.dart`) ko is naam ka
         alag `AndroidNotificationChannel` banana hoga (`'announcements'`)
@@ -222,12 +303,7 @@ def _send_multicast(tokens, *, notification=None, data=None, android_priority='h
                 if notification is not None else None
             ),
         ),
-        apns=messaging.APNSConfig(
-            headers={'apns-priority': '10'},
-            payload=messaging.APNSPayload(
-                aps=messaging.Aps(content_available=True, sound='default' if notification else None)
-            ),
-        ),
+        apns=_build_apns_config(notification, apns_alert),
     )
 
     try:
@@ -259,6 +335,90 @@ def send_push_to_users(recipient_ids, title, body, data=None):
     )
 
 
+# N8-BE — rich push (image + action buttons). Data-only on Android on
+# purpose: FCM *notification* messages cannot carry action buttons, and a
+# notification block next to a client-built local notification is exactly
+# the double-notification bug the chat pushes above already avoid. So the
+# client builds the notification from these data keys:
+#   title, body, image_url, actions (JSON string: [{"id","label"}, ...]),
+#   channel_id, plus the deep-link ids (post_id, comment_id, follow_id...).
+RICH_PUSH_CHANNEL_ID = os.getenv("RICH_PUSH_CHANNEL_ID", "notifications")
+# Per-action APNs category the iOS app registers; actions themselves are
+# declared client-side per category (iOS has no server-sent buttons).
+_APNS_CATEGORY_BY_ACTION_ID = {
+    "confirm_follow": "FOLLOW_REQUEST",
+    "delete_follow": "FOLLOW_REQUEST",
+    "follow_back": "FOLLOW_BACK",
+    # Reply = text-input action; iOS needs the category registered client-side
+    # with a UNTextInputNotificationAction.
+    "reply_comment": "COMMENT_REPLY",
+    "reply_message": "MESSAGE_REPLY",
+}
+
+# Same JSON shape send_rich_push uses for `actions`.
+_REPLY_MESSAGE_ACTIONS = json.dumps([{"id": "reply_message", "label": "Reply", "input": True}])
+
+
+def send_rich_push(recipient_ids, title, body, *, image_url=None, actions=None, data=None,
+                   channel_id=None):
+    """Generic rich push: title/body + optional image + optional action
+    buttons. Returns nothing; never raises (same as every sender here)."""
+    tokens = _tokens_for_users(recipient_ids)
+    if not tokens:
+        return
+    actions = list(actions or [])
+    payload = dict(data or {})
+    payload.update({
+        'title': title or '',
+        'body': body or '',
+        'channel_id': channel_id or RICH_PUSH_CHANNEL_ID,
+    })
+    if image_url:
+        payload['image_url'] = image_url
+    if actions:
+        payload['actions'] = json.dumps(actions)
+    category = next(
+        (_APNS_CATEGORY_BY_ACTION_ID[a['id']] for a in actions if a.get('id') in _APNS_CATEGORY_BY_ACTION_ID),
+        None,
+    )
+    _send_multicast(
+        tokens,
+        notification=None,
+        data=payload,
+        android_priority='high',
+        channel_id=payload['channel_id'],
+        apns_alert={'title': title, 'body': body, 'category': category, 'image': image_url},
+    )
+
+
+def send_push_for_notification(notification):
+    """Push for an already-saved core.Notification row (the row that
+    create_notification() returned). This is how core/in-app types get a
+    rich push: core.services itself never sends (module contract), so the
+    call-site does
+
+        row = create_notification(user, TYPE, title, message, actor=..., data={...})
+        send_push_for_notification(row)
+
+    `None` (create_notification skipped it: restricted/muted actor, or a
+    swallowed error) is a no-op. Honours NotificationPreference: push
+    disabled, or the type in `muted_types`, means no push (the bell row
+    still exists, same as allowed_channels_for's own contract)."""
+    if notification is None:
+        return
+    try:
+        pref = NotificationPreference.objects.filter(user_id=notification.recipient_id).first()
+        if pref is not None and 'push' not in pref.allowed_channels_for(notification.notif_type):
+            return
+        p = build_push_payload(notification)
+        send_rich_push(
+            [p['recipient_id']], p['title'], p['body'],
+            image_url=p['image_url'], actions=p['actions'], data=p['data'],
+        )
+    except Exception:
+        logger.exception("rich push failed for notification %s", getattr(notification, 'id', None))
+
+
 def _send_single_chat_push(recipient_ids, sender_name, body, conversation_id, message_id, is_announcement=False):
     """
     Actual single-message FCM call — DATA-ONLY (see class-level note on
@@ -283,6 +443,8 @@ def _send_single_chat_push(recipient_ids, sender_name, body, conversation_id, me
             'message_id': str(message_id),
             'sender_name': sender_name or '',
             'text': body or '',
+            # Inline Reply button (Android: client builds it from this JSON).
+            'actions': _REPLY_MESSAGE_ACTIONS,
         },
         android_priority='high',
         channel_id='announcements' if is_announcement else 'chat_messages',
@@ -358,6 +520,15 @@ def send_chat_message_push(recipient_ids, sender_name, message_text, message_typ
     # nahi — jo sahi hai, kyunki unhe koi individual push mila hi nahi).
     recipient_ids = _filter_recipients_for_focus(recipient_ids, is_announcement=is_announcement)
     recipient_ids = _filter_recipients_for_restrict(recipient_ids, message_id)
+
+    # 🔥 NAYA (M1-BE) — pending requests alag push (title "Message request"),
+    # declined silent; sirf accepted recipients aage normal flow me jaate hain
+    # (bell row + digest-counting bhi unhi ke liye).
+    recipient_ids, request_recipient_ids = _split_recipients_for_message_request(
+        recipient_ids, conversation_id,
+    )
+    if request_recipient_ids:
+        send_message_request_push(request_recipient_ids, sender_name, conversation_id, message_id)
     if not recipient_ids:
         return
 
@@ -493,6 +664,9 @@ def send_mention_push(recipient_ids, sender_name, message_text, conversation_id,
     """
     recipient_ids = _filter_recipients_for_focus(recipient_ids, is_announcement=is_announcement)
     recipient_ids = _filter_recipients_for_restrict(recipient_ids, message_id)
+    # 🔥 NAYA (M1-BE) — pending/declined request me mention push bhi nahi
+    # (mute override sirf accepted chats pe lagta hai).
+    recipient_ids, _ = _split_recipients_for_message_request(recipient_ids, conversation_id)
     if not recipient_ids:
         return
 
@@ -524,6 +698,7 @@ def send_mention_push(recipient_ids, sender_name, message_text, conversation_id,
             'message_id': str(message_id),
             'sender_name': sender_name or '',
             'text': body,
+            'actions': _REPLY_MESSAGE_ACTIONS,
         },
         android_priority='high',
         channel_id='announcements' if is_announcement else 'chat_messages',
@@ -555,7 +730,7 @@ def send_call_cancelled_push(recipient_ids, call_id, conversation_id):
 
 def send_parent_push(*, fcm_token, title, body, data=None):
     """
-    🔧 GAP FIX — `liveclass/parent_link_views.py` (ClassroomParentCodeGenerateView,
+    🔧 GAP FIX — `tuitionclass/parent_link_views.py` (ClassroomParentCodeGenerateView,
     ParentQueryReplyView) calls this for Parent Mode notifications. Every
     other push function above resolves FCM tokens FROM a `recipient_ids`
     list via `_tokens_for_users()` (DeviceToken.objects.filter(user_id__in=...)),
@@ -577,4 +752,4 @@ def send_parent_push(*, fcm_token, title, body, data=None):
         notification=messaging.Notification(title=title, body=body),
         data=data,
         android_priority='high',
-    )
+    )

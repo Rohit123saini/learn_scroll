@@ -1,9 +1,9 @@
 # post/models.py
 import uuid
 from datetime import timedelta
-from django.db import models
+from django.db import models, transaction
 from django.contrib.auth import get_user_model
-from django.core.validators import FileExtensionValidator
+from django.core.validators import FileExtensionValidator, MaxValueValidator, MinValueValidator
 from django.db.models.signals import post_save, post_delete
 from django.dispatch import receiver
 from django.conf import settings
@@ -34,6 +34,15 @@ class Post(models.Model):
         ('article', 'Article'),
         ('carousel', 'Carousel'),
         ('link', 'Link'),
+        ('repost', 'Repost'),
+        # TASK G6 (growth_and_feature_tasks.md) — "Ask a doubt" post: a
+        # student posts a question (in `content`, same as a text post) and
+        # others/teachers answer inline via the `PostAnswer` model below,
+        # with one answer pinnable as the best answer. Deliberately its
+        # own post_type (not "text" + a flag) so feed ranking/filtering
+        # and the composer's icon-toggle row can treat it as a distinct
+        # card type, same as 'poll' already is.
+        ('doubt', 'Doubt'),
     ]
 
     VISIBILITY_CHOICES = [
@@ -71,12 +80,71 @@ class Post(models.Model):
     post_type = models.CharField(max_length=20, choices=POST_TYPE_CHOICES, default='text', db_index=True)
     visibility = models.CharField(max_length=20, choices=VISIBILITY_CHOICES, default='public')
 
+    # ---------------------------------------------------------------------
+    # REPOST — Instagram/Twitter-style repost/retweet.
+    #
+    # A repost is a REAL Post row (`post_type='repost'`) with almost every
+    # other field left at its default (no content/media of its own is
+    # required) — `original_post` is what makes it a repost, pointing at
+    # the post being reposted. Self-FK so `Post.objects.filter(...)` and
+    # every existing feed query keep working unchanged; a repost shows up
+    # in feeds/profile lists exactly like any other post (newest-first),
+    # it just renders as a small "Reposted by X" wrapper around an
+    # embedded preview of `original_post` (see PostListSerializer's
+    # `get_original_post` in serializers.py).
+    #
+    # SET_NULL (not CASCADE): if the original post is later hard-deleted
+    # (soft-delete via `is_deleted` doesn't touch this at all — the repost
+    # keeps pointing at it and the serializer/frontend decide how to show
+    # a since-removed original), the repost row itself should survive as
+    # a plain post rather than vanishing along with it.
+    #
+    # Chain-flattening (repost-of-a-repost points at the ROOT original,
+    # not at the intermediate repost) is enforced in the view
+    # (`PostRepostAPIView`), not here — same "business logic doesn't
+    # belong in the model" call the rest of this file already makes
+    # (see `subcategory`'s comment above) — but the `null=True` here is
+    # what makes an ordinary (non-repost) post the common, unconstrained
+    # case.
+    original_post = models.ForeignKey(
+        'self', on_delete=models.SET_NULL, null=True, blank=True, related_name='reposts',
+    )
+    # Twitter's "Quote Tweet" equivalent — optional text the reposting
+    # user adds on top of the embedded original. Blank/null = a plain
+    # "quick repost" (one-tap, no added text), exactly like a retweet.
+    repost_caption = models.TextField(blank=True, null=True)
+
     # Engagement Counters - Denormalized for performance
     likes_count = models.PositiveIntegerField(default=0)
     comments_count = models.PositiveIntegerField(default=0)
     shares_count = models.PositiveIntegerField(default=0)
     views_count = models.BigIntegerField(default=0)
     saves_count = models.PositiveIntegerField(default=0)
+    # 🔥 NEW — Instagram/Twitter-style Repost feature.
+    reposts_count = models.PositiveIntegerField(default=0)
+    # TASK G4 (growth_and_feature_tasks.md) — denormalized average watch
+    # completion (0.0-1.0) across every PostView row that has watch-progress
+    # data (see PostView.watch_seconds below + PostVideoProgressAPIView in
+    # views.py). Only ever set for post_type='video' — stays at the 0.0
+    # default for every other post type, which is exactly the "no boost"
+    # value the feed ranking needs. Kept in sync by
+    # update_video_completion_rate (signal, further down this file), same
+    # denormalized-counter pattern as shares_count/saves_count above.
+    video_completion_rate = models.FloatField(default=0.0)
+    # WATCH-TIME RANKING (feed task, Part 1) - two more denormalised numbers
+    # over the same PostView rows as video_completion_rate, kept in sync by
+    # the same signal: how many viewers have watch data, and their average
+    # ABSOLUTE watch time in seconds. Together with the rate they let
+    # feed_mix.video_watch_boost() weigh a completion rate by how much
+    # evidence backs it (1 viewer != 200 viewers) and reward long watches
+    # (finishing a 5 s loop != finishing a 10 min lesson).
+    video_watch_count = models.PositiveIntegerField(default=0)
+    video_avg_watch_seconds = models.FloatField(default=0.0)
+    # TASK G6 — denormalized count of PostAnswer rows, same pattern as
+    # shares_count/saves_count above. Only meaningful for post_type='doubt'
+    # but harmless (stays 0) on every other post type. Kept in sync by
+    # sync_post_answers_count (signal, further down this file).
+    answers_count = models.PositiveIntegerField(default=0)
 
     like_count = models.PositiveIntegerField(default=0)
     confuse_count = models.PositiveIntegerField(default=0)
@@ -130,6 +198,7 @@ class Post(models.Model):
             models.Index(fields=['category', 'subcategory', '-created_at']),
             models.Index(fields=['-likes_count', '-created_at']),  # For trending
             models.Index(fields=['is_scheduled', 'published_at']),  # For the publish sweep
+            models.Index(fields=['original_post', '-created_at']),  # For reposts_count / "who reposted this"
         ]
 
     def __str__(self):
@@ -185,6 +254,22 @@ class PostMedia(models.Model):
         )]
     )
     thumbnail = models.ImageField(upload_to='posts/thumbnails/%Y/%m/%d/', blank=True, null=True)
+    # C4-BE — responsive image sizes, generated off-request by
+    # `post.tasks.generate_image_variants` (Celery) for image/gif uploads.
+    #   thumb_320  -> max 320px wide (grids, notification previews, chat cards)
+    #   medium_720 -> max 720px wide (feed cards)
+    # The ORIGINAL stays in `file` untouched (full-screen viewer / download).
+    # Both are NULL until the task has run (and stay NULL for non-images), so
+    # every reader must treat them as optional and fall back — see
+    # PostMediaSerializer. `medium_720` also stays NULL on purpose for animated
+    # images (GIF/animated WebP): a still JPEG would replace the animation, so
+    # those keep serving the original `file` and only get a still `thumb_320`.
+    # Deliberately separate from `thumbnail` above: that one is the VIDEO poster
+    # frame (480px, made by generate_video_thumbnail) and other code already
+    # reads it (notification previews, share_post_to_conversation) — reusing it
+    # for a second meaning would make both features fight over one column.
+    thumb_320 = models.ImageField(upload_to='posts/thumb_320/%Y/%m/%d/', max_length=255, blank=True, null=True)
+    medium_720 = models.ImageField(upload_to='posts/medium_720/%Y/%m/%d/', max_length=255, blank=True, null=True)
     # TASK 5 — per-attachment caption. new_post.dart collects one caption
     # per attachment (`attachment.caption`) and api_service.dart sends the
     # whole list as `media_captions` (JSON-encoded, same order/index as
@@ -203,7 +288,10 @@ class PostMedia(models.Model):
 
     # CDN & Storage
     cdn_url = models.URLField(blank=True, null=True)
-    blur_hash = models.CharField(max_length=100, blank=True, null=True)  # For image placeholder
+    # BlurHash string (~28 chars) for the image placeholder. Column already
+    # existed (ReelSerializer reads it for videos); C4-BE now fills it for
+    # images in `generate_image_variants`. Exposed to the API as `blurhash`.
+    blur_hash = models.CharField(max_length=100, blank=True, null=True)
 
     # Order in carousel
     display_order = models.PositiveIntegerField(default=0)
@@ -222,6 +310,43 @@ class PostMedia(models.Model):
 
     def __str__(self):
         return f"{self.media_type} - {self.file_name}"
+
+
+# C4-BE — kick off image-variant generation for every new image/gif PostMedia.
+#
+# A receiver (not a call inside PostCreateSerializer.create()) on purpose: a
+# PostMedia row is created from more than one place — the normal multipart
+# create AND the chunked-upload `complete` path in views.py — and a signal is
+# the one hook that sees all of them, including any future one. Same thin
+# "enqueue and return" shape as post.signals.queue_video_thumbnail_on_create
+# (that file wasn't part of this task, so this lives here; it can be moved
+# there unchanged — only the @receiver line and the imports matter).
+#
+# - `transaction.on_commit`: the worker must not run before the row (and its
+#   file) is committed, or `PostMedia.objects.get()` races the upload's own
+#   transaction and logs a bogus "no longer exists".
+# - The `.delay()` is wrapped: a Celery broker outage must NEVER turn a
+#   successful upload into a 500. The row simply stays without variants (the
+#   serializer falls back to the original file) until
+#   `manage.py backfill_image_variants` picks it up.
+@receiver(post_save, sender=PostMedia)
+def queue_image_variants_on_create(sender, instance, created, raw=False, **kwargs):
+    if raw or not created or instance.media_type not in ('image', 'gif'):
+        return
+    media_id = str(instance.id)
+
+    def _enqueue():
+        try:
+            from .tasks import generate_image_variants
+            generate_image_variants.delay(media_id)
+        except Exception:
+            import logging
+            logging.getLogger(__name__).exception(
+                "could not enqueue generate_image_variants for PostMedia %s "
+                "(run backfill_image_variants to catch up)", media_id,
+            )
+
+    transaction.on_commit(_enqueue)
 
 
 # ---------------------------------------------------------------------------
@@ -331,6 +456,50 @@ def sync_poll_vote_counts(sender, instance, **kwargs):
     )
 
 
+# ---------------------------------------------------------------------------
+# TASK G6 — "Ask a doubt" post type. A `Post` with post_type='doubt' holds
+# the question in its own `content` field (nothing new needed there); this
+# model holds the answers other students/teachers post underneath it, with
+# `is_best_answer` letting the asker pin the one that actually solved it
+# (rendered first in the answer list, badge in the UI).
+# ---------------------------------------------------------------------------
+class PostAnswer(models.Model):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    post = models.ForeignKey(Post, on_delete=models.CASCADE, related_name='answers')
+    user = models.ForeignKey(User, on_delete=models.CASCADE, related_name='post_answers')
+    content = models.TextField()
+    # Exactly one True per post at a time — enforced in the view
+    # (PostAnswerMarkBestAPIView clears any previous pin before setting a
+    # new one), not at the DB level, same "business logic doesn't belong
+    # in the model" call as Post.subcategory's validation above.
+    is_best_answer = models.BooleanField(default=False, db_index=True)
+    likes_count = models.PositiveIntegerField(default=0)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = 'post_answers'
+        # Best answer floats to the top, then most-liked, then
+        # chronological — matches how the answer list is meant to read.
+        ordering = ['-is_best_answer', '-likes_count', 'created_at']
+        indexes = [
+            models.Index(fields=['post', '-is_best_answer', 'created_at']),
+        ]
+
+    def __str__(self):
+        return f"Answer by {self.user.username} on doubt {self.post_id}"
+
+
+@receiver(post_save, sender=PostAnswer)
+@receiver(post_delete, sender=PostAnswer)
+def sync_post_answers_count(sender, instance, **kwargs):
+    """Same denormalized-counter pattern as sync_poll_vote_counts above —
+    recompute from the real rows on every create/delete."""
+    Post.objects.filter(id=instance.post_id).update(
+        answers_count=PostAnswer.objects.filter(post_id=instance.post_id).count()
+    )
+
+
 class PostLike(models.Model):
     REACTION_CHOICES = [
         ('like', 'like'),  # 👍
@@ -383,6 +552,11 @@ class PostComment(models.Model):
         indexes = [
             models.Index(fields=['post', '-created_at', 'is_hidden', 'is_deleted']),
             models.Index(fields=['parent', '-created_at']),
+            # TASK G5 — supports CommentListAPIView's new `?sort=top`
+            # (comment_view.py), which orders by -is_pinned, -likes_count,
+            # -created_at. The existing index above only covers the
+            # `?sort=newest` (chronological) path.
+            models.Index(fields=['post', '-is_pinned', '-likes_count', '-created_at']),
         ]
 
 class CommentMedia(models.Model):
@@ -430,11 +604,37 @@ class PostView(models.Model):
     ip_address = models.GenericIPAddressField(blank=True, null=True)
     user_agent = models.TextField(blank=True, null=True)
     viewed_at = models.DateTimeField(auto_now_add=True)
+    # TASK G4 — optional watch-progress pair, filled in by
+    # PostVideoProgressAPIView (views.py) after this row already exists
+    # (created via PostDetailAPIView's plain get_or_create, same as
+    # before). Both null = an ordinary non-video "viewed it" row, exactly
+    # like today. `watch_seconds` is the FURTHEST position the viewer
+    # reached (never decreases — see the view for why), and
+    # `video_duration_seconds` is a snapshot of the media's own duration
+    # at watch time, so a later edit to the source media can't silently
+    # skew an already-recorded ratio.
+    watch_seconds = models.FloatField(blank=True, null=True)
+    video_duration_seconds = models.FloatField(blank=True, null=True)
+    # FEED "SEEN" SIGNAL — False only for rows created by the batch
+    # `POST /post/feed/seen/` endpoint (PostSeenBatchAPIView), which marks a
+    # post as *seen in the feed* without touching `Post.views_count`.
+    # PostDetailAPIView flips it to True (and bumps views_count exactly
+    # once) the first time the user actually opens the post. Default True
+    # so every pre-existing row (all created via detail-open) and every
+    # other code path keep their old "already counted" meaning.
+    is_counted = models.BooleanField(default=True)
 
     class Meta:
         db_table = 'post_views'
+        constraints = [
+            # One row per (post, user). NULL users (SET_NULL after a
+            # user is deleted) never collide with each other in SQL.
+            models.UniqueConstraint(fields=['post', 'user'], name='uniq_postview_post_user'),
+        ]
         indexes = [
             models.Index(fields=['post', '-viewed_at']),
+            # "What has this user seen recently?" — feed de-dup lookups.
+            models.Index(fields=['user', '-viewed_at'], name='post_views_user_viewed_idx'),
         ]
 
 
@@ -499,6 +699,77 @@ def update_shares_count(sender, instance, **kwargs):
 def update_saves_count(sender, instance, **kwargs):
     Post.objects.filter(id=instance.post_id).update(
         saves_count=PostSave.objects.filter(post_id=instance.post_id).count()
+    )
+
+
+# TASK G4 (growth_and_feature_tasks.md) — keeps Post.video_completion_rate
+# in sync, same denormalized-counter shape as update_shares_count/
+# update_saves_count just above. Deliberately a no-op for the vast
+# majority of PostView writes: PostDetailAPIView's plain
+# `PostView.objects.get_or_create(post=instance, user=request.user)` never
+# touches watch_seconds/video_duration_seconds, so every non-video "viewed
+# it" row still costs nothing extra here. Only PostVideoProgressAPIView
+# (views.py) ever sets both fields, which is what actually triggers a
+# recompute.
+#
+# Average is computed in Python rather than as a SQL division
+# (watch_seconds / video_duration_seconds per row) on purpose — division
+# expressions inside `.aggregate()`/`.annotate()` behave differently across
+# the Postgres/SQLite split this project runs on (LearnScroll/settings.py),
+# and this signal only ever touches the handful of PostView rows for one
+# post, so the extra Python loop is cheap.
+@receiver(post_save, sender=PostView)
+def update_video_completion_rate(sender, instance, **kwargs):
+    if instance.watch_seconds is None or not instance.video_duration_seconds:
+        return
+    progress_rows = PostView.objects.filter(
+        post_id=instance.post_id,
+        watch_seconds__isnull=False,
+        video_duration_seconds__gt=0,
+    ).values_list('watch_seconds', 'video_duration_seconds')
+    # One pass gives all three numbers. Watch time is clamped to the row's own
+    # duration snapshot (same guard as the ratio) so a bad client value can't
+    # inflate the average.
+    ratios, watched_list = [], []
+    for watched, duration in progress_rows:
+        if duration:
+            ratios.append(min(watched / duration, 1.0))
+            watched_list.append(min(watched, duration))
+    if not ratios:
+        return
+    Post.objects.filter(id=instance.post_id, post_type='video').update(
+        video_completion_rate=sum(ratios) / len(ratios),
+        video_watch_count=len(ratios),
+        video_avg_watch_seconds=sum(watched_list) / len(watched_list),
+    )
+
+
+# ---------------------------------------------------------------------------
+# REPOST — keeps `Post.reposts_count` in sync, same shape as
+# update_saves_count/update_shares_count just above (recompute the real
+# count on every relevant save/delete rather than +1/-1 in the view).
+#
+# Fires on every `Post` save (not a separate model like PostShare/
+# PostSave — a repost IS a Post row), but is a no-op unless
+# `original_post_id` is set, so plain posts/edits pay for one extra
+# cheap attribute check, not a query.
+#
+# `Post.objects.filter(...).update(...)` is a queryset UPDATE, which
+# Django does NOT route back through `post_save` — so this can't
+# recursively re-trigger itself when it writes `reposts_count` on the
+# original post.
+#
+# `is_deleted=False` in the recompute is what makes a soft-deleted
+# repost (PostDeleteAPIView flips `is_deleted` via `.save()`, which
+# fires this same signal) stop counting toward the original's total,
+# without needing a separate "on soft-delete" code path.
+@receiver(post_save, sender=Post)
+@receiver(post_delete, sender=Post)
+def update_reposts_count(sender, instance, **kwargs):
+    if not instance.original_post_id:
+        return
+    Post.objects.filter(id=instance.original_post_id).update(
+        reposts_count=Post.objects.filter(original_post_id=instance.original_post_id, is_deleted=False).count()
     )
 
 
@@ -683,6 +954,17 @@ class Story(models.Model):
         ('video', 'Video'),
     ]
 
+    # STORIES UPGRADE - PART 1 (Close Friends). Who may see this story.
+    # `everyone` = the old behaviour (all followers). `close_friends` = only
+    # people on the owner's CloseFriend list (+ the owner). Enforced in ONE
+    # place - post/story_visibility.py - never re-implement it in a view.
+    AUDIENCE_EVERYONE = 'everyone'
+    AUDIENCE_CLOSE_FRIENDS = 'close_friends'
+    AUDIENCE_CHOICES = [
+        (AUDIENCE_EVERYONE, 'Everyone'),
+        (AUDIENCE_CLOSE_FRIENDS, 'Close friends'),
+    ]
+
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     user = models.ForeignKey(User, on_delete=models.CASCADE, related_name='stories')
 
@@ -692,6 +974,17 @@ class Story(models.Model):
     )
     media_type = models.CharField(max_length=10, choices=MEDIA_TYPE_CHOICES, default='image')
     caption = models.CharField(max_length=300, blank=True)
+    audience = models.CharField(
+        max_length=20, choices=AUDIENCE_CHOICES, default=AUDIENCE_EVERYONE,
+    )
+
+    # STORIES UPGRADE - PART 3a (Music). One CC0 track picked from the
+    # Freesound search proxy (`/post/music/search/`), stored as a small JSON
+    # object so the viewer needs no second lookup:
+    #   {"id", "title", "artist", "url", "duration", "start", "license"}
+    # `url` is the track's public preview mp3 (host allow-listed), `start` is
+    # the second the clip begins at. Rules: post/story_music.py. NULL = no music.
+    music = models.JSONField(null=True, blank=True, default=None)
 
     # Denormalized — kept in sync by update_story_views_count below, same
     # pattern as Post.saves_count / Post.shares_count.
@@ -753,3 +1046,464 @@ def update_story_views_count(sender, instance, **kwargs):
     Story.objects.filter(id=instance.story_id).update(
         views_count=StoryView.objects.filter(story_id=instance.story_id).count()
     )
+
+
+# ---------------------------------------------------------------------------
+# StoryReaction — Instagram-style quick emoji reaction on a story. One row
+# per (story, user), same `unique_together` shape as message.MessageReaction
+# — tapping a new emoji replaces the old one (see StoryReactAPIView.post in
+# views.py), tapping the SAME emoji again removes it, exactly one reaction
+# per viewer per story at any time.
+# ---------------------------------------------------------------------------
+class StoryReaction(models.Model):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    story = models.ForeignKey(Story, on_delete=models.CASCADE, related_name='reactions')
+    user = models.ForeignKey(User, on_delete=models.CASCADE, related_name='story_reactions')
+    emoji = models.CharField(max_length=20)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = 'story_reactions'
+        unique_together = ['story', 'user']
+        indexes = [
+            models.Index(fields=['story', '-created_at']),
+        ]
+
+    def __str__(self):
+        return f"{self.user.username} reacted {self.emoji} on {self.story_id}"
+
+
+# ---------------------------------------------------------------------------
+# CloseFriend - STORIES UPGRADE, PART 1. `owner`'s private "Close Friends"
+# list (Instagram's green-ring list). One row per (owner, friend). The list
+# is ONE-WAY and private: the friend is never told they were added, and
+# being on someone's list does not put them on yours.
+#
+# Used by post/story_visibility.py to decide who can see a
+# `Story(audience='close_friends')`. Rows are removed automatically when
+# either side blocks the other (post/signals.py).
+# ---------------------------------------------------------------------------
+class CloseFriend(models.Model):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    owner = models.ForeignKey(User, on_delete=models.CASCADE, related_name='close_friend_entries')
+    friend = models.ForeignKey(User, on_delete=models.CASCADE, related_name='close_friend_of_entries')
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = 'close_friends'
+        ordering = ['-created_at']
+        constraints = [
+            models.UniqueConstraint(fields=['owner', 'friend'], name='unique_close_friend'),
+            models.CheckConstraint(
+                condition=~models.Q(owner=models.F('friend')),
+                name='close_friend_no_self',
+            ),
+        ]
+        indexes = [
+            models.Index(fields=['owner', '-created_at']),
+        ]
+
+    def __str__(self):
+        return f"{self.owner_id} -> {self.friend_id} (close friend)"
+
+
+# ---------------------------------------------------------------------------
+# StorySticker - STORIES UPGRADE, PART 2a. ONE overlay placed on top of a
+# story: an @mention, a link, and (Part 2b) a poll or a question. They all
+# share the same placement shape (x/y/rotation/scale/z_index) so the client
+# has a single renderer and a single drag-scale-rotate editor for every kind.
+#
+# Placement is normalised: x and y are the sticker's CENTRE as a fraction of
+# the story canvas (0..1), so it lands in the same place on every screen size.
+# Kind-specific content lives in `data` (link: url/label/host) or - for
+# mentions, where we need to query "stories that mention me" and clean up on
+# block - in the `mentioned_user` FK. Validation: post/story_stickers.py.
+# ---------------------------------------------------------------------------
+class StorySticker(models.Model):
+    KIND_MENTION = 'mention'
+    KIND_LINK = 'link'
+    KIND_POLL = 'poll'
+    KIND_QUESTION = 'question'
+    KIND_CHOICES = [
+        (KIND_MENTION, 'Mention'),
+        (KIND_LINK, 'Link'),
+        (KIND_POLL, 'Poll'),
+        (KIND_QUESTION, 'Question'),
+    ]
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    story = models.ForeignKey(Story, on_delete=models.CASCADE, related_name='stickers')
+    kind = models.CharField(max_length=20, choices=KIND_CHOICES)
+
+    x = models.FloatField(default=0.5)
+    y = models.FloatField(default=0.5)
+    rotation = models.FloatField(default=0.0)
+    scale = models.FloatField(default=1.0)
+    z_index = models.PositiveSmallIntegerField(default=0)
+
+    mentioned_user = models.ForeignKey(
+        User, on_delete=models.CASCADE, null=True, blank=True, related_name='story_mention_stickers',
+    )
+    data = models.JSONField(default=dict, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = 'story_stickers'
+        ordering = ['z_index', 'created_at']
+        indexes = [
+            models.Index(fields=['story', 'kind'], name='story_stick_story_kind_idx'),
+            models.Index(fields=['mentioned_user', '-created_at'], name='story_stick_mention_idx'),
+        ]
+        constraints = [
+            # A person can be tagged once per story.
+            models.UniqueConstraint(
+                fields=['story', 'mentioned_user'],
+                condition=models.Q(kind='mention'),
+                name='unique_story_mention',
+            ),
+            # A mention sticker must name someone.
+            models.CheckConstraint(
+                condition=~models.Q(kind='mention') | models.Q(mentioned_user__isnull=False),
+                name='story_mention_has_user',
+            ),
+        ]
+
+    def __str__(self):
+        return f"{self.kind} sticker on {self.story_id}"
+
+
+# ---------------------------------------------------------------------------
+# StoryPollVote / StoryQuestionAnswer - STORIES UPGRADE, PART 2b. What viewers
+# send back to an interactive sticker. One row per (sticker, viewer): a poll
+# vote is final (like Instagram), and a question gets one answer per viewer.
+# Only the story owner can list them (post/story_sticker_responses.py); a
+# viewer only ever sees aggregate poll numbers after they have voted.
+# ---------------------------------------------------------------------------
+class StoryPollVote(models.Model):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    sticker = models.ForeignKey(StorySticker, on_delete=models.CASCADE, related_name='poll_votes')
+    user = models.ForeignKey(User, on_delete=models.CASCADE, related_name='story_poll_votes')
+    option_index = models.PositiveSmallIntegerField()
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = 'story_poll_votes'
+        ordering = ['-created_at']
+        constraints = [
+            models.UniqueConstraint(fields=['sticker', 'user'], name='unique_story_poll_vote'),
+        ]
+        indexes = [
+            models.Index(fields=['sticker', 'option_index'], name='story_pollvote_opt_idx'),
+        ]
+
+    def __str__(self):
+        return f"{self.user_id} voted {self.option_index} on {self.sticker_id}"
+
+
+class StoryQuestionAnswer(models.Model):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    sticker = models.ForeignKey(StorySticker, on_delete=models.CASCADE, related_name='answers')
+    user = models.ForeignKey(User, on_delete=models.CASCADE, related_name='story_question_answers')
+    text = models.CharField(max_length=300)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = 'story_question_answers'
+        ordering = ['-created_at']
+        constraints = [
+            models.UniqueConstraint(fields=['sticker', 'user'], name='unique_story_question_answer'),
+        ]
+        indexes = [
+            models.Index(fields=['sticker', '-created_at'], name='story_qanswer_recent_idx'),
+        ]
+
+    def __str__(self):
+        return f"{self.user_id} answered {self.sticker_id}"
+
+
+# ---------------------------------------------------------------------------
+# Highlight / HighlightItem - STORIES UPGRADE, PART 3b. A named, permanent
+# collection of the owner's past stories shown as a row on their profile.
+#
+# A highlight item POINTS AT the original Story row (no media copy). What keeps
+# that row alive after the 24 h expiry is post/tasks.py: `hard_delete_ancient_
+# stories` skips any story that is in a highlight. `expire_old_stories` still
+# flags it `is_deleted` once it is over 24 h old - that only hides it from the
+# live story tray; highlight reads use `highlightable_stories_q()`
+# (post/highlights.py) instead of `is_deleted=False`.
+# ---------------------------------------------------------------------------
+class Highlight(models.Model):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    user = models.ForeignKey(User, on_delete=models.CASCADE, related_name='highlights')
+    title = models.CharField(max_length=30)
+    # Which item's picture is the round cover. NULL = first photo item.
+    cover_item = models.ForeignKey(
+        'HighlightItem', on_delete=models.SET_NULL, null=True, blank=True, related_name='+',
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = 'story_highlights'
+        ordering = ['-updated_at']
+        indexes = [
+            models.Index(fields=['user', '-updated_at'], name='highlight_user_upd_idx'),
+        ]
+
+    def __str__(self):
+        return f"{self.user_id} highlight '{self.title}'"
+
+
+class HighlightItem(models.Model):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    highlight = models.ForeignKey(Highlight, on_delete=models.CASCADE, related_name='items')
+    story = models.ForeignKey(Story, on_delete=models.CASCADE, related_name='highlight_items')
+    position = models.PositiveIntegerField(default=0)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = 'story_highlight_items'
+        ordering = ['position', 'created_at']
+        constraints = [
+            models.UniqueConstraint(fields=['highlight', 'story'], name='unique_highlight_story'),
+        ]
+        indexes = [
+            models.Index(fields=['highlight', 'position'], name='highlight_item_pos_idx'),
+        ]
+
+    def __str__(self):
+        return f"{self.story_id} in {self.highlight_id} @ {self.position}"
+
+
+# ---------------------------------------------------------------------------
+# UserInterest — TASK 3 (production_readiness_tasks.md). Feed personalization.
+#
+# Deliberately reuses `Post.CATEGORY_CHOICES` (the same fixed, curated list
+# the composer's category picker already uses — see `category_taxonomy` in
+# views.py) rather than introducing a second, separate interest-tag
+# vocabulary. One row per (user, category) they've opted into; presence of a
+# row IS the "selected" state; UserInterestsAPIView.put replaces the full
+# set in one call so the client can just POST whatever chips are toggled on.
+# ---------------------------------------------------------------------------
+class UserInterest(models.Model):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    user = models.ForeignKey(User, on_delete=models.CASCADE, related_name='interests')
+    category = models.CharField(max_length=100, choices=Post.CATEGORY_CHOICES, db_index=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = 'user_interests'
+        unique_together = ['user', 'category']
+        indexes = [
+            models.Index(fields=['user']),
+        ]
+
+    def __str__(self):
+        return f"{self.user.username} -> {self.category}"
+
+
+# ---------------------------------------------------------------------------
+# FEED FEEDBACK CONTROLS - PART 1 (hide + mute).
+# "Not interested" on a post and "Mute this account". Both are PRIVATE,
+# per-user, silent preferences that only shape what the caller's own
+# feeds show (Home / Explore / Hashtag); nothing is sent to the other side.
+#   - PostHide      one row per (user, post). Also hides reposts of that post.
+#   - MutedAccount  one row per (user, muted_user). Unlike BlockUser the
+#                   follow relationship, profile access, DMs and search stay
+#                   exactly as they were - only the posts vanish from feeds.
+# Part 2 (built): "Show fewer like this" ranking signal (FeedFeedback, below
+# MutedAccount) and "Why am I seeing this" (post/feed_explain.py).
+# ---------------------------------------------------------------------------
+class PostHide(models.Model):
+    class Reason(models.TextChoices):
+        NOT_INTERESTED = 'not_interested', 'Not interested'
+        NOT_RELEVANT = 'not_relevant', 'Not relevant to me'
+        SEEN_TOO_OFTEN = 'seen_too_often', 'Seeing this too often'
+        OTHER = 'other', 'Other'
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    user = models.ForeignKey(User, on_delete=models.CASCADE, related_name='post_hides')
+    post = models.ForeignKey(Post, on_delete=models.CASCADE, related_name='hides')
+    reason = models.CharField(max_length=20, choices=Reason.choices, default=Reason.NOT_INTERESTED)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = 'post_hides'
+        ordering = ['-created_at']
+        constraints = [
+            models.UniqueConstraint(fields=['user', 'post'], name='uniq_post_hide_user_post'),
+        ]
+        indexes = [
+            models.Index(fields=['user', '-created_at'], name='post_hide_user_created_idx'),
+        ]
+
+    def __str__(self):
+        return f"{self.user_id} hid {self.post_id} ({self.reason})"
+
+
+class MutedAccount(models.Model):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    user = models.ForeignKey(User, on_delete=models.CASCADE, related_name='muted_accounts')
+    muted_user = models.ForeignKey(User, on_delete=models.CASCADE, related_name='muted_by_accounts')
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = 'post_muted_accounts'
+        ordering = ['-created_at']
+        constraints = [
+            models.UniqueConstraint(fields=['user', 'muted_user'], name='uniq_muted_account'),
+            models.CheckConstraint(condition=~models.Q(user=models.F('muted_user')), name='muted_account_no_self_mute'),
+        ]
+        indexes = [
+            models.Index(fields=['user', '-created_at'], name='post_muted_user_created_idx'),
+        ]
+
+    def __str__(self):
+        return f"{self.user_id} muted {self.muted_user_id}"
+
+
+# ---------------------------------------------------------------------------
+# FEED FEEDBACK CONTROLS - PART 2: "Show fewer like this".
+# A NEGATIVE ranking signal - the opposite of UserInterest's +15. One row per
+# (user, kind, key) where kind says WHAT is being dampened:
+#   category  key = Post.category            e.g. "tech"
+#   hashtag   key = lower-case tag, no '#'   e.g. "python"
+#   author    key = str(author user id)
+# `weight` is the strength AT `updated_at`; it grows by one step per "show
+# fewer" tap (capped) and DECAYS with a slow half-life at read time (default
+# 30 days, settings.FEED_FEEDBACK) - nothing is rewritten by a cron job. The
+# decayed weight becomes minus points in feed_mix.build_pool_ids, for the
+# recommended + trending pools only (never the following pool). See
+# feed_mix.load_feedback_penalties / penalty_expression.
+# ---------------------------------------------------------------------------
+class FeedFeedback(models.Model):
+    class Kind(models.TextChoices):
+        CATEGORY = 'category', 'Category'
+        HASHTAG = 'hashtag', 'Hashtag'
+        AUTHOR = 'author', 'Author'
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    user = models.ForeignKey(User, on_delete=models.CASCADE, related_name='feed_feedback')
+    kind = models.CharField(max_length=10, choices=Kind.choices)
+    key = models.CharField(max_length=100)
+    weight = models.FloatField(default=1.0)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = 'post_feed_feedback'
+        ordering = ['-updated_at']
+        constraints = [
+            models.UniqueConstraint(fields=['user', 'kind', 'key'], name='uniq_feed_feedback_user_kind_key'),
+            models.CheckConstraint(condition=models.Q(weight__gt=0), name='feed_feedback_weight_positive'),
+        ]
+        indexes = [
+            models.Index(fields=['user', '-updated_at'], name='post_feedback_user_upd_idx'),
+        ]
+
+    def __str__(self):
+        return f"{self.user_id} fewer {self.kind}:{self.key} ({self.weight:.2f})"
+
+
+# ---------------------------------------------------------------------------
+# C1-BE — feed / profile analytics events (impression, dwell, tap, skip).
+#
+# `PostView` / the feed "seen" signal only remember THAT a post was seen (one
+# row per (post, user)); they cannot say how long it stayed on screen, or
+# which surface it was on. This table is the append-only event log for that:
+# one row per event, written in bulk by `POST /post/events/`
+# (`PostEventBulkAPIView`) and pruned daily (`post.tasks.prune_old_post_events`,
+# 30-day retention) so it can never grow unbounded.
+#
+# Deliberately NOT unique on (user, post, event_type): the same post can
+# legitimately be impressed / dwelled on many times, and every row is data.
+# ---------------------------------------------------------------------------
+class PostEvent(models.Model):
+    class EventType(models.TextChoices):
+        IMPRESSION = 'impression', 'Impression'
+        DWELL = 'dwell', 'Dwell'
+        TAP = 'tap', 'Tap'
+        SKIP = 'skip', 'Skip'
+
+    class Surface(models.TextChoices):
+        FEED = 'feed', 'Feed'
+        REELS = 'reels', 'Reels'
+        PROFILE = 'profile', 'Profile'
+        EXPLORE = 'explore', 'Explore'
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    user = models.ForeignKey(User, on_delete=models.CASCADE, related_name='post_events')
+    post = models.ForeignKey(Post, on_delete=models.CASCADE, related_name='events')
+    event_type = models.CharField(max_length=12, choices=EventType.choices)
+    # Milliseconds the post was on screen. Only meaningful for `dwell` (and
+    # optionally `skip`); 0 for impression/tap.
+    dwell_ms = models.PositiveIntegerField(default=0)
+    surface = models.CharField(max_length=10, choices=Surface.choices)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = 'post_events'
+        ordering = ['-created_at']
+        indexes = [
+            # The daily prune (`created_at < cutoff`) — without this it is a
+            # full scan of the biggest table in the app.
+            models.Index(fields=['created_at'], name='post_events_created_idx'),
+            # Per-post analytics: "impressions / dwell for this post".
+            models.Index(fields=['post', 'event_type', '-created_at'], name='post_events_post_type_idx'),
+            # Per-user history: "what has this user dwelled on recently?".
+            models.Index(fields=['user', '-created_at'], name='post_events_user_idx'),
+        ]
+
+    def __str__(self):
+        return f"{self.user_id} {self.event_type} {self.post_id} on {self.surface}"
+
+
+# ---------------------------------------------------------------------------
+# post/models.py  —  APPEND this class (P5a-BE). post/models.py wasn't part of
+# the upload, so this is a drop-in block instead of an edited file.
+#
+# Needs these imports at the top of post/models.py if not already there:
+#     from django.conf import settings
+#     from django.core.validators import MaxValueValidator, MinValueValidator
+#
+# Then:   python manage.py makemigrations post core && python manage.py migrate
+#   * post : creates PostTag
+#   * core : state-only AlterField for Notification.notif_type (new POST_TAG choice)
+# ---------------------------------------------------------------------------
+
+
+class PostTag(models.Model):
+    """A user tagged in a post (Instagram-style "Tagged" tab on their profile).
+
+    x / y are relative (0..1) positions on the first image; both NULL for posts
+    tagged without a position (video, document, text).
+
+    is_hidden = the tagged user took the post off THEIR profile's Tagged tab
+    ("Hide from profile"). The tag itself stays on the post. "Remove tag" is a
+    real DELETE of this row.
+
+    notified = the POST_TAG notification has gone out. Kept on the row so a
+    scheduled post's tags can be notified later, once it is actually published,
+    without ever notifying twice.
+    """
+
+    post = models.ForeignKey("Post", on_delete=models.CASCADE, related_name="post_tags")
+    tagged_user = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="post_tags_received",
+    )
+    x = models.FloatField(null=True, blank=True, validators=[MinValueValidator(0.0), MaxValueValidator(1.0)])
+    y = models.FloatField(null=True, blank=True, validators=[MinValueValidator(0.0), MaxValueValidator(1.0)])
+    is_hidden = models.BooleanField(default=False)
+    notified = models.BooleanField(default=False)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(fields=["post", "tagged_user"], name="uniq_posttag_post_user"),
+        ]
+        indexes = [
+            # Tagged-tab query: "my visible tags, newest first".
+            models.Index(fields=["tagged_user", "is_hidden", "-created_at"], name="posttag_user_hidden_idx"),
+        ]
+
+    def __str__(self):
+        return f"{self.tagged_user_id} tagged in {self.post_id}"

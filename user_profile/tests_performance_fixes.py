@@ -138,6 +138,25 @@ class ChatContactSearchScalingTests(APITestCase):
         Follow.objects.create(follower=self.me, following=other)
         self.assertEqual(set(self.results(search="needle")), {"needle"})
 
+    def test_private_profile_hidden_unless_i_am_their_accepted_follower(self):
+        # I follow a private user (accepted) -> I can already see their
+        # private profile elsewhere, so they still show up here.
+        private_i_follow = mk("privateifollow", is_private=True)
+        Follow.objects.create(follower=self.me, following=private_i_follow)
+
+        # A private user only follows *me* -> I'm not their accepted
+        # follower, I can't see their private profile, so discovery
+        # search must hide them even though a follow relation exists.
+        private_follows_me = mk("privatefollowsme", is_private=True)
+        Follow.objects.create(follower=private_follows_me, following=self.me)
+
+        # Public user who follows me -> unaffected by the privacy gate.
+        public_follower = mk("publicfollower", is_private=False)
+        Follow.objects.create(follower=public_follower, following=self.me)
+
+        got = self.results()
+        self.assertEqual(set(got), {"privateifollow", "publicfollower"})
+
 
 # --------------------------------------------------------------------- 18
 class BlockAndDeleteFanOutTests(APITestCase):

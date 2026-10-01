@@ -25,6 +25,9 @@ Non-Postgres (sqlite, local dev/tests me common) pe `SearchVectorField`/
 unranked `icontains` pe fallback karte hain — behavior degrade hota hai
 par crash nahi hota.
 """
+import re
+from urllib.parse import urlparse
+
 from django.contrib.postgres.search import SearchQuery, SearchRank, TrigramSimilarity
 from django.db import connection
 from django.db.models import F, Q
@@ -119,3 +122,89 @@ def search_messages(qs, query: str):
     ).filter(
         Q(search_vector=search_query) | Q(similarity__gt=TRIGRAM_SIMILARITY_THRESHOLD)
     ).order_by('-rank', '-similarity', '-created_at')
+
+
+# ----------------------------------------------------------------------
+# 🔥 NAYA (M8-BE) — "Media, links and docs" library (har chat ke liye)
+#   GET /message/conversations/<id>/media/?type=media|links|docs
+# ----------------------------------------------------------------------
+LIBRARY_TABS = ('media', 'links', 'docs')
+LIBRARY_VISUAL_TYPES = {'image', 'video'}                    # tab "media"
+LIBRARY_DOC_TYPES = {'file', 'presentation', 'audio'}        # tab "docs"
+LINKS_PER_MESSAGE_CAP = 10  # ek message me 100 link paste ho to bhi response bounded rahe
+
+# http(s)://... ya www.... — whitespace / < > " ' pe ruk jaata hai.
+_URL_RE = re.compile(r"(?:https?://|www\.)[^\s<>\"']+", re.IGNORECASE)
+# Sentence punctuation jo URL ke aakhir me chipak jaata hai ("see https://x.com/a.")
+_URL_TRAILING = '.,;:!?)]}\'"'
+
+
+def extract_urls(text, limit=LINKS_PER_MESSAGE_CAP):
+    """Message text se unique, normalized (https:// prefix wale) URLs, order preserved."""
+    if not text:
+        return []
+    seen, out = set(), []
+    for raw in _URL_RE.findall(text):
+        url = raw.rstrip(_URL_TRAILING)
+        if not url:
+            continue
+        if url.lower().startswith('www.'):
+            url = 'https://' + url
+        key = url.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(url)
+        if len(out) >= limit:
+            break
+    return out
+
+
+def apply_library_filter(qs, tab):
+    """`qs` ko tab ke hisaab se narrow karta hai. `tab` pehle se LIBRARY_TABS me validated hona chahiye."""
+    if tab == 'media':
+        return qs.filter(type__in=LIBRARY_VISUAL_TYPES)
+    if tab == 'docs':
+        return qs.filter(type__in=LIBRARY_DOC_TYPES)
+    # links — sirf text messages (link-preview task bhi sirf TEXT pe chalta hai).
+    # DB-level iregex sirf candidates chhaantta hai; asli URL extraction Python me hoti hai.
+    return qs.filter(type='text', text__iregex=r'(https?://|www\.)')
+
+
+def _domain_of(url):
+    try:
+        host = urlparse(url).netloc.lower()
+    except ValueError:
+        return ''
+    host = host.split('@')[-1].split(':')[0]
+    return host[4:] if host.startswith('www.') else host
+
+
+def build_library_items(message, tab):
+    """
+    Ek Message ko library-tab ke items me badalta hai. Media/docs ka shape
+    `GroupMediaSerializer` jaisa rakha hai (file_type / file_url / thumbnail_url /
+    file_size) taaki Flutter ki existing tiles reuse ho sakein. Multi-image
+    message (`file_urls`) ek-ek item me expand hota hai.
+    """
+    base = {
+        'message_id': str(message.id),
+        'sender_id': str(message.sender_id) if message.sender_id else None,
+        'sender_username': getattr(message.sender, 'username', None),
+        'created_at': message.created_at.isoformat(),
+    }
+    if tab == 'links':
+        preview = getattr(message, 'link_preview', None)  # VERIFY: field ka naam models.py me check karo
+        return [
+            {**base, 'url': u, 'domain': _domain_of(u), 'text': message.text,
+             'link_preview': preview if isinstance(preview, dict) else None}
+            for u in extract_urls(message.text)
+        ]
+    urls = list(message.file_urls or []) or ([message.file_url] if message.file_url else [])
+    return [
+        {**base, 'file_type': message.type, 'file_url': u,
+         'thumbnail_url': message.thumbnail_url if len(urls) == 1 else None,
+         'file_name': getattr(message, 'file_name', None),
+         'file_size': getattr(message, 'file_size', None)}
+        for u in urls
+    ]

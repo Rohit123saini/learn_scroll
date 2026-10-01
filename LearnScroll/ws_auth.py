@@ -14,9 +14,9 @@ CLIENT connect karega:
     wss://yourdomain.com/ws/<jo bhi path>/?token=<JWT_ACCESS_TOKEN>
 
 Yeh project ki EK hi copy hai — `message` (chat/calls/study-rooms) aur
-`liveclass` (classroom realtime) dono isi se apna WS auth lete hain.
+`tuitionclass` (classroom realtime) dono isi se apna WS auth lete hain.
 Pehle dono apps ke paas apna-apna independent, kabhi-compare-na-hui copy
-tha (message/Middleware.py vs liveclass/ws_auth.py) — ab dono sirf yahan
+tha (message/Middleware.py vs tuitionclass/ws_auth.py) — ab dono sirf yahan
 se import karte hain, taaki future me sirf ek jagah update karni pade
 aur dono kabhi silently mismatch na ho.
 
@@ -30,14 +30,14 @@ Wire this into LearnScroll/asgi.py as:
     django.setup()
     django_asgi_app = get_asgi_application()
 
-    from liveclass.routing import websocket_urlpatterns as liveclass_ws
+    from tuitionclass.routing import websocket_urlpatterns as tuitionclass_ws
     from message.routing import websocket_urlpatterns as message_ws
     from LearnScroll.ws_auth import JWTAuthMiddleware
 
     application = ProtocolTypeRouter({
         "http": django_asgi_app,
         "websocket": AllowedHostsOriginValidator(
-            JWTAuthMiddleware(URLRouter(liveclass_ws + message_ws))
+            JWTAuthMiddleware(URLRouter(tuitionclass_ws + message_ws))
         ),
     })
 """

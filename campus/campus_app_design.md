@@ -239,11 +239,11 @@
 > to school yahin se bina rukawat chal sake.
 
 **Confirmed constraints (unchanged, enforced in code):**
-- Campus-side classes/features **student ke liye free** hain — `liveclass`
+- Campus-side classes/features **student ke liye free** hain — `tuitionclass`
   app ka coin/pass/escrow marketplace **isme kabhi involve nahi hoga**
   (`CampusLiveSession` me koi coin/pass/escrow field hi nahi hai — structurally
   impossible).
-- `campus` kabhi `liveclass`/`message`/`core` ke models seedha import nahi
+- `campus` kabhi `tuitionclass`/`message`/`core` ke models seedha import nahi
   karta — sab `campus/bridge.py` ke through jaata hai (poore project ka golden
   rule). Ye already isi tarah implement hai (see §10 below).
 - Har feature "continuity by design" follow karta hai (§9) — koi physical/
@@ -266,7 +266,7 @@
 | `views.py` | Har model ka ViewSet + custom `@action`s — §14 |
 | `urls.py` | `DefaultRouter` registrations + 1 plain `path()` — §14 |
 | `throttles.py` | **B-4, new** — 4 `ScopedRateThrottle` subclasses, each with its own fixed `scope` (not `view.throttle_scope`, since several apply to different `@action`s on the SAME ViewSet): `CampusFeePaymentThrottle` (`FeePaymentViewSet.pay`/`.record`/`.refund`), `CampusLiveSessionJoinThrottle` (`CampusLiveSessionViewSet.start`), `CampusNoticePostThrottle` (`NoticeViewSet.create` only, via `get_throttles()`), `CampusParentLinkVerifyThrottle` (`ParentLinkVerifyView`, class-level). §12a |
-| `bridge.py` | `campus` → `core`/`message`/`liveclass`/`assigments`/`testseries` ka **ONLY** door — §10. **Ab SAB functions hard-import/fully wired hain** — `create_section_group`/`notify`/`provision_video_room`/`resolve_parent_from_token` (`core`/`message` ki taraf) aur `create_assigments`/`get_assigments_submissions` (Task 11) aur `create_testseries`/`can_review_testseries_attempt`/`get_testseries_attempts` (Task 13, `is_paid`/`price_coins` ab wired — Task 19) — koi lazy-import/no-op degrade kahin nahi bacha. `resolve_parent_from_token` shadow-parent-user resolve karta hai (naya). `create_section_group`'s caller (`SectionViewSet.perform_create`) me is wiring se pichli pass jo real bug expose hua tha, wo **is pass FIXED hai** — §1/§10/§16 dekho. |
+| `bridge.py` | `campus` → `core`/`message`/`tuitionclass`/`assigments`/`testseries` ka **ONLY** door — §10. **Ab SAB functions hard-import/fully wired hain** — `create_section_group`/`notify`/`provision_video_room`/`resolve_parent_from_token` (`core`/`message` ki taraf) aur `create_assigments`/`get_assigments_submissions` (Task 11) aur `create_testseries`/`can_review_testseries_attempt`/`get_testseries_attempts` (Task 13, `is_paid`/`price_coins` ab wired — Task 19) — koi lazy-import/no-op degrade kahin nahi bacha. `resolve_parent_from_token` shadow-parent-user resolve karta hai (naya). `create_section_group`'s caller (`SectionViewSet.perform_create`) me is wiring se pichli pass jo real bug expose hua tha, wo **is pass FIXED hai** — §1/§10/§16 dekho. |
 | `services.py` | `compute_attendance_summary`, `generate_report_card_data`, `compute_attendance_streak`, `compute_assigments_ontime_streak` (F-3, ab resolved) — §11 |
 | `tasks.py` | 7 Celery tasks (`rollover_session`, `check_low_attendance`, `check_attendance_streak_rewards`, `send_assigments_due_reminders`, `check_assigments_ontime_streak_rewards`, `send_fee_due_reminders`, `refresh_analytics_snapshot`) — §12. **F-3's two streak tasks (`check_attendance_streak_rewards`, `check_assigments_ontime_streak_rewards`) ab poore wired hain (see §7a resolution) — pehle crash karte the, ab nahi, lekin koi test coverage abhi bhi nahi hai.** |
 | `tests.py` | 70 tests covering most flows below — §17 lists what's locked-in, and what's still untested. **Task 11/13/19 ke liye is pass 16 naye tests aaye hain (54→70) — Task 11 proxy aur Task 19 view-level gate ab covered hain, aur `TestSeriesBridgeForceResetTests`'s mock-target bug bhi is pass FIXED ho gaya (§16.10) — bridge-level force-reset ab genuinely tested hai. `TestAttemptViewSet`/`can_review_testseries_attempt()`/`migrate_campus_assigmentss_to_unified` abhi bhi zero-coverage hain.** |
@@ -509,7 +509,7 @@ ANY pending campus, not just ones they're already a member of. Sets
 
 ---
 
-## 3. Live classes — coin-free (Phase 4, DONE)
+## 3. Tuition classes — coin-free (Phase 4, DONE)
 
 ### `CampusLiveSession`
 - **Deliberately has NO coin/pass/escrow field at all** — structurally
@@ -927,16 +927,16 @@ Still zero tests for `TestAttemptViewSet` and
 
 **FEE-2 — product decision changed mid-flight, flagged so nobody re-derives
 the old design**: the previous version of this doc said fee was "decoupled
-from `liveclass` coins end-to-end" and paid through a real Razorpay gateway
+from `tuitionclass` coins end-to-end" and paid through a real Razorpay gateway
 (`FeePayment.Mode.ONLINE` + a `confirm` action standing in for a webhook).
 That is **no longer true**. Campus fee is now paid FROM the same
-`user_profile.CoinLedger`-backed `User.coin` wallet that `liveclass` already
+`user_profile.CoinLedger`-backed `User.coin` wallet that `tuitionclass` already
 uses for classes/passes:
 - `FeePayment.Mode.ONLINE` and the `POST /fee-payments/{id}/confirm/` action
   are **gone** (removed as dead code, not left in place unreachable) —
   replaced by `Mode.WALLET`.
 - `RAZORPAY_KEY_ID`/`RAZORPAY_KEY_SECRET` are untouched in settings.py
-  because `liveclass.CoinPurchase` still uses them to top the wallet up in
+  because `tuitionclass.CoinPurchase` still uses them to top the wallet up in
   the first place — fee itself no longer talks to any gateway, it just
   spends what's already in the wallet.
 - The actual debit happens at the view layer
@@ -1029,7 +1029,7 @@ first-class write paths** (neither bolted onto the other):
   key, only ever populated for the WALLET path now** (FEE-2 — previously an
   actual payment-gateway reference for the removed Razorpay integration;
   `RAZORPAY_KEY_ID`/`RAZORPAY_KEY_SECRET` in settings.py are still used
-  elsewhere, by `liveclass.CoinPurchase`, to top the wallet up — just not
+  elsewhere, by `tuitionclass.CoinPurchase`, to top the wallet up — just not
   by fee anymore). Callers on the wallet path
   `get_or_create(gateway_reference=..., defaults={...})` so a retried
   request can never double-apply a payment (mirrors `CoinLedger.reference`'s
@@ -1075,8 +1075,8 @@ first-class write paths** (neither bolted onto the other):
     not deleted; `gateway_reference` stays reserved) and the response is
     `402` with `{"detail": ..., "current_balance", "required",
     "coins_needed", "action": "top_up_coins"}` (a generic frontend routing
-    flag, not a hardcoded `liveclass` URL — campus never imports
-    `liveclass`). On success: `mark_success()`, `201`.
+    flag, not a hardcoded `tuitionclass` URL — campus never imports
+    `tuitionclass`). On success: `mark_success()`, `201`.
   - `POST /fee-payments/record/` — office-staff path, requires
     `is_campus_admin_or_principal` OR `is_any_active_staff` at that campus.
     Rejects `payment_mode=WALLET` with `400` ("office staff can't trigger a
@@ -1236,12 +1236,12 @@ rewards`'s post-reward `bridge.notify(...)` calls no longer `AttributeError`.
 ## 10. `bridge.py` — the golden-rule enforcement point `[FULLY WIRED — Group A (core/message) resolved this pass, alongside the already-wired assigments/testseries group]`
 
 `campus/bridge.py` is `campus`'s **ONLY** door into `core`/`message`/
-`liveclass`/`assigments`/`testseries`. Two groups used to have different
+`tuitionclass`/`assigments`/`testseries`. Two groups used to have different
 postures (see the module docstring's own "TASK 11 ADDITION" note); **as of
 this pass both groups are hard-wired, no degrade anywhere** — the distinction
 below is now historical/organizational, not a behavior difference.
 
-**Group A — `core`/`message`/`liveclass` integration — ✅ NOW FULLY WIRED
+**Group A — `core`/`message`/`tuitionclass` integration — ✅ NOW FULLY WIRED
 (this pass)**: every function used to lazy-import the real target and
 degrade to a logged no-op if that target didn't exist yet. **That degrade
 behaviour is GONE.** `bridge.py`'s own module STATUS note says it plainly:
@@ -1419,7 +1419,7 @@ golden rule — see §7a for why.
 ## 12a. `throttles.py` — as-built (B-4, new this pass)
 
 Before this pass `campus` had **zero** `throttle_scope`/`ScopedRateThrottle`
-usage anywhere, unlike `liveclass`/`message` which already throttle every
+usage anywhere, unlike `tuitionclass`/`message` which already throttle every
 abuse-prone action. Four `ScopedRateThrottle` subclasses now cover the same
 class of endpoint here — money movement, an unauthenticated-adjacent
 token-verification surface, session-start fan-out, and a public-facing post
@@ -1428,7 +1428,7 @@ to a whole roster:
 | Throttle class | `scope` | Applied to | Why |
 |---|---|---|---|
 | `CampusFeePaymentThrottle` | `campus_fee_payment` | `FeePaymentViewSet.pay` / `.record` / `.refund` (all three, same scope) | Every hit moves real coin balance one way or another — `pay` debits via `CoinLedger.record_transaction`, `refund` credits back, `record` writes a `SUCCESS` payment straight onto an invoice. Rated like the existing `coin_withdrawal`/`coin_purchase` scopes for the same reason: a script hammering this is a wallet-balance/invoice-desync risk, not just noise. |
-| `CampusLiveSessionJoinThrottle` | `campus_live_session_join` | `CampusLiveSessionViewSet.start` | `campus` has no separate student "join" endpoint (unlike `liveclass.ClassSessionViewSet.join`, which this scope name is modeled on) — `start` is the closest analogue: it flips a session `LIVE` and fires the `CAMPUS_SESSION_LIVE` notification fan-out to every active enrollment in the section. Stops a teacher account (compromised, scripted, or double-tapping) from re-triggering that fan-out in a loop. |
+| `CampusLiveSessionJoinThrottle` | `campus_live_session_join` | `CampusLiveSessionViewSet.start` | `campus` has no separate student "join" endpoint (unlike `tuitionclass.ClassSessionViewSet.join`, which this scope name is modeled on) — `start` is the closest analogue: it flips a session `LIVE` and fires the `CAMPUS_SESSION_LIVE` notification fan-out to every active enrollment in the section. Stops a teacher account (compromised, scripted, or double-tapping) from re-triggering that fan-out in a loop. |
 | `CampusNoticePostThrottle` | `campus_notice_post` | `NoticeViewSet.create` **only** — via a `get_throttles()` override, so list/retrieve/update/delete keep the project-wide default throttle | Any active staff member can post a notice at some scope (see §2/G-1); without a limit, one compromised/scripted staff account can spam every student/parent in a campus. Stands in for the still-missing finer-grained role-to-scope restriction. |
 | `CampusParentLinkVerifyThrottle` | `campus_parent_link_verify` | `ParentLinkVerifyView` — class-level `throttle_classes` (the whole view is a single `POST` action, so no `get_throttles()` override is needed here, unlike the three ViewSets above which have other unrelated actions to leave unthrottled) | Takes a raw `token` from the request body and resolves it via `bridge.resolve_parent_from_token` — without a rate limit this is a token-guessing surface: an authenticated user could brute-force someone else's parent-access token and get linked to (read access to) an arbitrary student's campus data. Rated tight, for the abuse case (guessing), not for legitimate retry traffic (a parent verifies their link once, not repeatedly) — same posture as `message`'s `parent_code_reveal`/`parent_code_verify_ip` scopes. |
 
@@ -2427,14 +2427,14 @@ would be new work.
   ```
 - **Fee wallet (FEE-2, corrects a stale claim in an earlier pass of this
   doc)**: `campus` fee is paid FROM the same `user_profile.CoinLedger`-backed
-  `User.coin` wallet `liveclass` already uses — there is no Razorpay (or any
+  `User.coin` wallet `tuitionclass` already uses — there is no Razorpay (or any
   other) gateway call anywhere in `FeePaymentViewSet.pay` today; the debit
   happens directly via `CoinLedger.objects.record_transaction()`, and the
   `Mode.ONLINE`/`POST /fee-payments/{id}/confirm/` gateway stand-in this
   paragraph used to describe has been **removed** (see §7's Fee module
   section and §19's `POST /fee-payments/pay/` contract for the current
   shape). `RAZORPAY_KEY_ID`/`RAZORPAY_KEY_SECRET` remain in settings.py, but
-  only for `liveclass.CoinPurchase` to top the wallet up in the first
+  only for `tuitionclass.CoinPurchase` to top the wallet up in the first
   place — `campus` never reads those settings.
 - **Throttle rates (B-4, new — see §12a)**: the project's
   `DEFAULT_THROTTLE_RATES` needs an entry for each of the 4 scopes
@@ -2451,7 +2451,7 @@ would be new work.
   }
   ```
   (Rates above are suggested, matching the tightness of the nearest existing
-  `liveclass`/`message` scope each was modeled on in §12a — not yet actually
+  `tuitionclass`/`message` scope each was modeled on in §12a — not yet actually
   added anywhere; tune to real traffic once this ships.)
 - `core.classroom_chat_bridge` and `core.models.Notification` — **confirmed
   to exist with the exact signatures `bridge.py` expects, and now wired in

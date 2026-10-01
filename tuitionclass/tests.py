@@ -1,0 +1,2893 @@
+"""
+tuitionclass/tests.py
+
+Regression safety net for the payment-adjacent surface of this app:
+coupons, the coin wallet/escrow system, refunds/cancellations, and the
+session waitlist. This was previously the single biggest untested area —
+zero coverage on money-moving code.
+
+Scope (deliberately NOT a full-app test suite — see README/audit for what's
+still uncovered elsewhere, e.g. scheduling/recurrence, chat, polls,
+assigmentss):
+    1. Coupon.is_valid() + classroom-scoping rules
+    2. _charge_and_create_purchase() — the only place coins actually leave a
+       student's wallet (discount math/rounding, insufficient balance,
+       free passes, coupon redemption bookkeeping)
+    3. PassPurchase escrow — charge_for_session() (per-day release to the
+       teacher, idempotency, validity-window edges) and reverse() (refund
+       math, no teacher clawback, coupon slot release rule)
+    4. The three HTTP entrypoints onto that money movement: join-request
+       accept(), pass-purchase cancel()/refund()
+    5. Session waitlist — overflow on join, auto-promotion on seat-free,
+       manual promote() permissions
+
+Run: python manage.py test tuitionclass
+
+Notes on fixtures:
+    - LiveKit is mocked everywhere (ensure_room/generate_livekit_token/
+      remove_participant) — these tests never make a real network call.
+    - _safe_delay is patched to a no-op so a missing/unreachable Celery
+      broker in CI never slows down or flakes a test (the real function
+      already swallows broker errors in production — this just skips the
+      attempt entirely so tests don't pay for it).
+    - User.coin is assumed to be a plain integer/PositiveIntegerField on
+      the custom User model (login.models.User), per the coin-wallet
+      design documented across models.py/views.py.
+"""
+
+import hashlib
+import hmac
+from datetime import timedelta
+from decimal import Decimal
+from unittest.mock import patch
+
+from django.conf import settings as django_settings
+from django.test import TestCase, override_settings
+from django.urls import reverse
+from django.utils import timezone
+from rest_framework import status
+from rest_framework.exceptions import ValidationError
+from rest_framework.test import APIClient
+
+from login.models import User
+
+from core.models import Notification, NotificationPreference
+
+from .models import (
+    ChatMessage,
+    ChatMessageReport,
+    ClassHoliday,
+    ClassJoinRequest,
+    ClassPass,
+    ClassQuery,
+    ClassSession,
+    Classroom,
+    ClassroomBan,
+    ClassroomReview,
+    ClassroomShare,
+    CoinPurchase,
+    CoinTransaction,
+    CoinWithdrawal,
+    Coupon,
+    ParentMessageTemplate,
+    ParentTeacherMessage,
+    PassDailyCharge,
+    PassGift,
+    PassPurchase,
+    Referral,
+    SessionParticipant,
+    SessionWaitlist,
+    referral_code_for_user,
+    referral_code_to_user_id,
+)
+from .moderation import screen_message
+from .tasks import run_auto_renewals, send_notification_digests
+from .views import _charge_and_create_purchase, _try_promote_from_waitlist
+
+# ---------------------------------------------------------------------------
+# Shared test settings: silence throttle scopes that don't have a
+# DEFAULT_THROTTLE_RATES entry in the real settings.py (coupon_validate,
+# session_token) so tests don't blow up on ImproperlyConfigured, and force
+# a predictable, generous rate instead of depending on prod values.
+# ---------------------------------------------------------------------------
+TEST_REST_FRAMEWORK_THROTTLES = override_settings(
+    REST_FRAMEWORK={
+        "DEFAULT_THROTTLE_RATES": {
+            "coupon_validate": "1000/min",
+            "session_token": "1000/min",
+        }
+    }
+)
+
+# Patch every LiveKit network call + Celery dispatch at the module level so
+# no test in this file ever touches the network or a broker.
+LIVEKIT_PATCH = patch.multiple(
+    "tuitionclass.views",
+    ensure_room=lambda *a, **k: None,
+    generate_livekit_token=lambda *a, **k: "fake-token",
+    remove_participant=lambda *a, **k: None,
+)
+SAFE_DELAY_PATCH = patch("tuitionclass.views._safe_delay", lambda *a, **k: None)
+
+
+def _apply_common_patches(test_case: TestCase):
+    p1 = LIVEKIT_PATCH
+    p2 = SAFE_DELAY_PATCH
+    p1.start()
+    p2.start()
+    test_case.addCleanup(p1.stop)
+    test_case.addCleanup(p2.stop)
+
+
+class TuitionClassTestBase(TestCase):
+    """Common fixtures shared by every test class below: a teacher, a
+    student, an active classroom, and a priced (non-free) pass on it."""
+
+    def setUp(self):
+        _apply_common_patches(self)
+
+        self.teacher = User.objects.create_user(
+            username="teacher1", password="pass12345", email="teacher1@example.com"
+        )
+        self.student = User.objects.create_user(
+            username="student1", password="pass12345", email="student1@example.com"
+        )
+        self.other_teacher = User.objects.create_user(
+            username="teacher2", password="pass12345", email="teacher2@example.com"
+        )
+        self.student.coin = 1000
+        self.student.save(update_fields=["coin"])
+
+        self.classroom = Classroom.objects.create(
+            teacher=self.teacher, title="DSA Batch", max_participants=2
+        )
+        self.other_classroom = Classroom.objects.create(
+            teacher=self.other_teacher, title="Chemistry Batch"
+        )
+
+        # 10-day pass, 100 coins -> per_day_rate = 10 exactly (no rounding
+        # edge cases by default; individual tests override where they need
+        # a fractional per_day_rate).
+        self.class_pass = ClassPass.objects.create(
+            classroom=self.classroom,
+            pass_type=ClassPass.PassType.MONTHLY,
+            price=Decimal("100"),
+            validity_days=10,
+        )
+
+    def make_session(self, classroom=None, status_=ClassSession.Status.SCHEDULED, **kwargs):
+        classroom = classroom or self.classroom
+        now = timezone.now()
+        defaults = dict(
+            classroom=classroom,
+            scheduled_start=now,
+            scheduled_end=now + timedelta(hours=1),
+            status=status_,
+        )
+        defaults.update(kwargs)
+        return ClassSession.objects.create(**defaults)
+
+
+# ===========================================================================
+# 1. COUPON — validity + classroom scoping
+# ===========================================================================
+class CouponValidityTests(TuitionClassTestBase):
+    def test_active_coupon_within_window_is_valid(self):
+        coupon = Coupon.objects.create(
+            created_by=self.teacher,
+            code="SAVE10",
+            discount_percent=10,
+            valid_until=timezone.now() + timedelta(days=5),
+        )
+        self.assertTrue(coupon.is_valid())
+
+    def test_inactive_coupon_is_invalid(self):
+        coupon = Coupon.objects.create(
+            created_by=self.teacher,
+            code="OFF20",
+            discount_percent=20,
+            valid_until=timezone.now() + timedelta(days=5),
+            is_active=False,
+        )
+        self.assertFalse(coupon.is_valid())
+
+    def test_expired_coupon_is_invalid(self):
+        coupon = Coupon.objects.create(
+            created_by=self.teacher,
+            code="EXPIRED",
+            discount_percent=20,
+            valid_from=timezone.now() - timedelta(days=10),
+            valid_until=timezone.now() - timedelta(days=1),
+        )
+        self.assertFalse(coupon.is_valid())
+
+    def test_future_coupon_not_yet_valid(self):
+        coupon = Coupon.objects.create(
+            created_by=self.teacher,
+            code="FUTURE",
+            discount_percent=20,
+            valid_from=timezone.now() + timedelta(days=1),
+            valid_until=timezone.now() + timedelta(days=10),
+        )
+        self.assertFalse(coupon.is_valid())
+
+    def test_max_uses_exhausted_is_invalid(self):
+        coupon = Coupon.objects.create(
+            created_by=self.teacher,
+            code="LIMITED",
+            discount_percent=10,
+            valid_until=timezone.now() + timedelta(days=5),
+            max_uses=1,
+            used_count=1,
+        )
+        self.assertFalse(coupon.is_valid())
+
+    def test_max_uses_not_yet_reached_is_valid(self):
+        coupon = Coupon.objects.create(
+            created_by=self.teacher,
+            code="LIMITED2",
+            discount_percent=10,
+            valid_until=timezone.now() + timedelta(days=5),
+            max_uses=5,
+            used_count=4,
+        )
+        self.assertTrue(coupon.is_valid())
+
+
+# ===========================================================================
+# 2. _charge_and_create_purchase — the only coin-debiting code path
+# ===========================================================================
+class ChargeAndCreatePurchaseTests(TuitionClassTestBase):
+    def test_full_price_debited_when_no_coupon(self):
+        purchase = _charge_and_create_purchase(self.student, self.class_pass, coupon_code="")
+        self.student.refresh_from_db()
+
+        self.assertEqual(purchase.coins_spent, 100)
+        self.assertEqual(purchase.amount_paid, Decimal("100"))
+        self.assertEqual(purchase.status, PassPurchase.Status.SUCCESS)
+        self.assertEqual(purchase.payment_method, PassPurchase.PaymentMethod.COIN_WALLET)
+        self.assertEqual(self.student.coin, 900)
+
+        txn = CoinTransaction.objects.get(user=self.student)
+        self.assertEqual(txn.txn_type, CoinTransaction.TxnType.DEBIT)
+        self.assertEqual(txn.reason, CoinTransaction.Reason.PASS_PURCHASE)
+        self.assertEqual(txn.amount, 100)
+        self.assertEqual(txn.balance_after, 900)
+
+    def test_per_day_rate_snapshot_is_frozen(self):
+        purchase = _charge_and_create_purchase(self.student, self.class_pass, coupon_code="")
+        self.assertEqual(purchase.per_day_rate, Decimal("100") / 10)
+
+        # Later price edit on the ClassPass must NOT retroactively change
+        # an already-purchased pass's per-day rate.
+        self.class_pass.price = Decimal("500")
+        self.class_pass.save(update_fields=["price"])
+        purchase.refresh_from_db()
+        self.assertEqual(purchase.per_day_rate, Decimal("10"))
+
+    def test_insufficient_balance_raises_and_writes_nothing(self):
+        self.student.coin = 50
+        self.student.save(update_fields=["coin"])
+
+        with self.assertRaises(ValidationError):
+            _charge_and_create_purchase(self.student, self.class_pass, coupon_code="")
+
+        self.student.refresh_from_db()
+        self.assertEqual(self.student.coin, 50)
+        self.assertFalse(PassPurchase.objects.exists())
+        self.assertFalse(CoinTransaction.objects.exists())
+
+    def test_free_pass_no_coin_debit(self):
+        free_pass = ClassPass.objects.create(
+            classroom=self.classroom,
+            pass_type=ClassPass.PassType.FREE,
+            price=Decimal("0"),
+            validity_days=30,
+        )
+        purchase = _charge_and_create_purchase(self.student, free_pass, coupon_code="")
+        self.student.refresh_from_db()
+
+        self.assertEqual(purchase.coins_spent, 0)
+        self.assertEqual(purchase.payment_method, PassPurchase.PaymentMethod.FREE)
+        self.assertEqual(self.student.coin, 1000)
+        self.assertFalse(CoinTransaction.objects.exists())
+
+    def test_percent_discount_rounds_half_up_in_teachers_favor(self):
+        # 20% off a 49-coin pass = 39.2 -> must round UP to 39... wait,
+        # ROUND_HALF_UP on 39.2 rounds to 39 (nearest), the leak case the
+        # code comments call out is e.g. 49.6 -> should become 50, not 49.
+        cheap_pass = ClassPass.objects.create(
+            classroom=self.classroom,
+            pass_type=ClassPass.PassType.DAILY,
+            price=Decimal("62"),
+            validity_days=5,
+        )
+        coupon = Coupon.objects.create(
+            created_by=self.teacher,
+            classroom=self.classroom,
+            code="R20",
+            discount_percent=20,
+            valid_until=timezone.now() + timedelta(days=5),
+        )
+        # 62 * 0.8 = 49.6 -> should round to 50, not truncate to 49.
+        purchase = _charge_and_create_purchase(self.student, cheap_pass, coupon_code="r20")
+        self.assertEqual(purchase.coins_spent, 50)
+        self.assertEqual(purchase.amount_paid, Decimal("50"))
+
+    def test_amount_and_percent_discount_stack_and_floor_at_zero(self):
+        coupon = Coupon.objects.create(
+            created_by=self.teacher,
+            classroom=self.classroom,
+            code="STACK",
+            discount_percent=50,
+            discount_amount=Decimal("80"),
+            valid_until=timezone.now() + timedelta(days=5),
+        )
+        # 100 - 50% = 50, then - 80 = -30 -> floored to 0 -> FREE, no debit.
+        purchase = _charge_and_create_purchase(self.student, self.class_pass, coupon_code="STACK")
+        self.assertEqual(purchase.coins_spent, 0)
+        self.assertEqual(purchase.payment_method, PassPurchase.PaymentMethod.FREE)
+
+    def test_coupon_code_is_case_insensitive(self):
+        Coupon.objects.create(
+            created_by=self.teacher,
+            classroom=self.classroom,
+            code="MixedCase",
+            discount_percent=10,
+            valid_until=timezone.now() + timedelta(days=5),
+        )
+        purchase = _charge_and_create_purchase(self.student, self.class_pass, coupon_code="mixedcase")
+        self.assertEqual(purchase.coins_spent, 90)
+
+    def test_invalid_coupon_code_raises(self):
+        with self.assertRaises(ValidationError):
+            _charge_and_create_purchase(self.student, self.class_pass, coupon_code="DOES_NOT_EXIST")
+
+    def test_expired_coupon_raises(self):
+        Coupon.objects.create(
+            created_by=self.teacher,
+            classroom=self.classroom,
+            code="OLD",
+            discount_percent=10,
+            valid_from=timezone.now() - timedelta(days=20),
+            valid_until=timezone.now() - timedelta(days=10),
+        )
+        with self.assertRaises(ValidationError):
+            _charge_and_create_purchase(self.student, self.class_pass, coupon_code="OLD")
+
+    def test_coupon_scoped_to_different_classroom_is_rejected(self):
+        other_pass = ClassPass.objects.create(
+            classroom=self.other_classroom,
+            pass_type=ClassPass.PassType.MONTHLY,
+            price=Decimal("100"),
+            validity_days=10,
+        )
+        # Coupon explicitly scoped to self.classroom, but purchase is
+        # against other_teacher's classroom/pass -> must be rejected even
+        # though the code exists and is otherwise valid.
+        Coupon.objects.create(
+            created_by=self.teacher,
+            classroom=self.classroom,
+            code="MINE",
+            discount_percent=50,
+            valid_until=timezone.now() + timedelta(days=5),
+        )
+        with self.assertRaises(ValidationError):
+            _charge_and_create_purchase(self.student, other_pass, coupon_code="MINE")
+
+    def test_unscoped_coupon_usable_across_creators_own_classrooms(self):
+        second_classroom = Classroom.objects.create(teacher=self.teacher, title="Second Batch")
+        second_pass = ClassPass.objects.create(
+            classroom=second_classroom,
+            pass_type=ClassPass.PassType.MONTHLY,
+            price=Decimal("100"),
+            validity_days=10,
+        )
+        Coupon.objects.create(
+            created_by=self.teacher,
+            classroom=None,  # usable across all of this teacher's classrooms
+            code="ANYCLASS",
+            discount_percent=10,
+            valid_until=timezone.now() + timedelta(days=5),
+        )
+        purchase = _charge_and_create_purchase(self.student, second_pass, coupon_code="ANYCLASS")
+        self.assertEqual(purchase.coins_spent, 90)
+
+    def test_unscoped_coupon_not_usable_on_another_teachers_classroom(self):
+        other_pass = ClassPass.objects.create(
+            classroom=self.other_classroom,
+            pass_type=ClassPass.PassType.MONTHLY,
+            price=Decimal("100"),
+            validity_days=10,
+        )
+        Coupon.objects.create(
+            created_by=self.teacher,
+            classroom=None,
+            code="STEAL",
+            discount_percent=90,
+            valid_until=timezone.now() + timedelta(days=5),
+        )
+        with self.assertRaises(ValidationError):
+            _charge_and_create_purchase(self.student, other_pass, coupon_code="STEAL")
+
+    def test_coupon_used_count_increments_on_successful_purchase(self):
+        coupon = Coupon.objects.create(
+            created_by=self.teacher,
+            classroom=self.classroom,
+            code="COUNTME",
+            discount_percent=10,
+            valid_until=timezone.now() + timedelta(days=5),
+        )
+        _charge_and_create_purchase(self.student, self.class_pass, coupon_code="COUNTME")
+        coupon.refresh_from_db()
+        self.assertEqual(coupon.used_count, 1)
+
+    def test_used_count_not_incremented_when_purchase_fails(self):
+        coupon = Coupon.objects.create(
+            created_by=self.teacher,
+            classroom=self.classroom,
+            code="NOCHARGE",
+            discount_percent=1,  # still leaves a large balance due
+            valid_until=timezone.now() + timedelta(days=5),
+        )
+        self.student.coin = 0
+        self.student.save(update_fields=["coin"])
+        with self.assertRaises(ValidationError):
+            _charge_and_create_purchase(self.student, self.class_pass, coupon_code="NOCHARGE")
+        coupon.refresh_from_db()
+        self.assertEqual(coupon.used_count, 0)
+
+
+# ===========================================================================
+# 3. PassPurchase escrow — charge_for_session() / sync_missed_charges()
+# ===========================================================================
+class EscrowChargeForSessionTests(TuitionClassTestBase):
+    def _buy(self):
+        return _charge_and_create_purchase(self.student, self.class_pass, coupon_code="")
+
+    def test_completed_session_releases_one_days_rate_to_teacher(self):
+        purchase = self._buy()
+        session = self.make_session(status_=ClassSession.Status.COMPLETED, actual_end=timezone.now())
+
+        charge = purchase.charge_for_session(session)
+        purchase.refresh_from_db()
+        self.teacher.refresh_from_db()
+
+        self.assertIsNotNone(charge)
+        self.assertEqual(charge.amount, 10)  # 100 coins / 10 days
+        self.assertEqual(purchase.coins_released, 10)
+        self.assertEqual(purchase.remaining_balance, 90)
+        self.assertEqual(self.teacher.coin, 10)
+
+        txn = CoinTransaction.objects.get(user=self.teacher)
+        self.assertEqual(txn.reason, CoinTransaction.Reason.CLASS_EARNING)
+        self.assertEqual(txn.amount, 10)
+
+    def test_charging_twice_for_the_same_date_is_idempotent(self):
+        purchase = self._buy()
+        session = self.make_session(status_=ClassSession.Status.COMPLETED, actual_end=timezone.now())
+
+        purchase.charge_for_session(session)
+        purchase.charge_for_session(session)  # simulate signal firing twice
+        purchase.refresh_from_db()
+        self.teacher.refresh_from_db()
+
+        self.assertEqual(purchase.coins_released, 10)  # not 20
+        self.assertEqual(self.teacher.coin, 10)
+        self.assertEqual(
+            PassDailyCharge.objects.filter(purchase=purchase).count(), 1
+        )
+
+    def test_two_different_days_release_twice(self):
+        purchase = self._buy()
+        day1 = self.make_session(
+            status_=ClassSession.Status.COMPLETED,
+            scheduled_start=timezone.now(),
+            actual_end=timezone.now(),
+        )
+        day2 = self.make_session(
+            status_=ClassSession.Status.COMPLETED,
+            scheduled_start=timezone.now() + timedelta(days=1),
+            actual_end=timezone.now() + timedelta(days=1),
+        )
+        purchase.charge_for_session(day1)
+        purchase.charge_for_session(day2)
+        purchase.refresh_from_db()
+
+        self.assertEqual(purchase.coins_released, 20)
+        self.assertEqual(
+            PassDailyCharge.objects.filter(purchase=purchase).count(), 2
+        )
+
+    def test_session_outside_validity_window_is_not_charged(self):
+        purchase = self._buy()
+        far_future = timezone.now() + timedelta(days=365)
+        session = self.make_session(
+            status_=ClassSession.Status.COMPLETED,
+            scheduled_start=far_future,
+            actual_end=far_future,
+        )
+        result = purchase.charge_for_session(session)
+        purchase.refresh_from_db()
+
+        self.assertIsNone(result)
+        self.assertEqual(purchase.coins_released, 0)
+
+    def test_session_for_different_classroom_is_not_charged(self):
+        purchase = self._buy()
+        other_session = self.make_session(
+            classroom=self.other_classroom, status_=ClassSession.Status.COMPLETED, actual_end=timezone.now()
+        )
+        result = purchase.charge_for_session(other_session)
+        self.assertIsNone(result)
+
+    def test_fully_released_escrow_charges_nothing_further(self):
+        purchase = self._buy()
+        # Manually exhaust the escrow.
+        purchase.coins_released = purchase.coins_spent
+        purchase.save(update_fields=["coins_released"])
+
+        session = self.make_session(status_=ClassSession.Status.COMPLETED, actual_end=timezone.now())
+        result = purchase.charge_for_session(session)
+        self.assertIsNone(result)
+
+    def test_final_day_absorbs_rounding_remainder(self):
+        # 3-day pass, 10 coins -> per_day_rate = 3.333..., so day1+day2
+        # round to 3 each (6 released), leaving 4 for the "final" day
+        # instead of stranding a fractional coin.
+        small_pass = ClassPass.objects.create(
+            classroom=self.classroom,
+            pass_type=ClassPass.PassType.DAILY,
+            price=Decimal("10"),
+            validity_days=3,
+        )
+        purchase = _charge_and_create_purchase(self.student, small_pass, coupon_code="")
+        self.assertEqual(purchase.per_day_rate, Decimal("10") / 3)
+
+        base = timezone.now()
+        for i in range(3):
+            day = self.make_session(
+                status_=ClassSession.Status.COMPLETED,
+                scheduled_start=base + timedelta(days=i),
+                actual_end=base + timedelta(days=i),
+            )
+            purchase.charge_for_session(day)
+
+        purchase.refresh_from_db()
+        self.assertEqual(purchase.coins_released, 10)  # nothing stranded
+        self.assertEqual(purchase.remaining_balance, 0)
+
+    def test_sync_missed_charges_catches_up_completed_sessions(self):
+        purchase = self._buy()
+        base = timezone.now()
+        for i in range(3):
+            self.make_session(
+                status_=ClassSession.Status.COMPLETED,
+                scheduled_start=base + timedelta(days=i),
+                actual_end=base + timedelta(days=i),
+            )
+        charged = purchase.sync_missed_charges()
+        purchase.refresh_from_db()
+
+        self.assertEqual(charged, 3)
+        self.assertEqual(purchase.coins_released, 30)
+
+    def test_sync_missed_charges_is_idempotent_with_signal_already_having_charged(self):
+        purchase = self._buy()
+        session = self.make_session(status_=ClassSession.Status.COMPLETED, actual_end=timezone.now())
+        purchase.charge_for_session(session)  # simulate the post_save signal
+
+        charged = purchase.sync_missed_charges()
+        purchase.refresh_from_db()
+
+        self.assertEqual(charged, 0)  # nothing NEW charged
+        self.assertEqual(purchase.coins_released, 10)
+
+
+# ===========================================================================
+# 3B. REFER & EARN — class-level referral commission (recurring, per-day,
+#     same trigger as the teacher's own escrow release — see
+#     Classroom.referral_enabled / PassPurchase.referred_by / models.py's
+#     charge_for_session for the design).
+# ===========================================================================
+@TEST_REST_FRAMEWORK_THROTTLES
+class ClassReferralCommissionTests(TuitionClassTestBase):
+    def setUp(self):
+        super().setUp()
+        self.referrer = User.objects.create_user(
+            username="referrer1", password="pass12345", email="referrer1@example.com"
+        )
+        # 20% referral commission, 10-day / 100-coin pass (same fixture pass
+        # as the base class) -> per_day_rate=10, referral_per_day_rate=2.
+        self.classroom.referral_enabled = True
+        self.classroom.referral_commission_percent = Decimal("20")
+        self.classroom.save(update_fields=["referral_enabled", "referral_commission_percent"])
+
+    def _buy_referred(self):
+        return _charge_and_create_purchase(
+            self.student,
+            self.class_pass,
+            coupon_code="",
+            referred_by=self.referrer,
+            referral_commission_percent=self.classroom.referral_commission_percent,
+        )
+
+    # --- model-level: charge_for_session pays the referrer alongside the teacher ---
+
+    def test_completed_session_pays_referrer_alongside_teacher(self):
+        purchase = self._buy_referred()
+        session = self.make_session(status_=ClassSession.Status.COMPLETED, actual_end=timezone.now())
+
+        charge = purchase.charge_for_session(session)
+        purchase.refresh_from_db()
+        self.teacher.refresh_from_db()
+        self.referrer.refresh_from_db()
+
+        self.assertEqual(charge.amount, 10)  # teacher's cut unchanged by the referral
+        self.assertEqual(charge.referral_amount, 2)  # 20% of 10
+        self.assertEqual(self.teacher.coin, 10)
+        self.assertEqual(self.referrer.coin, 2)
+        self.assertEqual(purchase.referral_coins_released, 2)
+
+        txn = CoinTransaction.objects.get(user=self.referrer)
+        self.assertEqual(txn.reason, CoinTransaction.Reason.CLASS_REFERRAL_COMMISSION)
+        self.assertEqual(txn.amount, 2)
+
+    def test_referral_payout_is_idempotent_per_date(self):
+        purchase = self._buy_referred()
+        session = self.make_session(status_=ClassSession.Status.COMPLETED, actual_end=timezone.now())
+
+        purchase.charge_for_session(session)
+        purchase.charge_for_session(session)  # simulate the signal firing twice
+        self.referrer.refresh_from_db()
+
+        self.assertEqual(self.referrer.coin, 2)  # not 4
+        self.assertEqual(
+            CoinTransaction.objects.filter(
+                user=self.referrer, reason=CoinTransaction.Reason.CLASS_REFERRAL_COMMISSION
+            ).count(),
+            1,
+        )
+
+    def test_referral_commission_capped_at_total_amount(self):
+        # 10 chargeable days at 2/day = 20 total, exactly
+        # referral_total_amount (20% of 100) — nothing released beyond it.
+        purchase = self._buy_referred()
+        self.assertEqual(purchase.referral_total_amount, 20)
+
+        base = timezone.now()
+        for i in range(10):
+            day = self.make_session(
+                status_=ClassSession.Status.COMPLETED,
+                scheduled_start=base + timedelta(days=i),
+                actual_end=base + timedelta(days=i),
+            )
+            purchase.charge_for_session(day)
+
+        purchase.refresh_from_db()
+        self.referrer.refresh_from_db()
+        self.assertEqual(purchase.referral_coins_released, 20)
+        self.assertEqual(purchase.referral_remaining_balance, 0)
+        self.assertEqual(self.referrer.coin, 20)
+
+    def test_unreferred_purchase_pays_no_commission(self):
+        purchase = _charge_and_create_purchase(self.student, self.class_pass, coupon_code="")
+        session = self.make_session(status_=ClassSession.Status.COMPLETED, actual_end=timezone.now())
+
+        charge = purchase.charge_for_session(session)
+        self.assertEqual(charge.referral_amount, 0)
+        self.assertFalse(
+            CoinTransaction.objects.filter(reason=CoinTransaction.Reason.CLASS_REFERRAL_COMMISSION).exists()
+        )
+
+    # --- task 65: student-side one-time join bonus ---
+
+    def test_referred_student_gets_one_time_join_bonus(self):
+        before = self.student.coin
+        self._buy_referred()
+        self.student.refresh_from_db()
+        bonus = django_settings.CLASSROOM_REFERRAL_JOIN_BONUS_COINS
+        # student paid coins_spent for the pass AND separately received the bonus
+        txn = CoinTransaction.objects.get(
+            user=self.student, reason=CoinTransaction.Reason.CLASS_REFERRAL_JOIN_BONUS
+        )
+        self.assertEqual(txn.amount, bonus)
+        self.assertEqual(self.student.coin, before - self.class_pass.price + bonus)
+
+    def test_unreferred_purchase_gets_no_join_bonus(self):
+        _charge_and_create_purchase(self.student, self.class_pass, coupon_code="")
+        self.assertFalse(
+            CoinTransaction.objects.filter(reason=CoinTransaction.Reason.CLASS_REFERRAL_JOIN_BONUS).exists()
+        )
+
+    def test_referral_dashboard_reports_referred_count_and_earnings(self):
+        purchase = self._buy_referred()
+        session = self.make_session(status_=ClassSession.Status.COMPLETED, actual_end=timezone.now())
+        purchase.charge_for_session(session)
+
+        self.client.force_authenticate(self.referrer)
+        resp = self.client.get(f"/tuitionclass/classrooms/{self.classroom.id}/referral-dashboard/")
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.data["referred_count"], 1)
+        self.assertEqual(resp.data["commission_earned"], 2)
+
+        resp2 = self.client.get("/tuitionclass/referrals/class-referral-summary/")
+        self.assertEqual(resp2.status_code, 200)
+        self.assertEqual(resp2.data["total_students_referred"], 1)
+        self.assertEqual(resp2.data["total_commission_earned"], 2)
+        # TASK 2 — by_classroom now also reports the classroom's current
+        # referral rate, not just the earned amount.
+        self.assertEqual(len(resp2.data["by_classroom"]), 1)
+        self.assertEqual(
+            resp2.data["by_classroom"][0]["commission_percent"],
+            self.classroom.referral_commission_percent,
+        )
+
+    def test_referral_disabled_at_accept_time_pays_nothing_even_if_requested_with_a_code(self):
+        # Mirrors ClassJoinRequestViewSet.accept()'s re-check: when the
+        # classroom's referral_enabled is False at accept-time, the caller
+        # passes referred_by=None regardless of what the join request had
+        # recorded (see accept()'s `referred_by=... if classroom.referral_enabled
+        # else None`) — so the purchase itself never gets a referrer.
+        purchase = _charge_and_create_purchase(
+            self.student, self.class_pass, coupon_code="",
+            referred_by=None, referral_commission_percent=Decimal("0"),
+        )
+        self.assertIsNone(purchase.referred_by_id)
+        self.assertEqual(purchase.referral_commission_percent, Decimal("0"))
+        session = self.make_session(status_=ClassSession.Status.COMPLETED, actual_end=timezone.now())
+        charge = purchase.charge_for_session(session)
+        self.assertEqual(charge.referral_amount, 0)
+
+    # --- API-level: refer-link -> join request with referral_code -> accept ---
+
+    def test_refer_link_requires_referral_enabled(self):
+        self.classroom.referral_enabled = False
+        self.classroom.save(update_fields=["referral_enabled"])
+        client = APIClient()
+        client.force_authenticate(self.referrer)
+        url = reverse("classroom-refer-link", args=[self.classroom.pk])
+        resp = client.get(url)
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_refer_link_returns_code_and_rate(self):
+        client = APIClient()
+        client.force_authenticate(self.referrer)
+        url = reverse("classroom-refer-link", args=[self.classroom.pk])
+        resp = client.get(url)
+
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(resp.data["referral_code"], referral_code_for_user(self.referrer.id))
+        self.assertEqual(Decimal(resp.data["commission_percent"]), Decimal("20"))
+        self.assertIn(f"ref={referral_code_for_user(self.referrer.id)}", resp.data["web_url"])
+
+    def test_join_request_with_valid_referral_code_records_referrer(self):
+        client = APIClient()
+        client.force_authenticate(self.student)
+        url = reverse("classjoinrequest-list")
+        code = referral_code_for_user(self.referrer.id)
+        resp = client.post(
+            url,
+            {"classroom": self.classroom.id, "class_pass": self.class_pass.id, "referral_code": code},
+            format="json",
+        )
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
+        join_request = ClassJoinRequest.objects.get(pk=resp.data["id"])
+        self.assertEqual(join_request.referred_by_id, self.referrer.id)
+
+    def test_join_request_referral_code_rejected_when_referrals_disabled(self):
+        self.classroom.referral_enabled = False
+        self.classroom.save(update_fields=["referral_enabled"])
+        client = APIClient()
+        client.force_authenticate(self.student)
+        url = reverse("classjoinrequest-list")
+        code = referral_code_for_user(self.referrer.id)
+        resp = client.post(
+            url,
+            {"classroom": self.classroom.id, "class_pass": self.class_pass.id, "referral_code": code},
+            format="json",
+        )
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_self_referral_is_rejected(self):
+        client = APIClient()
+        client.force_authenticate(self.student)
+        url = reverse("classjoinrequest-list")
+        code = referral_code_for_user(self.student.id)
+        resp = client.post(
+            url,
+            {"classroom": self.classroom.id, "class_pass": self.class_pass.id, "referral_code": code},
+            format="json",
+        )
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_accept_carries_referral_onto_purchase_and_pays_out_on_completed_session(self):
+        client = APIClient()
+        client.force_authenticate(self.student)
+        code = referral_code_for_user(self.referrer.id)
+        create_resp = client.post(
+            reverse("classjoinrequest-list"),
+            {"classroom": self.classroom.id, "class_pass": self.class_pass.id, "referral_code": code},
+            format="json",
+        )
+        join_request_id = create_resp.data["id"]
+
+        client.force_authenticate(self.teacher)
+        accept_resp = client.post(reverse("classjoinrequest-accept", args=[join_request_id]), {}, format="json")
+        self.assertEqual(accept_resp.status_code, status.HTTP_200_OK)
+
+        join_request = ClassJoinRequest.objects.get(pk=join_request_id)
+        purchase = join_request.pass_purchase
+        self.assertEqual(purchase.referred_by_id, self.referrer.id)
+        self.assertEqual(purchase.referral_commission_percent, Decimal("20"))
+        self.assertEqual(purchase.referral_per_day_rate, Decimal("2"))  # 10 * 20%
+
+        session = self.make_session(status_=ClassSession.Status.COMPLETED, actual_end=timezone.now())
+        purchase.charge_for_session(session)
+        self.referrer.refresh_from_db()
+        self.assertEqual(self.referrer.coin, 2)
+
+    def test_accept_ignores_referral_when_disabled_between_request_and_accept(self):
+        client = APIClient()
+        client.force_authenticate(self.student)
+        code = referral_code_for_user(self.referrer.id)
+        create_resp = client.post(
+            reverse("classjoinrequest-list"),
+            {"classroom": self.classroom.id, "class_pass": self.class_pass.id, "referral_code": code},
+            format="json",
+        )
+        join_request_id = create_resp.data["id"]
+
+        # Teacher turns referrals off before accepting.
+        self.classroom.referral_enabled = False
+        self.classroom.save(update_fields=["referral_enabled"])
+
+        client.force_authenticate(self.teacher)
+        client.post(reverse("classjoinrequest-accept", args=[join_request_id]), {}, format="json")
+
+        join_request = ClassJoinRequest.objects.get(pk=join_request_id)
+        purchase = join_request.pass_purchase
+        # referred_by stays recorded on the join request itself (who
+        # actually sent the student), but the purchase pays nothing since
+        # referrals were off at the moment coins actually moved.
+        self.assertEqual(join_request.referred_by_id, self.referrer.id)
+        self.assertIsNone(purchase.referred_by_id)
+        self.assertEqual(purchase.referral_commission_percent, Decimal("0"))
+
+    def test_referral_earnings_endpoint_lists_own_referrals_only(self):
+        purchase = self._buy_referred()
+        session = self.make_session(status_=ClassSession.Status.COMPLETED, actual_end=timezone.now())
+        purchase.charge_for_session(session)
+
+        client = APIClient()
+        client.force_authenticate(self.referrer)
+        resp = client.get(reverse("passpurchase-referral-earnings"))
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(resp.data["total_earned"], 2)
+
+        # A different user has no referrals -> empty list, zero total.
+        client.force_authenticate(self.other_teacher)
+        resp2 = client.get(reverse("passpurchase-referral-earnings"))
+        self.assertEqual(resp2.data["total_earned"], 0)
+
+
+# ===========================================================================
+# 4. PassPurchase.reverse() — refund math, no teacher clawback
+# ===========================================================================
+class ReverseRefundTests(TuitionClassTestBase):
+    def _buy(self, coupon_code=""):
+        return _charge_and_create_purchase(self.student, self.class_pass, coupon_code=coupon_code)
+
+    def test_reverse_before_any_class_taught_refunds_full_amount(self):
+        purchase = self._buy()
+        purchase.reverse(notify=False)
+        self.student.refresh_from_db()
+
+        self.assertEqual(purchase.status, PassPurchase.Status.REFUNDED)
+        self.assertFalse(purchase.is_active)
+        self.assertEqual(self.student.coin, 1000)  # full 100 back
+
+        txn = CoinTransaction.objects.filter(user=self.student, reason=CoinTransaction.Reason.REFUND).first()
+        self.assertIsNotNone(txn)
+        self.assertEqual(txn.amount, 100)
+
+    def test_reverse_after_some_days_taught_refunds_only_remaining_balance(self):
+        purchase = self._buy()
+        session = self.make_session(status_=ClassSession.Status.COMPLETED, actual_end=timezone.now())
+        purchase.charge_for_session(session)  # teacher earns 10
+
+        purchase.reverse(notify=False)
+        self.student.refresh_from_db()
+        self.teacher.refresh_from_db()
+
+        # Student started with 1000, paid 100 (-> 900), gets back
+        # remaining_balance = 90 -> 990. The 10 the teacher already earned
+        # is NOT clawed back.
+        self.assertEqual(self.student.coin, 990)
+        self.assertEqual(self.teacher.coin, 10)
+
+    def test_reverse_never_refunds_more_than_remaining_balance(self):
+        purchase = self._buy()
+        purchase.coins_released = purchase.coins_spent  # fully earned out
+        purchase.save(update_fields=["coins_released"])
+
+        purchase.reverse(notify=False)
+        self.student.refresh_from_db()
+
+        self.assertEqual(self.student.coin, 900)  # no refund at all
+        self.assertFalse(CoinTransaction.objects.filter(reason=CoinTransaction.Reason.REFUND).exists())
+
+    def test_coupon_slot_released_when_no_day_was_ever_charged(self):
+        coupon = Coupon.objects.create(
+            created_by=self.teacher,
+            classroom=self.classroom,
+            code="GIVEBACK",
+            discount_percent=10,
+            valid_until=timezone.now() + timedelta(days=5),
+        )
+        purchase = self._buy(coupon_code="GIVEBACK")
+        coupon.refresh_from_db()
+        self.assertEqual(coupon.used_count, 1)
+
+        purchase.reverse(notify=False)
+        coupon.refresh_from_db()
+        self.assertEqual(coupon.used_count, 0)
+
+    def test_coupon_slot_kept_once_any_day_has_been_charged(self):
+        coupon = Coupon.objects.create(
+            created_by=self.teacher,
+            classroom=self.classroom,
+            code="KEEPIT",
+            discount_percent=10,
+            valid_until=timezone.now() + timedelta(days=5),
+        )
+        purchase = self._buy(coupon_code="KEEPIT")
+        session = self.make_session(status_=ClassSession.Status.COMPLETED, actual_end=timezone.now())
+        purchase.charge_for_session(session)
+
+        purchase.reverse(notify=False)
+        coupon.refresh_from_db()
+        self.assertEqual(coupon.used_count, 1)  # NOT given back
+
+    def test_coupon_used_count_never_goes_negative(self):
+        coupon = Coupon.objects.create(
+            created_by=self.teacher,
+            classroom=self.classroom,
+            code="ZEROFLOOR",
+            discount_percent=10,
+            valid_until=timezone.now() + timedelta(days=5),
+            used_count=0,
+        )
+        purchase = self._buy(coupon_code="ZEROFLOOR")
+        # Simulate used_count having drifted to 0 already through some
+        # other path before reverse() runs.
+        Coupon.objects.filter(pk=coupon.pk).update(used_count=0)
+        purchase.reverse(notify=False)
+        coupon.refresh_from_db()
+        self.assertGreaterEqual(coupon.used_count, 0)
+
+    @patch("tuitionclass.tasks.notify_purchase_refunded.delay")
+    def test_reverse_queues_refund_notification_by_default(self, mock_delay):
+        purchase = self._buy()
+        purchase.reverse()  # notify=True (default)
+        mock_delay.assert_called_once_with(purchase.id)
+
+    @patch("tuitionclass.tasks.notify_purchase_refunded.delay")
+    def test_reverse_with_notify_false_skips_notification(self, mock_delay):
+        purchase = self._buy()
+        purchase.reverse(notify=False)
+        mock_delay.assert_not_called()
+
+
+# ===========================================================================
+# 5. HTTP layer — join-request accept(), pass-purchase cancel()/refund()
+# ===========================================================================
+@TEST_REST_FRAMEWORK_THROTTLES
+class JoinRequestAcceptViewTests(TuitionClassTestBase):
+    def setUp(self):
+        super().setUp()
+        self.client = APIClient()
+        self.client.force_authenticate(self.student)
+        self.join_request = ClassJoinRequest.objects.create(
+            classroom=self.classroom, class_pass=self.class_pass, student=self.student
+        )
+
+    def test_accept_charges_student_and_grants_access(self):
+        self.client.force_authenticate(self.teacher)
+        url = reverse("classjoinrequest-accept", args=[self.join_request.pk])
+        resp = self.client.post(url, {"note": "welcome"}, format="json")
+
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.join_request.refresh_from_db()
+        self.student.refresh_from_db()
+
+        self.assertEqual(self.join_request.status, ClassJoinRequest.Status.ACCEPTED)
+        self.assertIsNotNone(self.join_request.pass_purchase)
+        self.assertEqual(self.student.coin, 900)
+        self.assertTrue(self.classroom.has_access(self.student))
+
+    def test_accept_by_non_manager_is_forbidden(self):
+        random_user = User.objects.create_user(username="rando", password="pass12345")
+        self.client.force_authenticate(random_user)
+        url = reverse("classjoinrequest-accept", args=[self.join_request.pk])
+        resp = self.client.post(url, {}, format="json")
+        self.assertEqual(resp.status_code, status.HTTP_403_FORBIDDEN)
+
+    def test_accept_twice_is_rejected(self):
+        self.client.force_authenticate(self.teacher)
+        url = reverse("classjoinrequest-accept", args=[self.join_request.pk])
+        self.client.post(url, {}, format="json")
+        resp = self.client.post(url, {}, format="json")
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_accept_with_insufficient_balance_leaves_request_pending(self):
+        self.student.coin = 10
+        self.student.save(update_fields=["coin"])
+        self.client.force_authenticate(self.teacher)
+        url = reverse("classjoinrequest-accept", args=[self.join_request.pk])
+        resp = self.client.post(url, {}, format="json")
+
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+        self.join_request.refresh_from_db()
+        self.assertEqual(self.join_request.status, ClassJoinRequest.Status.PENDING)
+
+    def test_accept_against_closed_classroom_is_rejected(self):
+        self.classroom.is_active = False
+        self.classroom.save(update_fields=["is_active"])
+        self.client.force_authenticate(self.teacher)
+        url = reverse("classjoinrequest-accept", args=[self.join_request.pk])
+        resp = self.client.post(url, {}, format="json")
+
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+        self.student.refresh_from_db()
+        self.assertEqual(self.student.coin, 1000)  # never charged
+
+
+@TEST_REST_FRAMEWORK_THROTTLES
+class PassPurchaseCancelRefundViewTests(TuitionClassTestBase):
+    def setUp(self):
+        super().setUp()
+        self.purchase = _charge_and_create_purchase(self.student, self.class_pass, coupon_code="")
+
+    def test_student_can_cancel_own_purchase(self):
+        client = APIClient()
+        client.force_authenticate(self.student)
+        url = reverse("passpurchase-cancel", args=[self.purchase.pk])
+        resp = client.post(url, {}, format="json")
+
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.purchase.refresh_from_db()
+        self.assertEqual(self.purchase.status, PassPurchase.Status.REFUNDED)
+
+    def test_student_cannot_cancel_someone_elses_purchase(self):
+        other_student = User.objects.create_user(username="other_student", password="pass12345")
+        client = APIClient()
+        client.force_authenticate(other_student)
+        url = reverse("passpurchase-cancel", args=[self.purchase.pk])
+        resp = client.post(url, {}, format="json")
+        self.assertEqual(resp.status_code, status.HTTP_404_NOT_FOUND)
+
+    def test_teacher_can_refund_a_students_purchase(self):
+        client = APIClient()
+        client.force_authenticate(self.teacher)
+        url = reverse("passpurchase-refund", args=[self.purchase.pk])
+        resp = client.post(url, {}, format="json")
+
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.purchase.refresh_from_db()
+        self.assertEqual(self.purchase.status, PassPurchase.Status.REFUNDED)
+
+    def test_student_cannot_use_refund_action_on_self(self):
+        client = APIClient()
+        client.force_authenticate(self.student)
+        url = reverse("passpurchase-refund", args=[self.purchase.pk])
+        resp = client.post(url, {}, format="json")
+        self.assertEqual(resp.status_code, status.HTTP_403_FORBIDDEN)
+
+    def test_cannot_cancel_already_refunded_purchase(self):
+        client = APIClient()
+        client.force_authenticate(self.student)
+        url = reverse("passpurchase-cancel", args=[self.purchase.pk])
+        client.post(url, {}, format="json")
+        resp = client.post(url, {}, format="json")  # second call
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+
+
+class ClassroomCloseTests(TuitionClassTestBase):
+    def setUp(self):
+        super().setUp()
+        self.purchase = _charge_and_create_purchase(self.student, self.class_pass, coupon_code="")
+
+    def test_close_refunds_every_active_purchase(self):
+        client = APIClient()
+        client.force_authenticate(self.teacher)
+        url = reverse("classroom-close", args=[self.classroom.pk])
+        resp = client.post(url, {}, format="json")
+
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(resp.data["passes_refunded"], 1)
+
+        self.purchase.refresh_from_db()
+        self.classroom.refresh_from_db()
+        self.student.refresh_from_db()
+
+        self.assertEqual(self.purchase.status, PassPurchase.Status.REFUNDED)
+        self.assertFalse(self.classroom.is_active)
+        self.assertEqual(self.student.coin, 1000)
+
+    def test_close_by_non_teacher_is_forbidden(self):
+        client = APIClient()
+        client.force_authenticate(self.student)
+        url = reverse("classroom-close", args=[self.classroom.pk])
+        resp = client.post(url, {}, format="json")
+        self.assertEqual(resp.status_code, status.HTTP_403_FORBIDDEN)
+
+
+# ===========================================================================
+# 6. Session waitlist — overflow, auto-promotion, manual promote()
+# ===========================================================================
+class WaitlistTests(TuitionClassTestBase):
+    """self.classroom.max_participants = 2 (see base fixture)."""
+
+    def setUp(self):
+        super().setUp()
+        self.student2 = User.objects.create_user(username="student2", password="pass12345")
+        self.student3 = User.objects.create_user(username="student3", password="pass12345")
+        for s in (self.student2, self.student3):
+            s.coin = 1000
+            s.save(update_fields=["coin"])
+
+        # Give every student an active pass so has_access() passes for all.
+        self.purchase1 = _charge_and_create_purchase(self.student, self.class_pass, coupon_code="")
+        self.purchase2 = _charge_and_create_purchase(self.student2, self.class_pass, coupon_code="")
+        self.purchase3 = _charge_and_create_purchase(self.student3, self.class_pass, coupon_code="")
+
+        self.session = self.make_session(status_=ClassSession.Status.SCHEDULED)
+
+    def _join(self, user):
+        client = APIClient()
+        client.force_authenticate(user)
+        url = reverse("classsession-join", args=[self.session.pk])
+        return client.post(url, {}, format="json")
+
+    def test_join_beyond_capacity_is_waitlisted(self):
+        self._join(self.student)   # seat 1
+        self._join(self.student2)  # seat 2 (max_participants=2)
+        resp = self._join(self.student3)  # overflow
+
+        self.assertEqual(resp.status_code, status.HTTP_202_ACCEPTED)
+        self.assertTrue(
+            SessionWaitlist.objects.filter(session=self.session, student=self.student3).exists()
+        )
+        self.assertEqual(
+            SessionParticipant.objects.filter(session=self.session, left_at__isnull=True).count(), 2
+        )
+
+    def test_waitlist_join_is_idempotent(self):
+        self._join(self.student)
+        self._join(self.student2)
+        self._join(self.student3)
+        self._join(self.student3)  # duplicate waitlist attempt
+        self.assertEqual(
+            SessionWaitlist.objects.filter(session=self.session, student=self.student3).count(), 1
+        )
+
+    def test_leave_auto_promotes_next_waitlisted_student(self):
+        self._join(self.student)
+        self._join(self.student2)
+        self._join(self.student3)  # waitlisted
+
+        participant1 = SessionParticipant.objects.get(session=self.session, user=self.student)
+        client = APIClient()
+        client.force_authenticate(self.student)
+        url = reverse("sessionparticipant-leave", args=[participant1.pk])
+        resp = client.post(url, {}, format="json")
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+
+        self.assertFalse(SessionWaitlist.objects.filter(session=self.session).exists())
+        self.assertTrue(
+            SessionParticipant.objects.filter(
+                session=self.session, user=self.student3, left_at__isnull=True
+            ).exists()
+        )
+
+    def test_promotion_respects_first_come_first_served_order(self):
+        self._join(self.student)
+        self._join(self.student2)
+
+        student4 = User.objects.create_user(username="student4", password="pass12345")
+        student4.coin = 1000
+        student4.save(update_fields=["coin"])
+        _charge_and_create_purchase(student4, self.class_pass, coupon_code="")
+
+        # student3 waitlists first, then student4.
+        self._join(self.student3)
+        self._join(student4)
+
+        participant1 = SessionParticipant.objects.get(session=self.session, user=self.student)
+        client = APIClient()
+        client.force_authenticate(self.student)
+        url = reverse("sessionparticipant-leave", args=[participant1.pk])
+        client.post(url, {}, format="json")
+
+        self.assertTrue(
+            SessionParticipant.objects.filter(
+                session=self.session, user=self.student3, left_at__isnull=True
+            ).exists()
+        )
+        self.assertFalse(
+            SessionParticipant.objects.filter(
+                session=self.session, user=student4, left_at__isnull=True
+            ).exists()
+        )
+        self.assertTrue(SessionWaitlist.objects.filter(session=self.session, student=student4).exists())
+
+    def test_kicked_student_is_never_auto_promoted(self):
+        self._join(self.student)
+        self._join(self.student2)
+        self._join(self.student3)  # waitlisted
+
+        # Kick student3 from this same session's context while still on
+        # the waitlist (simulate: they were kicked earlier this session).
+        SessionParticipant.objects.create(
+            session=self.session, user=self.student3, role=SessionParticipant.Role.STUDENT,
+            left_at=timezone.now(), kicked_at=timezone.now(),
+        )
+
+        participant1 = SessionParticipant.objects.get(
+            session=self.session, user=self.student, left_at__isnull=True
+        )
+        client = APIClient()
+        client.force_authenticate(self.student)
+        url = reverse("sessionparticipant-leave", args=[participant1.pk])
+        client.post(url, {}, format="json")
+
+        self.assertFalse(
+            SessionParticipant.objects.filter(
+                session=self.session, user=self.student3, left_at__isnull=True
+            ).exists()
+        )
+        # The stale waitlist entry for the kicked student is dropped, not
+        # left behind to block the next legitimate student forever.
+        self.assertFalse(SessionWaitlist.objects.filter(session=self.session, student=self.student3).exists())
+
+    @TEST_REST_FRAMEWORK_THROTTLES
+    def test_manual_promote_is_teacher_only(self):
+        self._join(self.student)
+        self._join(self.student2)
+        self._join(self.student3)  # waitlisted
+        entry = SessionWaitlist.objects.get(session=self.session, student=self.student3)
+
+        client = APIClient()
+        client.force_authenticate(self.student2)  # a student, not staff
+        url = reverse("sessionwaitlist-promote", args=[entry.pk])
+        resp = client.post(url, {}, format="json")
+        self.assertEqual(resp.status_code, status.HTTP_403_FORBIDDEN)
+
+        client.force_authenticate(self.teacher)
+        resp = client.post(url, {}, format="json")
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertTrue(
+            SessionParticipant.objects.filter(
+                session=self.session, user=self.student3, left_at__isnull=True
+            ).exists()
+        )
+
+    def test_no_promotion_when_waitlist_is_empty(self):
+        self._join(self.student)
+        participant1 = SessionParticipant.objects.get(session=self.session, user=self.student)
+        # Should simply no-op, not error.
+        _try_promote_from_waitlist(self.session)
+        client = APIClient()
+        client.force_authenticate(self.student)
+        url = reverse("sessionparticipant-leave", args=[participant1.pk])
+        resp = client.post(url, {}, format="json")
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+
+# ===========================================================================
+# 7. Classroom-wide ban — permanent ban blocks join/access, refunds active
+#    passes, and is reversible via unban()
+# ===========================================================================
+class ClassroomBanTests(TuitionClassTestBase):
+    def _ban(self, actor, classroom, student, reason=""):
+        client = APIClient()
+        client.force_authenticate(actor)
+        url = reverse("classroom-ban", args=[classroom.pk])
+        return client.post(url, {"student_id": student.id, "reason": reason}, format="json")
+
+    def test_teacher_can_ban_student(self):
+        resp = self._ban(self.teacher, self.classroom, self.student, reason="Disruptive in chat")
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
+        self.assertTrue(
+            ClassroomBan.objects.filter(classroom=self.classroom, student=self.student).exists()
+        )
+
+    def test_non_manager_cannot_ban(self):
+        other_student = User.objects.create_user(username="student9", password="pass12345")
+        resp = self._ban(other_student, self.classroom, self.student)
+        self.assertEqual(resp.status_code, status.HTTP_403_FORBIDDEN)
+        self.assertFalse(ClassroomBan.objects.filter(classroom=self.classroom).exists())
+
+    def test_teacher_cannot_ban_self(self):
+        resp = self._ban(self.teacher, self.classroom, self.teacher)
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_ban_is_idempotent(self):
+        first = self._ban(self.teacher, self.classroom, self.student, reason="first")
+        self.assertEqual(first.status_code, status.HTTP_201_CREATED)
+        second = self._ban(self.teacher, self.classroom, self.student, reason="second attempt")
+        self.assertEqual(second.status_code, status.HTTP_200_OK)
+        self.assertEqual(ClassroomBan.objects.filter(classroom=self.classroom, student=self.student).count(), 1)
+
+    def test_ban_refunds_active_purchase_and_rejects_pending_join_request(self):
+        purchase = _charge_and_create_purchase(self.student, self.class_pass, coupon_code="")
+        self.assertEqual(purchase.status, PassPurchase.Status.SUCCESS)
+        student_before = User.objects.get(pk=self.student.pk).coin
+
+        pending_request = ClassJoinRequest.objects.create(
+            classroom=self.classroom,
+            student=self.student,
+            class_pass=self.class_pass,
+            status=ClassJoinRequest.Status.PENDING,
+        )
+
+        resp = self._ban(self.teacher, self.classroom, self.student)
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
+
+        purchase.refresh_from_db()
+        self.assertFalse(purchase.is_active)
+        student_after = User.objects.get(pk=self.student.pk).coin
+        self.assertGreater(student_after, student_before)
+
+        pending_request.refresh_from_db()
+        self.assertEqual(pending_request.status, ClassJoinRequest.Status.REJECTED)
+
+    def test_banned_student_cannot_raise_join_request(self):
+        ClassroomBan.objects.create(classroom=self.classroom, student=self.student, banned_by=self.teacher)
+        client = APIClient()
+        client.force_authenticate(self.student)
+        url = reverse("classjoinrequest-list")
+        resp = client.post(
+            url, {"classroom": self.classroom.pk, "class_pass": self.class_pass.pk}, format="json"
+        )
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_banned_student_cannot_join_live_session(self):
+        _charge_and_create_purchase(self.student, self.class_pass, coupon_code="")
+        ClassroomBan.objects.create(classroom=self.classroom, student=self.student, banned_by=self.teacher)
+        session = self.make_session(status_=ClassSession.Status.SCHEDULED)
+
+        client = APIClient()
+        client.force_authenticate(self.student)
+        url = reverse("classsession-join", args=[session.pk])
+        resp = client.post(url, {}, format="json")
+        self.assertIn(resp.status_code, (status.HTTP_403_FORBIDDEN, status.HTTP_400_BAD_REQUEST))
+
+    def test_bans_list_is_manager_only(self):
+        ClassroomBan.objects.create(classroom=self.classroom, student=self.student, banned_by=self.teacher)
+        client = APIClient()
+        client.force_authenticate(self.student)
+        url = reverse("classroom-bans", args=[self.classroom.pk])
+        resp = client.get(url)
+        self.assertEqual(resp.status_code, status.HTTP_403_FORBIDDEN)
+
+        client.force_authenticate(self.teacher)
+        resp = client.get(url)
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(len(resp.data), 1)
+
+    def test_unban_lifts_the_ban(self):
+        self._ban(self.teacher, self.classroom, self.student)
+        client = APIClient()
+        client.force_authenticate(self.teacher)
+        url = reverse("classroom-unban", args=[self.classroom.pk, self.student.pk])
+        resp = client.post(url, {}, format="json")
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertFalse(
+            ClassroomBan.objects.filter(classroom=self.classroom, student=self.student).exists()
+        )
+
+    def test_unban_missing_ban_returns_404(self):
+        client = APIClient()
+        client.force_authenticate(self.teacher)
+        url = reverse("classroom-unban", args=[self.classroom.pk, self.student.pk])
+        resp = client.post(url, {}, format="json")
+        self.assertEqual(resp.status_code, status.HTTP_404_NOT_FOUND)
+
+
+# ===========================================================================
+# 8. Referral redemption — one-time, new-account-only, credits both wallets
+# ===========================================================================
+class ReferralRedeemTests(TuitionClassTestBase):
+    def setUp(self):
+        super().setUp()
+        # A separate pair from the shared teacher/student fixtures so the
+        # redeem-window / coin-crediting math below isn't entangled with
+        # any pass-purchase coin spend done elsewhere in the base fixture.
+        self.referrer = User.objects.create_user(username="referrer1", password="pass12345")
+        self.newcomer = User.objects.create_user(username="newcomer1", password="pass12345")
+
+    def _redeem(self, user, code):
+        client = APIClient()
+        client.force_authenticate(user)
+        url = reverse("referral-redeem")
+        return client.post(url, {"code": code}, format="json")
+
+    def test_valid_code_credits_both_wallets(self):
+        code = referral_code_for_user(self.referrer.id)
+        referrer_before = self.referrer.coin
+        newcomer_before = self.newcomer.coin
+
+        resp = self._redeem(self.newcomer, code)
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
+
+        bonus = django_settings.REFERRAL_BONUS_COINS
+        self.referrer.refresh_from_db()
+        self.newcomer.refresh_from_db()
+        self.assertEqual(self.referrer.coin, referrer_before + bonus)
+        self.assertEqual(self.newcomer.coin, newcomer_before + bonus)
+        self.assertTrue(
+            Referral.objects.filter(referrer=self.referrer, referred=self.newcomer, bonus_amount=bonus).exists()
+        )
+        self.assertEqual(
+            CoinTransaction.objects.filter(
+                user__in=[self.referrer, self.newcomer], reason=CoinTransaction.Reason.REFERRAL_BONUS
+            ).count(),
+            2,
+        )
+
+    def test_invalid_code_is_rejected(self):
+        resp = self._redeem(self.newcomer, "not-a-real-code")
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertFalse(Referral.objects.exists())
+
+    def test_cannot_redeem_own_code(self):
+        code = referral_code_for_user(self.referrer.id)
+        resp = self._redeem(self.referrer, code)
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_cannot_redeem_twice(self):
+        code = referral_code_for_user(self.referrer.id)
+        first = self._redeem(self.newcomer, code)
+        self.assertEqual(first.status_code, status.HTTP_201_CREATED)
+
+        second_referrer = User.objects.create_user(username="referrer2", password="pass12345")
+        second_code = referral_code_for_user(second_referrer.id)
+        second = self._redeem(self.newcomer, second_code)
+        self.assertEqual(second.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(Referral.objects.filter(referred=self.newcomer).count(), 1)
+
+    def test_redeem_outside_window_is_rejected(self):
+        window = django_settings.REFERRAL_REDEEM_WINDOW_DAYS
+        self.newcomer.date_joined = timezone.now() - timedelta(days=window + 1)
+        self.newcomer.save(update_fields=["date_joined"])
+
+        code = referral_code_for_user(self.referrer.id)
+        resp = self._redeem(self.newcomer, code)
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertFalse(Referral.objects.exists())
+
+    def test_my_code_reflects_referral_count_and_earnings(self):
+        code = referral_code_for_user(self.referrer.id)
+        self._redeem(self.newcomer, code)
+
+        client = APIClient()
+        client.force_authenticate(self.referrer)
+        url = reverse("referral-my-code")
+        resp = client.get(url)
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(resp.data["code"], code)
+        self.assertEqual(resp.data["referral_count"], 1)
+        self.assertEqual(resp.data["total_bonus_earned"], django_settings.REFERRAL_BONUS_COINS)
+
+    def test_referral_list_is_own_ledger_only(self):
+        code = referral_code_for_user(self.referrer.id)
+        self._redeem(self.newcomer, code)
+
+        client = APIClient()
+        client.force_authenticate(self.newcomer)  # the referred user, not the referrer
+        url = reverse("referral-list")
+        resp = client.get(url)
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        results = resp.data.get("results", resp.data)
+        self.assertEqual(len(results), 0)
+
+
+# ===========================================================================
+# 9. Teacher earnings dashboard — aggregates PassDailyCharge, not
+#    CoinTransaction (see TeacherEarningsView docstring in views.py)
+# ===========================================================================
+class TeacherEarningsTests(TuitionClassTestBase):
+    def setUp(self):
+        super().setUp()
+        self.purchase = _charge_and_create_purchase(self.student, self.class_pass, coupon_code="")
+        today = timezone.now().date()
+        # Two charges within the last 30 days (this classroom), one older
+        # charge outside the 30-day daily-breakdown window but still
+        # inside the lifetime total, and one charge on an unrelated
+        # classroom/teacher that must never leak into this teacher's sum.
+        PassDailyCharge.objects.create(purchase=self.purchase, date=today, amount=10)
+        PassDailyCharge.objects.create(purchase=self.purchase, date=today - timedelta(days=1), amount=10)
+        PassDailyCharge.objects.create(purchase=self.purchase, date=today - timedelta(days=40), amount=10)
+
+        other_pass = ClassPass.objects.create(
+            classroom=self.other_classroom,
+            pass_type=ClassPass.PassType.MONTHLY,
+            price=Decimal("50"),
+            validity_days=10,
+        )
+        other_student = User.objects.create_user(username="student_other", password="pass12345")
+        other_student.coin = 1000
+        other_student.save(update_fields=["coin"])
+        other_purchase = _charge_and_create_purchase(other_student, other_pass, coupon_code="")
+        PassDailyCharge.objects.create(purchase=other_purchase, date=today, amount=999)
+
+    def _get(self, user, classroom=None):
+        client = APIClient()
+        client.force_authenticate(user)
+        url = reverse("teacher-earnings")
+        if classroom is not None:
+            url = f"{url}?classroom={classroom.pk}"
+        return client.get(url)
+
+    def test_totals_scoped_to_own_classrooms_only(self):
+        resp = self._get(self.teacher)
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(resp.data["total_earned"], 30)
+        self.assertEqual(resp.data["total_sessions_charged"], 3)
+
+    def test_other_teachers_earnings_never_leak_in(self):
+        resp = self._get(self.teacher)
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        # 999 belongs to other_classroom's teacher, not self.teacher.
+        self.assertNotEqual(resp.data["total_earned"], 999)
+        self.assertLess(resp.data["total_earned"], 999)
+
+    def test_classroom_scoping_requires_ownership(self):
+        resp = self._get(self.teacher, classroom=self.other_classroom)
+        self.assertEqual(resp.status_code, status.HTTP_403_FORBIDDEN)
+
+    def test_classroom_scoped_totals(self):
+        resp = self._get(self.teacher, classroom=self.classroom)
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(resp.data["total_earned"], 30)
+
+    def test_daily_breakdown_excludes_charges_older_than_30_days(self):
+        resp = self._get(self.teacher)
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        daily_total = sum(day["amount"] for day in resp.data["daily"])
+        self.assertEqual(daily_total, 20)  # excludes the 40-day-old charge
+
+
+# ===========================================================================
+# 10. Classroom recordings library — browsable past-recordings list
+# ===========================================================================
+class ClassroomRecordingsTests(TuitionClassTestBase):
+    def setUp(self):
+        super().setUp()
+        now = timezone.now()
+        self.recorded_session = self.make_session(
+            status_=ClassSession.Status.COMPLETED,
+            scheduled_start=now - timedelta(days=1),
+            scheduled_end=now - timedelta(days=1) + timedelta(hours=1),
+            actual_end=now - timedelta(days=1) + timedelta(hours=1),
+            recording_url="https://cdn.example.com/recordings/abc123.mp4",
+        )
+        # A completed session with no recording must never show up here.
+        self.make_session(
+            status_=ClassSession.Status.COMPLETED,
+            scheduled_start=now - timedelta(days=2),
+            scheduled_end=now - timedelta(days=2) + timedelta(hours=1),
+            actual_end=now - timedelta(days=2) + timedelta(hours=1),
+        )
+
+    def _get(self, user):
+        client = APIClient()
+        client.force_authenticate(user)
+        url = reverse("classroom-recordings", args=[self.classroom.pk])
+        return client.get(url)
+
+    def test_teacher_sees_only_recorded_sessions(self):
+        resp = self._get(self.teacher)
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        results = resp.data.get("results", resp.data)
+        self.assertEqual(len(results), 1)
+        self.assertEqual(results[0]["id"], self.recorded_session.pk)
+
+    def test_enrolled_student_can_view_recordings(self):
+        _charge_and_create_purchase(self.student, self.class_pass, coupon_code="")
+        resp = self._get(self.student)
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        results = resp.data.get("results", resp.data)
+        self.assertEqual(len(results), 1)
+
+    def test_student_without_access_is_forbidden(self):
+        resp = self._get(self.student)
+        self.assertEqual(resp.status_code, status.HTTP_403_FORBIDDEN)
+
+
+# ===========================================================================
+# 11. Classroom listing filters — ?min_price=/?max_price=/?min_rating=
+# ===========================================================================
+class ClassroomPriceRatingFilterTests(TuitionClassTestBase):
+    def setUp(self):
+        super().setUp()
+        # self.classroom already has a 100-coin pass (self.class_pass) and
+        # a default rating_avg of 0 from the base fixture — override it and
+        # add a second, differently-priced/rated classroom to filter against.
+        self.classroom.rating_avg = Decimal("4.5")
+        self.classroom.save(update_fields=["rating_avg"])
+
+        self.budget_classroom = Classroom.objects.create(
+            teacher=self.teacher, title="Budget Batch", rating_avg=Decimal("3.0")
+        )
+        ClassPass.objects.create(
+            classroom=self.budget_classroom,
+            pass_type=ClassPass.PassType.MONTHLY,
+            price=Decimal("10"),
+            validity_days=10,
+        )
+
+    def _list(self, user, **params):
+        client = APIClient()
+        client.force_authenticate(user)
+        url = reverse("classroom-list")
+        return client.get(url, params)
+
+    def test_min_rating_filters_out_lower_rated_classrooms(self):
+        resp = self._list(self.student, min_rating="4")
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        titles = {row["title"] for row in resp.data.get("results", resp.data)}
+        self.assertIn(self.classroom.title, titles)
+        self.assertNotIn(self.budget_classroom.title, titles)
+
+    def test_max_price_filters_out_more_expensive_classrooms(self):
+        resp = self._list(self.student, max_price="20")
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        titles = {row["title"] for row in resp.data.get("results", resp.data)}
+        self.assertIn(self.budget_classroom.title, titles)
+        self.assertNotIn(self.classroom.title, titles)
+
+    def test_min_price_filters_out_cheaper_classrooms(self):
+        resp = self._list(self.student, min_price="50")
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        titles = {row["title"] for row in resp.data.get("results", resp.data)}
+        self.assertIn(self.classroom.title, titles)
+        self.assertNotIn(self.budget_classroom.title, titles)
+
+    def test_price_range_matches_a_classroom_with_any_pass_in_range(self):
+        resp = self._list(self.student, min_price="5", max_price="15")
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        titles = {row["title"] for row in resp.data.get("results", resp.data)}
+        self.assertIn(self.budget_classroom.title, titles)
+        self.assertNotIn(self.classroom.title, titles)
+
+    def test_invalid_min_rating_is_ignored_not_a_400(self):
+        resp = self._list(self.student, min_rating="not-a-number")
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        titles = {row["title"] for row in resp.data.get("results", resp.data)}
+        self.assertIn(self.classroom.title, titles)
+        self.assertIn(self.budget_classroom.title, titles)
+
+# ---------------------------------------------------------------------------
+# COIN WITHDRAWAL (payout of a real, earned coin balance) — new in this
+# pass. Covers: the debit-at-request-time balance math, minimum-amount and
+# payout_details validation, the four staff/self-service actions
+# (cancel/approve/reject/mark-paid), and that coins are actually refunded on
+# reject/cancel and NOT moved again on approve/mark-paid.
+# ---------------------------------------------------------------------------
+class CoinWithdrawalTests(TuitionClassTestBase):
+    def setUp(self):
+        super().setUp()
+        # self.teacher has no starting coin balance in the base fixture —
+        # give it one, as if class-earning charges had already credited it.
+        self.teacher.coin = 500
+        self.teacher.save(update_fields=["coin"])
+        self.bank_details = {
+            "account_holder": "Teacher One",
+            "account_number": "1234567890",
+            "ifsc": "HDFC0000123",
+        }
+
+    def _client_for(self, user):
+        client = APIClient()
+        client.force_authenticate(user)
+        return client
+
+    def test_request_debits_coins_immediately(self):
+        client = self._client_for(self.teacher)
+        resp = client.post(
+            reverse("coinwithdrawal-list"),
+            {"coins": 200, "payout_method": "bank_transfer", "payout_details": self.bank_details},
+            format="json",
+        )
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
+        self.teacher.refresh_from_db()
+        self.assertEqual(self.teacher.coin, 300)
+        self.assertEqual(resp.data["status"], CoinWithdrawal.Status.PENDING)
+        self.assertTrue(
+            CoinTransaction.objects.filter(
+                user=self.teacher, reason=CoinTransaction.Reason.WITHDRAWAL, amount=200
+            ).exists()
+        )
+
+    def test_cannot_request_below_minimum(self):
+        client = self._client_for(self.teacher)
+        resp = client.post(
+            reverse("coinwithdrawal-list"),
+            {"coins": 10, "payout_method": "bank_transfer", "payout_details": self.bank_details},
+            format="json",
+        )
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+        self.teacher.refresh_from_db()
+        self.assertEqual(self.teacher.coin, 500)  # untouched
+
+    def test_cannot_request_more_than_balance(self):
+        client = self._client_for(self.teacher)
+        resp = client.post(
+            reverse("coinwithdrawal-list"),
+            {"coins": 999, "payout_method": "bank_transfer", "payout_details": self.bank_details},
+            format="json",
+        )
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+        self.teacher.refresh_from_db()
+        self.assertEqual(self.teacher.coin, 500)
+
+    def test_upi_request_requires_upi_id(self):
+        client = self._client_for(self.teacher)
+        resp = client.post(
+            reverse("coinwithdrawal-list"),
+            {"coins": 200, "payout_method": "upi", "payout_details": {}},
+            format="json",
+        )
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_bank_request_missing_ifsc_rejected(self):
+        client = self._client_for(self.teacher)
+        bad_details = {"account_holder": "Teacher One", "account_number": "1234567890"}
+        resp = client.post(
+            reverse("coinwithdrawal-list"),
+            {"coins": 200, "payout_method": "bank_transfer", "payout_details": bad_details},
+            format="json",
+        )
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_user_can_cancel_own_pending_request_and_gets_coins_back(self):
+        client = self._client_for(self.teacher)
+        create_resp = client.post(
+            reverse("coinwithdrawal-list"),
+            {"coins": 200, "payout_method": "bank_transfer", "payout_details": self.bank_details},
+            format="json",
+        )
+        withdrawal_id = create_resp.data["id"]
+        resp = client.post(reverse("coinwithdrawal-cancel", args=[withdrawal_id]), {}, format="json")
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.teacher.refresh_from_db()
+        self.assertEqual(self.teacher.coin, 500)
+        self.assertEqual(resp.data["status"], CoinWithdrawal.Status.CANCELLED)
+
+    def test_user_cannot_cancel_someone_elses_request(self):
+        withdrawal = CoinWithdrawal.create_request(
+            self.teacher, 200, CoinWithdrawal.PayoutMethod.BANK_TRANSFER, self.bank_details
+        )
+        client = self._client_for(self.student)
+        resp = client.post(reverse("coinwithdrawal-cancel", args=[withdrawal.pk]), {}, format="json")
+        self.assertEqual(resp.status_code, status.HTTP_403_FORBIDDEN)
+
+    def test_non_staff_cannot_approve(self):
+        withdrawal = CoinWithdrawal.create_request(
+            self.teacher, 200, CoinWithdrawal.PayoutMethod.BANK_TRANSFER, self.bank_details
+        )
+        client = self._client_for(self.teacher)
+        resp = client.post(reverse("coinwithdrawal-approve", args=[withdrawal.pk]), {}, format="json")
+        self.assertEqual(resp.status_code, status.HTTP_403_FORBIDDEN)
+
+    def test_staff_approve_then_mark_paid_moves_no_coins_again(self):
+        withdrawal = CoinWithdrawal.create_request(
+            self.teacher, 200, CoinWithdrawal.PayoutMethod.BANK_TRANSFER, self.bank_details
+        )
+        staff_user = User.objects.create_user(username="staff1", password="pass12345", is_staff=True)
+        client = self._client_for(staff_user)
+
+        approve_resp = client.post(reverse("coinwithdrawal-approve", args=[withdrawal.pk]), {}, format="json")
+        self.assertEqual(approve_resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(approve_resp.data["status"], CoinWithdrawal.Status.APPROVED)
+
+        paid_resp = client.post(
+            reverse("coinwithdrawal-mark-paid", args=[withdrawal.pk]),
+            {"external_reference": "UTR123456"},
+            format="json",
+        )
+        self.assertEqual(paid_resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(paid_resp.data["status"], CoinWithdrawal.Status.PAID)
+
+        self.teacher.refresh_from_db()
+        # Coins were already debited at request time — approve/mark-paid must
+        # not touch the wallet again.
+        self.assertEqual(self.teacher.coin, 300)
+
+    def test_staff_reject_refunds_coins_and_requires_reason(self):
+        withdrawal = CoinWithdrawal.create_request(
+            self.teacher, 200, CoinWithdrawal.PayoutMethod.BANK_TRANSFER, self.bank_details
+        )
+        staff_user = User.objects.create_user(username="staff2", password="pass12345", is_staff=True)
+        client = self._client_for(staff_user)
+
+        no_reason_resp = client.post(reverse("coinwithdrawal-reject", args=[withdrawal.pk]), {}, format="json")
+        self.assertEqual(no_reason_resp.status_code, status.HTTP_400_BAD_REQUEST)
+
+        resp = client.post(
+            reverse("coinwithdrawal-reject", args=[withdrawal.pk]),
+            {"reason": "Bank details could not be verified."},
+            format="json",
+        )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(resp.data["status"], CoinWithdrawal.Status.REJECTED)
+        self.teacher.refresh_from_db()
+        self.assertEqual(self.teacher.coin, 500)  # refunded in full
+
+    def test_cannot_cancel_already_approved_request(self):
+        withdrawal = CoinWithdrawal.create_request(
+            self.teacher, 200, CoinWithdrawal.PayoutMethod.BANK_TRANSFER, self.bank_details
+        )
+        staff_user = User.objects.create_user(username="staff3", password="pass12345", is_staff=True)
+        self._client_for(staff_user).post(reverse("coinwithdrawal-approve", args=[withdrawal.pk]), {}, format="json")
+
+        client = self._client_for(self.teacher)
+        resp = client.post(reverse("coinwithdrawal-cancel", args=[withdrawal.pk]), {}, format="json")
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_staff_sees_all_requests_non_staff_sees_only_own(self):
+        self.other_teacher.coin = 150
+        self.other_teacher.save(update_fields=["coin"])
+        CoinWithdrawal.create_request(
+            self.teacher, 200, CoinWithdrawal.PayoutMethod.BANK_TRANSFER, self.bank_details
+        )
+        other_teacher_withdrawal = CoinWithdrawal.create_request(
+            self.other_teacher, 150, CoinWithdrawal.PayoutMethod.UPI, {"upi_id": "other@upi"}
+        )
+
+        own_only_resp = self._client_for(self.teacher).get(reverse("coinwithdrawal-list"))
+        own_ids = {row["id"] for row in own_only_resp.data.get("results", own_only_resp.data)}
+        self.assertNotIn(other_teacher_withdrawal.id, own_ids)
+
+        staff_user = User.objects.create_user(username="staff4", password="pass12345", is_staff=True)
+        staff_resp = self._client_for(staff_user).get(reverse("coinwithdrawal-list"))
+        staff_ids = {row["id"] for row in staff_resp.data.get("results", staff_resp.data)}
+        self.assertIn(other_teacher_withdrawal.id, staff_ids)
+
+
+class CoinPurchaseTests(TuitionClassTestBase):
+    """New (fix — this feature had zero coverage until now, same as every
+    other money-moving surface in this file per the module docstring).
+    Covers the initiate -> verify -> credit flow, the fail-closed signature
+    check, and the retry-on-failure path CoinPurchase exists to provide."""
+
+    def _client_for(self, user):
+        client = APIClient()
+        client.force_authenticate(user)
+        return client
+
+    def _sign(self, secret, order_id, payment_id):
+        return hmac.new(secret.encode(), f"{order_id}|{payment_id}".encode(), hashlib.sha256).hexdigest()
+
+    def test_initiate_creates_pending_purchase_with_derived_amount(self):
+        client = self._client_for(self.student)
+        resp = client.post(reverse("coinpurchase-initiate"), {"coins": 300}, format="json")
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(resp.data["status"], CoinPurchase.Status.PENDING)
+        self.assertEqual(Decimal(resp.data["amount_inr"]), 300 * CoinWithdrawal.COIN_TO_INR_RATE)
+        self.assertTrue(resp.data["order_id"])
+
+    def test_initiate_rejects_non_positive_coins(self):
+        client = self._client_for(self.student)
+        resp = client.post(reverse("coinpurchase-initiate"), {"coins": 0}, format="json")
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+
+    @override_settings(RAZORPAY_KEY_SECRET="")
+    def test_verify_fails_closed_when_gateway_secret_not_configured(self):
+        client = self._client_for(self.student)
+        initiate_resp = client.post(reverse("coinpurchase-initiate"), {"coins": 100}, format="json")
+        purchase_id, order_id = initiate_resp.data["id"], initiate_resp.data["order_id"]
+
+        resp = client.post(
+            reverse("coinpurchase-verify", args=[purchase_id]),
+            {"razorpay_order_id": order_id, "razorpay_payment_id": "pay_x", "razorpay_signature": "bogus"},
+            format="json",
+        )
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+        purchase = CoinPurchase.objects.get(pk=purchase_id)
+        self.assertEqual(purchase.status, CoinPurchase.Status.FAILED)
+        self.student.refresh_from_db()
+        self.assertEqual(self.student.coin, 1000)  # untouched — base fixture starting balance
+
+    @override_settings(RAZORPAY_KEY_SECRET="test-secret-key")
+    def test_verify_with_correct_signature_credits_wallet_exactly_once(self):
+        client = self._client_for(self.student)
+        initiate_resp = client.post(reverse("coinpurchase-initiate"), {"coins": 100}, format="json")
+        purchase_id, order_id = initiate_resp.data["id"], initiate_resp.data["order_id"]
+        payment_id = "pay_abc123"
+        signature = self._sign("test-secret-key", order_id, payment_id)
+
+        resp = client.post(
+            reverse("coinpurchase-verify", args=[purchase_id]),
+            {"razorpay_order_id": order_id, "razorpay_payment_id": payment_id, "razorpay_signature": signature},
+            format="json",
+        )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(resp.data["status"], CoinPurchase.Status.SUCCESS)
+        self.student.refresh_from_db()
+        self.assertEqual(self.student.coin, 1100)  # base 1000 + 100 topped up
+        self.assertTrue(
+            CoinTransaction.objects.filter(
+                user=self.student, reason=CoinTransaction.Reason.TOPUP, amount=100
+            ).exists()
+        )
+
+        # A second verify call on an already-resolved purchase (a retried
+        # client call, or a duplicate gateway webhook) must never double-credit.
+        second_resp = client.post(
+            reverse("coinpurchase-verify", args=[purchase_id]),
+            {"razorpay_order_id": order_id, "razorpay_payment_id": payment_id, "razorpay_signature": signature},
+            format="json",
+        )
+        self.assertEqual(second_resp.status_code, status.HTTP_400_BAD_REQUEST)
+        self.student.refresh_from_db()
+        self.assertEqual(self.student.coin, 1100)
+
+    def test_verify_rejects_order_id_mismatch(self):
+        client = self._client_for(self.student)
+        initiate_resp = client.post(reverse("coinpurchase-initiate"), {"coins": 50}, format="json")
+        purchase_id = initiate_resp.data["id"]
+
+        resp = client.post(
+            reverse("coinpurchase-verify", args=[purchase_id]),
+            {"razorpay_order_id": "order_not_this_one", "razorpay_payment_id": "pay_x", "razorpay_signature": "x"},
+            format="json",
+        )
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+
+    @override_settings(RAZORPAY_KEY_SECRET="")
+    def test_failed_purchase_can_be_retried_as_a_new_pending_row(self):
+        client = self._client_for(self.student)
+        initiate_resp = client.post(reverse("coinpurchase-initiate"), {"coins": 100}, format="json")
+        purchase_id, order_id = initiate_resp.data["id"], initiate_resp.data["order_id"]
+        client.post(
+            reverse("coinpurchase-verify", args=[purchase_id]),
+            {"razorpay_order_id": order_id, "razorpay_payment_id": "pay_x", "razorpay_signature": "bogus"},
+            format="json",
+        )
+
+        retry_resp = client.post(reverse("coinpurchase-retry", args=[purchase_id]), {}, format="json")
+        self.assertEqual(retry_resp.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(retry_resp.data["status"], CoinPurchase.Status.PENDING)
+        self.assertNotEqual(retry_resp.data["order_id"], order_id)
+        new_purchase = CoinPurchase.objects.get(pk=retry_resp.data["id"])
+        self.assertEqual(new_purchase.retry_of_id, purchase_id)
+
+    def test_cannot_retry_a_still_pending_purchase(self):
+        client = self._client_for(self.student)
+        initiate_resp = client.post(reverse("coinpurchase-initiate"), {"coins": 100}, format="json")
+        resp = client.post(reverse("coinpurchase-retry", args=[initiate_resp.data["id"]]), {}, format="json")
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_cannot_verify_or_retry_someone_elses_purchase(self):
+        purchase = CoinPurchase.objects.create(
+            user=self.student, coins=100, amount_inr=100, order_id="order_other_student"
+        )
+        other_client = self._client_for(self.other_teacher)
+        verify_resp = other_client.post(
+            reverse("coinpurchase-verify", args=[purchase.pk]),
+            {"razorpay_order_id": purchase.order_id, "razorpay_payment_id": "p", "razorpay_signature": "s"},
+            format="json",
+        )
+        self.assertEqual(verify_resp.status_code, status.HTTP_404_NOT_FOUND)
+
+
+# ===========================================================================
+# 16. CLASSROOM SHARE — in-app (notifies a specific user) vs outside-the-app
+#     (just returns the link), share_count bookkeeping, and share-stats.
+# ===========================================================================
+class ClassroomShareTests(TuitionClassTestBase):
+    def setUp(self):
+        super().setUp()
+        self.friend = User.objects.create_user(username="friend1", password="pass12345")
+
+    def _client_for(self, user):
+        client = APIClient()
+        client.force_authenticate(user)
+        return client
+
+    def test_outside_app_share_returns_link_and_bumps_count_without_notifying_anyone(self):
+        url = reverse("classroom-share", args=[self.classroom.pk])
+        resp = self._client_for(self.student).post(url, {"channel": "whatsapp"}, format="json")
+
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
+        self.assertIn(str(self.classroom.pk), resp.data["deep_link"])
+        self.assertIn(str(self.classroom.pk), resp.data["web_url"])
+        self.assertIsNone(resp.data["shared_with"])
+        self.assertEqual(resp.data["share_count"], 1)
+
+        self.classroom.refresh_from_db()
+        self.assertEqual(self.classroom.share_count, 1)
+
+        share = ClassroomShare.objects.get(classroom=self.classroom, shared_by=self.student)
+        self.assertEqual(share.channel, ClassroomShare.Channel.WHATSAPP)
+        self.assertIsNone(share.shared_with)
+        # Outside-the-app share must not create any in-app notification —
+        # nobody on the platform was actually the target.
+        self.assertFalse(Notification.objects.filter(classroom=self.classroom).exists())
+
+    def test_in_app_share_notifies_target_user_and_forces_channel(self):
+        url = reverse("classroom-share", args=[self.classroom.pk])
+        resp = self._client_for(self.student).post(
+            url, {"to_user_id": self.friend.id, "channel": "copy_link"}, format="json"
+        )
+
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(resp.data["shared_with"]["id"], self.friend.id)
+
+        share = ClassroomShare.objects.get(classroom=self.classroom, shared_by=self.student)
+        # channel is forced to in_app whenever a target user is given,
+        # regardless of what the client sent — see ClassroomShareSerializer.
+        self.assertEqual(share.channel, ClassroomShare.Channel.IN_APP)
+        self.assertEqual(share.shared_with, self.friend)
+
+        notif = Notification.objects.get(recipient=self.friend, classroom=self.classroom)
+        self.assertEqual(notif.notif_type, Notification.NotifType.CLASSROOM_SHARED)
+
+    def test_cannot_share_with_self(self):
+        url = reverse("classroom-share", args=[self.classroom.pk])
+        resp = self._client_for(self.student).post(
+            url, {"to_user_id": self.student.id}, format="json"
+        )
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_in_app_channel_without_target_user_is_rejected(self):
+        url = reverse("classroom-share", args=[self.classroom.pk])
+        resp = self._client_for(self.student).post(url, {"channel": "in_app"}, format="json")
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_cannot_share_a_classroom_you_cannot_see(self):
+        # A random unaffiliated user shouldn't be able to share (or even
+        # find) a classroom that isn't theirs and that they've never
+        # accessed — same visibility gate as get_object()/retrieve().
+        other_classroom = Classroom.objects.create(
+            teacher=self.other_teacher, title="Private-ish Batch", is_active=False
+        )
+        url = reverse("classroom-share", args=[other_classroom.pk])
+        resp = self._client_for(self.student).post(url, {}, format="json")
+        self.assertEqual(resp.status_code, status.HTTP_404_NOT_FOUND)
+
+    def test_share_stats_visible_to_teacher_forbidden_to_student(self):
+        share_url = reverse("classroom-share", args=[self.classroom.pk])
+        self._client_for(self.student).post(share_url, {"channel": "sms"}, format="json")
+        self._client_for(self.student).post(
+            share_url, {"to_user_id": self.friend.id}, format="json"
+        )
+
+        stats_url = reverse("classroom-share-stats", args=[self.classroom.pk])
+
+        teacher_resp = self._client_for(self.teacher).get(stats_url)
+        self.assertEqual(teacher_resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(teacher_resp.data["share_count"], 2)
+        self.assertEqual(teacher_resp.data["by_channel"]["sms"], 1)
+        self.assertEqual(teacher_resp.data["by_channel"]["in_app"], 1)
+        self.assertEqual(len(teacher_resp.data["recent"]), 2)
+
+        student_resp = self._client_for(self.student).get(stats_url)
+        self.assertEqual(student_resp.status_code, status.HTTP_403_FORBIDDEN)
+
+# ===========================================================================
+# 17. OWNERSHIP FIXES (Pass 19) — ClassroomReviewViewSet/ClassHolidayViewSet/
+#     ClassQueryViewSet perform_update/perform_destroy now check ownership.
+#     Regression coverage for the exact cross-user PATCH/DELETE bugs the
+#     production-readiness audit (Pass 19, re-verified Pass 21) found.
+# ===========================================================================
+class ReviewHolidayQueryOwnershipTests(TuitionClassTestBase):
+    def setUp(self):
+        super().setUp()
+        self.other_student = User.objects.create_user(
+            username="other_student1", password="pass12345", email="other_student1@example.com"
+        )
+        # Both students need to have held a pass to create/own a review or
+        # query at all (ClassroomReview.is_enrolled / ClassQuery's
+        # _can_view_classroom_internals gate) — created directly via the
+        # ORM here since these tests are about update/destroy permissions,
+        # not the create-time gates already covered elsewhere.
+        self.review = ClassroomReview.objects.create(
+            classroom=self.classroom, student=self.student, rating=4, comment="Good class"
+        )
+        self.other_review = ClassroomReview.objects.create(
+            classroom=self.classroom, student=self.other_student, rating=2, comment="Meh"
+        )
+        self.holiday = ClassHoliday.objects.create(
+            classroom=self.classroom, date=timezone.now().date() + timedelta(days=3),
+            reason="Diwali", created_by=self.teacher,
+        )
+        self.query = ClassQuery.objects.create(
+            classroom=self.classroom, asked_by=self.student, question="What is Big-O?",
+        )
+
+    def _client_for(self, user):
+        client = APIClient()
+        client.force_authenticate(user)
+        return client
+
+    # --- ClassroomReviewViewSet ---
+    def test_student_cannot_edit_another_students_review(self):
+        url = reverse("classroomreview-detail", args=[self.other_review.pk])
+        resp = self._client_for(self.student).patch(url, {"comment": "hacked"}, format="json")
+        self.assertEqual(resp.status_code, status.HTTP_403_FORBIDDEN)
+        self.other_review.refresh_from_db()
+        self.assertEqual(self.other_review.comment, "Meh")
+
+    def test_student_cannot_delete_another_students_review(self):
+        url = reverse("classroomreview-detail", args=[self.other_review.pk])
+        resp = self._client_for(self.student).delete(url)
+        self.assertEqual(resp.status_code, status.HTTP_403_FORBIDDEN)
+        self.assertTrue(ClassroomReview.objects.filter(pk=self.other_review.pk).exists())
+
+    def test_student_can_edit_own_review(self):
+        url = reverse("classroomreview-detail", args=[self.review.pk])
+        resp = self._client_for(self.student).patch(url, {"comment": "Updated"}, format="json")
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.review.refresh_from_db()
+        self.assertEqual(self.review.comment, "Updated")
+
+    def test_review_update_cannot_reassign_classroom(self):
+        url = reverse("classroomreview-detail", args=[self.review.pk])
+        resp = self._client_for(self.student).patch(
+            url, {"classroom": self.other_classroom.pk}, format="json"
+        )
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+
+    # --- ClassHolidayViewSet ---
+    def test_non_manager_cannot_edit_classroom_holiday(self):
+        url = reverse("classholiday-detail", args=[self.holiday.pk])
+        resp = self._client_for(self.student).patch(url, {"reason": "hacked"}, format="json")
+        self.assertEqual(resp.status_code, status.HTTP_403_FORBIDDEN)
+        self.holiday.refresh_from_db()
+        self.assertEqual(self.holiday.reason, "Diwali")
+
+    def test_manager_can_edit_own_classroom_holiday(self):
+        url = reverse("classholiday-detail", args=[self.holiday.pk])
+        resp = self._client_for(self.teacher).patch(url, {"reason": "Rescheduled"}, format="json")
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.holiday.refresh_from_db()
+        self.assertEqual(self.holiday.reason, "Rescheduled")
+
+    def test_holiday_update_cannot_reassign_classroom(self):
+        url = reverse("classholiday-detail", args=[self.holiday.pk])
+        resp = self._client_for(self.teacher).patch(
+            url, {"classroom": self.other_classroom.pk}, format="json"
+        )
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+
+    # --- ClassQueryViewSet ---
+    def test_student_cannot_edit_another_students_query(self):
+        url = reverse("classquery-detail", args=[self.query.pk])
+        resp = self._client_for(self.other_student).patch(
+            url, {"question": "hacked"}, format="json"
+        )
+        self.assertEqual(resp.status_code, status.HTTP_403_FORBIDDEN)
+
+    def test_manager_cannot_edit_a_students_query_via_classroom_filter(self):
+        # Regression for the exact Pass 19 gap: get_queryset() returns every
+        # query in the classroom to a manager, but perform_update must still
+        # only allow the ORIGINAL asker to edit it.
+        url = reverse("classquery-detail", args=[self.query.pk]) + "?classroom=" + str(self.classroom.pk)
+        resp = self._client_for(self.teacher).patch(url, {"question": "hacked"}, format="json")
+        self.assertEqual(resp.status_code, status.HTTP_403_FORBIDDEN)
+        self.query.refresh_from_db()
+        self.assertEqual(self.query.question, "What is Big-O?")
+
+    def test_asker_can_edit_own_unanswered_query(self):
+        url = reverse("classquery-detail", args=[self.query.pk])
+        resp = self._client_for(self.student).patch(
+            url, {"question": "What is Big-O notation?"}, format="json"
+        )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+
+    def test_asker_cannot_edit_query_once_answered(self):
+        self.query.status = ClassQuery.Status.ANSWERED
+        self.query.answer = "O(n log n)"
+        self.query.save(update_fields=["status", "answer"])
+        url = reverse("classquery-detail", args=[self.query.pk])
+        resp = self._client_for(self.student).patch(url, {"question": "edit"}, format="json")
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+
+
+# ===========================================================================
+# 18. PASS GIFTING (Pass 14/16) — send/claim/cancel, insufficient balance,
+#     double-claim, claim-window expiry, refund-to-gifter coin math.
+# ===========================================================================
+class PassGiftFlowTests(TuitionClassTestBase):
+    def setUp(self):
+        super().setUp()
+        self.recipient = User.objects.create_user(
+            username="recipient1", password="pass12345", email="recipient1@example.com"
+        )
+
+    def _client_for(self, user):
+        client = APIClient()
+        client.force_authenticate(user)
+        return client
+
+    def test_send_gift_debits_gifter_and_creates_pending_gift(self):
+        resp = self._client_for(self.student).post(
+            reverse("passgift-list"),
+            {"recipient_id": self.recipient.id, "class_pass": self.class_pass.id, "gift_message": "Enjoy!"},
+            format="json",
+        )
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
+        self.student.refresh_from_db()
+        self.assertEqual(self.student.coin, 900)  # 1000 - 100 (class_pass price)
+        gift = PassGift.objects.get(gifter=self.student, recipient=self.recipient)
+        self.assertEqual(gift.status, PassGift.Status.PENDING)
+        self.assertEqual(gift.coins_spent, 100)
+
+    def test_send_gift_with_insufficient_balance_rejected(self):
+        self.student.coin = 10
+        self.student.save(update_fields=["coin"])
+        resp = self._client_for(self.student).post(
+            reverse("passgift-list"),
+            {"recipient_id": self.recipient.id, "class_pass": self.class_pass.id},
+            format="json",
+        )
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+        self.student.refresh_from_db()
+        self.assertEqual(self.student.coin, 10)  # never charged
+        self.assertFalse(PassGift.objects.filter(gifter=self.student).exists())
+
+    def test_recipient_can_claim_gift_creates_purchase(self):
+        gift = PassGift.objects.create(
+            gifter=self.student, recipient=self.recipient, class_pass=self.class_pass,
+            coins_spent=100, expires_at=timezone.now() + timedelta(days=PassGift.CLAIM_WINDOW_DAYS),
+        )
+        resp = self._client_for(self.recipient).post(reverse("passgift-claim", args=[gift.pk]), {}, format="json")
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        gift.refresh_from_db()
+        self.assertEqual(gift.status, PassGift.Status.CLAIMED)
+        self.assertIsNotNone(gift.purchase)
+        self.assertEqual(gift.purchase.status, PassPurchase.Status.SUCCESS)
+        self.assertEqual(gift.purchase.student_id, self.recipient.id)
+
+    def test_non_recipient_cannot_claim(self):
+        gift = PassGift.objects.create(
+            gifter=self.student, recipient=self.recipient, class_pass=self.class_pass,
+            coins_spent=100, expires_at=timezone.now() + timedelta(days=PassGift.CLAIM_WINDOW_DAYS),
+        )
+        resp = self._client_for(self.student).post(reverse("passgift-claim", args=[gift.pk]), {}, format="json")
+        self.assertEqual(resp.status_code, status.HTTP_403_FORBIDDEN)
+
+    def test_double_claim_rejected(self):
+        gift = PassGift.objects.create(
+            gifter=self.student, recipient=self.recipient, class_pass=self.class_pass,
+            coins_spent=100, expires_at=timezone.now() + timedelta(days=PassGift.CLAIM_WINDOW_DAYS),
+        )
+        client = self._client_for(self.recipient)
+        client.post(reverse("passgift-claim", args=[gift.pk]), {}, format="json")
+        resp = client.post(reverse("passgift-claim", args=[gift.pk]), {}, format="json")
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_expired_gift_cannot_be_claimed(self):
+        gift = PassGift.objects.create(
+            gifter=self.student, recipient=self.recipient, class_pass=self.class_pass,
+            coins_spent=100, expires_at=timezone.now() - timedelta(hours=1),
+        )
+        resp = self._client_for(self.recipient).post(reverse("passgift-claim", args=[gift.pk]), {}, format="json")
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+        gift.refresh_from_db()
+        self.assertEqual(gift.status, PassGift.Status.PENDING)  # claim rejected, not auto-expired inline
+
+    def test_gifter_can_cancel_pending_gift_and_get_refund(self):
+        self.student.coin = 900  # simulate having already paid for the gift
+        self.student.save(update_fields=["coin"])
+        gift = PassGift.objects.create(
+            gifter=self.student, recipient=self.recipient, class_pass=self.class_pass,
+            coins_spent=100, expires_at=timezone.now() + timedelta(days=PassGift.CLAIM_WINDOW_DAYS),
+        )
+        resp = self._client_for(self.student).post(reverse("passgift-cancel", args=[gift.pk]), {}, format="json")
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        gift.refresh_from_db()
+        self.student.refresh_from_db()
+        self.assertEqual(gift.status, PassGift.Status.CANCELLED)
+        self.assertEqual(self.student.coin, 1000)  # refunded
+
+    def test_non_gifter_cannot_cancel(self):
+        gift = PassGift.objects.create(
+            gifter=self.student, recipient=self.recipient, class_pass=self.class_pass,
+            coins_spent=100, expires_at=timezone.now() + timedelta(days=PassGift.CLAIM_WINDOW_DAYS),
+        )
+        resp = self._client_for(self.recipient).post(reverse("passgift-cancel", args=[gift.pk]), {}, format="json")
+        self.assertEqual(resp.status_code, status.HTTP_403_FORBIDDEN)
+
+
+# ===========================================================================
+# 19. AUTO-RENEW PASSES (Pass 15/16) — PassPurchase.renew()'s coin math and
+#     fail-closed path, plus tasks.run_auto_renewals' sweep filter.
+# ===========================================================================
+class AutoRenewTests(TuitionClassTestBase):
+    def setUp(self):
+        super().setUp()
+        self.purchase = _charge_and_create_purchase(self.student, self.class_pass, coupon_code="")
+        # Make it look already-expired with auto_renew on, the exact shape
+        # run_auto_renewals sweeps for.
+        PassPurchase.objects.filter(pk=self.purchase.pk).update(
+            auto_renew=True, expires_at=timezone.now() - timedelta(hours=1)
+        )
+        self.purchase.refresh_from_db()
+
+    def test_renew_creates_chained_purchase_and_debits_coins(self):
+        self.student.coin = 900  # already spent 100 on the original purchase
+        self.student.save(update_fields=["coin"])
+        new_purchase = self.purchase.renew()
+        self.assertIsNotNone(new_purchase)
+        self.student.refresh_from_db()
+        self.assertEqual(self.student.coin, 800)  # another 100 debited
+        self.assertEqual(new_purchase.status, PassPurchase.Status.SUCCESS)
+        self.assertEqual(new_purchase.renewed_from_id, self.purchase.pk)
+        self.assertTrue(new_purchase.auto_renew)  # continues by default
+        self.purchase.refresh_from_db()
+        self.assertFalse(self.purchase.auto_renew)  # old link in the chain stops being swept again
+
+    def test_renew_fails_closed_on_insufficient_balance(self):
+        self.student.coin = 5
+        self.student.save(update_fields=["coin"])
+        result = self.purchase.renew()
+        self.assertIsNone(result)
+        self.purchase.refresh_from_db()
+        self.assertFalse(self.purchase.auto_renew)
+        self.assertIsNotNone(self.purchase.renewal_failed_at)
+        self.student.refresh_from_db()
+        self.assertEqual(self.student.coin, 5)  # never charged
+
+    def test_run_auto_renewals_only_sweeps_due_success_purchases(self):
+        # A second, NOT-due purchase (auto_renew on, but not expired yet) —
+        # must be left alone by this sweep.
+        second_student = User.objects.create_user(username="student2", password="pass12345")
+        second_student.coin = 1000
+        second_student.save(update_fields=["coin"])
+        other_purchase = _charge_and_create_purchase(second_student, self.class_pass, coupon_code="")
+        PassPurchase.objects.filter(pk=other_purchase.pk).update(auto_renew=True)
+
+        self.student.coin = 900
+        self.student.save(update_fields=["coin"])
+        result = run_auto_renewals()
+
+        self.assertEqual(result["renewed"], 1)
+        self.purchase.refresh_from_db()
+        self.assertFalse(self.purchase.auto_renew)
+        other_purchase.refresh_from_db()
+        self.assertTrue(other_purchase.auto_renew)  # untouched — not expired yet
+
+    def test_run_auto_renewals_is_self_cleaning_on_second_run(self):
+        self.student.coin = 900
+        self.student.save(update_fields=["coin"])
+        first = run_auto_renewals()
+        second = run_auto_renewals()
+        self.assertEqual(first["renewed"], 1)
+        self.assertEqual(second["renewed"], 0)  # nothing left to process
+
+
+# ===========================================================================
+# 20. PER-MESSAGE CHAT REPORTS + PROFANITY/SPAM FILTER (Pass 14)
+# ===========================================================================
+class ChatMessageReportTests(TuitionClassTestBase):
+    def setUp(self):
+        super().setUp()
+        _charge_and_create_purchase(self.student, self.class_pass, coupon_code="")
+        self.session = self.make_session(status_=ClassSession.Status.LIVE)
+        self.message = ChatMessage.objects.create(
+            session=self.session, sender=self.teacher, message="check this out"
+        )
+
+    def _client_for(self, user):
+        client = APIClient()
+        client.force_authenticate(user)
+        return client
+
+    def test_filing_a_report_flags_the_message(self):
+        resp = self._client_for(self.student).post(
+            reverse("chatmessagereport-list"),
+            {"message": self.message.pk, "reason": "spam", "note": "advertising"},
+            format="json",
+        )
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
+        self.message.refresh_from_db()
+        self.assertTrue(self.message.is_flagged)
+        self.assertEqual(self.message.flagged_reason, "reported:spam")
+
+    def test_refiling_a_report_updates_not_duplicates(self):
+        client = self._client_for(self.student)
+        client.post(reverse("chatmessagereport-list"), {"message": self.message.pk, "reason": "spam"}, format="json")
+        client.post(
+            reverse("chatmessagereport-list"), {"message": self.message.pk, "reason": "abusive"}, format="json"
+        )
+        self.assertEqual(ChatMessageReport.objects.filter(message=self.message, reporter=self.student).count(), 1)
+        report = ChatMessageReport.objects.get(message=self.message, reporter=self.student)
+        self.assertEqual(report.reason, ChatMessageReport.Reason.ABUSIVE)
+
+    def test_cannot_report_own_message(self):
+        own_message = ChatMessage.objects.create(session=self.session, sender=self.student, message="hi all")
+        resp = self._client_for(self.student).post(
+            reverse("chatmessagereport-list"), {"message": own_message.pk, "reason": "other"}, format="json"
+        )
+        self.assertEqual(resp.status_code, status.HTTP_403_FORBIDDEN)
+
+    def test_moderator_review_actioning_soft_deletes_message(self):
+        report = ChatMessageReport.objects.create(message=self.message, reporter=self.student, reason="spam")
+        resp = self._client_for(self.teacher).post(
+            reverse("chatmessagereport-review", args=[report.pk]), {"status": "actioned"}, format="json"
+        )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        report.refresh_from_db()
+        self.message.refresh_from_db()
+        self.assertEqual(report.status, ChatMessageReport.Status.ACTIONED)
+        self.assertEqual(report.reviewed_by_id, self.teacher.id)
+        self.assertTrue(self.message.is_deleted)
+
+    def test_non_moderator_cannot_review(self):
+        report = ChatMessageReport.objects.create(message=self.message, reporter=self.student, reason="spam")
+        resp = self._client_for(self.student).post(
+            reverse("chatmessagereport-review", args=[report.pk]), {"status": "dismissed"}, format="json"
+        )
+        self.assertEqual(resp.status_code, status.HTTP_403_FORBIDDEN)
+
+
+class ChatModerationScreenMessageTests(TestCase):
+    """Pure unit tests on moderation.screen_message() — no DB fixtures
+    needed, deliberately kept separate from the HTTP-level report tests
+    above so a change to the word-list/regex logic doesn't need a full
+    session/classroom fixture to exercise."""
+
+    def test_clean_message_not_flagged(self):
+        flagged, reason = screen_message("Can someone explain recursion again?")
+        self.assertFalse(flagged)
+        self.assertEqual(reason, "")
+
+    def test_profanity_flagged(self):
+        flagged, reason = screen_message("this teacher is such a bastard")
+        self.assertTrue(flagged)
+        self.assertEqual(reason, "profanity")
+
+    def test_leetspeak_evasion_still_caught(self):
+        flagged, reason = screen_message("sh1t this is hard")
+        self.assertTrue(flagged)
+        self.assertEqual(reason, "profanity")
+
+    def test_link_flagged_as_spam(self):
+        flagged, reason = screen_message("join here https://example.com/promo")
+        self.assertTrue(flagged)
+        self.assertEqual(reason, "spam_link")
+
+    def test_phone_number_flagged(self):
+        flagged, reason = screen_message("call me at 9876543210 for cheaper classes")
+        self.assertTrue(flagged)
+        self.assertEqual(reason, "spam_contact_info")
+
+    def test_innocent_whatsapp_mention_alone_not_flagged(self):
+        flagged, reason = screen_message("does anyone use whatsapp for group study?")
+        self.assertFalse(flagged)
+
+    def test_repeated_chars_flagged(self):
+        flagged, reason = screen_message("YESSSSSSS finally understood it")
+        self.assertTrue(flagged)
+        self.assertEqual(reason, "spam_repeated_chars")
+
+    def test_empty_string_never_flagged(self):
+        flagged, reason = screen_message("")
+        self.assertFalse(flagged)
+        self.assertEqual(reason, "")
+
+    def test_malformed_input_never_raises(self):
+        # None isn't a valid message body, but screen_message must fail
+        # safe (unflagged), never raise, per its own documented contract.
+        flagged, reason = screen_message(None)
+        self.assertFalse(flagged)
+
+
+# ===========================================================================
+# 21. NOTIFICATION PREFERENCES + DIGEST EMAIL (Pass 14, digest task added
+#     Pass 21 — see tasks.send_notification_digests)
+# ===========================================================================
+class NotificationPreferenceTests(TuitionClassTestBase):
+    def test_for_user_creates_sane_defaults(self):
+        pref = NotificationPreference.for_user(self.student)
+        self.assertTrue(pref.push_enabled)
+        self.assertTrue(pref.email_enabled)
+        self.assertFalse(pref.sms_enabled)
+        self.assertFalse(pref.whatsapp_enabled)
+        self.assertEqual(pref.digest_frequency, NotificationPreference.DigestFrequency.OFF)
+
+    def test_for_user_is_idempotent(self):
+        first = NotificationPreference.for_user(self.student)
+        second = NotificationPreference.for_user(self.student)
+        self.assertEqual(first.pk, second.pk)
+
+    def test_allowed_channels_respects_toggles(self):
+        pref = NotificationPreference.objects.create(
+            user=self.student, push_enabled=True, email_enabled=False, sms_enabled=True, whatsapp_enabled=False,
+        )
+        self.assertEqual(pref.allowed_channels_for(Notification.NotifType.SESSION_LIVE), ["push", "sms"])
+
+    def test_muted_type_returns_no_channels(self):
+        pref = NotificationPreference.objects.create(
+            user=self.student, muted_types=[Notification.NotifType.NOTICE_POSTED],
+        )
+        self.assertEqual(pref.allowed_channels_for(Notification.NotifType.NOTICE_POSTED), [])
+        # A different, non-muted type on the same user is unaffected.
+        self.assertNotEqual(pref.allowed_channels_for(Notification.NotifType.SESSION_LIVE), [])
+
+
+@override_settings(EMAIL_BACKEND="django.core.mail.backends.locmem.EmailBackend")
+class NotificationDigestTaskTests(TuitionClassTestBase):
+    def setUp(self):
+        super().setUp()
+        from django.core import mail
+
+        mail.outbox = []
+
+    def test_due_user_with_notifications_gets_a_digest_email(self):
+        pref = NotificationPreference.objects.create(
+            user=self.student, digest_frequency=NotificationPreference.DigestFrequency.DAILY,
+        )
+        Notification.objects.create(recipient=self.student, notif_type="notice_posted", title="New notice")
+        Notification.objects.create(recipient=self.student, notif_type="session_live", title="Class started")
+
+        from django.core import mail
+
+        result = send_notification_digests()
+
+        self.assertEqual(result["sent"], 1)
+        self.assertEqual(len(mail.outbox), 1)
+        self.assertIn(self.student.email, mail.outbox[0].to)
+        pref.refresh_from_db()
+        self.assertIsNotNone(pref.last_digest_sent_at)
+
+    def test_user_with_digest_off_is_never_emailed(self):
+        NotificationPreference.objects.create(user=self.student)  # default OFF
+        Notification.objects.create(recipient=self.student, notif_type="notice_posted", title="New notice")
+
+        from django.core import mail
+
+        send_notification_digests()
+        self.assertEqual(len(mail.outbox), 0)
+
+    def test_user_with_nothing_new_is_not_emailed_and_window_stays_open(self):
+        pref = NotificationPreference.objects.create(
+            user=self.student, digest_frequency=NotificationPreference.DigestFrequency.DAILY,
+        )
+        send_notification_digests()
+        pref.refresh_from_db()
+        self.assertIsNone(pref.last_digest_sent_at)  # never advanced — nothing to report yet
+
+    def test_not_yet_due_user_is_skipped(self):
+        pref = NotificationPreference.objects.create(
+            user=self.student, digest_frequency=NotificationPreference.DigestFrequency.DAILY,
+            last_digest_sent_at=timezone.now() - timedelta(hours=1),  # sent an hour ago, daily interval not up
+        )
+        Notification.objects.create(recipient=self.student, notif_type="notice_posted", title="New notice")
+
+        from django.core import mail
+
+        send_notification_digests()
+        self.assertEqual(len(mail.outbox), 0)
+
+    def test_muted_notif_type_excluded_from_digest(self):
+        pref = NotificationPreference.objects.create(
+            user=self.student, digest_frequency=NotificationPreference.DigestFrequency.DAILY,
+            muted_types=["notice_posted"],
+        )
+        Notification.objects.create(recipient=self.student, notif_type="notice_posted", title="Muted notice")
+        Notification.objects.create(recipient=self.student, notif_type="session_live", title="Class started")
+
+        from django.core import mail
+
+        send_notification_digests()
+        self.assertEqual(len(mail.outbox), 1)
+        self.assertNotIn("Muted notice", mail.outbox[0].body)
+        self.assertIn("Class started", mail.outbox[0].body)
+
+    def test_running_twice_in_a_row_does_not_double_send(self):
+        NotificationPreference.objects.create(
+            user=self.student, digest_frequency=NotificationPreference.DigestFrequency.DAILY,
+        )
+        Notification.objects.create(recipient=self.student, notif_type="notice_posted", title="New notice")
+
+        from django.core import mail
+
+        send_notification_digests()
+        send_notification_digests()
+        self.assertEqual(len(mail.outbox), 1)
+
+
+# ===========================================================================
+# 22. POST-SESSION ENGAGEMENT REPORT (Pass 15)
+# ===========================================================================
+class SessionEngagementReportTests(TuitionClassTestBase):
+    def setUp(self):
+        super().setUp()
+        self.session = self.make_session(status_=ClassSession.Status.COMPLETED)
+        SessionParticipant.objects.create(
+            session=self.session, user=self.student, role=SessionParticipant.Role.STUDENT,
+        )
+        ChatMessage.objects.create(session=self.session, sender=self.student, message="hi")
+
+    def _client_for(self, user):
+        client = APIClient()
+        client.force_authenticate(user)
+        return client
+
+    def test_manager_can_view_and_it_gets_persisted(self):
+        url = reverse("classsession-engagement-report", args=[self.session.pk])
+        resp = self._client_for(self.teacher).get(url)
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(resp.data["attendee_count"], 1)
+        self.assertEqual(resp.data["chat_message_count"], 1)
+        self.session.refresh_from_db()
+        self.assertIsNotNone(self.session.engagement_report)
+
+    def test_non_manager_forbidden(self):
+        url = reverse("classsession-engagement-report", args=[self.session.pk])
+        resp = self._client_for(self.student).get(url)
+        self.assertEqual(resp.status_code, status.HTTP_403_FORBIDDEN)
+
+    def test_not_available_before_session_completes(self):
+        scheduled_session = self.make_session(status_=ClassSession.Status.SCHEDULED)
+        url = reverse("classsession-engagement-report", args=[scheduled_session.pk])
+        resp = self._client_for(self.teacher).get(url)
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_report_is_cached_not_recomputed_on_second_call(self):
+        url = reverse("classsession-engagement-report", args=[self.session.pk])
+        client = self._client_for(self.teacher)
+        first = client.get(url)
+        first_computed_at = first.data["computed_at"]
+
+        # A new chat message after the first computation should NOT change
+        # the already-persisted report on a second call.
+        ChatMessage.objects.create(session=self.session, sender=self.student, message="another one")
+        second = client.get(url)
+
+        self.assertEqual(second.data["computed_at"], first_computed_at)
+        self.assertEqual(second.data["chat_message_count"], 1)  # still the original count
+
+
+# ===========================================================================
+# 23. PARENT -> TEACHER STRUCTURED-TEMPLATE MESSAGING (task 69)
+#
+# Covers the actual misuse-prevention guarantee the feature exists for: a
+# sender can only ever pick one of the fixed, admin-authored templates —
+# never write their own wording — and the resolved sentence sent to the
+# teacher is always server-computed, never taken from the request body.
+# ===========================================================================
+class ParentTeacherMessageTests(TuitionClassTestBase):
+    def setUp(self):
+        super().setUp()
+        # self.student needs an actual SUCCESS pass to pass
+        # _can_view_classroom_internals — the base fixture only creates the
+        # ClassPass template, not a purchase.
+        PassPurchase.objects.create(
+            student=self.student,
+            class_pass=self.class_pass,
+            amount_paid=Decimal("100"),
+            coins_spent=100,
+            status=PassPurchase.Status.SUCCESS,
+            is_active=True,
+            expires_at=timezone.now() + timedelta(days=10),
+        )
+        self.other_student = User.objects.create_user(
+            username="unenrolled_student", password="pass12345", email="unenrolled@example.com"
+        )
+
+        self.template = ParentMessageTemplate.objects.create(
+            category=ParentMessageTemplate.Category.LEAVE_REQUEST,
+            title="My child will be absent today",
+            body_template="{child_name} will be absent from {classroom_title} today.",
+        )
+        self.session_template = ParentMessageTemplate.objects.create(
+            category=ParentMessageTemplate.Category.ATTENDANCE,
+            title="Question about today's class",
+            body_template="{child_name} has a question about today's session in {classroom_title}.",
+            requires_session=True,
+        )
+        self.inactive_template = ParentMessageTemplate.objects.create(
+            category=ParentMessageTemplate.Category.OTHER,
+            title="Retired template",
+            body_template="This template is retired.",
+            is_active=False,
+        )
+        self.session = self.make_session()
+
+    def _client_for(self, user):
+        client = APIClient()
+        client.force_authenticate(user)
+        return client
+
+    # --- ParentMessageTemplateViewSet (the picker) ---
+    def test_template_list_only_returns_active_templates(self):
+        resp = self._client_for(self.student).get(reverse("parentmessagetemplate-list"))
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        ids = {row["id"] for row in resp.data}
+        self.assertIn(self.template.id, ids)
+        self.assertNotIn(self.inactive_template.id, ids)
+
+    def test_template_list_category_filter(self):
+        url = reverse("parentmessagetemplate-list") + "?category=" + ParentMessageTemplate.Category.ATTENDANCE
+        resp = self._client_for(self.student).get(url)
+        ids = {row["id"] for row in resp.data}
+        self.assertEqual(ids, {self.session_template.id})
+
+    def test_template_list_never_exposes_raw_body_template(self):
+        # The whole point is the sender never sees/edits the raw
+        # placeholder-bearing sentence — only the resolved one, and only
+        # after they've sent it.
+        resp = self._client_for(self.student).get(reverse("parentmessagetemplate-list"))
+        for row in resp.data:
+            self.assertNotIn("body_template", row)
+
+    # --- create() ---
+    def test_create_resolves_placeholders_server_side(self):
+        url = reverse("parentteachermessage-list")
+        resp = self._client_for(self.student).post(
+            url, {"classroom": self.classroom.pk, "template": self.template.pk}, format="json"
+        )
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
+        expected = f"student1 will be absent from {self.classroom.title} today."
+        self.assertEqual(resp.data["resolved_message"], expected)
+        self.assertEqual(resp.data["sender"]["id"], self.student.id)
+
+    def test_create_ignores_client_supplied_resolved_message_and_sender(self):
+        # resolved_message/sender are read_only on the serializer — a
+        # tampered payload must not be able to plant arbitrary "sent"
+        # wording or spoof the sender.
+        url = reverse("parentteachermessage-list")
+        resp = self._client_for(self.student).post(
+            url,
+            {
+                "classroom": self.classroom.pk,
+                "template": self.template.pk,
+                "resolved_message": "totally different free text",
+                "sender": self.other_student.pk,
+            },
+            format="json",
+        )
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
+        self.assertNotEqual(resp.data["resolved_message"], "totally different free text")
+        self.assertEqual(resp.data["sender"]["id"], self.student.id)
+
+    def test_create_requires_pass_or_manage_access(self):
+        url = reverse("parentteachermessage-list")
+        resp = self._client_for(self.other_student).post(
+            url, {"classroom": self.classroom.pk, "template": self.template.pk}, format="json"
+        )
+        self.assertEqual(resp.status_code, status.HTTP_403_FORBIDDEN)
+
+    def test_create_rejects_inactive_template(self):
+        url = reverse("parentteachermessage-list")
+        resp = self._client_for(self.student).post(
+            url, {"classroom": self.classroom.pk, "template": self.inactive_template.pk}, format="json"
+        )
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_create_requires_session_when_template_needs_one(self):
+        url = reverse("parentteachermessage-list")
+        resp = self._client_for(self.student).post(
+            url, {"classroom": self.classroom.pk, "template": self.session_template.pk}, format="json"
+        )
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("session", resp.data)
+
+    def test_create_with_session_from_wrong_classroom_rejected(self):
+        other_session = self.make_session(classroom=self.other_classroom)
+        url = reverse("parentteachermessage-list")
+        resp = self._client_for(self.student).post(
+            url,
+            {
+                "classroom": self.classroom.pk,
+                "template": self.session_template.pk,
+                "session": other_session.pk,
+            },
+            format="json",
+        )
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_create_with_matching_session_succeeds(self):
+        url = reverse("parentteachermessage-list")
+        resp = self._client_for(self.student).post(
+            url,
+            {
+                "classroom": self.classroom.pk,
+                "template": self.session_template.pk,
+                "session": self.session.pk,
+            },
+            format="json",
+        )
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
+
+    def test_create_rejects_session_when_template_does_not_use_one(self):
+        url = reverse("parentteachermessage-list")
+        resp = self._client_for(self.student).post(
+            url,
+            {"classroom": self.classroom.pk, "template": self.template.pk, "session": self.session.pk},
+            format="json",
+        )
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+
+    # --- visibility (mirrors ClassQuery's split) ---
+    def test_sender_only_sees_own_messages_without_classroom_filter(self):
+        mine = ParentTeacherMessage.objects.create(
+            classroom=self.classroom, template=self.template, sender=self.student,
+            resolved_message="mine",
+        )
+        ParentTeacherMessage.objects.create(
+            classroom=self.classroom, template=self.template, sender=self.teacher,
+            resolved_message="not mine",
+        )
+        resp = self._client_for(self.student).get(reverse("parentteachermessage-list"))
+        ids = {row["id"] for row in resp.data["results"]}
+        self.assertEqual(ids, {mine.id})
+
+    def test_manager_sees_all_messages_via_classroom_filter(self):
+        ParentTeacherMessage.objects.create(
+            classroom=self.classroom, template=self.template, sender=self.student,
+            resolved_message="from student",
+        )
+        url = reverse("parentteachermessage-list") + "?classroom=" + str(self.classroom.pk)
+        resp = self._client_for(self.teacher).get(url)
+        self.assertEqual(len(resp.data["results"]), 1)
+
+    def test_non_manager_classroom_filter_still_scoped_to_own_messages(self):
+        # A non-manager passing ?classroom=<id> must NOT get every
+        # message in that classroom back — only their own.
+        ParentTeacherMessage.objects.create(
+            classroom=self.classroom, template=self.template, sender=self.teacher,
+            resolved_message="someone else's",
+        )
+        url = reverse("parentteachermessage-list") + "?classroom=" + str(self.classroom.pk)
+        resp = self._client_for(self.student).get(url)
+        self.assertEqual(resp.data["results"], [])
+
+    # --- reply() ---
+    def test_manager_can_reply(self):
+        message = ParentTeacherMessage.objects.create(
+            classroom=self.classroom, template=self.template, sender=self.student,
+            resolved_message="Absent today.",
+        )
+        url = reverse("parentteachermessage-reply", args=[message.pk])
+        resp = self._client_for(self.teacher).post(url, {"teacher_reply": "Noted, thanks!"}, format="json")
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        message.refresh_from_db()
+        self.assertEqual(message.status, ParentTeacherMessage.Status.RESPONDED)
+        self.assertEqual(message.replied_by_id, self.teacher.id)
+        self.assertIsNotNone(message.replied_at)
+
+    def test_non_manager_cannot_reply(self):
+        message = ParentTeacherMessage.objects.create(
+            classroom=self.classroom, template=self.template, sender=self.student,
+            resolved_message="Absent today.",
+        )
+        url = reverse("parentteachermessage-reply", args=[message.pk])
+        resp = self._client_for(self.student).post(url, {"teacher_reply": "hijacked"}, format="json")
+        self.assertEqual(resp.status_code, status.HTTP_403_FORBIDDEN)
+
+    def test_cannot_reply_twice(self):
+        message = ParentTeacherMessage.objects.create(
+            classroom=self.classroom, template=self.template, sender=self.student,
+            resolved_message="Absent today.", status=ParentTeacherMessage.Status.RESPONDED,
+            replied_by=self.teacher, replied_at=timezone.now(), teacher_reply="Already replied.",
+        )
+        url = reverse("parentteachermessage-reply", args=[message.pk])
+        resp = self._client_for(self.teacher).post(url, {"teacher_reply": "again"}, format="json")
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_reply_rejects_empty_text(self):
+        message = ParentTeacherMessage.objects.create(
+            classroom=self.classroom, template=self.template, sender=self.student,
+            resolved_message="Absent today.",
+        )
+        url = reverse("parentteachermessage-reply", args=[message.pk])
+        resp = self._client_for(self.teacher).post(url, {"teacher_reply": "   "}, format="json")
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)

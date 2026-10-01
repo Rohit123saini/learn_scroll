@@ -13,7 +13,10 @@ URL map (all under the app's mount, i.e. `/testseries/`):
            POST   testseries/{id}/questions-import/      CSV answer-key upload
            GET    testseries/{id}/answer-key/            is the key complete?
            POST   testseries/{id}/release-results/       manual result release
+           GET    testseries/trending/                   (Task G9) "Trending test series" rail
+           GET    testseries/following/                  (Task G9) "New from people you follow" rail
            GET    testseries/{id}/leaderboard/
+           GET    testseries/{id}/analytics/             (Task 4) creator-side performance dashboard
            GET    testseries/{id}/certificates/          (creator)
            POST   testseries/{id}/revoke-certificate/    (creator)
            POST   testseries/{id}/live-start/            host goes live (+records)
@@ -23,8 +26,10 @@ URL map (all under the app's mount, i.e. `/testseries/`):
   Attempt  PATCH  attempts/{id}/save/                    server-side autosave
            GET    attempts/{id}/solutions/
            GET    attempts/{id}/analytics/
+           POST   attempts/{id}/practice-weak-areas/    (Task G8) generate + start a revision test
            GET    attempts/{id}/certificate/
            GET    attempts/{id}/certificate-pdf/
+           GET    attempts/{id}/certificate-share-card/  (Task G10) shareable PNG + referral link
            POST   attempts/{id}/live-token/               student: viewer + proctor tokens
            POST   attempts/{id}/proctor-events/
            GET    attempts/{id}/integrity/                (creator / reviewer)
@@ -36,9 +41,13 @@ URL map (all under the app's mount, i.e. `/testseries/`):
 """
 import logging
 
+from datetime import timedelta
+
+from django.conf import settings as django_settings
 from django.core.exceptions import ValidationError as DjangoValidationError
 from django.db import IntegrityError, transaction
-from django.db.models import Count, F, Max
+from django.db.models import Avg, Count, F, Max, Q
+from django.db.models.functions import TruncDate
 from django.http import HttpResponse
 from django.shortcuts import get_object_or_404
 from django.utils import timezone
@@ -55,16 +64,17 @@ from login.models import User
 from . import live, policy
 from .access import user_can_access_series
 from .certificate_pdf import PdfUnavailable, render_pdf
+from .certificate_share_card import ImageUnavailable, render_png as render_certificate_share_png
 from .csv_import import parse_csv
 from .models import (
-    Question, TestAttempt, TestCertificate, TestLiveSession, TestProctorEvent,
+    Question, QuestionResponse, TestAttempt, TestCertificate, TestLiveSession, TestProctorEvent,
     TestRecording, TestSeries,
 )
 from .permissions import user_can_review_attempt
 from .serializers import (
     CertificateVerifySerializer, ProctorEventSerializer, ProgressSaveSerializer,
-    PublicSeriesSerializer, QuestionSerializer, TestCertificateSerializer, TestRecordingSerializer,
-    display_name,
+    PublicSeriesSerializer, QuestionSerializer, TestAttemptSerializer, TestCertificateSerializer,
+    TestRecordingSerializer, TestSeriesSerializer, display_name,
 )
 from .throttling import CertificateVerifyThrottle, TestSeriesPublicPageThrottle
 
@@ -74,6 +84,18 @@ MAX_BULK_QUESTIONS = 500
 MAX_CSV_BYTES = 1024 * 1024
 MAX_PROCTOR_EVENTS_PER_ATTEMPT = 500
 LEADERBOARD_DEFAULT_SIZE = 50
+# Task G9 — discovery rails ("Trending", "New from people you follow").
+DISCOVERY_DEFAULT_LIMIT = 20
+DISCOVERY_MAX_LIMIT = 50
+TRENDING_WINDOW_DAYS = 7
+
+
+def _discovery_limit(request, *, default=DISCOVERY_DEFAULT_LIMIT):
+    try:
+        limit = int(request.query_params.get("limit", default))
+    except (TypeError, ValueError):
+        limit = default
+    return max(1, min(DISCOVERY_MAX_LIMIT, limit))
 
 
 def _is_creator(user, series) -> bool:
@@ -170,6 +192,56 @@ class SeriesAdvancedActionsMixin:
             series.save(update_fields=["results_released_at"])
         return Response({"results_released_at": series.results_released_at})
 
+    # ------------------------------------------------------ discovery rails (Task G9)
+    @action(detail=False, methods=["get"])
+    def trending(self, request):
+        """"Trending test series" rail — Test Series home. Ranked by
+        attempt velocity over the last `TRENDING_WINDOW_DAYS` days
+        (ties broken by rating, then recency), over whatever this user
+        can already browse — `get_queryset()` already applies
+        `visible_series_q` (published campus/tuitionclass series they're a
+        member of, plus every published individual/marketplace series)
+        AND every `subject`/`difficulty`/`price`/`min_rating`/`search`
+        filter from Task G9's search endpoint, so `GET .../trending/
+        ?subject=Physics` narrows the rail the same way it narrows the
+        plain list. `?limit=` (default 20, max 50).
+        """
+        since = timezone.now() - timedelta(days=TRENDING_WINDOW_DAYS)
+        qs = (
+            self.get_queryset()
+            .filter(status=TestSeries.Status.PUBLISHED)
+            .with_recent_attempts(since=since)
+            .order_by("-recent_attempts", "-rating", "-created_at")[: _discovery_limit(request)]
+        )
+        return Response(TestSeriesSerializer(qs, many=True, context={"request": request}).data)
+
+    @action(detail=False, methods=["get"])
+    def following(self, request):
+        """"New from people you follow" rail — Test Series home.
+        Individual/marketplace series only (following-based discovery
+        doesn't make sense for a campus/tuitionclass series already scoped
+        to one classroom's roster) from creators this user follows
+        (`user_profile.Follow`, imported lazily — same cross-app
+        precedent as `_record_coin_transaction`'s `CoinLedger` import
+        in models.py), newest published first. `?limit=` (default 20,
+        max 50).
+        """
+        from user_profile.models import Follow
+
+        followed_ids = Follow.objects.filter(
+            follower=request.user, status=Follow.Status.ACCEPTED
+        ).values_list("following_id", flat=True)
+        qs = (
+            self.get_queryset()
+            .filter(
+                status=TestSeries.Status.PUBLISHED,
+                source=TestSeries.Source.INDIVIDUAL,
+                creator_id__in=followed_ids,
+            )
+            .order_by("-created_at")[: _discovery_limit(request)]
+        )
+        return Response(TestSeriesSerializer(qs, many=True, context={"request": request}).data)
+
     @action(detail=True, methods=["get"])
     def leaderboard(self, request, pk=None):
         """Best checked attempt per student, highest first (ties share a rank).
@@ -218,6 +290,95 @@ class SeriesAdvancedActionsMixin:
             for r in top
         ]
         return Response({"total_ranked": len(rows), "results": data})
+
+    # ------------------------------------------------------ series analytics (Task 4, creator-only)
+    @action(detail=True, methods=["get"])
+    def analytics(self, request, pk=None):
+        """Creator-facing performance dashboard for the WHOLE series —
+        average score/percentage, pass rate, which questions trip students
+        up the most, and attempt volume over time. Distinct from
+        `AttemptAdvancedActionsMixin.analytics` (attempts/{id}/analytics/),
+        which is one student's own rank/percentile view of a single
+        attempt; this one aggregates across every attempt anyone has ever
+        made on this series. Creator-only, same as `certificates` above —
+        a class-wide breakdown (including per-question wrong rates) is
+        exactly the kind of thing a student shouldn't see about peers.
+        """
+        series = self.get_object()
+        _require_creator(request.user, series)
+
+        attempts = TestAttempt.objects.filter(series=series)
+        submitted = attempts.exclude(status=TestAttempt.Status.IN_PROGRESS)
+        checked = attempts.filter(status=TestAttempt.Status.CHECKED)
+
+        percentages = list(attempts.exclude(percentage__isnull=True).values_list("percentage", flat=True))
+        average_percentage = round(sum(percentages) / len(percentages), 1) if percentages else None
+
+        pass_rows = list(attempts.exclude(passed__isnull=True).values_list("passed", flat=True))
+        pass_rate = (
+            round(100.0 * sum(1 for p in pass_rows if p) / len(pass_rows), 1) if pass_rows else None
+        )
+
+        average_score = checked.aggregate(avg=Avg("final_score"))["avg"]
+        average_score = round(average_score, 1) if average_score is not None else None
+
+        # ---- most-missed questions. Auto-graded only (`is_auto_graded`) —
+        # `text` responses have no correct/incorrect concept at all (see
+        # QuestionResponse.is_correct docstring), so they're excluded
+        # rather than silently counted as always-wrong.
+        per_question = (
+            QuestionResponse.objects.filter(attempt__series=series, is_auto_graded=True)
+            .values("question_id", "question__order", "question__text", "question__topic")
+            .annotate(
+                attempts_count=Count("id"),
+                wrong_count=Count("id", filter=Q(is_correct=False)),
+            )
+            .order_by("-wrong_count", "question__order")
+        )
+        most_missed_questions = [
+            {
+                "question_id": row["question_id"],
+                "order": row["question__order"],
+                "text": row["question__text"][:140],
+                "topic": row["question__topic"],
+                "attempts": row["attempts_count"],
+                "wrong_count": row["wrong_count"],
+                "wrong_rate": (
+                    round(100.0 * row["wrong_count"] / row["attempts_count"], 1)
+                    if row["attempts_count"]
+                    else 0
+                ),
+            }
+            for row in per_question
+            if row["attempts_count"] > 0
+        ][:10]
+
+        # ---- attempt volume over time (by submission date)
+        by_day = (
+            submitted.exclude(submitted_at__isnull=True)
+            .annotate(day=TruncDate("submitted_at"))
+            .values("day")
+            .annotate(count=Count("id"))
+            .order_by("day")
+        )
+        attempts_over_time = [{"date": row["day"].isoformat(), "count": row["count"]} for row in by_day]
+
+        return Response(
+            {
+                "series_id": series.id,
+                "total_attempts": attempts.count(),
+                "students_attempted": attempts.values("student_id").distinct().count(),
+                "submitted_count": submitted.count(),
+                "checked_count": checked.count(),
+                "total_marks": series.total_marks,
+                "average_score": average_score,
+                "average_percentage": average_percentage,
+                "pass_percentage_threshold": series.pass_percentage,
+                "pass_rate": pass_rate,
+                "most_missed_questions": most_missed_questions,
+                "attempts_over_time": attempts_over_time,
+            }
+        )
 
     # ------------------------------------------------------ certificates
     @action(detail=True, methods=["get"])
@@ -526,6 +687,55 @@ class AttemptAdvancedActionsMixin:
         out["time"] = {"total_seconds": total_seconds, "per_question": per_question}
         return Response(out)
 
+    # ------------------------------------------------------ practice weak areas (Task G8)
+    @action(detail=True, methods=["post"], url_path="practice-weak-areas")
+    def practice_weak_areas(self, request, pk=None):
+        """"Practice weak areas" CTA on the result screen. Owner-only —
+        this is a personal revision tool, not something a reviewer/
+        creator triggers on someone else's attempt — and only once
+        there's actually a result to revise from (same gate `solutions`/
+        `analytics` use).
+
+        On success, returns a ready-to-answer `TestAttempt` on the
+        freshly generated practice series — same response shape as
+        `TestAttemptViewSet.start()` — so the client can jump straight
+        into answering with no extra round trip. Calling this again
+        later (e.g. after more wrong answers pile up on other attempts)
+        simply generates another, independent practice series; it does
+        not try to update a previous one.
+        """
+        attempt = self.get_object()
+        self._owner_only(
+            request, attempt, "Only the student who took this test can generate a practice test from it."
+        )
+        if not _finished(attempt):
+            raise ValidationError("Submit the test first — there's nothing to revise yet.")
+
+        practice_series = TestSeries.create_weak_area_practice(student=request.user, source_series=attempt.series)
+        if practice_series is None:
+            return Response(
+                {
+                    "detail": (
+                        "No weak areas to practice — every auto-graded question you've "
+                        "answered on this series so far is correct."
+                    ),
+                    "practice_series_id": None,
+                }
+            )
+
+        practice_attempt = TestAttempt.objects.create(
+            series=practice_series, student=request.user, attempt_number=1,
+        )
+        return Response(
+            {
+                "practice_series_id": practice_series.id,
+                "question_count": practice_series.question_count,
+                "total_marks": practice_series.total_marks,
+                "attempt": TestAttemptSerializer(practice_attempt, context={"request": request}).data,
+            },
+            status=status.HTTP_201_CREATED,
+        )
+
     # ------------------------------------------------------ certificate
     def _certificate_for(self, request, attempt):
         self._results_gate(request, attempt)
@@ -557,6 +767,51 @@ class AttemptAdvancedActionsMixin:
             return Response({"detail": str(exc)}, status=status.HTTP_501_NOT_IMPLEMENTED)
         response = HttpResponse(pdf, content_type="application/pdf")
         response["Content-Disposition"] = f'attachment; filename="certificate-{cert.code}.pdf"'
+        return response
+
+    # ------------------------------------------------------ certificate share card (Task G10)
+    @action(detail=True, methods=["get"], url_path="certificate-share-card")
+    def certificate_share_card(self, request, pk=None):
+        """"Share your certificate" — a LinkedIn/Instagram-ready PNG card
+        (`certificate_share_card.py`) with the student's own referral link
+        baked in, so passing a certificate-enabled test doubles as a
+        referral touchpoint (growth_and_feature_tasks.md Task G10) instead
+        of a dead end once the PDF is downloaded.
+
+        Owner-only — same reasoning `practice_weak_areas` above restricts
+        itself to the attempt's own student: the referral link is tied to
+        THIS student's identity (`referral_code_for_user`), so it would
+        make no sense — and would leak another user's referral code — for
+        a reviewer/creator to fetch it for someone else's attempt. Also
+        blocked on a revoked certificate, same as `certificate_pdf` above.
+        """
+        # Lazy import — same cross-app precedent `following()` above uses
+        # for `user_profile.Follow` (avoids a hard, always-on dependency
+        # from testseries on tuitionclass at module-import time).
+        from tuitionclass.models import referral_code_for_user
+
+        attempt = self.get_object()
+        self._owner_only(
+            request, attempt, "Only the student who earned this certificate can share it."
+        )
+        cert = self._certificate_for(request, attempt)
+        if not cert.is_valid:
+            raise PermissionDenied("This certificate has been revoked.")
+
+        referral_url = (
+            f"{django_settings.APP_WEB_BASE_URL.rstrip('/')}/signup"
+            f"?ref={referral_code_for_user(cert.student_id)}"
+        )
+        try:
+            png = render_certificate_share_png(
+                student_name=display_name(cert.student), title=cert.title, series_title=cert.series.title,
+                score=cert.score, total_marks=cert.total_marks, percentage=cert.percentage,
+                code=cert.code, referral_url=referral_url,
+            )
+        except ImageUnavailable as exc:
+            return Response({"detail": str(exc)}, status=status.HTTP_501_NOT_IMPLEMENTED)
+        response = HttpResponse(png, content_type="image/png")
+        response["Content-Disposition"] = f'inline; filename="learnscroll_certificate_{cert.code}.png"'
         return response
 
     # ------------------------------------------------------ live / proctor
@@ -672,7 +927,7 @@ class PublicSeriesView(generics.RetrieveAPIView):
 
     Marketing info only (title, price, duration, rating, certificate?) — no
     questions, options or answers. Campus series are NEVER exposed here (they
-    belong to one institution); individual and live-class series are, so a
+    belong to one institution); individual and tuition-class series are, so a
     creator can share a link on WhatsApp / social and the app can deep-link it.
     """
 
@@ -723,7 +978,7 @@ class MyCertificatesView(generics.ListAPIView):
 class LiveKitWebhookView(APIView):
     """`POST /testseries/livekit-webhook/` — LiveKit tells us an egress
     (recording) finished. Signature-verified (that IS the access control, so no
-    auth / throttle — same reasoning as liveclass's own webhook). Events for
+    auth / throttle — same reasoning as tuitionclass's own webhook). Events for
     egress ids that are not ours are ignored with 200 so LiveKit doesn't retry."""
 
     permission_classes = [AllowAny]

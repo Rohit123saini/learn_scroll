@@ -8,6 +8,7 @@ from .models import (
     Attendance,
     Campus,
     CampusAnalyticsSnapshot,
+    CampusInviteCode,
     CampusLiveSession,
     CampusParentLink,
     ClassTeacherassigments,
@@ -134,6 +135,13 @@ class CampusParentLinkAdmin(admin.ModelAdmin):
     list_display = ("parent", "student", "campus", "created_at")
     list_filter = ("campus",)
     search_fields = ("parent__username", "student__username")
+
+
+@admin.register(CampusInviteCode)
+class CampusInviteCodeAdmin(admin.ModelAdmin):
+    list_display = ("code", "section", "campus", "is_active", "uses_count", "max_uses", "expires_at", "created_at")
+    list_filter = ("campus", "is_active")
+    search_fields = ("code", "label")
 
 
 @admin.register(Notice)

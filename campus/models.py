@@ -4,14 +4,14 @@
 Implements campus_app_design.md phases 1-13.
 
 GOLDEN RULE (unchanged from design doc): `campus` never imports
-`liveclass` or `message` models directly. The only cross-app model FK in
+`tuitionclass` or `message` models directly. The only cross-app model FK in
 this whole file is to `login.User` (identity is shared platform-wide,
 same as `core.models.Notification` already does). Anything that needs
-`liveclass`/`message` internals (video room provisioning, group-chat
+`tuitionclass`/`message` internals (video room provisioning, group-chat
 auto-creation, parent OTP issuance) goes through `core.classroom_chat_bridge`
 service functions from a signals.py/services.py layer — NOT from here.
 That also means: no signal handlers in this file that import core/message/
-liveclass. Auto-notify-on-schedule, auto-reminder Celery tasks etc. from
+tuitionclass. Auto-notify-on-schedule, auto-reminder Celery tasks etc. from
 the design doc are service-layer concerns, not model-layer ones.
 
 FEE MODULE — why it looks the way it does:
@@ -20,10 +20,10 @@ REVISED (this pass — FEE-2): the previous version of this docstring
 said fee was "decoupled end to end from `User.coin`/`CoinLedger`" and
 paid through a real Razorpay gateway. Product decision changed that:
 Campus fee is now paid FROM the same `user_profile.CoinLedger`-backed
-`User.coin` wallet that `liveclass` already uses for classes/passes —
+`User.coin` wallet that `tuitionclass` already uses for classes/passes —
 no separate payment gateway for fee. `FeePayment.Mode.ONLINE` +
 `RAZORPAY_KEY_ID`/`RAZORPAY_KEY_SECRET` are gone from this flow
-(those settings are untouched in settings.py because `liveclass`'s
+(those settings are untouched in settings.py because `tuitionclass`'s
 `CoinPurchase` gateway still uses them for topping the wallet up in
 the first place — fee just spends what's already in it). The actual
 debit happens at the view layer (`FeePaymentViewSet.pay`, campus/
@@ -97,11 +97,14 @@ guessed at, same as RestrictUser was flagged in user_profile/models.py):
     be pulled into it — see `permissions.is_campus_approved`'s docstring
     for exactly which endpoints that gates.
 """
+import secrets
 import uuid
+from datetime import timedelta
 
 from django.core.exceptions import ValidationError
 from django.db import models, transaction
 from django.db.models import CheckConstraint, Q, UniqueConstraint
+from django.utils import timezone
 
 from login.models import User
 
@@ -303,7 +306,7 @@ class Section(CampusBaseModel):
     school_class = models.ForeignKey(SchoolClass, on_delete=models.CASCADE, related_name="sections")
     name = models.CharField(max_length=20)  # "A", "B"
 
-    # [ADDED — section-group chat wiring] Mirrors liveclass.Classroom's
+    # [ADDED — section-group chat wiring] Mirrors tuitionclass.Classroom's
     # own chat_group_enabled/linked_conversation_id pair exactly (see
     # core/classroom_chat_bridge.py's module docstring, VERIFIED note on
     # Classroom) — this is where core.classroom_chat_bridge.
@@ -486,6 +489,98 @@ class CampusParentLink(CampusBaseModel):
         return f"{self.parent.username} -> {self.student.username} @ {self.campus.name}"
 
 
+class CampusInviteCode(CampusBaseModel):
+    """
+    [ADDED — Task 13, growth list §D/G13] "Invite your classmates to
+    [Campus Name]" — one enrolled batch/section brings its whole
+    section onto the platform, self-serve, no admin action per new
+    student.
+
+    Deliberately scoped to a single `section`, not the whole campus:
+    `StudentEnrollment` (see above) requires a `section` FK to create a
+    row at all — there's no "campus member, no section" concept
+    anywhere else in this app — so a code that resolved to "just this
+    campus" would have nowhere to actually enroll the redeemer without
+    a second "now pick your section" step. A section-scoped code also
+    matches the real-world flow better: it's a class-teacher/admin
+    generating "join OUR batch", not a stranger joining an entire
+    school blind. `session` is deliberately NOT stored separately here
+    (unlike `StudentEnrollment.session`) — it's always resolved off
+    `section.school_class.session` at redeem time (see
+    `campus_invite.py`), the same FK chain `StudentEnrollmentSerializer.
+    validate()` already asserts must match, so there's no way for this
+    row to point at a stale/mismatched session.
+
+    One code can be reused by every classmate until it's deactivated,
+    expires, or (optionally) hits `max_uses` — unlike `ParentAccessCode`
+    (message app), which is minted fresh per-parent. That's intentional:
+    a parent code is a private 1:1 credential; this is a public "here's
+    our batch's join code" meant to be pasted into a WhatsApp group.
+    """
+
+    campus = models.ForeignKey(Campus, on_delete=models.CASCADE, related_name="invite_codes")
+    section = models.ForeignKey(Section, on_delete=models.CASCADE, related_name="invite_codes")
+    created_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, related_name="campus_invite_codes_created")
+
+    # Same "no 0/O/1/I" alphabet as `message.ParentAccessCode` — see
+    # `generate_for()` below — but shorter (7 chars): this code is meant
+    # to be read aloud / typed by a classmate, not just tapped from a
+    # link, and it's scoped to one section (far smaller collision space
+    # to defend than a platform-wide parent code) so 7 chars is still
+    # plenty of entropy against the throttled redeem endpoint.
+    code = models.CharField(max_length=12, unique=True, db_index=True)
+    label = models.CharField(max_length=80, blank=True, default="")
+
+    is_active = models.BooleanField(default=True)
+    max_uses = models.PositiveIntegerField(null=True, blank=True)  # None = unlimited
+    uses_count = models.PositiveIntegerField(default=0)
+    expires_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+        indexes = [models.Index(fields=["section", "is_active"])]
+
+    ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
+    DEFAULT_TTL_DAYS = 365  # ~one academic year — admin can always deactivate sooner
+
+    @classmethod
+    def _generate_code(cls):
+        return "".join(secrets.choice(cls.ALPHABET) for _ in range(7))
+
+    @classmethod
+    def generate_for(cls, *, section, campus, created_by, label="", max_uses=None, ttl_days=None):
+        ttl_days = ttl_days if ttl_days is not None else cls.DEFAULT_TTL_DAYS
+        for _ in range(5):
+            code = cls._generate_code()
+            if not cls.objects.filter(code=code).exists():
+                return cls.objects.create(
+                    campus=campus,
+                    section=section,
+                    created_by=created_by,
+                    code=code,
+                    label=label,
+                    max_uses=max_uses,
+                    expires_at=timezone.now() + timedelta(days=ttl_days) if ttl_days else None,
+                )
+        raise RuntimeError("Invite code generate nahi ho paaya, dobara try karo.")
+
+    @property
+    def is_expired(self):
+        return self.expires_at is not None and self.expires_at <= timezone.now()
+
+    @property
+    def is_usable(self):
+        if not self.is_active or self.is_expired:
+            return False
+        if self.max_uses is not None and self.uses_count >= self.max_uses:
+            return False
+        return True
+
+    def __str__(self):
+        return f"{self.code} -> {self.section} @ {self.campus.name}"
+
+
 # ---------------------------------------------------------------------------
 # 2. Notices
 # ---------------------------------------------------------------------------
@@ -519,14 +614,14 @@ class Notice(CampusBaseModel):
 
 
 # ---------------------------------------------------------------------------
-# 3. Live classes (coin-free)
+# 3. Tuition classes (coin-free)
 # ---------------------------------------------------------------------------
 
 class CampusLiveSession(CampusBaseModel):
     """Deliberately lightweight and coin-free — no pass/escrow/coin field
     exists on this model at all, by design, so it's structurally
     impossible for this to accidentally grow into a second marketplace.
-    Video-room provisioning reuses `liveclass`/`message` infra only via
+    Video-room provisioning reuses `tuitionclass`/`message` infra only via
     `core.classroom_chat_bridge.provision_video_room(...)` from the
     service layer."""
 
@@ -923,7 +1018,7 @@ class FeePayment(CampusBaseModel):
     (FEE-2 — previously an actual payment-gateway reference for a
     Razorpay integration that has been removed from this flow;
     `RAZORPAY_KEY_ID`/`RAZORPAY_KEY_SECRET` in settings.py are still used
-    elsewhere, by `liveclass.CoinPurchase`, to top the wallet up — just
+    elsewhere, by `tuitionclass.CoinPurchase`, to top the wallet up — just
     not by fee anymore). Callers on the wallet path should
     `get_or_create(gateway_reference=..., defaults={...})` (see
     `FeePaymentViewSet.pay`), the same idempotency pattern

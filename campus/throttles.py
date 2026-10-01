@@ -2,7 +2,7 @@
 """
 B-4 fix — `campus` had zero `throttle_scope`/`ScopedRateThrottle` usage
 anywhere (confirmed: no hits in views.py before this pass), unlike
-`liveclass`/`message`, which throttle every abuse-prone action
+`tuitionclass`/`message`, which throttle every abuse-prone action
 (`session_join`, `message_send`, `coupon_validate`, `parent_code_verify_ip`,
 etc. — see settings.py's `DEFAULT_THROTTLE_RATES` comments for the full
 list and the reasoning behind each one). These four classes cover the
@@ -46,7 +46,7 @@ class CampusFeePaymentThrottle(ScopedRateThrottle):
 
 class CampusLiveSessionJoinThrottle(ScopedRateThrottle):
     """CampusLiveSessionViewSet.start — campus has no separate student
-    'join' endpoint on this viewset (unlike liveclass's
+    'join' endpoint on this viewset (unlike tuitionclass's
     ClassSessionViewSet.join, which the 'campus_live_session_join' scope
     name is modeled on); `start` is the closest analogue here, since
     it's what flips a session LIVE and fires the CAMPUS_SESSION_LIVE
@@ -81,3 +81,22 @@ class CampusParentLinkVerifyThrottle(ScopedRateThrottle):
     traffic, which is inherently rare (a parent verifies their link
     once, not repeatedly)."""
     scope = "campus_parent_link_verify"
+
+
+class CampusInviteCodeGenerateThrottle(ScopedRateThrottle):
+    """[ADDED — Task 13/G13] CampusInviteCodeGenerateView.post —
+    staff-only, so lower abuse risk than the redeem side below, but
+    still worth a scope so a scripted/compromised staff token can't
+    spin up invite codes in a tight loop."""
+    scope = "campus_invite_code_generate"
+
+
+class CampusInviteCodeRedeemThrottle(ScopedRateThrottle):
+    """[ADDED — Task 13/G13] CampusInviteCodeRedeemView.post — takes a
+    raw `code` from the request body and looks it up directly (no
+    per-user scoping on the lookup itself). Same "code-guessing
+    surface" reasoning as `CampusParentLinkVerifyThrottle` above: an
+    authenticated user could otherwise brute-force a section's 7-char
+    code and self-enroll into a batch they were never actually
+    invited to."""
+    scope = "campus_invite_code_redeem"

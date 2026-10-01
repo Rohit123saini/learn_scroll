@@ -7,10 +7,10 @@ an extension of the same Postgres FTS + trigram strategy
 
 Lives in `core`, not `message` — `core` is already this project's
 shared cross-app integration point (see `core.models.Notification`'s
-direct FKs into `liveclass`, and `campus/bridge.py`'s own "campus's
+direct FKs into `tuitionclass`, and `campus/bridge.py`'s own "campus's
 ONLY door into core/message" golden rule, which says nothing about
 `core` itself being restricted from reaching into any app). Putting
-this here also means `message`/`liveclass`/`campus`/`post`/`assigments`/
+this here also means `message`/`tuitionclass`/`campus`/`post`/`assigments`/
 `testseries` never need to import each other directly just to power one
 search box — they each only ever talk to `core`.
 
@@ -54,9 +54,9 @@ STATUS (this pass):
       Task 18) — fully wired via `_search_generic_model`. Caller scopes
       to individual/published + own-created + attempted + campus-
       enrolled (via `campus.StudentEnrollment`, the same roster source
-      `campus.bridge.create_testseries()` itself uses). Liveclass-
+      `campus.bridge.create_testseries()` itself uses). Tuitionclass-
       context test series are not yet included there — no roster/
-      entitlement resolver exists for testseries on the liveclass side
+      entitlement resolver exists for testseries on the tuitionclass side
       yet, so those rows are simply absent from search results, never
       leaked.
   - ✅ users, for "add friend" (`AUTH_USER_MODEL`, `username`/
@@ -82,9 +82,9 @@ STATUS (this pass):
     of any upload, so `Post`'s searchable field name(s) are unknown.
     Wire up by adding a `SearchSource` to `SOURCES` below (see
     `NOTICE_SOURCE` for the shape) once that model is available.
-  - ❌ classroom materials (`liveclass.ClassMaterial`) — STUB ONLY,
+  - ❌ classroom materials (`tuitionclass.ClassMaterial`) — STUB ONLY,
     same reason. The class exists (confirmed in an earlier
-    `liveclass/models.py` upload) but its field list was never seen.
+    `tuitionclass/models.py` upload) but its field list was never seen.
 
 NEEDED TO FINISH THIS FILE: `post/models.py` (for `Post`'s searchable
 field(s), and confirmation of how `post` already scopes visibility —
@@ -229,7 +229,7 @@ def _serialize_assigments(assigments) -> dict:
         "rank": getattr(assigments, "rank", None),
         "similarity": getattr(assigments, "similarity", None),
         "extra": {
-            # personal / campus / liveclass
+            # personal / campus / tuitionclass
             "source_type": assigments.source,
             "context_type": assigments.context_type,
             "context_id": str(assigments.context_id) if assigments.context_id else None,
@@ -247,7 +247,7 @@ def _serialize_testseries(series) -> dict:
         "rank": getattr(series, "rank", None),
         "similarity": getattr(series, "similarity", None),
         "extra": {
-            # individual / campus / liveclass
+            # individual / campus / tuitionclass
             "source_type": series.source,
             "is_paid": series.is_paid,
         },

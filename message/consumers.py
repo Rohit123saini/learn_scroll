@@ -1,6 +1,8 @@
+# message/consumers.py
 import asyncio
 import json
 import logging
+import time
 
 from channels.db import database_sync_to_async
 from channels.generic.websocket import AsyncWebsocketConsumer
@@ -17,13 +19,17 @@ from .models import (
     ConversationType,
     Message,
     MessageStatus,
+    RequestStatus,
     UserPresence,
 )
 from .user_display import build_user_mini, get_display_name
 from .mentions import extract_mentioned_user_ids
 from .media_utils import create_group_media_for_message
+from .voice_meta import sanitize_voice_meta  # 🔥 NAYA (M4a) — voice waveform
 from .constants import MAX_PINNED_PER_CONVERSATION
-from .throttles import WSMessageRateLimiter
+from .throttles import WSMessageRateLimiter, WSStudyRoomNoteRateLimiter
+from . import sticky_notes  # NAYA — collaborative study-room sticky notes
+from . import message_requests  # 🔥 NAYA (M1-BE) — message requests rules
 from .cache_utils import set_presence_cache
 # 🔥 NAYE — advanced features (link preview / auto voice-transcription)
 from .tasks import generate_link_preview_task, transcribe_voice_message_task
@@ -52,6 +58,8 @@ class ChatConsumer(AsyncWebsocketConsumer):
         {"type": "reaction", "message_id": "...", "emoji": "🔥"}
         {"type": "pin", "message_id": "...", "pin": true}
         {"type": "study_room_event", "action": "draw_point", "data": {...}}
+        # NAYA — sticky notes (persisted + ack; see sticky_notes.py docstring):
+        {"type": "study_room_event", "action": "note_add|note_move|note_edit|note_front|note_delete|note_drag", "data": {...}}
 
     Server -> Client events: same "type" field, plus "error" type on failure.
 
@@ -86,6 +94,17 @@ class ChatConsumer(AsyncWebsocketConsumer):
         await self.channel_layer.group_add(self.room_group_name, self.channel_name)
         await self.accept()
 
+        # 🔥 NAYA (M3b) — "chat khuli hai" counter (vanish mode ke "chat band
+        # hone par delete" ke liye). Fail ho jaaye to chat normal chalti rahe.
+        try:
+            from .tasks import chat_open_incr
+            await asyncio.wait_for(
+                database_sync_to_async(chat_open_incr)(str(self.conversation_id)), timeout=3
+            )
+            self._chat_open_counted = True
+        except Exception:
+            logger.exception("ChatConsumer.connect: chat_open counter incr failed")
+
         # presence: online mark karo (multi-device safe counter)
         await self.set_presence(online=True)
         await self.channel_layer.group_send(
@@ -112,7 +131,10 @@ class ChatConsumer(AsyncWebsocketConsumer):
             logger.exception("ChatConsumer.connect: presence partner-broadcast failed")
 
         # jo messages abhi tak deliver nahi hue the unhe deliver mark karo
-        await self.mark_undelivered_as_delivered(self.conversation_id, self.user.id)
+        # 🔥 NAYA (M1-BE) — pending/declined request me ye skip: delivered
+        # tick bhi sender ko signal hai ki receiver ne chat khola.
+        if await self._signals_allowed(force=True):
+            await self.mark_undelivered_as_delivered(self.conversation_id, self.user.id)
 
         # 🔥 NAYA — missed-event replay ("sync"). Pehle offline/background
         # rehte hue jo bhi WS events (naye messages) miss ho jaate the,
@@ -149,6 +171,22 @@ class ChatConsumer(AsyncWebsocketConsumer):
             )
         except Exception:
             logger.exception("ChatConsumer.disconnect: group_discard failed")
+
+        # 🔥 NAYA (M3b) — chat-open counter -1; agar ye aakhri connection tha
+        # to "seen" vanish messages ka sweep schedule karo. 5s countdown:
+        # flaky reconnect pe counter wapas >0 ho jaata hai aur task skip karta hai.
+        if getattr(self, '_chat_open_counted', False):
+            try:
+                from .tasks import chat_open_decr, sweep_vanish_for_conversation
+                remaining = await asyncio.wait_for(
+                    database_sync_to_async(chat_open_decr)(str(self.conversation_id)), timeout=3
+                )
+                if remaining == 0:
+                    sweep_vanish_for_conversation.apply_async(
+                        args=[str(self.conversation_id)], countdown=5
+                    )
+            except Exception:
+                logger.exception("ChatConsumer.disconnect: vanish sweep schedule failed")
 
         if getattr(self, 'user', None) and self.user.is_authenticated and hasattr(self, 'room_group_name'):
             still_online, last_seen_at = None, None
@@ -256,7 +294,7 @@ class ChatConsumer(AsyncWebsocketConsumer):
         file_url = data.get('file_url')
         file_urls = data.get('file_urls') or []
         thumbnail_url = data.get('thumbnail_url')
-        meta = data.get('meta') or {}
+        meta = sanitize_voice_meta(data.get('meta') or {}, message_type)  # 🔥 M4a: waveform clean
 
         if not text and message_type == 'text':
             return await self.send_error("empty_message", "Empty message bhej nahi sakte")
@@ -277,9 +315,10 @@ class ChatConsumer(AsyncWebsocketConsumer):
                 "blocked", "Block hone ki wajah se message nahi bheja ja sakta"
             )
 
-        allowed, reason = await self.check_group_message_rules(self.conversation_id, self.user)
+        allowed, reason, code = await self.check_group_message_rules(self.conversation_id, self.user)
         if not allowed:
-            return await self.send_error("group_rule_blocked", reason)
+            # M9a — 'admins_only' alag code taaki FE composer lock/dialog dikha sake
+            return await self.send_error(code or "group_rule_blocked", reason)
 
         message = await self.save_message(
             conversation_id=self.conversation_id,
@@ -374,6 +413,11 @@ class ChatConsumer(AsyncWebsocketConsumer):
         if not allowed:
             return  # silently drop — typing indicator ke liye error dikhana UX-wrong hoga
 
+        # 🔥 NAYA (M1-BE) — pending/declined request me receiver ka typing
+        # sender tak nahi jaata (silent drop, koi error nahi).
+        if not await self._signals_allowed():
+            return
+
         # DB me kuch save nahi karte, sirf broadcast — high frequency event
         await self.channel_layer.group_send(
             self.room_group_name,
@@ -388,6 +432,11 @@ class ChatConsumer(AsyncWebsocketConsumer):
         message_id = data.get('message_id')
         if not message_id:
             return await self.send_error("missing_field", "message_id required hai")
+
+        # 🔥 NAYA (M1-BE) — pending/declined request me read-receipt na DB me
+        # mark hoti hai, na sender ko broadcast. Accept ke baad normal.
+        if not await self._signals_allowed():
+            return
 
         await self.mark_message_read(message_id, self.user.id)
         await self.channel_layer.group_send(
@@ -488,6 +537,27 @@ class ChatConsumer(AsyncWebsocketConsumer):
         if not action:
             return await self.send_error("missing_field", "action required hai")
 
+        # 🔥 NAYA — sticky notes ab generic passthrough nahi: har op DB me
+        # persist hota hai (per-field last-write-wins), sender ko `note_ack`
+        # milta hai aur baaki sab ko authoritative `note_upsert`/`note_removed`.
+        if action in sticky_notes.NOTE_ACTIONS:
+            return await self.handle_note_event(action, payload)
+
+        await self._broadcast_study_room(action, payload)
+
+        # Board-level events (clear / page remove) ka asar notes pe bhi
+        # padta hai — relay ke saath DB se bhi saaf karo, warna rejoin pe
+        # "clear" kiye hue notes wapas aa jaate.
+        if action in sticky_notes.BOARD_CLEAR_ACTIONS and isinstance(payload, dict):
+            try:
+                await database_sync_to_async(sticky_notes.clear_notes_for_page)(
+                    self.conversation_id, payload.get('pageId'), self.user
+                )
+            except Exception:
+                logger.exception("clear_notes_for_page failed conv=%s", self.conversation_id)
+
+    async def _broadcast_study_room(self, action, payload):
+        """Room ke baaki sockets ko relay (sender ka apna channel exclude — see study_room_broadcast)."""
         await self.channel_layer.group_send(
             self.room_group_name,
             {
@@ -498,7 +568,63 @@ class ChatConsumer(AsyncWebsocketConsumer):
             },
         )
 
+    async def _send_study_room_event(self, action, data):
+        await self.send(text_data=json.dumps({'type': 'study_room_event', 'action': action, 'data': data}))
+
+    async def handle_note_event(self, action, payload):
+        payload = payload if isinstance(payload, dict) else {}
+
+        # Ephemeral live-drag preview: DB nahi, ack nahi, sirf validate + relay.
+        if action == sticky_notes.ACTION_DRAG:
+            allowed, _ = await database_sync_to_async(WSStudyRoomNoteRateLimiter.check)(self.user.id, 'drag')
+            if not allowed:
+                return  # silently drop — preview ke liye error dikhana UX-wrong hai
+            clean = sticky_notes.clean_drag_payload(payload)
+            if clean is None:
+                return
+            clean['userId'] = str(self.user.id)
+            return await self._broadcast_study_room(sticky_notes.ACTION_DRAG, clean)
+
+        op_id = str(payload.get('opId') or '')[:64]
+        allowed, _ = await database_sync_to_async(WSStudyRoomNoteRateLimiter.check)(self.user.id, 'ops')
+        if not allowed:
+            return await self._send_study_room_event('note_ack', {
+                'opId': op_id, 'noteId': str(payload.get('noteId') or ''),
+                'status': 'rejected', 'reason': 'rate_limited',
+            })
+
+        result = await database_sync_to_async(sticky_notes.apply_note_op)(
+            self.conversation_id, self.user, action, payload
+        )
+        # Pehle sender ko ack (optimistic UI confirm/rollback), phir baaki sab ko broadcast.
+        await self._send_study_room_event('note_ack', result.ack)
+        for b_action, b_data in result.broadcasts:
+            await self._broadcast_study_room(b_action, b_data)
+
     # ---------------- GROUP EVENT HANDLERS (server -> socket) ----------------
+    # 🔥 NAYA (M1-BE) — kya is socket ke user ke typing/read/delivered signals
+    # doosre ko dikhne chahiye? False jab ye chat uske liye pending/declined
+    # message-request hai. Typing har keystroke pe aata hai, isliye jawab
+    # `_SIGNALS_CACHE_SECONDS` tak instance pe cache hota hai (accept ke baad
+    # worst-case itni der signals late shuru honge). Row na mile/lookup fail
+    # ho to True (fail-open).
+    _SIGNALS_CACHE_SECONDS = 5
+
+    async def _signals_allowed(self, force=False):
+        now = time.monotonic()
+        cached = getattr(self, '_signals_cache', None)
+        if cached is not None and not force and now - cached[0] < self._SIGNALS_CACHE_SECONDS:
+            return cached[1]
+        try:
+            allowed = await database_sync_to_async(message_requests.is_request_accepted)(
+                self.conversation_id, self.user.id,
+            )
+        except Exception:
+            logger.exception("ChatConsumer._signals_allowed failed user=%s", self.user.id)
+            allowed = True
+        self._signals_cache = (now, allowed)
+        return allowed
+
     async def chat_message(self, event):
         await self.send(text_data=json.dumps(event))
 
@@ -665,17 +791,24 @@ class ChatConsumer(AsyncWebsocketConsumer):
 
         conversation = Conversation.objects.filter(id=conversation_id).first()
         if conversation is None or conversation.type != ConversationType.GROUP:
-            return True, ""
+            return True, "", ""
 
         group = getattr(conversation, 'group_detail', None)
         if not group:
-            return True, ""
+            return True, "", ""
+
+        # M9a — admin-only check sabse pehle (fresh DB read, har message pe)
+        from .admin_only import check_admin_only_send
+        allowed, reason, code = check_admin_only_send(group, user.id)
+        if not allowed:
+            return False, reason, code
 
         allowed, reason = check_group_permission(group, user.id, 'message_permission')
         if not allowed:
-            return False, reason
+            return False, reason, ""
 
-        return check_daily_message_limit(group, user, conversation)
+        allowed, reason = check_daily_message_limit(group, user, conversation)
+        return allowed, reason, ""
 
     @database_sync_to_async
     def save_message(self, conversation_id, sender_id, text, message_type, client_id, reply_to_id,
@@ -867,8 +1000,13 @@ class ChatConsumer(AsyncWebsocketConsumer):
             'last_message_type': message_type,
             'created_at': message['created_at'],
         }
-        for uid in participant_ids:
-            await self.channel_layer.group_send(f'user_{uid}', payload)
+        # 🔥 NAYA (M1-BE) — accepted -> `inbox_update`, pending ->
+        # `message_request`, declined -> kuch nahi.
+        events = await database_sync_to_async(message_requests.inbox_events_for)(
+            self.conversation_id, participant_ids, payload,
+        )
+        for uid, event in events:
+            await self.channel_layer.group_send(f'user_{uid}', event)
 
     # ---------------- PUSH NOTIFICATION ----------------
     @database_sync_to_async
@@ -1119,6 +1257,9 @@ class ChatConsumer(AsyncWebsocketConsumer):
         direct_conversation_ids = ConversationParticipant.objects.filter(
             user_id=user_id,
             left_at__isnull=True,
+            # 🔥 NAYA (M1-BE) — pending/declined request ke sender ko meri
+            # online/last-seen presence push nahi hoti.
+            request_status=RequestStatus.ACCEPTED,
         ).exclude(
             conversation__type=ConversationType.GROUP,
         ).values_list('conversation_id', flat=True)
@@ -1232,6 +1373,54 @@ class InboxConsumer(AsyncWebsocketConsumer):
 
     # ---------------- GROUP EVENT HANDLER (server -> socket) ----------------
     async def inbox_update(self, event):
+        await self.send(text_data=json.dumps(event))
+
+    # 🔥 NAYA — mutual-follow se auto-create hua empty conversation
+    # (`message.services.get_or_create_conversation`, `user_profile/
+    # signals.py` se call hota hai). Koi real `Message` nahi hai isliye
+    # `inbox_update` (jo ek message ke around bana hai — sender/text/etc)
+    # reuse nahi kiya; ye khud ka halka event hai, client bas apni
+    # conversations list ko refresh/prepend kar le.
+    # Server -> Client: {"type": "conversation_created",
+    #                     "conversation_id": ..., "conversation_type": ...,
+    #                     "created_at": ...}
+    async def conversation_created(self, event):
+        await self.send(text_data=json.dumps(event))
+
+    # 🔥 NAYA (M1-BE) — anjaan ka pehla DM: `inbox_update` ki jagah ye event
+    # aata hai (chat list me NAHI, Requests tab/badge me dikhana hai).
+    # Server -> Client: {"type": "message_request", "conversation_id": ...,
+    #   "message_id": ..., "sender_id": ..., "sender_name": ...,
+    #   "last_message_text": ..., "last_message_type": ..., "created_at": ...}
+    async def message_request(self, event):
+        await self.send(text_data=json.dumps(event))
+
+    # 🔥 NAYA (M1-BE) — accept/decline hone par SIRF receiver ke apne devices
+    # ko (kabhi sender ko nahi) taaki doosre device ka Requests list/badge
+    # sync ho. Accept pe saath me purana `conversation_created` bhi aata hai.
+    # Server -> Client: {"type": "message_request_resolved",
+    #   "conversation_id": ..., "status": "accepted" | "declined"}
+    async def message_request_resolved(self, event):
+        await self.send(text_data=json.dumps(event))
+
+    # 🔥 NAYA — story reaction (post.views.StoryReactAPIView group_sends
+    # this straight to the story owner's `user_<id>` inbox group — same
+    # group this consumer already listens on, no new group/consumer
+    # needed). Plain passthrough, same shape as `inbox_update`/
+    # `conversation_created` above.
+    # Server -> Client: {"type": "story_reaction", "story_id": ...,
+    #   "user_id": ..., "username": ..., "emoji": ..., "reacted": bool}
+    async def story_reaction(self, event):
+        await self.send(text_data=json.dumps(event))
+
+    # N10-BE — real-time bell badge. Published by
+    # core.services.publish_unread_badge() (via transaction.on_commit)
+    # whenever a Notification row is created, read or deleted for this
+    # user; goes to the same `user_<id>` group this consumer already joins,
+    # so no new socket/group is needed. `unread_count` is the user's total
+    # unread (see core.services.unread_badge_count). Plain passthrough.
+    # Server -> Client: {"type": "notification_badge", "unread_count": N}
+    async def notification_badge(self, event):
         await self.send(text_data=json.dumps(event))
 
     # 🔥 NAYA — `ChatConsumer.broadcast_presence_to_partners` ab is user

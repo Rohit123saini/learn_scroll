@@ -1,7 +1,7 @@
 # testseries/tasks.py
 """
-Celery safety-net tasks — same shape as `liveclass.expire_and_refund_passes`
-/ `liveclass.reconcile_stuck_coin_purchases` (design doc §7).
+Celery safety-net tasks — same shape as `tuitionclass.expire_and_refund_passes`
+/ `tuitionclass.reconcile_stuck_coin_purchases` (design doc §7).
 """
 import logging
 from datetime import timedelta
@@ -87,7 +87,7 @@ def refund_unchecked_paid_attempts():
 #
 # Enqueued via `.delay()` from `TestSeriesViewSet.publish()` in views.py,
 # only for `source="individual"` series — never called inline, same
-# reasoning as this app's sibling features in `post`/`liveclass`: a
+# reasoning as this app's sibling features in `post`/`tuitionclass`: a
 # popular creator's follower list can run into the thousands, and a
 # synchronous loop inside the publish request/response cycle would make
 # that request slow in direct proportion to follower count.
@@ -101,7 +101,7 @@ def refund_unchecked_paid_attempts():
 # scale to a fan-out that can be thousands of rows. Uses
 # `core.services.create_bulk_notifications` directly instead — one bulk
 # INSERT — with the same manual restrict-exclusion (a single bulk query)
-# already used by the equivalent `post`/`liveclass` follower-fan-out
+# already used by the equivalent `post`/`tuitionclass` follower-fan-out
 # tasks, so a follower who has restricted the creator still doesn't get
 # notified even though this path skips the single-recipient helper.
 #
@@ -111,7 +111,7 @@ def refund_unchecked_paid_attempts():
 # classroom=None, session=None, data=None)`. The call below passes
 # `recipient_ids`/`notif_type`/title/message positionally in that exact
 # order, then `data=` as the keyword-only arg it actually is — a clean
-# match, no signature drift from the `post`/`liveclass` fan-outs this
+# match, no signature drift from the `post`/`tuitionclass` fan-outs this
 # was copied from. Confirmed correct, not just reused on faith.
 #
 # Still NOT verified by this pass (out of scope for Task 33, which was

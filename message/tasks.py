@@ -4,7 +4,7 @@
 # ka delivery half (`finalize_scheduled_message`) sirf ek imaginary
 # `send_scheduled_messages` management command se call hone wala tha — par
 # na wo command kabhi exist karta tha, na `message` app ka koi entry hi
-# `settings.CELERY_BEAT_SCHEDULE` me tha (jabki `liveclass` app ke 6+ tasks
+# `settings.CELERY_BEAT_SCHEDULE` me tha (jabki `tuitionclass` app ke 6+ tasks
 # already wahan registered hain — same Celery/beat infra already running
 # hai, `message` app ne bas use hi nahi kiya tha).
 #
@@ -18,7 +18,7 @@
 #      hamesha ke liye reh jaati — "disappearing" sirf UI-level tha, storage
 #      se kabhi nahi hatta tha.
 #
-# Dono tasks Celery `shared_task` hain (`liveclass/tasks.py` jaisa hi
+# Dono tasks Celery `shared_task` hain (`tuitionclass/tasks.py` jaisa hi
 # pattern) — `settings.CELERY_BEAT_SCHEDULE` me register karo (neeche
 # instructions), poora sweep worker process me chalega, request-response
 # cycle se bilkul alag.
@@ -226,7 +226,7 @@ def cleanup_expired_messages():
     Suggested/registered schedule: every 15 min (expiry is minute-
     precision at best — the coarsest disappearing-duration option is
     "1 month" — so a 15 min sweep lag is invisible to users, same
-    lookback-vs-cadence reasoning `liveclass`'s beat entries already
+    lookback-vs-cadence reasoning `tuitionclass`'s beat entries already
     use). Registered in `settings.CELERY_BEAT_SCHEDULE` as
     "message-cleanup-expired-messages" — this IS already running
     periodically; the management command is a manual/ad-hoc
@@ -235,6 +235,174 @@ def cleanup_expired_messages():
     result = hard_delete_expired_messages(batch_size=500)
     if result["deleted"]:
         logger.info("cleanup_expired_messages: hard-deleted %s expired message(s)", result["deleted"])
+    return result
+
+
+# ================================================================
+# 🔥 NAYA (M3b) — "Delete after seen" (true vanish mode)
+#
+# Rule: `Message.delete_after_seen=True` wala message tab hard-delete hota
+# hai jab (1) recipient ne usse padh liya ho (`MessageStatus.is_read`) AUR
+# (2) us conversation me ab koi bhi WebSocket khula na ho (chat band).
+# Sirf PRIVATE chat — group me "sab ne padha" ka matlab ambiguous hai.
+#
+# (2) ke liye consumers.py har connect/disconnect pe Redis-cache counter
+# `chat_open:<conversation_id>` badhata/ghatata hai. Counter FAIL-SAFE hai:
+# worker crash se agar wo atak bhi jaaye to sirf delete late hota hai
+# (TTL ke baad khud theek), kabhi galat-jaldi delete nahi hota.
+# Unread messages kabhi is rule se delete nahi hote — unka backstop
+# `expires_at` (models.py: AFTER_SEEN -> 30 din) existing sweeper sambhalta hai.
+# ================================================================
+CHAT_OPEN_TTL = 60 * 60 * 24  # counter key ki max zindagi (crash-recovery)
+
+
+def _chat_open_key(conversation_id):
+    return f"chat_open:{conversation_id}"
+
+
+def chat_open_incr(conversation_id):
+    """Naya WS connect — is conversation ka open-connection count +1."""
+    from django.core.cache import cache
+    key = _chat_open_key(conversation_id)
+    cache.add(key, 0, CHAT_OPEN_TTL)
+    try:
+        n = cache.incr(key)
+    except ValueError:  # key add() aur incr() ke beech expire ho gayi
+        cache.set(key, 1, CHAT_OPEN_TTL)
+        n = 1
+    try:
+        cache.touch(key, CHAT_OPEN_TTL)  # lambe session me key expire na ho
+    except Exception:
+        pass
+    return n
+
+
+def chat_open_decr(conversation_id):
+    """WS disconnect — count -1; bacha hua count return karta hai (0 = chat band)."""
+    from django.core.cache import cache
+    key = _chat_open_key(conversation_id)
+    try:
+        n = cache.decr(key)
+    except ValueError:  # key nahi thi (TTL expiry) — band maan lo
+        return 0
+    if n <= 0:
+        cache.delete(key)
+        return 0
+    return n
+
+
+def chat_open_count(conversation_id):
+    from django.core.cache import cache
+    try:
+        return int(cache.get(_chat_open_key(conversation_id)) or 0)
+    except Exception:
+        # cache down ho to SAFE side: "khula hai" maan lo => kuch delete nahi hoga
+        return 1
+
+
+def _refresh_last_message(conversation_ids):
+    """
+    Hard-delete ke baad chat-list ka denormalized preview (`last_message_*`)
+    purane (ab delete ho chuke) message ka text na dikhaye — warna vanish
+    message chat list me leak hota rahega.
+    """
+    from .models import Conversation, Message
+
+    for cid in conversation_ids:
+        last = (
+            Message.objects.filter(conversation_id=cid, is_scheduled=False)
+            .order_by('-created_at').first()
+        )
+        if last:
+            Conversation.objects.filter(id=cid).update(
+                last_message_text=(last.text or '')[:500],
+                last_message_at=last.created_at,
+                last_message_sender_id=last.sender_id,
+                last_message_type=last.type,
+            )
+        else:
+            # `last_message_at` jaan-bhujh ke nahi chheda — chat-list ki
+            # ordering/position na badle; sirf preview text hatao.
+            Conversation.objects.filter(id=cid).update(
+                last_message_text=None, last_message_type=None,
+            )
+
+
+def hard_delete_seen_vanish_messages(conversation_id=None, batch_size=500, grace_seconds=0):
+    """
+    `delete_after_seen` messages ka hard-delete sweep (private chats only).
+
+    - `conversation_id` diya ho to sirf wahi chat (disconnect-trigger);
+      None ho to sab chats (periodic safety-net).
+    - `grace_seconds`: periodic run me sirf wahi messages jinhe padhe hue
+      itna waqt ho chuka — taaki REST se padhne wala client abhi WS connect
+      kar raha ho to race na ho.
+    - Jis chat me abhi koi WS khula hai wahan kuch delete nahi hota.
+    """
+    from django.db.models import Exists, OuterRef
+    from .models import ConversationType, Message, MessageStatus
+
+    now = timezone.now()
+    seen = MessageStatus.objects.filter(
+        message=OuterRef('pk'), is_read=True,
+        read_at__lte=now - timedelta(seconds=grace_seconds),
+    ).filter(~Q(user_id=OuterRef('sender_id')))
+    unread = MessageStatus.objects.filter(
+        message=OuterRef('pk'), is_read=False,
+    ).filter(~Q(user_id=OuterRef('sender_id')))
+
+    base_qs = Message.all_objects.filter(
+        delete_after_seen=True,
+        is_scheduled=False,
+        conversation__type=ConversationType.PRIVATE,
+    ).filter(Exists(seen), ~Exists(unread))
+    if conversation_id is not None:
+        base_qs = base_qs.filter(conversation_id=conversation_id)
+
+    conv_ids = list(base_qs.order_by().values_list('conversation_id', flat=True).distinct())
+    deleted_total, touched = 0, []
+    for cid in conv_ids:
+        if chat_open_count(cid) > 0:
+            continue
+        conv_qs = base_qs.filter(conversation_id=cid)
+        while True:
+            ids = list(conv_qs.values_list('id', flat=True)[:batch_size])
+            if not ids:
+                break
+            if chat_open_count(cid) > 0:  # delete se theek pehle dobara check (race)
+                break
+            with transaction.atomic():
+                Message.all_objects.filter(id__in=ids).delete()
+            deleted_total += len(ids)
+            touched.append(cid)
+            if len(ids) < batch_size:
+                break
+
+    if touched:
+        _refresh_last_message(set(touched))
+    return {"deleted": deleted_total}
+
+
+@shared_task(name="message.sweep_vanish_for_conversation")
+def sweep_vanish_for_conversation(conversation_id):
+    """ChatConsumer.disconnect se trigger (countdown ke saath — flaky reconnect absorb)."""
+    if chat_open_count(conversation_id) > 0:
+        return {"deleted": 0, "skipped": "chat_open"}
+    result = hard_delete_seen_vanish_messages(conversation_id=conversation_id)
+    if result["deleted"]:
+        logger.info("sweep_vanish_for_conversation: %s message(s) conv=%s", result["deleted"], conversation_id)
+    return result
+
+
+@shared_task(name="message.cleanup_seen_vanish_messages")
+def cleanup_seen_vanish_messages():
+    """
+    Periodic safety-net (suggested: har 5 min, grace 2 min) — un chats ke liye
+    jahan disconnect-trigger miss ho gaya (REST-only read, worker crash, ...).
+    """
+    result = hard_delete_seen_vanish_messages(grace_seconds=120)
+    if result["deleted"]:
+        logger.info("cleanup_seen_vanish_messages: hard-deleted %s message(s)", result["deleted"])
     return result
 
 
@@ -529,3 +697,23 @@ def transcribe_class_chunk_task(self, segment_id):
             },
         },
     )
+
+
+# ======================================================================
+# 🔥 NAYA (M2-BE) — expired Notes ka daily cleanup.
+# Correctness is task par NIRBHAR NAHI: `GET /message/notes/` read time par
+# `expires_at > now` filter karta hai. Ye sirf purani rows hatata hai.
+# Register: settings.CELERY_BEAT_SCHEDULE me
+#   "message-cleanup-expired-notes": {
+#       "task": "message.cleanup_expired_notes",
+#       "schedule": crontab(hour=3, minute=30),
+#   }
+# ======================================================================
+@shared_task(name="message.cleanup_expired_notes")
+def cleanup_expired_notes():
+    from .user_notes import purge_expired_notes
+
+    result = purge_expired_notes()
+    if result["deleted"]:
+        logger.info("cleanup_expired_notes: deleted %s expired note(s)", result["deleted"])
+    return result

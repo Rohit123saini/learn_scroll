@@ -3,8 +3,8 @@
 Tests for `core.classroom_chat_bridge.resolve_parent_from_token()` (Task 5).
 
 Scope: this is a pure unit test of the token-resolution function itself —
-it does NOT touch any `liveclass` view/endpoint (that's Task 9, not yet
-built — see `liveclass/tests.py` for the note on why the corresponding
+it does NOT touch any `tuitionclass` view/endpoint (that's Task 9, not yet
+built — see `tuitionclass/tests.py` for the note on why the corresponding
 `ParentSessionJoinTests` aren't included yet).
 
 Fixtures directly create `message.models.ParentAccessCode`/`ParentToken`

@@ -100,23 +100,23 @@ WHAT CHANGED in this pass, and why:
    `CoinWithdrawalRequestManager`: the canonical "cash out coins"
    request for this app, using the `WITHDRAWAL_REQUESTED`/
    `WITHDRAWAL_REJECTED` transaction types TASK 1 added ahead of time.
-   Reference read for this task was `liveclass.CoinWithdrawal` /
-   `liveclass.CoinTransaction`, which already implement this exact
+   Reference read for this task was `tuitionclass.CoinWithdrawal` /
+   `tuitionclass.CoinTransaction`, which already implement this exact
    escrow pattern (debit the coins the moment the request is made, not
    when the payout completes; refund only on reject; no second ledger
    write on completion since the debit already happened). This
    reproduces that lifecycle on top of `CoinLedger.record_transaction()`
-   instead of `liveclass.CoinTransaction`, since `CoinLedger` — not
-   `liveclass.CoinTransaction` — is this codebase's one shared,
+   instead of `tuitionclass.CoinTransaction`, since `CoinLedger` — not
+   `tuitionclass.CoinTransaction` — is this codebase's one shared,
    canonical coin ledger (see CoinLedger's own docstring). See
    `CoinWithdrawalRequest`'s class docstring below for the full
    lifecycle and what's deliberately left out of this pass (no
    `reviewed_by`, no `MIN_WITHDRAWAL_COINS` floor, no INR snapshot).
 
 8. TASK 30 (this pass) — `CoinPurchaseRequest` diffed directly against
-   `liveclass.CoinPurchase`, closing the gap an earlier pass had to
+   `tuitionclass.CoinPurchase`, closing the gap an earlier pass had to
    leave as an inference (that pass's upload didn't include
-   `liveclass/models.py`). Result: `liveclass.CoinPurchase` turned out
+   `tuitionclass/models.py`). Result: `tuitionclass.CoinPurchase` turned out
    to already be deprecated (its own Task 6 disabled
    `mark_success()`/`mark_failed()`), so full parity wasn't the goal —
    but it surfaced one real gap, not just a shape difference: this
@@ -138,14 +138,14 @@ WHAT CHANGED in this pass, and why:
    `UserPreference`'s class docstring for the full point-by-point diff.
 
 10. TASK 38 (this pass) — `CoinWithdrawalRequest` diffed directly
-    against `liveclass.CoinWithdrawal` now that `liveclass/models.py`
+    against `tuitionclass.CoinWithdrawal` now that `tuitionclass/models.py`
     has actually been reviewed (Task 4's docstring above deferred this
     with "no reviewed_by, no MIN_WITHDRAWAL_COINS floor, no INR
     snapshot ... add them if/when an admin-facing withdrawal review UI
     is built" — that's now). See `CoinWithdrawalRequest`'s own
     docstring for the full diff and what each added field means for
     this model's PENDING -> PROCESSING -> SUCCESS/REJECTED lifecycle,
-    which is NOT the same status set `liveclass.CoinWithdrawal` uses.
+    which is NOT the same status set `tuitionclass.CoinWithdrawal` uses.
 """
 from decimal import Decimal, InvalidOperation
 
@@ -529,7 +529,7 @@ class CoinLedger(models.Model):
     call as RestrictUser in task 18 — the shape was already right, it
     just had no write or read path). Purpose: an auditable "why did my
     balance change" trail for a coin economy that (per the settings.py
-    comments referencing PassPurchase/CoinPurchase in a liveclass app,
+    comments referencing PassPurchase/CoinPurchase in a tuitionclass app,
     and gifting in a message app) clearly spans more than this one app.
 
     Scope decision, same boundary as RestrictUser: user_profile owns
@@ -633,6 +633,17 @@ class CoinLedger(models.Model):
         WITHDRAWAL_REQUESTED = "withdrawal_requested", "Withdrawal Requested"
         WITHDRAWAL_COMPLETED = "withdrawal_completed", "Withdrawal Completed"
         WITHDRAWAL_REJECTED = "withdrawal_rejected", "Withdrawal Rejected"
+
+        # TASK G1 (growth list — Streaks): milestone bonus paid by
+        # Streak.objects.record_activity() the moment a user's daily
+        # streak first reaches one of settings.STREAK_MILESTONE_DAYS
+        # (7/30/100 by default). Kept distinct from CAMPUS_REWARD on the
+        # same "tell it apart at a glance in the ledger" reasoning that
+        # comment already gives — CAMPUS_REWARD is campus-attendance/
+        # assigments specific and requires an active enrollment; this is
+        # the app-wide, no-campus-required daily-open streak. "streak_reward"
+        # is 13 chars — comfortably under this field's max_length=20.
+        STREAK_REWARD = "streak_reward", "Streak Reward"
 
     user = models.ForeignKey(
         settings.AUTH_USER_MODEL,
@@ -866,18 +877,18 @@ class CoinPurchaseRequestManager(models.Manager):
 class CoinPurchaseRequest(models.Model):
     """
     TASK 3 — canonical "buy coins" request/receipt row for `user_profile`.
-    `liveclass.CoinPurchase` already has a purchase flow, but it's scoped
+    `tuitionclass.CoinPurchase` already has a purchase flow, but it's scoped
     to that app; this is the one every coin top-up should go through
     regardless of where in the product it's triggered from, the same way
     `CoinLedger` is the one shared ledger every coin-changing action
     writes to.
 
-    [TASK 30 — RESOLVED] Diffed directly against `liveclass.CoinPurchase`
-    now that `liveclass/models.py` has actually been reviewed (previously
+    [TASK 30 — RESOLVED] Diffed directly against `tuitionclass.CoinPurchase`
+    now that `tuitionclass/models.py` has actually been reviewed (previously
     inferred, see git history of this docstring for the old caveat).
     Findings:
 
-      - `liveclass.CoinPurchase` is itself already deprecated as of that
+      - `tuitionclass.CoinPurchase` is itself already deprecated as of that
         app's own Task 6: `mark_success()`/`mark_failed()` there raise
         `RuntimeError`, and its own docstring says coin top-ups now go
         through THIS model instead. So field-for-field parity with a
@@ -950,14 +961,14 @@ class CoinPurchaseRequest(models.Model):
     # purchase up by reference first.
     gateway_reference = models.CharField(max_length=150, db_index=True)
 
-    # [ADDED — Task 30] Mirrors liveclass.CoinPurchase.gateway_payment_id
+    # [ADDED — Task 30] Mirrors tuitionclass.CoinPurchase.gateway_payment_id
     # / .gateway_signature — filled in by confirm_success() once a
     # gateway webhook actually confirms payment. Both blank-ok at
     # creation time (start_purchase() runs before the gateway has
     # confirmed anything, so neither is known yet); this is the
     # persisted proof of what the gateway signed, for later
     # verification/audit — a real gap this model had before this pass,
-    # not just a naming difference from the liveclass model (see class
+    # not just a naming difference from the tuitionclass model (see class
     # docstring's Task 30 diff for the full comparison).
     gateway_payment_id = models.CharField(max_length=100, blank=True)
     gateway_signature = models.CharField(max_length=255, blank=True)
@@ -1029,7 +1040,7 @@ class CoinWithdrawalRequestManager(models.Manager):
     Money direction is the mirror image of `CoinPurchaseRequest`: a
     purchase credits coins only on success; a withdrawal debits coins
     immediately on request. This is the escrow pattern
-    `liveclass.CoinWithdrawal.create_request` already uses (reference
+    `tuitionclass.CoinWithdrawal.create_request` already uses (reference
     read for this task) — coins leave the wallet the moment the request
     is made, not when the payout is actually confirmed, specifically so
     a user can't request the same coins twice while a withdrawal is
@@ -1053,7 +1064,7 @@ class CoinWithdrawalRequestManager(models.Manager):
         `settings.COIN_TO_INR_RATE`) onto the request at
         creation time, so a later change to `COIN_TO_INR_RATE` never
         silently rewrites what a past request was actually worth —
-        mirrors `liveclass.CoinWithdrawal.amount_inr`'s own snapshot
+        mirrors `tuitionclass.CoinWithdrawal.amount_inr`'s own snapshot
         comment exactly.
 
         `record_transaction` raises `ValueError` for insufficient
@@ -1127,7 +1138,7 @@ class CoinWithdrawalRequestManager(models.Manager):
         [ADDED — Task 38] `reviewed_by` is the admin/ops user making
         this call — the natural point to stamp `reviewed_by`/
         `reviewed_at`, since this is this model's "an admin has looked
-        at this" step, the same role `liveclass.CoinWithdrawal.
+        at this" step, the same role `tuitionclass.CoinWithdrawal.
         approve(admin_user)` plays there. Optional and only applied
         when not already set, so an existing caller that doesn't pass
         it yet keeps working exactly as before, and a request that was
@@ -1162,7 +1173,7 @@ class CoinWithdrawalRequestManager(models.Manager):
         debited via WITHDRAWAL_REQUESTED at request time, and a
         WITHDRAWAL_COMPLETED entry with amount=0 would violate
         `coinledger_amount_not_zero`. This only flips the request's own
-        status, same as `liveclass.CoinWithdrawal.approve()`/
+        status, same as `tuitionclass.CoinWithdrawal.approve()`/
         `mark_paid()` not moving any coins either.
 
         Idempotent: already-SUCCESS is returned as-is. Raises
@@ -1246,39 +1257,39 @@ class CoinWithdrawalRequest(models.Model):
     mirror image of `CoinPurchaseRequest` above (coins -> money instead
     of money -> coins), built on the same `CoinLedger` primitives.
 
-    Reference read for this task was `liveclass.CoinWithdrawal`, which
+    Reference read for this task was `tuitionclass.CoinWithdrawal`, which
     already implements this exact escrow pattern (debit at request
     time, refund on reject, no second debit/credit on completion) via
     its own `CoinTransaction` ledger. This model reproduces that same
     lifecycle but writes through `CoinLedger.objects.record_transaction()`
-    instead, since `user_profile.CoinLedger` — not `liveclass.
+    instead, since `user_profile.CoinLedger` — not `tuitionclass.
     CoinTransaction` — is this codebase's shared, canonical coin ledger
     (see `CoinLedger`'s own docstring above). Differences from
-    `liveclass.CoinWithdrawal` that are deliberate, not oversights:
+    `tuitionclass.CoinWithdrawal` that are deliberate, not oversights:
       - No separate APPROVED status — this app's lifecycle is PENDING ->
         PROCESSING -> SUCCESS, or -> REJECTED from PENDING/PROCESSING.
         PROCESSING plays the same "payout initiated, not yet confirmed"
-        role `liveclass.CoinWithdrawal`'s APPROVED does.
-      - No CANCELLED status — `liveclass.CoinWithdrawal` lets a user
+        role `tuitionclass.CoinWithdrawal`'s APPROVED does.
+      - No CANCELLED status — `tuitionclass.CoinWithdrawal` lets a user
         cancel their own PENDING request; here that's just `reject()`
         called while still PENDING (see that manager method's own
-        `liveclass` cross-reference in its Task 6 stub docstring on the
-        `liveclass` side). Not revisited by Task 38 — out of scope for
+        `tuitionclass` cross-reference in its Task 6 stub docstring on the
+        `tuitionclass` side). Not revisited by Task 38 — out of scope for
         a fields-only pass.
       - `payout_method`/`payout_details` are still modeled as a
-        choices field + JSONField, same shape as `liveclass.
+        choices field + JSONField, same shape as `tuitionclass.
         CoinWithdrawal` uses, since there's no separate saved-bank-
         detail model in this app to reference by id instead.
 
-    [TASK 38 — RESOLVED] Diffed directly against `liveclass.
-    CoinWithdrawal` now that `liveclass/models.py` has actually been
+    [TASK 38 — RESOLVED] Diffed directly against `tuitionclass.
+    CoinWithdrawal` now that `tuitionclass/models.py` has actually been
     reviewed (Task 4's docstring above deferred all three of these with
     "add them if/when an admin-facing withdrawal review UI is built").
     Findings, each mapped onto THIS model's own shape rather than
     copied field-for-field:
 
       - [ADDED] `MIN_WITHDRAWAL_COINS = 100` — copied as a plain class
-        constant, same value and same reasoning `liveclass.
+        constant, same value and same reasoning `tuitionclass.
         CoinWithdrawal.MIN_WITHDRAWAL_COINS` already documents ("below
         this, a bank/UPI transfer typically costs more in fees than the
         payout itself"). Enforced in
@@ -1287,21 +1298,21 @@ class CoinWithdrawalRequest(models.Model):
         sufficient balance, so a caller can't route around the floor by
         skipping a view-level check.
       - [ADDED] `COIN_TO_INR_RATE = 1` and `amount_inr` — also copied
-        from `liveclass.CoinWithdrawal` as-is (same rate, same
+        from `tuitionclass.CoinWithdrawal` as-is (same rate, same
         "snapshotted at request time so a later rate change never
         rewrites history" reasoning, same `DecimalField(max_digits=10,
         decimal_places=2)` shape). `request_withdrawal()` computes and
         stores it once, at creation; nothing later recomputes it.
         NOTE: this app has its own separate `COIN_TO_INR_RATE` rather
-        than importing `liveclass.CoinWithdrawal`'s — importing a model
+        than importing `tuitionclass.CoinWithdrawal`'s — importing a model
         constant across apps for one integer is more coupling than the
         value is worth, and `CoinPurchaseRequest` above already sets
         the precedent of this app keeping its own parallel definitions
         (money precision, gateway field) rather than reaching into
-        `liveclass`. If the two rates should always move together in
+        `tuitionclass`. If the two rates should always move together in
         practice, that's an ops/config concern (keep both settings in
         sync when pricing changes) rather than a code-coupling one.
-      - [ADDED] `reviewed_by` / `reviewed_at` — `liveclass.
+      - [ADDED] `reviewed_by` / `reviewed_at` — `tuitionclass.
         CoinWithdrawal.reviewed_by` is a single FK stamped once, at
         `approve()`/`reject()`, whichever comes first (its lifecycle has
         no separate "PROCESSING" stage in between). This model's
@@ -1317,7 +1328,7 @@ class CoinWithdrawalRequest(models.Model):
         already have passed through `mark_processing()` in the normal
         flow, and if it didn't, that's a process gap for ops to fix, not
         something for this model to paper over with a second reviewer.
-        Both fields nullable/blank, same as `liveclass.CoinWithdrawal`'s
+        Both fields nullable/blank, same as `tuitionclass.CoinWithdrawal`'s
         (`on_delete=SET_NULL` so a deleted admin account doesn't cascade
         into deleting withdrawal history).
 
@@ -1336,9 +1347,9 @@ class CoinWithdrawalRequest(models.Model):
     change is `CoinLedger.objects.record_transaction()`.
     """
 
-    # [ADDED — Task 38] Copied from `liveclass.CoinWithdrawal` — see the
+    # [ADDED — Task 38] Copied from `tuitionclass.CoinWithdrawal` — see the
     # class docstring's Task 38 section for why this app keeps its own
-    # copy rather than importing the liveclass one.
+    # copy rather than importing the tuitionclass one.
     # FALLBACK default only. The live rate comes from `settings.COIN_TO_INR_RATE`
     # (env `COIN_TO_INR_RATE`) via `get_coin_to_inr_rate()` below, so ops can
     # change it without a code deploy. 1 coin == this many INR.
@@ -1385,7 +1396,7 @@ class CoinWithdrawalRequest(models.Model):
 
     # Bank: {"account_holder", "account_number", "ifsc"}. UPI: {"upi_id"}.
     # Kept as JSON (not separate columns), same reasoning as
-    # liveclass.CoinWithdrawal.payout_details — validated against
+    # tuitionclass.CoinWithdrawal.payout_details — validated against
     # payout_method in the serializer, not here, so a new payout method
     # never needs a migration.
     payout_details = models.JSONField(default=dict, blank=True)
@@ -1487,7 +1498,7 @@ class UserPreference(models.Model):
     Two harmless, non-functional differences, left as-is (nothing to
     reconcile):
       - `NotificationPreference.Meta.db_table` pins it to
-        `"liveclass_notificationpreference"` — a legacy-table artifact
+        `"tuitionclass_notificationpreference"` — a legacy-table artifact
         from that model's own history, not something this model has or
         needs (this is a fresh table with no prior name to preserve).
       - `NotificationPreference` declares no `Meta.ordering`;
@@ -1525,6 +1536,10 @@ class UserPreference(models.Model):
     # forcing a migration the day someone needs that.
     language = models.CharField(max_length=10, default="en")
 
+    # P14-BE — optional daily time-limit reminder, in minutes. NULL = off.
+    # Set via PATCH /profile/activity/ (not the preferences serializer).
+    daily_limit_minutes = models.PositiveSmallIntegerField(null=True, blank=True)
+
     updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:
@@ -1544,3 +1559,436 @@ class UserPreference(models.Model):
         """
         obj, _created = cls.objects.get_or_create(user=user)
         return obj
+
+
+class StreakManager(models.Manager):
+    """
+    TASK G1 (growth_and_feature_tasks.md, Task G1 — Streaks) — the one
+    sanctioned write path for `Streak`, same role `CoinLedgerManager`/
+    `CoinWithdrawalRequestManager` play above: a view (or, later, a
+    completed-test/attended-class hook) calls `record_activity()`
+    instead of poking `current_streak`/`last_active_date` directly, so
+    "today already counted" and "milestone paid exactly once" can't be
+    bypassed by a future call site that forgets the rules.
+
+    Primary action, per the task's own "pick one primary action" note:
+    a daily app open (any authenticated hit of `StreakView.post`) — the
+    simplest signal that doesn't depend on test-series or tuition-class
+    even being used that day, and the same "day 1 must never look
+    empty" spirit Task G18 (onboarding) asks for elsewhere in this list.
+    """
+
+    def record_activity(self, user):
+        """
+        Atomically get-or-create this user's `Streak` row and apply
+        today's check-in, using `timezone.localdate()` — Django's
+        current-timezone-aware "what day is it right now" (respects
+        `settings.TIME_ZONE`/`USE_TZ`, not naive `date.today()`).
+
+        Rules (same shape `campus.services.compute_attendance_streak`
+        already uses for "unbroken" vs "broken", just day-grained
+        instead of attendance-record-grained):
+          - Already checked in today (`last_active_date == today`): no
+            change — calling this twice in one day (e.g. the app opens
+            twice) must not double-count or re-pay a milestone.
+          - Checked in yesterday: `current_streak` continues (+1).
+          - Anything else (never checked in, or a gap of 1+ missed
+            days): the streak restarts at 1 — a missed day breaks it,
+            same as a missed attendance day breaks
+            `compute_attendance_streak`.
+          - `longest_streak` only ever grows (`max(longest, current)`).
+          - `total_active_days` is a simple lifetime counter of distinct
+            days checked in, for a future "recap" screen (Task G2) —
+            it never resets when a streak breaks.
+
+        Row-locked (`select_for_update()`) for the whole read-modify-
+        write so two concurrent check-ins for the same user (a double-
+        tap, two devices) can't both read `current_streak` before either
+        writes, which would otherwise let both increments land instead
+        of one no-op + one increment.
+
+        Milestone payout: whenever the NEW `current_streak` lands on a
+        value in `settings.STREAK_MILESTONE_DAYS` (default 7/30/100),
+        credits `settings.STREAK_MILESTONE_BONUS_COINS[<that number>]`
+        coins via `CoinLedger.objects.record_transaction()`. Idempotency
+        is keyed the same way `campus.tasks.check_attendance_streak_
+        rewards` keys its own reference — `(user id, milestone day
+        count, the calendar date the streak reached it)` — since a given
+        streak length can only be reached on one real date ever, this
+        reference can never collide with a genuine second milestone
+        (that would need a different `current_streak` value or the
+        streak breaking and being re-earned on a later date, which is a
+        new, separately-earned milestone). `record_transaction`'s own
+        reference check (inside ITS row lock) is the actual double-
+        credit guard; nothing here needs its own idempotency table.
+
+        Returns `(streak, milestone_hit)` — `streak` is the saved
+        `Streak` instance; `milestone_hit` is `None` if no milestone was
+        reached this call, else the `int` day-count that was hit (so the
+        view can tell the client "you just earned a 7-day bonus" without
+        re-deriving it from before/after `current_streak` values).
+        """
+        from django.conf import settings as dj_settings
+
+        from .fraud import EarnRateLimitExceeded
+
+        today = timezone.localdate()
+
+        with transaction.atomic():
+            streak, _created = self.select_for_update().get_or_create(user=user)
+
+            if streak.last_active_date == today:
+                # Already checked in today — a pure no-op, not even a save(),
+                # so `updated_at` doesn't churn on a repeat app-open.
+                return streak, None
+
+            if streak.last_active_date == today - timezone.timedelta(days=1):
+                streak.current_streak += 1
+            else:
+                streak.current_streak = 1
+
+            streak.longest_streak = max(streak.longest_streak, streak.current_streak)
+            streak.total_active_days += 1
+            streak.last_active_date = today
+            streak.save(update_fields=[
+                "current_streak", "longest_streak", "total_active_days",
+                "last_active_date", "updated_at",
+            ])
+
+            milestone_hit = None
+            milestone_days = getattr(dj_settings, "STREAK_MILESTONE_DAYS", (7, 30, 100))
+            if streak.current_streak in milestone_days:
+                bonus_map = getattr(dj_settings, "STREAK_MILESTONE_BONUS_COINS", {})
+                bonus = int(bonus_map.get(streak.current_streak, 0) or 0)
+                if bonus > 0:
+                    reference = (
+                        f"streak_milestone:{user.pk}:{streak.current_streak}:{today.isoformat()}"
+                    )
+                    try:
+                        CoinLedger.objects.record_transaction(
+                            user=user,
+                            transaction_type=CoinLedger.TransactionType.STREAK_REWARD,
+                            amount=bonus,
+                            reference=reference,
+                            description=f"{streak.current_streak}-day streak bonus",
+                            metadata={"streak_days": streak.current_streak},
+                        )
+                        milestone_hit = streak.current_streak
+                    except EarnRateLimitExceeded:
+                        # fraud.check_earn_rate_limit() today only restricts
+                        # EARN/CAMPUS_REWARD (see that function's own
+                        # docstring), so STREAK_REWARD can't actually hit
+                        # this yet — caught anyway, defensively, so that if
+                        # STREAK_REWARD is ever added to that rate-limited
+                        # set, a burst-limited user still keeps their streak
+                        # (the check-in above already saved); they just don't
+                        # get this particular bonus posted.
+                        pass
+
+            return streak, milestone_hit
+
+
+class Streak(models.Model):
+    """
+    TASK G1 (growth_and_feature_tasks.md) — app-wide daily-habit streak.
+
+    One row per user, written ONLY through `StreakManager.record_activity()`
+    above (never `.save()` directly from a view) — same "one sanctioned
+    write path" boundary `CoinLedger`/`CoinWithdrawalRequest` already draw
+    in this file, for the same reason: `current_streak` and
+    `last_active_date` must always change together, under a row lock, or
+    two concurrent check-ins can double-increment.
+
+    Deliberately its OWN table rather than columns bolted onto
+    `login.User` — same reasoning `UserPreference` above gives for being
+    lazily get-or-created rather than a signup-time row: most of this
+    table's write traffic (one row touched per user per day) has nothing
+    to do with the rest of `User`, and keeping it separate means a streak
+    check-in never has to lock/rewrite the wider user row.
+    """
+
+    user = models.OneToOneField(
+        settings.AUTH_USER_MODEL,
+        related_name="streak",
+        on_delete=models.CASCADE,
+    )
+
+    # Consecutive days (including today, once checked in) with no gap.
+    # Resets to 1 the day after a missed day — see
+    # StreakManager.record_activity for the exact break/continue rule.
+    current_streak = models.PositiveIntegerField(default=0)
+
+    # High-water mark of current_streak — never decreases, even when
+    # current_streak resets. Powers a "your best streak" profile stat
+    # without needing to scan history.
+    longest_streak = models.PositiveIntegerField(default=0)
+
+    # Lifetime count of distinct days checked in, streak-breaks included.
+    # Not the same number as current_streak/longest_streak — feeds Task
+    # G2's "Your Week" recap card ("tests attempted, classes attended,
+    # ... streak") rather than the streak chip itself.
+    total_active_days = models.PositiveIntegerField(default=0)
+
+    # The last calendar date (in the active timezone — see
+    # timezone.localdate() in record_activity) this user checked in.
+    # Null only for a freshly get-or-created row that has somehow never
+    # gone through record_activity (shouldn't happen via the API, since
+    # StreakView.get() also lazily creates via get_or_create — kept
+    # nullable defensively rather than forcing a sentinel date).
+    last_active_date = models.DateField(null=True, blank=True)
+
+    updated_at = models.DateTimeField(auto_now=True)
+
+    objects = StreakManager()
+
+    class Meta:
+        ordering = ["-current_streak"]
+        indexes = [
+            # "who's at risk of losing their streak today" — the
+            # send_streak_risk_reminders celery task's query shape
+            # (user_profile/tasks.py): current_streak > 0 AND
+            # last_active_date == yesterday. Composite so that scan
+            # doesn't touch users with no streak at all.
+            models.Index(fields=["last_active_date", "current_streak"]),
+        ]
+
+    def __str__(self):
+        return f"{self.user.username}: {self.current_streak}-day streak (best {self.longest_streak})"
+
+    @property
+    def is_active_today(self) -> bool:
+        """True once today's check-in has already been recorded — lets a
+        client (or the reminder task) skip a user without recomputing
+        `timezone.localdate()` itself."""
+        return self.last_active_date == timezone.localdate()
+
+
+class WeeklyRecap(models.Model):
+    """
+    TASK G2 (growth_and_feature_tasks.md) — "Your Week" recap.
+
+    One row per (user, week_start) — written ONLY by
+    `user_profile.recap.generate_weekly_recap_for_user()`, which is itself
+    only ever called from the `generate_weekly_recaps` celery-beat task
+    (user_profile/tasks.py). Same "one sanctioned write path" boundary
+    `Streak` above documents, for the same reason: a recap row is a
+    point-in-time snapshot aggregated from four other apps
+    (testseries/tuitionclass/post/this app's own Streak), so nothing should
+    ever `.save()` one by hand from a view — that would just be a partial,
+    inconsistent snapshot.
+
+    `week_start` is always a Monday (see `recap.py`'s `_week_bounds()`),
+    stored rather than derived so a client asking "show me last week's"
+    can page by it directly without the server re-deriving week
+    boundaries per request.
+
+    Deliberately its OWN table rather than columns bolted onto `Streak`:
+    `Streak` is a single always-current row per user; this is a growing
+    weekly history (one new row every Sunday, kept for the recap-history
+    screen / "compare this week to last week" later), so mixing the two
+    would turn `Streak` from a 1-row-per-user table into a 1-row-per-
+    user-per-week table for reasons that have nothing to do with the
+    streak counter itself.
+    """
+
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        related_name="weekly_recaps",
+        on_delete=models.CASCADE,
+    )
+
+    # Monday of the recapped week (inclusive); the week runs
+    # [week_start, week_start + 6 days] inclusive — see recap.py.
+    week_start = models.DateField()
+
+    # Denormalized rather than re-derived from week_start, so a row is
+    # still self-describing even if the "week runs Mon-Sun" convention
+    # ever changes later.
+    week_end = models.DateField()
+
+    # ---- the four numbers the share card / recap screen actually show ----
+    tests_attempted = models.PositiveIntegerField(default=0)
+    classes_attended = models.PositiveIntegerField(default=0)
+    posts_liked_received = models.PositiveIntegerField(default=0)
+    # Streak.current_streak AT THE MOMENT the recap was generated (Sunday
+    # night) — a snapshot, not a live FK read, so a recap from three
+    # months ago still shows what the streak was THEN, not what it is now.
+    streak_days = models.PositiveIntegerField(default=0)
+
+    generated_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["-week_start"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["user", "week_start"], name="uniq_weekly_recap_per_user_week"
+            ),
+        ]
+        indexes = [
+            # "give me this user's most recent recap" — WeeklyRecapView's
+            # query shape (user_profile/views.py).
+            models.Index(fields=["user", "-week_start"]),
+        ]
+
+    def __str__(self):
+        return f"{self.user.username}: week of {self.week_start.isoformat()}"
+
+    @property
+    def has_any_activity(self) -> bool:
+        """True if this recap has at least one non-zero stat — used by the
+        generation task to skip creating a row (and a notification) for a
+        user who did nothing at all that week."""
+        return bool(
+            self.tests_attempted or self.classes_attended
+            or self.posts_liked_received or self.streak_days
+        )
+
+
+# ---------------------------------------------------------------------------
+# P13-BE — Achievements / badges
+# ---------------------------------------------------------------------------
+class Badge(models.Model):
+    """Catalogue row: one badge a user can earn. One badge per rule, so
+    `code` == the `RuleType` value for the built-in five. Rows are
+    self-seeded by `services.award_badge()` from `services.BADGE_DEFAULTS`
+    the first time a badge is needed, so no data migration is required;
+    admins can then edit title/icon/description or switch `is_active` off
+    (an inactive badge is never awarded, existing awards stay visible)."""
+
+    class RuleType(models.TextChoices):
+        STREAK_7 = "streak_7", "7-day streak"
+        STREAK_30 = "streak_30", "30-day streak"
+        WEEKLY_TOP10 = "weekly_top10", "Top 10 on a weekly leaderboard"
+        FIRST_TEST = "first_test", "First test completed"
+        TEACHER_VERIFIED = "teacher_verified", "Teacher verified"
+
+    code = models.SlugField(max_length=50, unique=True)
+    title = models.CharField(max_length=100)
+    description = models.CharField(max_length=255, blank=True)
+    # An emoji or an asset name the client maps to an image.
+    icon = models.CharField(max_length=100, blank=True)
+    rule_type = models.CharField(max_length=30, choices=RuleType.choices, db_index=True)
+    is_active = models.BooleanField(default=True)
+    sort_order = models.PositiveSmallIntegerField(default=0)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["sort_order", "id"]
+
+    def __str__(self):
+        return f"{self.code} ({self.title})"
+
+
+class UserBadge(models.Model):
+    """A badge a user has earned. Written ONLY by `services.award_badge()`
+    (signals / celery call that, never a request). The unique constraint
+    makes every award idempotent: a retried task or a re-fired signal
+    cannot award (or notify) twice."""
+
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="user_badges"
+    )
+    badge = models.ForeignKey(Badge, on_delete=models.CASCADE, related_name="awards")
+    earned_at = models.DateTimeField(default=timezone.now, db_index=True)
+    # Why/when it was earned, e.g. {"week": "2026-W39", "rank": 4}.
+    context = models.JSONField(default=dict, blank=True)
+
+    class Meta:
+        constraints = [
+            UniqueConstraint(fields=["user", "badge"], name="unique_user_badge"),
+        ]
+        indexes = [
+            # "badges of this profile, newest first" — GET /profile/<username>/badges/
+            models.Index(fields=["user", "-earned_at"]),
+        ]
+        ordering = ["-earned_at"]
+
+    def __str__(self):
+        return f"user={self.user_id} earned {self.badge_id}"
+
+
+# ---------------------------------------------------------------------------
+# P14-BE — time spent in the app (foreground heartbeat)
+# ---------------------------------------------------------------------------
+class DailyUsageManager(models.Manager):
+    """The one sanctioned write path for `DailyUsage`, same boundary
+    `StreakManager` draws for `Streak`: a heartbeat is applied under a row
+    lock so two devices / a double-fired timer can't lose an update."""
+
+    # Allowed drift between a client's claimed seconds and the real time
+    # since its previous heartbeat (network jitter, timer skew).
+    HEARTBEAT_SLACK_SECONDS = 5
+
+    def record_heartbeat(self, user, seconds):
+        """Add foreground time. `seconds` = what the client says it was in the
+        foreground since its last heartbeat. Three bounds keep a forged client
+        from inflating the number: a per-beat cap
+        (`settings.ACTIVITY_HEARTBEAT_MAX_SECONDS`, default 120), the
+        wall-clock time since the previous heartbeat (+ slack), and 24h/day.
+        A client that was backgrounded for an hour and then sends 30s is
+        credited 30s — the first beat after a gap isn't wall-clock-limited.
+
+        Returns `(usage, credited_seconds, limit_just_reached)`;
+        `limit_just_reached` is True exactly once per day, on the heartbeat
+        that crosses `UserPreference.daily_limit_minutes`.
+        """
+        from django.conf import settings as dj_settings
+
+        max_beat = int(getattr(dj_settings, "ACTIVITY_HEARTBEAT_MAX_SECONDS", 120))
+        claimed = max(0, min(int(seconds), max_beat))
+
+        now = timezone.now()
+        today = timezone.localdate(now)
+
+        with transaction.atomic():
+            usage, _created = self.select_for_update().get_or_create(user=user, date=today)
+            if claimed == 0:
+                return usage, 0, False
+
+            credited = claimed
+            if usage.last_heartbeat_at is not None:
+                elapsed = max(0, int((now - usage.last_heartbeat_at).total_seconds()))
+                credited = min(claimed, elapsed + self.HEARTBEAT_SLACK_SECONDS)
+
+            usage.seconds = min(usage.seconds + credited, 24 * 3600)
+            usage.last_heartbeat_at = now
+
+            limit_reached = False
+            limit = (
+                UserPreference.objects.filter(user=user)
+                .values_list("daily_limit_minutes", flat=True)
+                .first()
+            )
+            if limit and not usage.limit_notified and usage.seconds >= limit * 60:
+                usage.limit_notified = True
+                limit_reached = True
+
+            usage.save(update_fields=["seconds", "last_heartbeat_at", "limit_notified", "updated_at"])
+            return usage, credited, limit_reached
+
+
+class DailyUsage(models.Model):
+    """Seconds this user had the app in the foreground on one local date
+    (`timezone.localdate()`, the same day boundary `Streak` uses). One row
+    per (user, date), written only by `record_heartbeat()`."""
+
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="daily_usage"
+    )
+    date = models.DateField()
+    seconds = models.PositiveIntegerField(default=0)
+    last_heartbeat_at = models.DateTimeField(null=True, blank=True)
+    # The "you've hit your daily limit" nudge fires once per day.
+    limit_notified = models.BooleanField(default=False)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    objects = DailyUsageManager()
+
+    class Meta:
+        constraints = [
+            UniqueConstraint(fields=["user", "date"], name="unique_daily_usage_per_user_date"),
+        ]
+        ordering = ["-date"]
+
+    def __str__(self):
+        return f"{self.user_id} {self.date}: {self.seconds}s"

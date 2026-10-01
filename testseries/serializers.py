@@ -131,6 +131,8 @@ class TestSeriesSerializer(serializers.ModelSerializer):
             "description", "is_paid", "price_coins", "duration_minutes",
             "total_marks", "status", "attempts_allowed", "questions", "question_count",
             "avg_rating", "review_count", "created_at", "updated_at",
+            # ---- discovery / search (Task G9)
+            "subject", "difficulty",
             # ---- advanced delivery / certification (migration 0003)
             "delivery_mode", "starts_at", "ends_at", "late_entry_minutes", "window_state",
             "proctoring", "record_live",
@@ -139,9 +141,9 @@ class TestSeriesSerializer(serializers.ModelSerializer):
             "share_slug", "share_url",
         ]
         # `source`/`context_type`/`context_id` are provenance — set once at
-        # creation (INDIVIDUAL here, or CAMPUS/LIVECLASS via bridge.py) and
+        # creation (INDIVIDUAL here, or CAMPUS/TUITIONCLASS via bridge.py) and
         # never client-writable afterward, or a creator could PATCH their own
-        # individual series into impersonating a campus/liveclass context it
+        # individual series into impersonating a campus/tuitionclass context it
         # was never actually created through. `status` is read-only too —
         # the only supported transition (draft -> published) has real
         # preconditions (has questions) and side effects (total_marks
@@ -194,7 +196,7 @@ class TestSeriesSerializer(serializers.ModelSerializer):
             return attrs.get(name, getattr(inst, name, default))
 
         # Provenance is read-only, so on create this endpoint always builds an
-        # INDIVIDUAL series (see the viewset); campus / liveclass series come
+        # INDIVIDUAL series (see the viewset); campus / tuitionclass series come
         # from their bridges.
         source = getattr(inst, "source", TestSeries.Source.INDIVIDUAL)
 

@@ -52,3 +52,5 @@ admin.site.register(UserPresence)
 admin.site.register(BlockedUser)
 admin.site.register(DeviceToken)
 admin.site.register(StudyRoomState)
+# 🔥 NAYA — sticky notes: soft-deleted (tombstone) rows bhi dikhein, restore action ke saath.
+admin.site.register(StudyRoomNote, SoftDeleteAdmin)

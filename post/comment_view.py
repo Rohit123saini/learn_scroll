@@ -25,7 +25,7 @@ from rest_framework.decorators import api_view, permission_classes, parser_class
 from rest_framework.permissions import IsAuthenticated, AllowAny
 from rest_framework.response import Response
 from rest_framework.parsers import MultiPartParser, FormParser, JSONParser
-from drf_spectacular.utils import extend_schema
+from drf_spectacular.utils import extend_schema, OpenApiParameter
 
 from.models import Post, PostComment, CommentMedia, ChunkedUpload, PostChunkedUpload, CommentLike
 from.comment_serializers import CreateCommentSerializer, PostCommentSerializer
@@ -454,6 +454,28 @@ class CommentDeleteAPIView(APIView):
 
 class CommentListAPIView(APIView):
     permission_classes = [AllowAny]
+
+    # TASK G5 (growth_and_feature_tasks.md) — "Comments & reactions parity
+    # with mainstream apps". The reaction model (5 types, CommentLike) and
+    # nested replies (PostComment.parent, CommentRepliesAPIView below)
+    # already existed before this task — the one real gap was sorting:
+    # comments only ever came back newest-first, with no way to surface
+    # the most-reacted-to ones first the way Instagram/YouTube do by
+    # default. `?sort=top` (the new default) orders by `likes_count` —
+    # already the TOTAL reaction count across all 5 types, not just
+    # 'like' (see models.py's update_comment_reaction_counts) — so it's
+    # genuinely "most reacted to", not just "most liked". `?sort=newest`
+    # keeps the old chronological behavior for anyone who wants it.
+    @extend_schema(
+        summary="List top-level comments for a post",
+        parameters=[
+            OpenApiParameter(
+                name='sort', type=str, required=False,
+                description="'top' (default, most-reacted first) or 'newest' (chronological).",
+            ),
+        ],
+        tags=['Comments'],
+    )
     def get(self, request, post_id):
         post = get_object_or_404(Post, id=post_id)
         qs = PostComment.objects.filter(post=post, parent__isnull=True, is_deleted=False).select_related('user').prefetch_related('media')
@@ -465,16 +487,39 @@ class CommentListAPIView(APIView):
         hidden_ids = hidden_commenter_ids(post.user_id, viewer_id)
         if hidden_ids:
             qs = qs.exclude(user_id__in=hidden_ids)
-        comments = qs.order_by('-is_pinned', '-created_at')[:50]
+        sort = (request.query_params.get('sort') or 'top').lower()
+        if sort == 'newest':
+            comments = qs.order_by('-is_pinned', '-created_at')[:50]
+        else:
+            comments = qs.order_by('-is_pinned', '-likes_count', '-created_at')[:50]
         serializer = PostCommentSerializer(comments, many=True, context={'request': request})
         return Response(serializer.data)
 
 class CommentRepliesAPIView(APIView):
     permission_classes = [AllowAny]
+
+    # TASK G5 — same `?sort=` support as CommentListAPIView, but the
+    # default stays 'oldest' (chronological) here on purpose: replies
+    # inside a thread read as a conversation, so re-ordering them by
+    # reaction count (like Instagram/YouTube do for top-level comments)
+    # would scramble who's replying to whom. Pass `?sort=top` explicitly
+    # if a thread's UI wants that instead.
+    @extend_schema(
+        summary="List replies to a comment",
+        parameters=[
+            OpenApiParameter(
+                name='sort', type=str, required=False,
+                description="'oldest' (default, chronological) or 'top' (most-reacted first).",
+            ),
+        ],
+        tags=['Comments'],
+    )
     def get(self, request, comment_id):
         parent = get_object_or_404(PostComment, id=comment_id, is_deleted=False)
+        sort = (request.query_params.get('sort') or 'oldest').lower()
+        order = ('-likes_count', 'created_at') if sort == 'top' else ('created_at',)
         # FIX 2 - nested replies ke liye sab reply laayenge
-        replies = PostComment.objects.filter(parent=parent, is_deleted=False, is_hidden=False).select_related('user').prefetch_related('media').order_by('created_at')
+        replies = PostComment.objects.filter(parent=parent, is_deleted=False, is_hidden=False).select_related('user').prefetch_related('media').order_by(*order)
         # RestrictUser (issue #2) — same rule as CommentListAPIView.
         viewer_id = request.user.id if request.user.is_authenticated else None
         hidden_ids = hidden_commenter_ids(parent.post.user_id, viewer_id)

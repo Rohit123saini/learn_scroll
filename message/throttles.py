@@ -246,3 +246,32 @@ class ParentCodeRevealThrottle(UserRateThrottle):
     karna is rate pe impractical ho jaata hai.
     """
     scope = 'parent_code_reveal'
+
+
+class WSStudyRoomNoteRateLimiter:
+    """
+    Study-room sticky notes ke WS events ke liye alag limiter (chat-message
+    limiter `WSMessageRateLimiter` 60/min hai — note drag/edit ke liye
+    bahut tight hota). Fixed-window per user per minute, same cache-backed
+    pattern.
+
+      kind='ops'  : persisted ops (add/move/edit/front/delete) — 240/min
+                    (client drag-end + debounced text edit ~ kuch ops/sec).
+      kind='drag' : ephemeral live-drag preview (`note_drag`) — 1200/min
+                    (~20/sec sustained, client khud ~12/sec pe throttle karta hai).
+    """
+    LIMITS = {'ops': 240, 'drag': 1200}
+    WINDOW_SECONDS = 60
+
+    @classmethod
+    def check(cls, user_id, kind='ops') -> tuple[bool, int]:
+        limit = cls.LIMITS.get(kind, cls.LIMITS['ops'])
+        key = f"ws_note_rl:{kind}:{user_id}"
+        try:
+            count = cache.incr(key)
+        except ValueError:
+            cache.set(key, 1, cls.WINDOW_SECONDS)
+            count = 1
+        if count > limit:
+            return False, cls.WINDOW_SECONDS
+        return True, 0

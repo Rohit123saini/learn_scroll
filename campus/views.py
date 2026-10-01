@@ -5,6 +5,7 @@ from decimal import Decimal, InvalidOperation
 
 from django.db import transaction
 from django.db.models import Q
+from django.http import HttpResponse
 from django.shortcuts import get_object_or_404
 from django.utils import timezone
 from django.utils.dateparse import parse_date
@@ -15,7 +16,7 @@ from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
-# FEE-2: fee is now paid out of the same wallet liveclass already uses,
+# FEE-2: fee is now paid out of the same wallet tuitionclass already uses,
 # not a separate gateway — user_profile owns CoinLedger/record_transaction,
 # campus only ever calls through it, never writes to CoinLedger directly
 # (same boundary user_profile/models.py's own CoinLedger docstring lays out).
@@ -44,8 +45,22 @@ from assigments.models import assigmentsSubmission as UnifiedassigmentsSubmissio
 # hard top-level import, no lazy-import degrade.
 from testseries.models import TestAttempt, TestSeries
 
+# NEW — notice push/bell fan-out (NoticeViewSet.perform_create below).
+from message.services import create_bell_rows_for_push
+# FIX (this pass) — ParentLinkVerifyView now resolves directly against
+# ParentAccessCode instead of the broken bridge.resolve_parent_from_token
+# unpack; see that view's docstring below.
+from message.models import ParentAccessCode
+# Task 5 subtask 3 — same fire-and-forget dispatch bridge.notify already
+# uses for push, reused here for FeePaymentViewSet's receipt-email side
+# effect (see campus/tasks.py::send_fee_receipt_email).
+from core.async_utils import dispatch_after_commit
+
 from . import bridge
+from . import tasks as campus_tasks
 from .bridge import NotifTypes
+from .receipt_pdf import PdfUnavailable, render_pdf
+from .receipt_pdf import _display_name as _receipt_display_name
 from .services import compute_attendance_summary, generate_report_card_data
 # B-4 fix — see campus/throttles.py module docstring for why these are
 # separate classes (each with its own fixed `scope`) rather than a
@@ -569,18 +584,56 @@ class NoticeViewSet(CampusMemberScopedMixin, viewsets.ModelViewSet):
             section_id=section.id if section else None,
         ):
             raise PermissionDenied("You're not allowed to post a notice at this scope.")
-        serializer.save(posted_by=self.request.user)
+        notice = serializer.save(posted_by=self.request.user)
+
+        # NEW — one-click "send notice to everyone" only actually reaches
+        # anyone if it's pushed, not just stored for someone to happen to
+        # pull later. Best-effort, never blocks the 201 response: audience
+        # = every ACTIVE student in this notice's scope, plus every parent
+        # already linked (CampusParentLink) to one of those students —
+        # both are real logged-in `User` rows in this app, so the normal
+        # bell/push pipeline (create_bell_rows_for_push) covers them
+        # directly, no separate FCM-token plumbing needed the way
+        # tuitionclass's loginless Parent Mode requires.
+        try:
+            student_ids = list(
+                StudentEnrollment.objects.filter(
+                    status=StudentEnrollment.Status.ACTIVE,
+                    section__school_class__campus_id=campus.id,
+                    **(
+                        {"section_id": section.id} if section
+                        else {"section__school_class_id": school_class.id} if school_class
+                        else {"section__school_class__department_id": department.id} if department
+                        else {}
+                    ),
+                ).values_list("student_id", flat=True).distinct()
+            )
+            parent_ids = list(
+                CampusParentLink.objects.filter(campus_id=campus.id, student_id__in=student_ids)
+                .values_list("parent_id", flat=True).distinct()
+            )
+            recipient_ids = list(set(student_ids) | set(parent_ids))
+            if recipient_ids:
+                create_bell_rows_for_push(
+                    recipient_ids=recipient_ids,
+                    notif_type="campus_notice_posted",
+                    title=notice.title,
+                    message=notice.body[:200],
+                    data={"type": "campus_notice_posted", "notice_id": str(notice.id), "campus_id": str(campus.id)},
+                )
+        except Exception:
+            pass
 
 
 # ============================================================
-# Phase 4 — live classes (coin-free)
+# Phase 4 — tuition classes (coin-free)
 # ============================================================
 class CampusLiveSessionViewSet(CampusMemberScopedMixin, viewsets.ModelViewSet):
     """
     Scheduling auto-fires a `Notice` + `core.Notification`
     (`CAMPUS_SESSION_SCHEDULED`) to the section, and attempts video-room
     provisioning through `bridge.provision_video_room` — both go through
-    `campus.bridge`, never a direct `core`/`message`/`liveclass` import
+    `campus.bridge`, never a direct `core`/`message`/`tuitionclass` import
     (design doc §4). `status`/`room_id` stay server-controlled; a
     teacher moves the session forward via the `start`/`end` actions
     below rather than PATCHing those fields directly.
@@ -1939,17 +1992,21 @@ class FeePaymentViewSet(CampusMemberScopedMixin, mixins.ListModelMixin, mixins.R
                     "required": int(amount),
                     "coins_needed": shortfall,
                     # FEE-3: no new coin-purchase gateway here — point the
-                    # client at the existing liveclass top-up flow instead
+                    # client at the existing tuitionclass top-up flow instead
                     # of rebuilding one. Campus deliberately never imports
-                    # liveclass (see models.py GOLDEN RULE), so this is a
+                    # tuitionclass (see models.py GOLDEN RULE), so this is a
                     # generic flag for the frontend to route on, not a
-                    # hardcoded liveclass URL.
+                    # hardcoded tuitionclass URL.
                     "action": "top_up_coins",
                 },
                 status=status.HTTP_402_PAYMENT_REQUIRED,
             )
 
         payment.mark_success()
+        # Task 5 subtask 3 — fire-and-forget receipt email, same dispatch
+        # bridge.notify uses for push: enqueued only once this request's
+        # transaction actually commits, never blocks the response.
+        dispatch_after_commit(campus_tasks.send_fee_receipt_email, payment.id)
         return Response(FeePaymentSerializer(payment).data, status=status.HTTP_201_CREATED)
 
     @action(detail=False, methods=["post"], throttle_classes=[CampusFeePaymentThrottle])
@@ -1980,6 +2037,10 @@ class FeePaymentViewSet(CampusMemberScopedMixin, mixins.ListModelMixin, mixins.R
             notes=request.data.get("notes", ""),
         )
         payment.invoice.recompute_status()
+        # Task 5 subtask 3 — same receipt-email dispatch as the wallet
+        # path above; `record` payments are created SUCCESS immediately
+        # (no mark_success() call), so this is the equivalent hook here.
+        dispatch_after_commit(campus_tasks.send_fee_receipt_email, payment.id)
         return Response(FeePaymentSerializer(payment).data, status=status.HTTP_201_CREATED)
 
     @action(detail=True, methods=["post"], throttle_classes=[CampusFeePaymentThrottle])
@@ -1996,6 +2057,57 @@ class FeePaymentViewSet(CampusMemberScopedMixin, mixins.ListModelMixin, mixins.R
         except ValueError as exc:
             return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
         return Response(FeePaymentSerializer(payment).data)
+
+    # ------------------------------------------------------ receipt PDF (Task 5, subtask 2/4)
+    def _check_receipt_view_permission(self, request, payment):
+        """Who can see a payment's receipt: the payer themselves, a
+        linked parent of the paying student, or campus admin/staff —
+        same three roles `_get_invoice_and_check` already recognizes for
+        the invoice as a whole (self-pay vs. office-side), just read-only
+        here instead of a write gate."""
+        invoice = payment.invoice
+        campus_id = invoice.enrollment.section.school_class.campus_id
+        is_payer = payment.paid_by_id == request.user.id
+        is_self = invoice.enrollment.student_id == request.user.id
+        is_parent = is_linked_parent_of_student(request.user, invoice.enrollment.student_id, campus_id)
+        is_staff = is_campus_admin_or_principal(request.user, campus_id) or is_any_active_staff(request.user, campus_id)
+        return is_payer or is_self or is_parent or is_staff
+
+    @action(detail=True, methods=["get"], url_path="receipt-pdf")
+    def receipt_pdf(self, request, pk=None):
+        payment = self.get_object()
+        if not self._check_receipt_view_permission(request, payment):
+            return Response({"detail": "Not allowed."}, status=status.HTTP_403_FORBIDDEN)
+        if payment.status != FeePayment.Status.SUCCESS:
+            return Response(
+                {"detail": "A receipt is only available for a successful payment."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        invoice = payment.invoice
+        try:
+            pdf = render_pdf(
+                receipt_no=f"RCPT-{payment.id}",
+                campus_name=invoice.enrollment.section.school_class.campus.name,
+                campus_type=invoice.enrollment.section.school_class.campus.type,
+                student_name=_receipt_display_name(invoice.enrollment.student),
+                fee_title=invoice.fee_structure.title,
+                invoice_id=str(invoice.id),
+                amount=payment.amount,
+                amount_due=invoice.amount_due,
+                amount_paid_total=invoice.amount_paid,
+                payment_mode=payment.payment_mode,
+                payer_role=payment.payer_role,
+                paid_by=payment.paid_by,
+                recorded_by=payment.recorded_by,
+                status=payment.status,
+                notes=payment.notes,
+                paid_at=payment.created_at,
+            )
+        except PdfUnavailable as exc:
+            return Response({"detail": str(exc)}, status=status.HTTP_501_NOT_IMPLEMENTED)
+        response = HttpResponse(pdf, content_type="application/pdf")
+        response["Content-Disposition"] = f'attachment; filename="fee-receipt-{payment.id}.pdf"'
+        return response
 
 
 class CampusAnalyticsSnapshotViewSet(CampusMemberScopedMixin, viewsets.ReadOnlyModelViewSet):
@@ -2039,11 +2151,25 @@ class CampusParentLinkViewSet(CampusMemberScopedMixin, viewsets.ReadOnlyModelVie
 
 class ParentLinkVerifyView(APIView):
     """
-    `POST {"campus": <id>, "token": "<parent access token>"}` — the
-    only way a `CampusParentLink` row is ever created. Verification
-    itself happens in `message`'s existing ParentAccessCode/ParentToken
-    flow via `bridge.resolve_parent_from_token`; this view never reads
-    or writes `message` models directly.
+    `POST {"campus": <id>, "token": "<parent access code>"}`.
+
+    🔧 FIX (this pass) — this view used to call
+    `bridge.resolve_parent_from_token(token)` and unpack the result as
+    `parent_user, student_user = ...`. `resolve_parent_from_token()`
+    actually returns a `ParentTokenResolution` object with `.student` /
+    `.parent_access_code` attributes (Parent Mode is deliberately
+    loginless — see `message.models.ParentAccessCode`'s own docstring; it
+    has no `.parent` user concept at all) and is not a 2-tuple, so that
+    unpack raised a `ValueError`/`TypeError` on every single real call —
+    this endpoint 500'd unconditionally. See campus/parent_invite.py's
+    module docstring for the original bug note; this view is now fixed
+    to resolve directly against `message.ParentAccessCode` instead,
+    exactly the way the newer `CampusParentLinkConfirmView` below already
+    does, rather than going through the mismatched bridge call. Logic is
+    intentionally identical to `CampusParentLinkConfirmView.post()` — kept
+    as a separate endpoint only so any existing caller of this URL/name
+    (e.g. `CampusService.verifyParentLink()` in the Flutter app) keeps
+    working without needing to switch call sites.
     """
     permission_classes = [IsAuthenticated]
     # B-4 fix — see CampusParentLinkVerifyThrottle's docstring in
@@ -2055,10 +2181,14 @@ class ParentLinkVerifyView(APIView):
     throttle_classes = [CampusParentLinkVerifyThrottle]
 
     def post(self, request):
-        token = request.data.get("token")
+        # Accepts either "token" (this endpoint's original, pre-existing
+        # param name) or "code" (the name the rest of the parent-invite
+        # feature uses) so old and new callers both work unchanged.
+        code = (request.data.get("token") or request.data.get("code") or "").strip()
         campus_id = request.data.get("campus")
-        if not token or not campus_id:
-            return Response({"detail": "token and campus are required."}, status=status.HTTP_400_BAD_REQUEST)
+        if not code or not campus_id:
+            return Response({"detail": "campus and token are required."}, status=status.HTTP_400_BAD_REQUEST)
+
         campus = Campus.objects.filter(pk=campus_id).first()
         if not campus:
             return Response({"detail": "Campus not found."}, status=status.HTTP_404_NOT_FOUND)
@@ -2070,10 +2200,23 @@ class ParentLinkVerifyView(APIView):
                 {"detail": "This campus is pending platform verification and can't link parents yet."},
                 status=status.HTTP_403_FORBIDDEN,
             )
-        parent_user, student_user = bridge.resolve_parent_from_token(token)
-        if not parent_user or not student_user:
+
+        access_code = ParentAccessCode.objects.filter(code=code, is_active=True).select_related("student").first()
+        if not access_code or access_code.is_expired:
             return Response({"detail": "Invalid or expired token."}, status=status.HTTP_400_BAD_REQUEST)
-        link, _ = CampusParentLink.objects.get_or_create(
-            campus=campus, student=student_user, parent=parent_user
+
+        student = access_code.student
+        if not StudentEnrollment.objects.filter(
+            student=student, status=StudentEnrollment.Status.ACTIVE, section__school_class__campus_id=campus.id,
+        ).exists():
+            return Response(
+                {"detail": "This student isn't enrolled at this campus."}, status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        link, created = CampusParentLink.objects.get_or_create(
+            campus=campus, student=student, parent=request.user,
         )
-        return Response(CampusParentLinkSerializer(link).data, status=status.HTTP_201_CREATED)
+        return Response(
+            CampusParentLinkSerializer(link).data,
+            status=status.HTTP_201_CREATED if created else status.HTTP_200_OK,
+        )

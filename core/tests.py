@@ -13,7 +13,7 @@ from .services import create_bulk_notifications, create_notification
 
 class CoreTestBase(TestCase):
     """Minimal fixtures — core stays app-agnostic, so unlike
-    liveclass.tests.LiveClassTestBase this doesn't set up a
+    tuitionclass.tests.TuitionClassTestBase this doesn't set up a
     Classroom/ClassSession/ClassPass; individual tests create those
     directly only when a test specifically needs the classroom/session
     FK on Notification."""
@@ -71,7 +71,7 @@ class NotificationModelTests(CoreTestBase):
 
 # ===========================================================================
 # NotificationPreference — task 47 regression: same assertions as the
-# original liveclass.tests.NotificationPreferenceTests, now exercised
+# original tuitionclass.tests.NotificationPreferenceTests, now exercised
 # directly against core.models from the new location.
 # ===========================================================================
 class NotificationPreferenceTests(CoreTestBase):
@@ -200,7 +200,7 @@ class NotificationViewSetTests(CoreTestBase):
         self.assertIn("unread_count", response.data)
         self.assertEqual(response.data["unread_count"], 1)
 
-    def test_source_filter_splits_message_and_liveclass_types(self):
+    def test_source_filter_splits_message_and_tuitionclass_types(self):
         Notification.objects.create(recipient=self.student, notif_type=Notification.NotifType.CHAT_MESSAGE, title="Chat")
         Notification.objects.create(recipient=self.student, notif_type=Notification.NotifType.SESSION_LIVE, title="Live")
 
@@ -209,10 +209,27 @@ class NotificationViewSetTests(CoreTestBase):
         self.assertEqual(response.data["results"][0]["title"], "Chat")
         self.assertEqual(response.data["results"][0]["source"], "message")
 
-        response = self.client.get("/core/notifications/?source=liveclass")
+        response = self.client.get("/core/notifications/?source=tuitionclass")
         self.assertEqual(response.data["count"], 1)
         self.assertEqual(response.data["results"][0]["title"], "Live")
-        self.assertEqual(response.data["results"][0]["source"], "liveclass")
+        self.assertEqual(response.data["results"][0]["source"], "tuitionclass")
+
+    def test_unread_count_source_filter(self):
+        # 🔥 NEW (settings/nav pass) — bell icon (tuitionclass-only) and the
+        # Chats tab badge (message-only) each need their own count from
+        # this one endpoint now, not just the combined total.
+        Notification.objects.create(recipient=self.student, notif_type=Notification.NotifType.CHAT_MESSAGE, title="Chat")
+        Notification.objects.create(recipient=self.student, notif_type=Notification.NotifType.SESSION_LIVE, title="Live")
+        Notification.objects.create(recipient=self.student, notif_type=Notification.NotifType.MENTION, title="Mention")
+
+        response = self.client.get("/core/notifications/unread-count/?source=message")
+        self.assertEqual(response.data["unread_count"], 2)
+
+        response = self.client.get("/core/notifications/unread-count/?source=tuitionclass")
+        self.assertEqual(response.data["unread_count"], 1)
+
+        response = self.client.get("/core/notifications/unread-count/")
+        self.assertEqual(response.data["unread_count"], 3)
 
     def test_mark_read(self):
         notification = Notification.objects.create(

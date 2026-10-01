@@ -1,8 +1,8 @@
 # core/views.py
 """
 NotificationViewSet + NotificationPreferenceView, moved here from
-liveclass/views.py (task 42) and generalized (tasks 45/46) now that
-Notification is a single shared table covering both liveclass and
+tuitionclass/views.py (task 42) and generalized (tasks 45/46) now that
+Notification is a single shared table covering both tuitionclass and
 message-app event types.
 
 SearchView (Task 18) is the unified "search everything" endpoint. It is
@@ -19,27 +19,36 @@ Endpoints (wired in core/urls.py, mounted under whatever prefix the root
 urlconf gives `core.urls` — see that file):
 
     GET    notifications/                 list, newest first
-                                           (?is_read=true/false, ?source=message|liveclass)
+                                           (?is_read=true/false, ?source=message|tuitionclass,
+                                            ?category=mentions|follows|classroom|tests|other)
     GET    notifications/{id}/            retrieve one
     DELETE notifications/{id}/            clear one (own only)
     GET    notifications/unread-count/    badge count for the bell icon
+                                           (?source=..., ?category=...)
     POST   notifications/{id}/mark-read/  mark one as read
     POST   notifications/mark-all-read/   mark every unread one as read
     GET/PATCH notification-preferences/me/   always the caller's own row
+    POST   notification-mutes/{user_id}/     N6-BE — mute that user's activity
+    DELETE notification-mutes/{user_id}/     N6-BE — unmute
     GET    search/                        Task 18 — unified cross-app search
                                            (?q=..., optional ?sources=a,b,c)
+    GET    notice-board/                  Task 12 — home-screen Notice Board
+                                           (?limit=&offset=), merges campus
+                                           notices + tuition-class notices
 """
 import logging
 
 from django.db.models import Q
 from django.utils import timezone
-from rest_framework import mixins, pagination, viewsets
+from rest_framework import mixins, pagination, status, viewsets
 from rest_framework.decorators import action
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
-from .models import Notification, NotificationPreference
+from login.models import User
+
+from .models import Notification, NotificationMute, NotificationPreference, OnboardingProgress
 from .search import search_everything
 from .serializers import NotificationPreferenceSerializer, NotificationSerializer
 
@@ -51,6 +60,22 @@ def _is_truthy(value) -> bool:
     — a bare `if request.query_params.get(...)` would treat "false" as
     truthy since it's a non-empty string."""
     return str(value).strip().lower() in ("1", "true", "yes", "on")
+
+
+def _minimal_user(user):
+    """Same shape as `campus.serializers.MinimalUserSerializer` — kept as
+    a plain dict here (not a real serializer) since `NoticeBoardView`
+    below builds its rows as plain dicts from two different apps'
+    models, not from one queryset a ModelSerializer could sit on top
+    of."""
+    if user is None:
+        return None
+    return {
+        "id": user.id,
+        "username": user.username,
+        "first_name": user.first_name,
+        "last_name": user.last_name,
+    }
 
 
 class NotificationPagination(pagination.LimitOffsetPagination):
@@ -94,29 +119,51 @@ class NotificationViewSet(
         if is_read is not None:
             qs = qs.filter(is_read=_is_truthy(is_read))
 
-        # task 46 — unified list, split-able by ?source=message|liveclass
+        # task 46 — unified list, split-able by ?source=message|tuitionclass
         # until Phase 5 (Posts/Follow/Like) joins this same system and the
         # split stops being a two-way one.
         source = self.request.query_params.get("source")
-        if source == "message":
-            qs = qs.filter(notif_type__in=Notification.MESSAGE_APP_TYPES)
-        elif source == "liveclass":
-            qs = qs.exclude(notif_type__in=Notification.MESSAGE_APP_TYPES)
+        qs = self._filter_by_source(qs, source)
 
+        # N3-BE — ?category=mentions|follows|classroom|tests|other. Same
+        # "unknown value is ignored" behaviour as ?source=, and it stacks
+        # with it (source AND category).
+        qs = Notification.filter_by_category(qs, self.request.query_params.get("category"))
+
+        return qs
+
+    @staticmethod
+    def _filter_by_source(qs, source):
+        """Shared by `get_queryset` and `unread_count` — same two-way
+        message/tuitionclass split, one place, so they can never drift out
+        of sync with each other."""
+        if source == "message":
+            return qs.filter(notif_type__in=Notification.MESSAGE_APP_TYPES)
+        elif source == "tuitionclass":
+            return qs.exclude(notif_type__in=Notification.MESSAGE_APP_TYPES)
         return qs
 
     @action(detail=False, methods=["get"], url_path="unread-count")
     def unread_count(self, request):
         # task 45 — single badge count for everyone, regardless of which
         # app produced the notification, since it's one shared table now.
-        count = Notification.objects.for_user(request.user).unread().count()
-        return Response({"unread_count": count})
+        #
+        # 🔥 FIX (settings/nav pass) — now accepts the same ?source=
+        # message|tuitionclass split as the list endpoint. The bell icon
+        # (home.dart) wants a tuitionclass-only count and the Chats tab
+        # wants a message-only count — previously this always returned
+        # the combined total, so the bell badge double-counted unread
+        # messages that were *also* shown as a badge on the Chats tab.
+        source = request.query_params.get("source")
+        qs = self._filter_by_source(Notification.objects.for_user(request.user).unread(), source)
+        qs = Notification.filter_by_category(qs, request.query_params.get("category"))
+        return Response({"unread_count": qs.count()})
 
     @action(detail=True, methods=["post"], url_path="mark-read")
     def mark_read(self, request, pk=None):
         notification = self.get_object()
         notification.mark_read()
-        return Response(NotificationSerializer(notification).data)
+        return Response(NotificationSerializer(notification, context=self.get_serializer_context()).data)
 
     @action(detail=False, methods=["post"], url_path="mark-all-read")
     def mark_all_read(self, request):
@@ -148,6 +195,35 @@ class NotificationPreferenceView(APIView):
         return Response(serializer.data)
 
 
+class NotificationMuteView(APIView):
+    """N6-BE — mute / unmute one account's notifications for the caller.
+    `user_id` in the URL is the user being muted; the muter is always
+    request.user, so nobody can create or remove anyone else's mutes.
+
+    POST   -> 201 (newly muted) / 200 (already muted); idempotent.
+    DELETE -> 204 whether or not a mute existed; idempotent.
+    Muting yourself is a 400. The muted user is never told (no
+    notification, no response difference on their side).
+    """
+
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, user_id):
+        if user_id == request.user.id:
+            return Response({"detail": "You can't mute yourself."}, status=status.HTTP_400_BAD_REQUEST)
+        if not User.objects.filter(id=user_id).exists():
+            return Response({"detail": "User not found."}, status=status.HTTP_404_NOT_FOUND)
+        _, created = NotificationMute.objects.get_or_create(user=request.user, muted_actor_id=user_id)
+        return Response(
+            {"muted": True, "user_id": user_id},
+            status=status.HTTP_201_CREATED if created else status.HTTP_200_OK,
+        )
+
+    def delete(self, request, user_id):
+        NotificationMute.objects.filter(user=request.user, muted_actor_id=user_id).delete()
+        return Response(status=status.HTTP_204_NO_CONTENT)
+
+
 class SearchView(APIView):
     """[Task 18] GET /core/search/?q=...&sources=assigments,testseries,...
 
@@ -168,10 +244,10 @@ class SearchView(APIView):
       - ✅ assigments — mirrors `assigmentsViewSet.get_queryset()`
         (assigments/views.py) exactly: staff see everything, everyone
         else only what they posted or a personal assigments they hold
-        a submission for. Campus/liveclass-sourced assigmentss are
+        a submission for. Campus/tuitionclass-sourced assigmentss are
         deliberately excluded here for non-staff too — that viewset
         already keeps them out (surfaced only through campus's/
-        liveclass's own thin-proxy viewsets, per that file's own
+        tuitionclass's own thin-proxy viewsets, per that file's own
         docstring), so this endpoint replicates that restriction
         rather than loosening it just because it's a search endpoint.
       - ✅ testseries — individual/published (marketplace) series, a
@@ -183,9 +259,9 @@ class SearchView(APIView):
         function's own docstring). This is reading the same table that
         bridge already treats as the source of truth, not inventing a
         new rule.
-        Liveclass-context series (`source="liveclass"`) are NOT
+        Tuitionclass-context series (`source="tuitionclass"`) are NOT
         included — no roster/entitlement resolver for testseries
-        exists on the liveclass side yet (`liveclass/bridge.py` only
+        exists on the tuitionclass side yet (`tuitionclass/bridge.py` only
         has assigments functions as of this pass). Those rows are
         simply absent from search results, never leaked; add a branch
         here once that resolver exists.
@@ -250,7 +326,7 @@ class SearchView(APIView):
         try:
             # --- assigments ------------------------------------------------
             # Mirrors assigmentsViewSet.get_queryset() (assigments/views.py)
-            # verbatim. See class docstring above for why campus/liveclass
+            # verbatim. See class docstring above for why campus/tuitionclass
             # sourced assigmentss stay excluded for non-staff here too.
             from assigments.models import assigments, assigmentsSource
 
@@ -268,7 +344,7 @@ class SearchView(APIView):
             # --- testseries --------------------------------------------------
             # individual/published + own-created + attempted + campus-context
             # series for sections the user is actively enrolled in. See class
-            # docstring above for the liveclass-context gap.
+            # docstring above for the tuitionclass-context gap.
             from testseries.models import TestSeries
             from campus.models import StudentEnrollment
 
@@ -375,3 +451,276 @@ class SearchView(APIView):
             return Response({"detail": str(exc)}, status=400)
 
         return Response({"results": results})
+
+
+class NoticeBoardView(APIView):
+    """
+    Task 12 — the home screen's "Notice Board" quick-action used to be a
+    bare `featureComingSoon` snackbar (see `home.dart`'s
+    `_buildQuickActionsGrid` comment) even though TWO real notice
+    features already exist — `campus.Notice` (campus/department/class/
+    section-scoped) and `tuitionclass.Notice` (per-classroom). Neither app
+    owns "the user's home-screen notice feed" on its own (a user can be
+    in campuses AND enrolled in classrooms at the same time), so — same
+    reasoning `core.search` already documents for cross-app aggregation
+    — that merge lives here in `core`, not in either app.
+
+    Pure read/merge layer, same posture as `core.search`'s golden rule
+    (see that module's docstring): this view never invents a new access
+    rule, it only unions two ALREADY permission-scoped querysets and
+    re-sorts them —
+      - campus notices: `campus.views.get_my_campus_ids(user)`, the
+        exact same centralized scoping function `SearchView`'s
+        `campus_notice` source above already reuses instead of
+        re-deriving.
+      - tuition-class notices: `tuitionclass.views._accessible_classroom_ids
+        (user)` — every classroom the user teaches/staffs OR has ever
+        held a successful pass for, the same set
+        `NoticeViewSet.get_queryset()` (tuitionclass/views.py) implicitly
+        relies on via `_can_view_classroom_internals`. Expired notices
+        (`expires_at` in the past) are excluded, same as that
+        viewset's own default (`include_expired` off).
+
+    GET core/notice-board/?limit=&offset=
+        -> {"count": <total merged>, "results": [ {...}, ... ]}
+
+    Each result (unified shape, both sources normalized into it):
+        id (str), source ("campus" | "tuition_class"), title, body,
+        is_pinned, created_at, posted_by {id, username, first_name,
+        last_name}, context_label (campus name / classroom title),
+        scope_label — campus rows only: "section"/"class"/
+        "department"/"campus" (mirrors `Notice.scopeLabel` already on
+        the Flutter side, `campus_models.dart`); always null for
+        tuition_class rows, which have no broader scope than "classroom".
+
+    Sorted pinned-first, then newest-first — same ordering
+    `NoticesScreen` (campus) and `NoticeViewSet` (tuitionclass) each
+    already apply within their own single source.
+    """
+
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        user = request.user
+        merged = []
+
+        try:
+            from campus.models import Notice as CampusNotice
+            from campus.views import get_my_campus_ids
+
+            campus_qs = CampusNotice.objects.filter(
+                campus_id__in=get_my_campus_ids(user)
+            ).select_related("posted_by", "campus")
+
+            for n in campus_qs:
+                if n.section_id:
+                    scope_label = "section"
+                elif n.school_class_id:
+                    scope_label = "class"
+                elif n.department_id:
+                    scope_label = "department"
+                else:
+                    scope_label = "campus"
+                merged.append({
+                    "id": str(n.id),
+                    "source": "campus",
+                    "title": n.title,
+                    "body": n.body,
+                    "is_pinned": bool(n.pin_until and n.pin_until > timezone.now()),
+                    "created_at": n.created_at,
+                    "posted_by": _minimal_user(n.posted_by),
+                    "context_label": n.campus.name,
+                    "scope_label": scope_label,
+                })
+        except Exception:
+            # One source failing must not take down the whole board —
+            # same degrade-not-crash posture SearchView above takes per
+            # source.
+            logger.exception("NoticeBoardView: skipping source %r (build failed).", "campus")
+
+        try:
+            from tuitionclass.models import Notice as TuitionClassNotice
+            from tuitionclass.views import _accessible_classroom_ids
+
+            live_qs = TuitionClassNotice.objects.filter(
+                classroom_id__in=_accessible_classroom_ids(user),
+            ).filter(
+                Q(expires_at__isnull=True) | Q(expires_at__gt=timezone.now())
+            ).select_related("posted_by", "classroom")
+
+            for n in live_qs:
+                merged.append({
+                    "id": str(n.id),
+                    "source": "tuition_class",
+                    "title": n.title,
+                    "body": n.message,
+                    "is_pinned": n.is_pinned,
+                    "created_at": n.created_at,
+                    "posted_by": _minimal_user(n.posted_by),
+                    "context_label": n.classroom.title,
+                    "scope_label": None,
+                })
+        except Exception:
+            logger.exception("NoticeBoardView: skipping source %r (build failed).", "tuition_class")
+
+        merged.sort(key=lambda item: (item["is_pinned"], item["created_at"]), reverse=True)
+
+        try:
+            limit = min(max(int(request.query_params.get("limit", 30)), 1), 100)
+        except (TypeError, ValueError):
+            limit = 30
+        try:
+            offset = max(int(request.query_params.get("offset", 0)), 0)
+        except (TypeError, ValueError):
+            offset = 0
+
+        page = merged[offset: offset + limit]
+        return Response({"count": len(merged), "results": page})
+
+# ============================================================
+# TASK G18 (growth_and_feature_tasks.md — Empty states & first-time-user
+# onboarding).
+#
+# A brand-new user with zero follows/campus/tests sees mostly blank
+# screens today. `OnboardingSuggestionsView` powers the 3-step flow the
+# Flutter side runs right after signup (see `onboarding/onboarding_screen
+# .dart`): pick interests (already served by `post.UserInterestsAPIView`
+# — TASK 3, this view does NOT duplicate that), suggested people +
+# campuses to look at, and one sample test to try.
+#
+# Same cross-app posture as `SearchView`/`NoticeBoardView` above: this
+# is a pure read layer over each app's own models, built here because
+# no single owning app should have to know about the other three just
+# to answer "what should a new user see first" — it never invents a
+# new access rule, and every suggestion is something the user could
+# already reach through that app's normal screens.
+# ============================================================
+class OnboardingSuggestionsView(APIView):
+    """GET core/onboarding/suggestions/
+
+    Returns:
+        {
+          "suggested_users": [{id, username, first_name, last_name,
+                                profile_photo}, ...],   # up to 8, not
+                                                          # already followed,
+                                                          # self excluded
+          "suggested_campuses": [{id, name, type}, ...], # up to 5,
+                                                           # approved + active
+          "sample_test_series": [<PublicSeriesSerializer row>, ...]  # up
+                                                           # to 3, free,
+                                                           # published,
+                                                           # highest-rated
+        }
+
+    Suggested users are ranked by `followers_count` (a simple, existing
+    denormalized popularity signal — same field `user_profile` already
+    maintains, see login.User's own field docstring) among users this
+    caller doesn't already follow. When the caller has picked interests
+    already (`post.UserInterest` — this endpoint is meant to run AFTER
+    that step, but doesn't require it), users who've posted in one of
+    those categories are boosted to the front instead of pure
+    popularity, so "suggested people" actually reflects what the user
+    just said they care about.
+    """
+
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        user = request.user
+
+        suggested_users = self._suggested_users(user)
+        suggested_campuses = self._suggested_campuses()
+        sample_test_series = self._sample_test_series()
+
+        return Response(
+            {
+                "suggested_users": suggested_users,
+                "suggested_campuses": suggested_campuses,
+                "sample_test_series": sample_test_series,
+            }
+        )
+
+    def _suggested_users(self, user, limit: int = 8):
+        # P8-BE — the ranking/exclusion rules moved to user_profile.discovery so this
+        # view and GET profile/<username>/similar/ can never drift apart. Behaviour
+        # change vs. the old inline version: blocked users (either direction) and users
+        # the caller restricted are no longer suggested, and the "posted in my interests"
+        # boost only counts public, approved, non-deleted posts.
+        from user_profile.discovery import suggested_users_queryset
+        from user_profile.serializers import UserSearchSerializer
+
+        return UserSearchSerializer(suggested_users_queryset(user)[:limit], many=True).data
+
+    def _suggested_campuses(self, limit: int = 5):
+        try:
+            from campus.models import Campus
+        except Exception:  # pragma: no cover — campus app not installed
+            return []
+
+        campuses = Campus.objects.filter(
+            is_active=True, verification_status=Campus.VerificationStatus.APPROVED
+        ).order_by("-created_at")[:limit]
+
+        return [{"id": c.id, "name": c.name, "type": c.type} for c in campuses]
+
+    def _sample_test_series(self, limit: int = 3):
+        try:
+            from django.db.models import Count, F
+
+            from testseries.models import TestSeries
+            from testseries.serializers import PublicSeriesSerializer
+        except Exception:  # pragma: no cover — testseries app not installed
+            return []
+
+        # `.with_rating()` (Task G9, testseries/models.py) — DB-level
+        # subquery annotation, same reasoning that method's own
+        # docstring gives for why sorting on the `avg_rating` PROPERTY
+        # directly (one query per row, and un-sortable at the DB level
+        # in the first place) isn't an option here.
+        series = (
+            TestSeries.objects.filter(status=TestSeries.Status.PUBLISHED, price_coins=0)
+            .exclude(source=TestSeries.Source.CAMPUS)
+            .select_related("creator")
+            .annotate(q_count=Count("questions", distinct=True))
+            .with_rating()
+            .order_by(F("rating").desc(nulls_last=True), "-id")[:limit]
+        )
+
+        return PublicSeriesSerializer(series, many=True).data
+
+
+class OnboardingCompleteView(APIView):
+    """POST core/onboarding/complete/   body: {"skipped": false}  (optional,
+    default false)
+
+    Marks the caller's onboarding flow as finished — either genuinely
+    completed (tapped "Finish" on the last step) or explicitly skipped
+    (tapped "Skip" at any point). Either way, the Flutter side (see
+    `main.dart`'s post-signup navigation, `signup_screen.dart` /
+    `complete_profile_screen.dart`) won't route back into the flow for
+    this user again.
+
+    GET is also supported, returning the caller's current state — used
+    by the Flutter side to decide whether to show the flow at all for a
+    user who's already been through it on another device.
+    """
+
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        progress = OnboardingProgress.objects.filter(user=request.user).first()
+        return Response(
+            {
+                "completed": bool(progress and progress.completed),
+                "skipped": bool(progress and progress.skipped),
+            }
+        )
+
+    def post(self, request):
+        skipped = bool(request.data.get("skipped", False))
+        progress, _ = OnboardingProgress.objects.get_or_create(user=request.user)
+        progress.completed = not skipped
+        progress.skipped = skipped
+        progress.completed_at = timezone.now()
+        progress.save(update_fields=["completed", "skipped", "completed_at"])
+        return Response({"completed": progress.completed, "skipped": progress.skipped})

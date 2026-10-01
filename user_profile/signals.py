@@ -59,7 +59,7 @@ from django.db.models.functions import Coalesce
 from django.db.models.signals import post_delete, post_save, pre_delete, pre_save
 from django.dispatch import Signal, receiver
 
-from .models import Follow
+from .models import Follow, Streak
 
 logger = logging.getLogger(__name__)
 
@@ -202,3 +202,138 @@ def _user_post_delete(sender, instance, **kwargs):
     others = getattr(instance, "_follow_recount_ids", None)
     if others:
         _schedule_recount(others)
+
+
+# ---------------------------------------------------------------------------
+# Mutual-follow -> auto-create conversation
+# ---------------------------------------------------------------------------
+# When A follows B AND B follows A (both rows ACCEPTED), the two should get
+# an empty conversation/thread in their inbox — WITHOUT either side sending a
+# real message. This can become true from either direction's save():
+#   - a brand-new Follow row created directly ACCEPTED (public account,
+#     instant follow) — `_follow_saved` above already returns early for a
+#     new PENDING row, but a new ACCEPTED row still reaches this receiver;
+#   - `AcceptFollowRequestView` flipping a PENDING row to ACCEPTED (private
+#     account, request accepted).
+# Kept as its own receiver (not folded into `_follow_saved`) because it is a
+# completely different concern (cross-app side effect vs. this user's own
+# denormalized counters) with its own dependency on `message.services` —
+# mixing the two would make `_follow_saved` harder to reason about and tie
+# the counter logic to message/ needlessly.
+def _maybe_link_mutual_conversation(follower_id, following_id):
+    """If `follower_id` <-> `following_id` now mutually follow each other
+    (both directions ACCEPTED), get-or-create their private conversation.
+    Idempotent — safe to call more than once for the same pair (called both
+    inline and again via `on_commit`, same as `_schedule_recount` does for
+    counts, and `message.services.get_or_create_conversation` itself is
+    race-safe via `Conversation.get_or_create_private`'s unique constraint)."""
+    if follower_id == following_id or follower_id is None or following_id is None:
+        return
+    reverse_exists = Follow.objects.filter(
+        follower_id=following_id,
+        following_id=follower_id,
+        status=Follow.Status.ACCEPTED,
+    ).exists()
+    if not reverse_exists:
+        return
+    # Lazy import — same reason as the `core` imports in views.py: user_profile
+    # must not hard-depend on message/ at module-import time.
+    from message.services import get_or_create_conversation
+    get_or_create_conversation(follower_id, following_id)
+
+
+@receiver(post_save, sender=Follow, dispatch_uid="user_profile.follow_saved_mutual_conversation")
+def _follow_saved_mutual_conversation(sender, instance, created, raw=False, **kwargs):
+    if raw or instance.status != Follow.Status.ACCEPTED:
+        return
+    follower_id, following_id = instance.follower_id, instance.following_id
+
+    def _check():
+        _maybe_link_mutual_conversation(follower_id, following_id)
+
+    # Same dual-invocation reasoning as `_schedule_recount`: run once now
+    # (so TestCase-based tests, where `on_commit` never fires, still see the
+    # conversation), and again after commit (the authoritative check — a
+    # concurrent transaction creating the reverse row at the same moment
+    # could otherwise be missed by both sides' pre-commit snapshot).
+    _check()
+    if transaction.get_connection().in_atomic_block:
+        transaction.on_commit(_check)
+
+
+# ---------------------------------------------------------------------------
+# P13-BE — Achievements / badges (event-driven rules)
+#
+# Streak (7/30), first test completed and teacher-verified are all awarded
+# from here the moment the underlying row is written. The remaining rule —
+# top-10 weekly leaderboard — only makes sense once a week is over, so it is
+# a Celery task (tasks.award_weekly_leaderboard_badges).
+#
+# Every award is deferred with transaction.on_commit() when inside a
+# transaction, so a rolled-back streak/attempt never leaves a badge behind.
+# award_badge() is idempotent, so a repeat firing is harmless. In
+# TestCase-based tests on_commit callbacks only run under
+# `self.captureOnCommitCallbacks(execute=True)`.
+# ---------------------------------------------------------------------------
+def _run_after_commit(fn):
+    if transaction.get_connection().in_atomic_block:
+        transaction.on_commit(fn)
+    else:
+        fn()
+
+
+@receiver(post_save, sender=Streak, dispatch_uid="user_profile.streak_saved_badges")
+def _streak_badges(sender, instance, raw=False, **kwargs):
+    if raw:
+        return
+    streak_days, user_id = instance.current_streak, instance.user_id
+    if streak_days < 7:
+        return
+
+    def _award():
+        from .services import award_badge
+
+        award_badge(user_id, "streak_7", context={"streak_days": streak_days})
+        if streak_days >= 30:
+            award_badge(user_id, "streak_30", context={"streak_days": streak_days})
+
+    _run_after_commit(_award)
+
+
+# String sender: user_profile must not import testseries at load time (same
+# lazy-dependency rule as the `message.services` import above); Django
+# resolves "app_label.Model" the moment that model class is loaded.
+@receiver(post_save, sender="testseries.TestAttempt", dispatch_uid="user_profile.attempt_saved_first_test_badge")
+def _first_test_badge(sender, instance, raw=False, **kwargs):
+    if raw:
+        return
+    from testseries.models import TestAttempt
+
+    # "Completed" = fully checked, the same state leaderboard/ treats as a
+    # settled attempt (an in-progress / partially-checked one doesn't count).
+    if instance.status != TestAttempt.Status.CHECKED:
+        return
+    student_id = instance.student_id
+
+    def _award():
+        from .services import award_badge
+
+        award_badge(student_id, "first_test", context={"attempt_id": str(instance.pk)})
+
+    _run_after_commit(_award)
+
+
+@receiver(post_save, sender=get_user_model(), dispatch_uid="user_profile.user_saved_teacher_verified_badge")
+def _teacher_verified_badge(sender, instance, raw=False, update_fields=None, **kwargs):
+    if raw:
+        return
+    from .services import award_badge, teacher_verified_field
+
+    field = teacher_verified_field()
+    # Cheap exits first: this fires on EVERY user save (last_login etc.).
+    if update_fields is not None and field not in update_fields:
+        return
+    if not getattr(instance, field, False):
+        return
+    user_id = instance.pk
+    _run_after_commit(lambda: award_badge(user_id, "teacher_verified"))

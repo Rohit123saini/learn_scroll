@@ -9,7 +9,7 @@
 
 
 ### TASK 38 — Add `MIN_WITHDRAWAL_COINS` floor, `reviewed_by`, INR-conversion snapshot to `CoinWithdrawalRequest`
-Deliberately deferred; `liveclass.CoinWithdrawal` already has all three. Add once an admin-facing withdrawal review UI is built.
+Deliberately deferred; `tuitionclass.CoinWithdrawal` already has all three. Add once an admin-facing withdrawal review UI is built.
 **Files:** `user_profile/models.py`, migration
 
 

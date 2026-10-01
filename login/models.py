@@ -73,7 +73,8 @@ from datetime import timedelta
 
 from django.contrib.auth.hashers import check_password, make_password
 from django.contrib.auth.models import AbstractUser
-from django.core.validators import RegexValidator
+from django.core.exceptions import ValidationError
+from django.core.validators import RegexValidator, URLValidator
 from django.db import models
 from django.db.models.signals import post_delete, pre_save
 from django.dispatch import receiver
@@ -83,6 +84,67 @@ phone_validator = RegexValidator(
     regex=r"^\+?[1-9]\d{7,14}$",
     message="Enter a valid phone number in international format, e.g. +919876543210.",
 )
+
+
+# ---------------------------------------------------------------------------
+# P6-BE — bio upgrade: `links`
+# One helper does both jobs: it VALIDATES and returns the CLEANED list, so the
+# model-field validator (admin / full_clean) and the API serializer
+# (user_profile.serializers.ProfileUpdateSerializer) can never disagree about
+# what a valid link list is. Referenced by name from the migration, so keep it
+# at module level and don't rename it.
+# ---------------------------------------------------------------------------
+MAX_PROFILE_LINKS = 3
+PROFILE_LINK_TITLE_MAX = 40
+PROFILE_LINK_URL_MAX = 200
+
+# http/https ONLY — rejects javascript:, data:, ftp:, file:, etc. (stored XSS via
+# a tappable profile link is the whole reason this is not just a CharField).
+_link_url_validator = URLValidator(schemes=["http", "https"])
+
+
+def clean_profile_links(value):
+    """Validate `User.links` and return it normalised as [{"title", "url"}, ...].
+
+    Rules: a list of at most MAX_PROFILE_LINKS objects, each with a non-empty
+    `title` (<= 40 chars) and an absolute http(s) `url` (<= 200 chars). Extra keys
+    are dropped. Raises django.core.exceptions.ValidationError otherwise.
+    """
+    if value is None:
+        return []
+    if not isinstance(value, list):
+        raise ValidationError("links must be a list of {title, url} objects.")
+    if len(value) > MAX_PROFILE_LINKS:
+        raise ValidationError(f"You can add at most {MAX_PROFILE_LINKS} links.")
+
+    cleaned = []
+    for i, item in enumerate(value, start=1):
+        if not isinstance(item, dict):
+            raise ValidationError(f"Link {i}: must be an object like {{\"title\": ..., \"url\": ...}}.")
+        title = item.get("title")
+        url = item.get("url")
+        if not isinstance(title, str) or not isinstance(url, str):
+            raise ValidationError(f"Link {i}: title and url must both be text.")
+        title, url = title.strip(), url.strip()
+        if not title:
+            raise ValidationError(f"Link {i}: title is required.")
+        if len(title) > PROFILE_LINK_TITLE_MAX:
+            raise ValidationError(f"Link {i}: title can be at most {PROFILE_LINK_TITLE_MAX} characters.")
+        if not url:
+            raise ValidationError(f"Link {i}: url is required.")
+        if len(url) > PROFILE_LINK_URL_MAX:
+            raise ValidationError(f"Link {i}: url can be at most {PROFILE_LINK_URL_MAX} characters.")
+        try:
+            _link_url_validator(url)
+        except ValidationError:
+            raise ValidationError(f"Link {i}: enter a valid http:// or https:// URL.")
+        cleaned.append({"title": title, "url": url})
+    return cleaned
+
+
+def validate_profile_links(value):
+    """Model-field validator wrapper (validators only need to raise, not return)."""
+    clean_profile_links(value)
 
 
 class User(AbstractUser):
@@ -107,6 +169,14 @@ class User(AbstractUser):
     )
 
     bio = models.TextField(blank=True)
+
+    # P6-BE — bio upgrade. All optional; blank/[] means "not set".
+    pronouns = models.CharField(max_length=30, blank=True, default="")
+    # Free-text label under the name, e.g. "Teacher", "JEE Aspirant".
+    category_label = models.CharField(max_length=40, blank=True, default="")
+    # Up to 3 {"title": str, "url": http(s) str}. Validated by
+    # clean_profile_links() above; the API also normalises through it.
+    links = models.JSONField(default=list, blank=True, validators=[validate_profile_links])
 
     is_private = models.BooleanField(default=False)
 
@@ -232,3 +302,69 @@ class OTPVerification(models.Model):
 
     def __str__(self):
         return f"{self.target} - OTP (hashed, attempts={self.attempts})"
+
+
+class AuthToken(models.Model):
+    """
+    Sliding-expiry session record — the one piece of server-side state
+    that sits on top of SimpleJWT's otherwise-stateless tokens (see
+    login/authentication.py for the full picture).
+
+    SimpleJWT's access/refresh tokens carry their own fixed lifetime
+    baked in at mint time (SIMPLE_JWT["ACCESS_TOKEN_LIFETIME"] /
+    ["REFRESH_TOKEN_LIFETIME"] in settings.py) — there's no way to
+    extend "how long until THIS token dies" after the fact, and no
+    notion of "still active, so keep it alive". Product wants exactly
+    that: a session should only die after SLIDING_EXPIRY of true
+    inactivity, extended on every authenticated request the user makes
+    — no separate refresh-token call required.
+
+    One row per issued refresh token (login/signup/Google-auth/OTP-login
+    all go through login.token_issuance.issue_tokens_for_user, which
+    creates this row and copies `jti` onto the access token as a
+    `session_jti` claim, so SlidingSessionAuthentication can find this
+    row from the access token alone on every request).
+    """
+
+    user = models.ForeignKey(User, on_delete=models.CASCADE, related_name="auth_tokens")
+
+    # The refresh token's own `jti` claim (SimpleJWT already generates a
+    # random unique one per token) — reused as the session identifier
+    # rather than minting a second random value. Copied onto every
+    # access token derived from that refresh token as a `session_jti`
+    # claim; see token_issuance.py.
+    jti = models.CharField(max_length=64, unique=True, db_index=True)
+
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    # Deliberately NOT auto_now — this only moves when
+    # SlidingSessionAuthentication.touch() explicitly renews it (or at
+    # creation, see token_issuance.py), never as a side-effect of some
+    # unrelated .save() call elsewhere touching this row.
+    last_used_at = models.DateTimeField(db_index=True)
+
+    # Product requirement: 10 days of zero activity -> session dies.
+    SLIDING_EXPIRY = timedelta(days=10)
+
+    class Meta:
+        indexes = [
+            # Supports a future periodic-cleanup job ("delete rows nobody
+            # will ever touch again") — same reasoning as the created_at
+            # index on OTPVerification above. Nothing queries by
+            # last_used_at directly today (is_expired() is evaluated
+            # per-row inside the request that already looked the row up
+            # by jti), so this is forward-looking, not load-bearing yet.
+            models.Index(fields=["last_used_at"]),
+        ]
+
+    def is_expired(self) -> bool:
+        return timezone.now() - self.last_used_at > self.SLIDING_EXPIRY
+
+    def touch(self) -> None:
+        """Silent renew — called by SlidingSessionAuthentication on every
+        authenticated request that passes the expiry check."""
+        self.last_used_at = timezone.now()
+        self.save(update_fields=["last_used_at"])
+
+    def __str__(self):
+        return f"session user_id={self.user_id} jti={self.jti[:8]}..."

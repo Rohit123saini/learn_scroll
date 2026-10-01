@@ -17,11 +17,14 @@ class QuestionInline(admin.TabularInline):
 @admin.register(TestSeries)
 class TestSeriesAdmin(admin.ModelAdmin):
     list_display = [
-        "title", "source", "delivery_mode", "creator", "is_paid", "price_coins", "status",
-        "certificate_enabled", "total_marks", "created_at",
+        "title", "source", "subject", "difficulty", "delivery_mode", "creator", "is_paid", "price_coins",
+        "status", "certificate_enabled", "total_marks", "created_at",
     ]
-    list_filter = ["source", "status", "is_paid", "delivery_mode", "proctoring", "certificate_enabled"]
-    search_fields = ["title", "creator__username", "creator__email", "share_slug"]
+    list_filter = [
+        "source", "status", "is_paid", "delivery_mode", "proctoring", "certificate_enabled",
+        "subject", "difficulty",
+    ]
+    search_fields = ["title", "subject", "creator__username", "creator__email", "share_slug"]
     readonly_fields = ["total_marks", "share_slug", "results_released_at", "created_at", "updated_at"]
     inlines = [QuestionInline]
 

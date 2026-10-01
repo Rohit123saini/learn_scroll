@@ -2833,7 +2833,7 @@ if settings.SERVE_MEDIA_VIA_DJANGO:
 | GET | `/post/list/` | `PostListAPIView` | ✅ | List my posts, or `?target_user_id=` another user's (respects privacy/follow) |
 | GET | `/post/details/<uuid:id>/` | `PostDetailAPIView` | ✅ | Single post + first 10 top-level comments + view tracking |
 | DELETE | `/post/<uuid:id>/delete/` | `PostDeleteAPIView` | ✅ | Soft-delete own post (or staff) — see §16.4 |
-| GET | `/post/feed/` | `HomeFeedView` | ✅ | Home feed (following-first, trending fallback) |
+| GET | `/post/feed/` | `HomeFeedView` | ✅ | Home feed: 60/30/10 following/recommended/trending mix, seen-aware, `seen_cutoff` paging (see §13.2) |
 | POST/GET | `/post/like/<uuid:post_id>/reaction/` | `PostReactionAPIView` | POST ✅ / GET public | Toggle a 5-type reaction / get counts |
 | POST | `/post/<uuid:post_id>/save/` | `PostSaveToggleAPIView` | ✅ | Save/unsave toggle |
 | GET | `/post/saved/` | `SavedPostsListAPIView` | ✅ | My saved posts, optional `?collection_name=` |
@@ -4059,31 +4059,64 @@ notifies every `ACCEPTED` follower of the post's author once the
 create transaction commits. Off the request path, same as the
 thumbnail fan-out above; see §22 for the full writeup.
 
-### 13.2 Home Feed algorithm (`GET /post/feed/`)
+### 13.2 Home Feed algorithm (`GET /post/feed/`) — discovery mix + seen-logic
+All logic lives in `post/feed_mix.py`; `HomeFeedView.list()` only wires it to HTTP.
 ```
-Get IDs of accounts I follow (ACCEPTED only)
+following ids (ACCEPTED)      seen ids (PostView, window/cap, <= seen_cutoff)
+        │                                  │
+        ▼                                  ▼
+ build_pool_ids()  ── three ordered id lists, seen handled BEFORE the caps ──
+   following    order: -is_recent, is_seen, -score, -created_at, -id
+                (seen posts pushed DOWN, never removed)
+   trending     public, non-followed, last 7d, velocity x2 — seen EXCLUDED
+   recommended  interests / liked categories / friends-of-following / quality
+                — seen EXCLUDED; excludes trending ids
+   thin pool?   trending / recommended < fill_min after exclusion
+                → topped up with seen posts (unseen first) = last resort
         │
-   any following?
-   │              │
-  yes              no
-   │                │
-   ▼                ▼
-Posts from people   Posts from EVERYONE (public only),
-I follow, last 7     last 7 days, ranked by:
-days prioritized,     likes×3 + comments×5 + shares×10
-ranked by:            → "trending" fallback feed
-is_recent(1st),
-likes×3+comments×5+shares×10+views×0.1
-   │
-   any results?
-   │           │
-  yes           no
-   │             │
-   ▼             ▼
-return them   fall through to trending-everyone feed (same as "no" branch above)
+        ▼
+ allocate_page()  60/30/10 quotas (FEED_MIX_RATIOS); a dry pool hands its
+                  slots to the others → feed is never empty
+        │
+        ▼
+ interleave()     spread evenly, response = {count, next, previous, results}
+                  (+ per-post `feed_source`)
 ```
 Always excludes: your own posts, soft-deleted, non-approved moderation
-status, and `is_sensitive=True` posts.
+status, `is_sensitive=True` posts, blocked/blocking authors.
+`?source=following` = following-first tab (ratios `{following: 1.0}`, discovery
+only as last-resort fill) — same seen-logic and same paging behaviour.
+
+**"Seen" definition** — a `PostView` row for (user, post): created by the batch
+`POST /post/feed/seen/` (`is_counted=False`, never bumps `views_count`) or by
+opening the post (`GET /post/details/<id>/`, counts once).
+`get_seen_post_ids(user, window_days, cap, until)` returns the most recently
+seen ids (default: last 30 days, max 2000).
+
+**Paging stability (`seen_cutoff`)** — pools are rebuilt on every request, so
+seen marks made *while scrolling* would shrink/reorder them and shift page 2+.
+Page 1 fixes `seen_cutoff` (= now, UTC, e.g. `2026-09-29T12:00:00.123456Z`);
+`next`/`previous` carry it together with `source`/`page_size`. Only
+`PostView.viewed_at <= seen_cutoff` counts as seen for that session; newer
+marks apply from the next page-1 request. Missing / invalid / future / stale
+(`cutoff_max_age_minutes`) cutoff = new session. Clients never build it.
+
+**Settings** (`LearnScroll/settings.py`; omitted keys fall back to
+`DEFAULT_SEEN_LIMITS` in `feed_mix.py`):
+
+| `FEED_SEEN_LIMITS` key | Default | Env | Meaning |
+|---|---|---|---|
+| `enabled` | `True` | `FEED_SEEN_ENABLED` (`0`/`1`) | master switch; off = feed ignores seen entirely |
+| `window_days` | `30` | `FEED_SEEN_WINDOW_DAYS` | look-back window (`<= 0` = off) |
+| `cap` | `2000` | `FEED_SEEN_CAP` | max most-recent seen ids per request (`<= 0` = off) |
+| `fill_min` | `20` | – | recommended/trending pool smaller than this after excluding seen → seen top-up |
+| `cutoff_max_age_minutes` | `180` | – | older `seen_cutoff` = new session |
+
+Pool caps/windows/ratios stay in `FEED_MIX_LIMITS` / `FEED_MIX_RATIOS`.
+
+**Tests:** `HomeFeedSeenTests` (`tests_feed_mix.py`, HTTP level),
+`tests_feed_mix_seen.py` (helper, pools, cutoff, paging stability, switch),
+`tests_feed_seen.py` (the `seen` endpoint itself).
 
 ### 13.3 Post Detail + View Tracking (`GET /post/details/<id>/`)
 ```
@@ -5215,3 +5248,248 @@ re-upload until the deploy pipeline (or CI) actually enforces
 lowercase filenames for this app.
 
 ---
+
+---
+
+## 27. Addendum 12 — Repost feature (Instagram/Twitter-style)
+
+**Model** (`models.py`, already present): `Post.original_post` (self-FK, `SET_NULL`, `related_name='reposts'`), `Post.repost_caption` (optional), `Post.reposts_count` (denormalised, kept by the `update_reposts_count` signal), `post_type='repost'`. A repost is a real `Post` row, so feeds/likes/comments/delete/`posts_count` need no special casing.
+
+**Migration**: `0003_post_repost.py` — this was the missing piece (the columns existed only in `models.py`).
+
+**Endpoint**: `POST /post/<uuid:post_id>/repost/` → `PostRepostAPIView`. Body optional: `{"repost_caption": "..."}` (≤500 chars; empty/blank = quick repost). Returns `201 {success, data: <PostListSerializer of the new repost>, original: {id, reposts_count, is_reposted_by_me}}`. Errors: 404 (deleted / unapproved / scheduled), 403 (not public, private account not followed, blocked), 400 (caption too long).
+
+**Policy**: chains are flattened to the root original; duplicates (same user, same original) are allowed but `_without_superseded_reposts` (views.py) shows only the latest in HomeFeed / user post list / Explore; undo = existing `DELETE /post/<repost_id>/delete/`. `PostCreateSerializer` rejects `post_type='repost'`.
+
+**Serializer**: `PostListSerializer` gains `get_original_post` (one level, `_repost_nested` context guard; returns `{id, is_unavailable: true}` when the viewer can't see the original) and `get_is_reposted_by_me`. Feed querysets now `select_related('original_post__user')` / `prefetch_related('original_post__media')`.
+
+**Not done (deliberately)**: no notification to the original author on repost; home-feed ranking is unchanged, so a fresh repost (0 engagement) sorts by the existing score like any other new post.
+
+---
+
+## 28. Addendum 13 — Post-create category bug fix
+
+**Root causes (two, both in the create flow):**
+
+1. `GET /post/categories/` returned `categories=[{value,label}]`, `subcategories={cat: []}` (a dict) and no `category_subcategory_map`. Both composers read `c['key']` (which became the string "null", and quick_post then POSTed it as `category`) and `List.from(data['subcategories'])` (a TypeError on a dict, so new_post's picker ended up empty). It now returns `categories=[{key,value,label}]`, `subcategories=[]`, `category_subcategory_map={cat: []}`, and `api_service.dart` also normalises the response defensively.
+2. `PostCreateAPIView` called `serializer.save(user=request.user)` while `PostCreateSerializer.create()` also passed `user=` explicitly, raising a TypeError on EVERY non-chunked create, which the view's blanket `except` turned into the generic 500 "Failed to create post". `create()` now drops the duplicate.
+
+**Validation:** `CategoryField` / `normalize_category` (serializers.py) accept the key case-insensitively (or the label) and reject anything else with 400 + `errors.category` + a readable top-level `message`. The chunked path (`post_chunked_upload_init`) used to store any string unvalidated; it now uses the same rule, and also carries `subcategory` through to the final Post.
+
+
+
+---
+
+## Addendum — Home feed Discovery Mix (Part 1: backend)
+
+`GET /post/feed/` ab **following-only nahi** hai. Har page 3 sources ka mix hai
+(default 60% following / 30% recommended / 10% trending), `settings.FEED_MIX_RATIOS`
+ (env `FEED_MIX_RATIOS="60,30,10"`) se tune hota hai.
+
+- Naya module `post/feed_mix.py`: pure logic (`compute_quotas`, `allocate_page`, `interleave`)
+  + DB pool builders (`build_pool_ids`). Pools disjoint hain; agar koi pool khaali ho
+  (naya user, follows ne post nahi kiya) to uske slots baaki pools se bhar jaate hain.
+- `HomeFeedView.list()` rewrite: response shape same (`count/next/previous/results`),
+  har post pe naya `feed_source` = `following|recommended|trending`.
+  `?source=following` = following-first tab (discovery sirf fallback).
+- Recommended signals: explicit interests (+15), pichle 30 din me react ki hui category (+10),
+  friend-of-following author (+12), engagement/video/freshness. Blocked users dono taraf hide.
+- Tests: `post/tests_feed_mix.py`.
+
+### Part 2 (Flutter) — done
+- `PostModel.feedSource` (`feed_source`) -> card pe "Suggested for you" (`recommended`) /
+  "Trending" (`trending`) strip; `following` / null pe koi badge nahi (`home.dart`, `_buildFeedSourceBadge`).
+- Home me "For you" (mixed, default) aur "Following" (`?source=following`) tabs (`_buildFeedTabs`).
+- Feed cache ab source ke hisaab se: `cached_feed_raw_v3_mixed` / `cached_feed_raw_v3_following`
+  (purani `cached_feed_raw_v2` key hata di gayi). Details: `lib/HOME_MODULE.md` §6.2 / §7.
+
+### App side — feed "seen" hook (short note for the mobile client)
+
+1. **Load the feed** with `GET /post/feed/?page_size=20`. For page 2+ **follow the `next` URL as-is** (it carries `seen_cutoff`, `source`, `page_size`). Never build or edit `seen_cutoff` yourself; on pull-to-refresh start again from the plain URL (= new session).
+2. **On scroll**, collect ids of cards that were really visible (e.g. >= 50% of the card for >= 1 s, once per id per session) and send them as a **batch**:
+   `POST /post/feed/seen/` body `{"post_ids": ["<uuid>", ...]}` → `{"success": true, "accepted": N}`.
+3. **When to flush:** every ~10 collected ids or ~5 s (whichever first), max **50 ids per call** (400 above that), and once when the feed screen goes to background/dispose. Fire-and-forget: ignore failures, never block scrolling; the endpoint is idempotent, so retries are safe.
+4. **Do not** call `GET /post/details/<id>/` just to mark a post seen — that bumps `views_count`. Really opening a post still works as before and also counts as seen.
+5. Don't hide or re-order "seen" cards locally; the server handles it from the next session on. Both tabs (mixed / `source=following`) use the same hook.
+
+```dart
+// sketch (Dart)
+final _pending = <String>{};
+final _sentThisSession = <String>{};
+void onCardVisible(String postId) {
+  if (_sentThisSession.add(postId)) _pending.add(postId);
+  if (_pending.length >= 10) _flush();
+}
+Future<void> _flush() async {
+  if (_pending.isEmpty) return;
+  final ids = _pending.take(50).toList();
+  _pending.removeAll(ids);
+  try { await api.post('/post/feed/seen/', {'post_ids': ids}); } catch (_) {/* best effort */}
+}
+// + Timer.periodic(5s, _flush) and _flush() on AppLifecycleState.paused / dispose
+```
+
+
+## Addendum — Cursor pagination (Part 1 of 2)
+
+`/post/explore/` and `/post/hashtag/<tag>/` now use `EngagementCursorPagination`
+(`common/pagination.py`): keyset pagination on `(-engagement_score, -created_at, -id)`.
+Query params: `cursor` (opaque, from `next`) + `page_size`. Response: `{next, previous: null, results}`
+- no `count`, no `page`. Details, limits and the Part 2 (Redis snapshot for HomeFeedView) plan:
+`post/CURSOR_PAGINATION_TASK.md`. Tests: `post/tests_cursor_pagination.py`.
+
+
+## Addendum — Cursor pagination (Part 2 of 2): Home feed snapshot
+
+`GET /post/feed/` now ranks once per scrolling session, freezes the ordered id pools in the cache
+(Redis via `REDIS_URL`) and pages with an opaque `cursor` (`post/feed_snapshot.py`,
+`feed_mix.allocate_next`). Response `{count, next, previous: null, results}`; follow `next`. Old
+`?page=N` (N>1) still works (legacy path); `FEED_SNAPSHOT_ENABLED=0` restores offset paging. Snapshot miss
+-> rebuild with the cursor's `seen_cutoff` + stored offsets (no 500). Tests: `post/tests_feed_snapshot.py`.
+Full description: `post/CURSOR_PAGINATION_TASK.md`.
+
+
+## Addendum - Feed feedback controls (Part 1 of 2): Not interested + Mute account
+
+New models `PostHide` and `MutedAccount` (migration `0003`), endpoints `POST/DELETE /post/<id>/not-interested/`,
+`GET /post/not-interested/`, `GET/POST /post/muted-accounts/`, `DELETE /post/muted-accounts/<user_id>/`.
+Home (all pools + frozen snapshot), Explore and Hashtag feeds exclude hidden posts / muted accounts through
+`post.services.exclude_hidden_and_muted`. Part 2 ("Show fewer like this", "Why am I seeing this") is described in the next addendum.
+Details: `post/FEED_FEEDBACK_CONTROLS_TASK.md`. Tests: `post/tests_feed_feedback.py`.
+
+
+## Addendum - Feed feedback controls (Part 2 of 2): Show fewer like this + Why am I seeing this
+
+New model `FeedFeedback(user, kind category|hashtag|author, key, weight, updated_at)` (migration `0004`). The weight
+decays (half-life 30 days, `settings.FEED_FEEDBACK`) and becomes minus points in `feed_mix.build_pool_ids` for the
+recommended + trending pools only (category 15 / hashtag 8 / author 25 per weight 1.0); the following pool is never
+touched. Endpoints: `POST /post/<id>/show-fewer/` (hide + dampen), `GET /post/feedback/`,
+`DELETE /post/feedback/<id>/`, `GET /post/<id>/why/` (reason codes `following`, `trending`, `interest_category`,
+`liked_category`, `friend_of_follow`, `popular`, `own_post`, `not_in_feed`; built by `post/feed_explain.py` from the same
+signals as the ranking). `HomeFeedView._base_qs` now delegates to module-level `_home_base_qs(user)`.
+Details + Flutter contract: `post/FEED_FEEDBACK_CONTROLS_TASK.md`. Tests: `post/tests_show_fewer_why.py`.
+
+
+## Addendum - Feed ranking Part 1: watch-time
+
+`Post.video_watch_count` + `Post.video_avg_watch_seconds` (migration `0005`, backfilled) join `video_completion_rate`,
+all maintained by the PostView signal. The video term of every feed score is now
+`confidence * (completion_rate * 30 + min(avg_watch_s, 60) / 60 * 10)`, `confidence = n / (n + 5)`
+(`feed_mix.video_watch_boost`, `settings.FEED_WATCH_TIME`; `FEED_WATCH_TIME_ENABLED=0` restores the old `rate * 30`).
+`python manage.py recompute_video_watch_stats` rebuilds the numbers. Details: `post/FEED_WATCH_TIME_AFFINITY_TASK.md`. Tests: `post/tests_watch_time.py`.
+
+
+## Addendum - Feed ranking Part 2: author-affinity
+
+Authors the caller likes / comments on rank higher in ALL Home pools (like 1, comment 3, 14-day half-life, 30-day
+window, `points = min(20, score * 2)`, top 50 authors; `feed_mix.load_author_affinity`, `settings.FEED_AUTHOR_AFFINITY`,
+`FEED_AUTHOR_AFFINITY_ENABLED=0` = off). Following: only re-orders inside the recent/unseen bands. An author with an
+active "show fewer" row gets no affinity. `GET /post/<id>/why/` may return reason `author_affinity`.
+Details: `post/FEED_WATCH_TIME_AFFINITY_TASK.md`. Tests: `post/tests_author_affinity.py`.
+
+
+## Addendum - Reels feed (vertical short videos) - backend
+
+`GET /post/reels/` (`post/reels.py`, `post/reels_views.py`, `ReelSerializer` in `post/serializers.py`,
+`settings.FEED_REELS`). Response `{count, next, previous: null, results}` like Home, but every result is the LEAN
+`ReelSerializer` payload (below), not `PostListSerializer`.
+
+### Payload (`ReelSerializer`)
+
+```json
+{
+  "id": "6f1a4c1e-8b7e-4a11-9c55-0d5f0e2c9a11",
+  "video": {"url": "https://.../posts/2026/09/30/a.mp4", "thumbnail": "https://.../t.jpg",
+            "duration": 42, "width": 720, "height": 1280, "blur_hash": "LEHV6nWB2yk8pyo0adR*.7kCMdnj"},
+  "caption": "Binary search in 30 seconds",
+  "hashtags": ["python", "dsa"],
+  "author": {"id": "12", "username": "fay", "names": "Fay Friend", "profile_photo": "https://.../p.jpg",
+             "is_following": true},
+  "counts": {"likes": 7, "comments": 3, "shares": 2, "saves": 5},
+  "is_liked": true, "my_reaction": "imp", "is_saved": false,
+  "feed_source": "following"
+}
+```
+
+* `video.thumbnail`, `video.blur_hash`, `author.profile_photo` are `null` when missing; `caption` is `""` (never null);
+  `author.names` is the full name or `""`. `video` is the first video media row with a known duration.
+* `is_liked` = any reaction row (same meaning as Home); `my_reaction` = `like|confuse|wrong|imp|explain` or `null`.
+* `feed_source` = `following` | `recommended`. `author.is_following` is always `false` for the caller's own video
+  (only possible through `?start=`).
+* A video post without a video file row is never served (nothing to play).
+* Queries per page do not grow with the page size: ONE following-id query (the Home N+1 fix, `following_ids` in the
+  serializer context), ONE posts query (author joined, `media` prefetched; the repost joins of Home are dropped), TWO
+  batched viewer-state queries (`reel_reactions`, `reel_saved_ids`). Covered by a test.
+
+### Candidates, ranking, pagination, `?start=`
+
+Candidates: `post_type='video'` (no reposts), approved, `visibility='public'`, not sensitive, not deleted, not own,
+author not blocked (either direction), `exclude_hidden_and_muted`; public posts of PRIVATE accounts only for followers.
+The video media must have a known `duration_seconds` (> 0, <= `FEED_REELS["max_duration_seconds"]`, default 180) and
+be vertical-friendly (`height / width >= FEED_REELS["min_aspect"]`, default 1.2; unknown width / height is allowed) -
+all on the same media row.
+
+Ranking (one pool, Home pieces from `feed_mix`): engagement + `video_watch_boost` + velocity + interest (+15) + taste
+(+10) + friend-of-follow (+12) + author affinity - show-fewer penalty, plus `following_bonus` (default +10) for authors
+the caller follows (people you follow show up without owning the feed). Seen videos (`PostView`) are excluded before
+the pool cap (`pool_cap`, default 300); a pool smaller than `FEED_SEEN_LIMITS["fill_min"]` is topped up with seen ones.
+
+Pagination: the first request ranks once and freezes the ordered ids in the cache (namespace `reels`,
+`feed_snapshot.save_list / load_list`, same TTL as Home); later pages are slices addressed by the opaque `cursor`
+(`encode_list_cursor` / `decode_list_cursor`: `{v, n:"reels", s, o: offset, c: seen_cutoff}`), so the order does not
+jump while swiping. Cache miss -> rebuild with the cursor's `seen_cutoff` and apply the offset (no 500). Bad cursor
+(incl. a Home cursor) -> 404. Videos deleted / made private / blocked / hidden / muted after the snapshot are skipped
+when a page is served. `?page_size=` default 10, max 30.
+
+`?start=<post_id>` (first request only, it is kept in `next` for cache-miss rebuilds): that video is item 0 and removed
+from the rest of the pool. It must be a video the caller may watch (approved, public + visible to them, or their own;
+not deleted / sensitive / blocked / hidden) - the aspect and duration rules do NOT apply to it. Anything else is
+ignored silently.
+
+### Seen / watch reporting - no new action endpoints
+
+* Seen: reuse `POST /post/feed/seen/` `{"post_ids": [...]}` (max 50 per call, idempotent, does not bump `views_count`).
+* Watch time: `POST /post/<id>/video-progress/` `{"watched_seconds": n}` (already used by the video player).
+* Like / save / share / follow: the existing endpoints (`POST /post/like/<id>/reaction/`, `POST /post/<id>/save/`,
+  `POST /post/<id>/share/`, `POST /profile/follow/<user_id>/`). `GET /post/reels/` is read-only (POST / DELETE -> 405).
+
+### Settings `FEED_REELS` (`LearnScroll/settings.py`; missing keys fall back to `DEFAULT_REELS` in `post/reels.py`)
+
+| key | default | env | meaning |
+|---|---|---|---|
+| `enabled` | `True` | `REELS_ENABLED` | master switch; off -> `{count:0, next:null, results:[]}` |
+| `min_aspect` | `1.2` | `REELS_MIN_ASPECT` | `height/width` minimum (0 = off; unknown size allowed) |
+| `max_duration_seconds` | `180` | `REELS_MAX_DURATION_SECONDS` | longer videos are not reels (0 = no cap) |
+| `following_bonus` | `10` | `REELS_FOLLOWING_BONUS` | extra points for followed authors |
+| `page_size` | `10` | `REELS_PAGE_SIZE` | default `?page_size=` (max 30) |
+
+Extra internal keys: `pool_cap` (300, `REELS_POOL_CAP`) and `max_page_size` (30). The old name `settings.REELS` is gone.
+
+Tests: `post/tests_reels.py` (78 tests: config, eligibility, ranking order, hide / mute / seen, `?start=`, cursor
+stability, payload shape, query count, other-user isolation). Run: `python manage.py test post.tests_reels`.
+
+### Flutter contract (Reels screen itself is a later part)
+
+Client code: `lib/post/services/reels_service.dart` (`ReelsService.fetchPage`, models `Reel`, `ReelVideo`, `ReelAuthor`,
+`ReelCounts`, `ReelsPage`). No UI.
+
+1. First page of a scrolling session: `GET /post/reels/` (add `?start=<post_id>` when opening from a profile / Home
+   video). Never send `cursor` on it.
+2. Next pages: call the returned `next` URL EXACTLY as given (it carries `cursor` + `seen_cutoff`, and the original
+   `start`, which later pages ignore). `next == null` = end of list. Prefetch when ~3 reels are left.
+3. Order is frozen for the session: do not re-sort, de-dupe by `id` anyway. `count` = size of the frozen list, not
+   of the page.
+4. Skip a reel whose `video` is `null` or whose `video.url` is empty (defensive; the server already filters).
+5. 404 on a `next` URL = cursor no longer valid -> start a new session (`GET /post/reels/` without cursor).
+6. Report the reels that were on screen with `POST /post/feed/seen/` in batches (<= 50); report watch time with
+   `POST /post/<id>/video-progress/`. Both are fire-and-forget (ignore errors).
+7. `blur_hash` + `thumbnail` are the placeholder while the video buffers; `video.width/height` may be `null`.
+8. Feature off (`enabled=False`) returns 200 with an empty `results` - show an empty state, not an error.
+
+
+## Addendum - Stories upgrade, Part 1 (Close Friends)
+
+See `STORIES_UPGRADE_TASK.md`. Summary: `Story.audience` (`everyone` | `close_friends`) + `CloseFriend` list;
+audience enforced by `post/story_visibility.py` on story list/view/react/reply (404 when not visible);
+endpoints `GET/PUT /post/close-friends/`, `POST/DELETE /post/close-friends/<user_id>/`,
+`GET /post/close-friends/candidates/?q=`; `POST /post/stories/create/` accepts optional `audience`.

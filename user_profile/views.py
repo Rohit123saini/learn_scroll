@@ -8,6 +8,7 @@ from django.contrib.auth import get_user_model
 from django.db import IntegrityError, transaction
 from django.db.models import Q
 from django.http import Http404
+from django.utils import timezone
 from django.http.request import RawPostDataException
 from django.shortcuts import get_object_or_404
 from drf_spectacular.types import OpenApiTypes
@@ -17,42 +18,56 @@ from rest_framework.generics import GenericAPIView, ListAPIView
 from rest_framework.parsers import FormParser, MultiPartParser
 from rest_framework.permissions import AllowAny, IsAdminUser, IsAuthenticated
 from rest_framework.response import Response
+from rest_framework.views import APIView
 
 from common.pagination import get_max_page_size
 
-from rest_framework.throttling import UserRateThrottle
+from rest_framework.throttling import ScopedRateThrottle, UserRateThrottle
 
-from . import fraud
+from . import activity, fraud
+from .discovery import mutual_followers_queryset, suggested_users_queryset  # P8-BE
 from .models import (
     BlockUser,
     CoinLedger,
     CoinLedgerBusy,
     CoinPurchaseRequest,
     CoinWithdrawalRequest,
+    DailyUsage,
     Follow,
     RestrictUser,
+    Streak,
     UserPreference,
+    WeeklyRecap,
     WithdrawalNotEligible,
 )
+from .activity import ActivityLimitSerializer, HeartbeatSerializer  # P14-BE
+from .services import pending_follow_requests_for, remove_follower  # P11-BE
 from .throttles import CoinPurchaseBurstThrottle, CoinPurchaseDailyThrottle
 from .serializers import (
+    MutualFollowersResponseSerializer,  # P8-BE
+    SimilarUsersResponseSerializer,  # P8-BE
     BlockUserSerializer,
     CoinLedgerSerializer,
     CoinPurchaseConfirmSerializer,
     CoinPurchaseRequestSerializer,
     CoinWithdrawalActionSerializer,
+    CoinWithdrawalAdminSerializer,
     CoinWithdrawalRequestSerializer,
     FollowActionResponseSerializer,
+    FollowListRowSerializer,
     MessageContactSearchSerializer,
     ProfileUpdateSerializer,
     RestrictedTargetUserProfileSerializer,
     RestrictUserSerializer,
+    StreakSerializer,
     TargetUserProfileSerializer,
     UserPreferenceSerializer,
     UserProfileDetailResponseSerializer,
     UserProfileSerializer,
     UserSearchSerializer,
+    WeeklyRecapSerializer,
     bulk_accepted_connection_ids,
+    bulk_viewer_follow_status,
 )
 
 User = get_user_model()
@@ -256,6 +271,103 @@ class UserSearchView(ListAPIView):
         })
 
 
+class MutualFollowersView(APIView):
+    """GET profile/<username>/mutuals/  (P8-BE)
+
+    "Followed by X, Y + 5 others": the people YOU follow who also follow <username>.
+
+        {"status": true, "preview": [<=3 users], "total": 7}
+
+    Frontend text: preview names, then `total - len(preview)` others.
+
+    Rules:
+      * accepted follows only, blocked users (either direction) never counted;
+      * your own profile -> empty (you can't have "mutuals" with yourself);
+      * blocked between you and <username> -> 404, same as UserProfileDetailView;
+      * private <username> you don't follow yet -> EMPTY result (not 403): who follows a
+        private account is not something a non-follower should be able to probe.
+    """
+
+    permission_classes = [IsAuthenticated]
+    PREVIEW_SIZE = 3
+
+    @extend_schema(
+        parameters=[OpenApiParameter(name="username", type=OpenApiTypes.STR, location=OpenApiParameter.PATH)],
+        responses={200: MutualFollowersResponseSerializer, 404: OpenApiTypes.OBJECT},
+        description="Users you follow who also follow this user (preview + total).",
+    )
+    def get(self, request, username):
+        target = get_object_or_404(User, username=username)
+        me = request.user
+
+        if target != me and is_blocked_between(me, target):
+            raise Http404
+
+        empty = Response({"status": True, "preview": [], "total": 0}, status=status.HTTP_200_OK)
+        if target == me:
+            return empty
+        if target.is_private and not Follow.objects.filter(
+            follower=me, following=target, status=Follow.Status.ACCEPTED
+        ).exists():
+            return empty
+
+        qs = mutual_followers_queryset(me, target)
+        total = qs.count()
+        preview = list(qs[: self.PREVIEW_SIZE]) if total else []
+        return Response(
+            {
+                "status": True,
+                "preview": UserSearchSerializer(preview, many=True, context={"request": request}).data,
+                "total": total,
+            },
+            status=status.HTTP_200_OK,
+        )
+
+
+class SimilarUsersView(APIView):
+    """GET profile/<username>/similar/?limit=10  (P8-BE)
+
+    "Suggested for you" shown under a profile. Same ranking as the onboarding
+    suggestions (interest match, then popularity) via discovery.suggested_users_queryset,
+    minus: yourself, <username>, everyone you already follow / requested, anyone in a
+    block relationship with you, and anyone you restricted.
+
+        {"status": true, "suggested_users": [{id, username, first_name, last_name, profile_photo}]}
+
+    `limit` defaults to 10, capped at 20. Blocked between you and <username> -> 404.
+    The list does not depend on <username>'s private data, so nothing about a private
+    account leaks through it.
+    """
+
+    permission_classes = [IsAuthenticated]
+    DEFAULT_LIMIT = 10
+    MAX_LIMIT = 20
+
+    @extend_schema(
+        parameters=[
+            OpenApiParameter(name="username", type=OpenApiTypes.STR, location=OpenApiParameter.PATH),
+            OpenApiParameter(name="limit", type=OpenApiTypes.INT, location=OpenApiParameter.QUERY, required=False),
+        ],
+        responses={200: SimilarUsersResponseSerializer, 404: OpenApiTypes.OBJECT},
+        description="Suggested accounts to follow, shown on a profile.",
+    )
+    def get(self, request, username):
+        target = get_object_or_404(User, username=username)
+        me = request.user
+        if target != me and is_blocked_between(me, target):
+            raise Http404
+
+        try:
+            limit = int(request.query_params.get("limit", self.DEFAULT_LIMIT))
+        except (TypeError, ValueError):
+            limit = self.DEFAULT_LIMIT
+        limit = max(1, min(limit, self.MAX_LIMIT))
+
+        qs = suggested_users_queryset(me, exclude_user_ids=[target.id])
+        data = UserSearchSerializer(qs[:limit], many=True, context={"request": request}).data
+        return Response({"status": True, "suggested_users": data}, status=status.HTTP_200_OK)
+
+
 class MessageContactSearchView(ListAPIView):
     """
     GET /profile/chat-search/?search=<query>
@@ -266,6 +378,20 @@ class MessageContactSearchView(ListAPIView):
     (dono me se ek bhi kaafi hai, pura mutual hona zaroori nahi — warna
     list bahut chhoti reh jaati). Response me profile_photo/bio waghera
     nahi, sirf id/username/first_name/last_name/mutual_friends.
+
+    🔥 FIX (private-profile discovery leak): `is_private` accounts were
+    showing up here for ANY follow relation, including someone who only
+    follows *me* (target ne mujhe follow kiya, maine unhe nahi) — jinki
+    private profile mujhe kabhi dikhti hi nahi (`UserProfileDetailView`
+    ka `is_accepted_follower` check dekho: wo sirf tab True hota hai jab
+    MAIN unhe follow karta hoon aur wo ACCEPTED hai). Ab discovery search
+    me private target sirf tab aata hai jab wo public ho YA main khud
+    unka accepted follower hoon (i.e. maine unhe follow kiya — is case
+    me unki private profile already dikhti hai, to search me chhupane
+    ka koi matlab nahi). Ye sirf is naye discovery/chat-search endpoint
+    ka badlaav hai — `UserProfileDetailView` / followers / following
+    list wagera jahan private-profile access already decide hota hai,
+    wo sab as-is hain.
     """
     permission_classes = [IsAuthenticated]
     serializer_class = MessageContactSearchSerializer
@@ -281,15 +407,22 @@ class MessageContactSearchView(ListAPIView):
         # the database as subqueries, and only the requested page is fetched.
         me = self.request.user
         accepted = Follow.objects.filter(status=Follow.Status.ACCEPTED)
+        my_following_ids = accepted.filter(follower=me).values("following_id")
+        my_follower_ids = accepted.filter(following=me).values("follower_id")
 
         # 🔥 FIX: someone you've since blocked (or who blocked you) could
         # still show up here as a "connection" and be pickable as a chat
         # contact — excluded in both directions.
         return (
             User.objects.filter(
-                Q(id__in=accepted.filter(follower=me).values("following_id"))
-                | Q(id__in=accepted.filter(following=me).values("follower_id"))
+                Q(id__in=my_following_ids) | Q(id__in=my_follower_ids)
             )
+            # Private-profile gate: public users always pass; a private
+            # user only passes if I'm already their accepted follower
+            # (same "can I actually see this profile" test as
+            # `UserProfileDetailView.is_accepted_follower`) — a person who
+            # merely follows *me* doesn't clear that bar.
+            .filter(Q(is_private=False) | Q(id__in=my_following_ids))
             .exclude(id=me.id)
             .exclude(id__in=BlockUser.objects.filter(blocker=me).values("blocked_id"))
             .exclude(id__in=BlockUser.objects.filter(blocked=me).values("blocker_id"))
@@ -354,7 +487,7 @@ class FollowersListView(ListAPIView):
     sath unka mutual_friends count bhi milta hai.
     """
     permission_classes = [IsAuthenticated]
-    serializer_class = MessageContactSearchSerializer
+    serializer_class = FollowListRowSerializer
 
     def get_queryset(self):
         target_user = get_object_or_404(User, username=self.kwargs["username"])
@@ -368,6 +501,8 @@ class FollowersListView(ListAPIView):
             "request": self.request,
             "connections_map": self._connections_map,
             "connections_map_is_mutual_only": True,  # built with restrict_to_user — see serializer
+            # TASK 7 — per-row Follow/Following button state.
+            "follow_status_map": self._follow_status_map,
         }
 
     @extend_schema(description="List of a user's followers, with mutual_friends relative to you")
@@ -381,9 +516,11 @@ class FollowersListView(ListAPIView):
             rows = page_rows
         else:
             rows = page
+        row_ids = [u.id for u in rows]
         self._connections_map = bulk_accepted_connection_ids(
-            (u.id for u in rows), restrict_to_user=request.user
+            row_ids, restrict_to_user=request.user
         )
+        self._follow_status_map = bulk_viewer_follow_status(row_ids, request.user)
 
         if page is not None:
             serializer = self.get_serializer(page, many=True)
@@ -407,7 +544,7 @@ class FollowingListView(ListAPIView):
     list — same shape/serializer jaisa `FollowersListView`.
     """
     permission_classes = [IsAuthenticated]
-    serializer_class = MessageContactSearchSerializer
+    serializer_class = FollowListRowSerializer
 
     def get_queryset(self):
         target_user = get_object_or_404(User, username=self.kwargs["username"])
@@ -421,6 +558,8 @@ class FollowingListView(ListAPIView):
             "request": self.request,
             "connections_map": self._connections_map,
             "connections_map_is_mutual_only": True,  # built with restrict_to_user — see serializer
+            # TASK 7 — per-row Follow/Following button state.
+            "follow_status_map": self._follow_status_map,
         }
 
     @extend_schema(description="List of who a user is following, with mutual_friends relative to you")
@@ -434,9 +573,11 @@ class FollowingListView(ListAPIView):
             rows = page_rows
         else:
             rows = page
+        row_ids = [u.id for u in rows]
         self._connections_map = bulk_accepted_connection_ids(
-            (u.id for u in rows), restrict_to_user=request.user
+            row_ids, restrict_to_user=request.user
         )
+        self._follow_status_map = bulk_viewer_follow_status(row_ids, request.user)
 
         if page is not None:
             serializer = self.get_serializer(page, many=True)
@@ -450,6 +591,30 @@ class FollowingListView(ListAPIView):
             "message": "Following fetched successfully.",
             "data": data,
         })
+
+
+def _new_follower_title(count, actors):
+    from core.notification_batching import batch_title
+
+    return batch_title(actors, count, "started following you", max_names=2)
+
+
+def _new_follower_batch_kwargs(following_user):
+    """N2-BE — shared by the follow (create) and unfollow (remove) paths so
+    both agree on key/title/window. Key = (recipient, FOLLOW_REQUEST_ACCEPTED,
+    recipient's own id) — one open batch per recipient. Only AUTO-ACCEPTED
+    follows are batched; follow REQUESTS (each needs its own Confirm/Delete
+    by follow_id) are deliberately never batched."""
+    from core.models import Notification
+    from core.notification_batching import get_batch_window
+
+    return dict(
+        recipient=following_user,
+        notif_type=Notification.NotifType.FOLLOW_REQUEST_ACCEPTED,
+        target_id=following_user.id,
+        title_fn=_new_follower_title,
+        window_seconds=get_batch_window("new_follower"),
+    )
 
 
 class FollowAPIView(GenericAPIView):
@@ -501,7 +666,16 @@ class FollowAPIView(GenericAPIView):
             # Unfollow. followers_count/following_count are NOT touched
             # here any more — the Follow post_delete signal
             # (user_profile/signals.py) recounts both users from real rows.
+            was_accepted = follow_obj.status == Follow.Status.ACCEPTED
             follow_obj.delete()
+            if was_accepted:
+                # N2-BE: drop them from the recipient's OPEN "new followers"
+                # batch (no-op once the window closed; never raises).
+                from core.notification_batching import remove_actor_from_batch
+
+                remove_actor_from_batch(
+                    actor=request.user, **_new_follower_batch_kwargs(following_user)
+                )
             return Response({
                 "message": "Unfollowed successfully",
                 "status": None,
@@ -562,6 +736,11 @@ class FollowAPIView(GenericAPIView):
                 "New follow request",
                 f"{request.user.username} wants to follow you.",
                 actor=request.user,
+                # TASK 6 (production_readiness_tasks.md) — the notification
+                # row needs this to let the recipient Confirm/Delete the
+                # request directly from the bell (AcceptFollowRequestView /
+                # RejectFollowRequestView both take follow_id, not user_id).
+                data={"follow_id": new_follow.id},
             )
         else:
             # Public account, auto-accept — no NEW_FOLLOWER type exists
@@ -570,12 +749,34 @@ class FollowAPIView(GenericAPIView):
             # FOLLOW_REQUEST_ACCEPTED for "someone just started
             # following you" too, same as a request that was actually
             # accepted.
-            _notify(
-                following_user,
-                Notification.NotifType.FOLLOW_REQUEST_ACCEPTED,
-                "New follower",
-                f"{request.user.username} started following you.",
+            #
+            # N2-BE: BATCHED ("X, Y and 12 others started following you",
+            # 6h sliding window, see settings.NOTIFICATION_BATCH_WINDOWS).
+            # Calls the batching helper directly (not _notify); it does its
+            # own restrict check and never raises.
+            from core.notification_batching import (
+                create_batched_notification,
+                get_batch_max_age,
+            )
+
+            def _follow_back_data(count, actors, latest):
+                # Follow-back button only makes sense for ONE actor; a
+                # merged row (count > 1) has no single "actor" to follow back.
+                if count != 1:
+                    return {"is_following_actor": None}
+                return {
+                    "is_following_actor": Follow.objects.filter(
+                        follower=following_user, following=request.user,
+                        status=Follow.Status.ACCEPTED,
+                    ).exists(),
+                }
+
+            create_batched_notification(
                 actor=request.user,
+                data_fn=_follow_back_data,
+                extra_data={"kind": "new_follower"},
+                max_age_seconds=get_batch_max_age("new_follower"),
+                **_new_follower_batch_kwargs(following_user),
             )
 
         return Response({
@@ -630,6 +831,12 @@ class AcceptFollowRequestView(GenericAPIView):
             "Follow request accepted",
             f"{request.user.username} accepted your follow request.",
             actor=request.user,
+            # TASK 6: accepting IS the follower relationship — the
+            # recipient (the original requester) is guaranteed to already
+            # follow the actor at this point, no query needed (contrast
+            # with the public-auto-follow branch in FollowAPIView.post
+            # above, which can't assume this and checks).
+            data={"is_following_actor": True},
         )
 
         return Response({
@@ -671,6 +878,104 @@ class RejectFollowRequestView(GenericAPIView):
             "message": "Follow request rejected",
             "status": None,
         }, status=status.HTTP_200_OK)
+
+
+class RemoveFollowerView(GenericAPIView):
+    """
+    P11-BE — DELETE /profile/followers/<user_id>/
+
+    "Remove follower": makes <user_id> stop following the logged-in user.
+    Only an ACCEPTED follower can be removed (a still-pending request is
+    handled by reject-request/). Counters are corrected by the Follow
+    post_delete signal; NO notification is sent to the removed user — see
+    services.remove_follower.
+    """
+    permission_classes = [IsAuthenticated]
+    serializer_class = FollowActionResponseSerializer
+
+    @extend_schema(
+        parameters=[
+            OpenApiParameter(
+                name="user_id",
+                type=OpenApiTypes.INT,
+                location=OpenApiParameter.PATH,
+                description="ID of the follower to remove",
+            )
+        ],
+        responses={200: FollowActionResponseSerializer, 400: OpenApiTypes.OBJECT, 404: OpenApiTypes.OBJECT},
+        description="Remove a user from your followers (silent — they are not notified)",
+    )
+    @transaction.atomic
+    def delete(self, request, user_id):
+        if request.user.id == user_id:
+            return Response(
+                {"error": "You cannot remove yourself"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        if not remove_follower(request.user, user_id):
+            return Response(
+                {"error": "This user is not following you."},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+
+        return Response({
+            "message": "Follower removed",
+            "status": None,
+        }, status=status.HTTP_200_OK)
+
+
+class FollowRequestsListView(ListAPIView):
+    """
+    P11-BE — GET /profile/follow-requests/
+
+    Paginated list of PENDING follow requests addressed to the logged-in
+    user, newest first. Each row is the same shape as the followers/
+    following lists (FollowListRowSerializer — the *requester's* user
+    row) plus `follow_id`, which is what accept-request/<follow_id>/ and
+    reject-request/<follow_id>/ take.
+    """
+    permission_classes = [IsAuthenticated]
+    serializer_class = FollowListRowSerializer
+
+    def get_queryset(self):
+        return pending_follow_requests_for(self.request.user)
+
+    def get_serializer_context(self):
+        return {
+            "request": self.request,
+            "connections_map": self._connections_map,
+            "connections_map_is_mutual_only": True,  # built with restrict_to_user — see serializer
+            "follow_status_map": self._follow_status_map,
+        }
+
+    @extend_schema(description="Pending incoming follow requests (each row carries follow_id)")
+    def list(self, request, *args, **kwargs):
+        queryset = self.filter_queryset(self.get_queryset())
+        page = self.paginate_queryset(queryset)
+        # No paginator configured: never materialise the whole table (issue #5).
+        follows = page if page is not None else list(queryset[:get_max_page_size()])
+
+        users = [f.follower for f in follows]
+        row_ids = [u.id for u in users]
+        self._connections_map = bulk_accepted_connection_ids(
+            row_ids, restrict_to_user=request.user
+        )
+        self._follow_status_map = bulk_viewer_follow_status(row_ids, request.user)
+
+        follow_id_by_user = {f.follower_id: f.id for f in follows}
+        rows = []
+        for row in self.get_serializer(users, many=True).data:
+            row = dict(row)
+            row["follow_id"] = follow_id_by_user.get(row.get("id"))
+            rows.append(row)
+
+        data = self.get_paginated_response(rows).data if page is not None else rows
+        return Response({
+            "status": True,
+            "message": "Follow requests fetched successfully.",
+            "data": data,
+        })
 
 
 class UpdateProfileView(GenericAPIView):
@@ -921,7 +1226,7 @@ class UnrestrictUserView(GenericAPIView):
 # Read-only, deliberately (see CoinLedgerSerializer's docstring for why
 # there's no POST here). The actual write path —
 # `CoinLedger.objects.record_transaction()` — is called from wherever a
-# coin-changing action happens (a purchase completing in the liveclass
+# coin-changing action happens (a purchase completing in the tuitionclass
 # app, a gift being sent in the message app, an admin adjustment
 # endpoint if/when one gets built); none of those views were part of
 # this upload, so this is the read side only: "let me see why my
@@ -1068,7 +1373,7 @@ def _verify_gateway_webhook_signature(request, gateway, raw_body=None):
     one, since no gateway integration was part of any upload for this
     app.
 
-    ⚠️ ASSUMPTION — `campus`/`liveclass`'s own gateway-verify code (the
+    ⚠️ ASSUMPTION — `campus`/`tuitionclass`'s own gateway-verify code (the
     reference the person doing this task pointed at) was NOT part of
     this pass's upload either, so this isn't copied from an established
     in-repo pattern — it's a generic, gateway-agnostic HMAC-SHA256
@@ -1076,7 +1381,7 @@ def _verify_gateway_webhook_signature(request, gateway, raw_body=None):
     gateway (Razorpay, Stripe, PayU, ...) uses for webhook auth, just
     without any one gateway's specific header name/payload-canonicalization
     quirks baked in (those differ per gateway and aren't confirmable from
-    here). If `campus`/`liveclass` turns out to already have gateway
+    here). If `campus`/`tuitionclass` turns out to already have gateway
     client code with its own verification helper, prefer reusing that
     over this — this exists so the endpoint isn't left unverified in the
     meantime, not to duplicate a real gateway SDK's verification call.
@@ -1196,7 +1501,7 @@ class BuyCoinConfirmView(GenericAPIView):
     testing the flow end-to-end. `permission_classes = [AllowAny]` now,
     gated instead by `_verify_gateway_webhook_signature()` above — see
     that function's own docstring for exactly what it checks and its
-    ⚠️ ASSUMPTION about not having `campus`/`liveclass`'s own
+    ⚠️ ASSUMPTION about not having `campus`/`tuitionclass`'s own
     gateway-verify code to copy from.
 
     Behavior change worth flagging explicitly: a `CoinPurchaseRequest`
@@ -1596,6 +1901,81 @@ class CoinWithdrawalRequestView(GenericAPIView):
         }, status=status.HTTP_201_CREATED)
 
 
+# TASK 1 (feature: Admin Coin-Withdrawal Review Dashboard) — the "see
+# the queue" half that was still missing: `CoinWithdrawalAdminActionView`
+# below already lets staff ACT on a withdrawal by id, but nothing
+# exposed the list of requests to act on over the API — only the Django
+# admin (`CoinWithdrawalRequestAdmin`, admin.py) or a shell could see
+# every user's requests. This is that list, scoped the same way the
+# `(status, created_at)` index on the model already anticipates ("an
+# admin queue view's PENDING/PROCESSING oldest first" — see that
+# index's own comment in models.py).
+class CoinWithdrawalAdminListView(ListAPIView):
+    """
+    GET /profile/coin-withdrawals/admin/
+    GET /profile/coin-withdrawals/admin/?status=pending
+    GET /profile/coin-withdrawals/admin/?status=pending,processing
+
+    Staff-only (`IsAdminUser`), same permission class
+    `CoinWithdrawalAdminActionView` already uses below — this is the
+    read side of the same "ops" surface, not a looser one. Paginated by
+    the project-wide `StandardPagination` (settings.py
+    REST_FRAMEWORK["DEFAULT_PAGINATION_CLASS"]) like every other list
+    endpoint in this module, so a growing table never becomes an
+    unbounded query.
+
+    `?status=` is optional and accepts a comma-separated list of
+    `CoinWithdrawalRequest.Status` values (e.g. `pending,processing` to
+    show only what's still actionable); omitted, it returns every
+    status, oldest-first within status groups isn't attempted here —
+    default ordering is the model's own `-created_at` (newest first),
+    which is what an ops dashboard actually wants to land on ("what
+    just came in"), NOT the oldest-first sweep order the `(status,
+    created_at)` index comment describes for a background task. A
+    client that wants the oldest PENDING request first can already get
+    that by filtering `?status=pending` and reading from the end of the
+    page — no separate `?ordering=` param is added for a queue this
+    small.
+
+    An unrecognized value in `?status=` is dropped rather than raising
+    a 400 — same "ignore, don't fail, a query param" posture as
+    filtering elsewhere in this codebase's list views; it never widens
+    the query, it can only narrow it to nothing.
+    """
+
+    permission_classes = [IsAdminUser]
+    serializer_class = CoinWithdrawalAdminSerializer
+
+    def get_queryset(self):
+        qs = CoinWithdrawalRequest.objects.select_related("user", "reviewed_by")
+        raw_status = self.request.query_params.get("status", "")
+        statuses = [s.strip() for s in raw_status.split(",") if s.strip()]
+        valid_statuses = {choice for choice, _ in CoinWithdrawalRequest.Status.choices}
+        statuses = [s for s in statuses if s in valid_statuses]
+        if statuses:
+            qs = qs.filter(status__in=statuses)
+        return qs
+
+    @extend_schema(
+        parameters=[
+            OpenApiParameter(
+                name="status",
+                type=OpenApiTypes.STR,
+                location=OpenApiParameter.QUERY,
+                required=False,
+                description="Comma-separated CoinWithdrawalRequest.Status values "
+                "(pending, processing, success, rejected). Omit for all statuses.",
+            )
+        ],
+        responses={200: CoinWithdrawalAdminSerializer(many=True)},
+        description="Staff-only. Every user's coin withdrawal requests, newest first, "
+        "optionally filtered by status — the review queue for "
+        "CoinWithdrawalAdminActionView below.",
+    )
+    def get(self, request, *args, **kwargs):
+        return super().get(request, *args, **kwargs)
+
+
 # 🔥 §11 item 12 — staff/ops endpoint for CoinWithdrawalRequestManager's
 # three lifecycle methods. Before this, mark_processing()/
 # confirm_success()/reject() (models.py) existed and were unit-tested,
@@ -1762,3 +2142,323 @@ class UserPreferenceView(GenericAPIView):
             "message": "Validation failed.",
             "errors": serializer.errors,
         }, status=status.HTTP_400_BAD_REQUEST)
+
+class StreakView(GenericAPIView):
+    """
+    TASK G1 (growth_and_feature_tasks.md — Streaks) — GET/POST
+    /profile/streak/, same GET-always-200 / lazy-row shape as
+    `UserPreferenceView` right above (`Streak.objects.get_or_create`
+    instead of `UserPreference.for_user`, same idea).
+
+    GET: read-only — current streak state, for the profile screen and
+    the home-app-bar streak chip. Never advances the streak itself, so
+    polling it (e.g. on every app-bar rebuild) is always safe.
+
+    POST: today's check-in — the ONE call site that should ever advance
+    a user's streak. The frontend calls this once per app session (e.g.
+    from the home screen's `initState`), not on every screen or every
+    API call — `Streak.objects.record_activity()` is already itself a
+    same-day no-op, so an accidental extra POST call the same day is
+    harmless, but it's still one deliberate call, not a per-request side
+    effect threaded through unrelated views.
+    """
+
+    permission_classes = [IsAuthenticated]
+    serializer_class = StreakSerializer
+
+    @extend_schema(
+        responses={200: StreakSerializer},
+        description="Get the current user's streak state (current/longest streak, "
+                     "whether today is already checked in).",
+    )
+    def get(self, request):
+        streak, _created = Streak.objects.get_or_create(user=request.user)
+        serializer = self.get_serializer(streak)
+        return Response({
+            "status": True,
+            "message": "Streak fetched successfully.",
+            "data": serializer.data,
+        }, status=status.HTTP_200_OK)
+
+    @extend_schema(
+        request=None,
+        responses={200: StreakSerializer},
+        description="Record today's check-in (once-a-day primary action). Idempotent — "
+                     "calling this again the same day makes no further change. Returns "
+                     "the updated streak plus milestone_reached/bonus_coins if a streak "
+                     "milestone (settings.STREAK_MILESTONE_DAYS) was just hit.",
+    )
+    def post(self, request):
+        streak, milestone_hit = Streak.objects.record_activity(request.user)
+
+        bonus = 0
+        if milestone_hit is not None:
+            # Lazy imports — same circular-import reasoning UserPreferenceView's
+            # neighbours above already document for core.models/.services.
+            from core.models import Notification
+
+            from .services import _notify
+
+            bonus = settings.STREAK_MILESTONE_BONUS_COINS.get(milestone_hit, 0)
+            _notify(
+                request.user,
+                Notification.NotifType.STREAK_MILESTONE_REACHED,
+                f"🔥 {milestone_hit}-day streak!",
+                (
+                    f"You've kept LearnScroll going for {milestone_hit} days in a row"
+                    + (f" — +{bonus} coins credited." if bonus else ".")
+                ),
+                data={"streak_days": milestone_hit, "bonus_coins": bonus},
+            )
+
+        serializer = self.get_serializer(streak)
+        return Response({
+            "status": True,
+            "message": "Streak updated successfully.",
+            "data": serializer.data,
+            "milestone_reached": milestone_hit,
+            "bonus_coins": bonus,
+        }, status=status.HTTP_200_OK)
+
+
+class WeeklyRecapView(GenericAPIView):
+    """TASK G2 (growth_and_feature_tasks.md) — GET the current user's most
+    recent `WeeklyRecap` row.
+
+    Read-only by design: recaps are only ever produced by the
+    `generate_weekly_recaps` celery task (tasks.py) every Sunday night —
+    this view never generates one on the fly, same "one sanctioned write
+    path" boundary `StreakView` already draws for `Streak` (see that
+    class's own docstring). A user who hasn't had a recap generated yet
+    (brand-new signup, or the very first Sunday hasn't run yet) gets a
+    clean 404 rather than a fabricated all-zero row.
+    """
+
+    permission_classes = [IsAuthenticated]
+    serializer_class = WeeklyRecapSerializer
+
+    @extend_schema(
+        responses={200: WeeklyRecapSerializer},
+        description="Get the current user's most recent weekly recap "
+                    "(tests attempted, classes attended, likes received, streak).",
+    )
+    def get(self, request):
+        recap = (
+            WeeklyRecap.objects.filter(user=request.user).order_by("-week_start").first()
+        )
+        if recap is None:
+            return Response({
+                "status": False,
+                "message": "No recap generated yet — check back after your first full week.",
+                "data": None,
+            }, status=status.HTTP_404_NOT_FOUND)
+
+        serializer = self.get_serializer(recap)
+        return Response({
+            "status": True,
+            "message": "Recap fetched successfully.",
+            "data": serializer.data,
+        }, status=status.HTTP_200_OK)
+
+
+class WeeklyRecapCardAPIView(GenericAPIView):
+    """TASK G2 — GET a shareable PNG "Your Week" card for one of the
+    current user's OWN recaps (recap_card.py does the actual drawing).
+
+    Scoped to `request.user`'s own rows only (`WeeklyRecap.objects.filter
+    (user=request.user, id=recap_id)` below) — same "you can only ever act
+    on your own row" boundary `CoinWithdrawalRequestView` already draws for
+    withdrawal requests; there's no legitimate reason for user A to fetch
+    user B's recap card image, even though the numbers on it aren't
+    otherwise sensitive.
+
+    Returns HTTP 501 (not a 500) if Pillow isn't installed on this
+    deployment — same `ImageUnavailable`-to-501 contract
+    `TestCertificatePdfView` (testseries/views.py) already uses for
+    `reportlab`/`PdfUnavailable`, so a missing optional dependency is a
+    clean, documented response instead of an unhandled crash.
+    """
+
+    permission_classes = [IsAuthenticated]
+
+    @extend_schema(
+        responses={200: OpenApiTypes.BINARY},
+        description="Render this recap as a shareable PNG card (image/png).",
+    )
+    def get(self, request, recap_id):
+        from .recap_card import ImageUnavailable, render_png
+
+        recap = get_object_or_404(WeeklyRecap, id=recap_id, user=request.user)
+
+        try:
+            png_bytes = render_png(
+                username=request.user.username,
+                week_start=recap.week_start,
+                week_end=recap.week_end,
+                tests_attempted=recap.tests_attempted,
+                classes_attended=recap.classes_attended,
+                posts_liked_received=recap.posts_liked_received,
+                streak_days=recap.streak_days,
+            )
+        except ImageUnavailable as exc:
+            return Response({
+                "status": False,
+                "message": str(exc),
+                "data": None,
+            }, status=status.HTTP_501_NOT_IMPLEMENTED)
+
+        from django.http import HttpResponse
+
+        response = HttpResponse(png_bytes, content_type="image/png")
+        response["Content-Disposition"] = (
+            f'inline; filename="learnscroll_week_{recap.week_start.isoformat()}.png"'
+        )
+        return response
+
+
+# ---------------------------------------------------------------------------
+# P14-BE — activity log + time spent
+# ---------------------------------------------------------------------------
+class ActivityView(GenericAPIView):
+    """GET/PATCH /profile/activity/ — the "Your activity" screen.
+
+    GET: last 7 local days (oldest -> newest, zero-filled) of time spent
+    (`DailyUsage`) + likes / comments / shares the user made, week totals,
+    today's usage vs. the optional daily limit, and the user's most recent
+    saved / liked posts (`?limit=`, default 20, max 50). A likes/comments/
+    shares value of `null` means "couldn't be computed" (post-model lookup
+    failed, see activity.py), not zero.
+
+    PATCH {"daily_limit_minutes": 60 | null}: set / clear the daily-limit
+    reminder (stored on `UserPreference`; null or 0 turns it off).
+    """
+
+    permission_classes = [IsAuthenticated]
+    serializer_class = ActivityLimitSerializer
+    throttle_classes = [UserRateThrottle, ScopedRateThrottle]
+    throttle_scope = "profile_activity"
+
+    @extend_schema(
+        parameters=[OpenApiParameter("limit", OpenApiTypes.INT, description="Saved/liked list size (max 50).")],
+        description="Last 7 days of time spent + likes/comments/shares made, plus saved and liked posts.",
+    )
+    def get(self, request):
+        try:
+            limit = int(request.query_params.get("limit", activity.DEFAULT_LIST_LIMIT))
+        except (TypeError, ValueError):
+            limit = activity.DEFAULT_LIST_LIMIT
+        limit = max(1, min(limit, activity.MAX_LIST_LIMIT))
+
+        dates = activity.window_dates()
+        usage_rows = dict(
+            DailyUsage.objects.filter(user=request.user, date__gte=dates[0])
+            .values_list("date", "seconds")
+        )
+        days, totals = activity.build_week(request.user, usage_rows)
+
+        preference = UserPreference.objects.filter(user=request.user).first()
+        daily_limit = getattr(preference, "daily_limit_minutes", None)
+        today_seconds = usage_rows.get(dates[-1], 0)
+
+        return Response({
+            "status": True,
+            "message": "Activity fetched successfully.",
+            "data": {
+                "range": {"start": dates[0].isoformat(), "end": dates[-1].isoformat(), "days": len(dates)},
+                "days": days,
+                "totals": totals,
+                "today": {
+                    "seconds": today_seconds,
+                    "daily_limit_minutes": daily_limit,
+                    "limit_reached": bool(daily_limit and today_seconds >= daily_limit * 60),
+                },
+                "daily_limit_minutes": daily_limit,
+                "saved_posts": activity.saved_posts(request.user, limit),
+                "liked_posts": activity.liked_posts(request.user, limit),
+            },
+        }, status=status.HTTP_200_OK)
+
+    @extend_schema(
+        request=ActivityLimitSerializer,
+        responses={200: ActivityLimitSerializer},
+        description="Set or clear (null / 0) the daily time-limit reminder.",
+    )
+    def patch(self, request):
+        serializer = self.get_serializer(data=request.data)
+        if not serializer.is_valid():
+            return Response({
+                "status": False,
+                "message": "Validation failed.",
+                "errors": serializer.errors,
+            }, status=status.HTTP_400_BAD_REQUEST)
+
+        limit = serializer.validated_data["daily_limit_minutes"]
+        preference = UserPreference.for_user(request.user)
+        preference.daily_limit_minutes = limit
+        preference.save(update_fields=["daily_limit_minutes", "updated_at"])
+
+        # A changed limit re-arms today's one-per-day nudge.
+        DailyUsage.objects.filter(user=request.user, date=timezone.localdate()).update(limit_notified=False)
+
+        return Response({
+            "status": True,
+            "message": "Daily limit updated successfully.",
+            "data": {"daily_limit_minutes": limit},
+        }, status=status.HTTP_200_OK)
+
+
+class ActivityHeartbeatView(GenericAPIView):
+    """POST /profile/activity/heartbeat/ {"seconds": 30} — the app calls this
+    every ~30-60 s while it is in the FOREGROUND (stop on pause/background),
+    sending the foreground seconds since its previous heartbeat. Bounds and
+    anti-inflation rules: `DailyUsage.objects.record_heartbeat`.
+
+    Returns today's total and, when this beat is the one that crossed the
+    user's daily limit, `limit_reached: true` (once per day) — the client can
+    show its own nudge from that; a bell notification is also written.
+    """
+
+    permission_classes = [IsAuthenticated]
+    serializer_class = HeartbeatSerializer
+    throttle_classes = [UserRateThrottle, ScopedRateThrottle]
+    throttle_scope = "profile_activity_heartbeat"
+
+    @extend_schema(request=HeartbeatSerializer, description="Foreground time heartbeat.")
+    def post(self, request):
+        serializer = self.get_serializer(data=request.data)
+        if not serializer.is_valid():
+            return Response({
+                "status": False,
+                "message": "Validation failed.",
+                "errors": serializer.errors,
+            }, status=status.HTTP_400_BAD_REQUEST)
+
+        usage, credited, limit_reached = DailyUsage.objects.record_heartbeat(
+            request.user, serializer.validated_data["seconds"],
+        )
+
+        if limit_reached:
+            try:
+                from core.models import Notification
+
+                from .services import _notify
+
+                minutes = UserPreference.objects.filter(user=request.user).values_list(
+                    "daily_limit_minutes", flat=True
+                ).first()
+                _notify(
+                    request.user,
+                    getattr(Notification.NotifType, "DAILY_LIMIT_REACHED", "daily_limit_reached"),
+                    "Daily limit reached ⏰",
+                    f"You've spent {minutes} minutes on LearnScroll today — time for a break?",
+                    data={"type": "daily_limit_reached", "daily_limit_minutes": minutes},
+                )
+            except Exception:
+                logger.exception("daily limit notification failed (user=%s)", request.user.pk)
+
+        return Response({
+            "status": True,
+            "message": "Heartbeat recorded.",
+            "data": {"today_seconds": usage.seconds, "credited_seconds": credited},
+            "limit_reached": limit_reached,
+        }, status=status.HTTP_200_OK)

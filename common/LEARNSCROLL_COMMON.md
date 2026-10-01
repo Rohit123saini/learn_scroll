@@ -4,9 +4,9 @@
 > **not a Django app of its own** (no `models.py`/`admin.py`/`apps.py`, not in
 > `INSTALLED_APPS`), just a place for small, import-free, cross-app utility
 > modules that more than one real app (`testseries`, `assigments`, and
-> potentially others — `liveclass`, `campus`) needs and shouldn't each
+> potentially others — `tuitionclass`, `campus`) needs and shouldn't each
 > redefine independently. Share only this file (plus the relevant app's own
-> doc, e.g. `LEARNSCROLL_LIVECLASS.md`) in a future chat when touching
+> doc, e.g. `LEARNSCROLL_TUITIONCLASS.md`) in a future chat when touching
 > anything that imports from `common.*`.
 
 ---
@@ -17,7 +17,7 @@
   functions and validator objects that any app can import without pulling
   in that app's models, views, or other app-specific baggage.
 - **Isn't**: a Django app. No `AppConfig`, no `INSTALLED_APPS` entry needed
-  (unlike `liveclass` — see that app's `apps.py`/§13 gotcha about
+  (unlike `tuitionclass` — see that app's `apps.py`/§13 gotcha about
   `signals.py` needing `AppConfig.ready()`). `common/` has no signals, no
   models, nothing that needs Django's app registry to wire up — it's just
   importable Python.
@@ -73,11 +73,11 @@ validate_attachment_size(file)  # raises django.core.exceptions.ValidationError 
 - **Safelist, not blocklist** — `FileExtensionValidator(allowed_extensions=...)`
   only accepts what's on the list (`pdf`/`jpg`/`jpeg`/`png`/`webp` by
   default). This is the same safelist-over-blocklist posture
-  `liveclass/models.py`'s own `DOCUMENT_MEDIA_EXTENSIONS` safelist takes for
+  `tuitionclass/models.py`'s own `DOCUMENT_MEDIA_EXTENSIONS` safelist takes for
   its own plain `FileField`s (material/assigments attachment/assigments
-  submission/certificate — see `LEARNSCROLL_LIVECLASS.md` §3) — **but it is
+  submission/certificate — see `LEARNSCROLL_TUITIONCLASS.md` §3) — **but it is
   a separate, independent safelist**, not the same one. Don't assume
-  `liveclass`'s `MaxFileSizeValidator`/`DOCUMENT_MEDIA_EXTENSIONS` and this
+  `tuitionclass`'s `MaxFileSizeValidator`/`DOCUMENT_MEDIA_EXTENSIONS` and this
   module's `attachment_extension_validator`/`validate_attachment_size` are
   interchangeable or share config — they're two different validators with
   two different settings keys, maintained in two different places, that
@@ -179,19 +179,19 @@ Returns `(is_correct, marks_awarded)`.
   a not-yet-done integration, not confirmation that it's done**. Before
   relying on `assigments` auto-grading anything, confirm `assigments`'s own
   code (`assigments/models.py`/`assigments/bridge.py` — see
-  `LEARNSCROLL_LIVECLASS.md` §6d for what's been read of that app so far)
+  `LEARNSCROLL_TUITIONCLASS.md` §6d for what's been read of that app so far)
   actually calls `common.question_grading.auto_grade(..., marks=<the
   question's own marks>)` the way the docstring instructs, rather than
   assuming the note alone means it's wired.
-- **`liveclass`**: no evidence in anything audited so far
-  (`LEARNSCROLL_LIVECLASS.md`) that `liveclass` imports from `common/` —
+- **`tuitionclass`**: no evidence in anything audited so far
+  (`LEARNSCROLL_TUITIONCLASS.md`) that `tuitionclass` imports from `common/` —
   its own file-upload validation is a separate, independently-maintained
   safelist (`DOCUMENT_MEDIA_EXTENSIONS` + `MaxFileSizeValidator`, see §2
-  above and that doc's §3). `liveclass` also has no auto-graded
+  above and that doc's §3). `tuitionclass` also has no auto-graded
   MCQ/MSQ-style question model — its `assigments`/`assigmentsSubmission`
   (legacy) and the unified `assigments` app's submissions are file-upload +
   manual-score based, not option-based, so `question_grading.py` has no
-  obvious call site there. Treat `liveclass` as **not currently a consumer**
+  obvious call site there. Treat `tuitionclass` as **not currently a consumer**
   of either `common/` module unless/until a future upload shows otherwise.
 
 ---
@@ -216,8 +216,8 @@ Returns `(is_correct, marks_awarded)`.
    a one-line tweak.
 3. **`common/` having no `AppConfig`/`INSTALLED_APPS` entry means there's
    nothing here that "loads" at Django startup** — no signals, no app-ready
-   hook, unlike `liveclass.apps.LiveclassConfig` (see
-   `LEARNSCROLL_LIVECLASS.md` §13/§17 item 1 for what happens when an app
+   hook, unlike `tuitionclass.apps.TuitionclassConfig` (see
+   `LEARNSCROLL_TUITIONCLASS.md` §13/§17 item 1 for what happens when an app
    *does* need that wiring and it's missing). Nothing in `common/` needs
    the equivalent — don't add one unless a future file in this folder
    genuinely needs Django's app registry (at which point it likely

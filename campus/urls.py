@@ -35,6 +35,17 @@ from .views import (
     TimeSlotViewSet,
     TimetableEntryViewSet,
 )
+from .parent_invite import (
+    CampusParentInviteBulkView,
+    CampusParentInviteSingleView,
+    CampusParentLinkConfirmView,
+)
+from .campus_invite import (
+    CampusInviteCodeGenerateView,
+    CampusInviteCodeListView,
+    CampusInviteCodeRedeemView,
+    CampusInviteCodeRevokeView,
+)
 
 router = DefaultRouter()
 
@@ -57,7 +68,7 @@ router.register("parent-links", CampusParentLinkViewSet, basename="campus-parent
 # Phase 3 — notices
 router.register("notices", NoticeViewSet, basename="notice")
 
-# Phase 4 — live classes
+# Phase 4 — tuition classes
 router.register("live-sessions", CampusLiveSessionViewSet, basename="campus-live-session")
 
 # Phase 5 — timetable & attendance
@@ -98,4 +109,50 @@ urlpatterns = [
     # isn't scoped to an existing parent-link object, so it doesn't
     # fit the router's list/detail shape anyway.
     path("parent-links/verify/", ParentLinkVerifyView.as_view(), name="campus-parent-link-verify"),
+
+    # NEW — "add parent" automation (bulk / manual / confirm). See
+    # campus/parent_invite.py's module docstring for why confirm/ is a
+    # NEW endpoint rather than reusing parent-links/verify/ above (that
+    # one has a pre-existing bug in how it resolves the token).
+    path(
+        "parent-invite/bulk/<str:campus_id>/",
+        CampusParentInviteBulkView.as_view(),
+        name="campus-parent-invite-bulk",
+    ),
+    path(
+        "parent-invite/<str:campus_id>/<str:student_id>/",
+        CampusParentInviteSingleView.as_view(),
+        name="campus-parent-invite-single",
+    ),
+    path(
+        "parent-link/confirm/",
+        CampusParentLinkConfirmView.as_view(),
+        name="campus-parent-link-confirm",
+    ),
+
+    # NEW — Task 13/G13: campus "family" network-effect invite codes.
+    # (Same "listed before router.urls" reasoning as parent-link/verify/
+    # above — none of these fit the router's list/detail shape, and
+    # "invite-code/redeem/" in particular must never be shadowed by a
+    # would-be router pattern.)
+    path(
+        "<str:campus_id>/sections/<str:section_id>/invite-code/",
+        CampusInviteCodeGenerateView.as_view(),
+        name="campus-invite-code-generate",
+    ),
+    path(
+        "<str:campus_id>/invite-codes/",
+        CampusInviteCodeListView.as_view(),
+        name="campus-invite-code-list",
+    ),
+    path(
+        "invite-code/<str:code_id>/revoke/",
+        CampusInviteCodeRevokeView.as_view(),
+        name="campus-invite-code-revoke",
+    ),
+    path(
+        "invite-code/redeem/",
+        CampusInviteCodeRedeemView.as_view(),
+        name="campus-invite-code-redeem",
+    ),
 ] + router.urls

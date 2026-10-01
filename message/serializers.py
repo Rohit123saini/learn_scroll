@@ -26,6 +26,7 @@ from .models import (
     UserPresence,
 )
 from .group_rules import is_group_admin_or_mod
+from .voice_meta import sanitize_voice_meta  # 🔥 NAYA (M4a) — voice waveform
 from .user_display import get_display_name, get_profile_photo_url
 
 User = get_user_model()
@@ -119,6 +120,10 @@ class ConversationListSerializer(serializers.ModelSerializer):
     unread_count = serializers.SerializerMethodField()
     my_settings = serializers.SerializerMethodField()
     last_message_sender = UserMiniSerializer(read_only=True)
+    # 🔥 NAYA (M1-BE) — message requests: 'accepted' | 'pending' | 'declined'
+    # (is user ka apna status). Inbox list me hamesha 'accepted'; detail /
+    # requests list me 'pending' bhi aa sakta hai.
+    request_status = serializers.SerializerMethodField()
 
     class Meta:
         model = Conversation
@@ -126,6 +131,7 @@ class ConversationListSerializer(serializers.ModelSerializer):
             'id', 'type', 'other_participant', 'group',
             'last_message_text', 'last_message_at', 'last_message_sender',
             'last_message_type', 'unread_count', 'my_settings', 'created_at',
+            'request_status',
         ]
 
     def _membership(self, obj):
@@ -169,6 +175,10 @@ class ConversationListSerializer(serializers.ModelSerializer):
     def get_my_settings(self, obj):
         membership = self._membership(obj)
         return ConversationSettingsSerializer(membership).data if membership else None
+
+    def get_request_status(self, obj):
+        membership = self._membership(obj)
+        return membership.request_status if membership else 'accepted'
 
 
 # ======================================================================
@@ -381,6 +391,12 @@ class MessageSerializer(serializers.ModelSerializer):
     # endpoint client ko poll dekhne ke liye nahi chahiye — normal message
     # list/detail me hi mil jaata hai, jaisa `reply_to_detail` ka pattern).
     poll = serializers.SerializerMethodField()
+    # 🔥 NAYA — story reply (post app bridge). Non-null only when
+    # `type == 'story_reply'`. `story_reply_snapshot` on the model
+    # survives the story itself expiring/soft-deleting later, so this
+    # stays renderable in the chat thread forever — same idea as
+    # `reply_to_detail` surviving a deleted parent message.
+    story_reply = serializers.SerializerMethodField()
 
     class Meta:
         model = Message
@@ -390,7 +406,7 @@ class MessageSerializer(serializers.ModelSerializer):
             'reply_to', 'reply_to_detail', 'is_edited', 'is_forwarded',
             'is_system_message', 'deleted_for_everyone', 'client_id',
             'reactions', 'is_read_by_me', 'is_pinned', 'pinned_at', 'pinned_by',
-            'mentioned_users', 'is_starred', 'poll',
+            'mentioned_users', 'is_starred', 'poll', 'story_reply',
             # 🔧 FIX (Feature 11 — Announcements, backend/frontend sync) —
             # field ab model pe bhi hai (`models.py`), aur frontend
             # (`message_models.dart`'s `MessageModel.isAnnouncement`) pehle
@@ -445,6 +461,20 @@ class MessageSerializer(serializers.ModelSerializer):
         if not poll:
             return None
         return PollSerializer(poll, context=self.context).data
+
+    def get_story_reply(self, obj):
+        if obj.type != MessageType.STORY_REPLY:
+            return None
+        return {
+            'story_id': str(obj.story_id) if obj.story_id else None,
+            # True only while the original Story row is still around
+            # (not expired/soft-deleted) — lets the client show a
+            # "View story" tap-through vs. just the static snapshot.
+            'story_available': bool(
+                obj.story_id and not obj.story.is_deleted and not obj.story.is_expired
+            ) if obj.story_id else False,
+            'snapshot_url': obj.story_reply_snapshot,
+        }
 
     def to_representation(self, instance):
         data = super().to_representation(instance)
@@ -520,6 +550,11 @@ class MessageCreateSerializer(serializers.ModelSerializer):
             raise serializers.ValidationError(
                 f"'{msg_type}' message ke liye 'file_url' ya 'file_urls' required hai."
             )
+
+        # 🔥 NAYA (M4a) — voice waveform (`meta['waveform']`, max 64 ints 0..100)
+        # clean karo; galat ho to message reject nahi hota, sirf waveform hat jaata hai.
+        if 'meta' in attrs:
+            attrs['meta'] = sanitize_voice_meta(attrs['meta'], msg_type)
         return attrs
 
 
@@ -585,6 +620,8 @@ class GroupSerializer(serializers.ModelSerializer):
             # `IsGroupAdminOrModerator` permission this ViewSet already
             # uses for `update`/`partial_update`, no new endpoint needed).
             'allow_anonymous_doubts',
+            # 🔥 NAYA (Task G14) — Study Groups discovery tag.
+            'topic_tag',
         ]
         read_only_fields = [
             'id', 'conversation_id', 'created_by', 'invite_code',
@@ -594,6 +631,36 @@ class GroupSerializer(serializers.ModelSerializer):
     def get_members(self, obj):
         qs = obj.group_members.filter(is_banned=False).select_related('user')
         return GroupMemberSerializer(qs, many=True, context=self.context).data
+
+
+# 🔥 NAYA (Task G14) — `GroupViewSet.discover` ke liye lightweight
+# serializer. Bilkul `GroupSerializer` jaisa nahi hai jaanbujh ke: discover
+# results me caller abhi tak member hi nahi hai, isliye poori `members`
+# list (`GroupSerializer.get_members`) bhejna faltu N+1 query + ek group
+# ke andar kaun members hain wo non-member ko dikhana bhi hai (private
+# groups discover me aate hi nahi, par public group ke andar bhi random
+# non-member ko poori member-list dikhana zaroori nahi). Bas discovery-card
+# UI ko jo chahiye wahi: naam, tag, member count, aur `invite_code` (public
+# group hai isliye safe hai — isi code se `POST /groups/join/` call hota
+# hai) + `is_member` taaki UI "Join" vs "Open" button decide kar sake.
+class GroupDiscoverSerializer(serializers.ModelSerializer):
+    is_member = serializers.SerializerMethodField()
+
+    class Meta:
+        model = Group
+        fields = [
+            'id', 'name', 'description', 'photo_url', 'topic_tag',
+            'invite_code', 'members_count', 'created_at', 'is_member',
+        ]
+
+    def get_is_member(self, obj):
+        user = self.context['request'].user
+        # `discover()` view prefetches `_viewer_member_ids` (a set) onto
+        # each object to avoid one membership query per row — see views.py.
+        member_ids = getattr(obj, '_viewer_member_ids', None)
+        if member_ids is not None:
+            return obj.id in member_ids
+        return obj.group_members.filter(user=user, is_banned=False).exists()
 
 
 class GroupCreateSerializer(serializers.Serializer):
@@ -615,6 +682,11 @@ class GroupCreateSerializer(serializers.Serializer):
     is_private = serializers.BooleanField(required=False, default=False)
     member_ids = serializers.ListField(
         child=serializers.IntegerField(), allow_empty=True, required=False, default=list
+    )
+    # 🔥 NAYA (Task G14) — optional subject/exam tag (e.g. "NEET 2027"),
+    # sirf discovery search ke liye. Blank chhodna bilkul valid hai.
+    topic_tag = serializers.CharField(
+        max_length=100, required=False, allow_blank=True, allow_null=True, default=''
     )
 
 

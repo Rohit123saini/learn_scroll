@@ -1,7 +1,7 @@
 # core/test_async_dispatch.py
 """
 Tests for the Celery side-effect layer: core/async_utils.py, core/tasks.py,
-and the two call sites that use it (campus.bridge.notify, liveclass signals).
+and the two call sites that use it (campus.bridge.notify, tuitionclass signals).
 
 Run: python manage.py test core.test_async_dispatch
 

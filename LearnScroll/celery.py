@@ -3,7 +3,7 @@
 Celery app for LearnScroll.
 
 WHY THIS FILE EXISTS:
-    Several liveclass features only *look* implemented — the DB rows and
+    Several tuitionclass features only *look* implemented — the DB rows and
     the logic to act on them exist, but nothing ever actually runs that
     logic on a schedule:
         - ClassSchedule (recurrence rule) never turns into joinable
@@ -15,7 +15,7 @@ WHY THIS FILE EXISTS:
         - A session a teacher forgot to /end/ stays LIVE forever (LiveKit
           room never torn down, attendance never finalized).
     All four need something to run periodically outside the request/
-    response cycle. See liveclass/tasks.py for the actual task bodies and
+    response cycle. See tuitionclass/tasks.py for the actual task bodies and
     CELERY_BEAT_SCHEDULE in settings.py for how often each one runs.
 
 WIRING (one-time setup):
@@ -53,6 +53,6 @@ app = Celery("LearnScroll")
 # Reads every CELERY_* setting from Django's settings.py (namespace="CELERY"
 # means e.g. CELERY_BROKER_URL maps to Celery's `broker_url`).
 app.config_from_object("django.conf:settings", namespace="CELERY")
-# Auto-discovers a `tasks.py` in every INSTALLED_APPS app (liveclass/tasks.py
+# Auto-discovers a `tasks.py` in every INSTALLED_APPS app (tuitionclass/tasks.py
 # included) — no manual task registration needed.
 app.autodiscover_tasks()

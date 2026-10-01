@@ -6,7 +6,8 @@ from datetime import timedelta
 from django.contrib.auth import get_user_model
 from django.core.cache import cache
 from django.db import transaction
-from django.db.models import F, Prefetch, Q, Sum
+from django.db.models import Exists, F, OuterRef, Prefetch, Q, Sum
+from django.db.models.functions import Coalesce
 from django.http import Http404
 from django.shortcuts import get_object_or_404
 from django.utils import timezone
@@ -51,7 +52,9 @@ from .models import (
     Poll,
     PollOption,
     PollVote,
+    RequestStatus,  # 🔥 NAYA (M1-BE) — message requests
     StudyRoomState,
+    StudyRoomNote,  # 🔥 NAYA — collaborative sticky notes
     # 🔥 NAYA — Feature 6: attendance/consistency streak
     StudyRoomAttendance,
 )
@@ -66,6 +69,7 @@ from .serializers import (
     DoubtCreateSerializer,
     DoubtQuestionSerializer,
     GroupCreateSerializer,
+    GroupDiscoverSerializer,
     GroupJoinRequestSerializer,
     GroupMediaSerializer,
     GroupMemberSerializer,
@@ -114,6 +118,10 @@ from .offline_queue import flush_offline_queue
 from .livekit_utils import EgressError, generate_livekit_token, start_room_recording, stop_room_recording
 from .user_display import build_user_mini, get_display_name, get_profile_photo_url
 from .group_rules import check_group_permission, check_daily_message_limit, is_group_admin_or_mod
+from .admin_only import admin_only_block_response, normalize_permission, is_admins_only, post_permission_system_message  # M9a
+from . import sticky_notes  # NAYA — collaborative study-room sticky notes
+from . import message_requests  # 🔥 NAYA (M1-BE) — message requests rules
+from . import user_notes  # 🔥 NAYA (M2-BE) — Instagram-style status notes (sticky_notes.py se alag)
 from .cache_utils import invalidate_group_role_cache, get_presence_cached, set_presence_cache
 from .mentions import extract_mentioned_user_ids
 from .media_utils import create_group_media_for_message
@@ -238,7 +246,23 @@ class ConversationViewSet(viewsets.ReadOnlyModelViewSet):
                 queryset=ConversationParticipant.objects.filter(user=self.request.user),
                 to_attr='my_membership_list',
             )
-        ).order_by('-last_message_at', '-created_at')
+        # 🔥 FIX — a brand-new conversation (new group just created, or the
+        # empty thread mutual-follow auto-creates — see
+        # `message.services.get_or_create_conversation`) has
+        # `last_message_at = NULL` until someone actually sends a message.
+        # Plain `order_by('-last_message_at', '-created_at')` left where
+        # NULL lands entirely up to the DB's default NULL-ordering, which
+        # differs by engine: Postgres puts NULLs FIRST on DESC (new chat on
+        # top), SQLite treats NULL as the smallest value so DESC puts it
+        # LAST (new chat sinks to the bottom) — exactly the bug reported.
+        # `Coalesce` removes the ambiguity: sort by "last activity time",
+        # falling back to `created_at` when there's no message yet, so a
+        # freshly created conversation sorts by *when it was created* (the
+        # most recent thing that happened to it) and lands at the top on
+        # every DB engine, consistently.
+        ).annotate(
+            _sort_ts=Coalesce('last_message_at', 'created_at')
+        ).order_by('-_sort_ts', '-created_at')
 
         # ⚠️ IMPORTANT: filters below apply ONLY to `list` — every detail
         # action (`messages`, `settings`, `disappearing_messages`, ...)
@@ -287,6 +311,12 @@ class ConversationViewSet(viewsets.ReadOnlyModelViewSet):
         if params.get('unread') == 'true':
             qs = qs.filter(memberships__user=me, memberships__unread_count__gt=0)
 
+        # 🔥 NAYA (M1-BE) — pending/declined message-requests normal inbox me
+        # NAHI aate (wo `GET /message/requests/` me hain). Sirf `list` pe —
+        # detail actions (messages/read_all/...) pending chat ke liye bhi
+        # chalne chahiye taaki receiver request khol ke padh sake.
+        qs = qs.filter(memberships__user=me, memberships__request_status=RequestStatus.ACCEPTED)
+
         return qs
 
     def get_serializer_context(self):
@@ -321,11 +351,19 @@ class ConversationViewSet(viewsets.ReadOnlyModelViewSet):
         # `left_at__isnull=True` is the app's actual "still in this chat"
         # signal (see `bulk_delete`/leave-group above — a deleted/left chat
         # sets `left_at`, `Conversation` itself is never soft-deleted).
-        qs = ConversationParticipant.objects.filter(user=request.user, left_at__isnull=True)
+        # 🔥 NAYA (M1-BE) — pending/declined requests inbox badge me count
+        # nahi hote; unka alag `message_requests_count` milta hai.
+        qs = ConversationParticipant.objects.filter(
+            user=request.user, left_at__isnull=True, request_status=RequestStatus.ACCEPTED,
+        )
         if str(request.query_params.get('exclude_muted', '')).lower() == 'true':
             qs = qs.exclude(is_muted=True)
         total = qs.aggregate(total=Sum('unread_count'))['total'] or 0
-        return Response({'unread_count': total})
+        requests_count = ConversationParticipant.objects.filter(
+            user=request.user, left_at__isnull=True, request_status=RequestStatus.PENDING,
+            conversation__type=ConversationType.PRIVATE,
+        ).count()
+        return Response({'unread_count': total, 'message_requests_count': requests_count})
 
     # ======================================================================
     # 🔥 NAYA (TASK 29 — suggested facility) — CHAT / MEDIA EXPORT
@@ -717,6 +755,10 @@ class ConversationViewSet(viewsets.ReadOnlyModelViewSet):
             # nahi padta tha).
             group = getattr(conversation, 'group_detail', None)
             if group:
+                # M9a — admin-only: explicit code ('admins_only') ke saath 403
+                blocked = admin_only_block_response(group, request.user.id)
+                if blocked is not None:
+                    return blocked
                 allowed, reason = check_group_permission(group, request.user.id, 'message_permission')
                 if not allowed:
                     return Response({'detail': reason}, status=status.HTTP_403_FORBIDDEN)
@@ -848,20 +890,23 @@ class ConversationViewSet(viewsets.ReadOnlyModelViewSet):
         # isi chat ke andar hain (ChatConsumer se joined); yahan har
         # recipient ke apne global `user_<id>` inbox group ko bhi ek
         # halka event bhejte hain (InboxConsumer se connect hota hai).
-        for uid in other_recipients:
-            async_to_sync(channel_layer.group_send)(
-                f'user_{uid}',
-                {
-                    'type': 'inbox_update',
-                    'conversation_id': str(conversation.id),
-                    'message_id': str(message.id),
-                    'sender_id': str(request.user.id),
-                    'sender_name': sender_name,
-                    'last_message_text': message.text,
-                    'last_message_type': message.type,
-                    'created_at': message.created_at.isoformat(),
-                }
-            )
+        # 🔥 NAYA (M1-BE) — recipient ke `request_status` ke hisaab se event:
+        # accepted -> `inbox_update` (jaisa pehle), pending -> `message_request`,
+        # declined -> kuch nahi.
+        inbox_payload = {
+            'type': 'inbox_update',
+            'conversation_id': str(conversation.id),
+            'message_id': str(message.id),
+            'sender_id': str(request.user.id),
+            'sender_name': sender_name,
+            'last_message_text': message.text,
+            'last_message_type': message.type,
+            'created_at': message.created_at.isoformat(),
+        }
+        for uid, inbox_event in message_requests.inbox_events_for(
+            conversation.id, other_recipients, inbox_payload,
+        ):
+            async_to_sync(channel_layer.group_send)(f'user_{uid}', inbox_event)
 
         # 🔥 FIX — jinhone ye conversation mute kar rakha hai unhe push
         # notification NAHI jaani chahiye (WhatsApp jaisa: chat list me
@@ -958,6 +1003,10 @@ class ConversationViewSet(viewsets.ReadOnlyModelViewSet):
         else:
             group = getattr(conversation, 'group_detail', None)
             if group:
+                # M9a — admin-only: explicit code ('admins_only') ke saath 403
+                blocked = admin_only_block_response(group, request.user.id)
+                if blocked is not None:
+                    return blocked
                 allowed, reason = check_group_permission(group, request.user.id, 'message_permission')
                 if not allowed:
                     return Response({'detail': reason}, status=status.HTTP_403_FORBIDDEN)
@@ -997,6 +1046,10 @@ class ConversationViewSet(viewsets.ReadOnlyModelViewSet):
         else:
             group = getattr(conversation, 'group_detail', None)
             if group:
+                # M9a — admin-only: explicit code ('admins_only') ke saath 403
+                blocked = admin_only_block_response(group, request.user.id)
+                if blocked is not None:
+                    return blocked
                 allowed, reason = check_group_permission(group, request.user.id, 'message_permission')
                 if not allowed:
                     return Response({'detail': reason}, status=status.HTTP_403_FORBIDDEN)
@@ -1111,9 +1164,32 @@ class ConversationViewSet(viewsets.ReadOnlyModelViewSet):
         """
         FIXED: pehle for loop me update_or_create se database locked ho rha tha.
         Ab bulk_update + bulk_create + ignore_conflicts use kiya hai.
+
+        Task 10 — is method ke andar hi ab `core.Notification` (source
+        'message', notif_type CHAT_MESSAGE) ke corresponding records bhi
+        read mark kiye jaate hain. Isse pehle sirf `MessageStatus.read_at`
+        set hota tha; Home ka Chat-tab badge `NotificationService.
+        getUnreadCount(source: 'message')` se aata hai, jo notification-
+        records ka unread-count deta hai — us table ko yahin se bhi
+        touch na karna hi badge-not-clearing bug ka root cause tha (dono
+        table ek doosre se disconnect the). Backend-side fix isliye
+        (frontend-side bulk-call ke bajaye) taaki ye hamesha single
+        source-of-truth rahe — push-notifications/bell dono isi record pe
+        depend karte hain, is se sync rehna zaroori hai.
         """
         conversation = self.get_object()
+        # 🔥 NAYA (M1-BE) — pending/declined request kholne par read-receipt
+        # sender tak NAHI jaani chahiye: kuch bhi read-mark mat karo (no-op).
+        # Accept ke baad normal read_all chalega aur tab messages read honge.
+        if not message_requests.is_request_accepted(conversation.id, request.user.id):
+            return Response({'detail': 'Saare messages read mark ho gaye.'})
         now = timezone.now()
+        try:
+            self._mark_message_notifications_read(request.user, conversation.id, now)
+        except Exception:
+            # Best-effort — a notification-table hiccup should never block
+            # the actual message read-receipts below from being written.
+            logger.exception('Task 10: failed to sync core.Notification read-state for conversation %s', conversation.id)
 
         try:
             # Sirf 500 tak limit rakho taaki ek sath lock na lage
@@ -1162,6 +1238,27 @@ class ConversationViewSet(viewsets.ReadOnlyModelViewSet):
             ).update(unread_count=0, last_read_at=now)
 
         return Response({'detail': 'Saare messages read mark ho gaye.'})
+
+    # Task 10 — shared helper: `core.Notification` rows for this
+    # recipient that are (a) still unread and (b) tagged to this
+    # conversation get read-marked too. Called from both `read_all`
+    # (bulk conversation open/read) and `MessageViewSet.mark_read`
+    # (single-message read) below, so a badge desync can't creep back in
+    # via one call site while the other stays fixed.
+    #
+    # `data__conversation_id` is a JSONField key lookup — CHAT_MESSAGE
+    # notifications always carry `conversation_id` as a string (see
+    # `push_utils.py`'s `create_notification(..., data={"conversation_id":
+    # str(conversation_id), ...})`), so the comparison value here is
+    # stringified to match exactly.
+    @staticmethod
+    def _mark_message_notifications_read(user, conversation_id, now):
+        from core.models import Notification
+
+        Notification.objects.for_user(user).unread().filter(
+            notif_type=Notification.NotifType.CHAT_MESSAGE,
+            data__conversation_id=str(conversation_id),
+        ).update(is_read=True, read_at=now)
 
     # ==================================================================
     # SEARCH — ek conversation ke andar text search
@@ -1233,6 +1330,9 @@ class ConversationViewSet(viewsets.ReadOnlyModelViewSet):
         qs = Message.objects.filter(
             conversation__memberships__user=request.user,
             conversation__memberships__left_at__isnull=True,
+            # 🔥 NAYA (M1-BE) — pending/declined requests ke messages global
+            # search me nahi aate (jaise wo inbox me nahi hain).
+            conversation__memberships__request_status=RequestStatus.ACCEPTED,
         ).filter(
             Q(expires_at__isnull=True) | Q(expires_at__gt=timezone.now())
         ).exclude(
@@ -1277,6 +1377,48 @@ class ConversationViewSet(viewsets.ReadOnlyModelViewSet):
         qs = with_message_list_prefetch(qs, request.user)  # 🔥 NAYA — perf, see helper def
         serializer = MessageSerializer(qs, many=True, context={'request': request})
         return Response(serializer.data)
+
+    # ==================================================================
+    # 🔥 NAYA (M8-BE) — MEDIA / LINKS / DOCS (private + group dono)
+    # ==================================================================
+    # GET /message/conversations/<id>/media/?type=media|links|docs[&page=&page_size=]
+    #   media -> image + video          (grid)
+    #   docs  -> file + presentation + audio
+    #   links -> text messages me se extract kiye hue URLs (+ `link_preview`
+    #            agar generate_link_preview_task ne Message pe store kiya ho)
+    # `GroupViewSet.media` (`GroupMedia` table) sirf groups ke liye hai aur
+    # `links` nahi deta; ye endpoint seedha Message table se chalta hai,
+    # isliye DM pe bhi kaam karta hai. Visibility rules `search` jaise hi
+    # hain (deleted-for-me/everyone, expired, scheduled hidden). Pagination
+    # message-level hai; multi-image / multi-link message ek page me
+    # ek se zyada item de sakta hai.
+    @action(detail=True, methods=['get'], url_path='media')
+    def media(self, request, pk=None):
+        conversation = self.get_object()
+        tab = (request.query_params.get('type') or 'media').strip().lower()
+        if tab not in search_utils.LIBRARY_TABS:
+            return Response(
+                {'detail': "'type' in me se ek hona chahiye: " + ', '.join(search_utils.LIBRARY_TABS)},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        qs = conversation.all_messages.filter(
+            Q(expires_at__isnull=True) | Q(expires_at__gt=timezone.now())
+        ).exclude(
+            deleted_for_everyone=True,
+        ).exclude(
+            deleted_for_users=request.user,
+        ).exclude(
+            is_scheduled=True,
+        ).select_related('sender').order_by('-created_at', '-id')
+        qs = search_utils.apply_library_filter(qs, tab)
+
+        paginator = MessagePagination()
+        page = paginator.paginate_queryset(qs, request, view=self)
+        items = []
+        for message in page:
+            items.extend(search_utils.build_library_items(message, tab))
+        return paginator.get_paginated_response(items)
 
     # ==================================================================
     # 🔥 NAYA (ADVANCED FEATURE) — SCHEDULED MESSAGES / "SEND LATER"
@@ -1326,6 +1468,10 @@ class ConversationViewSet(viewsets.ReadOnlyModelViewSet):
         else:
             group = getattr(conversation, 'group_detail', None)
             if group:
+                # M9a — admin-only: explicit code ('admins_only') ke saath 403
+                blocked = admin_only_block_response(group, request.user.id)
+                if blocked is not None:
+                    return blocked
                 allowed, reason = check_group_permission(group, request.user.id, 'message_permission')
                 if not allowed:
                     return Response({'detail': reason}, status=status.HTTP_403_FORBIDDEN)
@@ -1720,6 +1866,9 @@ class MessageViewSet(mixins.RetrieveModelMixin, mixins.UpdateModelMixin,
     @action(detail=True, methods=['post'], url_path='read')
     def mark_read(self, request, pk=None):
         message = self.get_object()
+        # 🔥 NAYA (M1-BE) — see `read_all`: pending/declined me read-receipt no-op.
+        if not message_requests.is_request_accepted(message.conversation_id, request.user.id):
+            return Response({'detail': 'Read mark ho gaya.'})
         now = timezone.now()
 
         MessageStatus.objects.update_or_create(
@@ -1730,6 +1879,21 @@ class MessageViewSet(mixins.RetrieveModelMixin, mixins.UpdateModelMixin,
             ConversationParticipant.objects.filter(
                 conversation=message.conversation, user=request.user, unread_count__gt=0,
             ).update(unread_count=F('unread_count') - 1)
+
+        # Task 10 — same core.Notification sync as ConversationViewSet
+        # .read_all() above, scoped to just THIS message (data__message_id)
+        # rather than the whole conversation, since a single-message read
+        # here doesn't imply every other message in the conversation was
+        # also read.
+        try:
+            from core.models import Notification
+
+            Notification.objects.for_user(request.user).unread().filter(
+                notif_type=Notification.NotifType.CHAT_MESSAGE,
+                data__message_id=str(message.id),
+            ).update(is_read=True, read_at=now)
+        except Exception:
+            logger.exception('Task 10: failed to sync core.Notification read-state for message %s', message.id)
 
         return Response({'detail': 'Read mark ho gaya.'})
 
@@ -2089,6 +2253,22 @@ class MessageViewSet(mixins.RetrieveModelMixin, mixins.UpdateModelMixin,
                 memberships__left_at__isnull=True,
             ).distinct()
         )
+        # M9a — forward bhi send hai: admin-only group me normal member forward
+        # nahi kar sakta (pehle ye path permission bypass karta tha).
+        _blocked_titles = []
+        _allowed_targets = []
+        for _c in target_conversations:
+            _g = getattr(_c, 'group_detail', None) if _c.type == ConversationType.GROUP else None
+            if _g is not None and is_admins_only(_g) and not is_group_admin_or_mod(_g, request.user.id):
+                _blocked_titles.append(str(_c.id))
+                continue
+            _allowed_targets.append(_c)
+        target_conversations = _allowed_targets
+        if not target_conversations and _blocked_titles:
+            return Response(
+                {'detail': 'Only admins can send messages', 'code': 'admins_only', 'blocked_conversation_ids': _blocked_titles},
+                status=status.HTTP_403_FORBIDDEN,
+            )
         if not target_conversations:
             return Response({'detail': 'Koi valid target conversation nahi mila.'}, status=status.HTTP_404_NOT_FOUND)
 
@@ -2270,6 +2450,23 @@ class GroupViewSet(viewsets.ModelViewSet):
             return [IsAuthenticated(), IsGroupAdminOrModerator()]
         return [IsAuthenticated()]
 
+    # M9a — message_permission change par (a) FE alias 'admins_mods' ->
+    # 'admins_only' normalize, (b) badalne par group me system message.
+    def update(self, request, *args, **kwargs):
+        data = request.data
+        for key in ('message_permission', 'call_permission', 'study_room_permission'):
+            if key in data and data.get(key) == 'admins_mods':
+                data = data.copy() if hasattr(data, 'copy') else dict(data)
+                data[key] = normalize_permission(data[key])
+        request._full_data = data  # DRF: normalized payload serializer ko mile
+        return super().update(request, *args, **kwargs)
+
+    def perform_update(self, serializer):
+        old_value = serializer.instance.message_permission
+        group = serializer.save()
+        if is_admins_only(group) != (old_value in ('admins_only', 'admins_mods')):
+            post_permission_system_message(group, self.request.user, is_admins_only(group))
+
     # 🔥 FIX — mass-group-creation spam guard (`GroupCreateThrottle`)
     # existed in throttles.py but was never wired in.
     def get_throttles(self):
@@ -2353,9 +2550,66 @@ class GroupViewSet(viewsets.ModelViewSet):
             photo_url=data.get('photo_url'),
             is_private=data.get('is_private', False),
             member_ids=data.get('member_ids', []),
+            topic_tag=data.get('topic_tag', ''),
         )
 
         return Response(GroupSerializer(group, context={'request': request}).data, status=status.HTTP_201_CREATED)
+
+    # 🔥 NAYA (Task G14) — "Study Groups" discovery. `get_queryset()` (top
+    # of this ViewSet) sirf caller ke apne groups tak limited hai (list/
+    # retrieve/update/destroy sab isi se aate hain) — is action ko isliye
+    # `get_object()`/`get_queryset()` reuse nahi karta, seedha `Group`
+    # model se query karta hai, taaki EK BHI authenticated user PUBLIC
+    # groups dhoond sake chahe wo member ho ya na ho (private groups
+    # kabhi is list me nahi aate — invite-code/direct-add hi unka raasta
+    # rehta hai, jaisa pehle tha).
+    #
+    # `?q=` — name/description/topic_tag pe case-insensitive search.
+    # `?topic=` — exact topic_tag match (chip-tap se filter, e.g. "NEET 2027").
+    # Ordering: sabse zyada members wale (trending) pehle, phir naye-se-purane.
+    # Simple offset pagination (`?page=`) — is discovery list ke liye poori
+    # `PageNumberPagination` class alag se banane ki zaroorat nahi, DRF ka
+    # default hi kaafi hai kyunki `page_size` fix rakha hai.
+    @action(detail=False, methods=['get'], url_path='discover')
+    def discover(self, request):
+        PAGE_SIZE = 20
+        try:
+            page = max(1, int(request.query_params.get('page', 1)))
+        except (TypeError, ValueError):
+            page = 1
+
+        qs = Group.objects.filter(is_private=False).select_related('created_by')
+
+        q = request.query_params.get('q', '').strip()
+        if q:
+            qs = qs.filter(Q(name__icontains=q) | Q(description__icontains=q) | Q(topic_tag__icontains=q))
+
+        topic = request.query_params.get('topic', '').strip()
+        if topic:
+            qs = qs.filter(topic_tag__iexact=topic)
+
+        qs = qs.order_by('-members_count', '-created_at')
+
+        start = (page - 1) * PAGE_SIZE
+        groups = list(qs[start:start + PAGE_SIZE])
+        has_more = qs[start + PAGE_SIZE:start + PAGE_SIZE + 1].exists()
+
+        # 🔥 Perf — ek hi query se batao ye caller kin-kin returned groups
+        # ka already member hai (N+1 `.exists()` per row se bachne ke liye).
+        # `GroupDiscoverSerializer.get_is_member` isi attribute ko padhta hai.
+        member_group_ids = set(
+            GroupMember.objects.filter(
+                group_id__in=[g.id for g in groups], user=request.user, is_banned=False,
+            ).values_list('group_id', flat=True)
+        )
+        for g in groups:
+            g._viewer_member_ids = member_group_ids
+
+        return Response({
+            'results': GroupDiscoverSerializer(groups, many=True, context={'request': request}).data,
+            'page': page,
+            'has_more': has_more,
+        })
 
     # 🔥 GAP FIX (this session) — `message_api_service.dart` calls
     # `DELETE /groups/<id>/photo/` (and `PROJECT_ARCHITECTURE.md` documents
@@ -2760,6 +3014,147 @@ class DoubtQuestionViewSet(mixins.ListModelMixin, viewsets.GenericViewSet):
                 'group_id': str(group.id),
             }
         )
+
+
+# ======================================================================
+# 🔥 NAYA (M1-BE) — MESSAGE REQUESTS
+# ----------------------------------------------------------------------
+#   GET  /message/requests/                       -> pending requests (paginated)
+#   POST /message/requests/<conversation_id>/accept/   -> inbox me shift
+#   POST /message/requests/<conversation_id>/decline/  -> hide; sender ko kuch nahi
+#
+# Rules/state-machine: `message_requests.py`. Decline pe sender ko koi
+# event/push/system-message NAHI jaata — sirf receiver ke apne devices ko
+# `message_request_resolved` inbox event milta hai.
+# ======================================================================
+def _conversation_list_qs_for(user):
+    """Same shape/prefetch jo `ConversationViewSet.get_queryset` use karta hai."""
+    return Conversation.objects.select_related('group_detail', 'last_message_sender').prefetch_related(
+        Prefetch(
+            'memberships',
+            queryset=ConversationParticipant.objects.filter(user=user),
+            to_attr='my_membership_list',
+        )
+    )
+
+
+class MessageRequestListView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        me = request.user
+        has_visible_message = Message.objects.filter(
+            conversation_id=OuterRef('pk'), is_scheduled=False,
+        )
+        # Single filter() call => teeno membership conditions ek hi row pe lagti hain.
+        qs = (
+            _conversation_list_qs_for(me)
+            .filter(
+                type=ConversationType.PRIVATE,
+                memberships__user=me,
+                memberships__left_at__isnull=True,
+                memberships__request_status=RequestStatus.PENDING,
+            )
+            # scheduled-but-undelivered first message se khaali request na bane
+            .annotate(_has_msg=Exists(has_visible_message)).filter(_has_msg=True)
+            .annotate(_sort_ts=Coalesce('last_message_at', 'created_at'))
+            .order_by('-_sort_ts', '-created_at')
+        )
+
+        paginator = StandardPagination()
+        page = paginator.paginate_queryset(qs, request, view=self)
+        data = ConversationListSerializer(page, many=True, context={'request': request}).data
+        for item, conversation in zip(data, page):
+            item['requester'] = (
+                build_user_mini(conversation.last_message_sender)
+                if conversation.last_message_sender_id else None
+            )
+        return paginator.get_paginated_response(data)
+
+
+class _MessageRequestRespondView(APIView):
+    permission_classes = [IsAuthenticated]
+    target_status = None  # subclass set karta hai
+
+    def post(self, request, conversation_id):
+        try:
+            membership, _changed = message_requests.set_request_status(
+                request.user, conversation_id, self.target_status,
+            )
+        except LookupError:
+            return Response({'detail': 'Message request nahi mili.'}, status=status.HTTP_404_NOT_FOUND)
+        except message_requests.RequestStateError:
+            return Response(
+                {'detail': 'Sirf pending request decline ho sakti hai.'},
+                status=status.HTTP_409_CONFLICT,
+            )
+
+        payload = {
+            'conversation_id': str(conversation_id),
+            'request_status': membership.request_status,
+        }
+        if self.target_status == RequestStatus.ACCEPTED:
+            conversation = _conversation_list_qs_for(request.user).filter(pk=conversation_id).first()
+            if conversation is not None:
+                payload['conversation'] = ConversationListSerializer(
+                    conversation, context={'request': request},
+                ).data
+        return Response(payload)
+
+
+class MessageRequestAcceptView(_MessageRequestRespondView):
+    target_status = RequestStatus.ACCEPTED
+
+
+class MessageRequestDeclineView(_MessageRequestRespondView):
+    target_status = RequestStatus.DECLINED
+
+
+# ======================================================================
+# 🔥 NAYA (M2-BE) — NOTES (Instagram-style status, 60 chars, 24h)
+# ----------------------------------------------------------------------
+#   GET    /message/notes/       -> mere followed + close-friends ke active notes
+#                                   (paginated) + `my_note` (apna active note ya null)
+#   PUT    /message/notes/me/    {"text", "emoji", "audience"} -> note set/replace, +24h
+#   DELETE /message/notes/me/    -> note hatao (idempotent, 204)
+#
+# `message/sticky_notes.py` (study-room sticky notes) se koi lena-dena nahi.
+# Rules / queries / privacy (fail-closed): `user_notes.py`.
+# ======================================================================
+class UserNotesListView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        qs = user_notes.visible_notes_qs(request.user)
+        paginator = StandardPagination()
+        page = paginator.paginate_queryset(qs, request, view=self)
+        data = [user_notes.serialize_note(n, request=request) for n in page]
+        response = paginator.get_paginated_response(data)
+        mine = user_notes.get_my_active_note(request.user)
+        response.data['my_note'] = user_notes.serialize_note(mine, request=request) if mine else None
+        return response
+
+
+class MyNoteView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def put(self, request):
+        data = request.data
+        try:
+            note = user_notes.set_note(
+                request.user,
+                text=data.get('text'),
+                emoji=data.get('emoji'),
+                audience=data.get('audience'),
+            )
+        except ValueError as exc:
+            raise ValidationError({'detail': str(exc)})
+        note.user = request.user  # extra query na lage
+        return Response(user_notes.serialize_note(note, request=request))
+
+    def delete(self, request):
+        user_notes.delete_note(request.user)
+        return Response(status=status.HTTP_204_NO_CONTENT)
 
 
 # ======================================================================
@@ -3453,6 +3848,12 @@ class StudyRoomJoinView(APIView):
             session_suffix = uuid.uuid4().hex[:12]
             room_name = f"study_{conversation_id}_{session_suffix}"
             cache.set(current_session_key, session_suffix, timeout=60 * 60 * 24 * 7)
+            # 🔥 NAYA — fresh session = fresh board, sticky notes samet.
+            # Best-effort: purge fail hone se join block nahi hona chahiye.
+            try:
+                sticky_notes.purge_room_notes(conversation.id)
+            except Exception:
+                logger.exception(f"purge_room_notes failed conv={conversation_id}")
         else:
             session_suffix = cache.get(current_session_key)
             room_name = (
@@ -3569,7 +3970,58 @@ class StudyRoomStateView(APIView):
             return Response({"detail": "Conversation not found"}, status=404)
 
         StudyRoomState.objects.filter(conversation=conversation).delete()
+        # 🔥 NAYA — session end => sticky notes bhi (tombstones samet) saaf.
+        sticky_notes.purge_room_notes(conversation.id)
         return Response({"detail": "cleared"})
+
+
+class StudyRoomNotesView(APIView):
+    """
+    GET /message/study-room/<conversation_id>/notes/[?page_id=<id>]
+
+    Room khulne / rejoin / socket-reconnect pe saare (non-deleted) sticky
+    notes wapas deta hai — z-order me (neeche se upar). Writes REST se nahi,
+    WebSocket (`note_*` study_room_event) se hote hain — see sticky_notes.py.
+
+    Response: {
+        "notes": [ {id, pageId, userId, x, y, width, height, color, text,
+                    zIndex, updatedAt, fieldTs}, ... ],
+        "count": 3,
+        "server_time_ms": 1790000000000,   # client isse apna clock offset nikalta hai
+        "limits": {"max_notes": 200, "max_text_length": 2000, ...}
+    }
+    """
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, conversation_id):
+        access = sticky_notes.check_room_access(conversation_id, request.user)
+        if access.conversation is None:
+            return Response({"detail": "Conversation not found"}, status=404)
+        if not access.allowed:
+            return Response({"detail": "Study room access allowed nahi hai."}, status=403)
+
+        # Deploy se pehle ke snapshot-JSON notes ek baar rows me aa jaate hain.
+        try:
+            sticky_notes.import_legacy_notes(access.conversation)
+        except Exception:
+            logger.exception(f"import_legacy_notes failed conv={conversation_id}")
+
+        qs = StudyRoomNote.objects.filter(room=access.conversation)
+        page_id = request.query_params.get('page_id')
+        if page_id:
+            qs = qs.filter(page_id=page_id)
+        notes = [sticky_notes.note_to_wire(n) for n in qs]
+        return Response({
+            "notes": notes,
+            "count": len(notes),
+            "server_time_ms": sticky_notes.server_time_ms(),
+            "limits": {
+                "max_notes": sticky_notes.MAX_NOTES_PER_ROOM,
+                "max_text_length": sticky_notes.MAX_TEXT_LENGTH,
+                "min_width": sticky_notes.MIN_WIDTH, "max_width": sticky_notes.MAX_WIDTH,
+                "min_height": sticky_notes.MIN_HEIGHT, "max_height": sticky_notes.MAX_HEIGHT,
+            },
+        })
 
 
 # ======================================================================

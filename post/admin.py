@@ -18,6 +18,7 @@ from .models import (
     CommentLike,
     CommentMedia,
     Post,
+    PostAnswer,
     PostComment,
     PostLike,
     PostMedia,
@@ -26,6 +27,17 @@ from .models import (
     PostView,
     Story,
     StoryView,
+    StoryReaction,
+    StorySticker,
+    StoryPollVote,
+    StoryQuestionAnswer,
+    CloseFriend,
+    Highlight,
+    HighlightItem,
+    UserInterest,
+    MutedAccount,
+    PostHide,
+    FeedFeedback,
 )
 
 
@@ -44,8 +56,11 @@ class PostAdmin(admin.ModelAdmin):
     readonly_fields = (
         "likes_count", "comments_count", "shares_count", "views_count", "saves_count",
         "like_count", "confuse_count", "wrong_count", "imp_count", "explain_count",
+        "reposts_count",
     )
     autocomplete_fields = ("user",)
+    # A plain <select> of every Post row would be unusable here.
+    raw_id_fields = ("original_post",)
     date_hierarchy = "created_at"
 
 
@@ -62,6 +77,16 @@ class PostLikeAdmin(admin.ModelAdmin):
     list_filter = ("reaction_type",)
     search_fields = ("user__username", "post__id")
     autocomplete_fields = ("user",)
+
+
+# TASK G6 — "Ask a doubt" answers.
+@admin.register(PostAnswer)
+class PostAnswerAdmin(admin.ModelAdmin):
+    list_display = ("id", "post", "user", "is_best_answer", "likes_count", "created_at")
+    list_filter = ("is_best_answer",)
+    search_fields = ("content", "user__username", "post__id")
+    autocomplete_fields = ("user",)
+    raw_id_fields = ("post",)
 
 
 @admin.register(PostComment)
@@ -114,16 +139,118 @@ class CommentLikeAdmin(admin.ModelAdmin):
     list_filter = ("reaction_type",)
     search_fields = ("user__username", "comment__id")
 
+class StoryStickerInline(admin.TabularInline):
+    # STORIES UPGRADE - PART 2: overlays are edited/inspected on the story.
+    model = StorySticker
+    extra = 0
+    fields = ("kind", "mentioned_user", "x", "y", "rotation", "scale", "z_index", "data")
+    raw_id_fields = ("mentioned_user",)
+
+
 @admin.register(Story)
 class StoryAdmin(admin.ModelAdmin):
     # NEW — checklist items 54/55/57/60.
-    list_display = ("id", "user", "media_type", "views_count", "is_deleted", "created_at", "expires_at")
-    list_filter = ("media_type", "is_deleted")
+    list_display = ("id", "user", "media_type", "audience", "views_count", "is_deleted", "created_at", "expires_at")
+    list_filter = ("media_type", "audience", "is_deleted")
     search_fields = ("user__username",)
     readonly_fields = ("views_count",)
+    inlines = [StoryStickerInline]
+
+
+@admin.register(StorySticker)
+class StoryStickerAdmin(admin.ModelAdmin):
+    list_display = ("id", "story", "kind", "mentioned_user", "created_at")
+    list_filter = ("kind",)
+    search_fields = ("story__id", "mentioned_user__username")
+    raw_id_fields = ("story", "mentioned_user")
+
+
+@admin.register(StoryPollVote)
+class StoryPollVoteAdmin(admin.ModelAdmin):
+    list_display = ("id", "sticker", "user", "option_index", "created_at")
+    search_fields = ("sticker__id", "user__username")
+    raw_id_fields = ("sticker", "user")
+
+
+@admin.register(StoryQuestionAnswer)
+class StoryQuestionAnswerAdmin(admin.ModelAdmin):
+    list_display = ("id", "sticker", "user", "created_at")
+    search_fields = ("sticker__id", "user__username", "text")
+    raw_id_fields = ("sticker", "user")
 
 
 @admin.register(StoryView)
 class StoryViewAdmin(admin.ModelAdmin):
     list_display = ("id", "story", "user", "viewed_at")
     search_fields = ("story__id", "user__username")
+
+
+@admin.register(StoryReaction)
+class StoryReactionAdmin(admin.ModelAdmin):
+    list_display = ("id", "story", "user", "emoji", "created_at")
+    search_fields = ("story__id", "user__username", "emoji")
+
+
+@admin.register(CloseFriend)
+class CloseFriendAdmin(admin.ModelAdmin):
+    # STORIES UPGRADE - PART 1.
+    list_display = ("id", "owner", "friend", "created_at")
+    search_fields = ("owner__username", "friend__username")
+    raw_id_fields = ("owner", "friend")
+
+
+class HighlightItemInline(admin.TabularInline):
+    # STORIES UPGRADE - PART 3b.
+    model = HighlightItem
+    extra = 0
+    fields = ("story", "position", "created_at")
+    readonly_fields = ("created_at",)
+    raw_id_fields = ("story",)
+
+
+@admin.register(Highlight)
+class HighlightAdmin(admin.ModelAdmin):
+    list_display = ("id", "user", "title", "created_at", "updated_at")
+    search_fields = ("user__username", "title")
+    raw_id_fields = ("user", "cover_item")
+    inlines = [HighlightItemInline]
+
+
+@admin.register(HighlightItem)
+class HighlightItemAdmin(admin.ModelAdmin):
+    list_display = ("id", "highlight", "story", "position", "created_at")
+    raw_id_fields = ("highlight", "story")
+
+
+@admin.register(UserInterest)
+class UserInterestAdmin(admin.ModelAdmin):
+    # TASK 3 — feed personalization (production_readiness_tasks.md).
+    list_display = ("id", "user", "category", "created_at")
+    list_filter = ("category",)
+    search_fields = ("user__username",)
+
+
+@admin.register(PostHide)
+class PostHideAdmin(admin.ModelAdmin):
+    # Feed feedback controls (Part 1): "Not interested".
+    list_display = ("id", "user", "post", "reason", "created_at")
+    list_filter = ("reason",)
+    search_fields = ("user__username", "post__id")
+    raw_id_fields = ("user", "post")
+
+
+@admin.register(MutedAccount)
+class MutedAccountAdmin(admin.ModelAdmin):
+    list_display = ("id", "user", "muted_user", "created_at")
+    search_fields = ("user__username", "muted_user__username")
+    raw_id_fields = ("user", "muted_user")
+
+
+@admin.register(FeedFeedback)
+class FeedFeedbackAdmin(admin.ModelAdmin):
+    # Feed feedback controls (Part 2): "Show fewer like this" negative ranking signal.
+    # `weight` is the value AT updated_at; ranking decays it (feed_mix.decay_weight).
+    list_display = ("id", "user", "kind", "key", "weight", "updated_at")
+    list_filter = ("kind",)
+    search_fields = ("user__username", "key")
+    raw_id_fields = ("user",)

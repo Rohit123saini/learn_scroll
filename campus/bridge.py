@@ -2,7 +2,7 @@
 """
 `campus`'s ONLY door into `core` / `message` — the project's golden rule
 (`campus_app_design.md`, top of file) is that `campus` never imports
-those apps' models directly, the same way `liveclass` already routes
+those apps' models directly, the same way `tuitionclass` already routes
 through `core` instead of touching `message` internals.
 
 STATUS (this pass — all three gaps this file previously flagged as
@@ -129,6 +129,13 @@ class NotifTypes:
     assigments_DUE_REMINDER = "assigments_due_reminder"
     RESULT_PUBLISHED = "result_published"
     FEE_DUE_REMINDER = "fee_due_reminder"
+    # Fee Reminder Notifications feature (follow-up to FEE-6) — must match
+    # core.models.NotifType.FEE_OVERDUE_REMINDER verbatim, same contract
+    # every other value on this class documents. Fired only for invoices
+    # already past `fee_structure.due_date` — see
+    # campus/tasks.py::send_fee_due_reminders for the due/overdue/advance
+    # branching that decides which of FEE_DUE_REMINDER vs this gets used.
+    FEE_OVERDUE_REMINDER = "fee_overdue_reminder"
     STAFF_assigments_APPROVED = "staff_assigments_approved"
     STAFF_assigments_REJECTED = "staff_assigments_rejected"
     # NOTICE_POSTED already exists on core.models.NotifType per the
@@ -151,7 +158,7 @@ class NotifTypes:
 def create_section_group(section, actor):
     """
     Create the `message.Group` (+ its `Conversation`) for a `Section`,
-    the same pattern `liveclass.create_classroom_group()` already uses
+    the same pattern `tuitionclass.create_classroom_group()` already uses
     for its own classrooms — via `core.classroom_chat_bridge`, never a
     direct `message` import from this app.
 
@@ -204,9 +211,9 @@ def notify(*, users, notif_type, title, body='', data=None):
 def provision_video_room(live_session, actor):
     """
     Provision a video room for a `CampusLiveSession`, reusing whatever
-    LiveKit/WebRTC infra `liveclass`/`message` already have — via
+    LiveKit/WebRTC infra `tuitionclass`/`message` already have — via
     `core.classroom_chat_bridge.provision_video_room`, never a direct
-    `liveclass`/`message` import from this app (design doc §4).
+    `tuitionclass`/`message` import from this app (design doc §4).
 
     `core.classroom_chat_bridge.provision_video_room` is now a
     confirmed, wired dependency (see module STATUS above) — no more
@@ -291,7 +298,7 @@ def create_assigments(*, section, subject, posted_by, title, description="", att
     app instead of the now-deprecated `campus.assigments` model (see that
     model's own docstring in models.py). Delegates the actual row
     creation + roster bulk-pre-create to `assigments.bridge.
-    create_context_assigments()` — the same entry point `liveclass` is
+    create_context_assigments()` — the same entry point `tuitionclass` is
     expected to use too (§1, §3 of assigments_app_design.md). `campus`
     resolves its own roster (`StudentEnrollment`) here, since
     `assigments` itself has no concept of what a `Section` or an
@@ -359,7 +366,7 @@ def create_testseries(*, section, creator, title, description="", duration_minut
     `testseries` app — the same "one function is the app boundary"
     pattern `create_assigments()` above already uses for `assigments`,
     and the same pattern `testseries/bridge.py`'s own module docstring
-    says it exists for (`campus`/`liveclass` bridge modules call
+    says it exists for (`campus`/`tuitionclass` bridge modules call
     `create_context_testseries()`, never `testseries` models directly).
     `testseries` is a confirmed, fully-built sibling app for this task —
     its own bridge module docstring spells out exactly this calling

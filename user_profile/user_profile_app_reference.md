@@ -1,10 +1,10 @@
 # `user_profile` App — Complete Self-Contained Reference
 
-> **v7 — TASK 30 (`CoinPurchaseRequest` diffed against `liveclass.
+> **v7 — TASK 30 (`CoinPurchaseRequest` diffed against `tuitionclass.
 > CoinPurchase` → `gateway_payment_id`/`gateway_signature` added), TASK
 > 31 (`UserPreference.for_user()` diffed against `core.
 > NotificationPreference` → confirmed, no code change), TASK 38
-> (`CoinWithdrawalRequest` diffed against `liveclass.CoinWithdrawal` →
+> (`CoinWithdrawalRequest` diffed against `tuitionclass.CoinWithdrawal` →
 > `MIN_WITHDRAWAL_COINS`, `amount_inr`, `reviewed_by`/`reviewed_at`
 > added), aur TASK 37 (earn-rate-limit constants moved from hardcoded
 > `fraud.py` values to Django settings) is pass me resolve hue hain.**
@@ -16,7 +16,7 @@
 >
 > **v6 se kya badla, sabse pehle:** section 0.6 (Changelog v6 → v7)
 > padho. Short version:
-> - **TASK 30** — `CoinPurchaseRequest` ab `liveclass.CoinPurchase` ke
+> - **TASK 30** — `CoinPurchaseRequest` ab `tuitionclass.CoinPurchase` ke
 >   against directly diffed hai (pehle sirf inferred tha). Us model ka
 >   apna Task 6 already deprecated kar chuka hai (`mark_success()`/
 >   `mark_failed()` ab `RuntimeError` raise karte hain), isliye field-
@@ -25,7 +25,7 @@
 >   the. Dono fields add hue, aur `confirm_success()` (models.py) ab
 >   dono ko optionally accept + store karta hai. `retry_of` deliberately
 >   NAHI add kiya — see §4.
-> - **TASK 38** — `CoinWithdrawalRequest` ab `liveclass.CoinWithdrawal`
+> - **TASK 38** — `CoinWithdrawalRequest` ab `tuitionclass.CoinWithdrawal`
 >   ke against diffed hai (Task 4 ne ye explicitly deferred kiya tha).
 >   Teen fields add hue: `MIN_WITHDRAWAL_COINS = 100` (class constant,
 >   `request_withdrawal()` me enforced), `COIN_TO_INR_RATE` + `amount_inr`
@@ -58,11 +58,11 @@
 Char naye/resolved items is pass me, `models.py` (§4), `fraud.py` (§8b),
 aur naye migrations (§3a) ke through:
 
-### 🔍 TASK 30 — `CoinPurchaseRequest` diffed against `liveclass.CoinPurchase`
+### 🔍 TASK 30 — `CoinPurchaseRequest` diffed against `tuitionclass.CoinPurchase`
 
-`liveclass/models.py` finally review ho gaya (§11 item 11 ka open gap
+`tuitionclass/models.py` finally review ho gaya (§11 item 11 ka open gap
 tha). Findings:
-- `liveclass.CoinPurchase` khud already deprecated hai (uska apna Task 6
+- `tuitionclass.CoinPurchase` khud already deprecated hai (uska apna Task 6
   `mark_success()`/`mark_failed()` ko `RuntimeError` bana chuka hai) —
   is model se field-for-field parity kabhi bhi real goal nahi thi.
 - Money precision (`amount`, `max_digits=10` vs `CoinPurchase`'s 8) aur
@@ -87,7 +87,7 @@ tha). Findings:
   support ready hai, wiring ek separate, is pass se bahar ka kaam hai
   (§11 me naya open item, neeche).
 
-### 🔍 TASK 38 — `CoinWithdrawalRequest` diffed against `liveclass.CoinWithdrawal`
+### 🔍 TASK 38 — `CoinWithdrawalRequest` diffed against `tuitionclass.CoinWithdrawal`
 
 Task 4's docstring ne ye teeno explicitly defer kiye the ("no
 `reviewed_by`, no `MIN_WITHDRAWAL_COINS` floor, no INR snapshot ... add
@@ -95,7 +95,7 @@ if/when an admin-facing withdrawal review UI is built") — woh review UI
 ab exist karta hai (`CoinWithdrawalAdminActionView` + admin bulk
 actions, v6 se), isliye ye pass unhe close karta hai:
 
-- **`MIN_WITHDRAWAL_COINS = 100`** — plain class constant, `liveclass.
+- **`MIN_WITHDRAWAL_COINS = 100`** — plain class constant, `tuitionclass.
   CoinWithdrawal`'s same value/reasoning se copy ("below this, a
   bank/UPI transfer typically costs more in fees than the payout
   itself"). `request_withdrawal()` me hi enforce hota hai — wahi single
@@ -107,11 +107,11 @@ actions, v6 se), isliye ye pass unhe close karta hai:
   historical value silently rewrite na ho. **Not `null=True`** on the
   model — isliye is field ke liye ek real (nullable-then-backfill-then-
   tighten) migration chahiye tha, na ki simple `AddField` — see §3a.
-  Apna alag `COIN_TO_INR_RATE` hai (liveclass wala import nahi kiya —
+  Apna alag `COIN_TO_INR_RATE` hai (tuitionclass wala import nahi kiya —
   same "own parallel definition" precedent jo `CoinPurchaseRequest`'s
   money precision/gateway field pehle se set kar chuke hain).
 - **`reviewed_by` (nullable FK, `SET_NULL`) + `reviewed_at`
-  (nullable DateTimeField)** — `liveclass.CoinWithdrawal.reviewed_by`
+  (nullable DateTimeField)** — `tuitionclass.CoinWithdrawal.reviewed_by`
   single stamp hai (`approve()`/`reject()` jo pehle chale). Is model ka
   lifecycle me ek extra PROCESSING stage hai, isliye `mark_processing()`
   aur `reject()` dono `if wr.reviewed_by_id is None` check karke stamp
@@ -174,7 +174,7 @@ tak **direct test coverage ke bina** hai — naya open item, §11 neeche.
 - **Coin economy**: `CoinPurchaseRequest` ab gateway webhook proof
   persist kar sakta hai; `CoinWithdrawalRequest` ab minimum-withdrawal
   floor, INR snapshot, aur reviewer audit-trail ke saath complete hai —
-  dono `liveclass`'s reference models ke against confirmed-diffed hain,
+  dono `tuitionclass`'s reference models ke against confirmed-diffed hain,
   ab sirf inferred nahi.
 - **Fraud/rate-limiting**: ops ab earn-rate limits ko ek deploy ke bina
   retune kar sakte hain (settings.py env var change + restart).
@@ -229,10 +229,10 @@ kyunki koi gateway integration kisi upload ka hissa nahi thi. Ab:
   **open gap** hai us case ke liye — no replacement path is pass me;
   flag kiya gaya hai taaki silently unconfirmable na reh jaaye (see §11).
 - ⚠️ **ASSUMPTION** (is helper ke docstring me bhi noted): `campus`/
-  `liveclass` apps ka apna gateway-verify code (agar exist karta hai)
+  `tuitionclass` apps ka apna gateway-verify code (agar exist karta hai)
   is pass ke upload ka hissa nahi tha, isliye ye ek generic mechanism hai,
   kisi existing in-repo pattern se copy nahi kiya gaya. Agar
-  `campus`/`liveclass` me pehle se gateway-client verification helper
+  `campus`/`tuitionclass` me pehle se gateway-client verification helper
   hai, usko prefer karo is generic version ke upar.
 
 ### 🛠️ §11 item 12 — Coin-Withdrawal admin/ops lifecycle actions
@@ -364,7 +364,7 @@ ek naya migration `0002_add_userpreference.py`.
   NotifType` me follow-specific values (jaise `FOLLOW_REQUEST`/
   `FOLLOW_ACCEPTED`) confirm karna padega — `core/models.py` is pass me
   bhi upload nahi hua tha. See §11 item 16 for the open wiring work.
-- `liveclass`/`testseries` jaisi kisi "reference `services.py`" (jise
+- `tuitionclass`/`testseries` jaisi kisi "reference `services.py`" (jise
   copy kiya ja sake) is codebase me maujood nahi thi — isliye ye sirf
   us *pattern* ko follow karta hai jo doosri apps ke docstrings point
   karte hain (lazy-import core.services), field-for-field copy nahi.
@@ -409,7 +409,7 @@ for the enum itself)
   — `IsAuthenticated` + "must be your own purchase" stand in for gateway-
   signature verification, which wasn't part of this upload. Replace/gate
   that before this goes live behind an actual gateway callback (see §11).
-- `liveclass/models.py` (which already has its own `CoinPurchase` flow)
+- `tuitionclass/models.py` (which already has its own `CoinPurchase` flow)
   was **not** part of this upload, so `CoinPurchaseRequest`'s shape is
   inferred from this app's own established patterns, not copied
   field-for-field — reconcile the two if they ever need to be the same
@@ -423,10 +423,10 @@ for the enum itself)
   pending. Lifecycle: `PENDING` → `PROCESSING` (no coin movement) →
   `SUCCESS` (no coin movement — debit already happened) **or** →
   `REJECTED` from `PENDING`/`PROCESSING` (credits coins back via
-  `WITHDRAWAL_REJECTED`). Reference read: `liveclass.CoinWithdrawal` /
-  `liveclass.CoinTransaction`, which already implement this exact escrow
+  `WITHDRAWAL_REJECTED`). Reference read: `tuitionclass.CoinWithdrawal` /
+  `tuitionclass.CoinTransaction`, which already implement this exact escrow
   pattern — reproduced here on top of `CoinLedger` instead, since
-  `CoinLedger` (not `liveclass.CoinTransaction`) is this codebase's one
+  `CoinLedger` (not `tuitionclass.CoinTransaction`) is this codebase's one
   shared ledger.
 - New view `CoinWithdrawalRequestView` (`GET`/`POST
   /profile/coin-withdrawals/`) — `GET` lists your own requests; `POST`
@@ -949,7 +949,7 @@ via a screenshot of `user_profile/migrations/`, not guessed).
 ```python
 # Task 30 — add gateway_payment_id/gateway_signature to
 # CoinPurchaseRequest, closing the signature-verification gap found by
-# diffing against liveclass.CoinPurchase (see that model's class
+# diffing against tuitionclass.CoinPurchase (see that model's class
 # docstring in user_profile/models.py for the full diff).
 #
 # Depends directly on 0001_initial — the screenshot of
@@ -1020,7 +1020,7 @@ class Migration(migrations.Migration):
 # schema-invisible — no migration needed for that part), reviewed_by,
 # reviewed_at, and an INR-conversion snapshot (amount_inr) to
 # CoinWithdrawalRequest, closing the gap Task 4's own docstring in
-# user_profile/models.py deliberately deferred until liveclass.
+# user_profile/models.py deliberately deferred until tuitionclass.
 # CoinWithdrawal (the reference model) was actually reviewed.
 #
 # amount_inr is added as a required field (no null=True on the model),
@@ -1221,23 +1221,23 @@ WHAT CHANGED in this pass, and why:
    `CoinWithdrawalRequestManager`: the canonical "cash out coins"
    request for this app, using the `WITHDRAWAL_REQUESTED`/
    `WITHDRAWAL_REJECTED` transaction types TASK 1 added ahead of time.
-   Reference read for this task was `liveclass.CoinWithdrawal` /
-   `liveclass.CoinTransaction`, which already implement this exact
+   Reference read for this task was `tuitionclass.CoinWithdrawal` /
+   `tuitionclass.CoinTransaction`, which already implement this exact
    escrow pattern (debit the coins the moment the request is made, not
    when the payout completes; refund only on reject; no second ledger
    write on completion since the debit already happened). This
    reproduces that lifecycle on top of `CoinLedger.record_transaction()`
-   instead of `liveclass.CoinTransaction`, since `CoinLedger` — not
-   `liveclass.CoinTransaction` — is this codebase's one shared,
+   instead of `tuitionclass.CoinTransaction`, since `CoinLedger` — not
+   `tuitionclass.CoinTransaction` — is this codebase's one shared,
    canonical coin ledger (see CoinLedger's own docstring). See
    `CoinWithdrawalRequest`'s class docstring below for the full
    lifecycle and what's deliberately left out of this pass (no
    `reviewed_by`, no `MIN_WITHDRAWAL_COINS` floor, no INR snapshot).
 
 8. TASK 30 (this pass) — `CoinPurchaseRequest` diffed directly against
-   `liveclass.CoinPurchase`, closing the gap an earlier pass had to
+   `tuitionclass.CoinPurchase`, closing the gap an earlier pass had to
    leave as an inference (that pass's upload didn't include
-   `liveclass/models.py`). Result: `liveclass.CoinPurchase` turned out
+   `tuitionclass/models.py`). Result: `tuitionclass.CoinPurchase` turned out
    to already be deprecated (its own Task 6 disabled
    `mark_success()`/`mark_failed()`), so full parity wasn't the goal —
    but it surfaced one real gap, not just a shape difference: this
@@ -1259,14 +1259,14 @@ WHAT CHANGED in this pass, and why:
    `UserPreference`'s class docstring for the full point-by-point diff.
 
 10. TASK 38 (this pass) — `CoinWithdrawalRequest` diffed directly
-    against `liveclass.CoinWithdrawal` now that `liveclass/models.py`
+    against `tuitionclass.CoinWithdrawal` now that `tuitionclass/models.py`
     has actually been reviewed (Task 4's docstring above deferred this
     with "no reviewed_by, no MIN_WITHDRAWAL_COINS floor, no INR
     snapshot ... add them if/when an admin-facing withdrawal review UI
     is built" — that's now). See `CoinWithdrawalRequest`'s own
     docstring for the full diff and what each added field means for
     this model's PENDING -> PROCESSING -> SUCCESS/REJECTED lifecycle,
-    which is NOT the same status set `liveclass.CoinWithdrawal` uses.
+    which is NOT the same status set `tuitionclass.CoinWithdrawal` uses.
 """
 from django.conf import settings
 from django.db import IntegrityError, models, transaction
@@ -1577,7 +1577,7 @@ class CoinLedger(models.Model):
     call as RestrictUser in task 18 — the shape was already right, it
     just had no write or read path). Purpose: an auditable "why did my
     balance change" trail for a coin economy that (per the settings.py
-    comments referencing PassPurchase/CoinPurchase in a liveclass app,
+    comments referencing PassPurchase/CoinPurchase in a tuitionclass app,
     and gifting in a message app) clearly spans more than this one app.
 
     Scope decision, same boundary as RestrictUser: user_profile owns
@@ -1878,18 +1878,18 @@ class CoinPurchaseRequestManager(models.Manager):
 class CoinPurchaseRequest(models.Model):
     """
     TASK 3 — canonical "buy coins" request/receipt row for `user_profile`.
-    `liveclass.CoinPurchase` already has a purchase flow, but it's scoped
+    `tuitionclass.CoinPurchase` already has a purchase flow, but it's scoped
     to that app; this is the one every coin top-up should go through
     regardless of where in the product it's triggered from, the same way
     `CoinLedger` is the one shared ledger every coin-changing action
     writes to.
 
-    [TASK 30 — RESOLVED] Diffed directly against `liveclass.CoinPurchase`
-    now that `liveclass/models.py` has actually been reviewed (previously
+    [TASK 30 — RESOLVED] Diffed directly against `tuitionclass.CoinPurchase`
+    now that `tuitionclass/models.py` has actually been reviewed (previously
     inferred, see git history of this docstring for the old caveat).
     Findings:
 
-      - `liveclass.CoinPurchase` is itself already deprecated as of that
+      - `tuitionclass.CoinPurchase` is itself already deprecated as of that
         app's own Task 6: `mark_success()`/`mark_failed()` there raise
         `RuntimeError`, and its own docstring says coin top-ups now go
         through THIS model instead. So field-for-field parity with a
@@ -1961,14 +1961,14 @@ class CoinPurchaseRequest(models.Model):
     # id the gateway doesn't know about.
     gateway_reference = models.CharField(max_length=150, unique=True, db_index=True)
 
-    # [ADDED — Task 30] Mirrors liveclass.CoinPurchase.gateway_payment_id
+    # [ADDED — Task 30] Mirrors tuitionclass.CoinPurchase.gateway_payment_id
     # / .gateway_signature — filled in by confirm_success() once a
     # gateway webhook actually confirms payment. Both blank-ok at
     # creation time (start_purchase() runs before the gateway has
     # confirmed anything, so neither is known yet); this is the
     # persisted proof of what the gateway signed, for later
     # verification/audit — a real gap this model had before this pass,
-    # not just a naming difference from the liveclass model (see class
+    # not just a naming difference from the tuitionclass model (see class
     # docstring's Task 30 diff for the full comparison).
     gateway_payment_id = models.CharField(max_length=100, blank=True)
     gateway_signature = models.CharField(max_length=255, blank=True)
@@ -2036,7 +2036,7 @@ class CoinWithdrawalRequestManager(models.Manager):
     Money direction is the mirror image of `CoinPurchaseRequest`: a
     purchase credits coins only on success; a withdrawal debits coins
     immediately on request. This is the escrow pattern
-    `liveclass.CoinWithdrawal.create_request` already uses (reference
+    `tuitionclass.CoinWithdrawal.create_request` already uses (reference
     read for this task) — coins leave the wallet the moment the request
     is made, not when the payout is actually confirmed, specifically so
     a user can't request the same coins twice while a withdrawal is
@@ -2058,7 +2058,7 @@ class CoinWithdrawalRequestManager(models.Manager):
         `amount_inr = coins * COIN_TO_INR_RATE` onto the request at
         creation time, so a later change to `COIN_TO_INR_RATE` never
         silently rewrites what a past request was actually worth —
-        mirrors `liveclass.CoinWithdrawal.amount_inr`'s own snapshot
+        mirrors `tuitionclass.CoinWithdrawal.amount_inr`'s own snapshot
         comment exactly.
 
         `record_transaction` raises `ValueError` for insufficient
@@ -2109,7 +2109,7 @@ class CoinWithdrawalRequestManager(models.Manager):
         [ADDED — Task 38] `reviewed_by` is the admin/ops user making
         this call — the natural point to stamp `reviewed_by`/
         `reviewed_at`, since this is this model's "an admin has looked
-        at this" step, the same role `liveclass.CoinWithdrawal.
+        at this" step, the same role `tuitionclass.CoinWithdrawal.
         approve(admin_user)` plays there. Optional and only applied
         when not already set, so an existing caller that doesn't pass
         it yet keeps working exactly as before, and a request that was
@@ -2143,7 +2143,7 @@ class CoinWithdrawalRequestManager(models.Manager):
         debited via WITHDRAWAL_REQUESTED at request time, and a
         WITHDRAWAL_COMPLETED entry with amount=0 would violate
         `coinledger_amount_not_zero`. This only flips the request's own
-        status, same as `liveclass.CoinWithdrawal.approve()`/
+        status, same as `tuitionclass.CoinWithdrawal.approve()`/
         `mark_paid()` not moving any coins either.
 
         Idempotent: already-SUCCESS is returned as-is. Raises
@@ -2225,39 +2225,39 @@ class CoinWithdrawalRequest(models.Model):
     mirror image of `CoinPurchaseRequest` above (coins -> money instead
     of money -> coins), built on the same `CoinLedger` primitives.
 
-    Reference read for this task was `liveclass.CoinWithdrawal`, which
+    Reference read for this task was `tuitionclass.CoinWithdrawal`, which
     already implements this exact escrow pattern (debit at request
     time, refund on reject, no second debit/credit on completion) via
     its own `CoinTransaction` ledger. This model reproduces that same
     lifecycle but writes through `CoinLedger.objects.record_transaction()`
-    instead, since `user_profile.CoinLedger` — not `liveclass.
+    instead, since `user_profile.CoinLedger` — not `tuitionclass.
     CoinTransaction` — is this codebase's shared, canonical coin ledger
     (see `CoinLedger`'s own docstring above). Differences from
-    `liveclass.CoinWithdrawal` that are deliberate, not oversights:
+    `tuitionclass.CoinWithdrawal` that are deliberate, not oversights:
       - No separate APPROVED status — this app's lifecycle is PENDING ->
         PROCESSING -> SUCCESS, or -> REJECTED from PENDING/PROCESSING.
         PROCESSING plays the same "payout initiated, not yet confirmed"
-        role `liveclass.CoinWithdrawal`'s APPROVED does.
-      - No CANCELLED status — `liveclass.CoinWithdrawal` lets a user
+        role `tuitionclass.CoinWithdrawal`'s APPROVED does.
+      - No CANCELLED status — `tuitionclass.CoinWithdrawal` lets a user
         cancel their own PENDING request; here that's just `reject()`
         called while still PENDING (see that manager method's own
-        `liveclass` cross-reference in its Task 6 stub docstring on the
-        `liveclass` side). Not revisited by Task 38 — out of scope for
+        `tuitionclass` cross-reference in its Task 6 stub docstring on the
+        `tuitionclass` side). Not revisited by Task 38 — out of scope for
         a fields-only pass.
       - `payout_method`/`payout_details` are still modeled as a
-        choices field + JSONField, same shape as `liveclass.
+        choices field + JSONField, same shape as `tuitionclass.
         CoinWithdrawal` uses, since there's no separate saved-bank-
         detail model in this app to reference by id instead.
 
-    [TASK 38 — RESOLVED] Diffed directly against `liveclass.
-    CoinWithdrawal` now that `liveclass/models.py` has actually been
+    [TASK 38 — RESOLVED] Diffed directly against `tuitionclass.
+    CoinWithdrawal` now that `tuitionclass/models.py` has actually been
     reviewed (Task 4's docstring above deferred all three of these with
     "add them if/when an admin-facing withdrawal review UI is built").
     Findings, each mapped onto THIS model's own shape rather than
     copied field-for-field:
 
       - [ADDED] `MIN_WITHDRAWAL_COINS = 100` — copied as a plain class
-        constant, same value and same reasoning `liveclass.
+        constant, same value and same reasoning `tuitionclass.
         CoinWithdrawal.MIN_WITHDRAWAL_COINS` already documents ("below
         this, a bank/UPI transfer typically costs more in fees than the
         payout itself"). Enforced in
@@ -2266,21 +2266,21 @@ class CoinWithdrawalRequest(models.Model):
         sufficient balance, so a caller can't route around the floor by
         skipping a view-level check.
       - [ADDED] `COIN_TO_INR_RATE = 1` and `amount_inr` — also copied
-        from `liveclass.CoinWithdrawal` as-is (same rate, same
+        from `tuitionclass.CoinWithdrawal` as-is (same rate, same
         "snapshotted at request time so a later rate change never
         rewrites history" reasoning, same `DecimalField(max_digits=10,
         decimal_places=2)` shape). `request_withdrawal()` computes and
         stores it once, at creation; nothing later recomputes it.
         NOTE: this app has its own separate `COIN_TO_INR_RATE` rather
-        than importing `liveclass.CoinWithdrawal`'s — importing a model
+        than importing `tuitionclass.CoinWithdrawal`'s — importing a model
         constant across apps for one integer is more coupling than the
         value is worth, and `CoinPurchaseRequest` above already sets
         the precedent of this app keeping its own parallel definitions
         (money precision, gateway field) rather than reaching into
-        `liveclass`. If the two rates should always move together in
+        `tuitionclass`. If the two rates should always move together in
         practice, that's an ops/config concern (keep both settings in
         sync when pricing changes) rather than a code-coupling one.
-      - [ADDED] `reviewed_by` / `reviewed_at` — `liveclass.
+      - [ADDED] `reviewed_by` / `reviewed_at` — `tuitionclass.
         CoinWithdrawal.reviewed_by` is a single FK stamped once, at
         `approve()`/`reject()`, whichever comes first (its lifecycle has
         no separate "PROCESSING" stage in between). This model's
@@ -2296,7 +2296,7 @@ class CoinWithdrawalRequest(models.Model):
         already have passed through `mark_processing()` in the normal
         flow, and if it didn't, that's a process gap for ops to fix, not
         something for this model to paper over with a second reviewer.
-        Both fields nullable/blank, same as `liveclass.CoinWithdrawal`'s
+        Both fields nullable/blank, same as `tuitionclass.CoinWithdrawal`'s
         (`on_delete=SET_NULL` so a deleted admin account doesn't cascade
         into deleting withdrawal history).
 
@@ -2315,9 +2315,9 @@ class CoinWithdrawalRequest(models.Model):
     change is `CoinLedger.objects.record_transaction()`.
     """
 
-    # [ADDED — Task 38] Copied from `liveclass.CoinWithdrawal` — see the
+    # [ADDED — Task 38] Copied from `tuitionclass.CoinWithdrawal` — see the
     # class docstring's Task 38 section for why this app keeps its own
-    # copy rather than importing the liveclass one.
+    # copy rather than importing the tuitionclass one.
     COIN_TO_INR_RATE = 1  # 1 coin == this many INR; adjust to match the actual coin pricing used when passes are priced
     MIN_WITHDRAWAL_COINS = 100  # below this, a bank/UPI transfer typically costs more in fees than the payout itself
 
@@ -2347,7 +2347,7 @@ class CoinWithdrawalRequest(models.Model):
 
     # Bank: {"account_holder", "account_number", "ifsc"}. UPI: {"upi_id"}.
     # Kept as JSON (not separate columns), same reasoning as
-    # liveclass.CoinWithdrawal.payout_details — validated against
+    # tuitionclass.CoinWithdrawal.payout_details — validated against
     # payout_method in the serializer, not here, so a new payout method
     # never needs a migration.
     payout_details = models.JSONField(default=dict, blank=True)
@@ -2514,9 +2514,9 @@ class UserPreference(models.Model):
   Idempotent on `gateway_reference` (DB-unique + `get_or_create`, with
   the concurrent-insert race caught as `IntegrityError` and re-fetched —
   same shape as `Follow`'s double-follow race fix in v2). ⚠️
-  `liveclass/models.py` wasn't part of this upload, so this shape is
+  `tuitionclass/models.py` wasn't part of this upload, so this shape is
   inferred from this app's own conventions, not copied from
-  `liveclass.CoinPurchase` — reconcile if the two need to match exactly
+  `tuitionclass.CoinPurchase` — reconcile if the two need to match exactly
   (see §11).
 - **`CoinWithdrawalRequest`** (TASK 4, new) — escrow-style: debits at
   request time via `WITHDRAWAL_REQUESTED`, refunds via
@@ -2524,7 +2524,7 @@ class UserPreference(models.Model):
   `confirm_success()` (the debit already happened; a zero-amount
   `WITHDRAWAL_COMPLETED` row would violate `coinledger_amount_not_zero`
   anyway — that's why `WITHDRAWAL_COMPLETED` stays unused). Reference
-  read: `liveclass.CoinWithdrawal`. No `reviewed_by`, no minimum-coins
+  read: `tuitionclass.CoinWithdrawal`. No `reviewed_by`, no minimum-coins
   floor, no INR snapshot — deliberately out of scope this pass (see
   §0.3 / §11).
 - **`CoinLedgerManager.record_transaction()`** — the row-lock
@@ -3906,7 +3906,7 @@ class UnrestrictUserView(GenericAPIView):
 # Read-only, deliberately (see CoinLedgerSerializer's docstring for why
 # there's no POST here). The actual write path —
 # `CoinLedger.objects.record_transaction()` — is called from wherever a
-# coin-changing action happens (a purchase completing in the liveclass
+# coin-changing action happens (a purchase completing in the tuitionclass
 # app, a gift being sent in the message app, an admin adjustment
 # endpoint if/when one gets built); none of those views were part of
 # this upload, so this is the read side only: "let me see why my
@@ -4032,7 +4032,7 @@ def _verify_gateway_webhook_signature(request, gateway):
     one, since no gateway integration was part of any upload for this
     app.
 
-    ⚠️ ASSUMPTION — `campus`/`liveclass`'s own gateway-verify code (the
+    ⚠️ ASSUMPTION — `campus`/`tuitionclass`'s own gateway-verify code (the
     reference the person doing this task pointed at) was NOT part of
     this pass's upload either, so this isn't copied from an established
     in-repo pattern — it's a generic, gateway-agnostic HMAC-SHA256
@@ -4040,7 +4040,7 @@ def _verify_gateway_webhook_signature(request, gateway):
     gateway (Razorpay, Stripe, PayU, ...) uses for webhook auth, just
     without any one gateway's specific header name/payload-canonicalization
     quirks baked in (those differ per gateway and aren't confirmable from
-    here). If `campus`/`liveclass` turns out to already have gateway
+    here). If `campus`/`tuitionclass` turns out to already have gateway
     client code with its own verification helper, prefer reusing that
     over this — this exists so the endpoint isn't left unverified in the
     meantime, not to duplicate a real gateway SDK's verification call.
@@ -4152,7 +4152,7 @@ class BuyCoinConfirmView(GenericAPIView):
     testing the flow end-to-end. `permission_classes = [AllowAny]` now,
     gated instead by `_verify_gateway_webhook_signature()` above — see
     that function's own docstring for exactly what it checks and its
-    ⚠️ ASSUMPTION about not having `campus`/`liveclass`'s own
+    ⚠️ ASSUMPTION about not having `campus`/`tuitionclass`'s own
     gateway-verify code to copy from.
 
     Behavior change worth flagging explicitly: a `CoinPurchaseRequest`
@@ -7064,8 +7064,8 @@ v6** (migration reset — see §3a). Items 10, 12, and 15 (and half of item
     authenticated user. **New sub-gap this introduces, still open** — see
     item 18 below.
 11. ~~**`CoinPurchaseRequest`'s shape is inferred, not confirmed against
-    `liveclass.CoinPurchase`.**~~ — **resolved in v7 (TASK 30 → §0.6):**
-    `liveclass/models.py` has now actually been reviewed. Result: not a
+    `tuitionclass.CoinPurchase`.**~~ — **resolved in v7 (TASK 30 → §0.6):**
+    `tuitionclass/models.py` has now actually been reviewed. Result: not a
     field-for-field match (that model is itself deprecated, so full
     parity was never the real goal), but one real gap was found and
     closed — `gateway_payment_id`/`gateway_signature` added to
@@ -7276,7 +7276,7 @@ serializers, views, urls, admin, tasks, tests — is enough to run the
       manual top-ups (§11 item 18) if your product still needs that
       flow.
 - [x] **v7:** `CoinPurchaseRequest` has already been diffed against
-      `liveclass.CoinPurchase` in code (TASK 30, §11 item 11 resolved) —
+      `tuitionclass.CoinPurchase` in code (TASK 30, §11 item 11 resolved) —
       `gateway_payment_id`/`gateway_signature` exist and
       `confirm_success()` accepts/stores them. Nothing left to reconcile
       here; if you want a webhook to actually populate them, wire
@@ -7342,7 +7342,7 @@ any upload for this app — everything below is inferred from how
 | **`login`** | `settings.AUTH_USER_MODEL` (`login.User`) is the target of every FK in this app (`Follow`, `BlockUser`, `RestrictUser`, `CoinLedger`, `CoinPurchaseRequest`, `CoinWithdrawalRequest`). `user_profile` never imports `login.User` directly — always via `settings.AUTH_USER_MODEL` or `type(user)` — to stay decoupled. | The custom fields §2 lists (`profile_photo`, `bio`, `is_private`, `is_verified`, `is_active`, `followers_count`, `following_count`, `posts_count`, `coin`) must exist on `login.User`. Its own `ModelAdmin` must declare `search_fields` for `autocomplete_fields` elsewhere in this app's `admin.py` to work (§11 item 6). |
 | **`testseries`** | `TestSeriesPurchase.purchase_and_start_attempt()` / `.release()` reference `CoinLedger.TransactionType.TESTSERIES_PURCHASE` / `TESTSERIES_PAYOUT` directly (TASK 1) — those values existing in this app's enum is a hard dependency; they were missing before TASK 1 and it was a live `AttributeError`. | Nothing — `testseries` is purely a consumer of this app's `TransactionType` enum and (presumably) calls `CoinLedger.objects.record_transaction()` itself for its own purchase/payout flow. |
 | **`campus`** | `campus/tasks.py` (FEE-3/FEE-6) reads a student's `User.coin` balance to decide whether it covers an upcoming fee. `FEE-2` routes real tuition-fee payments through this same `CoinLedger`. Small engagement bonuses (attendance-streak, on-time-assigments-streak) credit coins via `TransactionType.CAMPUS_REWARD` (F-3) — and are therefore automatically subject to TASK 5's earn-rate limiter, the same as any other `EARN`/`CAMPUS_REWARD` credit. | Nothing structural — `campus` just needs `CAMPUS_REWARD` to exist (it does, as of F-3) and to call `record_transaction()` rather than writing `User.coin` directly, or its credits would silently escape both the audit trail and the rate limiter. |
-| **`liveclass`** | Nothing currently — not a consumer of this app. | `liveclass.CoinPurchase` and `liveclass.CoinWithdrawal`/`CoinTransaction` were used as **reference reads** (not code dependencies) when designing `CoinPurchaseRequest` (TASK 3) and `CoinWithdrawalRequest` (TASK 4) respectively — both reproduce `liveclass`'s escrow/lifecycle patterns on top of `CoinLedger` instead of `liveclass.CoinTransaction`, since `CoinLedger` is this codebase's one shared ledger. `liveclass/models.py` itself was never uploaded, so these two models' exact field shapes are inferred, not verified against it (§11 item 11; `CoinWithdrawalRequest`'s specific missing fields vs. `liveclass.CoinWithdrawal` are §11 item 13) — worth reconciling if the two ever need to match exactly.
+| **`tuitionclass`** | Nothing currently — not a consumer of this app. | `tuitionclass.CoinPurchase` and `tuitionclass.CoinWithdrawal`/`CoinTransaction` were used as **reference reads** (not code dependencies) when designing `CoinPurchaseRequest` (TASK 3) and `CoinWithdrawalRequest` (TASK 4) respectively — both reproduce `tuitionclass`'s escrow/lifecycle patterns on top of `CoinLedger` instead of `tuitionclass.CoinTransaction`, since `CoinLedger` is this codebase's one shared ledger. `tuitionclass/models.py` itself was never uploaded, so these two models' exact field shapes are inferred, not verified against it (§11 item 11; `CoinWithdrawalRequest`'s specific missing fields vs. `tuitionclass.CoinWithdrawal` are §11 item 13) — worth reconciling if the two ever need to match exactly.
 | **`post`** | Nothing currently — not a consumer. | `post/models.py`'s `update_shares_count`/`update_saves_count`/`update_story_views_count` signal pattern is the reference design `tasks.py`'s module docstring points to as the *real* fix for follow-count drift (a `Follow` `post_save`/`post_delete` signal, instead of `reconcile_follow_counts`'s periodic detect-and-correct). Not implemented here — out of scope for this pass, noted for a future one. `post.views.TrendingHashtagsAPIView`'s "bounded recompute now, revisit at scale" trade-off is the same one `reconcile_follow_counts` makes. |
 | **`message`** | Consumes `is_blocked_between()` for chat/contact-search filtering (block) and is expected to eventually consume `is_restricted_between()` to suppress read-receipts/online-status/notifications from a restricted user (not implemented yet — §11 item 8). Gifting flows in `message` are expected to call `CoinLedger.objects.record_transaction(transaction_type=GIFT_SENT / GIFT_RECEIVED)` — not verified against actual `message` code since it wasn't uploaded. | `MessageContactSearchView`/`MessageContactSearchSerializer` exist specifically to serve `message`'s "add members" flow. |
 
@@ -7363,11 +7363,11 @@ any upload for this app — everything below is inferred from how
   app's public surface** (a `TransactionType` value, a helper function,
   `record_transaction()` itself) — none of them require `user_profile`
   to import the other app back, keeping this app's own import graph
-  free of circular references to `testseries`/`campus`/`liveclass`/
+  free of circular references to `testseries`/`campus`/`tuitionclass`/
   `post`/`message`.
 - **v6 addition:** `_verify_gateway_webhook_signature()` (views.py,
   §0.5) is a **generic**, gateway-agnostic HMAC check, not copied from
-  `campus`/`liveclass` gateway-client code — neither app's actual
+  `campus`/`tuitionclass` gateway-client code — neither app's actual
   gateway-integration code was part of any upload for `user_profile`,
   so this isn't confirmed to match whatever verification (if any)
   those apps already do for their own payment flows. If either already

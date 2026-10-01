@@ -272,6 +272,81 @@ def generate_classroom_answer(question: str, context_text: str, conversation_id:
     return result
 
 
+# 🔥 NAYA — Task G15 (growth_and_feature_tasks.md, Section E — "AI doubt-
+# solving assistant"). `generate_classroom_answer` above is grounded in
+# ONE study-room conversation's chat/whiteboard/transcript — great for
+# "ask the copilot inside a tuition class", but G15 wants an "Ask AI" entry
+# point reachable from anywhere a student has a doubt: a feed post they
+# don't understand, a test question they got wrong, or a plain chat
+# message — none of which are a study-room conversation, so requiring a
+# `conversation_id` + membership check (like the copilot does) would make
+# most of those entry points impossible to wire up.
+#
+# This function is intentionally conversation-agnostic: the caller
+# (`AskAIDoubtView` in `views_ai.py`) decides what `context_text` means
+# (a post's caption, a wrong test question + the student's answer + the
+# correct answer, a chat message) and passes it in as plain text — same
+# "ground the model in real content, don't just let it free-associate"
+# idea as the copilot, just without the classroom-specific plumbing.
+#
+# `context_label` is a short human-readable tag of WHERE the doubt came
+# from ("a social feed post", "a test question the student answered
+# wrong", ...) — folded into the prompt so the tone/framing fits the
+# source (a wrong test question should get "here's WHY you were wrong",
+# not just the concept restated in a vacuum).
+#
+# Same 24h content-hash cache pattern as the rest of this file.
+# `cache_scope` (caller passes e.g. "test_question:<question_id>" or
+# "feed_post:<post_id>") is folded into the cache key for the same
+# cross-context-leak reason `generate_reply_suggestions` folds in
+# `conversation_id` — two different posts/questions that happen to
+# produce byte-identical `question`+`context_text` shouldn't silently
+# share a cached answer meant for a different doubt. Deliberately NOT
+# scoped per-user (unlike smart-replies, which are private-chat) — two
+# students asking the identical doubt about the identical public post is
+# exactly the case where sharing the cached answer saves a Gemini call.
+def generate_doubt_answer(question: str, context_text: str, context_label: str, cache_scope: str) -> str:
+    if not AI_ENABLED:
+        raise RuntimeError("AI not configured")
+
+    key = _get_cache_key("doubt", f"{cache_scope}:{context_label}:{question}:{context_text}")
+    cached = _cache_get(key)
+    if cached is not _CACHE_MISS:
+        logger.info(f"CACHE HIT doubt {key}")
+        return cached
+
+    context_block = (
+        f"Context ({context_label}):\n---\n{context_text[:4000]}\n---\n\n"
+        if context_text else ""
+    )
+
+    prompt = f"""
+    You are a friendly, patient subject-tutor helping a student who has a
+    doubt.
+
+    {context_block}Student's question: {question}
+
+    Rules:
+    - Answer in the same language the student's question is in.
+    - Explain the underlying concept clearly rather than a one-line
+      answer — the goal is that the student actually understands it,
+      not just gets unblocked for now.
+    - If the context is a test question the student answered wrong,
+      explain WHY their answer was wrong and why the correct one is
+      right, don't just restate the correct option.
+    - Keep it under 200 words unless the question genuinely needs more.
+    """
+
+    res = _call_gemini(prompt)
+    result = res.text.strip()
+
+    if not result:
+        raise ValueError("AI returned empty doubt answer")
+
+    cache.set(key, result, CACHE_TTL)
+    return result
+
+
 # 🔥 NAYA — Revision Deck (Feature 5): summary/quiz ka agla step. Instead
 # of a one-off summary or a single 5-question quiz off of whatever's on
 # the board right now, this pulls together everything a student has for

@@ -87,11 +87,34 @@ class MessageType(models.TextChoices):
     # serializer validation pe 400 deta tha, kyunki ye pehle choices me
     # hi nahi tha.
     POLL = 'poll', 'Poll'  # 🔥 NAYA — group poll messages, see Poll model neeche
+    STORY_REPLY = 'story_reply', 'Story Reply'  # 🔥 NAYA — Instagram-style
+    # "reply to a story" message. This is a NORMAL message in every other
+    # respect (same conversation, same delivery/read/react pipeline) — the
+    # only difference is it carries `story`/`story_reply_snapshot` (below)
+    # so the chat UI can render the little story-thumbnail-+-reply bubble
+    # instead of a plain text bubble. See post/views.py's
+    # `StoryReplyAPIView` for where these get created.
+    POST_SHARE = 'post_share', 'Shared Post'  # 🔥 NAYA — "forward a post
+    # into a chat" (checklist item 61). Same pattern as STORY_REPLY just
+    # above: an ordinary message through the normal send/broadcast path,
+    # distinguished only by `type` + a `meta` payload
+    # (`shared_post_id`/`shared_post_author`/`shared_post_title`) the chat
+    # UI reads to render a tappable post-preview bubble instead of plain
+    # text. See post/services.py's `share_post_to_conversation` /
+    # post/views.py's `PostShareAPIView` for where these get created.
 
 
 class ConversationType(models.TextChoices):
     PRIVATE = 'private', 'Private Chat'
     GROUP = 'group', 'Group Chat'
+
+
+# 🔥 NAYA (M1-BE) — Message requests. Per-user state, `ConversationParticipant
+# .request_status` me. Poori rules `message_requests.py` me hain.
+class RequestStatus(models.TextChoices):
+    ACCEPTED = 'accepted', 'Accepted'
+    PENDING = 'pending', 'Pending'
+    DECLINED = 'declined', 'Declined'
 
 
 # 🔥 NAYA — Temporary / Disappearing messages (WhatsApp jaisa). Ye poori
@@ -102,6 +125,11 @@ class DisappearingDuration(models.TextChoices):
     ONE_MONTH = '1_month', '1 Month'
     SIX_MONTHS = '6_months', '6 Months'
     ONE_YEAR = '1_year', '1 Year'
+    # 🔥 NAYA (M3b) — "true vanish mode": message tab delete hota hai jab
+    # recipient ne padh liya ho AUR chat band ho chuki ho (private chat only —
+    # views.py me group par reject hota hai). 'after_seen' = 10 chars =
+    # max_length=10 ke andar hi hai, isliye column resize nahi chahiye.
+    AFTER_SEEN = 'after_seen', 'After seen'
 
 
 # duration string -> timedelta. `NONE` -> None (matlab disappearing off hai).
@@ -110,6 +138,13 @@ DISAPPEARING_DURATION_TIMEDELTA = {
     DisappearingDuration.ONE_MONTH: timedelta(days=30),
     DisappearingDuration.SIX_MONTHS: timedelta(days=182),
     DisappearingDuration.ONE_YEAR: timedelta(days=365),
+    # 🔥 NAYA (M3b) — `after_seen` ka asli delete "seen + chat closed" par
+    # hota hai (tasks.py). Ye timedelta sirf BACKSTOP hai: jo message kabhi
+    # padha hi nahi gaya wo `expires_at` par existing sweeper se hat jaaye,
+    # warna wo hamesha DB me pada rehta. Is dict me daalne ka fayda: REST aur
+    # WS dono send-paths (jo `get_disappearing_timedelta()` se `expires_at`
+    # snapshot karte hain) bina kisi change ke ye backstop apne-aap lagayenge.
+    DisappearingDuration.AFTER_SEEN: timedelta(days=30),
 }
 
 
@@ -218,6 +253,15 @@ class ConversationParticipant(BaseModel):
     is_muted = models.BooleanField(default=False)
     is_pinned = models.BooleanField(default=False)
 
+    # 🔥 NAYA (M1-BE) — Message requests. Per-user (receiver ka status; sender
+    # ki row hamesha `accepted`). DEFAULT `accepted` => saari purani rows aur
+    # saare group chats bina data-migration ke normal inbox me rehte hain.
+    # `pending`  : anjaan ka pehla DM, receiver ne abhi accept/decline nahi kiya.
+    # `declined` : receiver ne decline kiya — sender ko kuch pata nahi chalta.
+    request_status = models.CharField(
+        max_length=10, choices=RequestStatus.choices, default=RequestStatus.ACCEPTED,
+    )
+
     # 🔥 NAYA — Is chat ko apna custom naam/nickname dene ke liye (sirf
     # is user ko dikhega, dusre participant/group members ko nahi — isliye
     # `Conversation` pe nahi, per-user `ConversationParticipant` pe hai,
@@ -266,6 +310,9 @@ class ConversationParticipant(BaseModel):
         indexes = [
             models.Index(fields=['user', 'is_archived']),
             models.Index(fields=['conversation', 'user']),
+            # M1-BE — inbox list / requests list / unread-count sab
+            # `user + request_status` se filter karte hain.
+            models.Index(fields=['user', 'request_status'], name='cp_user_request_status_idx'),
         ]
 
 
@@ -317,6 +364,23 @@ class Group(BaseModel):
     # Fast count ke liye (signal se update karo, query se mat gino)
     members_count = models.PositiveIntegerField(default=0)
     messages_count = models.PositiveIntegerField(default=0)
+
+    # 🔥 NAYA (Task G14) — "Study Groups" ko discoverable banane ke liye.
+    # Pehle group sirf `member_ids` (existing contacts) se banta tha aur
+    # `GroupViewSet.get_queryset()` sirf uhi groups dikhata tha jinka user
+    # already member ho — matlab ek public "NEET 2027 Aspirants" jaisa
+    # group banao to bhi koi naya student use kabhi dhoond hi nahi sakta
+    # tha, sirf invite-code jaante hue hi join ho sakta tha. Fix do parts
+    # me hai: (1) ye `topic_tag` field — free-text subject/exam label
+    # (Post.CATEGORY_CHOICES jaisi fixed choices list jaanbujh ke nahi use
+    # ki, kyunki "NEET 2027", "JEE Mains", "UPSC Prelims" jaisे specific
+    # tags ek fixed taxonomy me kabhi fit nahi honge — subcategory field
+    # (post/models.py) jaisa hi free CharField pattern), (2) naya
+    # `GroupViewSet.discover` action (views.py) jo is field + name pe
+    # search karta hai. Sirf PUBLIC (`is_private=False`) groups discover
+    # me aate hain — private groups ab bhi sirf invite-code/direct-add se
+    # hi milte hain, ismein koi badlaav nahi.
+    topic_tag = models.CharField(max_length=100, blank=True, null=True, db_index=True)
 
     def __str__(self):
         return self.name
@@ -416,6 +480,14 @@ class Message(BaseModel):
     # expire nahi hoga (duration "none" thi jab bheja gaya tha).
     expires_at = models.DateTimeField(null=True, blank=True, db_index=True)
 
+    # 🔥 NAYA (M3b) — send-time snapshot: is message ko "seen + chat closed"
+    # par hard-delete karna hai (conversation `after_seen` mode me thi jab
+    # bheja gaya). Per-message flag isliye hai ki mode baad me off/on karne
+    # par purani history galti se delete na ho — sirf wahi messages jo mode
+    # ON rehte bheje gaye. `save()` override neeche se set karta hai, to REST,
+    # WS aur scheduled — har creation path automatically cover hota hai.
+    delete_after_seen = models.BooleanField(default=False, db_index=True)
+
     # 🔥 NAYA — Message pin. Ek conversation me kai messages pin ho sakte
     # hain (WhatsApp jaisa max-3 limit `MessageViewSet.pin` action me
     # enforce hota hai, model pe koi hard limit nahi taaki future me limit
@@ -486,6 +558,36 @@ class Message(BaseModel):
     # invalid keyword argument` de raha tha. True tab set hota hai jab
     # sender us waqt group ka admin/mod ho (private chat me hamesha False).
     is_announcement = models.BooleanField(default=False, db_index=True)
+
+    # 🔥 NAYA — Story reply (post app <-> message app bridge). Deliberately
+    # NOT a new model — a story reply IS a Message (type=STORY_REPLY), just
+    # with a pointer back to the story it replied to. `on_delete=SET_NULL`
+    # (not CASCADE) — if the story itself gets hard-deleted later, the chat
+    # bubble must keep existing (Instagram behaviour: the reply message
+    # stays in the DM thread even after the story is long gone), it just
+    # loses the "jump to story" link. String FK ('post.Story') so this app
+    # doesn't need a hard import-time dependency on the post app.
+    story = models.ForeignKey(
+        'post.Story', null=True, blank=True, on_delete=models.SET_NULL, related_name='replies'
+    )
+    # Snapshot of the story's media URL at reply time. A story auto-expires
+    # (soft-delete) ~24h after creation — long before most DM threads do —
+    # so the bubble can't rely on always being able to follow `story.media`.
+    # Stored once, at send time, exactly like `Message.meta` already
+    # snapshots other send-time-only data elsewhere in this model.
+    story_reply_snapshot = models.URLField(blank=True, null=True)
+
+    def save(self, *args, **kwargs):
+        # 🔥 NAYA (M3b) — sirf naye message par, conversation ki current
+        # setting dekh ke `delete_after_seen` snapshot karo. Ek halki
+        # `values_list` query (poora Conversation load nahi hota).
+        if self._state.adding and not self.delete_after_seen and self.conversation_id:
+            mode = Conversation.objects.filter(id=self.conversation_id).values_list(
+                'disappearing_messages_duration', flat=True
+            ).first()
+            if mode == DisappearingDuration.AFTER_SEEN:
+                self.delete_after_seen = True
+        super().save(*args, **kwargs)
 
     class Meta(BaseModel.Meta):
         indexes = [
@@ -821,6 +923,64 @@ class StudyRoomState(BaseModel):
 
     class Meta:
         indexes = [models.Index(fields=['conversation'])]
+
+
+# ======================================================================
+# STUDY ROOM — COLLABORATIVE STICKY NOTES
+# ------------------------------------------------------------
+# Pehle sticky notes whiteboard ke `StudyRoomState.state` JSON snapshot
+# ke andar `stickyNotes` list me rehte the — poora board ek saath PUT
+# hota tha, isliye do participants ek hi note ko ek saath badlein to
+# jis ka snapshot baad me save hua wo doosre ka poora kaam overwrite kar
+# deta tha (aur snapshot 20s ke interval pe save hota tha, real-time
+# nahi). Ab har note apni alag row hai (`room` = wahi `Conversation` jis
+# ka study room hai) — per-note, per-field conflict handling possible.
+#
+# Conflict handling (see `sticky_notes.py` for the actual logic):
+#   * `updated_at` (BaseModel) = note ka last-modified server time.
+#   * `field_ts` = har "field group" (pos / size / color / text / z) ka
+#     last-write timestamp (epoch ms, client ne bheja, server ne clamp
+#     kiya). Incoming write tabhi apply hota hai jab uska ts us group ke
+#     stored ts se kam na ho — yani last-write-wins, lekin per-group, taaki
+#     ek banda note MOVE kare aur doosra usi waqt TEXT edit kare to dono
+#     survive karein.
+#   * Delete = soft-delete tombstone (`is_deleted=True`), taaki late/
+#     retried add-ya-edit note ko resurrect na kar sake.
+#
+# `page_id` = whiteboard page ka id (client-generated string, e.g.
+# 'page_1') — study room multi-page hai, note kisi ek page ka hota hai.
+# `color` ARGB int hai (Flutter `Color.value`) — 0xFFFFFFFF int32 se
+# bada hai isliye BigIntegerField.
+# ======================================================================
+class StudyRoomNote(BaseModel):
+    room = models.ForeignKey(
+        Conversation, on_delete=models.CASCADE, related_name='study_room_notes'
+    )
+    created_by = models.ForeignKey(
+        User, null=True, blank=True, on_delete=models.SET_NULL, related_name='+'
+    )
+    last_edited_by = models.ForeignKey(
+        User, null=True, blank=True, on_delete=models.SET_NULL, related_name='+'
+    )
+    page_id = models.CharField(max_length=64, default='page_1')
+    x = models.FloatField(default=0)
+    y = models.FloatField(default=0)
+    width = models.FloatField(default=160)
+    height = models.FloatField(default=160)
+    color = models.BigIntegerField(default=0xFFFFF59D)
+    text = models.TextField(blank=True, default='')
+    z_index = models.IntegerField(default=0)
+    field_ts = models.JSONField(default=dict, blank=True)
+
+    class Meta:
+        ordering = ['z_index', 'created_at', 'id']
+        indexes = [
+            models.Index(fields=['room', 'page_id']),
+            models.Index(fields=['room', 'z_index']),
+        ]
+
+    def __str__(self):
+        return f"Note {self.id} (room={self.room_id}, page={self.page_id})"
 
 
 # ======================================================================
@@ -1300,6 +1460,26 @@ class ParentToken(BaseModel):
     token = models.CharField(max_length=64, unique=True, db_index=True)
     last_seen_at = models.DateTimeField(null=True, blank=True)
 
+    # FIX: views_parent.py (approve / list-devices / verify) and
+    # permissions.HasValidParentToken already read `status` and
+    # `approved_at`, but the model never had them, so the whole
+    # "student approves the parent's device" flow raised AttributeError.
+    # A new device starts PENDING and only the student can APPROVE it.
+    class Status(models.TextChoices):
+        PENDING = 'pending', 'Pending'
+        APPROVED = 'approved', 'Approved'
+
+    status = models.CharField(
+        max_length=10, choices=Status.choices, default=Status.PENDING, db_index=True,
+    )
+    approved_at = models.DateTimeField(null=True, blank=True)
+
+    # FEATURE (parent notifications): the parent app is loginless, so there's
+    # no User/DeviceToken row to push to. The parent app may send its FCM
+    # token at verify-time (optional); attendance / report-card pushes go
+    # straight to it via push_utils.send_parent_push.
+    fcm_token = models.CharField(max_length=255, blank=True, default='')
+
     # 🔧 GAP FIX — rolling inactivity expiry, independent of the parent
     # code's own `expires_at`. Ek device 30 din tak dashboard hit nahi
     # karta (phone kho gaya/app uninstall/parent ne bas dekhna band kar
@@ -1331,7 +1511,7 @@ class ParentToken(BaseModel):
 # ======================================================================
 # 🔧 GAP FIX — PARENT MODE QUERY THREADS (Phase 5, Task 24 + 27)
 # ------------------------------------------------------------
-# `liveclass/parent_link_views.py` (ClassroomParentQueryListView,
+# `tuitionclass/parent_link_views.py` (ClassroomParentQueryListView,
 # ParentQueryReplyView) already imports and uses these two models, but
 # they were never actually added here — that's what broke
 # `from message.models import ..., ParentModeQuery, ParentModeQueryMessage`
@@ -1356,11 +1536,11 @@ class ParentModeQuery(BaseModel):
         ANSWERED = 'answered', 'Answered'
         CLOSED = 'closed', 'Closed'
 
-    # String FK — avoids a hard `liveclass` import in this app (matches
-    # how `liveclass` already imports `message` directly; importing back
+    # String FK — avoids a hard `tuitionclass` import in this app (matches
+    # how `tuitionclass` already imports `message` directly; importing back
     # the other way would risk a circular import).
     classroom = models.ForeignKey(
-        'liveclass.Classroom', on_delete=models.CASCADE, related_name='parent_mode_queries',
+        'tuitionclass.Classroom', on_delete=models.CASCADE, related_name='parent_mode_queries',
     )
     parent_access_code = models.ForeignKey(
         ParentAccessCode, on_delete=models.CASCADE, related_name='queries',
@@ -1414,15 +1594,15 @@ class ParentModeQueryMessage(BaseModel):
 #
 # 🔧 FIX (this session) — `related_name` on both FKs below renamed
 # (`assigmentss` -> `message_assigmentss`, `assigments_submissions` ->
-# `message_assigments_submissions`) because a separate `liveclass` app
+# `message_assigments_submissions`) because a separate `tuitionclass` app
 # already defines its own `assigments`/`assigmentsSubmission` models with
 # the SAME related_names pointing at the SAME `User`/`Group` models.
 # Django can't register two identical reverse accessors on `User`, so
 # `makemigrations` failed with fields.E304/E305 until these were made
-# unique. NOTE: if `liveclass.assigments` is meant to be the SAME concept
+# unique. NOTE: if `tuitionclass.assigments` is meant to be the SAME concept
 # as this one (not a different feature that happens to share a name), the
 # better long-term fix is to delete this duplicate pair entirely and have
-# the parent-dashboard code query `liveclass.assigments` instead — see
+# the parent-dashboard code query `tuitionclass.assigments` instead — see
 # chat discussion. Kept here for now since that's a bigger structural
 # decision than a naming clash fix.
 # ----------------------------------------------------------------------
@@ -1543,4 +1723,82 @@ class FocusSession(BaseModel):
             user=user,
             ends_at=timezone.now() + timedelta(minutes=duration_minutes),
             exception_rule=exception_rule,
+        )
+
+
+# ======================================================================
+# 🔥 NAYA (M2-BE) — NOTES (Instagram-style status, 60 chars, 24h)
+#
+# ⚠️ `sticky_notes.py` / `StudyRoomNote` (study-room ke collaborative sticky
+# notes) se ALAG feature hai — isi liye model ka naam `UserNote`.
+# Rules + queries: `user_notes.py`. Expired notes read time par filter hote
+# hain (`expires_at > now`); `message.cleanup_expired_notes` daily hard-delete.
+# Hard delete (soft nahi): `user` OneToOne hai, soft-deleted row naya PUT rok deti.
+# ======================================================================
+class NoteAudience(models.TextChoices):
+    FOLLOWERS = 'followers', 'Followers'
+    CLOSE_FRIENDS = 'close_friends', 'Close friends'
+
+
+class UserNote(BaseModel):
+    NOTE_TTL = timedelta(hours=24)
+    MAX_TEXT_LENGTH = 60
+    MAX_EMOJI_LENGTH = 16  # ZWJ sequences (family/flag emojis) kaafi lambe ho sakte hain
+
+    user = models.OneToOneField(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name='status_note',
+    )
+    text = models.CharField(max_length=MAX_TEXT_LENGTH, blank=True, default='')
+    emoji = models.CharField(max_length=MAX_EMOJI_LENGTH, blank=True, default='')
+    audience = models.CharField(
+        max_length=20,
+        choices=NoteAudience.choices,
+        default=NoteAudience.FOLLOWERS,
+    )
+    expires_at = models.DateTimeField()
+
+    class Meta:
+        ordering = ['-updated_at']
+        indexes = [
+            models.Index(fields=['expires_at'], name='usernote_expires_idx'),
+        ]
+
+    def __str__(self):
+        return f"UserNote(user={self.user_id}, audience={self.audience}, expires_at={self.expires_at})"
+
+    @property
+    def is_active(self):
+        return self.expires_at > timezone.now()
+
+
+# ======================================================================
+# 🔥 NAYA (M1-BE) — MESSAGE REQUESTS: har naye Message ke baad receiver ki
+# `request_status` decide hoti hai (`message_requests.evaluate_incoming_message`).
+# Signal isliye (view/consumer me inline nahi) taaki REST, WebSocket, offline
+# queue, scheduled, story-reply, post-share — jo bhi `Message.objects.create`
+# kare — sab same rule se guzrein. NOTE: `bulk_create` signal fire nahi karta.
+# Fail-open: koi bhi error aaye to message normally (accepted) deliver hota hai.
+# ======================================================================
+from django.db.models.signals import post_save  # noqa: E402
+from django.dispatch import receiver  # noqa: E402
+
+
+@receiver(post_save, sender=Message, dispatch_uid='message_requests_evaluate_incoming')
+def _message_requests_on_message_saved(sender, instance, created, **kwargs):
+    if not created:
+        return
+    try:
+        from django.db import transaction
+
+        from .message_requests import evaluate_incoming_message
+
+        with transaction.atomic():  # savepoint — error aaye to message ka apna transaction na toote
+            evaluate_incoming_message(instance)
+    except Exception:
+        import logging
+
+        logging.getLogger(__name__).exception(
+            "message_requests: evaluate failed for message %s (fail-open)", instance.pk
         )

@@ -36,12 +36,12 @@ from typing import Any, Mapping
 # Product rule this encodes (owner's decision):
 #   * individual  — a user who creates a test series on their own: PAID
 #   * campus      — created from a campus: always FREE for students
-#   * liveclass   — created from a live class: FREE by default, teacher MAY
+#   * tuitionclass   — created from a tuition class: FREE by default, teacher MAY
 #                   make it paid
 DEFAULT_PRICING_POLICY: dict[str, dict[str, Any]] = {
     "individual": {"mode": "required", "min_coins": 1, "max_coins": 100_000},
     "campus": {"mode": "forbidden"},
-    "liveclass": {"mode": "optional", "min_coins": 1, "max_coins": 100_000},
+    "tuitionclass": {"mode": "optional", "min_coins": 1, "max_coins": 100_000},
 }
 
 

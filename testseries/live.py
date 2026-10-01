@@ -2,11 +2,11 @@
 """
 LiveKit glue for **live-video tests** and **proctored attempts**.
 
-Why a separate module (and not `liveclass.livekit_utils`)?
-    Golden rule of this codebase: `testseries` never imports `liveclass`
+Why a separate module (and not `tuitionclass.livekit_utils`)?
+    Golden rule of this codebase: `testseries` never imports `tuitionclass`
     (or `campus`). We therefore talk to the SAME LiveKit project directly
     through the official SDK, using the SAME environment variables and the
-    SAME call shapes `liveclass/livekit_utils.py` already uses in
+    SAME call shapes `tuitionclass/livekit_utils.py` already uses in
     production — nothing new to provision:
 
         LIVEKIT_API_KEY, LIVEKIT_API_SECRET, LIVEKIT_WS_URL (or LIVEKIT_URL)
@@ -26,10 +26,10 @@ Recording lifecycle
     LiveKit uploads the MP4 to S3 and calls our webhook
     (`POST /testseries/livekit-webhook/`), which fills `TestRecording.url`.
     Point your LiveKit project's webhook at that URL *in addition to* the
-    existing liveclass one (LiveKit supports several webhook URLs).
+    existing tuitionclass one (LiveKit supports several webhook URLs).
 
 Everything is validated lazily — an unconfigured LiveKit never breaks
-`manage.py check` / `migrate` / `test`, exactly like `liveclass`.
+`manage.py check` / `migrate` / `test`, exactly like `tuitionclass`.
 """
 from __future__ import annotations
 

@@ -11,7 +11,7 @@
 >   `celery.py`'s apna wiring pre-requisite ab satisfied hai — §3.1, §4, §8 update kiye.
 > - 🟢 **RESOLVED THIS PASS — §7.1 ka `INSTALLED_APPS` typo (`'assigments'` → `'assigments'`) fix ho gaya.** `settings.py` me typo'd string ab sahi spelling (`assigments`) me hai, apne khud ke naye inline comment ke saath jo exactly wahi failure mode explain karta hai jo is doc pehle se flag kar rahi thi (`get_app_config("assigments")` → `LookupError`). `urls.py` pehle se hi sahi spelling use karta tha, isliye ab settings.py + urls.py + `campus/bridge.py`/`core/views.py::SearchView` — sab EK hi spelling par consistent hain. §2, §5, §7.1, §8 update kiye.
 > - 🆕 **NAYA — `settings.py` me ab `CONFIG_DRIFT_APPS = ["user_profile", "core", "assigments", "testseries", "campus"]` maujood hai**, jo `core_app_documentation.md` §9 item 16 / is doc ke purane §8 item 5 ("confirmed MISSING") ko RESOLVE karta hai. Inline comment khud confirm karta hai ki spelling-typo fix isi list ko add karne ke dauraan surface hua (`get_app_config()` warna `LookupError` deta) — matlab dono fixes (typo + drift-apps list) ek hi pass me saath aaye, ek-dusre se independent nahi. `CONFIG_DRIFT_ADMIN_SKIP`/`CONFIG_DRIFT_ONDEMAND_TASKS`/`CONFIG_DRIFT_URL_SKIP` teeno abhi bhi jaan-bujh kar khaali (`set()`) hain. §2, §8 me naya sub-section.
-> - ✅ **STILL RESOLVED, unchanged — §7.3 (`ws_auth.py` dead code):** `asgi.py` ab bhi `from LearnScroll.ws_auth import JWTAuthMiddleware` use karta hai. `liveclass/ws_auth.py`/`message/Middleware.py` ki duplicate copies abhi bhi delete nahi hui (still-open cleanup, unchanged).
+> - ✅ **STILL RESOLVED, unchanged — §7.3 (`ws_auth.py` dead code):** `asgi.py` ab bhi `from LearnScroll.ws_auth import JWTAuthMiddleware` use karta hai. `tuitionclass/ws_auth.py`/`message/Middleware.py` ki duplicate copies abhi bhi delete nahi hui (still-open cleanup, unchanged).
 > - ✅ **STILL RESOLVED, unchanged — §7.2 (campus F-3 streak-reward tasks):** `campus-check-attendance-streak-rewards`/`campus-check-assigments-ontime-streak-rewards` dono ab bhi registered hain, 19:00/19:30 daily — no change.
 > - ⚠️ **STILL UNCONFIRMED, unchanged — `message-expire-stale-parent-access`** (daily 4:00 AM) beat entry ab bhi wahi hai; task-wrapper ka existence ab bhi verify nahi ho paaya (`message/tasks.py` is pass bhi upload nahi hua). §6/§8 me as-is flag kiya.
 > - `settings.py` ab **1319 lines** hai (pehle "1270 lines" likha tha — typo-fix comment block aur naya `CONFIG_DRIFT_APPS` entry ke extra lines ki wajah se badha). Line-number references jahan zaroori update kiye.
@@ -27,10 +27,10 @@
 |---|---|
 | `settings.py` | Poora Django config — security, DB, cache, channels, REST framework, JWT, CORS, email/SMS, Celery + beat schedule, feature-flags, storage — §1-§6 |
 | `urls.py` | Root urlconf — har app ka mount-prefix, Swagger/Redoc schema, media serving — §2 |
-| `asgi.py` | WebSocket entrypoint — `message` + `liveclass` dono apps ke Channels routes ko EK URLRouter me combine karta hai, JWT-over-querystring auth — §3 |
+| `asgi.py` | WebSocket entrypoint — `message` + `tuitionclass` dono apps ke Channels routes ko EK URLRouter me combine karta hai, JWT-over-querystring auth — §3 |
 | `wsgi.py` | Standard Django WSGI entrypoint (plain HTTP, sync) — §3 |
 | `celery.py` | Celery app bootstrap — `autodiscover_tasks()` se har app ka `tasks.py` register hota hai — §4 |
-| `ws_auth.py` | Project-level shared `JWTAuthMiddleware` for Channels — **✅ ab `asgi.py` se wired hai (RESOLVED this pass) — §3, §7.3. `liveclass`/`message` ki apni duplicate copies abhi delete karna baaki hai.** |
+| `ws_auth.py` | Project-level shared `JWTAuthMiddleware` for Channels — **✅ ab `asgi.py` se wired hai (RESOLVED this pass) — §3, §7.3. `tuitionclass`/`message` ki apni duplicate copies abhi delete karna baaki hai.** |
 | `__init__.py` | **🟢 RESOLVED THIS PASS — ab khaali nahi hai.** `celery.py`'s wiring-requirement (`from .celery import app as celery_app` + `__all__ = ("celery_app",)`) ab dono lines present hain — §3.1, §4, §8. |
 
 ---
@@ -51,7 +51,7 @@
 ```
 daphne, django.contrib.{admin,auth,contenttypes,sessions,messages,staticfiles},
 django.contrib.postgres, django_filters, rest_framework, drf_spectacular, corsheaders,
-login, user_profile, post, message, liveclass, campus, testseries, assigments, core
+login, user_profile, post, message, tuitionclass, campus, testseries, assigments, core
 [+ 'storages' if USE_S3_STORAGE]
 ```
 **🟢 RESOLVED THIS PASS** — `testseries` pehle se correctly registered tha; ab `assigments` bhi sahi spelling ke saath registered hai (pichli pass ka typo fix ho gaya) — `campus/bridge.py`/`core/views.py::SearchView` ke hard-import (`assigments.bridge`/`assigments.models`) se ab match karta hai. Poora detail **§7.1** me.
@@ -83,23 +83,23 @@ application = ProtocolTypeRouter({
         JWTAuthMiddleware(
             URLRouter(
                 message_routing.websocket_urlpatterns
-                + liveclass_routing.websocket_urlpatterns
+                + tuitionclass_routing.websocket_urlpatterns
             )
         )
     ),
 })
 ```
 - **`AuthMiddlewareStack` deliberately NAHI use hota** — wo sirf Django session-cookie padhta hai; is project ka `REST_FRAMEWORK` sirf `JWTAuthentication` use karta hai (mobile/SPA client cookie nahi, JWT access-token bhejta hai), isliye `AuthMiddlewareStack` ke saath `scope['user']` hamesha `AnonymousUser` milta aur har consumer connect reject ho jaata.
-- **✅ Auth — RESOLVED this pass (§7.3):** `from LearnScroll.ws_auth import JWTAuthMiddleware` — ab `LearnScroll/ws_auth.py`'s apne "single canonical copy" intent se match karta hai. Pehle ye `message.Middleware.JWTAuthMiddleware` tha; `asgi.py`'s apna comment is exact fix ko is doc ke §7.3 reference ke saath explicitly document karta hai. **Abhi bhi open**: `liveclass/ws_auth.py` aur `message/Middleware.py` ki apni duplicate `JWTAuthMiddleware` classes delete nahi hui — `asgi.py`'s apna comment khud flag karta hai ki ye ab dead code hain (kahin se import nahi ho rahi) aur inhe delete karna ek follow-up pass me baaki hai, jab tak wo do files khud upload na ho.
-- **Routing**: `message_routing.websocket_urlpatterns + liveclass_routing.websocket_urlpatterns` — dono apps ke routes ek hi `URLRouter` me. Iska apna module-comment ek **CRITICAL, production-breaking fix** document karta hai: pehle sirf `message`'s routing wired tha, `liveclass/routing.py` (`ws/liveclass/session/<id>/` → `SessionConsumer` — live-session chat/raise-hand/polls/presence) kabhi import hi nahi hota tha, isliye har `liveclass` WebSocket connection Channels me "no route matches" se fail hota (consumer/`ws_auth.py`'s apni logic kitni bhi sahi ho, farak nahi padta). **Ab fixed hai** — ye upar ka code already dono routing modules include karta hai.
+- **✅ Auth — RESOLVED this pass (§7.3):** `from LearnScroll.ws_auth import JWTAuthMiddleware` — ab `LearnScroll/ws_auth.py`'s apne "single canonical copy" intent se match karta hai. Pehle ye `message.Middleware.JWTAuthMiddleware` tha; `asgi.py`'s apna comment is exact fix ko is doc ke §7.3 reference ke saath explicitly document karta hai. **Abhi bhi open**: `tuitionclass/ws_auth.py` aur `message/Middleware.py` ki apni duplicate `JWTAuthMiddleware` classes delete nahi hui — `asgi.py`'s apna comment khud flag karta hai ki ye ab dead code hain (kahin se import nahi ho rahi) aur inhe delete karna ek follow-up pass me baaki hai, jab tak wo do files khud upload na ho.
+- **Routing**: `message_routing.websocket_urlpatterns + tuitionclass_routing.websocket_urlpatterns` — dono apps ke routes ek hi `URLRouter` me. Iska apna module-comment ek **CRITICAL, production-breaking fix** document karta hai: pehle sirf `message`'s routing wired tha, `tuitionclass/routing.py` (`ws/tuitionclass/session/<id>/` → `SessionConsumer` — live-session chat/raise-hand/polls/presence) kabhi import hi nahi hota tha, isliye har `tuitionclass` WebSocket connection Channels me "no route matches" se fail hota (consumer/`ws_auth.py`'s apni logic kitni bhi sahi ho, farak nahi padta). **Ab fixed hai** — ye upar ka code already dono routing modules include karta hai.
 - Ek hi `URLRouter` sirf ek middleware instance ke peeche baith sakta hai, isliye dono apps' routes ek hi (ab `LearnScroll.ws_auth.JWTAuthMiddleware`) ke peeche combine kiye gaye.
 
 ### `ws_auth.py` (`LearnScroll/ws_auth.py`)
-Project-level `JWTAuthMiddleware` — same contract (`?token=<jwt>` query-string, `rest_framework_simplejwt.AccessToken` validate, `scope['user']` set). **Iska poora purpose** apna hi docstring explicitly bolta hai: pehle `message`/`liveclass` dono ke paas apna-apna independent, kabhi-compare-na-hui copy tha (`message/Middleware.py` vs `liveclass/ws_auth.py`) — ye file unhe ek jagah consolidate karne ke liye likhi gayi, taaki future me sirf ek jagah update karni pade.
+Project-level `JWTAuthMiddleware` — same contract (`?token=<jwt>` query-string, `rest_framework_simplejwt.AccessToken` validate, `scope['user']` set). **Iska poora purpose** apna hi docstring explicitly bolta hai: pehle `message`/`tuitionclass` dono ke paas apna-apna independent, kabhi-compare-na-hui copy tha (`message/Middleware.py` vs `tuitionclass/ws_auth.py`) — ye file unhe ek jagah consolidate karne ke liye likhi gayi, taaki future me sirf ek jagah update karni pade.
 
 `get_user_from_token()` har failure mode (bad signature, expired, malformed, deleted/deactivated user) ko catch karke `AnonymousUser` degrade karta hai — kabhi raise nahi karta, taaki ek bura token WebSocket connection crash na kare (bas unauthenticated connect ho jaata hai, no-token jaisa hi).
 
-**🟡 Is file ka apna wiring-instruction docstring `asgi.py` me ab follow ho chuka hai (§3, §7.3 — RESOLVED). Cleanup abhi bhi baaki hai**: `liveclass/ws_auth.py`/`message/Middleware.py` ki duplicate copies delete karna.
+**🟡 Is file ka apna wiring-instruction docstring `asgi.py` me ab follow ho chuka hai (§3, §7.3 — RESOLVED). Cleanup abhi bhi baaki hai**: `tuitionclass/ws_auth.py`/`message/Middleware.py` ki duplicate copies delete karna.
 
 ### New section — 3.1 `LearnScroll/__init__.py` 🔴 CONFIRMED EMPTY
 
@@ -139,7 +139,7 @@ urlpatterns = [
     path("redoc/", SpectacularRedocView...),
     path("media/<path:path>", serve_media_with_range, name="media"),
     path("message/", include("message.urls")),
-    path("liveclass/", include("liveclass.urls")),
+    path("tuitionclass/", include("tuitionclass.urls")),
     path("core/", include("core.urls")),
     path("campus/", include("campus.urls")),
     path("testseries/", include("testseries.urls")),
@@ -151,7 +151,7 @@ urlpatterns = [
 - **`testseries.urls`/`assigments.urls` dono yahan wired hain**, prefixes `"testseries/"`/`"assigments/"` — `urls.py` hamesha se sahi spelling (`assigments`) use kar raha tha; `settings.py`'s `INSTALLED_APPS` ka typo (jo pehle inconsistent tha) is pass **fix ho chuka hai** (§7.1) — ab dono files ek hi sahi spelling par consistent hain.
 - Do `settings`-import lines duplicate hain (`from django.conf import settings` do baar) — harmless, cosmetic.
 - File ke end me commented-out `if settings.DEBUG: urlpatterns += static(...)` aur ek `re_path` media fallback — dono inactive, kyunki `path("media/<path:path>", serve_media_with_range, ...)` upar already unconditionally wired hai (§2's `SERVE_MEDIA_VIA_DJANGO` flag view-level pe decide karta hai, url-level pe nahi).
-- **⚠️ Cleanup reminder** (`core_app_documentation.md` §9 se bhi): agar `liveclass/urls.py` me abhi bhi purana `notifications`/`notification-preferences/me/` router registered hai, to `core.urls` wire ho jaane ke baad wo hata dena hai — warna do endpoints ek hi `Notification` table serve karenge.
+- **⚠️ Cleanup reminder** (`core_app_documentation.md` §9 se bhi): agar `tuitionclass/urls.py` me abhi bhi purana `notifications`/`notification-preferences/me/` router registered hai, to `core.urls` wire ho jaane ke baad wo hata dena hai — warna do endpoints ek hi `Notification` table serve karenge.
 
 
 ---
@@ -161,10 +161,10 @@ urlpatterns = [
 - **`DEFAULT_AUTHENTICATION_CLASSES`**: sirf `JWTAuthentication` (`rest_framework_simplejwt`) — koi `SessionAuthentication` nahi (isi wajah se §3's Channels `AuthMiddlewareStack` incompatibility).
 - **`DEFAULT_PERMISSION_CLASSES`**: `[IsAuthenticated]` — project-wide floor, "fail closed" default agar koi naya view apna `permission_classes` set karna bhool jaye.
 - **`DEFAULT_THROTTLE_CLASSES`**: `UserRateThrottle` + `AnonRateThrottle`.
-- **`DEFAULT_THROTTLE_RATES`** — 30+ scopes registered (`user`, `anon`, liveclass ka `session_join`/`session_token`/`chat_message_create`/`coin_withdrawal`/`coin_purchase`/`classroom_share`/`chat_reaction`/chunked-upload triplet, message ka `message_send`/`call_initiate`/`group_create`/`reaction`/`ai_transcribe`/`ai_smart_reply`/IP-keyed variants/`translate`/`parent_code_*`/`ai_class_transcript_*`/`ai_classroom_copilot`/`ai_revision_deck`/`focus_session`). Har entry ke comment me confirm hai ki "iske bina pehli hi request `ImproperlyConfigured` degi" — is codebase me ye exact bug-class 10+ baar mil chuka hai.
+- **`DEFAULT_THROTTLE_RATES`** — 30+ scopes registered (`user`, `anon`, tuitionclass ka `session_join`/`session_token`/`chat_message_create`/`coin_withdrawal`/`coin_purchase`/`classroom_share`/`chat_reaction`/chunked-upload triplet, message ka `message_send`/`call_initiate`/`group_create`/`reaction`/`ai_transcribe`/`ai_smart_reply`/IP-keyed variants/`translate`/`parent_code_*`/`ai_class_transcript_*`/`ai_classroom_copilot`/`ai_revision_deck`/`focus_session`). Har entry ke comment me confirm hai ki "iske bina pehli hi request `ImproperlyConfigured` degi" — is codebase me ye exact bug-class 10+ baar mil chuka hai.
   - **✅ `campus`'s chaaro throttle scope yahan register hain — `campus_app_design.md`'s apna open item is against RESOLVED hai:** `campus_fee_payment` (`10/min`), `campus_live_session_join` (`20/min`), `campus_notice_post` (`10/min`), `campus_parent_link_verify` (`10/min`) — `campus/throttles.py`'s chaaro `ScopedRateThrottle` subclasses ke exact scope-names se match karte hain.
 - **`DEFAULT_PAGINATION_CLASS`**: `PageNumberPagination`, `PAGE_SIZE=20` — project-wide default. **(`core/views.py::NotificationPagination` isse override karta hai apne `LimitOffsetPagination` se — `core_app_documentation.md` §7 me already noted, ye project-default se alag hona intentional hai.)**
-- **`EXCEPTION_HANDLER`**: `liveclass.exceptions.liveclass_exception_handler` — project-wide error-envelope normalizer.
+- **`EXCEPTION_HANDLER`**: `tuitionclass.exceptions.tuitionclass_exception_handler` — project-wide error-envelope normalizer.
 - **`SIMPLE_JWT`**: access token 1 din, refresh 30 din, `ROTATE_REFRESH_TOKENS=False`, `BLACKLIST_AFTER_ROTATION=True`, `HS256`, `SIGNING_KEY=SECRET_KEY`.
 - **`AUTH_USER_MODEL = "login.User"`** — `ws_auth.py`'s `get_user_model()` isi ko resolve karta hai.
 - **`CORS_ALLOWED_ORIGINS`**: `.env`-driven allowlist; `CORS_ALLOW_ALL_ORIGINS = DEBUG and not CORS_ALLOWED_ORIGINS` — production me kabhi wildcard nahi (jab tak `DEBUG=False`).
@@ -172,16 +172,16 @@ urlpatterns = [
 ### `CELERY_BEAT_SCHEDULE` — as-built entries
 | Beat key | Task | Cadence |
 |---|---|---|
-| `liveclass-generate-upcoming-sessions` | `liveclass.generate_upcoming_sessions` | hourly |
-| `liveclass-auto-complete-overdue-sessions` | `liveclass.auto_complete_overdue_sessions` | `*/5` min |
-| `liveclass-send-due-reminders` | `liveclass.send_due_reminders` | every min |
-| `liveclass-refresh-stale-enrolled-counts` | `liveclass.refresh_stale_enrolled_counts` | `*/15` min |
-| `liveclass-expire-and-refund-passes` | `liveclass.expire_and_refund_passes` | `*/15` min |
-| `liveclass-cleanup-stale-chunked-uploads` | `liveclass.cleanup_stale_chunked_uploads` | hourly |
-| `liveclass-reconcile-stuck-coin-purchases` | `liveclass.reconcile_stuck_coin_purchases` | `*/30` min |
-| `liveclass-run-auto-renewals` | `liveclass.run_auto_renewals` | `*/30` min |
-| `liveclass-expire-unclaimed-gifts` | `liveclass.expire_unclaimed_gifts` | `*/30` min |
-| `liveclass-send-notification-digests` | `liveclass.send_notification_digests` | hourly |
+| `tuitionclass-generate-upcoming-sessions` | `tuitionclass.generate_upcoming_sessions` | hourly |
+| `tuitionclass-auto-complete-overdue-sessions` | `tuitionclass.auto_complete_overdue_sessions` | `*/5` min |
+| `tuitionclass-send-due-reminders` | `tuitionclass.send_due_reminders` | every min |
+| `tuitionclass-refresh-stale-enrolled-counts` | `tuitionclass.refresh_stale_enrolled_counts` | `*/15` min |
+| `tuitionclass-expire-and-refund-passes` | `tuitionclass.expire_and_refund_passes` | `*/15` min |
+| `tuitionclass-cleanup-stale-chunked-uploads` | `tuitionclass.cleanup_stale_chunked_uploads` | hourly |
+| `tuitionclass-reconcile-stuck-coin-purchases` | `tuitionclass.reconcile_stuck_coin_purchases` | `*/30` min |
+| `tuitionclass-run-auto-renewals` | `tuitionclass.run_auto_renewals` | `*/30` min |
+| `tuitionclass-expire-unclaimed-gifts` | `tuitionclass.expire_unclaimed_gifts` | `*/30` min |
+| `tuitionclass-send-notification-digests` | `tuitionclass.send_notification_digests` | hourly |
 | `message-send-scheduled-messages` | `message.send_scheduled_messages` | every min |
 | `message-cleanup-expired-messages` | `message.cleanup_expired_messages` | `*/15` min |
 | `message-purge-soft-deleted-conversations` | `message.purge_soft_deleted_conversations` | daily 3:30 |
@@ -230,11 +230,11 @@ Is section ka maksad: dono app-level docs ke "kya settings.py me hona chahiye" w
 
 ### 7.3 ✅ RESOLVED — `LearnScroll/ws_auth.py` ab `asgi.py` me wired hai
 
-`ws_auth.py`'s apna module docstring: *"Yeh project ki EK hi copy hai — `message` aur `liveclass` dono isi se apna WS auth lete hain. Pehle dono apps ke paas apna-apna independent, kabhi-compare-na-hui copy tha ... ab dono sirf yahan se import karte hain."* — aur khud apna wiring-example bhi deta hai (`from LearnScroll.ws_auth import JWTAuthMiddleware`).
+`ws_auth.py`'s apna module docstring: *"Yeh project ki EK hi copy hai — `message` aur `tuitionclass` dono isi se apna WS auth lete hain. Pehle dono apps ke paas apna-apna independent, kabhi-compare-na-hui copy tha ... ab dono sirf yahan se import karte hain."* — aur khud apna wiring-example bhi deta hai (`from LearnScroll.ws_auth import JWTAuthMiddleware`).
 
 **✅ CONFIRMED FIXED — is pass ka `asgi.py` upload:** `asgi.py` ab `from LearnScroll.ws_auth import JWTAuthMiddleware` use karta hai — `message.Middleware.JWTAuthMiddleware` ko replace kar diya gaya. `asgi.py`'s apna comment explicitly is exact fix ko is doc ke §7.3 reference ke saath document karta hai ("🔧 FIX (this pass, LearnScroll_project_documentation.md §7.3)").
 
-**Abhi bhi baaki (chhota, non-functional cleanup):** `liveclass/ws_auth.py` aur `message/Middleware.py` ki apni duplicate `JWTAuthMiddleware` classes delete nahi hui — `asgi.py`'s apna comment khud isse "flagged, not done here" bolta hai, kyunki wo do files is pass ke upload me nahi aayi. Dono ab genuinely dead code hain (kahin se import nahi ho rahi), sirf delete karna baaki hai jab wo files khud available ho.
+**Abhi bhi baaki (chhota, non-functional cleanup):** `tuitionclass/ws_auth.py` aur `message/Middleware.py` ki apni duplicate `JWTAuthMiddleware` classes delete nahi hui — `asgi.py`'s apna comment khud isse "flagged, not done here" bolta hai, kyunki wo do files is pass ke upload me nahi aayi. Dono ab genuinely dead code hain (kahin se import nahi ho rahi), sirf delete karna baaki hai jab wo files khud available ho.
 
 ### 7.4 ✅ RESOLVED THIS PASS — `CONFIG_DRIFT_APPS` ab `settings.py` me define hai
 
@@ -247,7 +247,7 @@ CONFIG_DRIFT_ADMIN_SKIP = set()        # {"app_label.ModelName", ...}
 CONFIG_DRIFT_ONDEMAND_TASKS = set()    # {"task_function_name", ...}
 CONFIG_DRIFT_URL_SKIP = set()          # {"app_label.ViewClassName", ...}
 ```
-Inline comment khud confirm karta hai ki ye list add karne ke dauraan hi §7.1 ka typo bug pakda gaya (`assigments` ko is list me daalne se pehle `get_app_config("assigments")` `LookupError` deta agar `INSTALLED_APPS` ka typo fix na hota) — dono fixes ek hi pass me saath aaye. `'liveclass'/'message'/'post'/'login'` jaan-bujh kar is list me nahi hain — koi signal nahi mila ki unhe include/exclude karna decide kiya gaya ho, isliye guess nahi kiya gaya, future pass me explicit decision ke saath add honge. Escape-hatch sets (`CONFIG_DRIFT_ADMIN_SKIP` etc.) abhi bhi jaan-bujh kar khaali hain — sirf jab koi specific check genuinely deliberate cheez ko flag kare tab entry add hogi, preemptively nahi.
+Inline comment khud confirm karta hai ki ye list add karne ke dauraan hi §7.1 ka typo bug pakda gaya (`assigments` ko is list me daalne se pehle `get_app_config("assigments")` `LookupError` deta agar `INSTALLED_APPS` ka typo fix na hota) — dono fixes ek hi pass me saath aaye. `'tuitionclass'/'message'/'post'/'login'` jaan-bujh kar is list me nahi hain — koi signal nahi mila ki unhe include/exclude karna decide kiya gaya ho, isliye guess nahi kiya gaya, future pass me explicit decision ke saath add honge. Escape-hatch sets (`CONFIG_DRIFT_ADMIN_SKIP` etc.) abhi bhi jaan-bujh kar khaali hain — sirf jab koi specific check genuinely deliberate cheez ko flag kare tab entry add hogi, preemptively nahi.
 
 ---
 
@@ -255,11 +255,11 @@ Inline comment khud confirm karta hai ki ye list add karne ke dauraan hi §7.1 k
 
 1. ✅ ~~`INSTALLED_APPS` me `'assigments'` ko `'assigments'` se fix karna (spelling)~~ — **RESOLVED is pass, §7.1.** `settings.py`, `urls.py`, `campus/bridge.py`, aur `core/views.py::SearchView` ab sab ek hi sahi spelling par consistent hain.
 2. ✅ ~~Campus streak-reward tasks ko `CELERY_BEAT_SCHEDULE` me add karna~~ — **RESOLVED, §7.2.**
-3. ✅ ~~`ws_auth.py` ko `asgi.py` me actually wire karna~~ — **RESOLVED, §3, §7.3.** Duplicate copies (`liveclass/ws_auth.py`/`message/Middleware.py`) delete karna abhi bhi baaki hai — chhota cleanup item, functional impact nahi.
+3. ✅ ~~`ws_auth.py` ko `asgi.py` me actually wire karna~~ — **RESOLVED, §3, §7.3.** Duplicate copies (`tuitionclass/ws_auth.py`/`message/Middleware.py`) delete karna abhi bhi baaki hai — chhota cleanup item, functional impact nahi.
 4. ✅ ~~`LearnScroll/__init__.py` khaali hai — Celery wiring lines add karna~~ — **RESOLVED is pass, §3.1, §4.** File ab `from .celery import app as celery_app` + `__all__ = ("celery_app",)` rakhti hai.
 5. ✅ ~~`core_app_documentation.md` §9 item 16 (`check_config_drift.py`'s `CONFIG_DRIFT_APPS` setting) — confirmed MISSING~~ — **RESOLVED is pass, §7.4.** `CONFIG_DRIFT_APPS = ["user_profile", "core", "assigments", "testseries", "campus"]` ab set hai.
 6. `ALLOWED_HOSTS` ka module-level `["*"]` default — §1 me flag kiya, verify karo production `.env` me explicit value set hai.
-7. `liveclass/urls.py` cleanup — agar `core.urls` wire hone se pehle ka purana `notifications`/`notification-preferences/me/` router abhi bhi wahan hai to hatao (§5, `core_app_documentation.md` §9 se carried over).
+7. `tuitionclass/urls.py` cleanup — agar `core.urls` wire hone se pehle ka purana `notifications`/`notification-preferences/me/` router abhi bhi wahan hai to hatao (§5, `core_app_documentation.md` §9 se carried over).
 8. 🆕 **Verify `message/tasks.py` has an `@shared_task(name="message.expire_stale_parent_access")` wrapper** for the newly-documented `message-expire-stale-parent-access` beat entry (§6) — `message/tasks.py` hasn't been uploaded yet, so this can't be confirmed from this doc alone. Without that wrapper, the beat entry is a silent no-op (dropped tick, no error, no cleanup).
 
 ---

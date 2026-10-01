@@ -1,8 +1,8 @@
 # testseries/bridge.py
 """
-Entry point for OTHER apps (`campus`, `liveclass`) to create test series
+Entry point for OTHER apps (`campus`, `tuitionclass`) to create test series
 without importing `testseries` models into their own model layer, and
-without `testseries` ever importing `campus.Section` / `liveclass.
+without `testseries` ever importing `campus.Section` / `tuitionclass.
 Classroom` back — same "one function is the app boundary" pattern the
 design doc references for `assigments`.
 
@@ -11,12 +11,12 @@ Per design doc §6:
     `source="campus"`, `is_paid=False` (campus's own golden constraint —
     also re-enforced server-side in `TestSeries.save()`, defence in
     depth, not a substitute for this).
-  - `liveclass/bridge.py::create_testseries()` calls this with
-    `source="liveclass"`, `is_paid`/`price_coins` as chosen by the
+  - `tuitionclass/bridge.py::create_testseries()` calls this with
+    `source="tuitionclass"`, `is_paid`/`price_coins` as chosen by the
     teacher at creation time.
 
 Both callers own roster/context resolution — this function never queries
-`campus`/`liveclass` itself, it only accepts what the caller already
+`campus`/`tuitionclass` itself, it only accepts what the caller already
 resolved (golden rule, restated in the design doc's §1 and §6).
 
 BUG FIX (this pass) — `create_context_testseries()`'s roster-notify
@@ -86,15 +86,15 @@ def create_context_testseries(
 
     `roster`: iterable of `login.User`, or `None`. Used ONLY to fan out
     the `TESTSERIES_POSTED` notification (§4) — this function never
-    queries campus/liveclass to build that list itself, the caller
+    queries campus/tuitionclass to build that list itself, the caller
     already has it (same reasoning `assigments`'s roster param uses).
     Individual/marketplace series never call this function at all (they
     go through `TestSeriesViewSet.create` instead, see views.py), which
     is why "no bulk-notify for individual series" (§4) doesn't need a
     branch here.
     """
-    if source not in (TestSeries.Source.CAMPUS, TestSeries.Source.LIVECLASS):
-        raise ValueError("create_context_testseries() is only for source='campus'/'liveclass'; "
+    if source not in (TestSeries.Source.CAMPUS, TestSeries.Source.TUITIONCLASS):
+        raise ValueError("create_context_testseries() is only for source='campus'/'tuitionclass'; "
                           "individual series go through TestSeriesViewSet.create() instead.")
 
     with transaction.atomic():
@@ -141,10 +141,10 @@ def create_context_testseries(
 
 
 def get_attempts_for_context(*, context_type: str, context_id):
-    """Returns every `TestAttempt` for every campus/liveclass `TestSeries`
+    """Returns every `TestAttempt` for every campus/tuitionclass `TestSeries`
     in this `(context_type, context_id)` — the `testseries` analogue of
     `assigments.bridge.get_submissions_for_context()`, added so
-    `campus`/`liveclass` bridge modules have a context-scoped way to
+    `campus`/`tuitionclass` bridge modules have a context-scoped way to
     list attempts for review without ever touching `TestAttempt`/
     `TestSeries` directly (golden rule).
 

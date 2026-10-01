@@ -152,7 +152,7 @@ def check_attendance_streak_rewards():
     `settings.CAMPUS_ATTENDANCE_STREAK_DAYS` (default 7 — i.e. day 7,
     14, 21, ... of an unbroken run of PRESENT/LATE daily marks).
     `settings.CAMPUS_ATTENDANCE_STREAK_BONUS_COINS` (default 10) sets
-    the payout — same settings-constant shape as `liveclass`'s
+    the payout — same settings-constant shape as `tuitionclass`'s
     `REFERRAL_BONUS_COINS`/`CLASSROOM_REFERRAL_JOIN_BONUS_COINS`, so
     ops can retune either number without a deploy.
 
@@ -285,11 +285,11 @@ def send_assigments_due_reminders():
     today = timezone.now().date()
     reminded = 0
     campus_assigmentss = assigments.objects.filter(source=assigmentsSource.CAMPUS, due_date=today)
-    for assigments in campus_assigmentss:
+    for campus_item in campus_assigmentss:
         missing_students = [
             sub.student
             for sub in assigmentsSubmission.objects.filter(
-                assigments=assigments, status=assigmentsSubmission.SubmissionStatus.MISSING
+                assigments=campus_item, status=assigmentsSubmission.SubmissionStatus.MISSING
             ).select_related("student")
         ]
         if not missing_students:
@@ -298,7 +298,7 @@ def send_assigments_due_reminders():
             users=missing_students,
             notif_type=NotifTypes.assigments_DUE_REMINDER,
             title="assigments due today",
-            body=f"{assigments.title} is due today and you haven't submitted yet.",
+            body=f"{campus_item.title} is due today and you haven't submitted yet.",
         )
         reminded += len(missing_students)
     return {"reminded": reminded}
@@ -400,17 +400,45 @@ def check_assigments_ontime_streak_rewards():
 @shared_task
 def send_fee_due_reminders():
     """
-    FEE-6: `FEE_DUE_REMINDER` — for every `FeeInvoice` whose status is
-    still PENDING, PARTIAL, or OVERDUE and whose `FeeStructure.due_date`
-    is today or already past, notify the student + any linked parents.
-    Same shape as `send_assigments_due_reminders` above and the same
-    re-run safety reasoning: this task carries no state of its own, it
-    only reads `FeeInvoice.status`/`FeeStructure.due_date`, so running
-    it more than once a day just re-notifies invoices that are still
-    unpaid, never double-notifies ones that have since been settled —
-    `FeeInvoice.status` only ever leaves this filter once
-    `recompute_status()` (models.py) has actually marked it PAID or
-    WAIVED off the back of a real FeePayment.
+    FEE-6: `FEE_DUE_REMINDER` / `FEE_OVERDUE_REMINDER` — for every
+    `FeeInvoice` whose status is still PENDING, PARTIAL, or OVERDUE,
+    notify the student + any linked parents once its `FeeStructure.
+    due_date` is within `settings.CAMPUS_FEE_REMINDER_DAYS_BEFORE` days
+    away, due today, or already past. Same shape as
+    `send_assigments_due_reminders` above and the same re-run safety
+    reasoning: this task carries no state of its own, it only reads
+    `FeeInvoice.status`/`FeeStructure.due_date`, so running it more than
+    once a day just re-notifies invoices that are still unpaid, never
+    double-notifies ones that have since been settled — `FeeInvoice.
+    status` only ever leaves this filter once `recompute_status()`
+    (models.py) has actually marked it PAID or WAIVED off the back of a
+    real FeePayment.
+
+    [ADDED — feature: Fee Reminder Notifications] Three distinct copy/
+    type branches instead of one generic message, based on
+    `due_date - today`:
+      - `due_date > today` (within the reminder window): "Fee due in N
+        day(s)" — `FEE_DUE_REMINDER`. Only fires once the invoice is
+        WITHIN the window (`days_until <=
+        settings.CAMPUS_FEE_REMINDER_DAYS_BEFORE`), not from the moment
+        the invoice is created — a fee due in 45 days doesn't need a
+        reminder yet. Because the task carries no per-invoice "already
+        reminded today" flag, it re-fires once a day for every day left
+        in that window (e.g. day 3, day 2, day 1 out of a 3-day
+        window) rather than exactly once — same "harmless re-run,
+        never a double-notify within one run" posture the module
+        docstring already commits to for this whole file; a single
+        stronger "notified once per invoice" guarantee would need a new
+        column (e.g. `FeeInvoice.last_reminded_at`), which is a real
+        schema change, out of scope for this pass.
+      - `due_date == today`: "Fee due today" — still `FEE_DUE_REMINDER`
+        (same type as the advance warning; only the copy is more
+        urgent), since a client distinguishing "due in 3 days" from
+        "due today" only needs the message text, not a third type.
+      - `due_date < today`: "Fee overdue" — `FEE_OVERDUE_REMINDER`, the
+        new, separate type (see `NotifTypes.FEE_OVERDUE_REMINDER`'s own
+        comment in bridge.py) so a client can style/badge an overdue
+        fee differently from a same-day or advance reminder.
 
     FEE-3/FEE-6: since fee is now paid from the coin wallet (FEE-2),
     also flags a wallet-balance hint in the reminder body when the
@@ -424,11 +452,12 @@ def send_fee_due_reminders():
     from .models import CampusParentLink, FeeInvoice
 
     today = timezone.now().date()
+    window_days = getattr(settings, "CAMPUS_FEE_REMINDER_DAYS_BEFORE", 3)
     reminded = 0
     due_invoices = (
         FeeInvoice.objects.filter(
             status__in=[FeeInvoice.Status.PENDING, FeeInvoice.Status.PARTIAL, FeeInvoice.Status.OVERDUE],
-            fee_structure__due_date__lte=today,
+            fee_structure__due_date__lte=today + timezone.timedelta(days=window_days),
         )
         .select_related("enrollment__student", "enrollment__section__school_class", "fee_structure")
     )
@@ -440,14 +469,29 @@ def send_fee_due_reminders():
             CampusParentLink.objects.filter(student=student, campus_id=campus_id).values_list("parent", flat=True)
         )
         remaining = invoice.amount_due - invoice.amount_paid
-        body = f"{invoice.fee_structure.title} — {remaining} is still due."
+        days_until = (invoice.fee_structure.due_date - today).days
+
+        if days_until > 0:
+            notif_type = NotifTypes.FEE_DUE_REMINDER
+            title = "Fee due soon"
+            day_word = "day" if days_until == 1 else "days"
+            body = f"{invoice.fee_structure.title} — {remaining} due in {days_until} {day_word}."
+        elif days_until == 0:
+            notif_type = NotifTypes.FEE_DUE_REMINDER
+            title = "Fee due today"
+            body = f"{invoice.fee_structure.title} — {remaining} is due today."
+        else:
+            notif_type = NotifTypes.FEE_OVERDUE_REMINDER
+            title = "Fee overdue"
+            body = f"{invoice.fee_structure.title} — {remaining} is overdue."
+
         shortfall = int(remaining) - student.coin
         if shortfall > 0:
             body += f" Your wallet balance ({student.coin} coins) is short by {shortfall} coins."
         bridge.notify(
             users=recipients,
-            notif_type=NotifTypes.FEE_DUE_REMINDER,
-            title="Fee due",
+            notif_type=notif_type,
+            title=title,
             body=body,
         )
         reminded += 1
@@ -492,3 +536,98 @@ def refresh_analytics_snapshot(campus_id, session_id):
         "active_enrollments": enrollments.count(),
     }
     return CampusAnalyticsSnapshot.objects.create(campus_id=campus_id, session_id=session_id, data=data).id
+
+@shared_task
+def send_fee_receipt_email(payment_id):
+    """
+    Task 5 (Fee Invoice PDF Receipt), subtask 3/4 — emails the PDF
+    receipt to the paying student and, if one exists, a linked parent
+    with an email on file. Fire-and-forget: dispatched via
+    `core.async_utils.dispatch_after_commit` right after a `FeePayment`
+    settles to SUCCESS (`FeePaymentViewSet.pay`/`.record`), the same
+    "never blocks the request, never raises into the caller" contract
+    `bridge.notify` already uses for push — this is that same shape for
+    the one channel campus needs email for, kept local to this app
+    rather than routed through `tuitionclass.notifications` (golden rule:
+    campus never imports tuitionclass).
+
+    Degrades to a logged warning, never an exception, in every
+    unconfigured/missing-data case: no `reportlab` installed, no email
+    on file for anyone involved, or the SMTP send itself failing —
+    same "unconfigured channel is a no-op" contract
+    `tuitionclass/notifications.py` documents for its own channels.
+    """
+    from django.core.mail import EmailMessage
+
+    from .models import CampusParentLink, FeePayment
+    from .receipt_pdf import PdfUnavailable, _display_name, render_pdf
+
+    payment = (
+        FeePayment.objects.select_related(
+            "invoice__enrollment__student",
+            "invoice__enrollment__section__school_class__campus",
+            "invoice__fee_structure",
+            "paid_by",
+            "recorded_by",
+        )
+        .filter(pk=payment_id, status=FeePayment.Status.SUCCESS)
+        .first()
+    )
+    if payment is None:
+        logger.warning("send_fee_receipt_email: payment %s not found or not SUCCESS; skipping.", payment_id)
+        return
+
+    invoice = payment.invoice
+    student = invoice.enrollment.student
+    campus = invoice.enrollment.section.school_class.campus
+
+    recipients = {student.email} if getattr(student, "email", None) else set()
+    parent_emails = CampusParentLink.objects.filter(campus=campus, student=student).values_list(
+        "parent__email", flat=True
+    )
+    recipients.update(email for email in parent_emails if email)
+
+    if not recipients:
+        logger.info("send_fee_receipt_email: no email on file for anyone tied to payment %s; skipping.", payment_id)
+        return
+
+    try:
+        pdf_bytes = render_pdf(
+            receipt_no=f"RCPT-{payment.id}",
+            campus_name=campus.name,
+            campus_type=campus.type,
+            student_name=_display_name(student),
+            fee_title=invoice.fee_structure.title,
+            invoice_id=str(invoice.id),
+            amount=payment.amount,
+            amount_due=invoice.amount_due,
+            amount_paid_total=invoice.amount_paid,
+            payment_mode=payment.payment_mode,
+            payer_role=payment.payer_role,
+            paid_by=payment.paid_by,
+            recorded_by=payment.recorded_by,
+            status=payment.status,
+            notes=payment.notes,
+            paid_at=payment.created_at,
+        )
+    except PdfUnavailable as exc:
+        logger.warning("send_fee_receipt_email: %s (payment %s); skipping email.", exc, payment_id)
+        return
+
+    try:
+        email = EmailMessage(
+            subject=f"Fee receipt - {invoice.fee_structure.title} ({campus.name})",
+            body=(
+                f"Dear {_display_name(student)},\n\n"
+                f"We've received a payment of Rs. {payment.amount:.2f} towards "
+                f"'{invoice.fee_structure.title}' at {campus.name}.\n\n"
+                f"The receipt is attached as a PDF for your records.\n\n"
+                f"— {campus.name}"
+            ),
+            from_email=getattr(settings, "DEFAULT_FROM_EMAIL", None) or None,
+            to=list(recipients),
+        )
+        email.attach(f"fee-receipt-{payment.id}.pdf", pdf_bytes, "application/pdf")
+        email.send(fail_silently=False)
+    except Exception:
+        logger.exception("send_fee_receipt_email: failed to send email for payment %s.", payment_id)

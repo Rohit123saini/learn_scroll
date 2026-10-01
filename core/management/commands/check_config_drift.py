@@ -51,7 +51,7 @@ WIRING (one-time setup, settings.py):
 
 USAGE:
     python manage.py check_config_drift
-    python manage.py check_config_drift --apps user_profile core liveclass
+    python manage.py check_config_drift --apps user_profile core tuitionclass
     python manage.py check_config_drift --strict   # nonzero exit if CI should fail
 
 LIMITATIONS (read before trusting a clean run blindly):
@@ -64,7 +64,7 @@ LIMITATIONS (read before trusting a clean run blindly):
     - The Celery check matches on task *function name* only (not full
       dotted path) because this codebase itself is inconsistent about
       whether CELERY_BEAT_SCHEDULE uses "app.tasks.func" or "app.func"
-      (compare the user_profile entry to the liveclass/message entries
+      (compare the user_profile entry to the tuitionclass/message entries
       in settings.py) — matching the last path component is what
       actually works against both conventions.
     - This is a drift *detector*, not a fixer. It never edits

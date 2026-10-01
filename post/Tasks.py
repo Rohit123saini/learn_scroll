@@ -64,7 +64,9 @@ def hard_delete_ancient_stories(days=30):
     from .models import Story
 
     cutoff = timezone.now() - timedelta(days=days)
-    old = Story.objects.filter(is_deleted=True, deleted_at__lte=cutoff)
+    # STORIES UPGRADE - PART 3b: a story that is in a Highlight is permanent -
+    # the highlight points at this very row (post/highlights.py).
+    old = Story.objects.filter(is_deleted=True, deleted_at__lte=cutoff, highlight_items__isnull=True)
     count = old.count()
     old.delete()
     logger.info("hard_delete_ancient_stories: purged %s stories older than %sd", count, days)
@@ -158,6 +160,115 @@ def generate_video_thumbnail(self, media_id):
         for path in (local_video_path, thumb_path):
             if path and os.path.exists(path):
                 os.unlink(path)
+
+
+# ---------------------------------------------------------------------------
+# C4-BE — image size variants + BlurHash.
+#
+# Same shape as generate_video_thumbnail above (async off the upload request,
+# storage-backend agnostic, bounded retry on transient errors) for the same
+# reasons; the actual pixel work lives in services.build_image_variants.
+#
+# Idempotent: a row that already has `thumb_320` + `blur_hash` is skipped, so a
+# duplicate enqueue / retry / backfill re-run costs one SELECT. `force=True`
+# (used by `backfill_image_variants --force`) regenerates anyway and deletes the
+# files it replaces. All three outputs are written to storage first and then
+# recorded with ONE UPDATE, so a row never ends up half-done (thumb but no
+# medium) — it either has all of it or none of it.
+# ---------------------------------------------------------------------------
+@shared_task(bind=True, max_retries=3, default_retry_delay=30)
+def generate_image_variants(self, media_id, force=False):
+    """Create the 320px thumb, 720px medium and BlurHash for an image
+    `PostMedia`, and fill `width`/`height` if they are still empty. Returns
+    True if variants were written, False if skipped/failed permanently."""
+    from django.core.files.base import ContentFile
+    from django.core.files.storage import default_storage
+
+    from .models import PostMedia
+    from .services import ImageVariantError, build_image_variants, download_storage_file_to_temp
+
+    try:
+        media = PostMedia.objects.get(id=media_id)
+    except PostMedia.DoesNotExist:
+        logger.warning("generate_image_variants: PostMedia %s no longer exists", media_id)
+        return False
+
+    if media.media_type not in ("image", "gif"):
+        return False
+    if not media.file:
+        logger.warning("generate_image_variants: PostMedia %s has no file", media_id)
+        return False
+    if not force and media.thumb_320 and media.blur_hash:
+        return False
+
+    _, ext = os.path.splitext(media.file.name)
+    local_path = None
+    saved_names = []  # files written to storage by THIS run (for cleanup on failure)
+    try:
+        local_path = download_storage_file_to_temp(media.file, suffix=ext or ".jpg")
+        try:
+            variants = build_image_variants(local_path)
+        except ImageVariantError as exc:
+            # Corrupt / not-an-image / too big: the same bytes will fail the same
+            # way on every retry, so don't retry. Logged as a warning (bad
+            # user input), not an exception (not a bug in our code).
+            logger.warning("generate_image_variants: skipping PostMedia %s: %s", media_id, exc)
+            return False
+
+        old_names = [f.name for f in (media.thumb_320, media.medium_720) if f]
+
+        media.thumb_320.save(f"{media.id}_320.jpg", ContentFile(variants.thumb), save=False)
+        saved_names.append(media.thumb_320.name)
+        if variants.medium is not None:
+            media.medium_720.save(f"{media.id}_720.jpg", ContentFile(variants.medium), save=False)
+            saved_names.append(media.medium_720.name)
+        elif force:
+            media.medium_720 = None  # regenerating an animated image: don't keep a stale still medium around
+
+        fields = {
+            "thumb_320": media.thumb_320.name,
+            "medium_720": media.medium_720.name if media.medium_720 else None,
+            "blur_hash": variants.blurhash,
+        }
+        # Only fill dimensions that are missing — never overwrite a value the
+        # client/another code path already stored.
+        if media.width is None:
+            fields["width"] = variants.width
+        if media.height is None:
+            fields["height"] = variants.height
+
+        # .update() (not .save()): if the row was deleted while we were busy,
+        # this affects 0 rows instead of raising — and we then clean up the
+        # files we just wrote instead of leaving orphans in storage.
+        if PostMedia.objects.filter(pk=media.pk).update(**fields) == 0:
+            logger.warning("generate_image_variants: PostMedia %s deleted mid-task", media_id)
+            for name in saved_names:
+                default_storage.delete(name)
+            return False
+        saved_names = []  # now referenced by the row — the failure cleanup below must never touch them
+
+        # Replaced files (force regenerate only) are now unreferenced.
+        for name in old_names:
+            try:
+                default_storage.delete(name)
+            except Exception:  # cleanup must never fail the task
+                logger.warning("generate_image_variants: could not delete old file %s", name, exc_info=True)
+
+        logger.info("generate_image_variants: variants generated for PostMedia %s", media_id)
+        return True
+    except Exception as exc:
+        # Unexpected (transient storage read/write error, worker OOM...) — worth
+        # a bounded retry. Drop anything already written so a retry starts clean.
+        logger.exception("generate_image_variants: failed for PostMedia %s", media_id)
+        for name in saved_names:
+            try:
+                default_storage.delete(name)
+            except Exception:
+                pass
+        raise self.retry(exc=exc)
+    finally:
+        if local_path and os.path.exists(local_path):
+            os.unlink(local_path)
 
 
 # ---------------------------------------------------------------------------
@@ -282,3 +393,46 @@ def notify_followers_new_post(post_id):
         "notify_followers_new_post: notified %d follower(s) for post %s",
         len(recipient_ids), post_id,
     )
+
+
+# ---------------------------------------------------------------------------
+# C1-BE — daily retention prune for the `PostEvent` analytics log.
+#
+# Wire into settings.py CELERY_BEAT_SCHEDULE (done — "post-prune-old-events"):
+#
+#     "post-prune-old-events": {
+#         "task": "post.tasks.prune_old_post_events",
+#         "schedule": crontab(hour=3, minute=15),  # daily, off-peak
+#     },
+#
+# `PostEvent` is append-only and by far the highest-volume table in this app
+# (every impression is a row), so it is deleted in bounded batches: one giant
+# `DELETE ... WHERE created_at < cutoff` on millions of rows would hold a long
+# lock and bloat the WAL. Purely housekeeping — nothing reads events older than
+# the retention window, and the endpoint's correctness never depends on this
+# running.
+# ---------------------------------------------------------------------------
+POST_EVENT_RETENTION_DAYS = 30
+POST_EVENT_PRUNE_BATCH = 5000
+
+
+@shared_task
+def prune_old_post_events(days=POST_EVENT_RETENTION_DAYS, batch_size=POST_EVENT_PRUNE_BATCH):
+    """Delete `PostEvent` rows older than `days` (default 30). Returns the
+    number of rows deleted."""
+    from .models import PostEvent
+
+    cutoff = timezone.now() - timedelta(days=days)
+    total = 0
+    while True:
+        ids = list(
+            PostEvent.objects.filter(created_at__lt=cutoff)
+            .order_by()
+            .values_list("pk", flat=True)[:batch_size]
+        )
+        if not ids:
+            break
+        deleted, _ = PostEvent.objects.filter(pk__in=ids).delete()
+        total += deleted
+    logger.info("prune_old_post_events: deleted %s events older than %sd", total, days)
+    return total

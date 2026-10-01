@@ -10,7 +10,7 @@ from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework import status
 from rest_framework.throttling import ScopedRateThrottle
-from rest_framework_simplejwt.tokens import RefreshToken
+from .token_issuance import issue_tokens_for_user
 from rest_framework.permissions import IsAuthenticated
 from .serializers import ChangePasswordSerializer
 from .models import OTPVerification
@@ -78,7 +78,7 @@ class Login(GenericAPIView):
                 status=status.HTTP_401_UNAUTHORIZED,
             )
 
-        refresh = RefreshToken.for_user(user)
+        tokens = issue_tokens_for_user(user)
         return Response(
             {
                 "status": True,
@@ -90,10 +90,7 @@ class Login(GenericAPIView):
                     "first_name": user.first_name,
                     "last_name": user.last_name,
                 },
-                "token": {
-                    "refresh": str(refresh),
-                    "access": str(refresh.access_token),
-                },
+                "token": tokens,
             },
             status=status.HTTP_200_OK,
         )
@@ -119,7 +116,10 @@ class Signup(GenericAPIView):
         # `Login` call karni padti, jisme dobara password bhejna padta
         # (awkward — signup form ke paas already password hai). Ab
         # consistent hai: signup khud hi refresh+access token de deta hai.
-        refresh = RefreshToken.for_user(user)
+        # signup khud hi refresh+access token de deta hai (aur ab
+        # sliding-expiry AuthToken session row bhi — issue_tokens_for_user
+        # dono ek saath karta hai, see token_issuance.py).
+        tokens = issue_tokens_for_user(user)
 
         return Response(
             {
@@ -133,10 +133,7 @@ class Signup(GenericAPIView):
                     "last_name": user.last_name,
                     "phone": user.phone,
                 },
-                "token": {
-                    "refresh": str(refresh),
-                    "access": str(refresh.access_token),
-                },
+                "token": tokens,
             },
             status=status.HTTP_201_CREATED
         )
@@ -291,7 +288,7 @@ class GoogleAuthView(APIView):
             user.set_unusable_password()
             user.save()
 
-        refresh = RefreshToken.for_user(user)
+        tokens = issue_tokens_for_user(user)
 
         return Response(
             {
@@ -307,10 +304,7 @@ class GoogleAuthView(APIView):
                     "last_name": user.last_name,
                     "phone": user.phone,
                 },
-                "token": {
-                    "refresh": str(refresh),
-                    "access": str(refresh.access_token),
-                },
+                "token": tokens,
             },
             status=status.HTTP_200_OK,
         )
@@ -406,7 +400,7 @@ class SendOTPView(APIView):
             # ✅ Task 14 — wired up (was a hardcoded 501 before). Delivery
             # goes through MSG91 (see login/sms_service.py for why MSG91
             # over Twilio — the project already has an MSG91 account for
-            # liveclass notifications). The OTP itself is unchanged: same
+            # tuitionclass notifications). The OTP itself is unchanged: same
             # `secrets`-generated code, same hash stored above, MSG91 is
             # purely the delivery channel — so VerifyOTPView needs zero
             # changes to handle this path.
@@ -501,7 +495,7 @@ class VerifyOTPView(APIView):
                 # OTP here keeps meaning exactly one thing: "log this
                 # session in."
                 user = user_queryset.first()
-                refresh = RefreshToken.for_user(user)
+                tokens = issue_tokens_for_user(user)
                 # ✅ SECURITY: OTP consume ho gaya, dobara replay use nahi ho sakta
                 otp_obj.delete()
 
@@ -529,8 +523,8 @@ class VerifyOTPView(APIView):
                     "status": "success",
                     "user_exists": True,
                     "message": "Login Successful!",
-                    "access": str(refresh.access_token),
-                    "refresh": str(refresh),
+                    "access": tokens["access"],
+                    "refresh": tokens["refresh"],
                 }, status=status.HTTP_200_OK)
 
             else:

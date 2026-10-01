@@ -65,7 +65,7 @@ changes beyond two additive indexes):
        folding them into one type with a status field.
      - NEW_POST_FROM_FOLLOWED / CLASSROOM_CREATED_BY_FOLLOWED /
        TESTSERIES_CREATED_BY_FOLLOWED — "someone I follow just created
-       X" fan-out, one value per content type (post / liveclass
+       X" fan-out, one value per content type (post / tuitionclass
        classroom / testseries), same one-type-per-source-app pattern
        already used for TESTSERIES_POSTED vs assigments_POSTED vs
        CAMPUS_SESSION_SCHEDULED above rather than a single generic
@@ -92,7 +92,7 @@ changes beyond two additive indexes):
    notified the student in no way at all — `ParentPendingRequestsView`
    was the only way to discover one, and only by polling it. Added
    `PARENT_DEVICE_PENDING` — no existing value fit (it's neither a
-   join/follow/assigments event nor any liveclass type), so this is a
+   join/follow/assigments event nor any tuitionclass type), so this is a
    new choice, not a reuse, same reasoning already applied above for
    assigments_DUE_SOON vs assigments_DUE_REMINDER. Grouped under the
    task-44 message-app block above (Parent Mode lives in `message`, per
@@ -112,6 +112,8 @@ task-44/46 comments) is unchanged from the original — it was already
 correct.
 """
 import logging
+from datetime import timezone as dt_timezone
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from django.db import models
 from django.utils import timezone
@@ -132,7 +134,7 @@ class NotificationQuerySet(models.QuerySet):
 class Notification(models.Model):
     class NotifType(models.TextChoices):
         # --- Confirmed values, carried over verbatim from the original
-        # liveclass.Notification.NotifType (nothing dropped — a migration
+        # tuitionclass.Notification.NotifType (nothing dropped — a migration
         # with a narrower enum than what's already in the DB would leave
         # existing rows with an "invalid" notif_type). ---
         JOIN_REQUEST_RECEIVED = "join_request_received", "Join Request Received"
@@ -189,7 +191,7 @@ class Notification(models.Model):
 
         # --- task 11 (post app) — new types for post/services.py's
         # notify_post_liked()/notify_post_commented(). These are neither
-        # a liveclass type nor a message-app type (see MESSAGE_APP_TYPES
+        # a tuitionclass type nor a message-app type (see MESSAGE_APP_TYPES
         # below, which stays unchanged — post-app types are a third,
         # separate source, not folded into that set). Adding choices is
         # not a schema change (no migration needed for the enum itself).
@@ -254,6 +256,54 @@ class Notification(models.Model):
             "testseries_created_by_followed", "New Test Series From Someone You Follow"
         )
 
+        # --- TASK G1 (growth_and_feature_tasks.md — Streaks) —
+        # user_profile.models.Streak / user_profile.tasks.
+        # send_streak_risk_reminders. Two values, not one
+        # "streak_status_changed" type, for the same reason
+        # FOLLOW_REQUEST_RECEIVED/FOLLOW_REQUEST_ACCEPTED are kept
+        # separate above — a "you hit a milestone" push and a "you're
+        # about to lose your streak" push need different copy/urgency on
+        # the client, not a shared type with a flag. Both well under the
+        # max_length=30 ceiling (24 and 15 chars). ---
+        STREAK_MILESTONE_REACHED = "streak_milestone_reached", "Streak Milestone Reached"
+        STREAK_AT_RISK = "streak_at_risk", "Streak At Risk"
+
+        # --- TASK G2 (growth_and_feature_tasks.md — recap screen). Choices-
+        # only addition, same "no schema change but generate the state-only
+        # AlterField migration anyway" convention every other NotifType
+        # addition in this file follows. "weekly_recap_ready" is 19
+        # characters — well under max_length=30. ---
+        WEEKLY_RECAP_READY = "weekly_recap_ready", "Your Week Is Ready"
+
+        # --- FEE-6 follow-up (feature: Fee Reminder Notifications) —
+        # `FEE_DUE_REMINDER` above already covers "due today" and every
+        # day it stays unpaid after that; this is the separate, more
+        # urgent copy for an invoice that has actually gone past its
+        # due date, distinct enough from a same-day reminder that a
+        # client wants to style/badge it differently (e.g. red vs
+        # amber). See campus/tasks.py::send_fee_due_reminders for where
+        # this is actually fired, and campus/bridge.py's NotifTypes
+        # mirror class for the matching string constant campus imports
+        # instead of this enum directly (golden rule — see that
+        # module's docstring). 19 characters, well under max_length=30.
+        FEE_OVERDUE_REMINDER = "fee_overdue_reminder", "Fee Overdue"
+
+        # --- STORIES UPGRADE, PART 2a - "X mentioned you in their story".
+        # Created by post/services.py::notify_story_mentions; `data.story_id`
+        # is what the client opens. Deliberately NOT reusing MENTION above:
+        # that one belongs to the message app (MESSAGE_APP_TYPES) and its
+        # rows carry a conversation_id. 13 characters, well under
+        # max_length=30. Choices-only change; see migration core/0002. ---
+        STORY_MENTION = "story_mention", "Story Mention"
+
+        # --- P5a-BE — "X tagged you in a post". Fired by post/serializers.py
+        # (notify_post_tags) when a PostTag row is created for someone other
+        # than the post's author; `data.post_id` is what the client opens.
+        # 8 characters, well under max_length=30. Choices-only change: no DB
+        # schema change, but generate the state-only AlterField migration for
+        # `notif_type` (same convention as every addition above). ---
+        POST_TAG = "post_tag", "Tagged In Post"
+
     recipient = models.ForeignKey(User, on_delete=models.CASCADE, related_name="notifications")
     # max_length=30 kept as-is — the longest current NotifType value
     # ("testseries_payout_released", 27 chars) still fits comfortably.
@@ -264,7 +314,7 @@ class Notification(models.Model):
 
     title = models.CharField(max_length=150)
     # (task 44 — widened from CharField(255)): message-app chat text isn't
-    # length-capped the way the original liveclass notification copy was,
+    # length-capped the way the original tuitionclass notification copy was,
     # so a CharField(255) column would hard-fail on Postgres for any
     # longer message. TextField has no such limit.
     message = models.TextField(blank=True)
@@ -273,15 +323,15 @@ class Notification(models.Model):
     # SET_NULL (not CASCADE): a classroom/session being deleted later
     # shouldn't wipe out a user's notification history, just orphan the
     # link. `core` stays app-agnostic everywhere else in this file, but
-    # these two FKs are the one place it points at `liveclass` directly —
-    # acceptable because they're nullable/optional and only liveclass-
+    # these two FKs are the one place it points at `tuitionclass` directly —
+    # acceptable because they're nullable/optional and only tuitionclass-
     # sourced notif_types ever populate them (message-app types use
     # `data` below instead).
     classroom = models.ForeignKey(
-        "liveclass.Classroom", on_delete=models.SET_NULL, null=True, blank=True, related_name="notifications"
+        "tuitionclass.Classroom", on_delete=models.SET_NULL, null=True, blank=True, related_name="notifications"
     )
     session = models.ForeignKey(
-        "liveclass.ClassSession", on_delete=models.SET_NULL, null=True, blank=True, related_name="notifications"
+        "tuitionclass.ClassSession", on_delete=models.SET_NULL, null=True, blank=True, related_name="notifications"
     )
 
     # (task 44 — new column): generic free-form context for notification
@@ -297,7 +347,7 @@ class Notification(models.Model):
     objects = NotificationQuerySet.as_manager()
 
     class Meta:
-        db_table = "liveclass_notification"
+        db_table = "tuitionclass_notification"
         ordering = ["-created_at"]
         indexes = [
             # Unread-badge / unread-list queries (recipient + is_read, sorted).
@@ -312,7 +362,7 @@ class Notification(models.Model):
         return f"{self.recipient} - {self.title}"
 
     #: task 46 — which NotifType values came from the message app rather
-    #: than liveclass. Lives here (not in views.py/serializers.py) so
+    #: than tuitionclass. Lives here (not in views.py/serializers.py) so
     #: both can import the same set instead of maintaining two copies.
     #: Keep in sync with NotifType above whenever a new message-app type
     #: is added. PARENT_DEVICE_PENDING (G-6, this pass) added here too —
@@ -359,6 +409,72 @@ class Notification(models.Model):
         NotifType.TESTSERIES_CREATED_BY_FOLLOWED,
     })
 
+    #: N3-BE — notification-screen filter chips. ONE place that maps every
+    #: notif_type to a client-facing category: mentions | follows |
+    #: classroom | tests | other. Anything not listed here (including any
+    #: NotifType added later) falls into "other" automatically, so a new
+    #: type never needs a code change just to avoid crashing the serializer
+    #: or disappearing from the "All" tab. Add it to a set below only when
+    #: it deserves its own chip.
+    CATEGORY_MENTIONS = "mentions"
+    CATEGORY_FOLLOWS = "follows"
+    CATEGORY_CLASSROOM = "classroom"
+    CATEGORY_TESTS = "tests"
+    CATEGORY_OTHER = "other"
+    CATEGORIES = ("mentions", "follows", "classroom", "tests", "other")
+
+    CATEGORY_TYPES = {
+        # message-app MENTION is intentionally here too: it is still "someone
+        # mentioned/tagged me", whatever app fired it.
+        "mentions": frozenset({
+            NotifType.MENTION, NotifType.STORY_MENTION, NotifType.POST_TAG,
+        }),
+        "follows": FOLLOW_APP_TYPES,
+        "tests": TESTSERIES_APP_TYPES,
+        # tuitionclass + campus + assignments: everything classroom/campus
+        # side. (Chat messages, calls, likes/comments, streaks, recap,
+        # generic... stay in "other".)
+        "classroom": CAMPUS_APP_TYPES | frozenset({
+            NotifType.JOIN_REQUEST_RECEIVED, NotifType.JOIN_REQUEST_ACCEPTED,
+            NotifType.JOIN_REQUEST_REJECTED, NotifType.PASS_REFUNDED,
+            NotifType.SESSION_REMINDER, NotifType.SESSION_LIVE,
+            NotifType.SESSION_CANCELLED, NotifType.assigments_GRADED,
+            NotifType.assigments_POSTED, NotifType.assigments_DUE_SOON,
+            NotifType.QUERY_ANSWERED, NotifType.CERTIFICATE_ISSUED,
+            NotifType.WAITLIST_PROMOTED, NotifType.CLASSROOM_FLAGGED,
+            NotifType.NOTICE_POSTED, NotifType.SUBMISSION_RECEIVED,
+            NotifType.STAFF_ADDED, NotifType.REVIEW_POSTED,
+            NotifType.REPORT_REVIEWED, NotifType.WITHDRAWAL_APPROVED,
+            NotifType.WITHDRAWAL_REJECTED, NotifType.WITHDRAWAL_PAID,
+            NotifType.CLASSROOM_SHARED, NotifType.PASS_GIFT_RECEIVED,
+            NotifType.PASS_GIFT_CLAIMED, NotifType.PASS_AUTO_RENEWED,
+            NotifType.AUTO_RENEW_FAILED, NotifType.PASS_GIFT_EXPIRED,
+            NotifType.FEE_OVERDUE_REMINDER, NotifType.CAMPUS_REWARD_EARNED,
+        }),
+    }
+
+    @classmethod
+    def category_for(cls, notif_type) -> str:
+        """notif_type -> "mentions" | "follows" | "classroom" | "tests" |
+        "other". Unknown/future types -> "other"."""
+        for category, types in cls.CATEGORY_TYPES.items():
+            if notif_type in types:
+                return category
+        return cls.CATEGORY_OTHER
+
+    @classmethod
+    def filter_by_category(cls, qs, category):
+        """Shared by the list and unread-count endpoints (same pattern as
+        the ?source= helper in views.py). An unknown/empty category is
+        ignored (returns qs untouched) so a stale or typo'd client param
+        never turns into an empty screen or a 400."""
+        if category in ("mentions", "follows", "classroom", "tests"):
+            return qs.filter(notif_type__in=cls.CATEGORY_TYPES[category])
+        if category == cls.CATEGORY_OTHER:
+            listed = frozenset().union(*cls.CATEGORY_TYPES.values())
+            return qs.exclude(notif_type__in=listed)
+        return qs
+
     def mark_read(self):
         """Idempotent — only writes (and only touches these two columns)
         when the row wasn't already read, so calling this on an
@@ -388,21 +504,71 @@ class NotificationPreference(models.Model):
     digest_frequency = models.CharField(max_length=10, choices=DigestFrequency.choices, default=DigestFrequency.OFF)
     last_digest_sent_at = models.DateTimeField(null=True, blank=True)
 
+    # --- N9-BE — quiet hours / Do Not Disturb -------------------------
+    # Daily recurring window, interpreted in `timezone` (an IANA name such
+    # as "Asia/Kolkata", sent by the client). Both NULL = quiet hours off;
+    # exactly one set is rejected by the serializer. start > end means the
+    # window wraps past midnight (e.g. 22:00 -> 07:00).
+    quiet_start = models.TimeField(null=True, blank=True)
+    quiet_end = models.TimeField(null=True, blank=True)
+    # NOTE: this field name shadows the module-level `django.utils.timezone`
+    # import ONLY inside this class body; methods still see the module
+    # global, so `timezone.now()` below is fine.
+    timezone = models.CharField(max_length=64, default="UTC")
+    # One-off "pause everything until X" (the 1h / 8h / 24h chips).
+    dnd_until = models.DateTimeField(null=True, blank=True)
+
     updated_at = models.DateTimeField(auto_now=True)
 
+    #: Types that ignore quiet hours / DND (a missed call or a pending
+    #: parent-device approval is useless once it's hours old). A type the
+    #: user explicitly MUTED still stays muted — see allowed_channels_for.
+    #: There is no dedicated security NotifType yet; add it here when one
+    #: exists.
+    QUIET_BYPASS_TYPES = frozenset({
+        Notification.NotifType.INCOMING_CALL,
+        Notification.NotifType.PARENT_DEVICE_PENDING,
+    })
+    #: Interruptive channels that quiet hours silence. Email is left alone:
+    #: it doesn't buzz the phone and the user reads it whenever they like.
+    QUIET_SILENCED_CHANNELS = frozenset({"push", "sms", "whatsapp"})
+
     class Meta:
-        db_table = "liveclass_notificationpreference"
+        db_table = "tuitionclass_notificationpreference"
 
     def __str__(self):
         return f"Notification prefs for {self.user}"
 
-    def allowed_channels_for(self, notif_type: str) -> list[str]:
+    def _tzinfo(self):
+        try:
+            return ZoneInfo(self.timezone or "UTC")
+        except (ZoneInfoNotFoundError, ValueError, OSError):
+            return dt_timezone.utc  # bad/legacy value must never crash a send
+
+    def is_quiet_now(self, now=None) -> bool:
+        """True while a DND pause or the daily quiet window is active."""
+        now = now or timezone.now()
+        if self.dnd_until and now < self.dnd_until:
+            return True
+        start, end = self.quiet_start, self.quiet_end
+        if start is None or end is None or start == end:
+            return False
+        local = now.astimezone(self._tzinfo()).time()
+        if start < end:
+            return start <= local < end
+        return local >= start or local < end  # wraps past midnight
+
+    def allowed_channels_for(self, notif_type: str, now=None) -> list[str]:
         """What create_notification()'s callers should actually try for
         this (user, notif_type) — an empty list means "in-app bell row
         only, no push/email/sms/whatsapp send at all", which is what a
         muted type collapses to (the Notification row itself is still
         created — a user muting reminders shouldn't lose the in-app
-        history, just the interruption)."""
+        history, just the interruption).
+
+        N9-BE: during quiet hours / DND, push/sms/whatsapp are dropped
+        (email stays) unless `notif_type` is in QUIET_BYPASS_TYPES. The
+        bell row is still created either way."""
         if notif_type in (self.muted_types or []):
             return []
         allowed = []
@@ -414,6 +580,8 @@ class NotificationPreference(models.Model):
             allowed.append("sms")
         if self.whatsapp_enabled:
             allowed.append("whatsapp")
+        if notif_type not in self.QUIET_BYPASS_TYPES and self.is_quiet_now(now):
+            allowed = [c for c in allowed if c not in self.QUIET_SILENCED_CHANNELS]
         return allowed
 
     @classmethod
@@ -423,3 +591,91 @@ class NotificationPreference(models.Model):
         a signal on User creation — get_or_create on first touch."""
         pref, _ = cls.objects.get_or_create(user=user)
         return pref
+
+class NotificationMute(models.Model):
+    """N6-BE — `user` has muted `muted_actor`: nothing `muted_actor` does
+    (like, comment, follow, mention...) ever produces an in-app
+    notification row for `user`. Checked at write time in
+    core.services.create_notification and
+    core.notification_batching.create_batched_notification (same spot as
+    the RestrictUser check), so a muted actor leaves no row at all, not a
+    hidden one. Invisible to the muted actor.
+
+    Not retroactive: rows that already exist are left alone — the user
+    clears those with DELETE notifications/{id}/ if they want them gone.
+    Unlike `NotificationPreference.muted_types` (mutes a TYPE for
+    everyone, keeps the bell row), this mutes a PERSON and drops the row.
+    """
+
+    user = models.ForeignKey(User, on_delete=models.CASCADE, related_name="notification_mutes")
+    muted_actor = models.ForeignKey(User, on_delete=models.CASCADE, related_name="muted_by_notification_mutes")
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = "core_notification_mute"
+        constraints = [
+            models.UniqueConstraint(fields=["user", "muted_actor"], name="uniq_notification_mute_pair"),
+            models.CheckConstraint(condition=~models.Q(user=models.F("muted_actor")), name="notification_mute_not_self"),
+        ]
+
+    def __str__(self):
+        return f"{self.user_id} muted {self.muted_actor_id}"
+
+    @classmethod
+    def is_muted(cls, recipient_id, actor_id) -> bool:
+        """True if `recipient_id` has muted `actor_id`. Takes raw ids (no
+        User instances needed) — one indexed EXISTS via the unique index."""
+        if recipient_id is None or actor_id is None:
+            return False
+        return cls.objects.filter(user_id=recipient_id, muted_actor_id=actor_id).exists()
+
+
+# ============================================================
+# TASK G18 (growth_and_feature_tasks.md — Empty states & first-time-user
+# onboarding).
+#
+# Tracks whether a brand-new user has been through (or explicitly
+# skipped) the post-signup onboarding flow: pick interests
+# (post.UserInterest — already exists, TASK 3) -> suggested
+# people/campuses to follow (user_profile.Follow / campus.Campus) ->
+# try one sample test (testseries.TestSeries). Lives here in `core`,
+# not on `login.User` itself, for the same reason `NoticeBoardView`/
+# `SearchView` live here instead of being forked into each owning app
+# (see this module's own docstring, and core/views.py's SearchView /
+# NoticeBoardView docstrings): the flow is a cross-app concern by
+# nature (it reads from post, user_profile, campus and testseries all
+# at once), so it doesn't belong bolted onto any single one of them,
+# and `login.User` shouldn't grow a field per feature that happens to
+# run right after signup.
+class OnboardingProgress(models.Model):
+    user = models.OneToOneField(
+        User, on_delete=models.CASCADE, related_name="onboarding_progress"
+    )
+
+    # Set True only by the explicit "Finish" tap at the end of the flow
+    # (OnboardingCompleteView, core/views.py) — reaching the last step
+    # without tapping Finish does NOT set this; a user who closes the
+    # app mid-flow sees onboarding again next open, same as any
+    # unfinished setup wizard.
+    completed = models.BooleanField(default=False)
+
+    # Set True if the user tapped "Skip" instead of finishing — kept
+    # distinct from `completed` so it's answerable later (e.g. a growth
+    # metric on skip vs. completion rate) without being conflated with
+    # an actual finish. Either flag being True means "don't show the
+    # onboarding flow again."
+    skipped = models.BooleanField(default=False)
+
+    completed_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = "core_onboarding_progress"
+
+    def __str__(self):
+        state = "done" if self.completed else ("skipped" if self.skipped else "pending")
+        return f"{self.user.username} onboarding={state}"
+
+    @property
+    def is_finished(self) -> bool:
+        return self.completed or self.skipped

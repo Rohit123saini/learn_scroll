@@ -39,6 +39,7 @@ from .models import (
     Follow,
     RestrictUser,
     UserPreference,
+    WeeklyRecap,
 )
 
 
@@ -282,3 +283,28 @@ class CoinPurchaseRequestAdmin(admin.ModelAdmin):
     def has_delete_permission(self, request, obj=None):
         return False
 
+
+
+@admin.register(WeeklyRecap)
+class WeeklyRecapAdmin(admin.ModelAdmin):
+    """TASK G2 — read-only in admin: rows are only ever produced by
+    `generate_weekly_recaps` (tasks.py) — ops can look, not edit/create,
+    same reasoning `CoinPurchaseRequestAdmin`'s own has_add/change/delete
+    overrides already give for a system-generated table."""
+
+    list_display = (
+        "id", "user", "week_start", "week_end", "tests_attempted",
+        "classes_attended", "posts_liked_received", "streak_days", "generated_at",
+    )
+    list_filter = ("week_start",)
+    search_fields = ("user__username",)
+    ordering = ("-week_start",)
+
+    def has_add_permission(self, request):
+        return False
+
+    def has_change_permission(self, request, obj=None):
+        return False
+
+    def has_delete_permission(self, request, obj=None):
+        return False

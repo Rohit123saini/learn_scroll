@@ -87,10 +87,10 @@ CSRF_TRUSTED_ORIGINS = [
 # ---------------------------------------------------------------------------
 # ADD (missing — error tracking): console logging (see LOGGING below) means
 # every log.exception()/log.error() call in the codebase — and there are
-# several deliberate ones: _safe_delay() in liveclass/views.py swallowing a
+# several deliberate ones: _safe_delay() in tuitionclass/views.py swallowing a
 # dead Celery broker, sync_missed_charges()'s best-effort call inside
 # _perform_join, _try_promote_from_waitlist()'s own try/except, the signal
-# receivers in liveclass/signals.py — only ever shows up as a line in
+# receivers in tuitionclass/signals.py — only ever shows up as a line in
 # whatever's tailing stdout. In production that means a real, actionable
 # failure (broker down, a bug in waitlist promotion, a bad LiveKit
 # response) is silently invisible unless someone happens to be watching
@@ -113,7 +113,7 @@ if SENTRY_DSN:
         release=os.getenv("RELEASE_VERSION"),
         integrations=[
             DjangoIntegration(),
-            # Every notify_*.delay() call site in liveclass (views.py,
+            # Every notify_*.delay() call site in tuitionclass (views.py,
             # models.py's post_save signal, signals.py) runs through
             # Celery — without this, a task that throws only ever shows up
             # as a silent console line, exactly the gap this fix closes.
@@ -141,6 +141,39 @@ if SENTRY_DSN:
 # the full explanation of what this switches on.
 USE_S3_STORAGE = os.getenv("USE_S3_STORAGE", "false").lower() == "true"
 
+# ---------------------------------------------------------------------------
+# C5 — CDN + cache headers (ONE toggle: MEDIA_CDN_ENABLED).
+#
+#   MEDIA_CDN_ENABLED=true
+#   MEDIA_CDN_URL=https://cdn.learnscroll.app      # no trailing slash needed
+#
+# ON  -> every media URL (FileField.url, default_storage.url) is built on
+#        MEDIA_CDN_URL instead of the origin, and media responses carry
+#        `Cache-Control: public, max-age=31536000, immutable`.
+# OFF -> exactly the old behaviour (MEDIA_URL="/media/", 1-day S3 cache).
+#
+# Origin setup (what the CDN pulls from):
+#   * USE_S3_STORAGE=true  -> CDN origin = the bucket (CloudFront etc.); the
+#     CDN host is wired into AWS_S3_CUSTOM_DOMAIN below.
+#   * USE_S3_STORAGE=false -> CDN origin = this server's /media/ path
+#     (nginx or Django); MEDIA_URL becomes MEDIA_CDN_URL + "/media/".
+#
+# `immutable` is only safe because uploaded files are NEVER overwritten
+# (AWS_S3_FILE_OVERWRITE=False / Django's get_available_name appends a unique
+# suffix) — a changed file always gets a NEW url. Don't turn overwrite on
+# while this toggle is on.
+# ---------------------------------------------------------------------------
+MEDIA_CDN_ENABLED = os.getenv("MEDIA_CDN_ENABLED", "false").strip().lower() in ("1", "true", "yes", "on")
+MEDIA_CDN_URL = os.getenv("MEDIA_CDN_URL", "").strip().rstrip("/")
+MEDIA_CACHE_CONTROL = "public, max-age=31536000, immutable"
+
+if MEDIA_CDN_ENABLED and not MEDIA_CDN_URL.startswith(("https://", "http://")):
+    raise ImproperlyConfigured(
+        "MEDIA_CDN_ENABLED=true but MEDIA_CDN_URL is missing or has no scheme. "
+        "Set e.g. MEDIA_CDN_URL=https://cdn.example.com — or set "
+        "MEDIA_CDN_ENABLED=false."
+    )
+
 INSTALLED_APPS = [
     'daphne',
     'django.contrib.admin',
@@ -158,9 +191,16 @@ INSTALLED_APPS = [
     'user_profile',
     'post',
     "message",
-    'liveclass',
+    'tuitionclass',
     'campus',
     'testseries',
+    # TASK G7 (growth_and_feature_tasks.md â Leaderboards). Sits above
+    # testseries/campus/post the same way 'core' sits above tuitionclass/
+    # message â reads all three read-only via lazy imports, never the
+    # other way around. Listed after them so its own migration (a plain
+    # FK to settings.AUTH_USER_MODEL, no FK into those apps) never needs
+    # a strict load-order relative to them.
+    'leaderboard',
     # 🔧 GAP FIX — was 'assigments' (typo), which doesn't match this
     # app's real label anywhere else in the codebase (assigments/
     # models.py, assigments/bridge.py, assigments_APP_MASTER.md, etc. —
@@ -175,17 +215,20 @@ INSTALLED_APPS = [
     'assigments',
 
     # NEW (task 42) — neutral notification + classroom<->chat bridge
-    # layer. Must be able to resolve `liveclass.Classroom`/`ClassSession`
+    # layer. Must be able to resolve `tuitionclass.Classroom`/`ClassSession`
     # string FK references (core/models.py), so no strict load-order
-    # requirement relative to 'liveclass' here (Django resolves lazy
+    # requirement relative to 'tuitionclass' here (Django resolves lazy
     # "app_label.Model" references after all apps are loaded), but keeping
-    # it listed after 'liveclass' for readability.
+    # it listed after 'tuitionclass' for readability.
     'core',
 ] + (['storages'] if USE_S3_STORAGE else [])
 
 MIDDLEWARE = [
     "corsheaders.middleware.CorsMiddleware",
     'django.middleware.security.SecurityMiddleware',
+    # C5 — long-lived Cache-Control on /media/ responses (no-op unless
+    # MEDIA_CDN_ENABLED=true; see common/media_cache.py).
+    'common.media_cache.MediaCacheControlMiddleware',
     'whitenoise.middleware.WhiteNoiseMiddleware',
     'django.contrib.sessions.middleware.SessionMiddleware',
     'django.middleware.common.CommonMiddleware',
@@ -219,7 +262,7 @@ ASGI_APPLICATION = 'LearnScroll.asgi.application'
 # Database
 # NOTE (fix — production readiness): SQLite was hardcoded with no way to
 # switch without editing code. Fine for local dev, but it has no real
-# concurrent-write story — a live-class platform doing session joins, chat
+# concurrent-write story — a tuition-class platform doing session joins, chat
 # messages, poll votes and coin transactions from many users at once will
 # hit "database is locked" under real concurrency no matter how much
 # WAL/busy_timeout are tuned. Now env-driven: set DATABASE_URL
@@ -275,7 +318,7 @@ else:
 # one daphne/gunicorn worker (which any real production deployment does,
 # for throughput and zero-downtime restarts), two users connected to
 # different workers silently stop seeing each other's realtime messages —
-# a live-class chat/poll feature that quietly breaks under normal
+# a tuition-class chat/poll feature that quietly breaks under normal
 # horizontal scaling, not a rare edge case. REDIS_URL/CELERY_BROKER_URL
 # already exists in this project's env for Celery — reused here so there's
 # one Redis to run, not two. Falls back to in-memory only when neither is
@@ -328,7 +371,9 @@ USE_TZ = True
 
 STATIC_URL = 'static/'
 STATIC_ROOT = os.path.join(BASE_DIR, 'staticfiles')
-MEDIA_URL = '/media/'
+# C5 — with the CDN toggle on, local-disk media URLs point at the CDN
+# (which pulls from <origin>/media/). Off -> unchanged "/media/".
+MEDIA_URL = f"{MEDIA_CDN_URL}/media/" if MEDIA_CDN_ENABLED else '/media/'
 MEDIA_ROOT = BASE_DIR / 'media'
 os.makedirs(MEDIA_ROOT, exist_ok=True)
 
@@ -336,7 +381,7 @@ os.makedirs(MEDIA_ROOT, exist_ok=True)
 # is served (directly by Django in DEBUG via serve_media_with_range in
 # urls.py, and by nginx/S3 in production) — keeping partial chunks out of
 # it means a half-uploaded (unvalidated) file can never become reachable
-# mid-upload. See liveclass/chunked_upload_views.py.
+# mid-upload. See tuitionclass/chunked_upload_views.py.
 CHUNKED_UPLOAD_TMP_ROOT = BASE_DIR / 'tmp' / 'chunked_uploads'
 os.makedirs(CHUNKED_UPLOAD_TMP_ROOT, exist_ok=True)
 
@@ -374,9 +419,17 @@ if USE_S3_STORAGE:
     # Spaces, MinIO) or to front the bucket with a CDN/custom domain.
     AWS_S3_ENDPOINT_URL = os.getenv("AWS_S3_ENDPOINT_URL") or None
     AWS_S3_CUSTOM_DOMAIN = os.getenv("AWS_S3_CUSTOM_DOMAIN") or None
+    # C5 — toggle on: serve every object URL via the CDN host (wins over a
+    # separately-set AWS_S3_CUSTOM_DOMAIN so there is only one switch).
+    if MEDIA_CDN_ENABLED:
+        AWS_S3_CUSTOM_DOMAIN = MEDIA_CDN_URL.split("://", 1)[1]
     # Chat media is served straight from S3, never mutated in place, so a
     # long browser-cache lifetime is safe and reduces repeat egress cost.
-    AWS_S3_OBJECT_PARAMETERS = {"CacheControl": "max-age=86400"}
+    # Toggle on -> 1 year + immutable (objects are never overwritten, see C5
+    # block above). Toggle off -> the old conservative 1 day.
+    AWS_S3_OBJECT_PARAMETERS = {
+        "CacheControl": MEDIA_CACHE_CONTROL if MEDIA_CDN_ENABLED else "max-age=86400"
+    }
     # Bucket policy/ACLs manage public read (or the bucket stays private
     # and reads go through the CDN/custom domain) — the app itself never
     # needs to set a per-object ACL on upload.
@@ -484,6 +537,23 @@ GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 # there's still just one Redis to run. Falls back to LocMemCache when Redis
 # isn't configured (local dev), same behavior as before. Requires
 # `django-redis` installed once REDIS_URL is set.
+#
+# 🔧 FIX (production gap #7 — silent per-worker cache split): same failure
+# mode as the Channels layer above, just for CACHES instead of realtime
+# messaging — LocMemCache under gunicorn/daphne with >1 worker means each
+# process has its own cache, so rate-limiting and anything cached becomes
+# inconsistent depending purely on which worker served the request, with
+# no error anywhere. Reuse the same fail-fast guard: refuse to boot with
+# DEBUG=False and no REDIS_URL, rather than come up broken.
+if not REDIS_URL and not DEBUG:
+    raise ImproperlyConfigured(
+        "REDIS_URL (or CELERY_BROKER_URL) is not set and DEBUG=False. "
+        "Refusing to start with LocMemCache in production — it silently "
+        "gives each gunicorn/daphne worker its own cache, breaking "
+        "rate-limiting and caching consistency. Set REDIS_URL in the "
+        "environment before deploying."
+    )
+
 if REDIS_URL:
     CACHES = {
         "default": {
@@ -499,6 +569,23 @@ else:
             "LOCATION": "learnscroll-ai-cache",
         }
     }
+
+# N1/N2-BE — in-app notification batching (core/notification_batching.py).
+# Window (seconds) per batch type: a new event inside the window folds into
+# the SAME bell row ("X and 4 others liked your post") and sends no new push;
+# every event extends the window (sliding). NOTIFICATION_BATCH_MAX_AGE caps
+# a batch's TOTAL age so a long window on a busy account (followers) still
+# starts a fresh row/push eventually. Follow REQUESTS, mentions and chat
+# messages are never batched (see the helper's docstring for why).
+NOTIFICATION_BATCH_WINDOWS = {
+    "post_liked": int(os.environ.get("NOTIF_BATCH_POST_LIKED_SECONDS", 120)),
+    "post_commented": int(os.environ.get("NOTIF_BATCH_POST_COMMENTED_SECONDS", 120)),
+    "new_follower": int(os.environ.get("NOTIF_BATCH_NEW_FOLLOWER_SECONDS", 6 * 3600)),
+    "story_reaction": int(os.environ.get("NOTIF_BATCH_STORY_REACTION_SECONDS", 300)),
+}
+NOTIFICATION_BATCH_MAX_AGE = {
+    "new_follower": int(os.environ.get("NOTIF_BATCH_NEW_FOLLOWER_MAX_AGE_SECONDS", 24 * 3600)),
+}
 
 # ADD (missing pieces): the console handler had no formatter — log lines
 # had no timestamp/level/logger name, which is close to useless once you're
@@ -556,7 +643,7 @@ SUPPORTED_LANGUAGES = (
 # so a changed env var takes effect on restart — no code deploy). Decimal
 # string, must be > 0 (a bad value falls back to 1). Only NEW requests use
 # the new rate; existing requests keep the amount they were created with.
-# NOTE: liveclass has its own separate coin/INR constant — keep both in sync
+# NOTE: tuitionclass has its own separate coin/INR constant — keep both in sync
 # if pricing changes.
 COIN_TO_INR_RATE = os.getenv("COIN_TO_INR_RATE", "1")
 
@@ -573,13 +660,19 @@ COIN_PURCHASE_MAX_PENDING_PER_USER = int(os.getenv("COIN_PURCHASE_MAX_PENDING_PE
 
 # Issue #5 — hard ceiling on any client-requested page size (`?page_size=`).
 # Enforced by common.pagination.StandardPagination; views that define their
-# own paginator (post/liveclass) already cap at <= 100 themselves.
+# own paginator (post/tuitionclass) already cap at <= 100 themselves.
 MAX_PAGE_SIZE = int(os.getenv("MAX_PAGE_SIZE", "100"))
 
 REST_FRAMEWORK = {
     "DEFAULT_SCHEMA_CLASS": "drf_spectacular.openapi.AutoSchema",
     "DEFAULT_AUTHENTICATION_CLASSES": (
-        "rest_framework_simplejwt.authentication.JWTAuthentication",
+        # Was "rest_framework_simplejwt.authentication.JWTAuthentication"
+        # directly. SlidingSessionAuthentication wraps that same class
+        # (still does full JWT signature/exp validation first, nothing
+        # about existing token checks is loosened) and adds the 10-day
+        # inactivity sliding-expiry check on top — see
+        # login/authentication.py for the full explanation.
+        "login.authentication.SlidingSessionAuthentication",
     ),
     # ADD (missing — defense in depth): every current ViewSet/APIView
     # already sets its own permission_classes explicitly (verified), so
@@ -613,7 +706,7 @@ REST_FRAMEWORK = {
         "forgot_password": "5/min",
         "reset_password": "10/min",
         # NOTE (fix — CRITICAL, would crash in production): views.py wires
-        # ScopedRateThrottle onto four liveclass actions —
+        # ScopedRateThrottle onto four tuitionclass actions —
         # ClassSessionViewSet.join (throttle_scope="session_join"),
         # ClassSessionViewSet.token (throttle_scope="session_token"),
         # CouponViewSet.validate (throttle_scope="coupon_validate"), and
@@ -623,14 +716,14 @@ REST_FRAMEWORK = {
         # raises ImproperlyConfigured ("No default throttle rate set for
         # '<scope>' scope") the very first time ANY of these four endpoints
         # is hit — i.e. the very first time any student tries to join a
-        # live class, or send a single chat message. This wasn't a latent
+        # tuition class, or send a single chat message. This wasn't a latent
         # edge case; it was a guaranteed 500 on day one. Rates chosen to
         # match the reasoning already documented next to each
         # throttle_scope= in views.py.
         "session_join": "20/min",
         "session_token": "30/min",
         # NEW (task 9 — parent-join): ClassSessionViewSet.parent_join is
-        # unauthenticated (see ParentJoinIPThrottle in liveclass/throttles.py
+        # unauthenticated (see ParentJoinIPThrottle in tuitionclass/throttles.py
         # for why this is a separate, IP-keyed scope rather than reusing
         # session_token above). Rated tighter than session_token since this
         # is the endpoint that verifies a parent_token — brute-forcing/
@@ -638,7 +731,7 @@ REST_FRAMEWORK = {
         "session_parent_join_ip": "10/min",
         "coupon_validate": "20/min",
         "chat_message_create": "20/min",
-        # Chunked upload (liveclass/chunked_upload_views.py) — starting a
+        # Chunked upload (tuitionclass/chunked_upload_views.py) — starting a
         # lot of uploads fast is the abuse signal for init/complete; chunk
         # itself is rated higher since one real upload fires it dozens of
         # times in quick succession (~3/sec covers a fast client on an
@@ -657,11 +750,16 @@ REST_FRAMEWORK = {
         "coin_purchase": "10/min",
         # user_profile.BuyCoinView (POST /profile/buy-coin/) — each call
         # inserts a PENDING row, so a burst limit AND a daily ceiling.
-        # Deliberately NOT the liveclass "coin_purchase" scope: throttle
+        # Deliberately NOT the tuitionclass "coin_purchase" scope: throttle
         # cache keys are per scope, so sharing it would make the two
         # unrelated endpoints eat each other's quota.
         "profile_coin_purchase": "10/min",
         "profile_coin_purchase_daily": "100/day",
+        # P14-BE — user_profile ActivityView (aggregates 7 days + two post lists,
+        # so a modest rate) and ActivityHeartbeatView (client beats every
+        # ~30-60 s while foregrounded; 12/min leaves headroom for 2 devices).
+        "profile_activity": "30/min",
+        "profile_activity_heartbeat": "12/min",
         # NOTE (fix — same bug class as the scopes documented above):
         # ClassroomViewSet.share now sets throttle_scope="classroom_share"
         # via ScopedRateThrottle (see views.py) but had no rate here —
@@ -730,6 +828,7 @@ REST_FRAMEWORK = {
         "ai_class_transcript_search": "60/min",      # ClassTranscriptSearchThrottle -> ClassTranscriptSearchView
         "ai_classroom_copilot": "15/min",            # ClassroomCopilotThrottle -> ClassroomCopilotView
         "ai_revision_deck": "10/min",                # RevisionDeckThrottle -> RevisionDeckView
+        "ai_ask_doubt": "20/min",                    # AskAIDoubtThrottle -> AskAIDoubtView (Task G15)
         # NOTE (fix — Feature 12, Focus Mode): `views_focus.py`'s own
         # header comment suggests this scope (`FocusSessionThrottle`,
         # `UserRateThrottle`, 20/min) as an optional addition. Adding the
@@ -749,7 +848,7 @@ REST_FRAMEWORK = {
         # ---------------------------------------------------------------
         # B-4 fix (campus app, this pass): `campus` had ZERO
         # throttle_scope/ScopedRateThrottle usage anywhere — every other
-        # app (liveclass, message) throttles its money-movement, token-
+        # app (tuitionclass, message) throttles its money-movement, token-
         # verification, and fan-out-notification endpoints; campus's
         # equivalents (fee payment, live-session start, notice post,
         # parent-link-token verify) were completely unprotected. Wired
@@ -769,7 +868,7 @@ REST_FRAMEWORK = {
         "campus_fee_payment": "10/min",
         # CampusLiveSessionViewSet.start — fires a notification fan-out
         # to every active enrollment in the section (see that action in
-        # views.py); rated the same as liveclass's session_join, which
+        # views.py); rated the same as tuitionclass's session_join, which
         # this scope is modeled on (campus has no separate student-join
         # endpoint of its own — start is the closest analogue).
         "campus_live_session_join": "20/min",
@@ -786,6 +885,14 @@ REST_FRAMEWORK = {
         # token-guessing surface, not a retry-heavy legitimate flow (a
         # parent verifies their link once, not repeatedly).
         "campus_parent_link_verify": "10/min",
+        # NEW — Task 13/G13: campus invite-code generate/redeem (see
+        # campus/throttles.py's CampusInviteCodeGenerateThrottle /
+        # CampusInviteCodeRedeemThrottle for the reasoning behind each
+        # rate). Same bug class as every NOTE above: these had to land
+        # in the same commit as the throttle_classes= wiring in
+        # campus_invite.py, not after it.
+        "campus_invite_code_generate": "20/min",
+        "campus_invite_code_redeem": "15/min",
         # NOTE (fix — CRITICAL, same bug class as the scopes above):
         # assigments/throttling.py::assigmentsPublicPageThrottle sets
         # scope = "assigments_public_page" for the one AllowAny surface in the
@@ -798,6 +905,13 @@ REST_FRAMEWORK = {
         "testseries_public_page": "60/min",
         "testseries_certificate_verify": "30/min",
         "assigments_explore": "120/min",
+        # C1-BE: post.views.PostEventBulkAPIView (POST /post/events/) sets
+        # throttle_scope = "post_events" with ScopedRateThrottle. One request
+        # carries up to 100 events, so 60 requests/min/user = up to 6000
+        # events/min — far above any real feed scroll rate, tight enough to
+        # stop a runaway client. WITHOUT this key DRF raises
+        # ImproperlyConfigured (500) on the very first request.
+        "post_events": "60/min",
     },
     # NOTE (fix — production breaking gap): NOT having this meant every
     # list endpoint (classrooms, sessions, chat-messages, notices, etc.)
@@ -809,14 +923,14 @@ REST_FRAMEWORK = {
     # DRF's standard {"count","next","previous","results"} envelope.
     "DEFAULT_PAGINATION_CLASS": "common.pagination.StandardPagination",
     "PAGE_SIZE": 20,
-    # NOTE (fix — dead code activation): liveclass/exceptions.py already
+    # NOTE (fix — dead code activation): tuitionclass/exceptions.py already
     # contains a complete, well-designed error-envelope normalizer
-    # (liveclass_exception_handler) — its own docstring says to wire it
+    # (tuitionclass_exception_handler) — its own docstring says to wire it
     # here, but nothing ever did. Every error response in the app has been
     # falling back to DRF's default (inconsistent shape depending on
     # exception type — see that file's docstring for the exact problem).
     # This single line turns that already-written code on.
-    "EXCEPTION_HANDLER": "liveclass.exceptions.liveclass_exception_handler",
+    "EXCEPTION_HANDLER": "tuitionclass.exceptions.tuitionclass_exception_handler",
 }
 
 SIMPLE_JWT = {
@@ -828,6 +942,12 @@ SIMPLE_JWT = {
     "SIGNING_KEY": SECRET_KEY,
     "AUTH_HEADER_TYPES": ("Bearer",),
 }
+
+# Base URL for the one-click "add parent" confirmation link — see
+# common/parent_invite_links.py. This should be a universal/app link your
+# Flutter app is registered to intercept (falls back to a safe default so
+# local/dev still works if the env var isn't set).
+PARENT_INVITE_LINK_BASE = os.getenv("PARENT_INVITE_LINK_BASE", "https://learnscroll.app/parent-link")
 
 AUTH_USER_MODEL = "login.User"
 # NOTE (fix — security): CORS_ALLOW_ALL_ORIGINS=True means ANY website can
@@ -878,7 +998,7 @@ FREESOUND_API_KEY = os.environ.get('FREESOUND_API_KEY')
 GOOGLE_TRANSLATE_API_KEY = os.environ.get("GOOGLE_TRANSLATE_API_KEY", "")
 
 # ---------------------------------------------------------------------------
-# Referral program (see liveclass/models.py Referral, ReferralViewSet in
+# Referral program (see tuitionclass/models.py Referral, ReferralViewSet in
 # views.py). Both sides of a successful referral get REFERRAL_BONUS_COINS.
 # REFERRAL_REDEEM_WINDOW_DAYS caps how long after signup a NEW account can
 # redeem someone else's code — without this, a years-old account could farm
@@ -888,6 +1008,16 @@ GOOGLE_TRANSLATE_API_KEY = os.environ.get("GOOGLE_TRANSLATE_API_KEY", "")
 # ---------------------------------------------------------------------------
 REFERRAL_BONUS_COINS = int(os.environ.get("REFERRAL_BONUS_COINS", 50))
 REFERRAL_REDEEM_WINDOW_DAYS = int(os.environ.get("REFERRAL_REDEEM_WINDOW_DAYS", 7))
+
+# TASK G10 (growth_and_feature_tasks.md — certificates as a share loop):
+# general app web base URL, used to build a `?ref=<code>` signup link that
+# rides along on a certificate share card (testseries/certificate_share_card.py,
+# views_advanced.py::certificate_share_card). Same `getattr(settings, ...,
+# default)`-with-sane-fallback shape `Classroom.referral_urls()` already uses
+# for `TUITIONCLASS_WEB_BASE_URL` — this is the app-wide equivalent, not scoped
+# to one classroom, since a certificate's referral link should land a new
+# signup on the general signup screen, not inside someone else's classroom.
+APP_WEB_BASE_URL = os.environ.get("APP_WEB_BASE_URL", "https://app.example.com")
 
 # NEW (task 65 — classroom refer & earn, student side): one-time,
 # platform-funded coin bonus credited to a STUDENT who joins a classroom via
@@ -904,7 +1034,7 @@ CLASSROOM_REFERRAL_JOIN_BONUS_COINS = int(os.environ.get("CLASSROOM_REFERRAL_JOI
 # check_attendance_streak_rewards / check_assigments_ontime_streak_rewards,
 # campus/services.py's compute_attendance_streak / compute_assigments_ontime_streak).
 # Paid via user_profile.CoinLedger.record_transaction(transaction_type=
-# CAMPUS_REWARD, ...) -- distinct wallet/ledger from liveclass's
+# CAMPUS_REWARD, ...) -- distinct wallet/ledger from tuitionclass's
 # CoinTransaction above, but the same "flat, env-overridable settings
 # constant" shape as REFERRAL_BONUS_COINS, deliberately, so ops can retune
 # either program the same way.
@@ -917,6 +1047,54 @@ CAMPUS_ATTENDANCE_STREAK_DAYS = int(os.environ.get("CAMPUS_ATTENDANCE_STREAK_DAY
 CAMPUS_ATTENDANCE_STREAK_BONUS_COINS = int(os.environ.get("CAMPUS_ATTENDANCE_STREAK_BONUS_COINS", 10))
 CAMPUS_assigments_STREAK_COUNT = int(os.environ.get("CAMPUS_assigments_STREAK_COUNT", 5))
 CAMPUS_assigments_STREAK_BONUS_COINS = int(os.environ.get("CAMPUS_assigments_STREAK_BONUS_COINS", 15))
+
+# Fee Reminder Notifications feature (FEE-6 follow-up) -- how many days
+# before a FeeInvoice’s FeeStructure.due_date campus.tasks.
+# send_fee_due_reminders() starts sending its advance "Fee due in N
+# days" warning. Same env-overridable-constant shape as
+# CAMPUS_ATTENDANCE_STREAK_DAYS above.
+CAMPUS_FEE_REMINDER_DAYS_BEFORE = int(os.environ.get("CAMPUS_FEE_REMINDER_DAYS_BEFORE", 3))
+
+# ---------------------------------------------------------------------------
+# TASK G1 (growth_and_feature_tasks.md — Streaks): app-wide daily-open streak
+# (user_profile.models.Streak / StreakManager.record_activity, StreakView,
+# user_profile.tasks.send_streak_risk_reminders). Same env-overridable-
+# constant shape as CAMPUS_ATTENDANCE_STREAK_DAYS above, deliberately, so ops
+# can retune milestones/bonuses without a deploy.
+#
+# STREAK_MILESTONE_DAYS -- streak lengths (in days) that pay a one-time
+# coin bonus the moment they're first reached (see STREAK_MILESTONE_BONUS_COINS).
+# STREAK_MILESTONE_BONUS_COINS -- {milestone_day_count: coins}. A milestone
+# with no entry here (or an entry of 0) pays nothing but still shows in the
+# streak UI as reached.
+# STREAK_REMINDER_HOUR -- read directly by the CELERY_BEAT_SCHEDULE entry
+# above, not by the task itself, since a crontab's hour is fixed at process
+# start; changing this env var needs a beat restart to take effect, same as
+# any other crontab-shaped schedule in this file.
+# ---------------------------------------------------------------------------
+STREAK_MILESTONE_DAYS = tuple(
+    int(d) for d in os.environ.get("STREAK_MILESTONE_DAYS", "7,30,100").split(",") if d.strip()
+)
+STREAK_MILESTONE_BONUS_COINS = {
+    7: int(os.environ.get("STREAK_MILESTONE_BONUS_COINS_7", 20)),
+    30: int(os.environ.get("STREAK_MILESTONE_BONUS_COINS_30", 100)),
+    100: int(os.environ.get("STREAK_MILESTONE_BONUS_COINS_100", 500)),
+}
+
+# ---------------------------------------------------------------------------
+# TASK G2 (growth_and_feature_tasks.md — Daily/weekly "recap" screen):
+# user_profile.models.WeeklyRecap / user_profile.recap.generate_weekly_recap_
+# for_user / user_profile.tasks.generate_weekly_recaps. Same env-overridable-
+# constant shape as STREAK_REMINDER_HOUR above, deliberately, so ops can
+# retune the generation time without a deploy.
+#
+# RECAP_GENERATION_HOUR -- the CELERY_BEAT_SCHEDULE entry below fires the
+# generation task every Sunday at this server-time hour (default 23:00 /
+# 11pm), i.e. right after the week (Mon-Sun) has fully ended, so
+# recap.week_bounds()'s "the week that just finished" always resolves to a
+# week that's genuinely over by the time this runs.
+# ---------------------------------------------------------------------------
+RECAP_GENERATION_HOUR = int(os.environ.get("RECAP_GENERATION_HOUR", 23))
 
 # ---------------------------------------------------------------------------
 # TASK 37 — user_profile/fraud.py earn-rate-limit knobs (burst-farm guard on
@@ -940,7 +1118,7 @@ EARN_RATE_LIMIT_MAX_TRANSACTIONS = int(os.environ.get("EARN_RATE_LIMIT_MAX_TRANS
 EARN_RATE_LIMIT_MAX_COINS = int(os.environ.get("EARN_RATE_LIMIT_MAX_COINS", 500))
 
 # ---------------------------------------------------------------------------
-# Coin purchase gateway (see CoinPurchase in liveclass/models.py,
+# Coin purchase gateway (see CoinPurchase in tuitionclass/models.py,
 # CoinPurchaseViewSet + _verify_gateway_signature in views.py). Written
 # against Razorpay's order-create + HMAC-signature-verify shape. Both
 # _create_gateway_order and _verify_gateway_signature already degrade
@@ -979,7 +1157,7 @@ PAYMENT_GATEWAY_WEBHOOK_SIGNATURE_HEADERS = {
 }
 
 # ---------------------------------------------------------------------------
-# MSG91 (see liveclass/notifications.py _send_sms / _send_whatsapp).
+# MSG91 (see tuitionclass/notifications.py _send_sms / _send_whatsapp).
 # MSG91_AUTH_KEY is shared by both channels. SMS additionally needs a
 # DLT-registered sender id; WhatsApp additionally needs the integrated
 # number and a pre-approved template name (WhatsApp Business rule, not
@@ -993,11 +1171,11 @@ MSG91_WHATSAPP_TEMPLATE_NAME = os.environ.get("MSG91_WHATSAPP_TEMPLATE_NAME", ""
 
 # NEW (task 14 — phone OTP delivery, see login/sms_service.py): DLT-
 # registered MSG91 OTP template id, used by SendOTPView for phone
-# targets. Separate from the liveclass notification templates above —
+# targets. Separate from the tuitionclass notification templates above —
 # this one is fed through MSG91's dedicated `/api/v5/otp` endpoint (not
 # the generic SMS/flow API `_send_sms` uses) so our own `secrets`-
 # generated OTP code is what actually gets delivered, not one MSG91
-# generates itself. Reuses MSG91_AUTH_KEY above; unlike the liveclass
+# generates itself. Reuses MSG91_AUTH_KEY above; unlike the tuitionclass
 # notification channels, sms_service.send_otp_sms() fails LOUD (raises)
 # rather than silently no-op'ing when this isn't set — see that module's
 # docstring for why a missed OTP can't be treated like a missed reminder.
@@ -1014,17 +1192,17 @@ DEFAULT_FROM_EMAIL = os.environ.get("DEFAULT_FROM_EMAIL")
 # ---------------------------------------------------------------------------
 # CELERY — background/scheduled jobs.
 #
-# Without this, four liveclass features exist only as inert DB rows:
+# Without this, four tuitionclass features exist only as inert DB rows:
 #   - ClassSchedule recurrence rules never turn into joinable ClassSession
-#     rows (liveclass.generate_upcoming_sessions)
+#     rows (tuitionclass.generate_upcoming_sessions)
 #   - A session nobody clicks /end/ on stays LIVE forever
-#     (liveclass.auto_complete_overdue_sessions)
-#   - ClassReminder rows never actually get sent (liveclass.send_due_reminders)
+#     (tuitionclass.auto_complete_overdue_sessions)
+#   - ClassReminder rows never actually get sent (tuitionclass.send_due_reminders)
 #   - SessionWaitlist promotion never notifies the promoted student
-#     (liveclass.notify_waitlist_promotion, fired from signals.py)
+#     (tuitionclass.notify_waitlist_promotion, fired from signals.py)
 #   - A pass's un-taught escrow balance never comes back to an inactive
-#     student once it expires (liveclass.expire_and_refund_passes)
-# See liveclass/tasks.py for the task bodies and LearnScroll/celery.py for
+#     student once it expires (tuitionclass.expire_and_refund_passes)
+# See tuitionclass/tasks.py for the task bodies and LearnScroll/celery.py for
 # one-time wiring + how to run the worker/beat processes.
 # ---------------------------------------------------------------------------
 CELERY_BROKER_URL = os.environ.get("CELERY_BROKER_URL", "redis://localhost:6379/0")
@@ -1058,18 +1236,18 @@ CELERY_TASK_EAGER_PROPAGATES = False
 from celery.schedules import crontab  # noqa: E402
 
 CELERY_BEAT_SCHEDULE = {
-    "liveclass-generate-upcoming-sessions": {
-        "task": "liveclass.generate_upcoming_sessions",
+    "tuitionclass-generate-upcoming-sessions": {
+        "task": "tuitionclass.generate_upcoming_sessions",
         # Hourly is plenty — the task looks 14 days ahead and is fully
         # idempotent, so re-running it more or less often is always safe.
         "schedule": crontab(minute=0),
     },
-    "liveclass-auto-complete-overdue-sessions": {
-        "task": "liveclass.auto_complete_overdue_sessions",
+    "tuitionclass-auto-complete-overdue-sessions": {
+        "task": "tuitionclass.auto_complete_overdue_sessions",
         "schedule": crontab(minute="*/5"),
     },
-    "liveclass-send-due-reminders": {
-        "task": "liveclass.send_due_reminders",
+    "tuitionclass-send-due-reminders": {
+        "task": "tuitionclass.send_due_reminders",
         # Reminders are minute-precision (remind_at), so this needs to be
         # frequent — cheap query (filtered on is_sent + remind_at index-
         # worthy), safe to run every minute.
@@ -1086,8 +1264,8 @@ CELERY_BEAT_SCHEDULE = {
     # tasks.py (60 min) with a shorter run cadence than the lookback so a
     # slow/delayed tick can never let a batch of expiries fall in the gap
     # between two runs.
-    "liveclass-refresh-stale-enrolled-counts": {
-        "task": "liveclass.refresh_stale_enrolled_counts",
+    "tuitionclass-refresh-stale-enrolled-counts": {
+        "task": "tuitionclass.refresh_stale_enrolled_counts",
         "schedule": crontab(minute="*/15"),
     },
     # NOTE (fix — the actual "student loses money" gap): the per-day escrow
@@ -1097,21 +1275,21 @@ CELERY_BEAT_SCHEDULE = {
     # expires_at passes, nothing was ever calling reverse() for whatever
     # was LEFT in escrow — an inactive student who never noticed to hit
     # cancel() themselves just lost that balance permanently. This sweep
-    # (liveclass/tasks.py) auto-refunds it. Interval matches
+    # (tuitionclass/tasks.py) auto-refunds it. Interval matches
     # EXPIRE_REFUND_LOOKBACK_MINUTES in tasks.py (60 min) with a shorter
     # run cadence than the lookback, same reasoning as the enrolled-counts
     # job right above — a slow/delayed tick can never let a batch of
     # expiries fall in the gap between two runs and get missed.
-    "liveclass-expire-and-refund-passes": {
-        "task": "liveclass.expire_and_refund_passes",
+    "tuitionclass-expire-and-refund-passes": {
+        "task": "tuitionclass.expire_and_refund_passes",
         "schedule": crontab(minute="*/15"),
     },
     # Sweeps abandoned chunked uploads (client crashed/closed mid-upload)
     # and reclaims their temp disk usage — see
-    # liveclass/tasks.py:cleanup_stale_chunked_uploads for exactly what it
+    # tuitionclass/tasks.py:cleanup_stale_chunked_uploads for exactly what it
     # checks. Hourly is enough since the staleness window itself is 6h.
-    "liveclass-cleanup-stale-chunked-uploads": {
-        "task": "liveclass.cleanup_stale_chunked_uploads",
+    "tuitionclass-cleanup-stale-chunked-uploads": {
+        "task": "tuitionclass.cleanup_stale_chunked_uploads",
         "schedule": crontab(minute=0),
     },
     # NOTE (fix — same "written but never registered" bug the
@@ -1124,8 +1302,8 @@ CELERY_BEAT_SCHEDULE = {
     # matches COIN_PURCHASE_PENDING_TIMEOUT in tasks.py (2h) with a
     # shorter run cadence than the timeout, same reasoning as every other
     # lookback-window job in this schedule.
-    "liveclass-reconcile-stuck-coin-purchases": {
-        "task": "liveclass.reconcile_stuck_coin_purchases",
+    "tuitionclass-reconcile-stuck-coin-purchases": {
+        "task": "tuitionclass.reconcile_stuck_coin_purchases",
         "schedule": crontab(minute="*/30"),
     },
     # NOTE (fix — same "written but never registered" bug class as
@@ -1138,18 +1316,18 @@ CELERY_BEAT_SCHEDULE = {
     # renew() always clears auto_renew on the row it processes, success
     # or fail), so a short, frequent cadence is safe and keeps a lapsed
     # renewal from sitting unresolved for long.
-    "liveclass-run-auto-renewals": {
-        "task": "liveclass.run_auto_renewals",
+    "tuitionclass-run-auto-renewals": {
+        "task": "tuitionclass.run_auto_renewals",
         "schedule": crontab(minute="*/30"),
     },
-    # NOTE (fix — same gap as liveclass-run-auto-renewals immediately
+    # NOTE (fix — same gap as tuitionclass-run-auto-renewals immediately
     # above, audit §12 item 22): tasks.expire_unclaimed_gifts (Pass 16)
     # sweeps PENDING PassGifts past their 7-day CLAIM_WINDOW_DAYS deadline
     # and refunds the gifter — without this entry an unclaimed gift's
     # already-debited coins just sat in limbo forever. Same self-cleaning-
     # query reasoning, same cadence.
-    "liveclass-expire-unclaimed-gifts": {
-        "task": "liveclass.expire_unclaimed_gifts",
+    "tuitionclass-expire-unclaimed-gifts": {
+        "task": "tuitionclass.expire_unclaimed_gifts",
         "schedule": crontab(minute="*/30"),
     },
     # NOTE (fix — audit §12 item 24): tasks.send_notification_digests
@@ -1160,13 +1338,13 @@ CELERY_BEAT_SCHEDULE = {
     # frequent enough to keep a daily/weekly digest close to on-time
     # without re-scanning NotificationPreference constantly; the task
     # itself is a cheap no-op for any user not yet due.
-    "liveclass-send-notification-digests": {
-        "task": "liveclass.send_notification_digests",
+    "tuitionclass-send-notification-digests": {
+        "task": "tuitionclass.send_notification_digests",
         "schedule": crontab(minute=0),
     },
     # 🔥 NAYA — message app ka is Celery beat me pehle ZERO entry tha,
     # jabki dono tasks (message/tasks.py) ek poore feature ke liye zaroori
-    # hain aur zero-risk / idempotent hain, same pattern jo liveclass ke
+    # hain aur zero-risk / idempotent hain, same pattern jo tuitionclass ke
     # entries upar already follow karte hain.
     "message-send-scheduled-messages": {
         "task": "message.send_scheduled_messages",
@@ -1179,7 +1357,7 @@ CELERY_BEAT_SCHEDULE = {
         "task": "message.cleanup_expired_messages",
         # Disappearing-messages ka sabse chhota duration option bhi
         # "1_month" hai, isliye 15 min sweep lag bilkul invisible hai
-        # users ko - same cadence liveclass ke lookback-window jobs jaisa.
+        # users ko - same cadence tuitionclass ke lookback-window jobs jaisa.
         "schedule": crontab(minute="*/15"),
     },
     # 🔧 GAP FIX — `is_deleted`/`soft_delete()` (models.py `BaseModel`) ab
@@ -1268,23 +1446,60 @@ CELERY_BEAT_SCHEDULE = {
         "task": "user_profile.tasks.reconcile_follow_counts",
         "schedule": crontab(hour=3, minute=15, day_of_week=0),
     },
+    # TASK G1 (growth_and_feature_tasks.md — Streaks) —
+    # user_profile.tasks.send_streak_risk_reminders. Runs once a day at
+    # STREAK_REMINDER_HOUR (default 22:00 / 10pm server time), which is
+    # "~2 hours before day-end" for the same midnight-day-boundary
+    # `timezone.localdate()` rollover Streak.objects.record_activity()
+    # already uses — deliberately a single daily crontab entry (not
+    # every-N-minutes) since the task itself is idempotent per call but
+    # there is nothing to gain from firing it more than once in that
+    # window; same "no state of its own, occasional extra run is
+    # harmless" reasoning campus's own daily reminder jobs already rely
+    # on above.
+    "user-profile-send-streak-risk-reminders": {
+        "task": "user_profile.tasks.send_streak_risk_reminders",
+        "schedule": crontab(
+            hour=int(os.environ.get("STREAK_REMINDER_HOUR", 22)), minute=0,
+        ),
+    },
+    # TASK G2 (growth_and_feature_tasks.md — recap screen) —
+    # user_profile.tasks.generate_weekly_recaps. Sunday only (day_of_week=0
+    # in crontab's Sun=0 convention), at RECAP_GENERATION_HOUR (default
+    # 23:00) — deliberately once a week, not more often: the task is
+    # idempotent per (user, week_start) via WeeklyRecap's unique constraint
+    # (update_or_create in recap.py), so a re-run within the same week just
+    # recomputes and re-notifies, which is harmless but pointless to do on
+    # a tighter schedule.
+    "user-profile-generate-weekly-recaps": {
+        "task": "user_profile.tasks.generate_weekly_recaps",
+        "schedule": crontab(
+            hour=int(os.environ.get("RECAP_GENERATION_HOUR", 23)), minute=0, day_of_week=0,
+        ),
+    },
     # FEE-6 — campus/tasks.py::send_fee_due_reminders. Task string is
     # "campus.tasks.<name>" (Celery's default module-path-derived name,
     # since campus/tasks.py never passes an explicit name= to
     # @shared_task) — same convention as the user_profile entry right
-    # above, not the "app.func" shorthand liveclass/message entries use
+    # above, not the "app.func" shorthand tuitionclass/message entries use
     # (those explicitly rename their tasks; campus/user_profile don't).
     # Once-a-day is enough — same reasoning as
-    # liveclass-send-notification-digests and campus's own
+    # tuitionclass-send-notification-digests and campus's own
     # send_assigments_due_reminders (design doc §6): this task carries
     # no state of its own, so an occasional extra run is harmless.
     #
+    # CAMPUS_FEE_REMINDER_DAYS_BEFORE (env, default 3) controls how many
+    # days out the task’s own "advance" branch starts firing (see that
+    # function’s docstring for the day-by-day re-fire caveat this
+    # produces) — read directly by send_fee_due_reminders() at call
+    # time, same "settings knob, not a code constant" pattern this
+    # file already uses elsewhere (e.g. CAMPUS_ATTENDANCE_STREAK_DAYS).
     "campus-send-fee-due-reminders": {
         "task": "campus.tasks.send_fee_due_reminders",
         "schedule": crontab(hour=8, minute=0),
     },
     # 🔧 FIX (this pass) — same "written but never registered" bug class
-    # this file has already had to fix repeatedly for liveclass/message/
+    # this file has already had to fix repeatedly for tuitionclass/message/
     # user_profile above.
     "campus-check-low-attendance": {
         "task": "campus.tasks.check_low_attendance",
@@ -1388,6 +1603,32 @@ CELERY_BEAT_SCHEDULE = {
         "task": "testseries.tasks.expire_stale_recordings",
         "schedule": crontab(minute=5),
     },
+    # TASK G7 (growth_and_feature_tasks.md â Leaderboards) â
+    # leaderboard.tasks.recompute_weekly_boards. Only scans the CURRENT
+    # ISO week's TestAttempt/Attendance/PostLike-etc rows (see
+    # leaderboard/services.py's week_bounds()), so it stays cheap enough
+    # to run every 30 min and keep "your rank this week" close to live â
+    # same cadence class as the other near-live jobs above
+    # (tuitionclass-reconcile-stuck-coin-purchases etc.).
+    "leaderboard-recompute-weekly": {
+        "task": "leaderboard.recompute_weekly_boards",
+        "schedule": crontab(minute="*/30"),
+    },
+    # TASK G7 â leaderboard.tasks.recompute_all_time_boards. Scans full
+    # history per board, so it runs once a day, off-peak (03:30, same slot
+    # class as message-purge-soft-deleted-conversations above) rather than
+    # on the weekly job's tighter cadence.
+    "leaderboard-recompute-all-time": {
+        "task": "leaderboard.recompute_all_time_boards",
+        "schedule": crontab(hour=3, minute=30),
+    },
+    # C1-BE — post.tasks.prune_old_post_events: deletes PostEvent analytics
+    # rows older than 30 days, in batches. Daily, off-peak (03:15, just before
+    # the 03:30 leaderboard job above so the two heavy jobs never overlap).
+    "post-prune-old-events": {
+        "task": "post.tasks.prune_old_post_events",
+        "schedule": crontab(hour=3, minute=15),
+    },
 }
 
 # 🔧 GAP FIX — grace window ke liye, dekho message/tasks.py:
@@ -1420,7 +1661,7 @@ GROUP_SOFT_DELETE_GRACE_DAYS = int(os.getenv("GROUP_SOFT_DELETE_GRACE_DAYS", "7"
 # (`django_apps.get_app_config("assigments")` would otherwise raise
 # `LookupError`, not just skip it quietly).
 #
-# 'liveclass'/'message'/'post'/'login' are NOT added here — no signal in
+# 'tuitionclass'/'message'/'post'/'login' are NOT added here — no signal in
 # any doc reviewed so far that they were considered or excluded on
 # purpose; left out rather than guessed onto this list. Add them in a
 # future pass once that's an explicit decision, not a default.
@@ -1445,7 +1686,7 @@ CONFIG_DRIFT_URL_SKIP = set()          # {"app_label.ViewClassName", ...}
 #   mode "required"  -> must be paid   "optional" -> creator chooses
 #         "forbidden" -> always free
 # Product rule: a test series a user creates on their own (individual) is
-# PAID; a campus one is FREE; a live-class one is FREE by default and the
+# PAID; a campus one is FREE; a tuition-class one is FREE by default and the
 # teacher may make it paid. Flip a single mode to change that — e.g.
 # TESTSERIES_INDIVIDUAL_PRICING=optional lets individuals publish free tests.
 TESTSERIES_PRICING_POLICY = {
@@ -1455,8 +1696,8 @@ TESTSERIES_PRICING_POLICY = {
         "max_coins": int(os.getenv("TESTSERIES_MAX_PRICE_COINS", "100000")),
     },
     "campus": {"mode": "forbidden"},
-    "liveclass": {
-        "mode": os.getenv("TESTSERIES_LIVECLASS_PRICING", "optional"),
+    "tuitionclass": {
+        "mode": os.getenv("TESTSERIES_TUITIONCLASS_PRICING", "optional"),
         "min_coins": int(os.getenv("TESTSERIES_MIN_PRICE_COINS", "1")),
         "max_coins": int(os.getenv("TESTSERIES_MAX_PRICE_COINS", "100000")),
     },
@@ -1469,14 +1710,14 @@ TESTSERIES_SUBMIT_GRACE_SECONDS = int(os.getenv("TESTSERIES_SUBMIT_GRACE_SECONDS
 #   "use_draft" (default) grade the last autosave · "accept" grade it, flag it · "reject" 400
 TESTSERIES_LATE_SUBMIT = os.getenv("TESTSERIES_LATE_SUBMIT", "use_draft")
 
-# Campus / live-class series are visible and startable only by members of that
+# Campus / tuition-class series are visible and startable only by members of that
 # context. Resolvers live in the owning apps (golden rule: testseries never
-# imports campus/liveclass). Set a value to "public" to make that source
-# world-readable (live-class marketplace), or ENFORCE=0 to turn the check off.
+# imports campus/tuitionclass). Set a value to "public" to make that source
+# world-readable (tuition-class marketplace), or ENFORCE=0 to turn the check off.
 TESTSERIES_ENFORCE_CONTEXT_ACCESS = os.getenv("TESTSERIES_ENFORCE_CONTEXT_ACCESS", "1") == "1"
 TESTSERIES_CONTEXT_ACCESS = {
     "section": "campus.bridge.user_accessible_testseries_context_ids",
-    "classroom": "liveclass.bridge.user_accessible_testseries_context_ids",
+    "classroom": "tuitionclass.bridge.user_accessible_testseries_context_ids",
 }
 
 # Public share link, e.g. "https://learnscroll.app/test/{slug}". Empty = the API
@@ -1501,3 +1742,171 @@ TESTSERIES_LIVE_OVERRUN_MINUTES = int(os.getenv("TESTSERIES_LIVE_OVERRUN_MINUTES
 # "https://learnscroll.app/a/{slug}". Empty = the API preview URL
 # (/assigments/p/<slug>/) is returned instead.
 ASSIGNMENTS_SHARE_URL_TEMPLATE = os.getenv("ASSIGNMENTS_SHARE_URL_TEMPLATE", "")
+
+# =====================================================================
+# HOME FEED DISCOVERY MIX (post/feed_mix.py)
+# Share of every feed page taken from each source. Values are relative
+# weights (auto-normalised to 1.0): 0.6/0.3/0.1 = 60% following, 30%
+# recommended, 10% trending. Env override: FEED_MIX_RATIOS="60,30,10".
+# If a source has too few posts, its slots are refilled from the others.
+# =====================================================================
+def _feed_ratios_from_env():
+    raw = os.getenv("FEED_MIX_RATIOS", "60,30,10")
+    try:
+        f, r, t = [float(x) for x in raw.split(",")]
+        return {"following": f, "recommended": r, "trending": t}
+    except (ValueError, TypeError):
+        return {"following": 60.0, "recommended": 30.0, "trending": 10.0}
+
+
+FEED_MIX_RATIOS = _feed_ratios_from_env()
+# Optional caps/windows; any key omitted falls back to post/feed_mix.py defaults.
+FEED_MIX_LIMITS = {
+    "following_pool_cap": 600,
+    "recommended_pool_cap": 400,
+    "trending_pool_cap": 100,
+    "trending_window_days": 7,
+    "recommended_window_days": 30,
+}
+
+# =====================================================================
+# HOME FEED "SEEN" HANDLING (post/feed_mix.py + HomeFeedView)
+# Posts the user already saw (PostView rows, incl. the batch
+# POST /post/feed/seen/ ones) are dropped from recommended/trending and
+# pushed to the bottom of following. Same pattern as FEED_MIX_LIMITS: any
+# key omitted falls back to DEFAULT_SEEN_LIMITS in post/feed_mix.py.
+#   enabled                 master switch (env FEED_SEEN_ENABLED=0/1)
+#   window_days             look-back window in days (env FEED_SEEN_WINDOW_DAYS)
+#   cap                     max most-recent seen ids per request (env FEED_SEEN_CAP)
+#   fill_min                recommended/trending pool smaller than this after
+#                           excluding seen -> topped up with seen posts
+#   cutoff_max_age_minutes  older `seen_cutoff` (stale `next` link) = new session
+# =====================================================================
+def _env_int(name, default):
+    try:
+        return int(os.getenv(name, default))
+    except (TypeError, ValueError):
+        return default
+
+
+FEED_SEEN_LIMITS = {
+    "enabled": os.getenv("FEED_SEEN_ENABLED", "1").strip().lower() not in ("0", "false", "no", "off"),
+    "window_days": _env_int("FEED_SEEN_WINDOW_DAYS", 30),
+    "cap": _env_int("FEED_SEEN_CAP", 2000),
+    "fill_min": 20,
+    "cutoff_max_age_minutes": 180,
+}
+
+# =====================================================================
+# VIDEO WATCH-TIME RANKING (post/feed_mix.py video_watch_boost)
+# boost = confidence * (completion_rate * completion_points
+#                       + min(avg_watch_s, watch_seconds_cap) / cap * watch_seconds_points)
+# confidence = n / (n + confidence_k), n = viewers who reported watch progress.
+# Applies to Home (following/recommended/trending) and Explore. Any key omitted
+# falls back to DEFAULT_WATCH_TIME. enabled=False (env FEED_WATCH_TIME_ENABLED=0)
+# restores the old `video_completion_rate * 30`.
+# =====================================================================
+FEED_WATCH_TIME = {
+    "enabled": os.getenv("FEED_WATCH_TIME_ENABLED", "1").strip().lower() not in ("0", "false", "no", "off"),
+    "completion_points": 30.0,
+    "watch_seconds_points": 10.0,
+    "watch_seconds_cap": 60.0,
+    "confidence_k": 5.0,
+}
+
+# =====================================================================
+# AUTHOR AFFINITY (post/feed_mix.py load_author_affinity)
+# Authors the user likes / comments on rank higher in ALL Home pools
+# (following: only inside the recent/unseen bands). Any key omitted falls back
+# to DEFAULT_AFFINITY. Env FEED_AUTHOR_AFFINITY_ENABLED=0 switches it off.
+#   window_days / half_life_days   30-day window, an interaction halves every 14 days
+#   like_weight / comment_weight   1 / 3  ("wrong" reactions never count)
+#   points_per_unit / max_points   2 points per unit, capped at 20
+#   max_authors                    strongest N authors are used (SQL CASE branches)
+# An author with an active "show fewer" row gets no affinity (show fewer wins).
+# =====================================================================
+FEED_AUTHOR_AFFINITY = {
+    "enabled": os.getenv("FEED_AUTHOR_AFFINITY_ENABLED", "1").strip().lower() not in ("0", "false", "no", "off"),
+    "window_days": 30,
+    "half_life_days": 14.0,
+    "like_weight": 1.0,
+    "comment_weight": 3.0,
+    "points_per_unit": 2.0,
+    "max_points": 20.0,
+    "max_authors": 50,
+}
+
+# =====================================================================
+# HOME FEED "SHOW FEWER LIKE THIS" (post/feed_mix.py, FeedFeedback model)
+# A tap on "Show fewer" on a post's category / hashtag / author adds a
+# NEGATIVE ranking signal (the mirror image of UserInterest's +15). It is
+# subtracted in the recommended + trending pools only - never from the
+# following pool. Any key omitted falls back to DEFAULT_FEEDBACK in
+# post/feed_mix.py; `points` / `load_cap` may be overridden per kind.
+#   enabled         master switch (env FEED_FEEDBACK_ENABLED=0/1); off ->
+#                   rows are kept but ignored by ranking
+#   half_life_days  the weight halves every N days (env FEED_FEEDBACK_HALF_LIFE_DAYS,
+#                   default 30 = slow decay). 0 = permanent, never decays.
+#   step            weight added per tap; max_weight caps repeated taps
+#   min_effective   decayed below this -> ignored (and pruned on next write)
+#   points          minus points at weight 1.0, per kind (category 15 = the
+#                   interest bonus, hashtag 8, author 25)
+# =====================================================================
+def _env_float(name, default):
+    try:
+        return float(os.getenv(name, default))
+    except (TypeError, ValueError):
+        return default
+
+
+FEED_FEEDBACK = {
+    "enabled": os.getenv("FEED_FEEDBACK_ENABLED", "1").strip().lower() not in ("0", "false", "no", "off"),
+    "half_life_days": _env_float("FEED_FEEDBACK_HALF_LIFE_DAYS", 30.0),
+    "step": 1.0,
+    "max_weight": 3.0,
+    "min_effective": 0.05,
+    "points": {"category": 15.0, "hashtag": 8.0, "author": 25.0},
+}
+
+# =====================================================================
+# HOME FEED RANKED SNAPSHOT (post/feed_snapshot.py + HomeFeedView)
+# GET /post/feed/ builds the ranked id pools ONCE per scrolling session,
+# stores them in CACHES (Redis when REDIS_URL is set) and pages through the
+# frozen list with an opaque `cursor`, so posts don't jump up/down while
+# scores change. Cache miss/expiry falls back to a rebuild, never an error.
+#   enabled      master switch (env FEED_SNAPSHOT_ENABLED=0/1); off -> old
+#                page/offset behaviour
+#   ttl_seconds  how long one session's ranking stays frozen
+#                (env FEED_SNAPSHOT_TTL, default 900 = 15 min)
+# =====================================================================
+FEED_SNAPSHOT = {
+    "enabled": os.getenv("FEED_SNAPSHOT_ENABLED", "1").strip().lower() not in ("0", "false", "no", "off"),
+    "ttl_seconds": _env_int("FEED_SNAPSHOT_TTL", 900),
+}
+
+# =====================================================================
+# FEED_REELS (vertical short-video feed: post/reels.py + post/reels_views.py)
+# GET /post/reels/  [?start=<post_id>] [?cursor=...]. One ranked pool built from
+# the Home pieces (engagement + video watch boost + velocity + interest + taste +
+# friend-of-follow + author affinity - show-fewer), +following_bonus for authors
+# you follow, seen videos excluded, order frozen per scrolling session (same
+# snapshot store as Home, namespace "reels"). Any key omitted falls back to
+# DEFAULT_REELS in post/reels.py.
+#   enabled               master switch (env REELS_ENABLED=0/1); off -> empty page
+#   min_aspect            height/width must be >= this; unknown dimensions are
+#                         allowed (env REELS_MIN_ASPECT, default 1.2; 0 = off)
+#   max_duration_seconds  longer videos are not reels (env REELS_MAX_DURATION_SECONDS,
+#                         default 180; 0 = no cap). Videos need a KNOWN duration.
+#   following_bonus       extra points for authors the caller follows (default 10)
+#   pool_cap              max ranked ids per scrolling session (default 300)
+#   page_size / max_page_size   default 10 / 30 (?page_size=)
+# =====================================================================
+FEED_REELS = {
+    "enabled": os.getenv("REELS_ENABLED", "1").strip().lower() not in ("0", "false", "no", "off"),
+    "min_aspect": _env_float("REELS_MIN_ASPECT", 1.2),
+    "max_duration_seconds": _env_int("REELS_MAX_DURATION_SECONDS", 180),
+    "following_bonus": _env_float("REELS_FOLLOWING_BONUS", 10.0),
+    "pool_cap": _env_int("REELS_POOL_CAP", 300),
+    "page_size": _env_int("REELS_PAGE_SIZE", 10),
+    "max_page_size": 30,
+}

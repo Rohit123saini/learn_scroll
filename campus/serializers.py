@@ -10,6 +10,7 @@ from .models import (
     Attendance,
     Campus,
     CampusAnalyticsSnapshot,
+    CampusInviteCode,
     CampusLiveSession,
     CampusParentLink,
     ClassTeacherassigments,
@@ -274,6 +275,39 @@ class CampusParentLinkSerializer(serializers.ModelSerializer):
         }
 
 
+class CampusInviteCodeSerializer(serializers.ModelSerializer):
+    """[ADDED — Task 13/G13] Read-only from the API's point of view —
+    creation only ever happens via `CampusInviteCodeGenerateView`
+    (`campus_invite.py`), never a plain POST here, since generating one
+    needs the `can_manage_section_subject` authority check, not a plain
+    model-permission check. Unlike `CampusParentLinkSerializer`'s parent
+    code, the plaintext `code` is always included here (not masked) —
+    this code is meant to be shared openly with a whole batch, not kept
+    private to one parent."""
+
+    section_detail = serializers.SerializerMethodField()
+    created_by_detail = MinimalUserSerializer(source="created_by", read_only=True)
+    is_usable = serializers.BooleanField(read_only=True)
+    is_expired = serializers.BooleanField(read_only=True)
+
+    class Meta:
+        model = CampusInviteCode
+        fields = [
+            "id", "campus", "section", "section_detail", "code", "label",
+            "is_active", "max_uses", "uses_count", "expires_at", "created_at",
+            "created_by", "created_by_detail", "is_usable", "is_expired",
+        ]
+        read_only_fields = fields
+
+    def get_section_detail(self, obj):
+        return {
+            "id": obj.section_id,
+            "name": obj.section.name,
+            "school_class_id": obj.section.school_class_id,
+            "school_class_name": obj.section.school_class.name,
+        }
+
+
 # ============================================================
 # Phase 3 — notices
 # ============================================================
@@ -301,7 +335,7 @@ class NoticeSerializer(serializers.ModelSerializer):
 
 
 # ============================================================
-# Phase 4 — live classes
+# Phase 4 — tuition classes
 # ============================================================
 class CampusLiveSessionSerializer(serializers.ModelSerializer):
     class Meta:

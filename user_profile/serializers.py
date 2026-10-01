@@ -18,7 +18,9 @@ from .models import (
     CoinWithdrawalRequest,
     Follow,
     RestrictUser,
+    Streak,
     UserPreference,
+    WeeklyRecap,
 )
 
 User = get_user_model()
@@ -160,6 +162,35 @@ def bulk_accepted_connection_ids(user_ids, restrict_to_user=None):
     return connections
 
 
+# TASK 7 (production_readiness_tasks.md) — followers/following list needs
+# a per-row Follow/Following button. Same N+1 reasoning and chunking
+# pattern as bulk_accepted_connection_ids right above: one indexed query
+# for the whole page instead of one `Follow.objects.filter(...).first()`
+# per row.
+def bulk_viewer_follow_status(user_ids, viewer):
+    """{user_id: 'ACCEPTED' | 'PENDING' | None} — the *viewer's own*
+    follow status toward each of `user_ids` (viewer -> user_id), not the
+    other direction. `None`/a missing key means the viewer doesn't follow
+    that user at all (button should read "Follow"). Values match
+    `Follow.Status` verbatim (same casing FollowAPIView's own response
+    already uses) so the frontend can share one status vocabulary across
+    both endpoints.
+    """
+    user_ids = list({uid for uid in user_ids if uid is not None})
+    if not user_ids or viewer is None or not getattr(viewer, "is_authenticated", True):
+        return {}
+
+    viewer_id = getattr(viewer, "pk", viewer)
+    status_by_id = {}
+    for start in range(0, len(user_ids), _BULK_CONNECTION_CHUNK):
+        chunk = user_ids[start:start + _BULK_CONNECTION_CHUNK]
+        rows = Follow.objects.filter(
+            follower_id=viewer_id, following_id__in=chunk,
+        ).values_list("following_id", "status")
+        status_by_id.update(dict(rows))
+    return status_by_id
+
+
 class MessageContactSearchSerializer(serializers.ModelSerializer):
     """
     Message/group "add members" search ke response ke liye — sirf ye 5
@@ -200,6 +231,38 @@ class MessageContactSearchSerializer(serializers.ModelSerializer):
             their_connections = accepted_connection_ids(obj)
 
         return len(my_connections & their_connections)
+
+
+class FollowListRowSerializer(MessageContactSearchSerializer):
+    """`MessageContactSearchSerializer` + the one extra field the
+    followers/following list (FollowersListView/FollowingListView) needs
+    that message-contact search never did: whether the CALLER already
+    follows this row's user, so the frontend can render Follow/
+    Following/Requested without a second round-trip per row. Kept as its
+    own subclass rather than adding this field onto the shared base —
+    message contact search has no Follow button and shouldn't pay for
+    the extra context/query this needs.
+    """
+    follow_status = serializers.SerializerMethodField()
+
+    class Meta(MessageContactSearchSerializer.Meta):
+        fields = MessageContactSearchSerializer.Meta.fields + ["follow_status"]
+
+    def get_follow_status(self, obj):
+        request = self.context.get("request")
+        if not request or not request.user.is_authenticated:
+            return None
+        if obj.id == request.user.id:
+            # Explicit sentinel (not None) — a viewer looking at their own
+            # name in a followers/following list should get no button at
+            # all, which is a different UI outcome from "not following
+            # them yet" (None from the map below also stringifies to
+            # falsy on the Dart side, so these must stay distinguishable).
+            return "self"
+        follow_status_map = self.context.get("follow_status_map")
+        if follow_status_map is None:
+            return None
+        return follow_status_map.get(obj.id) or "none"
 
 
 class TargetUserProfileSerializer(serializers.ModelSerializer):
@@ -639,6 +702,64 @@ class CoinWithdrawalRequestSerializer(serializers.ModelSerializer):
         attrs["payout_details"] = cleaned
         return attrs
 
+
+class _WithdrawalRequesterSerializer(serializers.Serializer):
+    """Tiny read-only "who requested this" shape for the admin queue
+    below — deliberately not the full ProfileView/UserProfileSerializer
+    (that pulls in follower counts, bio, etc. an ops reviewer doesn't
+    need); just enough to identify the person and reach them if the
+    payout details turn out to be wrong."""
+
+    id = serializers.IntegerField()
+    username = serializers.CharField()
+    email = serializers.EmailField(allow_null=True)
+    phone = serializers.CharField(allow_null=True, allow_blank=True)
+
+
+class _WithdrawalReviewerSerializer(serializers.Serializer):
+    """Same idea as `_WithdrawalRequesterSerializer` but for
+    `reviewed_by` — `None` (not this serializer at all) until a request
+    has actually been looked at, per that field's own null=True."""
+
+    id = serializers.IntegerField()
+    username = serializers.CharField()
+
+
+# TASK 1 (feature: Admin Coin-Withdrawal Review Dashboard) —
+# `CoinWithdrawalRequestSerializer` above is deliberately scoped to "my
+# own requests" (no `user`/`amount_inr`/`reviewed_by` — a caller already
+# knows who they are). This is the admin-facing counterpart the review
+# queue (`CoinWithdrawalAdminListView`, views.py) actually needs: same
+# base fields, plus who requested it, the INR snapshot
+# (`CoinWithdrawalRequest.amount_inr` — already on the model since Task
+# 38, just never serialized anywhere before this), and who reviewed it.
+# Read-only end to end (GET only), since this is a queue view, not a
+# form — the actual state transitions still go exclusively through
+# `CoinWithdrawalAdminActionView` + `CoinWithdrawalActionSerializer`
+# above.
+class CoinWithdrawalAdminSerializer(serializers.ModelSerializer):
+    user = _WithdrawalRequesterSerializer()
+    reviewed_by = _WithdrawalReviewerSerializer(allow_null=True)
+
+    class Meta:
+        model = CoinWithdrawalRequest
+        fields = [
+            "id",
+            "user",
+            "coins",
+            "amount_inr",
+            "payout_method",
+            "payout_details",
+            "status",
+            "failure_reason",
+            "reviewed_by",
+            "reviewed_at",
+            "created_at",
+            "updated_at",
+        ]
+        read_only_fields = fields
+
+
 # TASK 1 -- theme/language preferences.
 # Row is get-or-created via UserPreference.for_user() in the view
 # (models.py) -- this serializer only ever sees a row that already
@@ -672,3 +793,58 @@ class UserPreferenceSerializer(serializers.ModelSerializer):
                 extra.title() if len(extra) == 4 else extra.upper() if len(extra) == 2 else extra
             )
         return "-".join(canonical)
+
+
+class StreakSerializer(serializers.ModelSerializer):
+    """TASK G1 — read shape for GET/POST /profile/streak/. `is_active_today`
+    is the model's own property (not a DB column) so the client can show
+    "checked in today" state without recomputing today's date itself."""
+
+    is_active_today = serializers.BooleanField(read_only=True)
+
+    class Meta:
+        model = Streak
+        fields = [
+            "current_streak",
+            "longest_streak",
+            "total_active_days",
+            "last_active_date",
+            "is_active_today",
+            "updated_at",
+        ]
+        read_only_fields = fields
+
+
+class WeeklyRecapSerializer(serializers.ModelSerializer):
+    """TASK G2 — read shape for GET /profile/recap/latest/. Purely a
+    snapshot readout; nothing on this serializer is writable (recaps are
+    only ever produced by the celery task — see recap.py)."""
+
+    class Meta:
+        model = WeeklyRecap
+        fields = [
+            "id",
+            "week_start",
+            "week_end",
+            "tests_attempted",
+            "classes_attended",
+            "posts_liked_received",
+            "streak_days",
+            "generated_at",
+        ]
+        read_only_fields = fields
+
+
+class MutualFollowersResponseSerializer(serializers.Serializer):
+    """P8-BE — schema shape for GET /profile/profile/<username>/mutuals/."""
+
+    status = serializers.BooleanField()
+    preview = UserSearchSerializer(many=True)
+    total = serializers.IntegerField()
+
+
+class SimilarUsersResponseSerializer(serializers.Serializer):
+    """P8-BE — schema shape for GET /profile/profile/<username>/similar/."""
+
+    status = serializers.BooleanField()
+    suggested_users = UserSearchSerializer(many=True)

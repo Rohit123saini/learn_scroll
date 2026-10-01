@@ -134,7 +134,7 @@ return karta tha ("no SMS provider wired yet"). Ab:
 - Naya file **`sms_service.py`** — `send_otp_sms(phone, otp_code)`,
   MSG91 ke `POST /api/v5/otp` endpoint ke through deliver karta hai.
   MSG91 isliye chuna gaya kyunki project ke paas already ek MSG91
-  account hai (`liveclass/notifications.py` ke `_send_sms`/
+  account hai (`tuitionclass/notifications.py` ke `_send_sms`/
   `_send_whatsapp` ke liye) — ek naya vendor (Twilio) khada karne ki
   zaroorat nahi.
 - OTP generation/hashing/storage bilkul same rehta hai
@@ -143,13 +143,13 @@ return karta tha ("no SMS provider wired yet"). Ab:
   hain, MSG91 ka apna auto-OTP feature use nahi hota. Isi wajah se
   `VerifyOTPView` ko phone vs email ke liye koi alag branching nahi
   chahiye — dono humare apne `otp_hash` ke against verify hote hain.
-- **Fails loud, deliberately** — `liveclass`'s `_send_sms` best-effort
+- **Fails loud, deliberately** — `tuitionclass`'s `_send_sms` best-effort
   hai (missed notification blocking nahi hai), lekin ek OTP jo silently
   fail ho jaye woh ek broken signup/login hai with no path forward. Har
   failure `SMSDeliveryError` raise karta hai, aur `SendOTPView` ise catch
   karke `503` return karta hai — same shape jaisa existing email-failure
   path already karta tha.
-- Requires `MSG91_AUTH_KEY` (already shared with liveclass) aur naya
+- Requires `MSG91_AUTH_KEY` (already shared with tuitionclass) aur naya
   `MSG91_OTP_TEMPLATE_ID` (settings.py) — DLT-registered OTP template
   jisme `##OTP##` variable ho (India TRAI/DLT regulation requirement).
   See §5a for full details.
@@ -273,7 +273,7 @@ EMAIL_BACKEND = "django.core.mail.backends.smtp.EmailBackend"  # or console back
 # + EMAIL_HOST / EMAIL_PORT / EMAIL_HOST_USER / EMAIL_HOST_PASSWORD / EMAIL_USE_TLS
 
 # --- SMS (phone OTP delivery via MSG91 — v3, see §5a) ---
-MSG91_AUTH_KEY = "your-msg91-auth-key"          # likely already set for liveclass notifications
+MSG91_AUTH_KEY = "your-msg91-auth-key"          # likely already set for tuitionclass notifications
 MSG91_OTP_TEMPLATE_ID = "your-dlt-registered-otp-template-id"  # NEW — must contain a ##OTP## variable
 
 # --- JWT ---
@@ -1379,7 +1379,7 @@ class SendOTPView(APIView):
             # ✅ Task 14 — wired up (was a hardcoded 501 before). Delivery
             # goes through MSG91 (see login/sms_service.py for why MSG91
             # over Twilio — the project already has an MSG91 account for
-            # liveclass notifications). The OTP itself is unchanged: same
+            # tuitionclass notifications). The OTP itself is unchanged: same
             # `secrets`-generated code, same hash stored above, MSG91 is
             # purely the delivery channel — so VerifyOTPView needs zero
             # changes to handle this path.
@@ -1883,7 +1883,7 @@ plain module called from `SendOTPView` (§5).
 Phone-OTP delivery via MSG91.
 
 WHY MSG91 and not Twilio: the project already has an MSG91 account wired
-up for liveclass notifications (see `liveclass/notifications.py`
+up for tuitionclass notifications (see `tuitionclass/notifications.py`
 `_send_sms` / `_send_whatsapp`, and `MSG91_AUTH_KEY` /
 `MSG91_SMS_SENDER_ID` in settings.py). Standing up a second SMS vendor
 (Twilio) just for login OTP would mean two vendor accounts, two sets of
@@ -1904,9 +1904,9 @@ paths verify the same way, against our own `otp_hash`.
 Needs a DLT-registered OTP template on the MSG91 dashboard containing a
 `##OTP##` variable (India's TRAI/DLT regulations require this for any
 transactional SMS) — its ID goes in `MSG91_OTP_TEMPLATE_ID` (settings.py).
-`MSG91_AUTH_KEY` is already shared with the liveclass notifications.
+`MSG91_AUTH_KEY` is already shared with the tuitionclass notifications.
 
-Fails LOUD, on purpose: `_send_sms` in liveclass is a best-effort
+Fails LOUD, on purpose: `_send_sms` in tuitionclass is a best-effort
 notification (it no-ops on missing config, since a missed "class
 starting soon" ping isn't blocking). An OTP that silently fails to send
 is a broken signup/login with no path forward for the user — so every
@@ -1943,7 +1943,7 @@ def send_otp_sms(phone: str, otp_code: str) -> None:
     Raises `SMSDeliveryError` on any failure. Returns None on success.
     """
     if not (settings.MSG91_AUTH_KEY and settings.MSG91_OTP_TEMPLATE_ID):
-        # Fail loud (unlike liveclass's best-effort notifications) —
+        # Fail loud (unlike tuitionclass's best-effort notifications) —
         # see module docstring. An unconfigured SMS provider must not
         # look like a successful send to the caller.
         logger.error(
@@ -1990,8 +1990,8 @@ def send_otp_sms(phone: str, otp_code: str) -> None:
 
 ### `sms_service.py` notes
 - **Why MSG91, not Twilio:** the project already has an MSG91 account
-  wired up for `liveclass` notifications (`_send_sms`/`_send_whatsapp`
-  in `liveclass/notifications.py`, `MSG91_AUTH_KEY`/`MSG91_SMS_SENDER_ID`
+  wired up for `tuitionclass` notifications (`_send_sms`/`_send_whatsapp`
+  in `tuitionclass/notifications.py`, `MSG91_AUTH_KEY`/`MSG91_SMS_SENDER_ID`
   in settings.py). Standing up a second SMS vendor just for login OTP
   would mean a second vendor account, credentials, and billing
   relationship for the exact same job.
@@ -2002,7 +2002,7 @@ def send_otp_sms(phone: str, otp_code: str) -> None:
   own auto-generated-code feature is never used. This is also why
   `VerifyOTPView` needs zero phone-vs-email branching: both paths verify
   against the same locally-stored `otp_hash`.
-- **Fails loud, on purpose** — unlike `liveclass`'s best-effort
+- **Fails loud, on purpose** — unlike `tuitionclass`'s best-effort
   `_send_sms` (a missed "class starting soon" ping isn't blocking), a
   silently-failed OTP is a broken signup/login with no path forward for
   the user. Every failure mode (missing config, network failure, a

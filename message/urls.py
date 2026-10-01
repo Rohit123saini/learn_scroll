@@ -46,9 +46,17 @@ from .views import (
     DoubtQuestionViewSet,
     GroupViewSet,
     MessageViewSet,
+    # 🔥 NAYA (M1-BE) — Message requests
+    MessageRequestAcceptView,
+    MessageRequestDeclineView,
+    MessageRequestListView,
+    # 🔥 NAYA (M2-BE) — Notes (Instagram-style status)
+    MyNoteView,
+    UserNotesListView,
     ReadReceiptSettingsView,
     StudyRoomJoinView,
     StudyRoomStateView,
+    StudyRoomNotesView,  # NAYA — sticky notes
     # 🔥 NAYA — Feature 6: attendance/consistency streak
     StudyRoomStreakView,
     UserPresenceView,
@@ -64,6 +72,10 @@ from .views_ai import (
     ClassTranscriptChunkUploadView, ClassTranscriptSearchView, ClassroomCopilotView,
     # 🔥 NAYA — Feature 5: revision deck (flashcards + quiz from class materials)
     RevisionDeckView,
+    # 🔥 NAYA — Task G15: generalized "Ask AI" doubt solver (feed post /
+    # wrong test question / chat — NOT conversation-scoped, unlike
+    # ClassroomCopilotView above).
+    AskAIDoubtView,
 )
 from .upload_view import MessageUploadAPIView
 # 🔥 NAYA — Parent/Guardian Mode (Feature 8): student-side code
@@ -132,9 +144,27 @@ urlpatterns = [
     path('calls/<uuid:call_id>/action/', CallActionView.as_view(), name='call-action'),
     path('calls/<uuid:call_id>/recording/', CallRecordingView.as_view(), name='call-recording'),
 
+    # --- Message requests (NAYA, M1-BE) — anjaan ka pehla DM inbox me nahi, yahan ---
+    path('requests/', MessageRequestListView.as_view(), name='message-requests'),
+    path(
+        'requests/<uuid:conversation_id>/accept/',
+        MessageRequestAcceptView.as_view(),
+        name='message-request-accept',
+    ),
+    path(
+        'requests/<uuid:conversation_id>/decline/',
+        MessageRequestDeclineView.as_view(),
+        name='message-request-decline',
+    ),
+
+    # --- Notes (NAYA, M2-BE) — 60-char status, 24h. `sticky_notes` se alag ---
+    path('notes/', UserNotesListView.as_view(), name='user-notes'),
+    path('notes/me/', MyNoteView.as_view(), name='user-note-me'),
+
     # --- Study Room ---
     path('study-room/<uuid:conversation_id>/join/', StudyRoomJoinView.as_view(), name='study-room-join'),
     path('study-room/<uuid:conversation_id>/state/', StudyRoomStateView.as_view(), name='study-room-state'),
+    path('study-room/<uuid:conversation_id>/notes/', StudyRoomNotesView.as_view(), name='study-room-notes'),
 
     # --- Attendance / consistency streak (NAYA, Feature 6) ---
     path('study-room/<uuid:conversation_id>/streak/', StudyRoomStreakView.as_view(), name='study-room-streak'),
@@ -168,6 +198,10 @@ urlpatterns = [
 
     # --- Classroom Copilot: AI grounded in full classroom context (NAYA) ---
     path('ai/classroom-copilot/', ClassroomCopilotView.as_view(), name='ai-classroom-copilot'),
+
+    # --- Ask AI: generalized doubt solver — feed post / wrong test
+    # question / chat, no conversation membership required (NAYA, Task G15) ---
+    path('ai/ask-doubt/', AskAIDoubtView.as_view(), name='ai-ask-doubt'),
 
     # --- Generic file upload (returns a URL to attach to a message) ---
     path('upload/', MessageUploadAPIView.as_view(), name='message-upload'),
@@ -315,6 +349,7 @@ urlpatterns = [
 #   GET        /groups/, /groups/<id>/
 #   PATCH/DELETE /groups/<id>/
 #   POST       /groups/<id>/members/
+#   GET        /groups/discover/?q=&topic=&page=  (Task G14 — public groups, not member-only)
 #   POST       /groups/join/
 #   GET        /groups/<id>/join-requests/
 #   POST       /groups/<id>/join-requests/<request_id>/approve/
@@ -329,6 +364,13 @@ urlpatterns = [
 #
 #   GET/POST/DELETE /blocked-users/, /blocked-users/<lookup>/
 #
+#   GET        /requests/                           (NAYA, M1-BE — pending message requests)
+#   POST       /requests/<conversation_id>/accept/  (NAYA, M1-BE)
+#   POST       /requests/<conversation_id>/decline/ (NAYA, M1-BE — sender ko kuch nahi jaata)
+#
+#   GET        /notes/                              (NAYA, M2-BE — followed + close-friends ke active notes, + my_note)
+#   PUT/DELETE /notes/me/                           (NAYA, M2-BE — {"text"<=60,"emoji","audience"}; +24h)
+#
 #   GET        /calls/history/
 #   GET        /calls/history/missed/?since=<iso>
 #   GET        /calls/history/<call_id>/addable-participants/
@@ -340,4 +382,4 @@ urlpatterns = [
 #   DELETE     /parent/codes/<id>/tokens/<token_id>/ (NAYA, per-device revoke)
 #   POST       /parent/verify/            (NAYA, no login — parent side; 410 if code expired)
 #   GET        /parent/dashboard/         (NAYA, X-Parent-Token header)
-# ==============================================================================
+# ==============================================================================

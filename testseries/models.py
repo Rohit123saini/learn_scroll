@@ -4,10 +4,10 @@
 TestSeries, Question, QuestionResponse, TestSeriesPurchase, TestAttempt.
 
 Golden rule (same as `assigments`): this app NEVER imports `campus` or
-`liveclass` models directly. Context is referenced opaquely via
+`tuitionclass` models directly. Context is referenced opaquely via
 `context_type` (CharField) + `context_id` (UUID) — resolving that back to
-a `campus.Section` / `liveclass.Classroom` is the calling bridge's job
-(see `campus/bridge.py::create_testseries` / `liveclass/bridge.py::
+a `campus.Section` / `tuitionclass.Classroom` is the calling bridge's job
+(see `campus/bridge.py::create_testseries` / `tuitionclass/bridge.py::
 create_testseries` in the design doc), never this app's.
 
 `user_profile.CoinLedger` is used DIRECTLY (no bridge) — same precedent
@@ -71,7 +71,7 @@ Everything else below matches the design doc's confirmed decisions:
     `partially_checked` — auto-graded questions can finish instantly
     while `text` questions are still pending review; a series with zero
     `text` questions goes straight to `checked` (see `submit()`).
-  - Escrow: `TestSeriesPurchase` mirrors `liveclass.PassPurchase` —
+  - Escrow: `TestSeriesPurchase` mirrors `tuitionclass.PassPurchase` —
     coins move to escrow on purchase, release to creator only once the
     ENTIRE attempt (including every `text` question) has been reviewed.
     Partial release is an explicit non-goal (§8 item — escrow holds
@@ -152,21 +152,62 @@ class TestSeriesBaseModel(models.Model):
         abstract = True
 
 
+class TestSeriesQuerySet(models.QuerySet):
+    """Task G9 — discovery/search query helpers. Split out from plain
+    `.annotate()` calls in the view because a naive `.annotate(rating=
+    Avg("reviews__rating"))` on a queryset that ALSO carries another
+    to-many annotation (e.g. `TestSeriesViewSet.get_queryset()`'s
+    `q_count=Count("questions", distinct=True)`) double-counts rows off
+    the resulting JOIN fan-out and silently inflates the average — a
+    correlated subquery sidesteps that entirely, however many other
+    relations get annotated alongside it on the same queryset."""
+
+    def with_rating(self):
+        """Annotate `rating` = this series' average review score (`None`
+        with zero reviews, same as the `avg_rating` property this
+        mirrors) — lets a discovery listing sort/filter on it at the
+        DB level instead of the property's one-query-per-row cost."""
+        ratings = (
+            TestSeriesReview.objects.filter(series=models.OuterRef("pk"))
+            .values("series")
+            .annotate(avg=models.Avg("rating"))
+            .values("avg")
+        )
+        return self.annotate(rating=models.Subquery(ratings))
+
+    def with_recent_attempts(self, *, since):
+        """Annotate `recent_attempts` = attempts STARTED on/after `since`
+        ("trending" rail). `Count(..., distinct=True)` — i.e. `COUNT(
+        DISTINCT attempt.id)` — rather than a subquery here: unlike
+        `Avg`, a distinct `Count` is immune to join fan-out from any
+        other to-many annotation already on the queryset (e.g.
+        `with_rating()`'s subquery doesn't join at all, and `q_count`'s
+        own `Count(..., distinct=True)` stays correct alongside it for
+        the same reason), so this is safe to stack with either."""
+        return self.annotate(
+            recent_attempts=models.Count(
+                "attempts", filter=models.Q(attempts__started_at__gte=since), distinct=True
+            )
+        )
+
+
 class TestSeries(TestSeriesBaseModel):
+    objects = TestSeriesQuerySet.as_manager()
+
     class Source(models.TextChoices):
         INDIVIDUAL = "individual", "Individual / Marketplace"
         CAMPUS = "campus", "Campus"
-        LIVECLASS = "liveclass", "LiveClass"
+        TUITIONCLASS = "tuitionclass", "TuitionClass"
 
     class Status(models.TextChoices):
         DRAFT = "draft", "Draft"
         PUBLISHED = "published", "Published"
         ARCHIVED = "archived", "Archived"
 
-    source = models.CharField(max_length=10, choices=Source.choices, db_index=True)
+    source = models.CharField(max_length=20, choices=Source.choices, db_index=True)
 
     # Opaque context reference — golden rule: this app never resolves
-    # these to real campus.Section / liveclass.Classroom rows itself.
+    # these to real campus.Section / tuitionclass.Classroom rows itself.
     # Both blank/null for `source="individual"`.
     context_type = models.CharField(max_length=20, blank=True, null=True)
     context_id = models.UUIDField(blank=True, null=True)
@@ -199,6 +240,32 @@ class TestSeries(TestSeriesBaseModel):
     # (serializers.py) before `TestAttemptViewSet.start()` (views.py)
     # creates a row through either the paid or free path.
     attempts_allowed = models.PositiveIntegerField(default=1)
+
+    # ------------------------------------------------------------------
+    # DISCOVERY (Task G9, migration 0004). Both blank-by-default and
+    # optional on write, so every pre-existing series keeps working
+    # unfiltered/untagged — these are pure browse/search facets, not a
+    # workflow requirement (a series still creates/publishes fine with
+    # neither set; it just won't surface under a `subject=`/`difficulty=`
+    # filter or a "Trending"/"New from people you follow" rail until it
+    # naturally does — see `views.py::TestSeriesViewSet.get_queryset()`
+    # and `views_advanced.py`'s `trending`/`following` actions).
+    #
+    # A SEPARATE `Difficulty` choice set from `Question.Difficulty`
+    # (same three values) rather than reusing that one: `Question` is
+    # defined later in this file, so referencing `Question.Difficulty.
+    # choices` here at class-body-evaluation time would be a forward
+    # reference Python can't resolve — same reasoning `Question` itself
+    # doesn't reuse some earlier class's enum. This is the CREATOR'S
+    # own overall-difficulty label for the whole series (a browse-time
+    # filter), not derived from individual question difficulties.
+    class Difficulty(models.TextChoices):
+        EASY = "easy", "Easy"
+        MEDIUM = "medium", "Medium"
+        HARD = "hard", "Hard"
+
+    subject = models.CharField(max_length=60, blank=True, db_index=True)
+    difficulty = models.CharField(max_length=6, choices=Difficulty.choices, blank=True, db_index=True)
 
     # ------------------------------------------------------------------
     # ADVANCED DELIVERY (migration 0003). Every field below has a default
@@ -263,6 +330,9 @@ class TestSeries(TestSeriesBaseModel):
         indexes = [
             models.Index(fields=["source", "context_type", "context_id"]),
             models.Index(fields=["creator", "status"]),
+            # Task G9 — the discovery/search endpoint's most common shape:
+            # published series, optionally narrowed by subject/difficulty.
+            models.Index(fields=["status", "subject", "difficulty"]),
         ]
 
     def save(self, *args, **kwargs):
@@ -343,9 +413,131 @@ class TestSeries(TestSeriesBaseModel):
         """`None` (not `0`) when there are no reviews yet — a series
         with zero reviews and a series rated straight `0`s are not the
         same thing, and callers (e.g. a "sort by rating" browse view)
-        need to be able to tell them apart."""
+        need to be able to tell them apart.
+
+        Task G9: prefers `self.rating` (set by `TestSeriesQuerySet.
+        with_rating()`, same `question_count`/`q_count` pattern as
+        below) over recomputing it here, so a discovery LISTING pays
+        for this once per query instead of once per row."""
+        if hasattr(self, "rating"):  # annotated by with_rating() — even when it's None
+            return round(self.rating, 2) if self.rating is not None else None
         result = self.reviews.aggregate(avg=models.Avg("rating"))["avg"]
         return round(result, 2) if result is not None else None
+
+    # ---- Task G8: weak-area practice generation ----------------------
+    # A short revision test is built from questions this student has
+    # actually gotten wrong before, not newly-authored content — no new
+    # question-writing/AI-generation involved, just re-serving the
+    # existing bank's wrong answers back to the student.
+    MAX_PRACTICE_QUESTIONS = 20
+    PRACTICE_MINUTES_PER_QUESTION = 1.5
+    # A student may retry their own generated revision test a handful of
+    # times without needing to ask anyone to raise a cap — this is a
+    # scratch practice tool, not a graded series with a real attempt cap.
+    PRACTICE_ATTEMPTS_ALLOWED = 10
+
+    @classmethod
+    @transaction.atomic
+    def create_weak_area_practice(cls, *, student: User, source_series: "TestSeries") -> "TestSeries | None":
+        """Task G8 — "Practice weak areas" CTA on the result screen.
+
+        Pulls every AUTO-GRADABLE question (`mcq`/`msq`/`list`) this
+        student has ever answered wrong across ALL of their finished
+        attempts on `source_series` (multi-attempt series included —
+        see `attempts_allowed`), ranks the underlying topics by how
+        often they tripped this student up, and re-packages the
+        weakest-topics-first slice (capped at `MAX_PRACTICE_QUESTIONS`)
+        as a brand-new, free, self-paced, instantly-graded practice
+        `TestSeries` the student owns.
+
+        `text` questions are excluded: they have no answer key to grade
+        a redo against, so including one would just leave the
+        generated attempt stuck `partially_checked` forever — the exact
+        opposite of an instantly-actionable practice test.
+
+        `creator=student` is deliberate, not an oversight: `access.
+        user_can_access_series` always grants the creator access
+        regardless of status, so this reuses that existing rule instead
+        of adding a new "private practice series" access path — no
+        other student can ever see or attempt this series.
+
+        Returns `None` when there's nothing to revise yet (no finished
+        attempts on this series at all, or a clean sheet — every
+        auto-graded question answered right so far).
+        """
+        wrong_responses = (
+            QuestionResponse.objects.filter(
+                attempt__student=student,
+                attempt__series=source_series,
+                is_auto_graded=True,
+                is_correct=False,
+            )
+            .exclude(question__question_type=Question.QuestionType.TEXT)
+            .select_related("question")
+        )
+
+        topic_miss_counts: dict[str, int] = {}
+        wrong_questions_by_id: dict[uuid.UUID, Question] = {}
+        for response in wrong_responses:
+            question = response.question
+            wrong_questions_by_id[question.id] = question
+            topic_miss_counts[question.topic] = topic_miss_counts.get(question.topic, 0) + 1
+
+        if not wrong_questions_by_id:
+            return None
+
+        # Weakest topic first (most misses), tie-broken by the
+        # question's original order so the resulting practice test
+        # still reads top-to-bottom the way the source series did.
+        ordered_questions = sorted(
+            wrong_questions_by_id.values(),
+            key=lambda q: (-topic_miss_counts[q.topic], q.order),
+        )[: cls.MAX_PRACTICE_QUESTIONS]
+
+        practice = cls.objects.create(
+            source=cls.Source.INDIVIDUAL,
+            creator=student,
+            title=f"Revise: {source_series.title}"[:200],
+            description=(
+                f"Auto-generated from questions you got wrong in '{source_series.title}'. "
+                "Weakest topics first — clear these and you're solid."
+            ),
+            is_paid=False,
+            price_coins=0,
+            duration_minutes=max(5, round(len(ordered_questions) * cls.PRACTICE_MINUTES_PER_QUESTION)),
+            status=cls.Status.PUBLISHED,
+            attempts_allowed=cls.PRACTICE_ATTEMPTS_ALLOWED,
+            delivery_mode=cls.DeliveryMode.SELF_PACED,
+            certificate_enabled=False,
+            result_release=cls.ResultRelease.INSTANT,
+            show_solutions=True,
+        )
+        Question.objects.bulk_create([
+            Question(
+                series=practice,
+                order=order,
+                question_type=question.question_type,
+                text=question.text,
+                marks=question.marks,
+                # Practice mode never penalises a retry — the point is
+                # to close the gap, not to re-score the original miss.
+                negative_marks=0,
+                options=question.options,
+                correct_answer=question.correct_answer,
+                topic=question.topic,
+                difficulty=question.difficulty,
+                explanation=question.explanation,
+                # `attachment` intentionally NOT copied: re-pointing a
+                # FileField at another row's file needs the underlying
+                # file re-saved (not just the path string) to survive
+                # storage-backend moves/deletes cleanly, and every
+                # auto-gradable question type's `text`/`options`
+                # already carries everything a redo needs without it.
+            )
+            for order, question in enumerate(ordered_questions, start=1)
+        ])
+        practice.recompute_total_marks()
+        return practice
 
     def __str__(self):
         return f"{self.title} ({self.get_source_display()})"
@@ -576,7 +768,7 @@ class QuestionResponse(TestSeriesBaseModel):
 
 
 class TestSeriesPurchase(TestSeriesBaseModel):
-    """Direct analogue of `liveclass.PassPurchase`'s escrow design, scoped
+    """Direct analogue of `tuitionclass.PassPurchase`'s escrow design, scoped
     per-attempt instead of per-day: buyer's coins move to escrow
     immediately on purchase, release to the creator only once the WHOLE
     attempt (every question, including every `text` question) has been
@@ -745,9 +937,9 @@ class TestAttempt(TestSeriesBaseModel):
         User, on_delete=models.SET_NULL, null=True, blank=True, related_name="testseries_attempts_checked"
     )
 
-    # `assigments` app's snapshot pattern — campus/liveclass callers pass
+    # `assigments` app's snapshot pattern — campus/tuitionclass callers pass
     # these from the roster at submit-time rather than this app resolving
-    # them itself (golden rule: no direct campus/liveclass imports).
+    # them itself (golden rule: no direct campus/tuitionclass imports).
     roll_number = models.CharField(max_length=30, blank=True)
     enrollment_no = models.CharField(max_length=30, blank=True)
 
@@ -1170,8 +1362,8 @@ class TestLiveSession(TestSeriesBaseModel):
     and — if `series.record_live` — the whole session is recorded to S3 via
     LiveKit egress so it can be replayed alongside the test.
 
-    Deliberately separate from `liveclass.ClassSession` (golden rule: this app
-    never imports `liveclass`); it talks to the same LiveKit project through
+    Deliberately separate from `tuitionclass.ClassSession` (golden rule: this app
+    never imports `tuitionclass`); it talks to the same LiveKit project through
     `testseries.live`."""
 
     class Status(models.TextChoices):

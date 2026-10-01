@@ -42,11 +42,11 @@ class PricingPolicyTests(unittest.TestCase):
         )
         self.assertEqual(policy.normalize_pricing(source="campus", is_paid=False, price_coins=0, strict=True), (False, 0))
 
-    def test_liveclass_free_or_paid(self):
-        self.assertEqual(policy.normalize_pricing(source="liveclass", is_paid=False, price_coins=0, strict=True), (False, 0))
-        self.assertEqual(policy.normalize_pricing(source="liveclass", is_paid=True, price_coins=25, strict=True), (True, 25))
+    def test_tuitionclass_free_or_paid(self):
+        self.assertEqual(policy.normalize_pricing(source="tuitionclass", is_paid=False, price_coins=0, strict=True), (False, 0))
+        self.assertEqual(policy.normalize_pricing(source="tuitionclass", is_paid=True, price_coins=25, strict=True), (True, 25))
         with self.assertRaises(policy.PolicyError):
-            policy.normalize_pricing(source="liveclass", is_paid=False, price_coins=5, strict=True)
+            policy.normalize_pricing(source="tuitionclass", is_paid=False, price_coins=5, strict=True)
 
     def test_non_strict_never_raises_and_keeps_legacy_free_individual(self):
         # Legacy free individual rows must keep saving (e.g. recompute_total_marks()).

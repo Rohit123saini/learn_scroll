@@ -166,7 +166,7 @@ Auth model: `AUTH_USER_MODEL` is a **custom `User`** (app `login`), primary key 
 > migration, mistakenly still listed as present — and the `models_focus.py` file-map
 > entry now notes `FocusSession` is confirmed **merged** into `models.py` itself, not
 > still a separate pending-merge file. A new §2 entry was added for `message`'s own
-> `assigments`/`assigmentsSubmission` models (distinct from `liveclass.assigments`),
+> `assigments`/`assigmentsSubmission` models (distinct from `tuitionclass.assigments`),
 > which existed in `models.py` and were already referenced elsewhere in this doc (Parent
 > Dashboard §6) but had no dedicated model-section entry. Everything else checked came
 > back an exact match to what was already written — no other changes were needed.
@@ -183,7 +183,7 @@ Auth model: `AUTH_USER_MODEL` is a **custom `User`** (app `login`), primary key 
 | `views.py` | REST views/viewsets (the bulk of the app logic) |
 | `consumers.py` | Django Channels WebSocket consumers |
 | `routing.py` | WS URL patterns |
-| `Middleware.py` | JWT auth for WebSocket connections. No longer carries its own copy of the logic — re-exports `JWTAuthMiddleware`/`get_user_from_token` from project-level `LearnScroll/ws_auth.py`, which `liveclass` also now imports from *(fix — see §9.0)* |
+| `Middleware.py` | JWT auth for WebSocket connections. No longer carries its own copy of the logic — re-exports `JWTAuthMiddleware`/`get_user_from_token` from project-level `LearnScroll/ws_auth.py`, which `tuitionclass` also now imports from *(fix — see §9.0)* |
 | `permissions.py` | DRF permission classes. `IsGroupAdminOrModerator` now confirmed on `group_rules.is_group_admin_or_mod` (cached single source of truth) instead of its own raw query. `HasValidParentToken` *(Feature 8 — Parent Mode, see §7.16)* — header-token auth (`X-Parent-Token`) for parent-facing read-only views, deliberately not touching `request.user`. **🔧 GAP FIX (G-6, mutual consent) — NEW this session**: a verified-but-not-yet-`status=APPROVED` token is now rejected here just like an expired/revoked one — closes old §9.4 item 10, see there and §2/§6 |
 | `group_rules.py` | Group access-control (message/call/study-room permission, daily limit) |
 | `services.py` *(NEW — task 27)* | `GroupViewSet.create`/`add_members`/`update_member`'s core logic extracted into plain functions (`create_group`, `add_members_to_group`, `remove_group_member`, `update_group_member_role`) — decoupled from DRF so `core/classroom_chat_bridge.py` can reuse the exact same "create group / add member / change role" logic without going through an HTTP request/response cycle. Raises plain `ValueError`/`PermissionError` (not DRF exceptions) so it stays importable from non-DRF code; the caller converts them. Also re-homes `add_or_reactivate_participant` (moved here from `views.py`, which now imports it from here — single source, also reused by `offline_queue.py`) — **and both this and the `GroupViewSet` delegation are now confirmed actually wired in `views.py`**, see §5/§9.4 item 21. `create_bell_rows_for_push` (task 44) **used to live here but has been removed** — see §7.22/§10 `push_utils.py` for where bell-row creation actually happens. **`answer_doubt_question` *(NEW this batch — Task 16)*** — shared answer-path for both group and context-pointer `DoubtQuestion`s, confirmed called by an **external `testseries` app** (`testseries/bridge.py::answer_query_on_series()`), **not** by `message`'s own `DoubtQuestionViewSet` — see §2 `DoubtQuestion`, §9.4 item 23, §10 |
@@ -441,6 +441,13 @@ note used to flag is resolved; kept only as a pointer to where the wiring lives.
 ### `StudyRoomState`
 - `conversation` (OneToOne), `state` (JSON — `{"pages": [...]}`, whole whiteboard),
   `updated_by`
+- The JSON is **opaque** to the backend (stored/returned verbatim). Whiteboard colour therefore
+  needs no model/serializer field: every stroke point carries its own `color` (ARGB int, e.g.
+  `4294198070`), plus `tool` (`marker|paint|highlighter|eraser`) and `strokeWidth`; shapes,
+  texts and sticky notes carry `color` too. A late joiner's `GET .../state/` returns the full
+  multi-colour board, and live `draw_point` events (`study_room_event`, relayed verbatim to every
+  *other* socket) include the same `color`. Pinned by `message/tests.py`. `eraser` points are a
+  real erase on the client (`BlendMode.clear`), not a white line — their `color` is ignored.
 
 ### `StudyRoomAttendance` *(NEW — Feature 6: consistency streak)*
 - `conversation` (FK), `user` (FK), `session_id` (blank-ok text), `attended_date`
@@ -642,7 +649,7 @@ confirmed in `models.py`)*
   two new views.
 
 ### `assigments` / `assigmentsSubmission` (`message`'s own — distinct from
-`liveclass.assigments`)
+`tuitionclass.assigments`)
 - `assigments`: `group` (FK, `related_name='message_assigmentss'`), `title`,
   `description` (blank ok), `due_at` (nullable), `created_by` (`SET_NULL`,
   `related_name='+'`). Index on `(group, due_at)`.
@@ -653,16 +660,16 @@ confirmed in `models.py`)*
   `(student, is_submitted)`.
 - **Deliberately renamed `related_name`s** (`assigmentss` →
   `message_assigmentss`, `assigments_submissions` →
-  `message_assigments_submissions`) — `liveclass` has its own, separately-
+  `message_assigments_submissions`) — `tuitionclass` has its own, separately-
   built `assigments`/`assigmentsSubmission` models sharing the same
   `Group`/`User` targets; Django can't register two identical reverse
   accessors on the same target model, so `makemigrations` failed
   (`fields.E304`/`E305`) until these were made unique. **Not yet resolved
   which one is authoritative** — see §6 Parent Dashboard's "Gap 1" note:
-  if `liveclass.assigments` is meant to be the same concept as this one
+  if `tuitionclass.assigments` is meant to be the same concept as this one
   (not a genuinely different feature that happens to share a name), the
   cleaner long-term fix is deleting this duplicate pair and pointing
-  parent-dashboard code at `liveclass.assigments` instead; that's a
+  parent-dashboard code at `tuitionclass.assigments` instead; that's a
   bigger structural call than this pass makes unilaterally, so both
   models currently coexist, unmerged.
 
@@ -760,7 +767,7 @@ Queryset: groups where the user has a non-banned `GroupMember` row.
 
 | Method & path | Action | Notes |
 |---|---|---|
-| `POST /` | `create` | Uses `GroupCreateSerializer`. Creates `Conversation` + `Group` + creator as admin + given `member_ids` (integers, not UUIDs). Throttled 5/min/user (`GroupCreateThrottle`) |
+| `POST /` | `create` | Uses `GroupCreateSerializer`. Creates `Conversation` + `Group` + creator as admin + given `member_ids` (integers, not UUIDs). Optional `topic_tag` (Task G14 — subject/exam label for discovery, e.g. "NEET 2027"). Throttled 5/min/user (`GroupCreateThrottle`) |
 | `GET /`, `GET /<id>/` | list/retrieve | |
 | `PATCH /<id>/` | `partial_update` | Admin/mod only (`IsGroupAdminOrModerator`) |
 | `DELETE /<id>/` | `destroy` | **Admin role only** (not moderator). Broadcasts `group_deleted` *before* deleting (handled by `ChatConsumer.group_deleted`, see §8), then **soft-deletes** (`group.soft_delete()` + `conversation.soft_delete()`) rather than hard-`.delete()`-ing *(fix — see §9.0/§9.4 item 1)* — see the note right below this table |
@@ -772,6 +779,7 @@ Queryset: groups where the user has a non-banned `GroupMember` row.
 | `PATCH /<id>/members/<user_id>/` | `update_member` | Admin/mod only (unless acting on self). Body: any of `role`, `is_muted`, `is_banned`. Banning/unbanning also toggles `ConversationParticipant.left_at` |
 | `DELETE /<id>/members/<user_id>/` | `update_member` | Self-leave allowed; removing someone else requires admin/mod |
 | `GET /<id>/media/` | `media` | `GroupMedia` gallery, optional `?type=image/video/...` filter, paginated (`StandardPagination`). ⚠️ see `GroupMedia` note in §2 |
+| `GET /discover/` | `discover` | **NEW — Task G14 (Study Groups).** Bypasses `get_queryset()` — queries `Group` directly so non-members can find PUBLIC groups. `?q=` searches `name`/`description`/`topic_tag`; `?topic=` exact-matches `topic_tag`; `?page=` (20/page). Ordered by `-members_count, -created_at` (trending first). Uses `GroupDiscoverSerializer` (lighter than `GroupSerializer` — no full member list, adds `is_member` + `invite_code` so the client can call the existing `POST /join/` directly) |
 
 **✅ RESOLVED this batch — `create`/`add_members`/`update_member` now actually call
 `services.py` (task 27)**, confirmed against the current `views.py`: it now imports
@@ -933,24 +941,24 @@ Gap 2/Gap 3, supersedes the Group-primary shape described in earlier revisions o
     ]
   }
   ```
-- **🔧 GAP FIX (Gap 2) — `liveclass` `Classroom` is now the PRIMARY, always-present
+- **🔧 GAP FIX (Gap 2) — `tuitionclass` `Classroom` is now the PRIMARY, always-present
   source**, not the message app's own `Group`. Earlier, this view looped over the
   student's chat `Group`s first — meaning a fully active classroom (homework, marks,
   report cards, attendance) was silently invisible here whenever chat-group linking
   hadn't happened for it (`chat_group_enabled=False` — teacher opted out, or an older
   classroom predating the feature), with no way for a parent to tell that was even
-  happening. `classrooms` is now built from every `liveclass.Classroom` the student has
+  happening. `classrooms` is now built from every `tuitionclass.Classroom` the student has
   an active-or-lapsed pass for (`PassPurchase.status=SUCCESS, is_active=True`) — the
   same enrollment breadth `Classroom.is_enrolled()`/`ClassroomParentCodeGenerateView`/
   `ReportCardViewSet` already use. `chat_group` is now the OPTIONAL part: present only
   when `core.classroom_chat_bridge.get_groups_for_classrooms()` *(a `core`-app bridge
-  function, outside this doc's `message`-app scope — see the `liveclass`/`core` app docs
+  function, outside this doc's `message`-app scope — see the `tuitionclass`/`core` app docs
   for its implementation; only its usage contract matters here)* finds a real linked `Group` **and** the student is still an unbanned member
   of it; otherwise `chat_group: null` — the classroom itself still shows up in full.
-- **🔧 GAP FIX (Gap 3) — attendance is now 100% liveclass-sourced.** Both
+- **🔧 GAP FIX (Gap 3) — attendance is now 100% tuitionclass-sourced.** Both
   `attendance_percent` (top-level) and the one inside `latest_report_card` come
-  exclusively from `liveclass`'s own session-attendance record (`ClassSession`/
-  `SessionParticipant`, via `liveclass.models.compute_attendance_percent_bulk`). The
+  exclusively from `tuitionclass`'s own session-attendance record (`ClassSession`/
+  `SessionParticipant`, via `tuitionclass.models.compute_attendance_percent_bulk`). The
   message app's own `StudyRoomAttendance` self-check-in streak widget
   (`attendance_utils.compute_attendance_stats_bulk`, §7.16/§10) is **no longer used
   anywhere in this view** — per product decision, since `message` has no
@@ -960,15 +968,15 @@ Gap 2/Gap 3, supersedes the Group-primary shape described in earlier revisions o
   `group_name` + `assigmentss`, never an attendance field.
 - **`homework` vs `chat_group.assigmentss` are still never summed (Gap 1, unchanged)** —
   two independently-sourced datasets from two different apps' same-named models
-  (`liveclass.assigments`/`assigmentsSubmission` vs this app's own), imported here under
-  a `Liveclass*` alias specifically so no reference is ever ambiguous about which one it
+  (`tuitionclass.assigments`/`assigmentsSubmission` vs this app's own), imported here under
+  a `Tuitionclass*` alias specifically so no reference is ever ambiguous about which one it
   means. `assigments.group`'s/`assigmentsSubmission.student`'s `related_name`s were
   separately renamed in `models.py` (`assigmentss`→`message_assigmentss`,
   `assigments_submissions`→`message_assigments_submissions`) to resolve the reverse-
   accessor clash between the two apps' models sharing the same `Group`/`User` — doesn't
   affect this view since every query here goes forward through the FK, never through the
   renamed reverse accessor.
-- **`latest_report_card` is new this batch** — `liveclass.StudentReportCard`, most recent
+- **`latest_report_card` is new this batch** — `tuitionclass.StudentReportCard`, most recent
   per classroom (`order_by('-id')`, first one kept per classroom in a single pass over
   one query — not one query per classroom). `null` if the student has no report card yet
   for that classroom.
@@ -1615,7 +1623,7 @@ confirmed via `views_focus.py`, but NOT wired into `urls.py`)*
 
 ### 7.19 Class Transcript (chunked classroom-audio transcription) *(NEW this batch)*
 - A third Gemini-backed transcription flow, alongside voice-message auto-transcription
-  (§7.6) — this one is for **live class audio**, uploaded and transcribed in rolling
+  (§7.6) — this one is for **tuition class audio**, uploaded and transcribed in rolling
   chunks rather than one full recording. `transcribe_class_chunk_task` (`tasks.py`)
   reuses the exact same `ai_service.transcribe_audio()` call as voice-note transcription,
   just with a different destination: `ClassTranscriptSegment.text` instead of
@@ -1783,7 +1791,7 @@ board)*
   4 independent copies of the same "admin/mod, not banned" rule having drifted out of
   sync before they were consolidated.
   **⚠️ No longer used by `ParentDashboardView`** *(Gap 3, see §6)* — that view's
-  attendance now comes exclusively from `liveclass`'s own `ClassSession`/
+  attendance now comes exclusively from `tuitionclass`'s own `ClassSession`/
   `SessionParticipant` data, per product decision (this app has no
   teacher/student/classroom concept of its own). `compute_attendance_stats_bulk` (the
   bulk variant, still documented in §10) is therefore currently only reachable from
@@ -1833,7 +1841,7 @@ see §9.4 item 19)*
      data=None)` **has been RESTORED this batch (Task 11)**, after this doc previously
      recorded it as removed/dead code. The file's own updated comment explains why: it
      was accurate that nothing called it *at the time* — but
-     `liveclass/parent_link_views.py::ClassroomParentCodeGenerateView.post()` (a
+     `tuitionclass/parent_link_views.py::ClassroomParentCodeGenerateView.post()` (a
      different app, Task 11's "notify the student a parent code was created" gap-fix)
      now calls it directly, and needed exactly what plain `create_notification()`
      doesn't offer — fan-out over a **list** of `recipient_ids` (`create_notification`
@@ -2209,8 +2217,8 @@ computes `duration_seconds` and marks the whole `CallSession` `ENDED`.
     (§7.14, added new this batch) was built with `conversation_id` in its key from the
     start for the same reason.
 12. **`Middleware.py` carried its own independent copy of the WS JWT-auth logic**, and
-    `liveclass` (a separate, unrelated app) had a near-identical copy that had never been
-    diffed against this one. Since `message` has no dependency on `liveclass` (or vice
+    `tuitionclass` (a separate, unrelated app) had a near-identical copy that had never been
+    diffed against this one. Since `message` has no dependency on `tuitionclass` (or vice
     versa), neither app should depend on the other directly — the tested logic (JWT
     `AccessToken` + manual `is_active` check) was moved to a neutral, project-level
     `LearnScroll/ws_auth.py` (alongside `settings.py`/`asgi.py`), and both apps now import
@@ -2311,7 +2319,7 @@ computes `duration_seconds` and marks the whole `CallSession` `ENDED`.
    app's own throttle scopes** — `message_send`, `call_initiate`, `group_create`,
    `reaction` (all `throttles.py`), `ai_transcribe` (`views_ai.py`), and the two new
    `message_send_ip`/`call_initiate_ip` scopes (§9.1 item 2 below). Same failure mode
-   `settings.py` already documents (and had already fixed) for several `liveclass`
+   `settings.py` already documents (and had already fixed) for several `tuitionclass`
    scopes: DRF's `UserRateThrottle`/`SimpleRateThrottle` look up their rate via
    `DEFAULT_THROTTLE_RATES[self.scope]` exactly like `ScopedRateThrottle` does — a
    missing entry raises `ImproperlyConfigured` on the **very first** hit, not a rare
@@ -2635,7 +2643,7 @@ computes `duration_seconds` and marks the whole `CallSession` `ENDED`.
     different, previously-unmentioned-in-this-doc app (`testseries`) that creates/answers
     `DoubtQuestion` rows scoped to a test-series query rather than a chat group, reusing
     this app's `DoubtQuestion` model as shared infrastructure. This is a new confirmed
-    cross-app dependency in the same family as the existing `liveclass`/`core` ones (§6
+    cross-app dependency in the same family as the existing `tuitionclass`/`core` ones (§6
     Parent Dashboard, §7.16) — worth remembering that `message.DoubtQuestion` now has
     **two** independent consumers with different data shapes sharing one table.
     ~~**However — `message`'s own `DoubtQuestionViewSet.answer()` (views.py, §6/§7.20)
@@ -2761,7 +2769,7 @@ dead code in an earlier pass, then genuinely restored, see §7.22/§10 `push_uti
   dead at that point, but is not anymore. A thin fan-out wrapper around `core.services.
   create_notification()` for callers that need to notify a **list** of `recipient_ids` in
   one call, which bare `create_notification()` (single `recipient` only) doesn't support.
-  **Confirmed caller**: `liveclass/parent_link_views.py::ClassroomParentCodeGenerateView.
+  **Confirmed caller**: `tuitionclass/parent_link_views.py::ClassroomParentCodeGenerateView.
   post()` (a different app — Task 11's "notify the student a parent code was created"
   gap-fix). Best-effort per recipient — one bad id, or `core` not installed
   (`create_notification` degrades to a no-op), never stops the rest of the batch. **Task
@@ -2930,7 +2938,7 @@ dead code in an earlier pass, then genuinely restored, see §7.22/§10 `push_uti
     "removed from `services.py` entirely" as dead code. That was accurate for the pass it
     was written in, but is **no longer current** — `create_bell_rows_for_push` has since
     been genuinely restored in `services.py` (Task 11, see §10 `services.py`) because a
-    different app (`liveclass/parent_link_views.py::ClassroomParentCodeGenerateView`)
+    different app (`tuitionclass/parent_link_views.py::ClassroomParentCodeGenerateView`)
     needed exactly what it offers and `push_utils.py`'s own inline-per-event calls don't:
     fan-out over a **list** of `recipient_ids` in one call. The two are not competing —
     this file's three call-sites still write their own bell rows inline, per-event,
@@ -2941,7 +2949,7 @@ dead code in an earlier pass, then genuinely restored, see §7.22/§10 `push_uti
   (`DeviceToken.objects.filter(user_id__in=...)`), which only works for actual `User`
   rows — a parent has none (Parent Mode, §2, is deliberately loginless). This function
   instead sends straight to a single, already-known FCM token (`ParentToken.token`,
-  captured at verify-time) — the caller (`liveclass/parent_link_views.py`:
+  captured at verify-time) — the caller (`tuitionclass/parent_link_views.py`:
   `ClassroomParentCodeGenerateView`, `ParentQueryReplyView`, a different app) already has
   it in hand, no user lookup needed. Unlike the data-only chat pushes above, this sends a
   real `notification` block (not data-only) — the parent-side surface has no separate
@@ -3004,21 +3012,21 @@ vars below — TASK 21)
 - *(fix — see §9.0)* The actual implementation now lives in project-level
   `LearnScroll/ws_auth.py`; this file just re-exports `JWTAuthMiddleware` and
   `get_user_from_token` so existing imports (`from .Middleware import ...`) keep working.
-  `liveclass` (which used to carry a near-identical independent copy) imports from the
+  `tuitionclass` (which used to carry a near-identical independent copy) imports from the
   same shared location now — one implementation instead of two that could drift apart.
 - **`LearnScroll/ws_auth.py`'s own docstring confirms the exact `asgi.py` wiring**
   (reviewed directly this batch, not inferred): both apps' `websocket_urlpatterns` are
   combined into one `URLRouter`, wrapped in `JWTAuthMiddleware`, wrapped in
   `AllowedHostsOriginValidator` —
   ```python
-  from liveclass.routing import websocket_urlpatterns as liveclass_ws
+  from tuitionclass.routing import websocket_urlpatterns as tuitionclass_ws
   from message.routing import websocket_urlpatterns as message_ws
   from LearnScroll.ws_auth import JWTAuthMiddleware
 
   application = ProtocolTypeRouter({
       "http": django_asgi_app,
       "websocket": AllowedHostsOriginValidator(
-          JWTAuthMiddleware(URLRouter(liveclass_ws + message_ws))
+          JWTAuthMiddleware(URLRouter(tuitionclass_ws + message_ws))
       ),
   })
   ```
@@ -3261,7 +3269,7 @@ vars below — TASK 21)
 - `app = Celery("LearnScroll")`, `app.config_from_object("django.conf:settings",
   namespace="CELERY")` (reads every `CELERY_*` setting from `settings.py`),
   `app.autodiscover_tasks()` (auto-discovers a `tasks.py` in every `INSTALLED_APPS` app —
-  `message/tasks.py` and `liveclass/tasks.py` both included, no manual registration
+  `message/tasks.py` and `tuitionclass/tasks.py` both included, no manual registration
   needed).
 - **One-time wiring, confirmed required and not itself part of this file:**
   1. `LearnScroll/__init__.py` needs `from .celery import app as celery_app` +
@@ -3282,13 +3290,13 @@ vars below — TASK 21)
        beat means nothing self-triggers; beat with no worker means tasks queue up in
        Redis but never execute.
 - Confirms (from the file's own docstring) that the same worker+beat pair also drives
-  four `liveclass`-app periodic tasks that were previously inert DB rows with no runner
+  four `tuitionclass`-app periodic tasks that were previously inert DB rows with no runner
   (session generation from `ClassSchedule`, `ClassReminder` sending, waitlist-promotion
   notification, and auto-ending sessions a teacher forgot to `/end/`) — out of scope for
   this doc's detail, but relevant context: this app's own two Celery entries share
   infrastructure with, and depend on the same worker/beat pair as, a much larger set of
-  `liveclass` periodic jobs. If beat/worker are ever debugged or restarted for a
-  `liveclass` issue, `message`'s scheduled-messages/disappearing-messages sweeps are
+  `tuitionclass` periodic jobs. If beat/worker are ever debugged or restarted for a
+  `tuitionclass` issue, `message`'s scheduled-messages/disappearing-messages sweeps are
   affected too, and vice versa.
 
 ### `scheduled_messages.py`
@@ -3469,7 +3477,7 @@ files reviewed for the first time, none previously part of any file batch)*
 
 This app doesn't ship its own settings — everything below lives in the project-level
 `settings.py` (project `LearnScroll`, shared with `login`, `user_profile`, `post`, and
-`liveclass`). Documented here because `message`'s realtime (§8) and background-task
+`tuitionclass`). Documented here because `message`'s realtime (§8) and background-task
 (§7.5/§7.6, `tasks.py`) features are directly load-bearing on these.
 
 ### Channels / WebSocket transport
@@ -3502,7 +3510,7 @@ This app doesn't ship its own settings — everything below lives in the project
   specifically, nothing in `CELERY_BEAT_SCHEDULE` below ever fires on its own, no matter
   how correctly it's configured here.
 - `CELERY_BEAT_SCHEDULE` — full schedule reviewed this batch (project-wide, shared with
-  `liveclass`). The `message` app's 2 periodic entries, confirmed present:
+  `tuitionclass`). The `message` app's 2 periodic entries, confirmed present:
   - `message-send-scheduled-messages` → `message.send_scheduled_messages`, every minute
     (matches `remind_at`/`scheduled_for` minute-precision — cheap indexed query, bounded
     200/run batch)
@@ -3515,7 +3523,7 @@ This app doesn't ship its own settings — everything below lives in the project
     `.apply_async(countdown=...)` right after a message is created or a push window
     opens (§7.5/§7.6/§7.13), not a periodic sweep.
   - **Not `message`-specific, but confirmed present in the same schedule dict**: 10
-    `liveclass`-app periodic entries (session generation from recurring `ClassSchedule`
+    `tuitionclass`-app periodic entries (session generation from recurring `ClassSchedule`
     rows, auto-completing overdue sessions, sending due `ClassReminder`s, refreshing
     stale enrolled-counts, expiring/refunding lapsed passes, cleaning up abandoned
     chunked uploads, reconciling stuck coin purchases, running pass auto-renewals,

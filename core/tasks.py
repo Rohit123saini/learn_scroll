@@ -66,11 +66,11 @@ CHAT_SYNC_ACTIONS = ("join_accept", "removal", "promote", "metadata", "archive")
 
 @shared_task(bind=True, name="core.chat_sync", max_retries=3, acks_late=True)
 def chat_sync(self, action, classroom_id, user_id=None, reason=""):
-    """Keep a liveclass classroom's linked chat group in step with the
+    """Keep a tuitionclass classroom's linked chat group in step with the
     classroom (join accepted / student removed / co-teacher added / metadata
     changed / classroom closed). Thin wrapper over `core.classroom_chat_bridge`
     — all the actual group logic stays there, unchanged."""
-    from liveclass.models import Classroom
+    from tuitionclass.models import Classroom
 
     from . import classroom_chat_bridge as chat_bridge
 

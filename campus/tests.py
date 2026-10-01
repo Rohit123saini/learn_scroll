@@ -574,16 +574,16 @@ class assigmentsFlowTests(APITestCase):
             )
         self.assertEqual(response.status_code, status.HTTP_201_CREATED)
         notify.assert_called_once()
-        assigments = assigments.objects.get(id=response.data["id"])
-        submission = assigmentsSubmission.objects.get(assigments=assigments, student=self.student_user)
+        hw = assigments.objects.get(id=response.data["id"])
+        submission = assigmentsSubmission.objects.get(assigments=hw, student=self.student_user)
         self.assertEqual(submission.status, assigmentsSubmission.Status.MISSING)
 
     def test_student_can_submit_own_assigments(self):
-        assigments = assigments.objects.create(
+        hw = assigments.objects.create(
             section=self.section, subject=self.subject, title="HW1",
             due_date=date.today() + timedelta(days=1), session=self.session,
         )
-        submission = assigmentsSubmission.objects.create(assigments=assigments, student=self.student_user)
+        submission = assigmentsSubmission.objects.create(assigments=hw, student=self.student_user)
         self.client.force_authenticate(user=self.student_user)
         response = self.client.patch(
             reverse("assigments-submission-detail", args=[submission.id]), {"grade": "A"}
@@ -594,12 +594,12 @@ class assigmentsFlowTests(APITestCase):
         self.assertIsNotNone(submission.submitted_at)
 
     def test_teacher_can_grade_submission(self):
-        assigments = assigments.objects.create(
+        hw = assigments.objects.create(
             section=self.section, subject=self.subject, title="HW1",
             due_date=date.today() + timedelta(days=1), session=self.session,
         )
         submission = assigmentsSubmission.objects.create(
-            assigments=assigments, student=self.student_user,
+            assigments=hw, student=self.student_user,
             status=assigmentsSubmission.Status.SUBMITTED, submitted_at=timezone.now(),
         )
         self.client.force_authenticate(user=self.teacher_user)
@@ -611,11 +611,11 @@ class assigmentsFlowTests(APITestCase):
         self.assertEqual(submission.grade, "A")
 
     def test_unrelated_user_cannot_grade_submission(self):
-        assigments = assigments.objects.create(
+        hw = assigments.objects.create(
             section=self.section, subject=self.subject, title="HW1",
             due_date=date.today() + timedelta(days=1), session=self.session,
         )
-        submission = assigmentsSubmission.objects.create(assigments=assigments, student=self.student_user)
+        submission = assigmentsSubmission.objects.create(assigments=hw, student=self.student_user)
         self.client.force_authenticate(user=self.outsider)
         response = self.client.patch(
             reverse("assigments-submission-detail", args=[submission.id]), {"grade": "A"}

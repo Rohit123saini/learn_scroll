@@ -23,6 +23,8 @@
 import secrets
 from typing import Iterable, Optional
 
+from asgiref.sync import async_to_sync
+from channels.layers import get_channel_layer
 from django.contrib.auth import get_user_model
 from django.db import transaction
 from django.utils import timezone
@@ -38,6 +40,55 @@ from .models import (
 )
 
 User = get_user_model()
+
+
+# ---------------------------------------------------------------------------
+# get_or_create_conversation() — mutual-follow (user_profile/signals.py) ke
+# liye. `Conversation.get_or_create_private()` (models.py) khud hi race-safe
+# get_or_create hai (private_key unique constraint) — ye function usi ko
+# thin-wrap karta hai taaki har caller isi ek naam/jagah se dhoonde, aur
+# NEW conversation banne par dono participants ko unke personal inbox-socket
+# group pe turant push kar de (see consumers.py InboxConsumer.
+# conversation_created) — WITHOUT bhejna koi actual `Message` row, taaki
+# frontend ka "Start the conversation" empty-state list item me dikhe.
+# ---------------------------------------------------------------------------
+def get_or_create_conversation(user_a, user_b):
+    """
+    `user_a`/`user_b` User instance ya id (int/str) ho sakte hain.
+    Returns: (conversation, created) — `Conversation.get_or_create_private`
+    jaisa hi.
+    """
+    if not hasattr(user_a, "pk"):
+        user_a = User.objects.get(pk=user_a)
+    if not hasattr(user_b, "pk"):
+        user_b = User.objects.get(pk=user_b)
+
+    conversation, created = Conversation.get_or_create_private(user_a, user_b)
+
+    if created:
+        _broadcast_conversation_created(conversation, [user_a.id, user_b.id])
+
+    return conversation, created
+
+
+def _broadcast_conversation_created(conversation, user_ids):
+    """Dono participants ke `user_<uid>` inbox-socket group (InboxConsumer,
+    consumers.py) pe naya conversation ban jane ka event bhejta hai — agar
+    koi connected hai to inbox list bina refresh ke turant update ho jaaye.
+    Channel layer configured na ho (e.g. kuch test setups) to silently
+    skip — ye best-effort real-time push hai, REST list hamesha source of
+    truth rehti hai."""
+    channel_layer = get_channel_layer()
+    if channel_layer is None:
+        return
+    payload = {
+        "type": "conversation_created",
+        "conversation_id": str(conversation.id),
+        "conversation_type": conversation.type,
+        "created_at": conversation.created_at.isoformat(),
+    }
+    for uid in user_ids:
+        async_to_sync(channel_layer.group_send)(f"user_{uid}", payload)
 
 
 # ---------------------------------------------------------------------------
@@ -61,6 +112,144 @@ def add_or_reactivate_participant(conversation, user):
         participant.left_at = None
         participant.save(update_fields=['left_at'])
     return participant, created
+
+
+# ---------------------------------------------------------------------------
+# create_message_and_broadcast() — the shared core of
+# `ConversationViewSet.messages()`'s POST branch (views.py), pulled out so a
+# non-REST caller (currently: `post.views.StoryReplyAPIView`, delivering a
+# story reply into the recipient's DM inbox) can create a real `Message`
+# row and push it out over the EXACT SAME two channel-layer paths that
+# endpoint already uses, instead of that caller growing its own parallel
+# broadcast logic:
+#   - `chat_{conversation.id}`   -> ChatConsumer.chat_message (open chat screen)
+#   - `user_{other_uid}`         -> InboxConsumer.inbox_update (chat list)
+#
+# Deliberately does NOT include the REST-only pieces of that view action
+# (permission gates, @mention extraction, group daily-limit checks, the
+# link-preview/voice-transcribe Celery hooks, `client_id` offline-dedup) —
+# none of those apply to a message a backend feature is inserting into a
+# thread on a user's behalf. If a future caller needs one of those, extend
+# this function's kwargs rather than duplicating the loop again elsewhere.
+# ---------------------------------------------------------------------------
+def create_message_and_broadcast(
+    *, conversation, sender, message_type, text=None,
+    file_url=None, file_urls=None, thumbnail_url=None, meta=None,
+    extra_fields=None, send_push=True,
+):
+    """Returns the created `Message`."""
+    from django.db.models import F
+    from .models import Message, MessageStatus
+    from .push_utils import send_chat_message_push
+    from .user_display import build_user_mini
+
+    extra_fields = extra_fields or {}
+    disappearing_delta = conversation.get_disappearing_timedelta()
+    expires_at = (timezone.now() + disappearing_delta) if disappearing_delta else None
+
+    with transaction.atomic():
+        message = Message.objects.create(
+            conversation=conversation,
+            sender=sender,
+            type=message_type,
+            text=text,
+            file_url=file_url,
+            file_urls=file_urls or [],
+            thumbnail_url=thumbnail_url,
+            meta=meta or {},
+            expires_at=expires_at,
+            **extra_fields,
+        )
+
+        conversation.last_message_text = (text or '')[:500]
+        conversation.last_message_at = message.created_at
+        conversation.last_message_sender = sender
+        conversation.last_message_type = message.type
+        conversation.save(update_fields=[
+            'last_message_text', 'last_message_at', 'last_message_sender', 'last_message_type',
+        ])
+
+        other_recipients = list(
+            ConversationParticipant.objects.filter(conversation=conversation)
+            .exclude(user=sender)
+            .values_list('user_id', flat=True)
+        )
+        ConversationParticipant.objects.filter(
+            conversation=conversation, user_id__in=other_recipients,
+        ).update(unread_count=F('unread_count') + 1)
+
+        MessageStatus.objects.bulk_create(
+            [MessageStatus(message=message, user_id=uid) for uid in other_recipients],
+            ignore_conflicts=True,
+        )
+
+    sender_mini = build_user_mini(sender)
+    channel_layer = get_channel_layer()
+    if channel_layer is not None:
+        async_to_sync(channel_layer.group_send)(
+            f'chat_{conversation.id}',
+            {
+                'type': 'chat_message',
+                'event': 'message',
+                'id': str(message.id),
+                'conversation_id': str(conversation.id),
+                'sender_id': str(sender.id),
+                'sender_name': sender_mini['display_name'],
+                'sender_username': sender_mini['username'],
+                'sender_first_name': sender_mini['first_name'],
+                'sender_last_name': sender_mini['last_name'],
+                'sender_profile_photo': sender_mini['profile_photo'],
+                'message_type': message.type,
+                'text': message.text,
+                'file_url': message.file_url,
+                'file_urls': message.file_urls,
+                'thumbnail_url': message.thumbnail_url,
+                'meta': message.meta,
+                'reply_to': None,
+                'client_id': None,
+                'mentioned_user_ids': [],
+                # Story-reply metadata — harmless/absent for every other
+                # message type, read by the Flutter side's
+                # `MessageType.storyReply` branch (message_models.dart).
+                'story_id': str(message.story_id) if message.story_id else None,
+                'story_reply_snapshot': message.story_reply_snapshot,
+                'created_at': message.created_at.isoformat(),
+            }
+        )
+        for uid in other_recipients:
+            async_to_sync(channel_layer.group_send)(
+                f'user_{uid}',
+                {
+                    'type': 'inbox_update',
+                    'conversation_id': str(conversation.id),
+                    'message_id': str(message.id),
+                    'sender_id': str(sender.id),
+                    'sender_name': sender_mini['display_name'],
+                    'last_message_text': message.text,
+                    'last_message_type': message.type,
+                    'created_at': message.created_at.isoformat(),
+                }
+            )
+
+    if send_push and other_recipients:
+        muted_user_ids = set(
+            ConversationParticipant.objects.filter(
+                conversation=conversation, user_id__in=other_recipients, is_muted=True,
+            ).values_list('user_id', flat=True)
+        )
+        push_recipients = [uid for uid in other_recipients if uid not in muted_user_ids]
+        if push_recipients:
+            send_chat_message_push(
+                recipient_ids=push_recipients,
+                sender_name=sender_mini['display_name'],
+                message_text=message.text,
+                message_type=message.type,
+                conversation_id=conversation.id,
+                message_id=message.id,
+                is_announcement=False,
+            )
+
+    return message
 
 
 def generate_group_invite_code() -> str:
@@ -89,12 +278,18 @@ def create_group(
     photo_url: Optional[str] = None,
     is_private: bool = False,
     member_ids: Iterable = (),
+    topic_tag: Optional[str] = None,
 ) -> Group:
     """
     Naya group + uski underlying Conversation banata hai, `created_by` ko
     ADMIN role ke saath, aur `member_ids` (agar diye hon) ko plain MEMBER
     ke roop me. `created_by` khud `member_ids` me ho to bhi duplicate
     nahi banega (discard kar diya jaata hai).
+
+    🔥 NAYA (Task G14) — `topic_tag` optional hai (e.g. "NEET 2027",
+    "JEE Mains") — sirf discovery search ke liye use hota hai, koi aur
+    behaviour nahi badalta. Blank/None chhod do to group bas discover
+    search me topic-filter se nahi milega (name-search se phir bhi milega).
     """
     with transaction.atomic():
         conversation = Conversation.objects.create(type=ConversationType.GROUP)
@@ -106,6 +301,7 @@ def create_group(
             is_private=is_private,
             invite_code=generate_group_invite_code(),
             created_by=created_by,
+            topic_tag=(topic_tag or '').strip() or None,
         )
 
         ids = set(member_ids)
@@ -305,7 +501,7 @@ def answer_doubt_question(*, doubt, actor, answer_text: str, answered_by=None):
 # kept below for history) on the grounds that `push_utils.py` already
 # creates bell rows inline per-event via `core.services.create_notification()`,
 # and nothing else called this. That's no longer true:
-# `liveclass/parent_link_views.py::ClassroomParentCodeGenerateView.post()`
+# `tuitionclass/parent_link_views.py::ClassroomParentCodeGenerateView.post()`
 # now calls this directly (Task 11's "notify the student a parent code was
 # created" gap-fix) with a `recipient_ids` LIST, which bare
 # `create_notification()` doesn't support — it only takes one `recipient`.

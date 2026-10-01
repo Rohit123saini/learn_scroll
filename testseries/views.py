@@ -38,9 +38,9 @@ from .serializers import (
 class TestSeriesViewSet(SeriesAdvancedActionsMixin, viewsets.ModelViewSet):
     """§5: `source="individual"` — any authenticated user creates
     directly here, choosing `is_paid`/`price_coins` themselves.
-    `source="campus"`/`"liveclass"` series are NOT created through this
+    `source="campus"`/`"tuitionclass"` series are NOT created through this
     endpoint at all — they arrive via `bridge.create_context_testseries()`,
-    called from campus/liveclass's own bridge-wrapped endpoints (which
+    called from campus/tuitionclass's own bridge-wrapped endpoints (which
     have already done their staff/teacher checks). This viewset still
     lists/retrieves them (read path is shared), just never creates them.
     """
@@ -49,27 +49,71 @@ class TestSeriesViewSet(SeriesAdvancedActionsMixin, viewsets.ModelViewSet):
     serializer_class = TestSeriesSerializer
     permission_classes = [IsAuthenticated, IsSeriesCreatorOrReadOnly]
 
+    # Task G9 — `?ordering=` values accepted on the list endpoint.
+    # `"trending"` is deliberately NOT here: attempt-velocity ranking
+    # needs `with_recent_attempts()` (a `TestAttempt.started_at` window),
+    # which the plain list endpoint has no reason to compute on every
+    # page load — that ranking lives on its own `trending` rail action
+    # (`views_advanced.py::SeriesAdvancedActionsMixin.trending`).
+    ORDERING_FIELDS = {
+        "newest": "-created_at",
+        "oldest": "created_at",
+        "rating": db_models.F("rating").desc(nulls_last=True),
+        "price_low": "price_coins",
+        "price_high": "-price_coins",
+    }
+
     def get_queryset(self):
-        qs = super().get_queryset().annotate(q_count=db_models.Count("questions", distinct=True))
-        source = self.request.query_params.get("source")
+        qs = (
+            super().get_queryset()
+            .annotate(q_count=db_models.Count("questions", distinct=True))
+            .with_rating()
+        )
+        params = self.request.query_params
+        source = params.get("source")
         if source:
             qs = qs.filter(source=source)
+
+        # ---- Task G9: search / filter — subject, difficulty, price
+        # (free/paid), minimum rating, free-text title/description.
+        subject = params.get("subject")
+        if subject:
+            qs = qs.filter(subject__icontains=subject)
+        difficulty = params.get("difficulty")
+        if difficulty:
+            qs = qs.filter(difficulty=difficulty)
+        price = params.get("price")
+        if price == "free":
+            qs = qs.filter(is_paid=False)
+        elif price == "paid":
+            qs = qs.filter(is_paid=True)
+        min_rating = params.get("min_rating")
+        if min_rating:
+            try:
+                qs = qs.filter(rating__gte=float(min_rating))
+            except (TypeError, ValueError):
+                pass  # a garbage value just means "no rating filter", not a 400
+        search = params.get("search")
+        if search:
+            qs = qs.filter(db_models.Q(title__icontains=search) | db_models.Q(description__icontains=search))
+        qs = qs.order_by(self.ORDERING_FIELDS.get(params.get("ordering"), "-created_at"))
+
         # Individual/marketplace discovery is browse-based (§4 — no
         # follower/subscriber concept yet), so published individual series
         # are visible to everyone; a creator additionally sees their own
         # drafts.
         #
-        # [SECURITY FIX] campus / liveclass series used to be returned to
+        # [SECURITY FIX] campus / tuitionclass series used to be returned to
         # EVERY logged-in user here ("scoped upstream by the bridge endpoint" —
         # but this endpoint is reachable directly). They are now limited to
         # members of that section / classroom via `access.visible_series_q`,
         # which asks the owning app through a configured resolver, so this app
-        # still never imports campus or liveclass (golden rule).
+        # still never imports campus or tuitionclass (golden rule).
         return qs.filter(visible_series_q(self.request.user))
 
     def perform_create(self, serializer):
         # No bulk TESTSERIES_POSTED notification here — that's a
-        # roster-driven notification only meaningful for campus/liveclass
+        # roster-driven notification only meaningful for campus/tuitionclass
         # context series, which don't go through this method at all
         # (see bridge.create_context_testseries). Individual series rely
         # on browse-based discovery per §4.
@@ -96,7 +140,7 @@ class TestSeriesViewSet(SeriesAdvancedActionsMixin, viewsets.ModelViewSet):
             )
 
         # Pricing policy, STRICT (config: settings.TESTSERIES_PRICING_POLICY):
-        # individual = paid, campus = free, liveclass = free or paid. Legacy
+        # individual = paid, campus = free, tuitionclass = free or paid. Legacy
         # drafts created before the policy existed are caught here, not silently
         # published against the rules.
         try:
@@ -127,11 +171,11 @@ class TestSeriesViewSet(SeriesAdvancedActionsMixin, viewsets.ModelViewSet):
 
         # TASK 5: notify the creator's followers that a new (individual/
         # marketplace) series is live. Only for source="individual" —
-        # campus/liveclass-context series already notify their own
+        # campus/tuitionclass-context series already notify their own
         # classroom/section roster through a different, membership-based
         # path (see perform_create's own note above for why THAT
         # notification is scoped the same way; individual discovery is
-        # follow/browse-based per §4, campus/liveclass is not). Queued,
+        # follow/browse-based per §4, campus/tuitionclass is not). Queued,
         # never inline — see tasks.py::notify_followers_new_testseries
         # for why a synchronous per-follower loop here would be wrong.
         if series.source == TestSeries.Source.INDIVIDUAL:
@@ -222,7 +266,7 @@ class TestAttemptViewSet(
         # campus subject-teacher may review" — resolving that set here
         # would mean this app resolving campus context-membership
         # itself, which is exactly what the golden rule (no campus/
-        # liveclass imports/queries from this app) forbids. Retrieving
+        # tuitionclass imports/queries from this app) forbids. Retrieving
         # a SINGLE attempt for review is handled separately by
         # get_object() below, which is where the subject-teacher case
         # actually needs to work.
@@ -271,7 +315,7 @@ class TestAttemptViewSet(
         series = get_object_or_404(TestSeries, pk=series_id, status=TestSeries.Status.PUBLISHED)
 
         # [SECURITY FIX] anyone could start any published series, including a
-        # campus series of another school or a live class they never joined.
+        # campus series of another school or a tuition class they never joined.
         if not user_can_access_series(request.user, series):
             raise PermissionDenied("You don't have access to this test series.")
 

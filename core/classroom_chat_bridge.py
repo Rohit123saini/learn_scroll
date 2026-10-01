@@ -1,18 +1,18 @@
 # core/classroom_chat_bridge.py
 """
-Classroom (liveclass app) <-> chat Group (message app) bridge — task 28.
+Classroom (tuitionclass app) <-> chat Group (message app) bridge — task 28.
 🔧 GAP FIX (this pass) — also now the campus (campus app) <-> chat
 Group / video-room bridge, see functions 10/11 below.
 
-Ye module do already-separate apps ko jodta hai: `liveclass` (classrooms,
+Ye module do already-separate apps ko jodta hai: `tuitionclass` (classrooms,
 sessions, join requests, staff, bans) aur `message` (Groups/chat). Koi bhi
-cross-app coupling isi ek file se guzarta hai — `liveclass/signals.py`,
-`liveclass/views.py`, aur `notify_session_live` task in 9 functions ko
+cross-app coupling isi ek file se guzarta hai — `tuitionclass/signals.py`,
+`tuitionclass/views.py`, aur `notify_session_live` task in 9 functions ko
 call karte hain (pehle 8 the — Task 5 ne `resolve_parent_from_token()`
 add ki, neeche dekho).
 
 🔧 Docstring fix: is module ke total **14** public entry points hain —
-functions 1-9 `liveclass` khud call karta hai, 10wa (`get_groups_for_
+functions 1-9 `tuitionclass` khud call karta hai, 10wa (`get_groups_for_
 classrooms()`) `message/views_parent.py` seedha call karta hai, aur
 11wa/12wa (`create_section_group()`/`provision_video_room()`, pehli pass
 me add kiye — campus/bridge.py's own STATUS note dekho) `campus/bridge.py`
@@ -29,7 +29,7 @@ TASK 14 ke file list me bhi nahi thi).
 
 Module khud kabhi `message.models`/`message.services` ko seedha import
 nahi karta (sirf local imports, function ke andar). Isse:
-    1. `liveclass`/`campus` app `message` app ke internal implementation
+    1. `tuitionclass`/`campus` app `message` app ke internal implementation
        details (Group ka exact shape, GroupMember role enum, ...) se
        decoupled rehte hain — sirf yahi ek jagah dono taraf ka contract
        jaanta hai.
@@ -37,7 +37,7 @@ nahi karta (sirf local imports, function ke andar). Isse:
        ek file badalni padegi.
 
 DESIGN — har function best-effort hai (module docstring ka wahi pattern
-jo liveclass/signals.py already follow karta hai): agar classroom ke paas
+jo tuitionclass/signals.py already follow karta hai): agar classroom ke paas
 `chat_group_enabled=False` hai (teacher ne kabhi group banaya hi nahi),
 har sync function chup-chaap NO-OP ho jaata hai — kabhi exception nahi
 raise karta jo caller (koi bhi signal handler) ko todde. Sirf
@@ -46,7 +46,7 @@ teacher/class-teacher confirm actions hain, signal nahi) real errors
 raise karte hain — us case me caller (the view) ko pata hona chahiye ki
 create fail hui.
 
-✅ VERIFIED (Task 2 gap-fix pass) against the real `liveclass/models.py`:
+✅ VERIFIED (Task 2 gap-fix pass) against the real `tuitionclass/models.py`:
 `Classroom.chat_group_enabled` / `linked_conversation_id`,
 `ClassJoinRequest(classroom, student, status)`,
 `ClassroomStaff(classroom, user, role)`, and `Classroom.cover_image`
@@ -193,7 +193,7 @@ def get_groups_for_classrooms(classrooms):
 # ---------------------------------------------------------------------------
 def create_classroom_group(classroom, actor):
     """
-    Teacher ke explicit "haan" (POST /liveclass/classrooms/<id>/create_group/)
+    Teacher ke explicit "haan" (POST /tuitionclass/classrooms/<id>/create_group/)
     pe call hota hai. Idempotent — agar classroom ke paas already group hai,
     wahi wapas kar deta hai (naya nahi banata).
 
@@ -214,16 +214,16 @@ def create_classroom_group(classroom, actor):
     if existing is not None:
         return existing
 
-    # CONFIRMED against liveclass/models.py: ClassJoinRequest(classroom,
+    # CONFIRMED against tuitionclass/models.py: ClassJoinRequest(classroom,
     # student, status) with Status.ACCEPTED — exact match, no change needed.
-    from liveclass.models import ClassJoinRequest, ClassroomStaff
+    from tuitionclass.models import ClassJoinRequest, ClassroomStaff
 
     accepted_student_ids = list(
         ClassJoinRequest.objects.filter(
             classroom=classroom, status=ClassJoinRequest.Status.ACCEPTED,
         ).values_list('student_id', flat=True)
     )
-    # CONFIRMED against liveclass/models.py: ClassroomStaff(classroom,
+    # CONFIRMED against tuitionclass/models.py: ClassroomStaff(classroom,
     # user, role) — exact match, no change needed.
     staff_user_ids = list(
         ClassroomStaff.objects.filter(classroom=classroom).values_list('user_id', flat=True)
@@ -449,7 +449,7 @@ def post_session_live_announcement(session):
 # ADDED this pass to close the gap `campus/bridge.py`'s own module
 # docstring flagged: `create_section_group`/`provision_video_room` were
 # referenced from campus but did not exist here yet. Both follow the
-# exact same "campus never imports message/liveclass models directly,
+# exact same "campus never imports message/tuitionclass models directly,
 # core.classroom_chat_bridge is the only door" pattern as functions 1-8
 # above — the only difference is the section/campus vocabulary
 # (StudentEnrollment/ClassTeacherassigments/SubjectTeacherassigments
@@ -605,7 +605,7 @@ def provision_video_room(live_session, actor):
 # at actual join time, by campus/views.py's new `join` action.
 #
 # Kept here (not pushed onto `campus/bridge.py`) for the same "campus
-# never imports message/liveclass directly, this module is the only
+# never imports message/tuitionclass directly, this module is the only
 # door" reasoning every function above documents — `campus/views.py`
 # imports this function directly, same as `message/views_parent.py`
 # already imports `get_groups_for_classrooms()` directly rather than
@@ -668,7 +668,7 @@ def generate_campus_session_token(room_name: str, user) -> str:
 # 14. resolve_parent_from_token() — Task 5, parent-portal auth
 # ---------------------------------------------------------------------------
 class ParentTokenResolution:
-    """Lightweight result object — `liveclass/permissions.py`'s
+    """Lightweight result object — `tuitionclass/permissions.py`'s
     `HasValidParentSessionToken` copies these straight onto
     `request.parent_student` / `request.parent_access_code`."""
 

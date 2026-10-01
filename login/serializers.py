@@ -60,7 +60,13 @@ def validate_phone_format(value):
     validators when it builds the field itself, not when you redeclare
     it). That gap meant bad phone numbers (too short, leading zero)
     could reach the DB without ever being rejected.
+
+    Phone is now optional everywhere it's used, so this only runs when a
+    value was actually supplied — an empty/blank phone skips format
+    validation entirely instead of being rejected.
     """
+    if not value:
+        return value
     try:
         phone_validator(value)
     except DjangoValidationError as exc:
@@ -94,7 +100,12 @@ class SignupSerializer(serializers.ModelSerializer):
         style={"input_type": "password"},
     )
 
-    phone = serializers.CharField()
+    # Optional now — a signup with no phone must go through cleanly.
+    # allow_null covers a client sending JSON `null`; allow_blank covers
+    # an empty string ("") from a form field. Either way it ends up as
+    # None (see validate_phone below / models.User.save()'s blank->None
+    # normalization), never as ''.
+    phone = serializers.CharField(required=False, allow_blank=True, allow_null=True)
 
     class Meta:
         model = User
@@ -132,7 +143,14 @@ class SignupSerializer(serializers.ModelSerializer):
 
     def validate_phone(self, value):
 
-        value = value.strip()
+        value = (value or "").strip()
+
+        # Phone is optional — no value means "skip validation, skip the
+        # uniqueness check, store as None" (User.save() also normalizes
+        # '' -> None, but returning None here up front keeps attrs["phone"]
+        # correct for the OTP lookup in validate() below too).
+        if not value:
+            return None
 
         value = validate_phone_format(value)
 
@@ -203,7 +221,12 @@ class SignupSerializer(serializers.ModelSerializer):
             email=validated_data["email"],
             first_name=validated_data["first_name"],
             last_name=validated_data["last_name"],
-            phone=validated_data["phone"],
+            # .get, not [...]: phone is optional now, so with
+            # required=False and no default, the key is simply absent
+            # from validated_data when the client omits it entirely
+            # (as opposed to sending "" / null, which validate_phone
+            # turns into None) — direct indexing would KeyError.
+            phone=validated_data.get("phone"),
             password=validated_data["password"],
             # ✅ Actually true now — gated by the `validate()` check above
             # instead of assumed.

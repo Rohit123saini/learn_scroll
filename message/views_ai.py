@@ -14,6 +14,9 @@ from rest_framework.throttling import UserRateThrottle
 from .ai_service import (
     generate_summary, generate_quiz, transcribe_audio, generate_reply_suggestions,
     generate_classroom_answer, generate_revision_deck, AI_ENABLED,
+    # 🔥 NAYA — Task G15 (growth_and_feature_tasks.md): generalized "Ask AI"
+    # doubt solver, see AskAIDoubtView below.
+    generate_doubt_answer,
 )
 from .models import (
     Message, ConversationParticipant, ClassTranscriptSegment,
@@ -194,6 +197,111 @@ class SmartReplySuggestionsView(APIView):
             return Response({"error": "Suggestions temporarily unavailable"}, status=500)
 
         return Response({"suggestions": suggestions}, status=200)
+
+
+# 🔥 NAYA — Task G15's own throttle. Kept looser than the classroom
+# copilot's (15/min) since this is meant to be tapped from all over the
+# app (feed, test results, chat) rather than one focused study-room
+# screen, but still bounded so a client bug/loop can't burn Gemini quota.
+class AskAIDoubtThrottle(UserRateThrottle):
+    rate = '20/min'
+    scope = 'ai_ask_doubt'
+
+
+# ==========================================================================
+# 🔥 NAYA — Task G15 (growth_and_feature_tasks.md, Section E): generalized
+# "Ask AI" doubt-solving entry point.
+# --------------------------------------------------------------------------
+# `ClassroomCopilotView` below already does AI doubt-answering, but it's
+# hard-wired to ONE study-room conversation (requires `conversation_id` +
+# `ConversationParticipant` membership, builds its context from that
+# conversation's chat/whiteboard/transcript). G15 explicitly asks for
+# "Ask AI" reachable from a feed post, a wrong test-series question, or a
+# chat message — the first two have no conversation to be a member of, so
+# this view is deliberately conversation-agnostic: any authenticated user
+# can ask, and the caller (frontend) supplies whatever context text is
+# relevant (a post's caption, a wrong question + correct answer, a chat
+# message) as plain text.
+# ==========================================================================
+class AskAIDoubtView(APIView):
+    """
+    POST /message/ai/ask-doubt/
+    Body: {
+      "question": "...",                  (required — the student's doubt)
+      "context_type": "feed_post" | "test_question" | "chat" | "general",
+      "context_text": "...",               (optional — the post caption,
+                                             the test question + student's
+                                             wrong answer + correct answer,
+                                             the chat message, etc.)
+      "source_id": "..."                   (optional — post id / question
+                                             id / message id. Folded into
+                                             the cache key only so two
+                                             different posts/questions
+                                             with coincidentally identical
+                                             text don't share a cached
+                                             answer — never persisted.)
+    }
+    Response: {"answer": "..."}
+
+    Stateless by design (same as `AiStudyRoomView`/`VoiceTranscribeView`
+    below) — nothing is written to the DB, this is a pure ask-and-answer.
+    If a "doubt history" screen is ever wanted later, wrap this the same
+    way `RevisionDeckView` wraps `generate_revision_deck` with a model.
+    """
+    permission_classes = [IsAuthenticated]
+    throttle_classes = [AskAIDoubtThrottle]
+
+    VALID_CONTEXT_TYPES = {"feed_post", "test_question", "chat", "general"}
+    MAX_QUESTION_LEN = 500
+    MAX_CONTEXT_LEN = 4000
+
+    # Har context_type ke liye ek chhota human-readable label — prompt me
+    # jaata hai taaki AI ka framing source ke hisaab se badle (e.g. wrong
+    # test question => "explain WHY you were wrong", generic post => plain
+    # concept explanation). See `ai_service.generate_doubt_answer`.
+    CONTEXT_LABELS = {
+        "feed_post": "a social feed post the student is reading",
+        "test_question": "a test question the student answered, including their answer and the correct answer",
+        "chat": "a chat conversation",
+        "general": "general studies",
+    }
+
+    def post(self, request):
+        if not AI_ENABLED:
+            return Response({"error": "AI service not configured on server"}, status=503)
+
+        question = (request.data.get("question") or "").strip()
+        context_type = (request.data.get("context_type") or "general").strip()
+        context_text = (request.data.get("context_text") or "").strip()
+        source_id = (request.data.get("source_id") or "").strip()
+
+        if not question:
+            return Response({"error": "question required hai"}, status=400)
+        if len(question) > self.MAX_QUESTION_LEN:
+            return Response(
+                {"error": f"Question too long, max {self.MAX_QUESTION_LEN} chars"}, status=400,
+            )
+        if context_type not in self.VALID_CONTEXT_TYPES:
+            context_type = "general"
+        # Abuse rokne ke liye — chhota-sa truncate, silently (post caption
+        # ya question text kabhi itna bada nahi hota ki ye trigger ho, ye
+        # sirf ek defensive cap hai).
+        context_text = context_text[: self.MAX_CONTEXT_LEN]
+
+        try:
+            answer = generate_doubt_answer(
+                question=question,
+                context_text=context_text,
+                context_label=self.CONTEXT_LABELS[context_type],
+                cache_scope=f"{context_type}:{source_id}",
+            )
+        except Exception as e:
+            logger.exception(
+                f"Ask-AI doubt failed user={request.user.id} type={context_type} err={e}"
+            )
+            return Response({"error": "AI temporarily unavailable, try again"}, status=500)
+
+        return Response({"answer": answer}, status=200)
 
 
 class AiStudyRoomView(APIView):

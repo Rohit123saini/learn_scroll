@@ -698,3 +698,63 @@ class BoundedPaginationTests(APITestCase):
         r = self.client.get(reverse("user-followers", args=[target.username]))
         row = next(x for x in r.data["data"]["results"] if x["username"] == "f")
         self.assertEqual(row["mutual_friends"], 1)
+
+
+# --------------------------------------------------------------------- mutual-follow -> conversation
+class MutualFollowConversationTests(APITestCase):
+    """`user_profile/signals.py`'s `_follow_saved_mutual_conversation`: once
+    two users follow each other (both `Follow` rows ACCEPTED), an empty
+    private `Conversation` should exist for the pair — created without
+    either side sending a real `Message` — and it should be visible in
+    both users' `GET /message/conversations/` inbox immediately."""
+
+    def test_second_accepted_follow_creates_conversation_for_both(self):
+        a, b = mk("a"), mk("b")
+        Follow.objects.create(follower=a, following=b, status=Follow.Status.ACCEPTED)
+        self.assertEqual(Conversation.objects.count(), 0)  # one-way yet — no thread
+
+        # the follow-back is what makes it mutual
+        Follow.objects.create(follower=b, following=a, status=Follow.Status.ACCEPTED)
+
+        self.assertEqual(Conversation.objects.count(), 1)
+        convo = Conversation.objects.get()
+        self.assertEqual(
+            set(convo.memberships.values_list("user_id", flat=True)), {a.id, b.id},
+        )
+        self.assertIsNone(convo.last_message_text)  # no message was sent
+
+        for who in (a, b):
+            self.client.force_authenticate(who)
+            r = self.client.get(reverse("conversation-list"))
+            self.assertEqual(r.status_code, status.HTTP_200_OK)
+            ids = [c["id"] for c in r.data["results"]] if "results" in r.data else [
+                c["id"] for c in r.data["data"]["results"]
+            ]
+            self.assertIn(str(convo.id), ids)
+
+    def test_accepting_a_pending_request_that_completes_mutual_creates_conversation(self):
+        # private account -> follow starts PENDING, and only becomes mutual
+        # once the request is *accepted* (status flips on save(), not create()).
+        a, b = mk("a"), mk("b", is_private=True)
+        Follow.objects.create(follower=b, following=a, status=Follow.Status.ACCEPTED)
+        pending = Follow.objects.create(follower=a, following=b, status=Follow.Status.PENDING)
+        self.assertEqual(Conversation.objects.count(), 0)
+
+        pending.status = Follow.Status.ACCEPTED
+        pending.save(update_fields=["status"])
+
+        self.assertEqual(Conversation.objects.count(), 1)
+
+    def test_one_way_follow_alone_never_creates_a_conversation(self):
+        a, b = mk("a"), mk("b")
+        Follow.objects.create(follower=a, following=b, status=Follow.Status.ACCEPTED)
+        self.assertEqual(Conversation.objects.count(), 0)
+
+    def test_repeated_saves_of_an_already_mutual_pair_stay_idempotent(self):
+        a, b = mk("a"), mk("b")
+        f1 = Follow.objects.create(follower=a, following=b, status=Follow.Status.ACCEPTED)
+        Follow.objects.create(follower=b, following=a, status=Follow.Status.ACCEPTED)
+        self.assertEqual(Conversation.objects.count(), 1)
+
+        f1.save()  # unrelated re-save — must not spawn a second conversation
+        self.assertEqual(Conversation.objects.count(), 1)

@@ -3,7 +3,7 @@
 Phone-OTP delivery via MSG91.
 
 WHY MSG91 and not Twilio: the project already has an MSG91 account wired
-up for liveclass notifications (see `liveclass/notifications.py`
+up for tuitionclass notifications (see `tuitionclass/notifications.py`
 `_send_sms` / `_send_whatsapp`, and `MSG91_AUTH_KEY` /
 `MSG91_SMS_SENDER_ID` in settings.py). Standing up a second SMS vendor
 (Twilio) just for login OTP would mean two vendor accounts, two sets of
@@ -24,9 +24,9 @@ paths verify the same way, against our own `otp_hash`.
 Needs a DLT-registered OTP template on the MSG91 dashboard containing a
 `##OTP##` variable (India's TRAI/DLT regulations require this for any
 transactional SMS) — its ID goes in `MSG91_OTP_TEMPLATE_ID` (settings.py).
-`MSG91_AUTH_KEY` is already shared with the liveclass notifications.
+`MSG91_AUTH_KEY` is already shared with the tuitionclass notifications.
 
-Fails LOUD, on purpose: `_send_sms` in liveclass is a best-effort
+Fails LOUD, on purpose: `_send_sms` in tuitionclass is a best-effort
 notification (it no-ops on missing config, since a missed "class
 starting soon" ping isn't blocking). An OTP that silently fails to send
 is a broken signup/login with no path forward for the user — so every
@@ -63,7 +63,7 @@ def send_otp_sms(phone: str, otp_code: str) -> None:
     Raises `SMSDeliveryError` on any failure. Returns None on success.
     """
     if not (settings.MSG91_AUTH_KEY and settings.MSG91_OTP_TEMPLATE_ID):
-        # Fail loud (unlike liveclass's best-effort notifications) —
+        # Fail loud (unlike tuitionclass's best-effort notifications) —
         # see module docstring. An unconfigured SMS provider must not
         # look like a successful send to the caller.
         logger.error(

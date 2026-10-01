@@ -7,10 +7,10 @@ class CoreConfig(AppConfig):
       1. The notification system (Notification / NotificationPreference
          models, create_notification(), create_batched_notification(),
          and the REST endpoints that expose them).
-      2. The liveclass <-> message classroom/chat bridge
+      2. The tuitionclass <-> message classroom/chat bridge
          (classroom_chat_bridge.py).
 
-    `liveclass`, `message`, and future Phase 5 apps (Posts/Follow/Like)
+    `tuitionclass`, `message`, and future Phase 5 apps (Posts/Follow/Like)
     all depend on `core` — `core` never imports from them at module load
     time (only local imports inside functions, see
     classroom_chat_bridge.py), so it stays the neutral bottom layer of
