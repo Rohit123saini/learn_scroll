@@ -127,6 +127,15 @@ class _ParentDashboardScreenState extends State<ParentDashboardScreen> {
                   )
                 else
                   ...dashboard.classrooms.map((c) => _classroomCard(c, l10n)),
+                if (dashboard.testResults.isNotEmpty) ...[
+                  const SizedBox(height: 8),
+                  Text(
+                    'Test results',
+                    style: TextStyle(color: cs.onSurface, fontSize: 17, fontWeight: FontWeight.w600),
+                  ),
+                  const SizedBox(height: 12),
+                  ...dashboard.testResults.map((r) => _testResultCard(r)),
+                ],
               ],
             ),
           );
@@ -180,6 +189,65 @@ class _ParentDashboardScreenState extends State<ParentDashboardScreen> {
                 label: l10n.parentDashSubmitted,
                 value: '${c.assignments.submitted}/${c.assignments.total}',
               ),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+
+  /// One checked testseries result — report-card fields only (title,
+  /// score, pass/fail, where it came from). No question-level answers or
+  /// reviewer feedback ever reaches parent mode (see backend STRICT SCOPE).
+  Widget _testResultCard(ParentTestResult r) {
+    final cs = Theme.of(context).colorScheme;
+    final tokens = AppThemeTokens.of(context);
+    final passed = r.passed;
+    final statusColor = passed == null
+        ? cs.onSurfaceVariant
+        : (passed ? tokens.success : tokens.warning);
+    final sourceLabel = r.source == 'campus'
+        ? 'Campus'
+        : (r.source == 'tuitionclass' ? 'Tuition class' : 'Test series');
+    return Container(
+      margin: const EdgeInsets.only(bottom: 12),
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        color: tokens.surface2,
+        borderRadius: BorderRadius.circular(16),
+      ),
+      child: Row(
+        children: [
+          Icon(Icons.fact_check_outlined, color: statusColor),
+          const SizedBox(width: 12),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  r.seriesTitle,
+                  style: TextStyle(color: cs.onSurface, fontSize: 15, fontWeight: FontWeight.w600),
+                ),
+                const SizedBox(height: 2),
+                Text(
+                  '$sourceLabel · Attempt ${r.attemptNumber}',
+                  style: TextStyle(color: cs.onSurfaceVariant, fontSize: 12),
+                ),
+              ],
+            ),
+          ),
+          Column(
+            crossAxisAlignment: CrossAxisAlignment.end,
+            children: [
+              Text(
+                '${r.finalScore ?? '-'}/${r.totalMarks}',
+                style: TextStyle(color: cs.onSurface, fontSize: 16, fontWeight: FontWeight.bold),
+              ),
+              if (passed != null)
+                Text(
+                  passed ? 'Passed' : 'Failed',
+                  style: TextStyle(color: statusColor, fontSize: 12, fontWeight: FontWeight.w600),
+                ),
             ],
           ),
         ],

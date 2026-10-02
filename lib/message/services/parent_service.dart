@@ -86,17 +86,65 @@ class ParentClassroomSummary {
   }
 }
 
+/// A single fully-checked testseries result, as returned by
+/// `testseries.bridge.get_result_summary_for_student()` via
+/// `GET /message/parent/dashboard/`'s `test_results` list. Report-card
+/// fields only — no per-question answers/feedback (parent mode never
+/// exposes those, see the backend view's own STRICT SCOPE docstring).
+class ParentTestResult {
+  final String seriesTitle;
+  final String source; // "individual" | "campus" | "tuitionclass"
+  final int attemptNumber;
+  final int? finalScore;
+  final int totalMarks;
+  final double? percentage;
+  final bool? passed;
+  final String? checkedAt;
+
+  ParentTestResult({
+    required this.seriesTitle,
+    required this.source,
+    required this.attemptNumber,
+    required this.finalScore,
+    required this.totalMarks,
+    required this.percentage,
+    required this.passed,
+    required this.checkedAt,
+  });
+
+  factory ParentTestResult.fromJson(Map<String, dynamic> json) {
+    return ParentTestResult(
+      seriesTitle: json['series_title'] ?? '',
+      source: json['source'] ?? '',
+      attemptNumber: json['attempt_number'] ?? 1,
+      finalScore: json['final_score'],
+      totalMarks: json['total_marks'] ?? 0,
+      percentage: (json['percentage'] as num?)?.toDouble(),
+      passed: json['passed'],
+      checkedAt: json['checked_at'],
+    );
+  }
+}
+
 class ParentDashboard {
   final String studentName;
   final List<ParentClassroomSummary> classrooms;
+  final List<ParentTestResult> testResults;
 
-  ParentDashboard({required this.studentName, required this.classrooms});
+  ParentDashboard({
+    required this.studentName,
+    required this.classrooms,
+    this.testResults = const [],
+  });
 
   factory ParentDashboard.fromJson(Map<String, dynamic> json) {
     return ParentDashboard(
       studentName: json['student_name'] ?? '',
       classrooms: (json['classrooms'] as List? ?? [])
           .map((c) => ParentClassroomSummary.fromJson(c))
+          .toList(),
+      testResults: (json['test_results'] as List? ?? [])
+          .map((r) => ParentTestResult.fromJson(r))
           .toList(),
     );
   }

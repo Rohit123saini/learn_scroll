@@ -2,15 +2,18 @@ import 'package:flutter/material.dart';
 import 'package:google_sign_in/google_sign_in.dart';
 import '../services/api_service.dart';
 import '../services/auth_service.dart';
+import '../services/onboarding_service.dart';
 import '../login/signup_screen.dart';
 import '../home.dart';
 import 'forgot_password_screen.dart';
 import 'complete_profile_screen.dart'; // ✅ Google signup ke baad phone lene ke liye
+import '../onboarding/screens/onboarding_screen.dart'; // 🔥 TASK G18 — post-signup onboarding
 // 🔥 NAYA — dark mode + i18n. `theme_service.dart`/`language_service.dart`
 // jaisa hi pattern jo home.dart use karta hai (dekho ARCHITECTURE doc §3).
 import '../l10n/app_localizations.dart';
 import '../message/screens/parent_code_entry_screen.dart'; // Parent/Guardian Mode entry (Feature 8)
 import 'auth_widgets.dart';
+import '../services/account_manager.dart'; // P15-FE
 
 class LoginScreen extends StatefulWidget {
   const LoginScreen({super.key});
@@ -85,6 +88,14 @@ class _LoginScreenState extends State<LoginScreen> {
     );
   }
 
+  // P15-FE — "Add account" mode: the previous account is parked in the
+  // vault; X restores it and goes back Home.
+  Future<void> _cancelAddAccount() async {
+    final restored = await AccountManager.instance.cancelAddAccount();
+    if (!mounted || !restored) return;
+    Navigator.of(context).pushNamedAndRemoveUntil('/home', (_) => false);
+  }
+
   Future<void> _login() async {
     if (!_formKey.currentState!.validate()) return;
     final l10n = AppLocalizations.of(context)!;
@@ -113,9 +124,22 @@ class _LoginScreenState extends State<LoginScreen> {
 
       if (!mounted) return;
 
+      // 🔥 TASK G18 — plain username/password login doesn't tell us
+      // `isNewUser` the way the Google flows above do (this same
+      // endpoint is also how someone logs in for the very first time,
+      // right after `signup_screen.dart`'s OTP-verify pops them back
+      // here without auto-logging them in). `OnboardingService.
+      // isFinished()` asks the backend directly instead — it's a fast,
+      // single call, and defaults to `true` (skip straight to Home) on
+      // any failure, so a slow/offline check never blocks login.
+      final onboardingDone = await OnboardingService.isFinished();
+      if (!mounted) return;
+
       Navigator.pushReplacement(
         context,
-        MaterialPageRoute(builder: (context) => const HomeScreen()),
+        MaterialPageRoute(
+          builder: (context) => onboardingDone ? const HomeScreen() : const OnboardingScreen(),
+        ),
       );
     } catch (e) {
       if (!mounted) return;
@@ -166,11 +190,20 @@ class _LoginScreenState extends State<LoginScreen> {
 
       if (!mounted) return;
 
-      // If phone is missing (fresh Google signup), collect it before Home.
-      if (res.phoneMissing == true) {
+      // Phone is optional -> only offer the (skippable) phone step right
+      // after a brand-new Google signup, not on every later Google login.
+      if (res.phoneMissing == true && res.isNewUser == true) {
         Navigator.pushReplacement(
           context,
           MaterialPageRoute(builder: (context) => const CompleteProfileScreen()),
+        );
+      } else if (res.isNewUser == true) {
+        // 🔥 TASK G18 — same reasoning as signup_screen.dart's Google
+        // handler: a brand-new signup with no phone step needed still
+        // gets onboarding; an existing user logging in goes straight Home.
+        Navigator.pushReplacement(
+          context,
+          MaterialPageRoute(builder: (context) => const OnboardingScreen()),
         );
       } else {
         Navigator.pushReplacement(
@@ -445,6 +478,16 @@ class _LoginScreenState extends State<LoginScreen> {
               ),
             ),
             // 🔥 NAYA — home.dart jaisa hi EN/हिं toggle, top-right corner.
+            if (AccountManager.instance.isAddingAccount)
+              Positioned(
+                top: 4,
+                left: 4,
+                child: IconButton(
+                  tooltip: l10n.cancel,
+                  icon: const Icon(Icons.close_rounded),
+                  onPressed: anyLoading ? null : _cancelAddAccount,
+                ),
+              ),
             const Positioned(top: 4, right: 4, child: AuthLanguageToggle()),
           ],
         ),

@@ -3,8 +3,9 @@
 // 🎨 REDESIGN — sab logic/state/API calls bilkul same hain (kuch bhi tod
 // nahi hai), sirf visuals professional/polished bana diye hain — rounded
 // search pill, better avatar treatment, cleaner unread badges, nicer empty
-// states, aur ab wahi bottom nav bar bhi hai jo HomeScreen me hai (Home /
-// Search / Chats / Profile) — dekho app_bottom_nav.dart.
+// states, aur ab wahi bottom nav bar bhi hai jo HomeScreen me hai — same
+// 5 tabs, same order (Home / Campus / Classes / Chat / Profile) — dekho
+// widgets/app_bottom_nav.dart.
 
 import 'dart:async';
 import 'package:flutter/material.dart';
@@ -17,9 +18,13 @@ import '../services/message_cache_service.dart';
 import '../services/inbox_socket_service.dart';
 import 'chat_screen.dart';
 import 'create_group_screen.dart';
-import 'app_bottom_nav.dart'; // 🔥 NAYA
+import 'study_groups_discovery_screen.dart'; // 🔥 NAYA (Task G14) — Study Groups discovery entry point
+import '../../widgets/app_bottom_nav.dart'; // 🔥 FIX [Settings/Nav pass] — shared widget, home.dart ka exact mirror
+import '../../widgets/skeletons.dart'; // LsListSkeleton — cold-start loading row skeleton (Task G16)
 import 'message_search_screen.dart'; // 🔥 NAYA (Phase 4, §2.1/§4.2) — global message search
 import 'focus_mode_screen.dart'; // 🔥 NAYA (Feature 12) — Smart DND / Focus Mode setup screen
+import 'message_requests_screen.dart'; // 🔥 NAYA (M1-FE) — Message requests folder
+import '../widgets/notes_bar.dart'; // 🔥 NAYA (M2-FE) — Notes row (Instagram-style status)
 
 import '../../theme_service.dart'; // 🎨 THEME FIX — AppThemeTokens (home.dart jaisa hi shared design system)
 
@@ -66,6 +71,9 @@ class _ConversationsScreenState extends State<ConversationsScreen> {
 
   StreamSubscription? _inboxSub;
 
+  // 🔥 NAYA (M2-FE) — Notes row; pull-to-refresh par isko bhi refresh karte hain.
+  final GlobalKey<NotesBarState> _notesKey = GlobalKey<NotesBarState>();
+
   // 🔥 NAYA — Long-press select mode: WhatsApp jaisa. Long-press se
   // select mode on hota hai (jis chat pe long-press hua wo select ho
   // jaati hai), fir tap se aur chats select/deselect kar sakte ho.
@@ -94,6 +102,56 @@ class _ConversationsScreenState extends State<ConversationsScreen> {
     InboxSocketService.instance.connect();
     _inboxSub = InboxSocketService.instance.events.listen(_onInboxUpdate);
     _loadFocusStatus(); // 🔥 NAYA
+    InboxSocketService.instance.refreshRequestCount(); // 🔥 NAYA (M1-FE) — "Message requests (N)" row
+  }
+
+  // 🔥 NAYA (M1-FE) — requests folder kholo; wapas aane par chat list aur
+  // count dono refresh (accept hui chat ab inbox me aani chahiye).
+  Future<void> _openMessageRequests() async {
+    await Navigator.push(
+      context,
+      MaterialPageRoute(builder: (_) => const MessageRequestsScreen()),
+    );
+    if (!mounted) return;
+    _loadConversations(silent: true);
+    InboxSocketService.instance.refreshRequestCount();
+  }
+
+  // 🔥 NAYA (M1-FE) — chat list ke upar "Message requests (N)" row. N == 0
+  // ho to poori row gayab. Count `InboxSocketService` se live aata hai
+  // (`message_request` / `message_request_resolved` socket events).
+  Widget _buildRequestsRow() {
+    return ValueListenableBuilder<int>(
+      valueListenable: InboxSocketService.instance.pendingRequestCount,
+      builder: (context, count, _) {
+        if (count <= 0) return const SizedBox.shrink();
+        return InkWell(
+          onTap: _openMessageRequests,
+          child: Container(
+            decoration: BoxDecoration(
+              color: _surface,
+              border: Border(bottom: BorderSide(color: _border)),
+            ),
+            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+            child: Row(children: [
+              Container(
+                width: 44, height: 44,
+                decoration: BoxDecoration(color: _navy.withOpacity(0.08), shape: BoxShape.circle),
+                child: Icon(Icons.mark_chat_unread_outlined, color: _navy, size: 22),
+              ),
+              const SizedBox(width: 14),
+              Expanded(
+                child: Text(
+                  'Message requests ($count)',
+                  style: TextStyle(fontSize: 15.5, fontWeight: FontWeight.w600, color: _ink),
+                ),
+              ),
+              Icon(Icons.chevron_right_rounded, color: _muted),
+            ]),
+          ),
+        );
+      },
+    );
   }
 
   // 🔥 NAYA (Feature 12) — screen open hote hi current focus-status pata
@@ -137,6 +195,21 @@ class _ConversationsScreenState extends State<ConversationsScreen> {
   }
 
   void _onInboxUpdate(Map<String, dynamic> event) {
+    // 🔥 NAYA — mutual-follow se auto-create hua (abhi tak zero-message)
+    // conversation (backend: `message.services.get_or_create_conversation`,
+    // `user_profile/signals.py` se trigger hota hai). Koi `last_message_*`
+    // is event me nahi hota (ye `inbox_update` jaisa message-around-event
+    // nahi hai) — list me abhi present na ho to seedha silent refresh kar
+    // do, taaki naya conversation (empty-state "Start the conversation"
+    // placeholder ke saath, see `_lastMessagePreview()`) turant dikhe.
+    if (event['type'] == 'conversation_created') {
+      final conversationId = event['conversation_id']?.toString();
+      if (conversationId != null && !_conversations.any((c) => c.id == conversationId)) {
+        _loadConversations(silent: true);
+      }
+      return;
+    }
+
     if (event['type'] != 'inbox_update') return;
     final conversationId = event['conversation_id']?.toString();
     if (conversationId == null) return;
@@ -498,18 +571,34 @@ class _ConversationsScreenState extends State<ConversationsScreen> {
             curve: Curves.easeInOut,
             child: _isSearchExpanded ? _buildSearchField() : const SizedBox(width: double.infinity),
           ),
+          // 🔥 NAYA (M2-FE) — Notes row, inbox ke bilkul upar. `Visibility(maintainState)`
+          // taaki select mode / search se wapas aane par dobara fetch na ho.
+          Visibility(
+            visible: !_isSelectMode && !(_isSearchExpanded && _searchController.text.trim().isNotEmpty),
+            maintainState: true,
+            child: NotesBar(key: _notesKey),
+          ),
+          // 🔥 NAYA (M1-FE) — select mode / user-search ke dauraan nahi dikhti
+          if (!_isSelectMode && !(_isSearchExpanded && _searchController.text.trim().isNotEmpty))
+            _buildRequestsRow(),
           Expanded(
             child: _isSearchExpanded && _searchController.text.trim().isNotEmpty
                 ? _buildSearchResults()
                 : RefreshIndicator(
                     color: _navy,
-                    onRefresh: () => _loadConversations(),
+                    onRefresh: () {
+                      _notesKey.currentState?.refresh(); // 🔥 NAYA (M2-FE) — fire-and-forget
+                      return _loadConversations();
+                    },
                     child: _buildBody(),
                   ),
           ),
         ],
       ),
-      bottomNavigationBar: const AppBottomNav(current: AppTab.chats), // 🔥 NAYA
+      // 🔥 FIX [Settings/Nav pass] — `AppTab.chats` → `AppTab.chat`, aur
+      // widget ab home.dart ke asli 5-tab nav ka exact mirror hai (dekho
+      // widgets/app_bottom_nav.dart).
+      bottomNavigationBar: const AppBottomNav(current: AppTab.chat),
     );
   }
 
@@ -549,6 +638,21 @@ class _ConversationsScreenState extends State<ConversationsScreen> {
             await Navigator.push(
               context,
               MaterialPageRoute(builder: (_) => const CreateGroupScreen()),
+            );
+            _loadConversations(silent: true);
+          },
+        ),
+        // 🔥 NAYA (Task G14) — Study Groups discovery entry point. Alag
+        // icon rakha "New group" (upar wala, jo ad-hoc contacts se group
+        // banata hai) se — ye PUBLIC groups browse/search/join karne ke
+        // liye hai, apne existing contacts ke bahar bhi.
+        IconButton(
+          icon: Icon(Icons.travel_explore_rounded, color: _onNavy),
+          tooltip: 'Discover study groups',
+          onPressed: () async {
+            await Navigator.push(
+              context,
+              MaterialPageRoute(builder: (_) => const StudyGroupsDiscoveryScreen()),
             );
             _loadConversations(silent: true);
           },
@@ -727,7 +831,14 @@ class _ConversationsScreenState extends State<ConversationsScreen> {
 
   Widget _buildBody() {
     if (_isLoading) {
-      return Center(child: CircularProgressIndicator(color: _navy));
+      // TASK G16 — this only ever renders on a true cold start (no local
+      // cache yet: see _loadFromCacheThenNetwork, which already flips
+      // _isLoading false the instant cached rows exist). It used to be a
+      // bare full-screen spinner even though every other list screen in
+      // the app had already moved to skeleton rows — swapped for the
+      // generic row skeleton so a brand-new device doesn't see a
+      // noticeably jankier first-open than everyone else.
+      return const LsListSkeleton(count: 7, sidePad: 16, trailingChip: true);
     }
     if (_error != null) {
       return ListView(children: [
@@ -979,7 +1090,12 @@ class _ConversationTile extends StatelessWidget {
         case 'file': return '📄 File';
         case 'presentation': return '📊 Presentation';
         case 'location': return '📍 Location';
-        default: return 'No messages yet';
+        // 🔥 NAYA — zero-message conversation (mutual-follow se
+        // auto-create hua, ya `start_private` se banaya gaya, koi bhi
+        // message bheje bina) ke liye blank/"No messages yet" ki jagah
+        // "say hi" jaisa nudge — jaisa Instagram naye mutual-follow pe
+        // dikhata hai.
+        default: return 'Say hi 👋 — start the conversation';
       }
     }
     return conversation.lastMessageText!;

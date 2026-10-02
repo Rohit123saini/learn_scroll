@@ -52,6 +52,15 @@ class AppLocalizationsHi extends AppLocalizations {
   String get following => 'फॉलोइंग';
 
   @override
+  String get feedTabForYou => 'आपके लिए';
+
+  @override
+  String get feedBadgeSuggested => 'आपके लिए सुझाया गया';
+
+  @override
+  String get feedBadgeTrending => 'ट्रेंडिंग';
+
+  @override
   String get addFriends => 'दोस्त जोड़ें';
 
   @override
@@ -1234,6 +1243,25 @@ class AppLocalizationsHi extends AppLocalizations {
   String get noticeScopeSection => 'सेक्शन';
 
   @override
+  String get noticeBoardTitle => 'नोटिस बोर्ड';
+
+  @override
+  String get noticeBoardEmpty => 'अभी कोई नोटिस नहीं है';
+
+  @override
+  String get noticeBoardEmptySubtitle =>
+      'कैंपस और ट्यूशन क्लास के नोटिस यहाँ दिखेंगे।';
+
+  @override
+  String get noticeBoardLoadFailed => 'नोटिस बोर्ड लोड नहीं हो पाया';
+
+  @override
+  String get noticeBoardSourceCampus => 'कैंपस';
+
+  @override
+  String get noticeBoardSourceTuitionClass => 'ट्यूशन क्लास';
+
+  @override
   String get attendanceWholeDay => 'पूरा दिन';
 
   @override
@@ -1543,6 +1571,34 @@ class AppLocalizationsHi extends AppLocalizations {
   String get addCaptionHint => 'कैप्शन लिखें…';
 
   @override
+  String get storyAudienceYourStory => 'आपकी स्टोरी';
+
+  @override
+  String get closeFriends => 'क्लोज़ फ्रेंड्स';
+
+  @override
+  String get closeFriendsEditList => 'लिस्ट बदलें';
+
+  @override
+  String get closeFriendsSearchHint => 'फ़ॉलोअर्स और फ़ॉलोइंग खोजें';
+
+  @override
+  String get closeFriendsEmpty => 'कोई नहीं मिला';
+
+  @override
+  String get closeFriendsInfo =>
+      'सिर्फ़ इस लिस्ट के लोग आपकी क्लोज़ फ्रेंड्स स्टोरी देख सकते हैं। जोड़ने या हटाने पर उन्हें कोई नोटिफ़िकेशन नहीं जाता।';
+
+  @override
+  String get closeFriendsLoadFailed => 'लिस्ट लोड नहीं हो सकी';
+
+  @override
+  String get closeFriendsUpdateFailed => 'लिस्ट अपडेट नहीं हो सकी';
+
+  @override
+  String get closeFriendsDone => 'हो गया';
+
+  @override
   String get download => 'डाउनलोड';
 
   @override
@@ -1593,13 +1649,21 @@ class AppLocalizationsHi extends AppLocalizations {
   String get noViewsYet => 'अभी तक कोई नहीं देखा।';
 
   @override
+  String replyToStoryHint(String username) {
+    return '$username को जवाब दें...';
+  }
+
+  @override
+  String get replySentToStory => 'जवाब भेज दिया गया';
+
+  @override
   String get tsSourceIndividual => 'व्यक्तिगत';
 
   @override
   String get tsSourceCampus => 'कैंपस';
 
   @override
-  String get tsSourceLiveClass => 'लाइव क्लास';
+  String get tsSourceTuitionClass => 'ट्यूशन क्लास';
 
   @override
   String get tsSearchHint => 'टेस्ट सीरीज़ खोजें';
@@ -1844,7 +1908,7 @@ class AppLocalizationsHi extends AppLocalizations {
       'कैटेगरी बंद करने पर भी वह आपकी नोटिफिकेशन लिस्ट में दिखेगी — बस पुश, ईमेल, एसएमएस या व्हाट्सऐप अलर्ट नहीं भेजा जाएगा।';
 
   @override
-  String get notifCategoryLiveClasses => 'लाइव क्लासेस और सेशन';
+  String get notifCategoryTuitionClasses => 'ट्यूशन क्लासेस और सेशन';
 
   @override
   String get notifCategoryAssignmentsTests => 'असाइनमेंट और टेस्ट';
@@ -1880,7 +1944,7 @@ class AppLocalizationsHi extends AppLocalizations {
   String get themeSystem => 'सिस्टम डिफ़ॉल्ट';
 
   @override
-  String get liveClassesTitle => 'लाइव क्लासेस';
+  String get tuitionClassesTitle => 'ट्यूशन क्लासेस';
 
   @override
   String get searchClassroomsHint => 'क्लासरूम खोजें';
@@ -1902,6 +1966,40 @@ class AppLocalizationsHi extends AppLocalizations {
 
   @override
   String get tryDifferentSearch => 'अलग खोज या फ़िल्टर आज़माएं';
+
+  @override
+  String get createTuitionClassCta => 'क्लास बनाएँ';
+
+  @override
+  String get createClassroomTitle => 'क्लासरूम बनाएँ';
+
+  @override
+  String get classroomTitleLabel => 'टाइटल';
+
+  @override
+  String get classroomTitleHint => 'जैसे Class 10 Physics — Batch A';
+
+  @override
+  String get classroomTitleRequired => 'अपने क्लासरूम का टाइटल डालें';
+
+  @override
+  String get classroomSubjectLabel => 'विषय (वैकल्पिक)';
+
+  @override
+  String get classroomDescriptionLabel => 'विवरण (वैकल्पिक)';
+
+  @override
+  String get classroomLanguageLabel => 'भाषा';
+
+  @override
+  String get createClassroomSubmit => 'बनाएँ';
+
+  @override
+  String get createClassroomSuccess => 'क्लासरूम बन गया';
+
+  @override
+  String get createClassroomFailed =>
+      'क्लासरूम नहीं बन पाया। दोबारा कोशिश करें।';
 
   @override
   String enrolledCountLabel(int count) {
@@ -2077,6 +2175,15 @@ class AppLocalizationsHi extends AppLocalizations {
 
   @override
   String get commissionEarnedLabel => 'अर्जित कमीशन';
+
+  @override
+  String get commissionRateLabel => 'कमीशन दर';
+
+  @override
+  String get pendingCommissionLabel => 'लंबित कमीशन';
+
+  @override
+  String get studentsReferredLabel => 'रेफ़र किए गए छात्र';
 
   @override
   String get couldNotLoadAssignments => 'असाइनमेंट लोड नहीं हो पाए';
@@ -2443,7 +2550,7 @@ class AppLocalizationsHi extends AppLocalizations {
   String get visibilityNetwork => 'नेटवर्क';
 
   @override
-  String get visibilityPrivate => 'निजी';
+  String get visibilityPrivate => 'सिर्फ़ मैं';
 
   @override
   String get quickPostTitle => 'क्विक पोस्ट';
@@ -2755,7 +2862,7 @@ class AppLocalizationsHi extends AppLocalizations {
   String get visibilityAnyoneCanSee => 'कोई भी देख सकता है';
 
   @override
-  String get visibilityConnections => 'कनेक्शन';
+  String get visibilityConnections => 'कनेक्शंस';
 
   @override
   String get visibilityJustYou => 'सिर्फ़ आप';
@@ -3605,6 +3712,14 @@ class AppLocalizationsHi extends AppLocalizations {
   String get parentAccessRevokeDeviceFailed => 'डिवाइस नहीं हट पाया।';
 
   @override
+  String get parentAccessShareAction => 'शेयर करें';
+
+  @override
+  String parentAccessShareMessage(String code) {
+    return 'आपको LearnScroll पर Parent/Guardian Access के लिए आमंत्रित किया गया है।\n\n1. LearnScroll ऐप इंस्टॉल करें\n2. लॉगिन स्क्रीन पर \"मैं एक parent हूं\" चुनें\n3. यह कोड डालें: $code';
+  }
+
+  @override
   String get chatYou => 'आप';
 
   @override
@@ -3771,6 +3886,18 @@ class AppLocalizationsHi extends AppLocalizations {
 
   @override
   String get chatUnmuteNotifications => 'सूचनाएं अनम्यूट करें';
+
+  @override
+  String get chatEnableTranslate => 'मैसेज ट्रांसलेट चालू करें';
+
+  @override
+  String get chatDisableTranslate => 'मैसेज ट्रांसलेट बंद करें';
+
+  @override
+  String get chatTranslateEnabled => 'मैसेज ट्रांसलेट चालू कर दिया गया';
+
+  @override
+  String get chatTranslateDisabled => 'मैसेज ट्रांसलेट बंद कर दिया गया';
 
   @override
   String get chatThisUser => 'यह यूज़र';
@@ -4235,6 +4362,12 @@ class AppLocalizationsHi extends AppLocalizations {
   String get chatPreviewPoll => '📊 पोल';
 
   @override
+  String get chatRepliedToYourStory => 'आपकी स्टोरी का जवाब दिया';
+
+  @override
+  String get chatPreviewStoryReply => '📷 आपकी स्टोरी का जवाब दिया';
+
+  @override
   String get chatToday => 'आज';
 
   @override
@@ -4483,6 +4616,64 @@ class AppLocalizationsHi extends AppLocalizations {
   String get waitingForTeacher => 'शिक्षक के वीडियो शुरू करने का इंतज़ार…';
 
   @override
+  String get trialBadge => 'ट्रायल';
+
+  @override
+  String get trialInProgressBanner =>
+      'आप ट्रायल प्रीव्यू में हैं। पूरी क्लास जॉइन करने पर आपको पूरा अनुभव मिलेगा।';
+
+  @override
+  String get joinFullClassCta => 'पूरी क्लास जॉइन करें';
+
+  @override
+  String get maybeLaterCta => 'बाद में';
+
+  @override
+  String get trialEndedTitle => 'आपका ट्रायल खत्म हो गया';
+
+  @override
+  String get trialEndedMessage =>
+      'उम्मीद है क्लास अच्छी लगी! इस शिक्षक के साथ आगे सीखने के लिए पूरी क्लास जॉइन करें।';
+
+  @override
+  String get tryTrialCta => 'फ्री ट्रायल आज़माएँ';
+
+  @override
+  String get trialPasswordLabel => 'ट्रायल पासवर्ड';
+
+  @override
+  String get trialPasswordHint => 'अपने शिक्षक का दिया कोड डालें';
+
+  @override
+  String get trialAlreadyUsedNotice =>
+      'आप इस क्लास का ट्रायल पहले ही इस्तेमाल कर चुके हैं।';
+
+  @override
+  String get trialDurationLabel => 'ट्रायल अवधि (मिनट)';
+
+  @override
+  String get enableTrialAccessLabel => 'ट्रायल एक्सेस चालू करें';
+
+  @override
+  String get trialAccessSettingsTitle => 'ट्रायल एक्सेस';
+
+  @override
+  String get trialSettingsSaved => 'ट्रायल सेटिंग्स सेव हो गईं।';
+
+  @override
+  String get setTrialPasswordFirst =>
+      'ट्रायल एक्सेस चालू करने से पहले एक ट्रायल पासवर्ड सेट करें।';
+
+  @override
+  String get freeTrialClassesTitle => 'फ्री ट्रायल क्लासेस';
+
+  @override
+  String get liveNowBadge => 'अभी लाइव';
+
+  @override
+  String get recommendedForYouBadge => 'आपके लिए';
+
+  @override
   String get savedPostsTitle => 'सेव किए गए पोस्ट';
 
   @override
@@ -4506,6 +4697,33 @@ class AppLocalizationsHi extends AppLocalizations {
 
   @override
   String get postDeleteFailed => 'पोस्ट नहीं हटाया जा सका';
+
+  @override
+  String get editPostCta => 'पोस्ट संपादित करें';
+
+  @override
+  String get postTitleFieldLabel => 'शीर्षक (वैकल्पिक)';
+
+  @override
+  String get postUpdated => 'पोस्ट अपडेट हो गई';
+
+  @override
+  String get postUpdateFailed => 'पोस्ट अपडेट नहीं हो सकी';
+
+  @override
+  String get postEditedLabel => 'संपादित';
+
+  @override
+  String get changePrivacyCta => 'गोपनीयता बदलें';
+
+  @override
+  String get changePrivacyTitle => 'इस पोस्ट को कौन देख सकता है?';
+
+  @override
+  String get privacyUpdated => 'गोपनीयता अपडेट हो गई';
+
+  @override
+  String get privacyUpdateFailed => 'गोपनीयता अपडेट नहीं हो सकी';
 
   @override
   String get allCaughtUp => 'आप सब कुछ देख चुके हैं';
@@ -4556,6 +4774,17 @@ class AppLocalizationsHi extends AppLocalizations {
   String documentsTabLabel(int count) {
     return 'दस्तावेज़ ($count)';
   }
+
+  @override
+  String repostsTabLabel(int count) {
+    return 'रीपोस्ट ($count)';
+  }
+
+  @override
+  String get noRepostsYetTitle => 'अभी कोई रीपोस्ट नहीं';
+
+  @override
+  String get noRepostsYetSubtitle => 'इस यूज़र के रीपोस्ट यहाँ दिखेंगे।';
 
   @override
   String get noDocumentsYetTitle => 'अभी कोई दस्तावेज़ नहीं';
@@ -4675,6 +4904,46 @@ class AppLocalizationsHi extends AppLocalizations {
 
   @override
   String get assignmentNoSubmissions => 'अभी कोई सबमिशन नहीं';
+
+  @override
+  String get assignmentPossibleDuplicate => 'संभावित डुप्लीकेट';
+
+  @override
+  String get assignmentSimilarityFlagsTitle => 'संभावित डुप्लीकेट्स';
+
+  @override
+  String get assignmentMatchesWith => 'इनसे मिलता-जुलता है';
+
+  @override
+  String get assignmentSimilarityScoreLabel => 'समानता';
+
+  @override
+  String get assignmentThisStudentAnswer => 'यह सबमिशन';
+
+  @override
+  String get assignmentOtherStudentAnswer => 'मिलता-जुलता सबमिशन';
+
+  @override
+  String get assignmentConfirmDuplicate => 'डुप्लीकेट कन्फर्म करें';
+
+  @override
+  String get assignmentDismissFlag => 'खारिज करें';
+
+  @override
+  String get assignmentFlagStatusConfirmed => 'डुप्लीकेट कन्फर्म हुआ';
+
+  @override
+  String get assignmentFlagStatusDismissed => 'खारिज (false positive)';
+
+  @override
+  String get assignmentFlagStatusPending => 'समीक्षा बाकी';
+
+  @override
+  String get assignmentSimilarityFlagsLoadFailed =>
+      'डुप्लीकेट फ़्लैग लोड नहीं हो सके';
+
+  @override
+  String get assignmentNoSimilarityFlags => 'कोई संभावित डुप्लीकेट नहीं मिला';
 
   @override
   String get assignmentNotSubmitted => 'जमा नहीं किया';
@@ -5067,6 +5336,22 @@ class AppLocalizationsHi extends AppLocalizations {
   String get feePaymentModeLabel => 'भुगतान का तरीका';
 
   @override
+  String get feeReceiptDownload => 'रसीद डाउनलोड करें';
+
+  @override
+  String get feeReceiptDownloadFailed =>
+      'रसीद डाउनलोड नहीं हो सकी — थोड़ी देर में फिर कोशिश करें।';
+
+  @override
+  String get feeReceiptUnavailable => 'इस कैंपस पर रसीदें अभी उपलब्ध नहीं हैं।';
+
+  @override
+  String get feeReceiptsCta => 'रसीदें देखें';
+
+  @override
+  String get feeReceiptsTitle => 'रसीदें';
+
+  @override
   String get feeRecordPayment => 'भुगतान दर्ज करें';
 
   @override
@@ -5233,5 +5518,385 @@ class AppLocalizationsHi extends AppLocalizations {
   @override
   String mutualFriendsCount(int count) {
     return '$count साझा';
+  }
+
+  @override
+  String get repostAlready => 'आपने इसे पहले ही रीपोस्ट कर दिया है';
+
+  @override
+  String get repostOriginalUnavailable => 'यह पोस्ट अब उपलब्ध नहीं है';
+
+  @override
+  String get repostDone => 'रीपोस्ट किया गया';
+
+  @override
+  String get repostUndo => 'पूर्ववत करें';
+
+  @override
+  String get repostFailed => 'रीपोस्ट नहीं हो सका। कृपया फिर से प्रयास करें।';
+
+  @override
+  String get repostRemoved => 'रीपोस्ट हटा दिया गया';
+
+  @override
+  String get repostAction => 'रीपोस्ट';
+
+  @override
+  String repostedBy(String username) {
+    return '$username द्वारा रीपोस्ट किया गया';
+  }
+
+  @override
+  String get repostWithCaption => 'कैप्शन के साथ रीपोस्ट करें';
+
+  @override
+  String get repostCaptionHint => 'एक कैप्शन जोड़ें (वैकल्पिक)';
+
+  @override
+  String get completeProfileSkip => 'छोड़ें';
+
+  @override
+  String savedTabLabel(int count) {
+    return 'सहेजे गए ($count)';
+  }
+
+  @override
+  String get noSavedPostsYetTitle => 'अभी कोई सहेजी गई पोस्ट नहीं';
+
+  @override
+  String get noSavedPostsYetSubtitle => 'आपकी सहेजी गई पोस्ट यहाँ दिखेंगी।';
+
+  @override
+  String get parentSendToAllCta => 'सभी छात्रों को भेजें';
+
+  @override
+  String get addParentCta => 'पैरेंट जोड़ें';
+
+  @override
+  String get skipCta => 'छोड़ें';
+
+  @override
+  String get parentStatusInvited => 'आमंत्रित';
+
+  @override
+  String get parentStatusLinked => 'जुड़ा हुआ';
+
+  @override
+  String get parentStatusSkipped => 'छोड़ा गया';
+
+  @override
+  String parentLinkSentMessage(int sent, int total) {
+    return '$total में से $sent छात्रों को पैरेंट जोड़ने का लिंक भेजा गया।';
+  }
+
+  @override
+  String get reelsTab => 'रील्स';
+
+  @override
+  String get reelsEmpty => 'अभी कोई रील नहीं है';
+
+  @override
+  String get reelNotInterested => 'रुचि नहीं है';
+
+  @override
+  String get reelShowFewer => 'इस तरह की कम रील दिखाएँ';
+
+  @override
+  String get reelWhySeeing => 'मुझे यह क्यों दिख रही है';
+
+  @override
+  String get reelHidden => 'रील छिपा दी गई';
+
+  @override
+  String get reelFewerDone => 'हम इस तरह की कम रील दिखाएँगे';
+
+  @override
+  String get reelCaptionMore => 'और देखें';
+
+  @override
+  String get reelCaptionLess => 'कम करें';
+
+  @override
+  String get storyAddSticker => 'स्टिकर जोड़ें';
+
+  @override
+  String get stickerMention => 'मेंशन';
+
+  @override
+  String get stickerLink => 'लिंक';
+
+  @override
+  String get stickerPoll => 'पोल';
+
+  @override
+  String get stickerQuestion => 'सवाल';
+
+  @override
+  String get stickerLimitReached => 'सीमा पूरी हो गई';
+
+  @override
+  String get stickerMentionSearchHint => 'मेंशन करने के लिए लोगों को खोजें';
+
+  @override
+  String get stickerMentionEmpty => 'कोई व्यक्ति नहीं मिला';
+
+  @override
+  String get stickerMentionCloseFriendsNote =>
+      'क्लोज़ फ्रेंड्स स्टोरी में सिर्फ़ क्लोज़ फ्रेंड्स को मेंशन किया जा सकता है';
+
+  @override
+  String get stickerLoadFailed => 'लोड नहीं हो सका। दोबारा कोशिश करें।';
+
+  @override
+  String get stickerLinkUrlHint => 'लिंक पेस्ट करें';
+
+  @override
+  String get stickerLinkLabelHint => 'लेबल (वैकल्पिक)';
+
+  @override
+  String get stickerLinkInvalid => 'सही http या https लिंक डालें';
+
+  @override
+  String get stickerPollQuestionHint => 'कोई सवाल पूछें';
+
+  @override
+  String stickerPollOptionHint(int number) {
+    return 'विकल्प $number';
+  }
+
+  @override
+  String get stickerPollAddOption => 'विकल्प जोड़ें';
+
+  @override
+  String get stickerPollInvalid => 'एक सवाल और कम से कम 2 अलग विकल्प जोड़ें';
+
+  @override
+  String get stickerQuestionPromptHint => 'मुझसे कुछ भी पूछें';
+
+  @override
+  String get stickerQuestionInvalid => 'लिखें कि आप क्या पूछना चाहते हैं';
+
+  @override
+  String get stickerAddButton => 'स्टोरी में जोड़ें';
+
+  @override
+  String get stickerDragToRemove => 'हटाने के लिए यहाँ खींचें';
+
+  @override
+  String get stickerCloseFriendsMentionWarn =>
+      'क्लोज़ फ्रेंड्स स्टोरी में सिर्फ़ क्लोज़ फ्रेंड्स को मेंशन किया जा सकता है। आपके मेंशन स्टिकर हटा दिए जाएँगे।';
+
+  @override
+  String get stickerRemoveMentions => 'मेंशन हटाएँ';
+
+  @override
+  String stickerPollVotes(int count) {
+    String _temp0 = intl.Intl.pluralLogic(
+      count,
+      locale: localeName,
+      other: '$count वोट',
+      one: '1 वोट',
+    );
+    return '$_temp0';
+  }
+
+  @override
+  String get stickerQuestionTapToAnswer => 'जवाब देने के लिए टैप करें';
+
+  @override
+  String get stickerQuestionAnswered => 'जवाब भेज दिया गया';
+
+  @override
+  String stickerQuestionAnswersCount(int count) {
+    String _temp0 = intl.Intl.pluralLogic(
+      count,
+      locale: localeName,
+      other: '$count जवाब',
+      one: '1 जवाब',
+    );
+    return '$_temp0';
+  }
+
+  @override
+  String get stickerOwnerTapToView => 'जवाब देखने के लिए टैप करें';
+
+  @override
+  String get stickerAnswerHint => 'अपना जवाब लिखें…';
+
+  @override
+  String get stickerSendAnswer => 'भेजें';
+
+  @override
+  String get stickerResponsesTitle => 'जवाब';
+
+  @override
+  String get stickerNoResponses => 'अभी कोई जवाब नहीं';
+
+  @override
+  String get stickerLoadMore => 'और लोड करें';
+
+  @override
+  String get stickerOpenLinkTitle => 'यह लिंक खोलें?';
+
+  @override
+  String get stickerOpenLink => 'खोलें';
+
+  @override
+  String get stickerLinkOpenFailed => 'लिंक नहीं खुल सका';
+
+  @override
+  String get storyMentionUnavailable => 'यह स्टोरी अब उपलब्ध नहीं है';
+
+  @override
+  String get acctSectionTitle => 'अकाउंट्स';
+
+  @override
+  String get acctSwitchAccount => 'अकाउंट बदलें';
+
+  @override
+  String acctCountSubtitle(int count, int max) {
+    return 'इस डिवाइस पर $max में से $count अकाउंट';
+  }
+
+  @override
+  String get acctAddAccount => 'अकाउंट जोड़ें';
+
+  @override
+  String acctMaxReached(int max) {
+    return 'आप इस डिवाइस पर अधिकतम $max अकाउंट रख सकते हैं।';
+  }
+
+  @override
+  String get acctSessionExpiredTap =>
+      'सत्र समाप्त — दोबारा लॉग इन करने के लिए टैप करें';
+
+  @override
+  String acctSwitchExpired(String username) {
+    return '@$username का सत्र समाप्त हो गया है। दोबारा लॉग इन करने के लिए अकाउंट पर टैप करें।';
+  }
+
+  @override
+  String get acctSwitchNoConnection =>
+      'इंटरनेट कनेक्शन नहीं है। अकाउंट नहीं बदला जा सका।';
+
+  @override
+  String get acctSwitchInCall => 'अकाउंट बदलने से पहले कॉल समाप्त करें।';
+
+  @override
+  String get acctSwitchFailed =>
+      'अकाउंट नहीं बदला जा सका। कृपया दोबारा प्रयास करें।';
+
+  @override
+  String get acctAddFailed => 'अभी दूसरा अकाउंट नहीं जोड़ा जा सकता।';
+
+  @override
+  String get settingsEditProfileSub => 'नाम, बायो, प्रोफ़ाइल फ़ोटो';
+
+  @override
+  String get settingsPrivateAccount => 'प्राइवेट अकाउंट';
+
+  @override
+  String get settingsPrivateAccountSub =>
+      'सिर्फ़ मंज़ूर किए गए फ़ॉलोअर्स ही आपकी पोस्ट देख सकेंगे';
+
+  @override
+  String get settingsGeneralSection => 'सामान्य';
+
+  @override
+  String get settingsParentAccessSub =>
+      'इस अकाउंट से पैरेंट/गार्जियन को जोड़ें';
+
+  @override
+  String get settingsInviteEarnSub =>
+      'अपना कोड शेयर करें, जुड़ने वाले हर दोस्त पर बोनस कॉइन्स कमाएं';
+
+  @override
+  String get settingsActivitySection => 'गतिविधि';
+
+  @override
+  String get settingsYourActivity => 'आपकी गतिविधि';
+
+  @override
+  String get settingsYourActivitySub =>
+      'बिताया गया समय, लाइक, कमेंट और सेव की गई पोस्ट';
+
+  @override
+  String get settingsYourWeek => 'आपका सप्ताह';
+
+  @override
+  String get settingsYourWeekSub => 'टेस्ट, क्लास, लाइक और आपकी स्ट्रीक का सार';
+
+  @override
+  String get settingsLeaderboard => 'लीडरबोर्ड';
+
+  @override
+  String get settingsLeaderboardSub => 'देखें LearnScroll पर आपकी रैंक क्या है';
+
+  @override
+  String get settingsPrivacySection => 'गोपनीयता';
+
+  @override
+  String get settingsReadReceipts => 'रीड रिसीप्ट';
+
+  @override
+  String get settingsReadReceiptsSub => 'तय करें कि संदेश पढ़ने पर किसे दिखे';
+
+  @override
+  String get settingsBlockedAccounts => 'ब्लॉक किए गए अकाउंट';
+
+  @override
+  String get settingsBlockedAccountsSub =>
+      'जिन्हें आपने ब्लॉक किया है उन्हें प्रबंधित करें';
+
+  @override
+  String get settingsNotificationsSub => 'पुश, ईमेल, SMS, WhatsApp और डाइजेस्ट';
+
+  @override
+  String get settingsSecuritySection => 'सुरक्षा';
+
+  @override
+  String get settingsChangePassword => 'पासवर्ड बदलें';
+
+  @override
+  String get settingsChangePasswordSub => 'इस अकाउंट का पासवर्ड अपडेट करें';
+
+  @override
+  String get notifPauseSectionTitle => 'नोटिफिकेशन रोकें';
+
+  @override
+  String get notifPause1h => '1 घंटा';
+
+  @override
+  String get notifPause8h => '8 घंटे';
+
+  @override
+  String get notifPause24h => '24 घंटे';
+
+  @override
+  String get notifPauseResume => 'नोटिफिकेशन फिर शुरू करें';
+
+  @override
+  String get notifQuietSectionTitle => 'शांत समय';
+
+  @override
+  String get notifQuietToggle => 'शांत समय चालू करें';
+
+  @override
+  String get notifQuietFrom => 'से';
+
+  @override
+  String get notifQuietTo => 'तक';
+
+  @override
+  String get notifQuietHint =>
+      'इन घंटों में किसी भी नोटिफिकेशन की आवाज़ नहीं आएगी।';
+
+  @override
+  String get notifQuietSameTime =>
+      'शुरू और खत्म होने का समय एक जैसा नहीं हो सकता';
+
+  @override
+  String notifPausedUntil(String until) {
+    return '$until तक रोका गया';
   }
 }

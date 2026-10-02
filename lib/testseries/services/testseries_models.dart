@@ -66,8 +66,8 @@ TsAttemptStatus tsAttemptStatusFrom(String? raw) {
   }
 }
 
-/// Series ka source — teeno forms: individual, campus, live class.
-enum TsSource { individual, campus, liveclass, unknown }
+/// Series ka source — teeno forms: individual, campus, tuition class.
+enum TsSource { individual, campus, tuitionclass, unknown }
 
 TsSource tsSourceFrom(String? raw) {
   final k = (raw ?? '').toLowerCase().replaceAll(RegExp(r'[\s_\-]'), '');
@@ -77,8 +77,8 @@ TsSource tsSourceFrom(String? raw) {
       return TsSource.individual;
     case 'campus':
       return TsSource.campus;
-    case 'liveclass':
-      return TsSource.liveclass;
+    case 'tuitionclass':
+      return TsSource.tuitionclass;
     default:
       return TsSource.unknown;
   }
@@ -257,7 +257,7 @@ class TestSeriesModel {
   final String id;
   final String title;
   final String description;
-  final String source; // individual / campus / liveclass
+  final String source; // individual / campus / tuitionclass
   final String status; // draft / published / archived
   final bool isPaid;
   final int priceCoins;
@@ -269,6 +269,12 @@ class TestSeriesModel {
   final int reviewCount;
   final String creator;
   final DateTime? createdAt;
+
+  // ---- discovery / search (Task G9) ----
+  /// Free-text browse/search facet (backend `subject`, blank = unset).
+  final String subject;
+  /// `easy` / `medium` / `hard`, blank = unset. Backend `difficulty`.
+  final String difficulty;
 
   // ---- advanced delivery / certification (migration 0003) ----
   final TsDeliveryMode deliveryMode;
@@ -308,6 +314,8 @@ class TestSeriesModel {
     this.durationMinutes,
     this.avgRating,
     this.createdAt,
+    this.subject = '',
+    this.difficulty = '',
     this.deliveryMode = TsDeliveryMode.selfPaced,
     this.startsAt,
     this.endsAt,
@@ -357,6 +365,8 @@ class TestSeriesModel {
       reviewCount: (j['review_count'] as num?)?.toInt() ?? 0,
       creator: creator,
       createdAt: DateTime.tryParse(j['created_at']?.toString() ?? ''),
+      subject: j['subject']?.toString() ?? '',
+      difficulty: j['difficulty']?.toString() ?? '',
       deliveryMode: tsDeliveryModeFrom(j['delivery_mode']?.toString()),
       startsAt: DateTime.tryParse(j['starts_at']?.toString() ?? ''),
       endsAt: DateTime.tryParse(j['ends_at']?.toString() ?? ''),
@@ -543,6 +553,37 @@ class TestAttemptModel {
 }
 
 // =====================================================================
+// TASK G8 — weak-area practice ("Practice weak areas" CTA on the result
+// screen). Mirrors the response shape `practice_weak_areas()`
+// (testseries/views_advanced.py) returns on success: a freshly generated,
+// ready-to-answer practice series + its first attempt, so the caller can
+// jump straight into `TestAttemptScreen` with no extra round trip.
+// =====================================================================
+
+class TsWeakAreaPractice {
+  final String practiceSeriesId;
+  final int questionCount;
+  final int totalMarks;
+  final TestAttemptModel attempt;
+
+  const TsWeakAreaPractice({
+    required this.practiceSeriesId,
+    required this.questionCount,
+    required this.totalMarks,
+    required this.attempt,
+  });
+
+  factory TsWeakAreaPractice.fromJson(Map<String, dynamic> j) {
+    return TsWeakAreaPractice(
+      practiceSeriesId: tsIdOf(j['practice_series_id']),
+      questionCount: (j['question_count'] as num?)?.toInt() ?? 0,
+      totalMarks: (j['total_marks'] as num?)?.toInt() ?? 0,
+      attempt: TestAttemptModel.fromJson(Map<String, dynamic>.from(j['attempt'] as Map)),
+    );
+  }
+}
+
+// =====================================================================
 // ADVANCED: certificates / recordings / proctoring
 // =====================================================================
 
@@ -719,4 +760,112 @@ class TestSeriesReview {
       createdAt: DateTime.tryParse(j['created_at']?.toString() ?? ''),
     );
   }
+}
+
+// ============================================================
+// Task 4 — creator-side series performance analytics.
+// Backend: GET {mount}/testseries/{id}/analytics/ (see
+// testseries/views_advanced.py, SeriesAdvancedActionsMixin.analytics).
+// Distinct from the per-attempt `analytics` a student sees on their own
+// result (TsService.analytics(attemptId) -> raw map used by
+// test_result_screen) — this is the creator's class-wide dashboard.
+// ============================================================
+
+/// One question's wrong-rate across every auto-graded attempt on the
+/// series — "sabse zyada galat kiya gaya question".
+class TsMissedQuestion {
+  final String questionId;
+  final int order;
+  final String text;
+  final String topic;
+  final int attempts;
+  final int wrongCount;
+  final double wrongRate;
+
+  const TsMissedQuestion({
+    required this.questionId,
+    required this.order,
+    required this.text,
+    required this.topic,
+    required this.attempts,
+    required this.wrongCount,
+    required this.wrongRate,
+  });
+
+  factory TsMissedQuestion.fromJson(Map<String, dynamic> j) => TsMissedQuestion(
+        questionId: tsIdOf(j['question_id']),
+        order: (j['order'] as num?)?.toInt() ?? 0,
+        text: j['text']?.toString() ?? '',
+        topic: j['topic']?.toString() ?? '',
+        attempts: (j['attempts'] as num?)?.toInt() ?? 0,
+        wrongCount: (j['wrong_count'] as num?)?.toInt() ?? 0,
+        wrongRate: (j['wrong_rate'] as num?)?.toDouble() ?? 0,
+      );
+}
+
+/// One day's attempt-submission count, for the "attempts over time" chart.
+class TsAttemptsByDay {
+  final DateTime? date;
+  final int count;
+
+  const TsAttemptsByDay({this.date, required this.count});
+
+  factory TsAttemptsByDay.fromJson(Map<String, dynamic> j) => TsAttemptsByDay(
+        date: DateTime.tryParse(j['date']?.toString() ?? ''),
+        count: (j['count'] as num?)?.toInt() ?? 0,
+      );
+}
+
+/// Full creator dashboard payload for one series.
+class TsSeriesAnalytics {
+  final String seriesId;
+  final int totalAttempts;
+  final int studentsAttempted;
+  final int submittedCount;
+  final int checkedCount;
+  final int totalMarks;
+  final double? averageScore;
+  final double? averagePercentage;
+  final int passPercentageThreshold;
+  final double? passRate;
+  final List<TsMissedQuestion> mostMissedQuestions;
+  final List<TsAttemptsByDay> attemptsOverTime;
+
+  const TsSeriesAnalytics({
+    required this.seriesId,
+    required this.totalAttempts,
+    required this.studentsAttempted,
+    required this.submittedCount,
+    required this.checkedCount,
+    required this.totalMarks,
+    this.averageScore,
+    this.averagePercentage,
+    required this.passPercentageThreshold,
+    this.passRate,
+    this.mostMissedQuestions = const [],
+    this.attemptsOverTime = const [],
+  });
+
+  factory TsSeriesAnalytics.fromJson(Map<String, dynamic> j) => TsSeriesAnalytics(
+        seriesId: tsIdOf(j['series_id']),
+        totalAttempts: (j['total_attempts'] as num?)?.toInt() ?? 0,
+        studentsAttempted: (j['students_attempted'] as num?)?.toInt() ?? 0,
+        submittedCount: (j['submitted_count'] as num?)?.toInt() ?? 0,
+        checkedCount: (j['checked_count'] as num?)?.toInt() ?? 0,
+        totalMarks: (j['total_marks'] as num?)?.toInt() ?? 0,
+        averageScore: (j['average_score'] as num?)?.toDouble(),
+        averagePercentage: (j['average_percentage'] as num?)?.toDouble(),
+        passPercentageThreshold: (j['pass_percentage_threshold'] as num?)?.toInt() ?? 0,
+        passRate: (j['pass_rate'] as num?)?.toDouble(),
+        mostMissedQuestions: (j['most_missed_questions'] as List?)
+                ?.whereType<Map>()
+                .map((e) => TsMissedQuestion.fromJson(Map<String, dynamic>.from(e)))
+                .toList() ??
+            const [],
+        attemptsOverTime: (j['attempts_over_time'] as List?)
+                ?.whereType<Map>()
+                .map((e) => TsAttemptsByDay.fromJson(Map<String, dynamic>.from(e)))
+                .toList() ??
+            const [],
+      );
 }

@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 
 import '../../l10n/app_localizations.dart';
 import '../../widgets/error_widgets.dart';
@@ -199,6 +200,21 @@ class _VerifyLinkSheetState extends State<_VerifyLinkSheet> {
     super.dispose();
   }
 
+  /// Parent taps a link like
+  /// "https://learnscroll.app/parent-link?campus=12&code=ABCD1234" and
+  /// pastes it here (or the OS opens it straight into this screen with
+  /// the fields pre-filled — see the app's deep-link handler). This just
+  /// parses campus+code out of any pasted URL so the parent never has to
+  /// type either by hand.
+  void _tryParsePastedLink(String value) {
+    final uri = Uri.tryParse(value.trim());
+    if (uri == null || uri.queryParameters.isEmpty) return;
+    final campus = uri.queryParameters['campus'];
+    final code = uri.queryParameters['code'] ?? uri.queryParameters['token'];
+    if (campus != null) _campusId.text = campus;
+    if (code != null) _token.text = code;
+  }
+
   Future<void> _submit() async {
     final l10n = AppLocalizations.of(context)!;
     if (_campusId.text.trim().isEmpty || _token.text.trim().isEmpty) return;
@@ -207,9 +223,12 @@ class _VerifyLinkSheetState extends State<_VerifyLinkSheet> {
       _error = null;
     });
     try {
-      await CampusService.verifyParentLink(
+      // NEW — the working confirm endpoint (see campus/parent_invite.py's
+      // module docstring for why the old verifyParentLink() call it used
+      // to make here never actually succeeded).
+      await CampusService.confirmParentLink(
         campusId: _campusId.text.trim(),
-        token: _token.text.trim(),
+        code: _token.text.trim(),
       );
       if (mounted) {
         Navigator.pop(context, true);
@@ -271,7 +290,21 @@ class _VerifyLinkSheetState extends State<_VerifyLinkSheet> {
               labelText: l10n.parentLinkTokenLabel,
               hintText: l10n.parentLinkTokenHint,
               border: const OutlineInputBorder(),
+              suffixIcon: IconButton(
+                tooltip: 'Paste link',
+                icon: const Icon(Icons.content_paste_rounded, size: 18),
+                onPressed: () async {
+                  final data = await Clipboard.getData('text/plain');
+                  if (data?.text != null) _tryParsePastedLink(data!.text!);
+                  setState(() {});
+                },
+              ),
             ),
+            onChanged: (v) {
+              // Pasting a full link (not just a short code) auto-fills both
+              // fields — typing a plain code leaves campus ID untouched.
+              if (v.contains('://')) _tryParsePastedLink(v);
+            },
             onSubmitted: (_) => _submit(),
           ),
           if (_error != null) ...[

@@ -142,11 +142,14 @@ class CommentService {
     return token;
   }
 
-  static Future<List<CommentModel>> getComments(String postId) async {
+  // TASK G5 (growth_and_feature_tasks.md) — `sort`: 'top' (default,
+  // most-reacted first) or 'newest' (chronological). Backend:
+  // CommentListAPIView's new `?sort=` param (comment_view.py).
+  static Future<List<CommentModel>> getComments(String postId, {String sort = 'top'}) async {
     final token = await _requireToken();
     final res = await http
         .get(
-          Uri.parse("$base/post/$postId/"),
+          Uri.parse("$base/post/$postId/?sort=$sort"),
           headers: {"Authorization": "Bearer $token"},
         )
         .timeout(kApiTimeout);
@@ -158,11 +161,14 @@ class CommentService {
     }
   }
 
-  static Future<List<CommentModel>> getReplies(String commentId) async {
+  // TASK G5 — `sort`: 'oldest' (default, chronological within a thread)
+  // or 'top' (most-reacted first). Backend: CommentRepliesAPIView's new
+  // `?sort=` param.
+  static Future<List<CommentModel>> getReplies(String commentId, {String sort = 'oldest'}) async {
     final token = await _requireToken();
     final res = await http
         .get(
-          Uri.parse("$base/$commentId/replies/"),
+          Uri.parse("$base/$commentId/replies/?sort=$sort"),
           headers: {"Authorization": "Bearer $token"},
         )
         .timeout(kApiTimeout);

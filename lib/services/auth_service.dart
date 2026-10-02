@@ -1,6 +1,9 @@
 import 'dart:convert';
 
+import 'dart:io' show HttpClient;
+
 import 'package:http/http.dart' as http;
+import 'package:http/io_client.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import '../utils/api.dart';
@@ -100,6 +103,36 @@ class AuthService {
   static Future<void> logout() async {
     final prefs = await SharedPreferences.getInstance();
     await prefs.clear();
+  }
+
+  // ---- app start / resume — active sliding-expiry check ----
+
+  /// App start par (aur foreground resume par) call karo. Local exp-check
+  /// (`getValidToken()`, jo zaroorat pade to khud hi refresh kar leta hai)
+  /// ke upar ek lightweight authenticated ping bhi karta hai, taaki agar
+  /// access token LOCALLY abhi bhi valid dikh raha ho (JWT exp door hai)
+  /// lekin SERVER-SIDE 10-din-inactivity ki wajah se sliding-expired ho
+  /// chuka ho, to wo turant pakda jaaye — user ke agle kisi screen-specific
+  /// API call ka intezaar nahi karna padta.
+  ///
+  /// 401 "TOKEN_EXPIRED" khud yeh method handle NAHI karta — woh
+  /// `SessionAwareHttpClient` (session_http_interceptor.dart) globally
+  /// intercept karta hai aur `SessionService.markExpired()` call karta
+  /// hai, jise home.dart ka existing 3-sec countdown + redirect flow
+  /// already sunta hai. Yahan sirf itna ensure karna hai ki koi
+  /// authenticated request ho taaki wo interceptor ko mauka mile.
+  static Future<void> checkSessionAlive() async {
+    final token = await getValidToken();
+    if (token == null) return; // logged out already, ya getValidToken() ne khud force-logout kar diya
+
+    try {
+      await http.get(
+        Uri.parse('${Api.baseUrl}/profile/'),
+        headers: {'Authorization': 'Bearer $token'},
+      );
+    } catch (_) {
+      // Network error — session ka issue nahi, agli baar try ho jaayega.
+    }
   }
 
   // ---- NAYA: expiry-aware token + refresh ----
@@ -202,4 +235,43 @@ class AuthService {
       return null;
     }
   }
+
+  /// P15-FE — account switching. Exchanges a SAVED account's refresh token
+  /// for a fresh access token WITHOUT touching the live session (prefs) and
+  /// without triggering `onForceLogout`. Uses a raw `IOClient` on purpose:
+  /// `http.Client()` inside main()'s `runWithClient` zone returns the
+  /// zone's SessionAwareHttpClient, so a plain `http.Client()` would NOT
+  /// bypass the 401 interceptor (a dead saved account would then trigger
+  /// the current account's session-expiry logout).
+  ///   returns null  -> refresh token is dead (401/403)
+  ///   throws        -> network / server error (caller treats as "offline")
+  static Future<RefreshedTokens?> exchangeRefresh(String refresh) async {
+    if (refresh.isEmpty) return null;
+    final client = IOClient(HttpClient());
+    try {
+      final res = await client
+          .post(
+            Uri.parse('${Api.baseUrl}$_refreshEndpoint'),
+            headers: {'Content-Type': 'application/json'},
+            body: jsonEncode({'refresh': refresh}),
+          )
+          .timeout(const Duration(seconds: 15));
+      if (res.statusCode == 200) {
+        final body = jsonDecode(res.body) as Map<String, dynamic>;
+        final access = body['access'] as String?;
+        if (access == null || access.isEmpty) throw Exception('No access token in refresh response');
+        return RefreshedTokens(access, body['refresh'] as String?);
+      }
+      if (res.statusCode == 401 || res.statusCode == 403) return null;
+      throw Exception('Refresh failed (${res.statusCode})');
+    } finally {
+      client.close();
+    }
+  }
+}
+
+class RefreshedTokens {
+  final String access;
+  final String? refresh; // only present if backend rotates refresh tokens
+  const RefreshedTokens(this.access, this.refresh);
 }

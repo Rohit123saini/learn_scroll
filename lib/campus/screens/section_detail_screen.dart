@@ -4,6 +4,7 @@ import '../../l10n/app_localizations.dart';
 import '../../widgets/ls_ui.dart';
 import '../models/campus_models.dart';
 import '../services/campus_service.dart';
+import 'campus_invite_screen.dart' show CampusInviteManageScreen;
 import 'campus_setup_screen.dart' show SetupAccordionSection, SetupAddSheetShell;
 
 // ============================================================
@@ -207,6 +208,41 @@ class _SectionDetailScreenState extends State<SectionDetailScreen> {
                       ),
                     ),
           ),
+
+          // ---- Invite classmates (Task 13/G13) ----
+          // Same authority as "add student" above (`canGrowMembership` +
+          // `canManageSection`), but a self-service alternative to it —
+          // one code, shared once, replaces adding students one at a
+          // time. Only shown to whoever could already manage this
+          // section's enrollments.
+          if (widget.access.canGrowMembership && widget.access.canManageSection(widget.section.id))
+            Padding(
+              padding: const EdgeInsets.only(top: 10),
+              child: LsCard(
+                child: ListTile(
+                  contentPadding: EdgeInsets.zero,
+                  leading: CircleAvatar(
+                    radius: 18,
+                    backgroundColor: Theme.of(context).colorScheme.primaryContainer,
+                    child: Icon(Icons.group_add_rounded,
+                        size: 18, color: Theme.of(context).colorScheme.onPrimaryContainer),
+                  ),
+                  title: const Text('Invite classmates', style: TextStyle(fontWeight: FontWeight.w700, fontSize: 13.5)),
+                  subtitle: const Text('Share a join code — no admin action per student', style: TextStyle(fontSize: 11.5)),
+                  trailing: const Icon(Icons.chevron_right_rounded),
+                  onTap: () => Navigator.push(
+                    context,
+                    MaterialPageRoute(
+                      builder: (_) => CampusInviteManageScreen(
+                        campusId: widget.access.campus.id,
+                        sectionId: widget.section.id,
+                        sectionLabel: '${widget.schoolClass.name} - ${widget.section.name}',
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+            ),
         ],
       ),
     );

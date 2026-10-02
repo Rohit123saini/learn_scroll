@@ -2,6 +2,7 @@ import 'dart:convert';
 import 'package:http/http.dart' as http;
 import '../utils/api.dart';
 import '../services/auth_service.dart';
+import '../services/crash_reporting_service.dart';
 import 'models/search_result.dart';
 
 /// `search/api_service.dart` — sibling of `search/search.dart`, same
@@ -62,9 +63,8 @@ class SearchApiService {
         }
       }
       return [];
-    } catch (e) {
-      // ignore: avoid_print
-      print('People search error: $e');
+    } catch (e, st) {
+      CrashReportingService.logError("SearchApiService.peopleSearch", e, stackTrace: st);
       return [];
     }
   }
@@ -133,9 +133,8 @@ class SearchApiService {
             .toList();
       }
       return [];
-    } catch (e) {
-      // ignore: avoid_print
-      print('Trending hashtags error: $e');
+    } catch (e, st) {
+      CrashReportingService.logError("SearchApiService.trendingHashtags", e, stackTrace: st);
       return [];
     }
   }
@@ -176,9 +175,8 @@ class SearchApiService {
             .toList();
       }
       return [];
-    } catch (e) {
-      // ignore: avoid_print
-      print('Unified search error: $e');
+    } catch (e, st) {
+      CrashReportingService.logError("SearchApiService.searchEverything", e, stackTrace: st);
       return [];
     }
   }

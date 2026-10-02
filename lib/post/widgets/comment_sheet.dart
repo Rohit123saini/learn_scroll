@@ -44,6 +44,9 @@ class CommentBottomSheet extends StatefulWidget {
   final int initialCommentsCount;
   final VoidCallback onCommentAdded;
   final Function(String) onGoToProfile;
+  // N7-FE — opened from a comment notification: scroll to + tint this comment
+  // (top-level comments only; null = normal open).
+  final String? highlightCommentId;
   const CommentBottomSheet({
     super.key,
     required this.postId,
@@ -51,6 +54,7 @@ class CommentBottomSheet extends StatefulWidget {
     required this.initialCommentsCount,
     required this.onCommentAdded,
     required this.onGoToProfile,
+    this.highlightCommentId,
   });
   @override
   State<CommentBottomSheet> createState() => _CommentBottomSheetState();
@@ -71,10 +75,17 @@ class _CommentBottomSheetState extends State<CommentBottomSheet> {
   final Map<String, bool> _expandedMap = {};
   // local mirror of the count so the header updates immediately on send.
   late int _commentsCount = widget.initialCommentsCount;
+  // TASK G5 (growth_and_feature_tasks.md) — 'top' (most-reacted first,
+  // matches CommentListAPIView's new default) or 'newest' (chronological).
+  String _sort = 'top';
+  // N7-FE — one-shot: cleared after the first scroll-to so re-sorting doesn't re-jump.
+  String? _highlightId;
+  final GlobalKey _highlightKey = GlobalKey();
 
   @override
   void initState() {
     super.initState();
+    _highlightId = widget.highlightCommentId;
     _fetchComments();
   }
 
@@ -87,11 +98,43 @@ class _CommentBottomSheetState extends State<CommentBottomSheet> {
 
   Future<void> _fetchComments() async {
     try {
-      final data = await CommentService.getComments(widget.postId);
-      if (mounted) setState(() { comments = data; loading = false; });
+      final data = await CommentService.getComments(widget.postId, sort: _sort);
+      if (mounted) {
+        setState(() { comments = data; loading = false; });
+        _scrollToHighlight();
+      }
     } catch (e) {
       if (mounted) setState(() => loading = false);
     }
+  }
+
+  void _scrollToHighlight() {
+    final id = _highlightId;
+    if (id == null || !comments.any((c) => c.id == id)) return;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      final ctx = _highlightKey.currentContext;
+      if (!mounted || ctx == null) return;
+      Scrollable.ensureVisible(ctx, duration: const Duration(milliseconds: 350), alignment: 0.1, curve: Curves.easeOut);
+    });
+  }
+
+  // TASK G5 — switches between "Top" (most-reacted) and "Newest"
+  // (chronological) comment order; re-fetches from the new
+  // `?sort=` param rather than re-sorting the already-loaded list, so it
+  // stays correct beyond the first 50 comments the API returns.
+  void _setSort(String sort) {
+    if (sort == _sort) return;
+    setState(() { _sort = sort; loading = true; });
+    _fetchComments();
+  }
+
+  Widget _wrapHighlight(String id, Widget child) {
+    if (id != _highlightId) return child;
+    return Container(
+      key: _highlightKey,
+      color: Theme.of(context).colorScheme.primary.withOpacity(0.10),
+      child: child,
+    );
   }
 
   bool _checkFileSize(File file) {
@@ -276,6 +319,14 @@ class _CommentBottomSheetState extends State<CommentBottomSheet> {
                     decoration: BoxDecoration(color: cs.primary.withOpacity(0.12), borderRadius: BorderRadius.circular(20)),
                     child: Text('$_commentsCount', style: TextStyle(fontSize: 12.5, fontWeight: FontWeight.w800, color: cs.primary)),
                   ),
+                  const Spacer(),
+                  // TASK G5 — Top/Newest sort toggle (comment_sheet.dart's
+                  // labels aren't yet in AppLocalizations, so these two
+                  // stay plain English for now, same as a few other
+                  // developer-facing strings already in this file).
+                  _SortChip(label: 'Top', selected: _sort == 'top', onTap: () => _setSort('top')),
+                  const SizedBox(width: 6),
+                  _SortChip(label: 'Newest', selected: _sort == 'newest', onTap: () => _setSort('newest')),
                 ]),
               ),
               const SizedBox(height: 10),
@@ -309,7 +360,7 @@ class _CommentBottomSheetState extends State<CommentBottomSheet> {
                             controller: scrollController,
                             padding: const EdgeInsets.only(top: 6, bottom: 10),
                             itemCount: comments.length,
-                            itemBuilder: (c, i) => CommentTile(
+                            itemBuilder: (c, i) => _wrapHighlight(comments[i].id, CommentTile(
                               key: ValueKey(comments[i].id +
                                   comments[i].repliesCount.toString() +
                                   (_localReplies[comments[i].id]?.length ?? 0).toString() +
@@ -337,7 +388,7 @@ class _CommentBottomSheetState extends State<CommentBottomSheet> {
                                 _commentsCount = _commentsCount > 0 ? _commentsCount - 1 : 0;
                               }),
                               onGoToProfile: widget.onGoToProfile,
-                            ),
+                            )),
                           ),
               ),
               if (replyToName != null)
@@ -457,6 +508,32 @@ class _SheetGrabber extends StatelessWidget {
   Widget build(BuildContext context) {
     final cs = Theme.of(context).colorScheme;
     return Container(width: 40, height: 4, decoration: BoxDecoration(color: cs.outlineVariant, borderRadius: BorderRadius.circular(10)));
+  }
+}
+
+// TASK G5 (growth_and_feature_tasks.md) — small pill button for the
+// Top/Newest comment-sort toggle in the sheet header above.
+class _SortChip extends StatelessWidget {
+  final String label;
+  final bool selected;
+  final VoidCallback onTap;
+  const _SortChip({required this.label, required this.selected, required this.onTap});
+  @override
+  Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
+    return InkWell(
+      onTap: onTap,
+      borderRadius: BorderRadius.circular(20),
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+        decoration: BoxDecoration(
+          color: selected ? cs.primary.withOpacity(0.12) : Colors.transparent,
+          borderRadius: BorderRadius.circular(20),
+          border: Border.all(color: selected ? cs.primary : cs.outlineVariant),
+        ),
+        child: Text(label, style: TextStyle(fontSize: 11.5, fontWeight: FontWeight.w700, color: selected ? cs.primary : cs.onSurfaceVariant)),
+      ),
+    );
   }
 }
 

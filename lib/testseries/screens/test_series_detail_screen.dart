@@ -13,6 +13,7 @@ import '../utils/ts_error_text.dart';
 import '../widgets/ts_review_tile.dart';
 import '../widgets/ts_series_card.dart' show TsRatingBit;
 import '../widgets/ts_status.dart';
+import 'series_analytics_screen.dart';
 import 'test_attempt_screen.dart';
 import 'test_result_screen.dart';
 import 'test_series_reviews_screen.dart';
@@ -207,7 +208,33 @@ class _TestSeriesDetailScreenState extends State<TestSeriesDetailScreen> {
 
     return Scaffold(
       backgroundColor: lsBg(context),
-      appBar: lsAppBar(context, title: l10n.testSeries),
+      appBar: lsAppBar(
+        context,
+        title: l10n.testSeries,
+        // Task 4 — creator-side performance dashboard. Shown for every
+        // series (not just ones this client can confirm are "mine" —
+        // TestSeriesModel only carries the creator's display name, not
+        // their id); a non-creator tapping this just sees the normal
+        // 403 error state on SeriesAnalyticsScreen, same "shown to
+        // everyone, backend gates it" pattern as Classroom.refer_link.
+        actions: _series == null
+            ? null
+            : [
+                IconButton(
+                  icon: const Icon(Icons.bar_chart_rounded),
+                  tooltip: 'Analytics',
+                  onPressed: () => Navigator.push(
+                    context,
+                    MaterialPageRoute(
+                      builder: (_) => SeriesAnalyticsScreen(
+                        seriesId: _series!.id,
+                        seriesTitle: _series!.title,
+                      ),
+                    ),
+                  ),
+                ),
+              ],
+      ),
       body: _buildBody(cs, l10n),
       bottomNavigationBar: _series == null ? null : _buildCtaBar(cs, l10n),
     );

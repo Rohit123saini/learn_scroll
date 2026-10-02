@@ -15,6 +15,7 @@ import 'package:dio/dio.dart'; // 🔥 NAYA — real upload progress ke liye
 import '../../utils/api.dart';
 import '../../services/auth_service.dart';
 import '../models/message_models.dart';
+import 'message_cache_service.dart'; // 🔥 NAYA (M6-FE) — outbox (PendingMessage)
 
 class MessageApiException implements Exception {
   final String message;
@@ -59,6 +60,79 @@ class UploadedFileResult {
       mimeType: json['mime_type']?.toString() ?? '',
     );
   }
+}
+
+/// 🔥 NAYA (M1-FE) — `GET /message/requests/` ka ek page.
+class MessageRequestsPage {
+  final List<ConversationModel> items;
+  final int total; // saari pending requests (sirf is page ki nahi)
+  final bool hasMore;
+  const MessageRequestsPage({
+    required this.items,
+    required this.total,
+    required this.hasMore,
+  });
+}
+
+/// 🔥 NAYA (M2-FE) — ek Note (backend `UserNote`, M2-BE). NOTE: study-room ke
+/// sticky notes (`StudyRoomNote`) se bilkul alag cheez hai.
+class UserNoteModel {
+  final String id;
+  final String userId;
+  final String username;
+  final String displayName;
+  final String? photoUrl;
+  final String text;
+  final String emoji;
+  final String audience; // 'followers' | 'close_friends'
+  final DateTime postedAt;
+  final DateTime expiresAt;
+
+  const UserNoteModel({
+    required this.id,
+    required this.userId,
+    required this.username,
+    required this.displayName,
+    required this.photoUrl,
+    required this.text,
+    required this.emoji,
+    required this.audience,
+    required this.postedAt,
+    required this.expiresAt,
+  });
+
+  factory UserNoteModel.fromJson(Map<String, dynamic> json) {
+    final user = (json['user'] is Map) ? (json['user'] as Map).cast<String, dynamic>() : <String, dynamic>{};
+    final username = (user['username'] ?? '').toString();
+    final display = (user['display_name'] ?? '').toString().trim();
+    return UserNoteModel(
+      id: json['id']?.toString() ?? '',
+      userId: user['id']?.toString() ?? '',
+      username: username,
+      displayName: display.isNotEmpty ? display : (username.isNotEmpty ? username : 'User'),
+      photoUrl: user['profile_photo']?.toString(),
+      text: (json['text'] ?? '').toString(),
+      emoji: (json['emoji'] ?? '').toString(),
+      audience: (json['audience'] ?? 'followers').toString(),
+      postedAt: DateTime.tryParse(json['posted_at']?.toString() ?? '') ?? DateTime.now(),
+      expiresAt: DateTime.tryParse(json['expires_at']?.toString() ?? '') ??
+          DateTime.now().add(const Duration(hours: 24)),
+    );
+  }
+
+  bool get isCloseFriends => audience == 'close_friends';
+  bool get isExpired => !expiresAt.isAfter(DateTime.now());
+
+  /// Bubble / quote me dikhne wala poora text (text + emoji).
+  String get label => emoji.isEmpty ? text : (text.isEmpty ? emoji : '$text $emoji');
+}
+
+/// `GET /message/notes/` ka ek page — doosron ke notes + apna active note.
+class NotesPage {
+  final List<UserNoteModel> items;
+  final UserNoteModel? myNote;
+  final bool hasMore;
+  const NotesPage({required this.items, required this.myNote, required this.hasMore});
 }
 
 class MessageApiService {
@@ -285,6 +359,108 @@ class MessageApiService {
     return count is int ? count : conversationIds.length;
   }
 
+  // ==================================================================
+  // 🔥 NAYA (M1-FE) — MESSAGE REQUESTS (backend: M1-BE, message_requests.py)
+  // ==================================================================
+
+  /// GET /message/requests/?page=N  (page size 20)
+  static Future<MessageRequestsPage> getMessageRequests({int page = 1}) async {
+    final res = await http.get(Uri.parse("$_base/requests/?page=$page"),
+        headers: await _headers());
+    final data = _decode(res);
+    final List list = data is Map && data['results'] is List
+        ? data['results']
+        : (data is List ? data : const []);
+    final items = list.map((e) => ConversationModel.fromJson(e)).toList();
+    final total = data is Map && data['count'] is int
+        ? data['count'] as int
+        : items.length;
+    final hasMore = data is Map && data['next'] != null;
+    return MessageRequestsPage(items: items, total: total, hasMore: hasMore);
+  }
+
+  /// POST /message/requests/<conversation_id>/accept/
+  /// Chat inbox me shift ho jaati hai; iske baad reply de sakte ho.
+  static Future<void> acceptMessageRequest(String conversationId) async {
+    final res = await http.post(
+      Uri.parse("$_base/requests/$conversationId/accept/"),
+      headers: await _headers(),
+    );
+    _decode(res);
+  }
+
+  /// POST /message/requests/<conversation_id>/decline/
+  /// Request hide ho jaati hai; sender ko kuch nahi jaata (backend silent).
+  static Future<void> declineMessageRequest(String conversationId) async {
+    final res = await http.post(
+      Uri.parse("$_base/requests/$conversationId/decline/"),
+      headers: await _headers(),
+    );
+    _decode(res);
+  }
+
+  /// GET /message/conversations/<id>/  -> `request_status` ('accepted' |
+  /// 'pending' | 'declined'). Raw JSON se padhta hai taaki `ConversationModel`
+  /// me field ho ya na ho, koi farak na pade. Error pe null (= normal chat
+  /// maano, chat screen kabhi block na ho).
+  static Future<String?> getConversationRequestStatus(String conversationId) async {
+    try {
+      final res = await http.get(
+          Uri.parse("$_base/conversations/$conversationId/"),
+          headers: await _headers());
+      final data = _decode(res);
+      return data is Map ? data['request_status']?.toString() : null;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  // ==================================================================
+  // 🔥 NAYA (M2-FE) — NOTES (backend: M2-BE, user_notes.py)
+  // ==================================================================
+
+  /// GET /message/notes/?page=N  — mere followed + close-friends ke active
+  /// notes (page size 20) + `my_note` (apna active note ya null).
+  static Future<NotesPage> getNotes({int page = 1}) async {
+    final res = await http.get(Uri.parse("$_base/notes/?page=$page"),
+        headers: await _headers());
+    final data = _decode(res);
+    final map = data is Map ? data : const {};
+    final List list = map['results'] is List ? map['results'] : const [];
+    final items = list
+        .whereType<Map>()
+        .map((e) => UserNoteModel.fromJson(e.cast<String, dynamic>()))
+        .toList();
+    final mine = map['my_note'];
+    return NotesPage(
+      items: items,
+      myNote: mine is Map ? UserNoteModel.fromJson(mine.cast<String, dynamic>()) : null,
+      hasMore: map['next'] != null,
+    );
+  }
+
+  /// PUT /message/notes/me/  {"text"<=60, "emoji", "audience"}
+  /// Note set ya replace karta hai; expiry hamesha abhi + 24h.
+  static Future<UserNoteModel> putMyNote({
+    required String text,
+    String emoji = '',
+    String audience = 'followers', // 'followers' | 'close_friends'
+  }) async {
+    final res = await http.put(
+      Uri.parse("$_base/notes/me/"),
+      headers: await _headers(),
+      body: jsonEncode({"text": text, "emoji": emoji, "audience": audience}),
+    );
+    return UserNoteModel.fromJson((_decode(res) as Map).cast<String, dynamic>());
+  }
+
+  /// DELETE /message/notes/me/  (idempotent — note na ho tab bhi 204)
+  static Future<void> deleteMyNote() async {
+    final res = await http.delete(Uri.parse("$_base/notes/me/"),
+        headers: await _headers());
+    _decode(res);
+  }
+
   /// GET /message/conversations/<id>/  -> `my_settings.is_muted` nikal
   /// ke deta hai.
   ///
@@ -359,8 +535,196 @@ class MessageApiService {
         if (replyTo != null) "reply_to": replyTo,
         if (clientId != null) "client_id": clientId,
       }),
-    );
+    ).timeout(const Duration(seconds: 30)); // 🔥 M6-FE — hang hone par bhi message "failed" ban jaaye, spinner forever na ghume
     return MessageModel.fromJson(_decode(res));
+  }
+
+  // ==================================================================
+  // 🔥 NAYA (M6-FE) — OUTBOX SEND / RETRY
+  // ==================================================================
+  //
+  // Har outgoing message (text-REST / media / location / study-room) ab
+  // `sendPending()` se jaata hai: upload (agar zaroori) + REST send +
+  // outbox cleanup, ek hi jagah. Resend aur reopen-auto-retry bhi yahi
+  // function use karte hain, isliye first-send aur retry ka behaviour
+  // hamesha same rehta hai.
+
+  // clientId -> chal rahi send. Chat screen aur `flushOutbox()` ek hi
+  // message ke liye saath chalein to dono ko wahi Future milta hai —
+  // double send nahi hota.
+  static final Map<String, Future<MessageModel>> _inflight = {};
+  static Future<void>? _flushFuture;
+
+  static bool isSending(String clientId) => _inflight.containsKey(clientId);
+
+  static Future<MessageModel> sendPending(
+    PendingMessage p, {
+    void Function(double progress)? onProgress,
+  }) {
+    final existing = _inflight[p.clientId];
+    if (existing != null) return existing;
+    final f = _sendPendingInner(p, onProgress).whenComplete(() => _inflight.remove(p.clientId));
+    _inflight[p.clientId] = f;
+    return f;
+  }
+
+  static Future<MessageModel> _sendPendingInner(
+    PendingMessage p,
+    void Function(double progress)? onProgress,
+  ) async {
+    final uploaded = Map<String, dynamic>.from(p.uploaded);
+    try {
+      // 1) Upload (sirf jo abhi baaki hain; multi-image parallel).
+      if (p.localPaths.isNotEmpty) {
+        final progress = List<double>.filled(p.localPaths.length, 0.0);
+        void report() {
+          if (onProgress != null) {
+            onProgress(progress.reduce((a, b) => a + b) / progress.length);
+          }
+        }
+
+        await Future.wait(List.generate(p.localPaths.length, (i) async {
+          final path = p.localPaths[i];
+          if (uploaded[path] != null) {
+            progress[i] = 1.0;
+            return;
+          }
+          final file = File(path);
+          if (!await file.exists()) {
+            throw MessageApiException('Attachment file not found', code: 'local_file_missing');
+          }
+          final r = await uploadFile(file, onProgress: (v) {
+            progress[i] = v;
+            report();
+          });
+          uploaded[path] = {
+            'file_url': r.fileUrl,
+            'file_name': r.fileName,
+            'size': r.fileSize,
+            'mime_type': r.mimeType,
+          };
+          progress[i] = 1.0;
+          report();
+        }));
+        // Upload ho gaya — send fail ho bhi jaaye to Resend dobara upload na kare.
+        await MessageCacheService.updatePending(p.clientId, (x) => x.copyWith(uploaded: uploaded));
+      }
+
+      // 2) REST send — payload purane per-screen code jaisa hi.
+      String? fileUrl;
+      List<String>? fileUrls;
+      Map<String, dynamic>? meta = p.meta;
+      // Multi-image message (meta['count']) ek file ke saath bhi `file_urls` list hi bhejta tha.
+      final isMulti = p.localPaths.length > 1 || (p.meta?.containsKey('count') ?? false);
+      if (p.localPaths.length == 1 && !isMulti) {
+        final u = uploaded[p.localPaths.first] as Map;
+        fileUrl = u['file_url'].toString();
+        final extra = Map<String, dynamic>.from(p.meta ?? const {})..remove('file_name');
+        meta = {
+          'file_name': u['file_name'],
+          'size': u['size'],
+          'mime_type': u['mime_type'],
+          ...extra,
+        };
+      } else if (p.localPaths.isNotEmpty) {
+        final items = p.localPaths.map((path) => uploaded[path] as Map).toList();
+        fileUrls = items.map((u) => u['file_url'].toString()).toList();
+        meta = {
+          'count': fileUrls.length,
+          'items': items
+              .map((u) => {'file_name': u['file_name'], 'size': u['size'], 'mime_type': u['mime_type']})
+              .toList(),
+        };
+      }
+
+      final sent = await sendMessageRest(
+        p.conversationId,
+        type: p.type,
+        text: p.text,
+        fileUrl: fileUrl,
+        fileUrls: fileUrls,
+        meta: meta,
+        replyTo: p.replyTo,
+        clientId: p.clientId,
+      );
+      await MessageCacheService.removePending(p.clientId);
+      return sent;
+    } catch (e) {
+      await MessageCacheService.updatePending(
+        p.clientId,
+        (x) => x.copyWith(
+          attempts: x.attempts + 1,
+          permanentFailure: _isPermanentSendError(e),
+          uploaded: uploaded,
+        ),
+      );
+      rethrow;
+    }
+  }
+
+  // 4xx (401/408/429 chhodke) = retry se theek nahi hoga (group blocked,
+  // not a member, file too large, attachment missing...). Dio errors
+  // `MessageApiException` nahi hote, isliye `response.statusCode` duck-typed
+  // padhte hain (dio 4 aur 5 dono me chalta hai).
+  static bool _isPermanentSendError(Object e) {
+    int? code;
+    if (e is MessageApiException) {
+      if (e.code == 'local_file_missing') return true;
+      code = e.statusCode;
+    } else {
+      try {
+        code = (e as dynamic).response?.statusCode as int?;
+      } catch (_) {}
+    }
+    return code != null && code >= 400 && code < 500 && code != 401 && code != 408 && code != 429;
+  }
+
+  /// App start / conversations screen khulte hi ek baar call karo — outbox ke
+  /// auto-retry-eligible messages bhej deta hai (chat screen khuli ho ya nahi).
+  /// Order per conversation: purana pehle. Fire-and-forget safe.
+  static Future<void> flushOutbox() {
+    // Pehle se chal rahi flush ho to usi ka Future do — caller `await` karke
+    // jaan sakta hai ki outbox ka kaam khatam hua ya nahi.
+    return _flushFuture ??= _flushOutboxInner().whenComplete(() => _flushFuture = null);
+  }
+
+  static Future<void> _flushOutboxInner() async {
+    try {
+      final eligible = (await MessageCacheService.getAllPending())
+          .where((p) => p.canAutoRetry && !_inflight.containsKey(p.clientId))
+          .toList();
+      if (eligible.isEmpty) return;
+
+      final byConversation = <String, List<PendingMessage>>{};
+      for (final p in eligible) {
+        byConversation.putIfAbsent(p.conversationId, () => []).add(p);
+      }
+
+      for (final entry in byConversation.entries) {
+        // App kill hone se pehle request server tak pahunch chuki ho sakti hai
+        // (response ya cleanup reh gaya) — isliye bhejne se pehle server ke
+        // recent messages me clientId dhoondo, mil jaaye to dobara mat bhejo.
+        var items = entry.value;
+        try {
+          final recent = await getMessages(entry.key, page: 1, pageSize: 30);
+          final serverClientIds = recent.map((m) => m.clientId).whereType<String>().toSet();
+          for (final p in items.where((p) => serverClientIds.contains(p.clientId))) {
+            await MessageCacheService.removePending(p.clientId);
+          }
+          items = items.where((p) => !serverClientIds.contains(p.clientId)).toList();
+        } catch (_) {
+          continue; // network abhi bhi down — agli baar
+        }
+        for (final p in items) {
+          // Beech me user ne Resend/Delete kar diya ho to dobara mat bhejo.
+          final stillQueued = (await MessageCacheService.getAllPending()).any((x) => x.clientId == p.clientId);
+          if (!stillQueued) continue;
+          try {
+            await sendPending(p);
+          } catch (_) {} // failure outbox me attempts+1 ke saath record ho chuka
+        }
+      }
+    } catch (_) {}
   }
 
   /// POST /message/conversations/<id>/read_all/
@@ -746,13 +1110,14 @@ class MessageApiService {
   // GROUPS
   // ==================================================================
 
-  /// POST /message/groups/  {"name","description","photo_url","is_private","member_ids"}
+  /// POST /message/groups/  {"name","description","photo_url","is_private","member_ids","topic_tag"}
   static Future<Map<String, dynamic>> createGroup({
     required String name,
     String description = '',
     String? photoUrl,
     bool isPrivate = false,
     List<String> memberIds = const [],
+    String? topicTag, // 🔥 NAYA (Task G14) — e.g. "NEET 2027", "JEE Mains"
   }) async {
     final res = await http.post(
       Uri.parse("$_base/groups/"),
@@ -763,9 +1128,32 @@ class MessageApiService {
         if (photoUrl != null) "photo_url": photoUrl,
         "is_private": isPrivate,
         "member_ids": memberIds,
+        if (topicTag != null) "topic_tag": topicTag,
       }),
     );
     return _decode(res);
+  }
+
+  /// 🔥 NAYA (Task G14) — Study Groups discovery. `GET /message/groups/
+  /// discover/?q=&topic=&page=`. Member-hue-bina bhi PUBLIC groups dhoondh
+  /// sakte hain (`GroupViewSet.discover` — private groups kabhi is list me
+  /// nahi aate). Returns `{results, page, has_more}` — raw map wapas karte
+  /// hain (baaki group screens jaisa hi pattern, Dart model class nahi
+  /// banayi hai isliye).
+  static Future<Map<String, dynamic>> discoverGroups({
+    String query = '',
+    String topic = '',
+    int page = 1,
+  }) async {
+    final uri = Uri.parse("$_base/groups/discover/").replace(queryParameters: {
+      if (query.trim().isNotEmpty) "q": query.trim(),
+      if (topic.trim().isNotEmpty) "topic": topic.trim(),
+      "page": page.toString(),
+    });
+    final res = await http.get(uri, headers: await _headers());
+    final decoded = _decode(res);
+    if (decoded is Map<String, dynamic>) return decoded;
+    return {'results': [], 'page': page, 'has_more': false};
   }
 
   /// GET /message/groups/<id>/
@@ -884,6 +1272,29 @@ class MessageApiService {
     final res = await http.get(uri, headers: await _headers());
     final data = _decode(res);
     return data is Map && data.containsKey('results') ? data['results'] : data;
+  }
+
+  /// 🔥 NAYA (M8-FE) — GET /message/conversations/<id>/media/?type=media|links|docs&page=N
+  ///
+  /// Private + group dono chats ke liye "Media, links and docs" library
+  /// (`ConversationViewSet.media`). `GroupMedia` wale `getGroupMedia` se alag:
+  /// ye seedha Message table se chalta hai aur "links" bhi deta hai.
+  /// Paginated map return karta hai (`count`, `next`, `previous`, `results`) —
+  /// caller ko `next` chahiye ("aur page hai ya nahi"), isliye yahan
+  /// `results` unwrap nahi karte.
+  static Future<Map<String, dynamic>> getConversationMedia(
+    String conversationId, {
+    String type = 'media',
+    int page = 1,
+  }) async {
+    final uri = Uri.parse("$_base/conversations/$conversationId/media/").replace(
+      queryParameters: {'type': type, 'page': page.toString()},
+    );
+    final res = await http.get(uri, headers: await _headers());
+    final data = _decode(res);
+    if (data is Map) return Map<String, dynamic>.from(data);
+    // Defensive: pagination band ho jaye to plain list aayegi.
+    return {'results': data is List ? data : const [], 'next': null};
   }
 
   // ------------------------------------------------------------------
@@ -1214,6 +1625,23 @@ class MessageApiService {
   static Future<Map<String, dynamic>?> getStudyRoomState(String conversationId) async {
     final res = await http.get(
       Uri.parse("$_base/study-room/$conversationId/state/"),
+      headers: await _headers(),
+    );
+    final data = _decode(res);
+    return data is Map<String, dynamic> ? data : null;
+  }
+
+  /// GET /message/study-room/<id>/notes/[?page_id=<id>]
+  ///
+  /// 🔥 NAYA — collaborative sticky notes (backend `StudyRoomNote` table).
+  /// Room khulne / rejoin / socket-reconnect par saare notes (z-order me)
+  /// + `server_time_ms` (client clock-offset ke liye) + limits. Writes REST
+  /// se nahi, WebSocket `note_*` study_room_events se hote hain
+  /// (`StickyNoteSync`). Fail hone par exception throw hota hai — caller
+  /// (StickyNoteSync.load) error state dikhata hai.
+  static Future<Map<String, dynamic>?> getStudyRoomNotes(String conversationId) async {
+    final res = await http.get(
+      Uri.parse("$_base/study-room/$conversationId/notes/"),
       headers: await _headers(),
     );
     final data = _decode(res);

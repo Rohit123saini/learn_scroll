@@ -46,8 +46,8 @@ String tsSourceLabel(AppLocalizations l10n, TsSource source) {
       return l10n.tsSourceIndividual;
     case TsSource.campus:
       return l10n.tsSourceCampus;
-    case TsSource.liveclass:
-      return l10n.tsSourceLiveClass;
+    case TsSource.tuitionclass:
+      return l10n.tsSourceTuitionClass;
     case TsSource.unknown:
       return l10n.tsSourceIndividual;
   }
@@ -59,7 +59,7 @@ Color tsSourceColor(BuildContext context, TsSource source) {
   switch (source) {
     case TsSource.campus:
       return t.info;
-    case TsSource.liveclass:
+    case TsSource.tuitionclass:
       return t.danger;
     case TsSource.individual:
     case TsSource.unknown:

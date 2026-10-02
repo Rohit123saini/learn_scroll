@@ -134,7 +134,7 @@ abstract class AppLocalizations {
   /// **'Search courses, tests, notices...'**
   String get searchHint;
 
-  /// Section header for live classes/streams
+  /// Section header for tuition classes/streams
   ///
   /// In en, this message translates to:
   /// **'Live Now'**
@@ -146,7 +146,7 @@ abstract class AppLocalizations {
   /// **'LIVE'**
   String get liveBadge;
 
-  /// Subtitle for live class card
+  /// Subtitle for tuition class card
   ///
   /// In en, this message translates to:
   /// **'{teacher} · {viewers} watching'**
@@ -158,7 +158,7 @@ abstract class AppLocalizations {
   /// **'See all'**
   String get seeAll;
 
-  /// Button to join a live class/session
+  /// Button to join a tuition class/session
   ///
   /// In en, this message translates to:
   /// **'Join'**
@@ -175,6 +175,24 @@ abstract class AppLocalizations {
   /// In en, this message translates to:
   /// **'Following'**
   String get following;
+
+  /// Home feed tab label for the mixed (following + suggested + trending) feed
+  ///
+  /// In en, this message translates to:
+  /// **'For you'**
+  String get feedTabForYou;
+
+  /// Badge on a feed post recommended from an account the user does not follow
+  ///
+  /// In en, this message translates to:
+  /// **'Suggested for you'**
+  String get feedBadgeSuggested;
+
+  /// Badge on a feed post that is trending platform-wide
+  ///
+  /// In en, this message translates to:
+  /// **'Trending'**
+  String get feedBadgeTrending;
 
   /// Button/section to add friends
   ///
@@ -2348,6 +2366,42 @@ abstract class AppLocalizations {
   /// **'Section'**
   String get noticeScopeSection;
 
+  /// No description provided for @noticeBoardTitle.
+  ///
+  /// In en, this message translates to:
+  /// **'Notice Board'**
+  String get noticeBoardTitle;
+
+  /// No description provided for @noticeBoardEmpty.
+  ///
+  /// In en, this message translates to:
+  /// **'No notices yet'**
+  String get noticeBoardEmpty;
+
+  /// No description provided for @noticeBoardEmptySubtitle.
+  ///
+  /// In en, this message translates to:
+  /// **'Campus and tuition-class notices will show up here.'**
+  String get noticeBoardEmptySubtitle;
+
+  /// No description provided for @noticeBoardLoadFailed.
+  ///
+  /// In en, this message translates to:
+  /// **'Couldn\'t load the notice board'**
+  String get noticeBoardLoadFailed;
+
+  /// No description provided for @noticeBoardSourceCampus.
+  ///
+  /// In en, this message translates to:
+  /// **'Campus'**
+  String get noticeBoardSourceCampus;
+
+  /// No description provided for @noticeBoardSourceTuitionClass.
+  ///
+  /// In en, this message translates to:
+  /// **'Tuition Class'**
+  String get noticeBoardSourceTuitionClass;
+
   /// No description provided for @attendanceWholeDay.
   ///
   /// In en, this message translates to:
@@ -2564,7 +2618,7 @@ abstract class AppLocalizations {
   /// **'Could not open this classroom.'**
   String get couldNotOpenClassroom;
 
-  /// Shown when tapping a live class card fails to open it
+  /// Shown when tapping a tuition class card fails to open it
   ///
   /// In en, this message translates to:
   /// **'Could not open this class.'**
@@ -2852,6 +2906,60 @@ abstract class AppLocalizations {
   /// **'Add a caption…'**
   String get addCaptionHint;
 
+  /// Audience option: share the story with all followers
+  ///
+  /// In en, this message translates to:
+  /// **'Your story'**
+  String get storyAudienceYourStory;
+
+  /// Close Friends list title / audience option / story badge
+  ///
+  /// In en, this message translates to:
+  /// **'Close Friends'**
+  String get closeFriends;
+
+  /// Button that opens the Close Friends list editor
+  ///
+  /// In en, this message translates to:
+  /// **'Edit list'**
+  String get closeFriendsEditList;
+
+  /// Search hint on the Close Friends screen
+  ///
+  /// In en, this message translates to:
+  /// **'Search followers and following'**
+  String get closeFriendsSearchHint;
+
+  /// Empty state on the Close Friends screen
+  ///
+  /// In en, this message translates to:
+  /// **'No people found'**
+  String get closeFriendsEmpty;
+
+  /// Privacy note at the top of the Close Friends screen
+  ///
+  /// In en, this message translates to:
+  /// **'Only people on this list can see your Close Friends stories. They won\'t be notified when you add or remove them.'**
+  String get closeFriendsInfo;
+
+  /// Error when the Close Friends list fails to load
+  ///
+  /// In en, this message translates to:
+  /// **'Couldn\'t load your list'**
+  String get closeFriendsLoadFailed;
+
+  /// Error when adding/removing a close friend fails
+  ///
+  /// In en, this message translates to:
+  /// **'Couldn\'t update your list'**
+  String get closeFriendsUpdateFailed;
+
+  /// Button that closes the Close Friends screen
+  ///
+  /// In en, this message translates to:
+  /// **'Done'**
+  String get closeFriendsDone;
+
   /// Generic download button label
   ///
   /// In en, this message translates to:
@@ -2924,6 +3032,18 @@ abstract class AppLocalizations {
   /// **'No views yet.'**
   String get noViewsYet;
 
+  /// Hint text on the story-reply text field, {username} is the story owner
+  ///
+  /// In en, this message translates to:
+  /// **'Reply to {username}...'**
+  String replyToStoryHint(String username);
+
+  /// Snackbar shown after a story reply is sent successfully
+  ///
+  /// In en, this message translates to:
+  /// **'Reply sent'**
+  String get replySentToStory;
+
   /// Source filter chip / badge: a test series created by an individual creator
   ///
   /// In en, this message translates to:
@@ -2936,11 +3056,11 @@ abstract class AppLocalizations {
   /// **'Campus'**
   String get tsSourceCampus;
 
-  /// Source filter chip / badge: a test series attached to a live class
+  /// Source filter chip / badge: a test series attached to a tuition class
   ///
   /// In en, this message translates to:
-  /// **'Live Class'**
-  String get tsSourceLiveClass;
+  /// **'Tuition Class'**
+  String get tsSourceTuitionClass;
 
   /// Hint text of the search field on the test series list
   ///
@@ -3326,11 +3446,11 @@ abstract class AppLocalizations {
   /// **'Turning a category off still shows it in your notification list — it just won\'t send a push, email, SMS or WhatsApp alert.'**
   String get notifCategoriesHint;
 
-  /// No description provided for @notifCategoryLiveClasses.
+  /// No description provided for @notifCategoryTuitionClasses.
   ///
   /// In en, this message translates to:
-  /// **'Live classes & sessions'**
-  String get notifCategoryLiveClasses;
+  /// **'Tuition classes & sessions'**
+  String get notifCategoryTuitionClasses;
 
   /// No description provided for @notifCategoryAssignmentsTests.
   ///
@@ -3401,8 +3521,8 @@ abstract class AppLocalizations {
   /// Classrooms browse screen title
   ///
   /// In en, this message translates to:
-  /// **'Live Classes'**
-  String get liveClassesTitle;
+  /// **'Tuition Classes'**
+  String get tuitionClassesTitle;
 
   /// No description provided for @searchClassroomsHint.
   ///
@@ -3445,6 +3565,72 @@ abstract class AppLocalizations {
   /// In en, this message translates to:
   /// **'Try a different search or filter'**
   String get tryDifferentSearch;
+
+  /// No description provided for @createTuitionClassCta.
+  ///
+  /// In en, this message translates to:
+  /// **'Create class'**
+  String get createTuitionClassCta;
+
+  /// No description provided for @createClassroomTitle.
+  ///
+  /// In en, this message translates to:
+  /// **'Create classroom'**
+  String get createClassroomTitle;
+
+  /// No description provided for @classroomTitleLabel.
+  ///
+  /// In en, this message translates to:
+  /// **'Title'**
+  String get classroomTitleLabel;
+
+  /// No description provided for @classroomTitleHint.
+  ///
+  /// In en, this message translates to:
+  /// **'e.g. Class 10 Physics — Batch A'**
+  String get classroomTitleHint;
+
+  /// No description provided for @classroomTitleRequired.
+  ///
+  /// In en, this message translates to:
+  /// **'Enter a title for your classroom'**
+  String get classroomTitleRequired;
+
+  /// No description provided for @classroomSubjectLabel.
+  ///
+  /// In en, this message translates to:
+  /// **'Subject (optional)'**
+  String get classroomSubjectLabel;
+
+  /// No description provided for @classroomDescriptionLabel.
+  ///
+  /// In en, this message translates to:
+  /// **'Description (optional)'**
+  String get classroomDescriptionLabel;
+
+  /// No description provided for @classroomLanguageLabel.
+  ///
+  /// In en, this message translates to:
+  /// **'Language'**
+  String get classroomLanguageLabel;
+
+  /// No description provided for @createClassroomSubmit.
+  ///
+  /// In en, this message translates to:
+  /// **'Create'**
+  String get createClassroomSubmit;
+
+  /// No description provided for @createClassroomSuccess.
+  ///
+  /// In en, this message translates to:
+  /// **'Classroom created'**
+  String get createClassroomSuccess;
+
+  /// No description provided for @createClassroomFailed.
+  ///
+  /// In en, this message translates to:
+  /// **'Couldn\'t create classroom. Try again.'**
+  String get createClassroomFailed;
 
   /// Enrolled student count on a classroom card
   ///
@@ -3781,6 +3967,24 @@ abstract class AppLocalizations {
   /// In en, this message translates to:
   /// **'Commission earned'**
   String get commissionEarnedLabel;
+
+  /// No description provided for @commissionRateLabel.
+  ///
+  /// In en, this message translates to:
+  /// **'Commission rate'**
+  String get commissionRateLabel;
+
+  /// No description provided for @pendingCommissionLabel.
+  ///
+  /// In en, this message translates to:
+  /// **'Pending commission'**
+  String get pendingCommissionLabel;
+
+  /// No description provided for @studentsReferredLabel.
+  ///
+  /// In en, this message translates to:
+  /// **'Students referred'**
+  String get studentsReferredLabel;
 
   /// No description provided for @couldNotLoadAssignments.
   ///
@@ -4451,7 +4655,7 @@ abstract class AppLocalizations {
   /// Post visibility option: only me
   ///
   /// In en, this message translates to:
-  /// **'Private'**
+  /// **'Only me'**
   String get visibilityPrivate;
 
   /// Title of the Quick Post composer screen
@@ -6404,6 +6608,18 @@ abstract class AppLocalizations {
   /// **'Couldn\'t revoke the device.'**
   String get parentAccessRevokeDeviceFailed;
 
+  /// Button/tooltip to share the parent-access code via the OS share sheet
+  ///
+  /// In en, this message translates to:
+  /// **'Share'**
+  String get parentAccessShareAction;
+
+  /// Text shared through the OS share sheet (WhatsApp/SMS/email) when a student shares a parent-access code
+  ///
+  /// In en, this message translates to:
+  /// **'You\'ve been invited to Parent/Guardian Access on LearnScroll.\n\n1. Install the LearnScroll app\n2. On the login screen, choose \"I\'m a parent\"\n3. Enter this code: {code}'**
+  String parentAccessShareMessage(String code);
+
   /// Sender label for your own messages in a chat
   ///
   /// In en, this message translates to:
@@ -6667,6 +6883,30 @@ abstract class AppLocalizations {
   /// In en, this message translates to:
   /// **'Unmute notifications'**
   String get chatUnmuteNotifications;
+
+  /// 3-dot menu item — turns on the per-message translate button
+  ///
+  /// In en, this message translates to:
+  /// **'Enable message translate'**
+  String get chatEnableTranslate;
+
+  /// 3-dot menu item — turns off the per-message translate button
+  ///
+  /// In en, this message translates to:
+  /// **'Disable message translate'**
+  String get chatDisableTranslate;
+
+  /// Snackbar shown after enabling translate from the 3-dot menu
+  ///
+  /// In en, this message translates to:
+  /// **'Message translate turned on'**
+  String get chatTranslateEnabled;
+
+  /// Snackbar shown after disabling translate from the 3-dot menu
+  ///
+  /// In en, this message translates to:
+  /// **'Message translate turned off'**
+  String get chatTranslateDisabled;
 
   /// Fallback name in the block dialog
   ///
@@ -7418,6 +7658,18 @@ abstract class AppLocalizations {
   /// **'📊 Poll'**
   String get chatPreviewPoll;
 
+  /// Shown in a story-reply chat bubble, above the story thumbnail
+  ///
+  /// In en, this message translates to:
+  /// **'Replied to your story'**
+  String get chatRepliedToYourStory;
+
+  /// Conversation-list / app-bar preview text for a story-reply message
+  ///
+  /// In en, this message translates to:
+  /// **'📷 Replied to your story'**
+  String get chatPreviewStoryReply;
+
   /// Date separator between messages
   ///
   /// In en, this message translates to:
@@ -7808,6 +8060,114 @@ abstract class AppLocalizations {
   /// **'Waiting for the teacher to start video…'**
   String get waitingForTeacher;
 
+  /// No description provided for @trialBadge.
+  ///
+  /// In en, this message translates to:
+  /// **'Trial'**
+  String get trialBadge;
+
+  /// No description provided for @trialInProgressBanner.
+  ///
+  /// In en, this message translates to:
+  /// **'You\'re in a trial preview. Enrolled classes get the full experience.'**
+  String get trialInProgressBanner;
+
+  /// No description provided for @joinFullClassCta.
+  ///
+  /// In en, this message translates to:
+  /// **'Join full class'**
+  String get joinFullClassCta;
+
+  /// No description provided for @maybeLaterCta.
+  ///
+  /// In en, this message translates to:
+  /// **'Maybe later'**
+  String get maybeLaterCta;
+
+  /// No description provided for @trialEndedTitle.
+  ///
+  /// In en, this message translates to:
+  /// **'Your trial ended'**
+  String get trialEndedTitle;
+
+  /// No description provided for @trialEndedMessage.
+  ///
+  /// In en, this message translates to:
+  /// **'Hope you liked the class! Join fully to keep learning with this teacher.'**
+  String get trialEndedMessage;
+
+  /// No description provided for @tryTrialCta.
+  ///
+  /// In en, this message translates to:
+  /// **'Try a free trial'**
+  String get tryTrialCta;
+
+  /// No description provided for @trialPasswordLabel.
+  ///
+  /// In en, this message translates to:
+  /// **'Trial password'**
+  String get trialPasswordLabel;
+
+  /// No description provided for @trialPasswordHint.
+  ///
+  /// In en, this message translates to:
+  /// **'Enter the code your teacher shared'**
+  String get trialPasswordHint;
+
+  /// No description provided for @trialAlreadyUsedNotice.
+  ///
+  /// In en, this message translates to:
+  /// **'You\'ve already used your trial for this class.'**
+  String get trialAlreadyUsedNotice;
+
+  /// No description provided for @trialDurationLabel.
+  ///
+  /// In en, this message translates to:
+  /// **'Trial duration (minutes)'**
+  String get trialDurationLabel;
+
+  /// No description provided for @enableTrialAccessLabel.
+  ///
+  /// In en, this message translates to:
+  /// **'Enable trial access'**
+  String get enableTrialAccessLabel;
+
+  /// No description provided for @trialAccessSettingsTitle.
+  ///
+  /// In en, this message translates to:
+  /// **'Trial access'**
+  String get trialAccessSettingsTitle;
+
+  /// No description provided for @trialSettingsSaved.
+  ///
+  /// In en, this message translates to:
+  /// **'Trial settings saved.'**
+  String get trialSettingsSaved;
+
+  /// No description provided for @setTrialPasswordFirst.
+  ///
+  /// In en, this message translates to:
+  /// **'Set a trial password before enabling trial access.'**
+  String get setTrialPasswordFirst;
+
+  /// No description provided for @freeTrialClassesTitle.
+  ///
+  /// In en, this message translates to:
+  /// **'Free trial classes'**
+  String get freeTrialClassesTitle;
+
+  /// No description provided for @liveNowBadge.
+  ///
+  /// In en, this message translates to:
+  /// **'LIVE NOW'**
+  String get liveNowBadge;
+
+  /// No description provided for @recommendedForYouBadge.
+  ///
+  /// In en, this message translates to:
+  /// **'For you'**
+  String get recommendedForYouBadge;
+
   /// No description provided for @savedPostsTitle.
   ///
   /// In en, this message translates to:
@@ -7855,6 +8215,60 @@ abstract class AppLocalizations {
   /// In en, this message translates to:
   /// **'Couldn\'t delete the post'**
   String get postDeleteFailed;
+
+  /// No description provided for @editPostCta.
+  ///
+  /// In en, this message translates to:
+  /// **'Edit post'**
+  String get editPostCta;
+
+  /// No description provided for @postTitleFieldLabel.
+  ///
+  /// In en, this message translates to:
+  /// **'Title (optional)'**
+  String get postTitleFieldLabel;
+
+  /// No description provided for @postUpdated.
+  ///
+  /// In en, this message translates to:
+  /// **'Post updated'**
+  String get postUpdated;
+
+  /// No description provided for @postUpdateFailed.
+  ///
+  /// In en, this message translates to:
+  /// **'Couldn\'t update the post'**
+  String get postUpdateFailed;
+
+  /// No description provided for @postEditedLabel.
+  ///
+  /// In en, this message translates to:
+  /// **'Edited'**
+  String get postEditedLabel;
+
+  /// No description provided for @changePrivacyCta.
+  ///
+  /// In en, this message translates to:
+  /// **'Change privacy'**
+  String get changePrivacyCta;
+
+  /// No description provided for @changePrivacyTitle.
+  ///
+  /// In en, this message translates to:
+  /// **'Who can see this post?'**
+  String get changePrivacyTitle;
+
+  /// No description provided for @privacyUpdated.
+  ///
+  /// In en, this message translates to:
+  /// **'Privacy updated'**
+  String get privacyUpdated;
+
+  /// No description provided for @privacyUpdateFailed.
+  ///
+  /// In en, this message translates to:
+  /// **'Couldn\'t update privacy'**
+  String get privacyUpdateFailed;
 
   /// No description provided for @allCaughtUp.
   ///
@@ -7945,6 +8359,24 @@ abstract class AppLocalizations {
   /// In en, this message translates to:
   /// **'Documents ({count})'**
   String documentsTabLabel(int count);
+
+  /// No description provided for @repostsTabLabel.
+  ///
+  /// In en, this message translates to:
+  /// **'Reposts ({count})'**
+  String repostsTabLabel(int count);
+
+  /// No description provided for @noRepostsYetTitle.
+  ///
+  /// In en, this message translates to:
+  /// **'No reposts yet'**
+  String get noRepostsYetTitle;
+
+  /// No description provided for @noRepostsYetSubtitle.
+  ///
+  /// In en, this message translates to:
+  /// **'Posts this user reposts will show up here.'**
+  String get noRepostsYetSubtitle;
 
   /// No description provided for @noDocumentsYetTitle.
   ///
@@ -8155,6 +8587,84 @@ abstract class AppLocalizations {
   /// In en, this message translates to:
   /// **'No submissions yet'**
   String get assignmentNoSubmissions;
+
+  /// No description provided for @assignmentPossibleDuplicate.
+  ///
+  /// In en, this message translates to:
+  /// **'Possible duplicate'**
+  String get assignmentPossibleDuplicate;
+
+  /// No description provided for @assignmentSimilarityFlagsTitle.
+  ///
+  /// In en, this message translates to:
+  /// **'Possible duplicates'**
+  String get assignmentSimilarityFlagsTitle;
+
+  /// No description provided for @assignmentMatchesWith.
+  ///
+  /// In en, this message translates to:
+  /// **'Matches with'**
+  String get assignmentMatchesWith;
+
+  /// No description provided for @assignmentSimilarityScoreLabel.
+  ///
+  /// In en, this message translates to:
+  /// **'Similarity'**
+  String get assignmentSimilarityScoreLabel;
+
+  /// No description provided for @assignmentThisStudentAnswer.
+  ///
+  /// In en, this message translates to:
+  /// **'This submission'**
+  String get assignmentThisStudentAnswer;
+
+  /// No description provided for @assignmentOtherStudentAnswer.
+  ///
+  /// In en, this message translates to:
+  /// **'Matching submission'**
+  String get assignmentOtherStudentAnswer;
+
+  /// No description provided for @assignmentConfirmDuplicate.
+  ///
+  /// In en, this message translates to:
+  /// **'Confirm duplicate'**
+  String get assignmentConfirmDuplicate;
+
+  /// No description provided for @assignmentDismissFlag.
+  ///
+  /// In en, this message translates to:
+  /// **'Dismiss'**
+  String get assignmentDismissFlag;
+
+  /// No description provided for @assignmentFlagStatusConfirmed.
+  ///
+  /// In en, this message translates to:
+  /// **'Confirmed duplicate'**
+  String get assignmentFlagStatusConfirmed;
+
+  /// No description provided for @assignmentFlagStatusDismissed.
+  ///
+  /// In en, this message translates to:
+  /// **'Dismissed (false positive)'**
+  String get assignmentFlagStatusDismissed;
+
+  /// No description provided for @assignmentFlagStatusPending.
+  ///
+  /// In en, this message translates to:
+  /// **'Pending review'**
+  String get assignmentFlagStatusPending;
+
+  /// No description provided for @assignmentSimilarityFlagsLoadFailed.
+  ///
+  /// In en, this message translates to:
+  /// **'Could not load duplicate flags'**
+  String get assignmentSimilarityFlagsLoadFailed;
+
+  /// No description provided for @assignmentNoSimilarityFlags.
+  ///
+  /// In en, this message translates to:
+  /// **'No possible duplicates found'**
+  String get assignmentNoSimilarityFlags;
 
   /// No description provided for @assignmentNotSubmitted.
   ///
@@ -8906,6 +9416,36 @@ abstract class AppLocalizations {
   /// **'Payment mode'**
   String get feePaymentModeLabel;
 
+  /// No description provided for @feeReceiptDownload.
+  ///
+  /// In en, this message translates to:
+  /// **'Download receipt'**
+  String get feeReceiptDownload;
+
+  /// No description provided for @feeReceiptDownloadFailed.
+  ///
+  /// In en, this message translates to:
+  /// **'Couldn\'t download the receipt — try again in a bit.'**
+  String get feeReceiptDownloadFailed;
+
+  /// No description provided for @feeReceiptUnavailable.
+  ///
+  /// In en, this message translates to:
+  /// **'Receipts aren\'t available on this campus yet.'**
+  String get feeReceiptUnavailable;
+
+  /// No description provided for @feeReceiptsCta.
+  ///
+  /// In en, this message translates to:
+  /// **'View receipts'**
+  String get feeReceiptsCta;
+
+  /// No description provided for @feeReceiptsTitle.
+  ///
+  /// In en, this message translates to:
+  /// **'Receipts'**
+  String get feeReceiptsTitle;
+
   /// No description provided for @feeRecordPayment.
   ///
   /// In en, this message translates to:
@@ -9223,6 +9763,678 @@ abstract class AppLocalizations {
   /// In en, this message translates to:
   /// **'{count} mutual'**
   String mutualFriendsCount(int count);
+
+  /// Snackbar shown when trying to repost a post that was already reposted
+  ///
+  /// In en, this message translates to:
+  /// **'You\'ve already reposted this'**
+  String get repostAlready;
+
+  /// Snackbar shown when the original post of a repost can't be found
+  ///
+  /// In en, this message translates to:
+  /// **'This post is no longer available'**
+  String get repostOriginalUnavailable;
+
+  /// Snackbar shown after successfully reposting a post
+  ///
+  /// In en, this message translates to:
+  /// **'Reposted'**
+  String get repostDone;
+
+  /// Action label to undo a repost, shown in a snackbar
+  ///
+  /// In en, this message translates to:
+  /// **'Undo'**
+  String get repostUndo;
+
+  /// Snackbar shown when reposting a post fails
+  ///
+  /// In en, this message translates to:
+  /// **'Couldn\'t repost. Please try again.'**
+  String get repostFailed;
+
+  /// Snackbar shown after a repost is removed
+  ///
+  /// In en, this message translates to:
+  /// **'Repost removed'**
+  String get repostRemoved;
+
+  /// Label for the repost action button
+  ///
+  /// In en, this message translates to:
+  /// **'Repost'**
+  String get repostAction;
+
+  /// Label showing who reposted a post
+  ///
+  /// In en, this message translates to:
+  /// **'Reposted by {username}'**
+  String repostedBy(String username);
+
+  /// Title of the sheet for reposting a post with an added caption
+  ///
+  /// In en, this message translates to:
+  /// **'Repost with caption'**
+  String get repostWithCaption;
+
+  /// Hint text for the repost caption input field
+  ///
+  /// In en, this message translates to:
+  /// **'Add a caption (optional)'**
+  String get repostCaptionHint;
+
+  /// Button label to skip completing the profile
+  ///
+  /// In en, this message translates to:
+  /// **'Skip'**
+  String get completeProfileSkip;
+
+  /// Label for the saved posts tab with a count
+  ///
+  /// In en, this message translates to:
+  /// **'Saved ({count})'**
+  String savedTabLabel(int count);
+
+  /// Title shown when the user has no saved posts
+  ///
+  /// In en, this message translates to:
+  /// **'No saved posts yet'**
+  String get noSavedPostsYetTitle;
+
+  /// Subtitle shown when the user has no saved posts
+  ///
+  /// In en, this message translates to:
+  /// **'Posts you save will show up here.'**
+  String get noSavedPostsYetSubtitle;
+
+  /// Button: send parent-add link to every student without a parent
+  ///
+  /// In en, this message translates to:
+  /// **'Send to all students'**
+  String get parentSendToAllCta;
+
+  /// Roster row action: invite a parent for this student
+  ///
+  /// In en, this message translates to:
+  /// **'Add parent'**
+  String get addParentCta;
+
+  /// Roster row action: skip adding a parent for this student
+  ///
+  /// In en, this message translates to:
+  /// **'Skip'**
+  String get skipCta;
+
+  /// Parent status chip: invite sent
+  ///
+  /// In en, this message translates to:
+  /// **'Invited'**
+  String get parentStatusInvited;
+
+  /// Parent status chip: parent linked
+  ///
+  /// In en, this message translates to:
+  /// **'Linked'**
+  String get parentStatusLinked;
+
+  /// Parent status chip: teacher skipped adding a parent
+  ///
+  /// In en, this message translates to:
+  /// **'Skipped'**
+  String get parentStatusSkipped;
+
+  /// Snackbar after sending the parent-add link in bulk
+  ///
+  /// In en, this message translates to:
+  /// **'Parent-add link sent to {sent} of {total} students.'**
+  String parentLinkSentMessage(int sent, int total);
+
+  /// No description provided for @reelsTab.
+  ///
+  /// In en, this message translates to:
+  /// **'Reels'**
+  String get reelsTab;
+
+  /// No description provided for @reelsEmpty.
+  ///
+  /// In en, this message translates to:
+  /// **'No reels yet'**
+  String get reelsEmpty;
+
+  /// No description provided for @reelNotInterested.
+  ///
+  /// In en, this message translates to:
+  /// **'Not interested'**
+  String get reelNotInterested;
+
+  /// No description provided for @reelShowFewer.
+  ///
+  /// In en, this message translates to:
+  /// **'Show fewer like this'**
+  String get reelShowFewer;
+
+  /// No description provided for @reelWhySeeing.
+  ///
+  /// In en, this message translates to:
+  /// **'Why am I seeing this'**
+  String get reelWhySeeing;
+
+  /// No description provided for @reelHidden.
+  ///
+  /// In en, this message translates to:
+  /// **'Reel hidden'**
+  String get reelHidden;
+
+  /// No description provided for @reelFewerDone.
+  ///
+  /// In en, this message translates to:
+  /// **'We\'ll show fewer like this'**
+  String get reelFewerDone;
+
+  /// No description provided for @reelCaptionMore.
+  ///
+  /// In en, this message translates to:
+  /// **'more'**
+  String get reelCaptionMore;
+
+  /// No description provided for @reelCaptionLess.
+  ///
+  /// In en, this message translates to:
+  /// **'less'**
+  String get reelCaptionLess;
+
+  /// Title of the sticker tray in the story composer
+  ///
+  /// In en, this message translates to:
+  /// **'Add sticker'**
+  String get storyAddSticker;
+
+  /// Sticker type: @mention a person
+  ///
+  /// In en, this message translates to:
+  /// **'Mention'**
+  String get stickerMention;
+
+  /// Sticker type: tappable link
+  ///
+  /// In en, this message translates to:
+  /// **'Link'**
+  String get stickerLink;
+
+  /// Sticker type: poll
+  ///
+  /// In en, this message translates to:
+  /// **'Poll'**
+  String get stickerPoll;
+
+  /// Sticker type: question box
+  ///
+  /// In en, this message translates to:
+  /// **'Question'**
+  String get stickerQuestion;
+
+  /// Shown under a sticker type that cannot be added any more
+  ///
+  /// In en, this message translates to:
+  /// **'Limit reached'**
+  String get stickerLimitReached;
+
+  /// Search hint in the mention picker
+  ///
+  /// In en, this message translates to:
+  /// **'Search people to mention'**
+  String get stickerMentionSearchHint;
+
+  /// Empty state of the mention picker
+  ///
+  /// In en, this message translates to:
+  /// **'No people found'**
+  String get stickerMentionEmpty;
+
+  /// Note in the mention picker for a Close Friends story
+  ///
+  /// In en, this message translates to:
+  /// **'Only Close Friends can be mentioned in a Close Friends story'**
+  String get stickerMentionCloseFriendsNote;
+
+  /// Generic load error inside sticker sheets
+  ///
+  /// In en, this message translates to:
+  /// **'Couldn\'t load. Please try again.'**
+  String get stickerLoadFailed;
+
+  /// Hint of the link URL field
+  ///
+  /// In en, this message translates to:
+  /// **'Paste a link'**
+  String get stickerLinkUrlHint;
+
+  /// Hint of the link label field
+  ///
+  /// In en, this message translates to:
+  /// **'Label (optional)'**
+  String get stickerLinkLabelHint;
+
+  /// Validation error for the link sticker
+  ///
+  /// In en, this message translates to:
+  /// **'Enter a valid http or https link'**
+  String get stickerLinkInvalid;
+
+  /// Hint of the poll question field
+  ///
+  /// In en, this message translates to:
+  /// **'Ask a question'**
+  String get stickerPollQuestionHint;
+
+  /// Hint of a poll option field, {number} is 1-based
+  ///
+  /// In en, this message translates to:
+  /// **'Option {number}'**
+  String stickerPollOptionHint(int number);
+
+  /// Button that adds one more poll option
+  ///
+  /// In en, this message translates to:
+  /// **'Add option'**
+  String get stickerPollAddOption;
+
+  /// Validation error for the poll sticker
+  ///
+  /// In en, this message translates to:
+  /// **'Add a question and at least 2 different options'**
+  String get stickerPollInvalid;
+
+  /// Hint of the question sticker prompt field
+  ///
+  /// In en, this message translates to:
+  /// **'Ask me anything'**
+  String get stickerQuestionPromptHint;
+
+  /// Validation error for the question sticker
+  ///
+  /// In en, this message translates to:
+  /// **'Write what you want to ask'**
+  String get stickerQuestionInvalid;
+
+  /// Primary button of the sticker input sheets
+  ///
+  /// In en, this message translates to:
+  /// **'Add to story'**
+  String get stickerAddButton;
+
+  /// Hint on the trash zone while dragging a sticker
+  ///
+  /// In en, this message translates to:
+  /// **'Drag here to remove'**
+  String get stickerDragToRemove;
+
+  /// Dialog text when switching a story with mentions to Close Friends
+  ///
+  /// In en, this message translates to:
+  /// **'Only Close Friends can be mentioned in a Close Friends story. Your mention stickers will be removed.'**
+  String get stickerCloseFriendsMentionWarn;
+
+  /// Dialog button that removes the mention stickers
+  ///
+  /// In en, this message translates to:
+  /// **'Remove mentions'**
+  String get stickerRemoveMentions;
+
+  /// Total votes under a poll sticker
+  ///
+  /// In en, this message translates to:
+  /// **'{count, plural, =1{1 vote} other{{count} votes}}'**
+  String stickerPollVotes(int count);
+
+  /// Under a question sticker the viewer has not answered
+  ///
+  /// In en, this message translates to:
+  /// **'Tap to answer'**
+  String get stickerQuestionTapToAnswer;
+
+  /// Question sticker after answering / snackbar
+  ///
+  /// In en, this message translates to:
+  /// **'Answer sent'**
+  String get stickerQuestionAnswered;
+
+  /// Answers count under the owner's question sticker
+  ///
+  /// In en, this message translates to:
+  /// **'{count, plural, =1{1 answer} other{{count} answers}}'**
+  String stickerQuestionAnswersCount(int count);
+
+  /// Owner hint on poll / question stickers
+  ///
+  /// In en, this message translates to:
+  /// **'Tap to see responses'**
+  String get stickerOwnerTapToView;
+
+  /// Hint of the answer field
+  ///
+  /// In en, this message translates to:
+  /// **'Type your answer…'**
+  String get stickerAnswerHint;
+
+  /// Button that sends a question answer
+  ///
+  /// In en, this message translates to:
+  /// **'Send'**
+  String get stickerSendAnswer;
+
+  /// Fallback title of the sticker responses sheet
+  ///
+  /// In en, this message translates to:
+  /// **'Responses'**
+  String get stickerResponsesTitle;
+
+  /// Empty state of the sticker responses sheet
+  ///
+  /// In en, this message translates to:
+  /// **'No responses yet'**
+  String get stickerNoResponses;
+
+  /// Pagination button in the responses sheet
+  ///
+  /// In en, this message translates to:
+  /// **'Load more'**
+  String get stickerLoadMore;
+
+  /// Title of the confirm dialog for a link sticker
+  ///
+  /// In en, this message translates to:
+  /// **'Open this link?'**
+  String get stickerOpenLinkTitle;
+
+  /// Confirm button of the link dialog
+  ///
+  /// In en, this message translates to:
+  /// **'Open'**
+  String get stickerOpenLink;
+
+  /// Snackbar when a link cannot be opened
+  ///
+  /// In en, this message translates to:
+  /// **'Couldn\'t open the link'**
+  String get stickerLinkOpenFailed;
+
+  /// Shown when a story-mention notification points to an expired / hidden story
+  ///
+  /// In en, this message translates to:
+  /// **'This story is no longer available'**
+  String get storyMentionUnavailable;
+
+  /// No description provided for @acctSectionTitle.
+  ///
+  /// In en, this message translates to:
+  /// **'Accounts'**
+  String get acctSectionTitle;
+
+  /// No description provided for @acctSwitchAccount.
+  ///
+  /// In en, this message translates to:
+  /// **'Switch account'**
+  String get acctSwitchAccount;
+
+  /// No description provided for @acctCountSubtitle.
+  ///
+  /// In en, this message translates to:
+  /// **'{count} of {max} accounts on this device'**
+  String acctCountSubtitle(int count, int max);
+
+  /// No description provided for @acctAddAccount.
+  ///
+  /// In en, this message translates to:
+  /// **'Add account'**
+  String get acctAddAccount;
+
+  /// No description provided for @acctMaxReached.
+  ///
+  /// In en, this message translates to:
+  /// **'You can keep up to {max} accounts on this device.'**
+  String acctMaxReached(int max);
+
+  /// No description provided for @acctSessionExpiredTap.
+  ///
+  /// In en, this message translates to:
+  /// **'Session expired — tap to log in again'**
+  String get acctSessionExpiredTap;
+
+  /// No description provided for @acctSwitchExpired.
+  ///
+  /// In en, this message translates to:
+  /// **'Session for @{username} has expired. Tap the account to log in again.'**
+  String acctSwitchExpired(String username);
+
+  /// No description provided for @acctSwitchNoConnection.
+  ///
+  /// In en, this message translates to:
+  /// **'No connection. Could not switch account.'**
+  String get acctSwitchNoConnection;
+
+  /// No description provided for @acctSwitchInCall.
+  ///
+  /// In en, this message translates to:
+  /// **'End the call before switching accounts.'**
+  String get acctSwitchInCall;
+
+  /// No description provided for @acctSwitchFailed.
+  ///
+  /// In en, this message translates to:
+  /// **'Could not switch account. Please try again.'**
+  String get acctSwitchFailed;
+
+  /// No description provided for @acctAddFailed.
+  ///
+  /// In en, this message translates to:
+  /// **'Cannot add another account right now.'**
+  String get acctAddFailed;
+
+  /// No description provided for @settingsEditProfileSub.
+  ///
+  /// In en, this message translates to:
+  /// **'Name, bio, profile photo'**
+  String get settingsEditProfileSub;
+
+  /// No description provided for @settingsPrivateAccount.
+  ///
+  /// In en, this message translates to:
+  /// **'Private account'**
+  String get settingsPrivateAccount;
+
+  /// No description provided for @settingsPrivateAccountSub.
+  ///
+  /// In en, this message translates to:
+  /// **'Only approved followers can see your posts'**
+  String get settingsPrivateAccountSub;
+
+  /// No description provided for @settingsGeneralSection.
+  ///
+  /// In en, this message translates to:
+  /// **'General'**
+  String get settingsGeneralSection;
+
+  /// No description provided for @settingsParentAccessSub.
+  ///
+  /// In en, this message translates to:
+  /// **'Link a parent/guardian to this account'**
+  String get settingsParentAccessSub;
+
+  /// No description provided for @settingsInviteEarnSub.
+  ///
+  /// In en, this message translates to:
+  /// **'Share your code, earn bonus coins for every friend who joins'**
+  String get settingsInviteEarnSub;
+
+  /// No description provided for @settingsActivitySection.
+  ///
+  /// In en, this message translates to:
+  /// **'Activity'**
+  String get settingsActivitySection;
+
+  /// No description provided for @settingsYourActivity.
+  ///
+  /// In en, this message translates to:
+  /// **'Your activity'**
+  String get settingsYourActivity;
+
+  /// No description provided for @settingsYourActivitySub.
+  ///
+  /// In en, this message translates to:
+  /// **'Time spent, likes, comments and saved posts'**
+  String get settingsYourActivitySub;
+
+  /// No description provided for @settingsYourWeek.
+  ///
+  /// In en, this message translates to:
+  /// **'Your Week'**
+  String get settingsYourWeek;
+
+  /// No description provided for @settingsYourWeekSub.
+  ///
+  /// In en, this message translates to:
+  /// **'Tests, classes, likes and your streak, recapped'**
+  String get settingsYourWeekSub;
+
+  /// No description provided for @settingsLeaderboard.
+  ///
+  /// In en, this message translates to:
+  /// **'Leaderboard'**
+  String get settingsLeaderboard;
+
+  /// No description provided for @settingsLeaderboardSub.
+  ///
+  /// In en, this message translates to:
+  /// **'See how you rank across LearnScroll'**
+  String get settingsLeaderboardSub;
+
+  /// No description provided for @settingsPrivacySection.
+  ///
+  /// In en, this message translates to:
+  /// **'Privacy'**
+  String get settingsPrivacySection;
+
+  /// No description provided for @settingsReadReceipts.
+  ///
+  /// In en, this message translates to:
+  /// **'Read receipts'**
+  String get settingsReadReceipts;
+
+  /// No description provided for @settingsReadReceiptsSub.
+  ///
+  /// In en, this message translates to:
+  /// **'Control who sees when you’ve read a message'**
+  String get settingsReadReceiptsSub;
+
+  /// No description provided for @settingsBlockedAccounts.
+  ///
+  /// In en, this message translates to:
+  /// **'Blocked accounts'**
+  String get settingsBlockedAccounts;
+
+  /// No description provided for @settingsBlockedAccountsSub.
+  ///
+  /// In en, this message translates to:
+  /// **'Manage people you’ve blocked'**
+  String get settingsBlockedAccountsSub;
+
+  /// No description provided for @settingsNotificationsSub.
+  ///
+  /// In en, this message translates to:
+  /// **'Push, email, SMS, WhatsApp & digest'**
+  String get settingsNotificationsSub;
+
+  /// No description provided for @settingsSecuritySection.
+  ///
+  /// In en, this message translates to:
+  /// **'Security'**
+  String get settingsSecuritySection;
+
+  /// No description provided for @settingsChangePassword.
+  ///
+  /// In en, this message translates to:
+  /// **'Change password'**
+  String get settingsChangePassword;
+
+  /// No description provided for @settingsChangePasswordSub.
+  ///
+  /// In en, this message translates to:
+  /// **'Update the password for this account'**
+  String get settingsChangePasswordSub;
+
+  /// No description provided for @notifPauseSectionTitle.
+  ///
+  /// In en, this message translates to:
+  /// **'Pause notifications'**
+  String get notifPauseSectionTitle;
+
+  /// No description provided for @notifPause1h.
+  ///
+  /// In en, this message translates to:
+  /// **'1 hour'**
+  String get notifPause1h;
+
+  /// No description provided for @notifPause8h.
+  ///
+  /// In en, this message translates to:
+  /// **'8 hours'**
+  String get notifPause8h;
+
+  /// No description provided for @notifPause24h.
+  ///
+  /// In en, this message translates to:
+  /// **'24 hours'**
+  String get notifPause24h;
+
+  /// No description provided for @notifPauseResume.
+  ///
+  /// In en, this message translates to:
+  /// **'Resume notifications'**
+  String get notifPauseResume;
+
+  /// No description provided for @notifQuietSectionTitle.
+  ///
+  /// In en, this message translates to:
+  /// **'Quiet hours'**
+  String get notifQuietSectionTitle;
+
+  /// No description provided for @notifQuietToggle.
+  ///
+  /// In en, this message translates to:
+  /// **'Enable quiet hours'**
+  String get notifQuietToggle;
+
+  /// No description provided for @notifQuietFrom.
+  ///
+  /// In en, this message translates to:
+  /// **'From'**
+  String get notifQuietFrom;
+
+  /// No description provided for @notifQuietTo.
+  ///
+  /// In en, this message translates to:
+  /// **'To'**
+  String get notifQuietTo;
+
+  /// No description provided for @notifQuietHint.
+  ///
+  /// In en, this message translates to:
+  /// **'No notifications will make a sound during these hours.'**
+  String get notifQuietHint;
+
+  /// No description provided for @notifQuietSameTime.
+  ///
+  /// In en, this message translates to:
+  /// **'Start and end time can\'t be the same'**
+  String get notifQuietSameTime;
+
+  /// Shows when notifications resume
+  ///
+  /// In en, this message translates to:
+  /// **'Paused until {until}'**
+  String notifPausedUntil(String until);
 }
 
 class _AppLocalizationsDelegate

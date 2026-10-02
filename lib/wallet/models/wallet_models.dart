@@ -325,3 +325,98 @@ class CoinWithdrawalRequest {
         updatedAt: _parseDate(j['updated_at']),
       );
 }
+
+// ------------------------------------------------------------
+// Admin withdrawal review — `CoinWithdrawalAdminSerializer`
+// (`GET /profile/coin-withdrawals/admin/` — staff only)
+// ------------------------------------------------------------
+
+/// `_WithdrawalRequesterSerializer` / `_WithdrawalReviewerSerializer`
+/// (user_profile/serializers.py) — tiny read-only user summary, not the
+/// full profile payload.
+class AdminWithdrawalUser {
+  final int id;
+  final String username;
+  final String? email;
+  final String? phone;
+
+  const AdminWithdrawalUser({
+    required this.id,
+    required this.username,
+    this.email,
+    this.phone,
+  });
+
+  factory AdminWithdrawalUser.fromJson(Map<String, dynamic> j) => AdminWithdrawalUser(
+        id: (j['id'] as num).toInt(),
+        username: (j['username'] ?? '').toString(),
+        email: j['email']?.toString(),
+        phone: j['phone']?.toString(),
+      );
+}
+
+/// One row of `GET /profile/coin-withdrawals/admin/` —
+/// `CoinWithdrawalAdminSerializer`. Same status/payout shape as
+/// `CoinWithdrawalRequest` above, plus who requested it, the INR
+/// snapshot, and who (if anyone) reviewed it. Read-only end to end —
+/// state transitions go through `WalletService.adminWithdrawalAction()`.
+class AdminCoinWithdrawalRequest {
+  final int id;
+  final AdminWithdrawalUser user;
+  final int coins;
+
+  /// `CoinWithdrawalRequest.amount_inr` — DRF DecimalField, JSON me
+  /// string aati hai, isliye `double.tryParse`.
+  final double amountInr;
+  final String payoutMethod;
+  final Map<String, dynamic> payoutDetails;
+  final String status; // pending | processing | success | rejected
+  final String failureReason;
+  final AdminWithdrawalUser? reviewedBy;
+  final DateTime? reviewedAt;
+  final DateTime? createdAt;
+  final DateTime? updatedAt;
+
+  const AdminCoinWithdrawalRequest({
+    required this.id,
+    required this.user,
+    required this.coins,
+    required this.amountInr,
+    this.payoutMethod = '',
+    this.payoutDetails = const {},
+    this.status = CoinWithdrawalStatus.pending,
+    this.failureReason = '',
+    this.reviewedBy,
+    this.reviewedAt,
+    this.createdAt,
+    this.updatedAt,
+  });
+
+  bool get isPending => status == CoinWithdrawalStatus.pending;
+  bool get isProcessing => status == CoinWithdrawalStatus.processing;
+  bool get isSuccess => status == CoinWithdrawalStatus.success;
+  bool get isRejected => status == CoinWithdrawalStatus.rejected;
+
+  /// PENDING/PROCESSING dono actionable hain (§CoinWithdrawalAdminActionView) —
+  /// SUCCESS/REJECTED dono terminal, koi action nahi.
+  bool get isActionable => isPending || isProcessing;
+
+  factory AdminCoinWithdrawalRequest.fromJson(Map<String, dynamic> j) => AdminCoinWithdrawalRequest(
+        id: (j['id'] as num).toInt(),
+        user: AdminWithdrawalUser.fromJson(Map<String, dynamic>.from(j['user'] as Map)),
+        coins: (j['coins'] as num?)?.toInt() ?? 0,
+        amountInr: double.tryParse((j['amount_inr'] ?? '0').toString()) ?? 0,
+        payoutMethod: (j['payout_method'] ?? '').toString(),
+        payoutDetails: j['payout_details'] is Map
+            ? Map<String, dynamic>.from(j['payout_details'] as Map)
+            : const {},
+        status: (j['status'] ?? CoinWithdrawalStatus.pending).toString(),
+        failureReason: (j['failure_reason'] ?? '').toString(),
+        reviewedBy: j['reviewed_by'] is Map
+            ? AdminWithdrawalUser.fromJson(Map<String, dynamic>.from(j['reviewed_by'] as Map))
+            : null,
+        reviewedAt: _parseDate(j['reviewed_at']),
+        createdAt: _parseDate(j['created_at']),
+        updatedAt: _parseDate(j['updated_at']),
+      );
+}

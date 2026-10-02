@@ -16,7 +16,7 @@ import '../l10n/app_localizations.dart';
 /// (`/profile/search/`, full user base incl. exact user-id search) +
 /// friends/connections, notices, assignments, tests, messages
 /// (`/core/search/`, `core.views.SearchView`). `post` and class
-/// "documents" (`liveclass.ClassMaterial`) are NOT here — both are
+/// "documents" (`tuitionclass.ClassMaterial`) are NOT here — both are
 /// documented STUBS on the backend (`core_app_documentation.md` §6.2 —
 /// no model ever got uploaded/wired for either), so there's nothing
 /// real to search yet. Add a `SearchFilter` case + a section once the

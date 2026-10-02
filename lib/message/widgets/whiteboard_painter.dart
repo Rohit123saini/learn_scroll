@@ -19,6 +19,22 @@ class WhiteboardPainter extends CustomPainter {
   @override
   void paint(Canvas canvas, Size size) {
     // ---- Freehand strokes (marker / paint / highlighter / eraser) ----
+    // 🔥 FIX — eraser pehle sirf ek SAFED line thi (`Colors.white`), yaani
+    // wo asal me erase nahi karta tha, upar se safed rang chadha deta tha —
+    // PDF/image/ruled-paper/screen-share ke upar draw karte hi wahan bhi
+    // safed patch dikhta tha. Ab freehand strokes ek alag transparent
+    // layer (`saveLayer`) me draw hote hain aur eraser us layer me
+    // `BlendMode.clear` se sirf strokes ke pixels hataata hai — neeche ka
+    // background (PDF/image/ruled lines/video) bilkul waisa hi rehta hai.
+    // Layer sirf tab banti hai jab board pe koi eraser stroke ho (normal
+    // boards pe koi extra cost nahi). Shapes/text/sticky notes is layer ke
+    // BAAD draw hote hain, isliye eraser unko nahi chhoota (unke liye Undo).
+    final hasEraser = strokes.any(
+      (stroke) => stroke.any((p) => p.toolType == ToolType.eraser),
+    );
+    if (hasEraser) {
+      canvas.saveLayer(Offset.zero & size, Paint());
+    }
     for (final stroke in strokes) {
       if (stroke.isEmpty) continue;
       for (int i = 0; i < stroke.length - 1; i++) {
@@ -27,7 +43,7 @@ class WhiteboardPainter extends CustomPainter {
 
         if (p1.toolType == ToolType.eraser) {
           final eraserPaint = Paint()
-            ..color = Colors.white
+            ..blendMode = BlendMode.clear
             ..strokeWidth = p1.paint.strokeWidth
             ..strokeCap = StrokeCap.round;
           canvas.drawLine(p1.offset, p2.offset, eraserPaint);
@@ -43,6 +59,9 @@ class WhiteboardPainter extends CustomPainter {
           canvas.drawLine(p1.offset, p2.offset, p1.paint);
         }
       }
+    }
+    if (hasEraser) {
+      canvas.restore();
     }
 
     // ---- Finalized shapes ----

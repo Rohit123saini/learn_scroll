@@ -1,4 +1,8 @@
+import 'dart:io';
+
 import 'package:flutter/material.dart';
+import 'package:path_provider/path_provider.dart';
+import 'package:share_plus/share_plus.dart';
 
 import '../../l10n/app_localizations.dart';
 import '../../widgets/error_widgets.dart';
@@ -204,6 +208,7 @@ class _InvoiceOfficeSheetState extends State<_InvoiceOfficeSheet> {
   bool _saving = false;
   String? _error;
   String? _busyPaymentId;
+  String? _downloadingReceiptId;
 
   @override
   void initState() {
@@ -275,6 +280,32 @@ class _InvoiceOfficeSheetState extends State<_InvoiceOfficeSheet> {
       if (mounted) lsSnack(context, e.message, error: true);
     } finally {
       if (mounted) setState(() => _busyPaymentId = null);
+    }
+  }
+
+  // Task 5 subtask 4 — office reprint: same download-to-temp-file, then
+  // `Share.shareXFiles` shape `test_result_screen._shareCertificate` uses
+  // for the certificate share card, just a receipt PDF instead of a PNG.
+  Future<void> _downloadReceipt(FeePayment payment) async {
+    if (_downloadingReceiptId != null) return;
+    final l10n = AppLocalizations.of(context)!;
+    setState(() => _downloadingReceiptId = payment.id);
+    try {
+      final bytes = await CampusService.downloadFeeReceiptPdf(payment.id);
+      final dir = await getTemporaryDirectory();
+      final file = File('${dir.path}/fee_receipt_${payment.id}.pdf');
+      await file.writeAsBytes(bytes, flush: true);
+      if (mounted) {
+        await Share.shareXFiles([XFile(file.path)], text: l10n.feeReceiptsTitle);
+      }
+    } on CampusApiException catch (e) {
+      if (mounted) {
+        lsSnack(context, e.isReceiptUnavailable ? l10n.feeReceiptUnavailable : e.message, error: true);
+      }
+    } catch (_) {
+      if (mounted) lsSnack(context, l10n.feeReceiptDownloadFailed, error: true);
+    } finally {
+      if (mounted) setState(() => _downloadingReceiptId = null);
     }
   }
 
@@ -365,6 +396,18 @@ class _InvoiceOfficeSheetState extends State<_InvoiceOfficeSheet> {
                       Text(p.status, style: TextStyle(fontSize: 11, color: cs.onSurfaceVariant)),
                     ]),
                   ),
+                  if (p.status == 'success')
+                    _downloadingReceiptId == p.id
+                        ? const Padding(
+                            padding: EdgeInsets.symmetric(horizontal: 10),
+                            child: SizedBox(
+                                width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2)),
+                          )
+                        : IconButton(
+                            icon: const Icon(Icons.download_rounded, size: 19),
+                            tooltip: l10n.feeReceiptDownload,
+                            onPressed: () => _downloadReceipt(p),
+                          ),
                   if (p.isRefundable)
                     _busyPaymentId == p.id
                         ? const SizedBox(

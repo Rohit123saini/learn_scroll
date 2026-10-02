@@ -6,7 +6,10 @@ import 'package:http/http.dart' as http;
 import 'package:shared_preferences/shared_preferences.dart';
 import '../utils/api.dart';
 import './model.dart';
+import './discovery_models.dart'; // P8-FE
+import './profile_link.dart'; // P7-FE
 import '../services/auth_service.dart';
+import '../services/crash_reporting_service.dart';
 import 'package:path_provider/path_provider.dart';
 
 class ApiService {
@@ -67,7 +70,7 @@ class ApiService {
       
       // Step 2: Background me API call - error ignore kar dena
       getProfileFromAPI().catchError((e) {
-        print("Background refresh failed: $e");
+        CrashReportingService.logError("ProfileApiService.backgroundRefresh", e);
         onBackgroundError?.call(e);
         // catchError needs a return value matching the Future's type —
         // rethrow-free, caller already got the cached profile above.
@@ -111,6 +114,37 @@ class ApiService {
 
   static Future<TargetProfileModel> refreshTargetProfile(String username) async {
     return await getTargetProfile(username);
+  }
+
+  // 🔥 P8-FE — "Followed by X, Y + N others". Decorative, so callers should swallow
+  // errors (the profile must never fail to open because this line couldn't load).
+  static Future<MutualFollowers> getMutualFollowers(String username) async {
+    final token = await AuthService.getValidToken();
+    if (token == null) return MutualFollowers.empty;
+    final url = Uri.parse("${Api.baseUrl}/profile/profile/${Uri.encodeComponent(username)}/mutuals/");
+    final response = await http.get(url, headers: {
+      "Authorization": "Bearer $token",
+      "Content-Type": "application/json",
+    });
+    if (response.statusCode != 200) throw Exception('Mutuals failed (${response.statusCode})');
+    final body = jsonDecode(utf8.decode(response.bodyBytes));
+    return body is Map<String, dynamic> ? MutualFollowers.fromJson(body) : MutualFollowers.empty;
+  }
+
+  // 🔥 P8-FE — "Suggested for you" under a profile (viewer's follows / blocked /
+  // restricted are already excluded server-side).
+  static Future<List<MiniUser>> getSimilarUsers(String username, {int limit = 10}) async {
+    final token = await AuthService.getValidToken();
+    if (token == null) return const [];
+    final url = Uri.parse(
+        "${Api.baseUrl}/profile/profile/${Uri.encodeComponent(username)}/similar/?limit=$limit");
+    final response = await http.get(url, headers: {
+      "Authorization": "Bearer $token",
+      "Content-Type": "application/json",
+    });
+    if (response.statusCode != 200) throw Exception('Suggestions failed (${response.statusCode})');
+    final body = jsonDecode(utf8.decode(response.bodyBytes));
+    return body is Map ? MiniUser.listFrom(body['suggested_users']) : const [];
   }
 
   // 🔥 7. Follow/Unfollow
@@ -172,13 +206,87 @@ class ApiService {
     }
   }
 
+  // 🔥 P11-FE — GET /profile/follow-requests/ : PENDING requests addressed to me,
+  // newest first, paginated. Same {status, message, data: {results, next}} envelope
+  // as the followers/following lists; every row is a user row (id, username,
+  // first_name, last_name, mutual_friends, …) PLUS `follow_id` — the id that
+  // acceptFollowRequest / rejectFollowRequest above take.
+  //
+  // First page: call with no args. Next page: pass the previous page's `next`
+  // (its scheme/host are pinned to Api.baseUrl, same as FollowListScreen does).
+  static Future<({List<Map<String, dynamic>> rows, String? next, int? total})> getFollowRequests({String? nextUrl}) async {
+    final token = await AuthService.getValidToken();
+    if (token == null) throw Exception('Session expired. Please log in again.');
+
+    final Uri url;
+    if (nextUrl != null && nextUrl.isNotEmpty) {
+      final b = Uri.parse(Api.baseUrl);
+      url = Uri.parse(nextUrl).replace(scheme: b.scheme, host: b.host, port: b.hasPort ? b.port : null);
+    } else {
+      url = Uri.parse("${Api.baseUrl}/profile/follow-requests/");
+    }
+
+    final response = await http.get(url, headers: {
+      "Authorization": "Bearer $token",
+      "Content-Type": "application/json",
+    }).timeout(const Duration(seconds: 20));
+
+    if (response.statusCode != 200) {
+      throw Exception(_extractErrorMessage(response, fallback: 'Failed to load follow requests'));
+    }
+
+    final body = jsonDecode(utf8.decode(response.bodyBytes));
+    final data = body is Map && body.containsKey('data') ? body['data'] : body;
+    List raw;
+    String? next;
+    int? total; // DRF page `count` = ALL pending requests, not just this page
+    if (data is Map) {
+      raw = (data['results'] as List?) ?? const [];
+      next = data['next']?.toString();
+      final c = data['count'];
+      total = c is num ? c.toInt() : int.tryParse('${c ?? ''}');
+    } else {
+      raw = (data as List?) ?? const [];
+    }
+    return (
+      rows: raw.whereType<Map>().map((e) => Map<String, dynamic>.from(e)).toList(),
+      next: next,
+      total: total ?? raw.length,
+    );
+  }
+
+  // 🔥 P11-FE — DELETE /profile/followers/<user_id>/ : "Remove follower".
+  // Silent on the backend (the removed user is NOT notified). A 404 *with a JSON
+  // body* means "that user isn't your follower (any more)" — double-tap, or already
+  // removed from another device — which is exactly the end state the caller wants,
+  // so it counts as success. A 404 without a JSON body (route missing / old
+  // backend) is still an error.
+  static Future<void> removeFollower(int userId) async {
+    final token = await AuthService.getValidToken();
+    if (token == null) throw Exception('Session expired. Please log in again.');
+    final url = Uri.parse("${Api.baseUrl}/profile/followers/$userId/");
+
+    final response = await http.delete(url, headers: {
+      "Authorization": "Bearer $token",
+      "Content-Type": "application/json",
+    });
+
+    if (response.statusCode == 200) return;
+    if (response.statusCode == 404 && _tryDecodeMap(response) != null) return;
+    throw Exception(_extractErrorMessage(response, fallback: 'Remove follower failed'));
+  }
+
   // 🔥 10. Update Profile - Image + text
   static Future<UpdateProfileResponse> updateProfile({
     String? username,
     String? firstName,
     String? lastName,
     String? bio,
+    String? pronouns, // P7-FE
+    String? categoryLabel, // P7-FE
+    List<ProfileLink>? links, // P7-FE — [] clears them
     File? profilePhoto,
+    bool? isPrivate,
   }) async {
     final token = await AuthService.getValidToken();
     final url = Uri.parse("${Api.baseUrl}/profile/update/");
@@ -190,6 +298,15 @@ class ApiService {
     if (firstName != null) request.fields['first_name'] = firstName;
     if (lastName != null) request.fields['last_name'] = lastName;
     if (bio != null) request.fields['bio'] = bio;
+    // P7-FE — bio upgrade (backend P6-BE). `links` travels as a JSON string in the multipart body.
+    if (pronouns != null) request.fields['pronouns'] = pronouns;
+    if (categoryLabel != null) request.fields['category_label'] = categoryLabel;
+    if (links != null) request.fields['links'] = jsonEncode(links.map((l) => l.toJson()).toList());
+    // 🔥 NAYA [Settings/Nav pass] — Settings > Account > "Private account"
+    // toggle. Backend `UpdateProfileView` `is_private` already accept karta
+    // tha (docstring: "Allowed fields: ... is_private") — bas frontend se
+    // kabhi bheja hi nahi jaata tha.
+    if (isPrivate != null) request.fields['is_private'] = isPrivate.toString();
 
     if (profilePhoto != null) {
       String extension = profilePhoto.path.split('.').last.toLowerCase();
@@ -228,8 +345,19 @@ class ApiService {
   // English text that breaks the moment this app ships another locale.
   static String _extractUpdateError(http.Response response) {
     if (_tryDecodeMap(response) case final body?) {
-      if (body['username'] is List && (body['username'] as List).isNotEmpty) {
-        return 'username:${(body['username'] as List).first}';
+      // UpdateProfileView wraps DRF field errors as {"status": false, "message": ..,
+      // "errors": {"username": [..]}} — the old code only looked at the TOP level, so
+      // this branch never fired and the duplicate-username copy never showed. Check
+      // `errors` first, top level second (in case a proxy/other view returns bare DRF).
+      final errs = body['errors'] is Map<String, dynamic> ? body['errors'] as Map<String, dynamic> : body;
+      if (errs['username'] is List && (errs['username'] as List).isNotEmpty) {
+        return 'username:${(errs['username'] as List).first}';
+      }
+      // P7-FE — show the real reason ("You can add at most 3 links.", "Link 2: enter a
+      // valid http:// or https:// URL.") instead of the generic "Validation failed.".
+      for (final key in const ['links', 'pronouns', 'category_label', 'bio', 'profile_photo']) {
+        final v = errs[key];
+        if (v is List && v.isNotEmpty) return v.first.toString();
       }
     }
     return _extractErrorMessage(response, fallback: 'Update failed');
@@ -308,6 +436,70 @@ static Future<PostsPage> getMyPostsPage({int page = 1}) async {
   }
 }
 
+// 🔥 NAYA — Instagram jaisa "Saved" tab (own profile only).
+// GET /post/saved/?page= -> current user ke saved posts, paginated,
+// newest-saved-first (backend already orders by `-saved_by__created_at`).
+// Same PostsPage shape as getMyPostsPage so profile.dart's grid + real
+// infinite-scroll pattern works unchanged for this tab too.
+static Future<PostsPage> getSavedPosts({int page = 1}) async {
+  final token = await AuthService.getValidToken();
+  final url = Uri.parse("${Api.baseUrl}/post/saved/?page=$page");
+
+  final response = await http.get(
+    url,
+    headers: {
+      "Authorization": "Bearer $token",
+      "Content-Type": "application/json",
+    },
+  );
+
+  if (response.statusCode == 200) {
+    final data = jsonDecode(response.body);
+    final List results = data['results'] ?? [];
+    return PostsPage(
+      posts: results.map((e) => PostModel.fromJson(e)).toList(),
+      hasMore: data['next'] != null,
+    );
+  } else {
+    throw Exception('Failed to load saved posts: ${response.body}');
+  }
+}
+
+
+// P3-FE — pin / unpin one of MY posts (profile pinned posts, max 3).
+// POST   /post/<id>/pin/ -> 200 {data:{is_pinned,pinned_count,max_pinned}}
+//                           400 {code:"pin_limit_reached"|"post_not_pinnable", message}
+//                           403 not owner / 404 gone
+// DELETE /post/<id>/pin/ -> 200 (idempotent)
+static Future<PinResult> setPostPinned(String postId, bool pinned) async {
+  final token = await AuthService.getValidToken();
+  if (token == null) throw Exception('User not authenticated');
+  final uri = Uri.parse("${Api.baseUrl}/post/$postId/pin/");
+  final headers = {"Authorization": "Bearer $token"};
+  final res = await (pinned ? http.post(uri, headers: headers) : http.delete(uri, headers: headers))
+      .timeout(const Duration(seconds: 15));
+
+  Map<String, dynamic>? body;
+  try {
+    final d = jsonDecode(res.body);
+    if (d is Map) body = Map<String, dynamic>.from(d);
+  } catch (_) {}
+
+  if (res.statusCode == 200) {
+    final data = body?['data'] is Map ? Map<String, dynamic>.from(body!['data'] as Map) : const <String, dynamic>{};
+    return PinResult(
+      isPinned: data['is_pinned'] == true,
+      pinnedCount: (data['pinned_count'] as num?)?.toInt() ?? 0,
+      maxPinned: (data['max_pinned'] as num?)?.toInt() ?? 3,
+    );
+  }
+  final fallback = res.statusCode == 404
+      ? 'This post is no longer available.'
+      : res.statusCode == 403
+          ? 'You can only pin your own posts.'
+          : 'Could not ${pinned ? 'pin' : 'unpin'} post (${res.statusCode}).';
+  throw PinException(body?['message']?.toString() ?? fallback, code: body?['code']?.toString());
+}
 
 // 🔥 Add this method in ApiService class
 static Future<void> downloadFile(String url, String fileName) async {
@@ -400,10 +592,43 @@ static Future<PostsPage> getTargetUserPostsPage(int targetUserId, {int page = 1}
   }
 }
 
+// ============================================================
+// 🔥 NAYA [Settings/Nav pass] — Settings > Privacy > Blocked accounts.
+// Backend `BlockedUsersView`/`UnblockUserView` (user_profile/views.py)
+// already production-ready thay, bas frontend se kabhi call hi nahi
+// hote thay — koi settings UI hi nahi thi.
+// ============================================================
 
+/// GET /profile/blocked-users/ -> maine jinko block kiya hai unki list.
+static Future<List<BlockedUserModel>> getBlockedUsers() async {
+  final token = await AuthService.getValidToken();
+  final url = Uri.parse("${Api.baseUrl}/profile/blocked-users/");
+  final response = await http.get(url, headers: {
+    "Authorization": "Bearer $token",
+    "Content-Type": "application/json",
+  });
 
+  if (response.statusCode == 200) {
+    final data = jsonDecode(response.body);
+    final List results = data['data'] ?? [];
+    return results.map((e) => BlockedUserModel.fromJson(e)).toList();
+  }
+  throw Exception(_extractErrorMessage(response, fallback: 'Failed to load blocked accounts'));
+}
 
-
+/// DELETE /profile/blocked-users/<id>/ — `<id>` target user ki id bhi ho
+/// sakti hai (backend dono accept karta hai — dekho UnblockUserView).
+static Future<void> unblockUser(int userId) async {
+  final token = await AuthService.getValidToken();
+  final url = Uri.parse("${Api.baseUrl}/profile/blocked-users/$userId/");
+  final response = await http.delete(url, headers: {
+    "Authorization": "Bearer $token",
+    "Content-Type": "application/json",
+  });
+  if (response.statusCode != 200) {
+    throw Exception(_extractErrorMessage(response, fallback: 'Failed to unblock user'));
+  }
+}
 
 
 

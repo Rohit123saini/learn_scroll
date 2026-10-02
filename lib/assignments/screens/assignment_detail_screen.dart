@@ -249,7 +249,7 @@ class _AssignmentDetailScreenState extends State<AssignmentDetailScreen> {
     setState(() => _submitting = true);
     try {
       // Submission row nahi hai (personal assignment ka pehla submit) to
-      // pehle bana lo — campus/liveclass me ye row bridge already bana
+      // pehle bana lo — campus/tuitionclass me ye row bridge already bana
       // chuka hota hai.
       var submission = _submission;
       submission ??= await AssignmentService.createSubmission(a.id);

@@ -22,6 +22,8 @@ import 'assignment_models.dart';
 //   POST   {mount}/submissions/{id}/answer/{qid}/review/      text-answer review
 //   POST   {mount}/submissions/{id}/publish/                  mint public link
 //   POST   {mount}/submissions/{id}/unpublish/                revoke public link
+//   GET    {mount}/submissions/{id}/similarity-flags/         possible-duplicate flags (Task 6 Part C)
+//   POST   {mount}/submissions/{id}/similarity-flags/{fid}/review/  confirm/dismiss a flag
 //   GET    {mount}/public/{slug}/                    (auth-free)
 //
 // Har call `AuthService.getValidToken()` use karti hai (getToken() nahi) —
@@ -122,7 +124,7 @@ class AssignmentService {
   /// List screen ka main call — assignments aur meri submissions ko client
   /// side pe join karta hai.
   ///
-  /// Campus/liveclass assignments ke liye submission row backend pehle se
+  /// Campus/tuitionclass assignments ke liye submission row backend pehle se
   /// bana chuka hota hai (`status=missing`, roster se); personal wale me
   /// row tab banti hai jab student pehli baar submit karta hai. Dono cases
   /// me UI ek jaisa dikhna chahiye, isliye join yahan hota hai aur
@@ -169,7 +171,7 @@ class AssignmentService {
 
   /// `POST {mount}/assigmentss/` — the *only* create entry point this app
   /// exposes to a mobile client (`assigmentsViewSet.perform_create()` hard-
-  /// wires `source=personal`; campus/liveclass assignments are created by
+  /// wires `source=personal`; campus/tuitionclass assignments are created by
   /// those apps' own bridge, never through here). This is a genuinely
   /// **self-assignment**: nothing here adds other students to a roster, so
   /// realistically only the creator will ever see/submit it (see
@@ -338,7 +340,7 @@ class AssignmentService {
   // ---------------- writes ----------------
 
   /// Personal assignment ke liye submission row banata hai. Campus/
-  /// liveclass assignments me row already exist karti hai, to `submit_*`
+  /// tuitionclass assignments me row already exist karti hai, to `submit_*`
   /// seedha usi id pe chalega — isliye ye tabhi call hota hai jab local
   /// join me koi submission mili hi na ho.
   static Future<AssignmentSubmission> createSubmission(String assignmentId) async {
@@ -486,6 +488,50 @@ class AssignmentService {
         .timeout(_timeout);
     if (r.statusCode != 200 && r.statusCode != 201) _fail(r);
     return AssignmentAnswer.fromJson(
+        Map<String, dynamic>.from(jsonDecode(utf8.decode(r.bodyBytes)) as Map));
+  }
+
+  // ---------------- duplicate/plagiarism flags (Task 6 Part C) ----------------
+  //
+  // Frontend half of "Assignment Duplicate/Plagiarism Flag" — backend Parts
+  // A (similarity engine) and B (auto-run-on-submit + these two endpoints)
+  // are already done (`backend/assigments/plagiarism.py`, `views.py`'s
+  // `similarity_flags`/`review_similarity_flag` actions). Same
+  // `IsassigmentsStaffOrOwner` gate as `grade`/`gradeRubric`/`reviewAnswer`
+  // above — only the assignment's poster or staff can call these; anyone
+  // else gets a 403, surfaced as a normal AssignmentApiException.
+
+  /// `GET {mount}/submissions/{id}/similarity-flags/` — every possible-
+  /// duplicate flag involving this submission (either side of the pair),
+  /// ordered by similarity score descending (backend's own ordering).
+  /// Empty list = nothing flagged, not an error.
+  static Future<List<SimilarityFlag>> getSimilarityFlags(String submissionId) async {
+    final r = await http
+        .get(Uri.parse('$_base/submissions/$submissionId/similarity-flags/'), headers: await _headers())
+        .timeout(_timeout);
+    if (r.statusCode != 200) _fail(r);
+    return _asList(jsonDecode(utf8.decode(r.bodyBytes)))
+        .map((e) => SimilarityFlag.fromJson(Map<String, dynamic>.from(e as Map)))
+        .toList();
+  }
+
+  /// `POST {mount}/submissions/{id}/similarity-flags/{flagId}/review/` —
+  /// teacher marks a flag `confirmed` (yes, a real duplicate) or
+  /// `dismissed` (false positive). `status` must be exactly one of those
+  /// two strings — the backend's `SimilarityFlagReviewSerializer` 400s on
+  /// anything else (e.g. `'pending'`, which only makes sense as an
+  /// initial/unreviewed state, never something to review *into*).
+  static Future<SimilarityFlag> reviewSimilarityFlag({
+    required String submissionId,
+    required String flagId,
+    required String status, // 'confirmed' | 'dismissed'
+  }) async {
+    final r = await http
+        .post(Uri.parse('$_base/submissions/$submissionId/similarity-flags/$flagId/review/'),
+            headers: await _headers(), body: jsonEncode({'status': status}))
+        .timeout(_timeout);
+    if (r.statusCode != 200) _fail(r);
+    return SimilarityFlag.fromJson(
         Map<String, dynamic>.from(jsonDecode(utf8.decode(r.bodyBytes)) as Map));
   }
 

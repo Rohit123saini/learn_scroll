@@ -19,12 +19,21 @@ import '../../l10n/app_localizations.dart';
 import '../../services/auth_service.dart';
 import '../../utils/api.dart';
 import '../../widgets/ls_ui.dart';
+import '../api_service.dart';
+import '../../message/services/message_api_service.dart';
+import '../../message/screens/chat_screen.dart';
 import 'target_profile.dart';
+import 'follow_requests_screen.dart'; // P11-FE
 
 class FollowListScreen extends StatefulWidget {
   final String username;
   final bool followers; // false → "following"
-  const FollowListScreen({super.key, required this.username, required this.followers});
+  /// P11-FE — true ONLY when this is the logged-in user's own list. Unlocks
+  /// "Remove follower" (and the Follow-requests shortcut) on the followers list.
+  /// Must be passed by the caller: on someone else's list, DELETE
+  /// /profile/followers/<id>/ would remove that user from MY followers, not theirs.
+  final bool isOwner;
+  const FollowListScreen({super.key, required this.username, required this.followers, this.isOwner = false});
 
   @override
   State<FollowListScreen> createState() => _FollowListScreenState();
@@ -37,6 +46,25 @@ class _FollowListScreenState extends State<FollowListScreen> {
   bool _loading = true;
   bool _loadingMore = false;
   bool _error = false;
+
+  // TASK 7 (production_readiness_tasks.md) — per-row Follow/Following
+  // button state, keyed by user id. Seeded from each row's own
+  // `follow_status` field (FollowListRowSerializer, backend) the moment
+  // it's fetched — see _seedFollowStatus below — then updated locally
+  // (optimistic) after a Follow/Unfollow tap so the row doesn't have to
+  // be refetched.
+  final Map<int, String?> _followStatus = {};
+  final Set<int> _followBusy = {};
+  final Set<int> _removeBusy = {}; // P11-FE — follower removals in flight
+
+  bool get _canRemove => widget.isOwner && widget.followers;
+
+  void _seedFollowStatus(List<Map<String, dynamic>> rows) {
+    for (final row in rows) {
+      final id = row['id'];
+      if (id is int) _followStatus[id] = row['follow_status']?.toString();
+    }
+  }
 
   @override
   void initState() {
@@ -88,6 +116,7 @@ class _FollowListScreenState extends State<FollowListScreen> {
           ..addAll(res.rows);
         _next = res.next;
         _loading = false;
+        _seedFollowStatus(res.rows);
       });
     } catch (_) {
       if (!mounted) return;
@@ -111,12 +140,167 @@ class _FollowListScreenState extends State<FollowListScreen> {
       setState(() {
         _rows.addAll(res.rows);
         _next = res.next;
+        _seedFollowStatus(res.rows);
       });
     } catch (_) {
       // leave `_next` so a later scroll retries
     } finally {
       if (mounted) setState(() => _loadingMore = false);
     }
+  }
+
+  Future<void> _openChat(Map<String, dynamic> row) async {
+    final id = row['id'];
+    if (id == null) return;
+    try {
+      final convo = await MessageApiService.getOrCreateConversation(id.toString());
+      if (!mounted) return;
+      Navigator.of(context).push(MaterialPageRoute(builder: (_) => ChatScreen(conversation: convo)));
+    } catch (_) {
+      if (!mounted) return;
+      lsSnack(context, AppLocalizations.of(context)!.usersLoadFailed, error: true);
+    }
+  }
+
+  // `profile/follow/<user_id>/` toggles — one call handles Follow,
+  // Follow-back, cancelling a pending request, AND unfollowing, all
+  // depending on the row's current status. Callers below only differ in
+  // whether they confirm first (unfollow) or not (everything else).
+  Future<void> _toggleFollow(Map<String, dynamic> row) async {
+    final id = row['id'];
+    if (id is! int || _followBusy.contains(id)) return;
+    setState(() => _followBusy.add(id));
+    try {
+      final result = await ApiService.followUser(id);
+      if (!mounted) return;
+      setState(() {
+        _followStatus[id] = result['status']?.toString(); // null → back to "none"
+        _followBusy.remove(id);
+      });
+    } catch (_) {
+      if (!mounted) return;
+      setState(() => _followBusy.remove(id));
+      lsSnack(context, 'Could not update follow status, try again.', error: true);
+    }
+  }
+
+  Future<void> _confirmUnfollow(Map<String, dynamic> row) async {
+    final username = row['username']?.toString() ?? '';
+    final cs = Theme.of(context).colorScheme;
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: const Text('Unfollow?'),
+        content: Text('Unfollow @$username?'),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(dialogContext, false), child: const Text('Cancel')),
+          TextButton(
+            onPressed: () => Navigator.pop(dialogContext, true),
+            child: Text('Unfollow', style: TextStyle(color: cs.error)),
+          ),
+        ],
+      ),
+    );
+    if (confirmed == true) await _toggleFollow(row);
+  }
+
+  // P11-FE — "Remove follower": confirm, then OPTIMISTIC — the row leaves the list
+  // immediately and is put back at its old position if the request fails.
+  Future<void> _confirmRemoveFollower(Map<String, dynamic> row) async {
+    final username = row['username']?.toString() ?? '';
+    final cs = Theme.of(context).colorScheme;
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: const Text('Remove follower?'),
+        content: Text("@$username will be removed from your followers. They won't be notified."),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(dialogContext, false), child: const Text('Cancel')),
+          TextButton(
+            onPressed: () => Navigator.pop(dialogContext, true),
+            child: Text('Remove', style: TextStyle(color: cs.error)),
+          ),
+        ],
+      ),
+    );
+    if (confirmed == true) await _removeFollower(row);
+  }
+
+  Future<void> _removeFollower(Map<String, dynamic> row) async {
+    final id = row['id'];
+    if (id is! int || _removeBusy.contains(id)) return;
+    final index = _rows.indexWhere((r) => r['id'] == id);
+    if (index < 0) return;
+
+    _removeBusy.add(id);
+    setState(() => _rows.removeAt(index));
+    try {
+      await ApiService.removeFollower(id);
+      if (!mounted) return;
+      lsSnack(context, 'Removed @${row['username'] ?? ''} from your followers');
+      // A short list never fires the scroll listener — pull the next page ourselves.
+      if (_rows.length < 10) _more();
+    } catch (_) {
+      if (!mounted) return;
+      setState(() => _rows.insert(index > _rows.length ? _rows.length : index, row));
+      lsSnack(context, 'Could not remove follower, try again.', error: true);
+    } finally {
+      _removeBusy.remove(id);
+    }
+  }
+
+  Widget _buildRemoveMenu(Map<String, dynamic> row) {
+    final cs = Theme.of(context).colorScheme;
+    return PopupMenuButton<String>(
+      tooltip: 'Remove follower',
+      padding: EdgeInsets.zero,
+      icon: Icon(Icons.more_vert_rounded, size: 20, color: cs.onSurfaceVariant),
+      onSelected: (_) => _confirmRemoveFollower(row),
+      itemBuilder: (_) => [
+        PopupMenuItem<String>(
+          value: 'remove',
+          child: Text('Remove', style: TextStyle(color: cs.error)),
+        ),
+      ],
+    );
+  }
+
+  Widget? _buildFollowButton(Map<String, dynamic> row) {
+    final id = row['id'];
+    if (id is! int) return null;
+    final status = _followStatus[id];
+    if (status == 'self') return null; // your own row in your own list
+    final busy = _followBusy.contains(id);
+    const shrink = MaterialTapTargetSize.shrinkWrap;
+
+    if (status == 'ACCEPTED') {
+      // TASK 7: "tap 'Following' → confirm → unfollow" — the one status
+      // that gets a confirmation, since it's the only tap here that
+      // actually removes an existing relationship rather than
+      // creating/cancelling a request.
+      return OutlinedButton(
+        onPressed: busy ? null : () => _confirmUnfollow(row),
+        style: OutlinedButton.styleFrom(padding: const EdgeInsets.symmetric(horizontal: 12), minimumSize: Size.zero, tapTargetSize: shrink),
+        child: const Text('Following', style: TextStyle(fontSize: 12)),
+      );
+    }
+    if (status == 'PENDING') {
+      return OutlinedButton(
+        onPressed: busy ? null : () => _toggleFollow(row),
+        style: OutlinedButton.styleFrom(padding: const EdgeInsets.symmetric(horizontal: 12), minimumSize: Size.zero, tapTargetSize: shrink),
+        child: busy
+            ? const SizedBox(width: 14, height: 14, child: CircularProgressIndicator(strokeWidth: 2))
+            : const Text('Requested', style: TextStyle(fontSize: 12)),
+      );
+    }
+    final cs = Theme.of(context).colorScheme;
+    return ElevatedButton(
+      onPressed: busy ? null : () => _toggleFollow(row),
+      style: ElevatedButton.styleFrom(backgroundColor: cs.primary, foregroundColor: cs.onPrimary, padding: const EdgeInsets.symmetric(horizontal: 12), minimumSize: Size.zero, tapTargetSize: shrink),
+      child: busy
+          ? SizedBox(width: 14, height: 14, child: CircularProgressIndicator(strokeWidth: 2, color: cs.onPrimary))
+          : const Text('Follow', style: TextStyle(fontSize: 12)),
+    );
   }
 
   @override
@@ -130,6 +314,21 @@ class _FollowListScreenState extends State<FollowListScreen> {
         elevation: 0,
         iconTheme: IconThemeData(color: cs.onSurface),
         title: Text(widget.followers ? l10n.followersStat : l10n.following, style: LsType.head(context, size: 16)),
+        actions: [
+          // P11-FE — shortcut to pending requests (same screen the bell's
+          // "Follow requests" row opens). Accepting there adds followers, so
+          // reload this list when coming back.
+          if (_canRemove)
+            IconButton(
+              icon: const Icon(Icons.person_add_alt_1_outlined),
+              tooltip: 'Follow requests',
+              onPressed: () => Navigator.of(context)
+                  .push(MaterialPageRoute(builder: (_) => const FollowRequestsScreen()))
+                  .then((_) {
+                if (mounted) _load();
+              }),
+            ),
+        ],
       ),
       body: RefreshIndicator(
         onRefresh: _load,
@@ -155,6 +354,13 @@ class _FollowListScreenState extends State<FollowListScreen> {
                           final username = u['username']?.toString() ?? '';
                           final name = '${u['first_name'] ?? ''} ${u['last_name'] ?? ''}'.trim();
                           final mutual = u['mutual_friends'];
+                          // TASK 7 (production_readiness_tasks.md) —
+                          // Instagram-style per-row controls: a Message
+                          // icon plus a Follow/Following/Requested button,
+                          // both self-contained InkWells so they intercept
+                          // their own taps — the ListTile's own onTap below
+                          // still fires for taps anywhere else on the row.
+                          final followButton = _buildFollowButton(u);
                           return ListTile(
                             leading: CircleAvatar(
                               backgroundColor: cs.surfaceVariant,
@@ -167,6 +373,22 @@ class _FollowListScreenState extends State<FollowListScreen> {
                                 if (mutual is int && mutual > 0) l10n.mutualFriendsCount(mutual),
                               ].join(' · '),
                               style: TextStyle(color: cs.onSurfaceVariant, fontSize: 12),
+                            ),
+                            trailing: Row(
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                if (u['id'] != null && _followStatus[u['id']] != 'self')
+                                  IconButton(
+                                    icon: Icon(Icons.chat_bubble_outline_rounded, size: 20, color: cs.onSurfaceVariant),
+                                    tooltip: 'Message',
+                                    visualDensity: VisualDensity.compact,
+                                    onPressed: () => _openChat(u),
+                                  ),
+                                if (followButton != null) followButton,
+                                // P11-FE — own followers list only; never on your own row.
+                                if (_canRemove && u['id'] is int && _followStatus[u['id']] != 'self')
+                                  _buildRemoveMenu(u),
+                              ],
                             ),
                             onTap: username.isEmpty
                                 ? null

@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 
 import '../../l10n/app_localizations.dart';
+import '../../widgets/ask_ai_sheet.dart';
 import '../../widgets/ls_ui.dart';
 import '../services/testseries_models.dart';
 import 'ts_image_viewer.dart';
@@ -92,6 +93,42 @@ class TsResponseCard extends StatelessWidget {
             title: l10n.tsCorrectAnswer,
             text: tsReadableAnswer(l10n, correct, q),
             background: t.success.withOpacity(.10),
+          ),
+        ],
+        // 🔥 NAYA — Task G15 ("AI doubt-solving assistant"): "Ask AI to
+        // explain" on a wrong answer — the single biggest source of real
+        // doubts in the whole app (per the task's Section C rationale:
+        // test series is the module that monetizes directly, so a clear
+        // "why was I wrong" moment is worth investing in). Only shown
+        // once we actually know the question was wrong AND we have the
+        // question text to ground the explanation in — a card with no
+        // `question` loaded (edge case, see `_questionById` above) has
+        // nothing meaningful to explain.
+        if (response.isCorrect == false && q != null) ...[
+          const SizedBox(height: 10),
+          InkWell(
+            borderRadius: BorderRadius.circular(20),
+            onTap: () {
+              final correctText = correct != null ? tsReadableAnswer(l10n, correct, q) : null;
+              showAskAiSheet(
+                context,
+                contextType: 'test_question',
+                contextText: 'Question: ${q.text}\n'
+                    'Student\'s answer: $yourAnswer\n'
+                    '${correctText != null ? 'Correct answer: $correctText' : ''}',
+                contextPreview: q.text,
+                initialQuestion: 'Why is my answer wrong here?',
+                sourceId: q.id,
+              );
+            },
+            child: Padding(
+              padding: const EdgeInsets.symmetric(vertical: 4),
+              child: Row(mainAxisSize: MainAxisSize.min, children: [
+                Icon(Icons.auto_awesome_rounded, size: 15, color: cs.primary),
+                const SizedBox(width: 6),
+                Text('Ask AI to explain', style: TextStyle(fontSize: 12, fontWeight: FontWeight.w700, color: cs.primary)),
+              ]),
+            ),
           ),
         ],
         if (response.reviewerFeedback.isNotEmpty) ...[

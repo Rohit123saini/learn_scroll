@@ -36,6 +36,10 @@ class CampusApiException implements Exception {
 
   bool get isForbidden => statusCode == 403;
   bool get isNotFound => statusCode == 404;
+  // Task 5 subtask 4 — backend's `receipt-pdf` action 501s when `reportlab`
+  // isn't installed on that deployment (see `campus/receipt_pdf.py`); same
+  // "optional PDF dependency" shape testseries certificates use.
+  bool get isReceiptUnavailable => statusCode == 501;
 
   @override
   String toString() => message;
@@ -437,6 +441,105 @@ class CampusService {
   }
 
   // ==========================================================
+  // NEW — "add parent" automation.
+  //
+  // `confirmParentLink` below hits a NEW, WORKING endpoint
+  // (`parent-link/confirm/`) rather than the legacy `verifyParentLink`
+  // above — the legacy one relies on a backend token-resolution path
+  // that's mismatched against its own helper function and always fails.
+  // Use `confirmParentLink` for anything new; `verifyParentLink` is kept
+  // only so old call sites don't break.
+  // ==========================================================
+
+  /// One click -> every actively-enrolled student in scope gets their own
+  /// parent-add link pushed to them (they forward it to their parent).
+  /// Leave [departmentId]/[schoolClassId]/[sectionId] all null for the
+  /// whole campus.
+  static Future<Map<String, dynamic>> parentInviteBulk({
+    required String campusId,
+    String? departmentId,
+    String? schoolClassId,
+    String? sectionId,
+    String label = 'Parent',
+  }) {
+    return _post('parent-invite/bulk/$campusId', {
+      'label': label,
+      if (departmentId != null) 'department': departmentId,
+      if (schoolClassId != null) 'school_class': schoolClassId,
+      if (sectionId != null) 'section': sectionId,
+    });
+  }
+
+  /// Manual — one specific student. Returns the link directly (in
+  /// `result['link']`) so it can be shared immediately, on top of the
+  /// push notification the student also gets.
+  static Future<Map<String, dynamic>> parentInviteSingle({
+    required String campusId,
+    required String studentId,
+    String label = 'Parent',
+  }) {
+    return _post('parent-invite/$campusId/$studentId', {'label': label});
+  }
+
+  /// What the parent's app calls when they tap the link / paste the code.
+  /// [code] is the plaintext code embedded in the link's `?code=` param.
+  static Future<CampusParentLink> confirmParentLink({
+    required String campusId,
+    required String code,
+  }) async {
+    final json = await _post('parent-link/confirm', {'campus': campusId, 'code': code});
+    return CampusParentLink.fromJson(json);
+  }
+
+  // ==========================================================
+  // NEW — Task 13/G13: campus "family" network-effect invite codes.
+  // Generate is staff-only (admin/principal OR the section's own
+  // class-teacher — backend `can_manage_section_subject`); redeem is
+  // the one self-service write in this whole app (any authenticated
+  // user, no staff role needed — see campus/campus_invite.py).
+  // ==========================================================
+
+  /// Admin/Principal/Class-teacher only. Reuses an existing still-usable
+  /// code for [sectionId] unless [forceNew] is set (rotates it — e.g.
+  /// the old one leaked outside the batch). Response includes
+  /// `shareText`, ready to paste into the class group.
+  static Future<CampusInviteCode> generateInviteCode({
+    required String campusId,
+    required String sectionId,
+    String label = '',
+    int? maxUses,
+    int? ttlDays,
+    bool forceNew = false,
+  }) async {
+    final json = await _post('$campusId/sections/$sectionId/invite-code', {
+      if (label.isNotEmpty) 'label': label,
+      if (maxUses != null) 'max_uses': maxUses,
+      if (ttlDays != null) 'ttl_days': ttlDays,
+      if (forceNew) 'force_new': true,
+    });
+    return CampusInviteCode.fromJson(json);
+  }
+
+  /// Admin/Principal only — every code issued across the whole campus,
+  /// for a simple "manage invites" table.
+  static Future<List<CampusInviteCode>> inviteCodes(String campusId) =>
+      _list('$campusId/invite-codes', CampusInviteCode.fromJson);
+
+  /// Deactivate a code early (leaked, batch's join window closed).
+  static Future<CampusInviteCode> revokeInviteCode(String codeId) async {
+    final json = await _post('invite-code/$codeId/revoke', const {});
+    return CampusInviteCode.fromJson(json);
+  }
+
+  /// What runs when a student pastes a code — self-enrolls the CALLER
+  /// (no student-id param; it's always `request.user` server-side).
+  /// Returns the raw decoded body (`enrollment` + `campus_name` +
+  /// `already_enrolled`) rather than a single model, since it's not
+  /// exactly a `StudentEnrollment` POST response shape.
+  static Future<Map<String, dynamic>> redeemInviteCode(String code) =>
+      _post('invite-code/redeem', {'code': code.trim().toUpperCase()});
+
+  // ==========================================================
   // Phase 6 — assigmentss (thin proxy over unified `assigments` app) & syllabus
   // ==========================================================
 
@@ -749,6 +852,22 @@ class CampusService {
     return FeePayment.fromJson(json);
   }
 
+  /// `GET /fee-payments/{id}/receipt-pdf/` — Task 5 subtask 4. Downloads the
+  /// PDF receipt bytes (auth header attached) for a `success` payment; caller
+  /// should only offer this once `FeePayment.status == 'success'`, same gate
+  /// the backend re-checks (400 otherwise). On `501` (no `reportlab` on that
+  /// deployment) the caller should check `CampusApiException.isReceiptUnavailable`
+  /// and show a friendly message instead of a generic failure — same
+  /// optional-dependency contract `TestSeriesService.downloadCertificatePdf`
+  /// uses for certificates.
+  static Future<List<int>> downloadFeeReceiptPdf(String paymentId) async {
+    final r = await http
+        .get(Uri.parse('$_base/fee-payments/$paymentId/receipt-pdf/'), headers: await _headers())
+        .timeout(_timeout);
+    if (r.statusCode != 200) _fail(r);
+    return r.bodyBytes;
+  }
+
   // ==========================================================
   // Phase 8 — analytics (read-only, Celery-computed)
   // ==========================================================
@@ -909,7 +1028,7 @@ class CampusService {
 
   /// `POST /live-sessions/{id}/join/` — response me video room ka token
   /// aata hai. Shape backend pe LiveKit util se banti hai, isliye raw map
-  /// return kar rahe hain; live-class screen isko consume karti hai.
+  /// return kar rahe hain; tuition-class screen isko consume karti hai.
   static Future<Map<String, dynamic>> joinLiveSession(String id) =>
       _post('live-sessions/$id/join', const {});
 

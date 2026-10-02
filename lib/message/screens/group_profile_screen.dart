@@ -89,7 +89,17 @@ class _GroupProfileScreenState extends State<GroupProfileScreen> {
   List<Map<String, dynamic>> _members = []; // normalized: {id, name, username, avatar, role, is_muted, is_banned}
 
   // 🔥 NAYA — "kaun message bhej sakta hai" aur "daily message limit"
-  String _messagePermission = 'everyone'; // 'everyone' | 'admins_mods'
+  // M9a — backend value 'admins_only' hai (purana FE alias 'admins_mods' bhi
+  // aa sakta hai) — dono ko "admins-only" maana jaata hai.
+  String _messagePermission = 'everyone'; // 'everyone' | 'admins_only'
+  bool get _onlyAdminsCanSend =>
+      _messagePermission == 'admins_only' || _messagePermission == 'admins_mods';
+  // Backend ke 'admins_only' ko call/study dropdown ki 'admins_mods' value me
+  // map karta hai (warna DropdownButton assertion se crash karta hai).
+  String _asDropdownPermission(dynamic raw) {
+    final v = raw?.toString() ?? 'everyone';
+    return (v == 'admins_only' || v == 'admins_mods') ? 'admins_mods' : 'everyone';
+  }
   int? _dailyMessageLimit; // null = unlimited
   bool _savingSettings = false;
 
@@ -199,12 +209,14 @@ class _GroupProfileScreenState extends State<GroupProfileScreen> {
         _isPrivate = data['is_private'] == true;
         _inviteCode = data['invite_code']?.toString();
         _conversationId = data['conversation_id']?.toString();
-        _messagePermission = data['message_permission']?.toString() ?? 'everyone';
+        _messagePermission = _asDropdownPermission(data['message_permission']) == 'admins_mods'
+            ? 'admins_only'
+            : 'everyone';
         _dailyMessageLimit = data['daily_message_limit'] is int
             ? data['daily_message_limit'] as int
             : int.tryParse(data['daily_message_limit']?.toString() ?? '');
-        _callPermission = data['call_permission']?.toString() ?? 'everyone';
-        _studyRoomPermission = data['study_room_permission']?.toString() ?? 'everyone';
+        _callPermission = _asDropdownPermission(data['call_permission']);
+        _studyRoomPermission = _asDropdownPermission(data['study_room_permission']);
         _allowAnonymousDoubts = data['allow_anonymous_doubts'] != false;
         _members = normalized;
         _myRole = myRole;
@@ -382,17 +394,20 @@ class _GroupProfileScreenState extends State<GroupProfileScreen> {
   }
 
   // ------------------------------------------------------------------
-  // MESSAGE PERMISSION — 'everyone' | 'admins_mods' (admin + moderator)
+  // ONLY ADMINS CAN SEND (M9a) — switch ON => 'admins_only', OFF => 'everyone'
+  // Optimistic update; fail hone par purani value wapas. Backend group me
+  // system message ("Only admins can send messages") khud post karta hai.
   // ------------------------------------------------------------------
-  Future<void> _updateMessagePermission(String value) async {
-    if (_savingSettings || value == _messagePermission) return;
+  Future<void> _toggleOnlyAdminsCanSend(bool enabled) async {
+    if (_savingSettings || enabled == _onlyAdminsCanSend) return;
     final prev = _messagePermission;
+    final next = enabled ? 'admins_only' : 'everyone';
     setState(() {
-      _messagePermission = value;
+      _messagePermission = next;
       _savingSettings = true;
     });
     try {
-      await MessageApiService.updateGroup(widget.groupId, {'message_permission': value});
+      await MessageApiService.updateGroup(widget.groupId, {'message_permission': next});
       if (mounted) setState(() => _savingSettings = false);
     } catch (e) {
       if (!mounted) return;
@@ -1124,17 +1139,20 @@ class _GroupProfileScreenState extends State<GroupProfileScreen> {
         Row(children: [
           Icon(Icons.forum_outlined, color: Theme.of(context).colorScheme.primary, size: 19),
           const SizedBox(width: 12),
-          const Expanded(child: Text("Who can send messages", style: TextStyle(fontSize: 13.5))),
-          DropdownButton<String>(
-            value: _messagePermission,
-            underline: const SizedBox.shrink(),
-            items: const [
-              DropdownMenuItem(value: 'everyone', child: Text("Everyone", style: TextStyle(fontSize: 13))),
-              DropdownMenuItem(value: 'admins_mods', child: Text("Admins & mods", style: TextStyle(fontSize: 13))),
-            ],
-            onChanged: _savingSettings ? null : (v) { if (v != null) _updateMessagePermission(v); },
+          const Expanded(child: Text("Only admins can send messages", style: TextStyle(fontSize: 13.5))),
+          Switch(
+            value: _onlyAdminsCanSend,
+            activeColor: AppThemeTokens.of(context).coral,
+            onChanged: _savingSettings ? null : _toggleOnlyAdminsCanSend,
           ),
         ]),
+        Padding(
+          padding: const EdgeInsets.only(top: 2),
+          child: Text(
+            "Members can still read the chat, but only admins & moderators can send messages.",
+            style: TextStyle(fontSize: 11, color: Theme.of(context).colorScheme.onSurfaceVariant),
+          ),
+        ),
         const Divider(height: 22),
         Row(children: [
           Icon(Icons.timer_outlined, color: Theme.of(context).colorScheme.primary, size: 19),

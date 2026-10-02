@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:cached_network_image/cached_network_image.dart';
 
 import '../../l10n/app_localizations.dart';
 import '../services/testseries_service.dart';
@@ -27,31 +28,34 @@ class TsNetworkImage extends StatelessWidget {
           color: cs.surfaceVariant,
           constraints: BoxConstraints(maxHeight: maxHeight),
           width: double.infinity,
-          child: Image.network(
-            resolved,
-            fit: BoxFit.contain,
-            semanticLabel: semanticLabel,
-            loadingBuilder: (context, child, progress) {
-              if (progress == null) return child;
-              return SizedBox(
+          // TASK G17 (growth_and_feature_tasks.md) — was a bare
+          // Image.network with no cache: every question/response card
+          // re-downloaded its image on each rebuild, and tapping through
+          // to the full-screen zoom below re-fetched it again from
+          // scratch. CachedNetworkImage shares one disk/memory cache
+          // across both, keyed by URL, plus a bounded memCacheHeight so a
+          // full-resolution exam attachment isn't decoded at full size
+          // just to show a small inline preview.
+          child: Semantics(
+            image: true,
+            label: semanticLabel,
+            child: CachedNetworkImage(
+              imageUrl: resolved,
+              fit: BoxFit.contain,
+              memCacheHeight: (maxHeight * 2).round(),
+              progressIndicatorBuilder: (context, url, progress) => SizedBox(
                 height: 120,
-                child: Center(child: CircularProgressIndicator(strokeWidth: 2, value: _fraction(progress))),
-              );
-            },
-            errorBuilder: (context, _, __) => SizedBox(
-              height: 90,
-              child: Center(child: Icon(Icons.broken_image_outlined, color: cs.onSurfaceVariant)),
+                child: Center(child: CircularProgressIndicator(strokeWidth: 2, value: progress.progress)),
+              ),
+              errorWidget: (context, url, error) => SizedBox(
+                height: 90,
+                child: Center(child: Icon(Icons.broken_image_outlined, color: cs.onSurfaceVariant)),
+              ),
             ),
           ),
         ),
       ),
     );
-  }
-
-  double? _fraction(ImageChunkEvent p) {
-    final total = p.expectedTotalBytes;
-    if (total == null || total == 0) return null;
-    return p.cumulativeBytesLoaded / total;
   }
 }
 
@@ -78,10 +82,13 @@ class _TsImageViewerPage extends StatelessWidget {
         child: InteractiveViewer(
           minScale: 1,
           maxScale: 5,
-          child: Image.network(
-            url,
+          // TASK G17 — same CachedNetworkImage + URL as the inline
+          // preview above, so opening the zoom view reuses whatever was
+          // already downloaded instead of re-fetching the full image.
+          child: CachedNetworkImage(
+            imageUrl: url,
             fit: BoxFit.contain,
-            errorBuilder: (context, _, __) =>
+            errorWidget: (context, url, error) =>
                 const Icon(Icons.broken_image_outlined, color: Colors.white54, size: 48),
           ),
         ),

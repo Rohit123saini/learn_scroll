@@ -1,7 +1,7 @@
 // lib/wallet/screens/wallet_withdraw_screen.dart
 //
 // Withdrawal form — bank ya UPI, jo bhi `payout_details` shape backend
-// docs se confirmed hai (§6e, LEARNSCROLL_LIVECLASS.md).
+// docs se confirmed hai (§6e, LEARNSCROLL_TUITIONCLASS.md).
 // Client-side `kMinWithdrawalCoins` check sirf UX ke liye — asli enforcement
 // server-side hi honi chahiye (WalletService me bhi duplicate check hai,
 // defence-in-depth, security guarantee client-side se nahi maani jaani chahiye).

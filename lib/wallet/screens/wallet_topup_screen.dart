@@ -1,19 +1,37 @@
 // lib/wallet/screens/wallet_topup_screen.dart
 //
-// Coin top-up flow: server order create -> Razorpay checkout SDK -> server verify.
-// IMPORTANT (security): Razorpay signature verification hamesha SERVER-SIDE hoti hai
-// (`CoinPurchaseRequest.confirm_success()`). Client kabhi khud "payment successful"
-// nahi maanta — sirf gateway se mile raw `payment_id`/`signature` ko backend ko
-// forward karta hai, backend hi final decide karta hai (§WalletService.verifyPurchase).
+// ============================================================
+// 🔥 FIX (per request) — Razorpay hata diya.
 //
-// Package: `razorpay_flutter` — pubspec.yaml me add karo agar already nahi hai.
+// Ye file pehle poora Razorpay checkout flow try kar rahi thi
+// (`razorpay_flutter` package + `RazorpayConfig.keyId`), lekin is
+// project ke upload me `pubspec.yaml` hi nahi hai (sirf `lib/` +
+// `backend/`) — matlab `razorpay_flutter` dependency kabhi actually
+// add/build ho hi nahi sakti thi is upload ke against. Wo hissa ab
+// hata diya gaya hai.
+//
+// Abhi ke liye payment gateway wire NAHI kiya gaya hai (jaise bola gaya,
+// "abhi aise hi chod do") — ye screen sirf pack-selection UI dikhati hai
+// aur "Continue to Pay" pe seedha ek "coming soon" message deti hai.
+// Backend `POST /profile/buy-coin/` (`WalletService.initiatePurchase`)
+// ko bhi is se call NAHI kiya — is se koi orphan PENDING
+// `CoinPurchaseRequest` row backend me nahi banti jo kabhi complete hi
+// nahi hogi.
+//
+// Jab bhi actual gateway (Razorpay ya koi aur) wire karna ho:
+//   1. Iska package pubspec.yaml me add karo, `flutter pub get`.
+//   2. `_startPurchase` me `WalletService.instance.initiatePurchase(...)`
+//      call karo (jaisa `wallet_service.dart`'s header comment
+//      documents), phir gateway ka checkout SDK open karo.
+//   3. Success callback pe koi client-side "confirm"/"verify" endpoint
+//      MAT call karna — `wallet_service.dart` ka header confirm karta
+//      hai ki coin-credit backend webhook se hoti hai, client sirf
+//      `refreshAfterPurchase()` karta hai.
+// ============================================================
 
 import 'package:flutter/material.dart';
-import 'package:uuid/uuid.dart';
-// import 'package:razorpay_flutter/razorpay_flutter.dart'; // TODO: uncomment jab package add ho
 
 import '../models/wallet_models.dart';
-import '../services/wallet_service.dart';
 import '../../widgets/ls_ui.dart';
 
 class WalletTopupScreen extends StatefulWidget {
@@ -28,99 +46,13 @@ class _WalletTopupScreenState extends State<WalletTopupScreen> {
   static const List<int> _presetPacks = [100, 250, 500, 1000, 2500];
 
   int? _selectedPack;
-  bool _processing = false;
-  String? _error;
 
-  // late final Razorpay _razorpay; // TODO: uncomment jab package add ho
-
-  @override
-  void initState() {
-    super.initState();
-    // _razorpay = Razorpay();
-    // _razorpay.on(Razorpay.EVENT_PAYMENT_SUCCESS, _onPaymentSuccess);
-    // _razorpay.on(Razorpay.EVENT_PAYMENT_ERROR, _onPaymentError);
+  void _continueToPay() {
+    lsSnack(
+      context,
+      'Payments abhi available nahi hain — coin top-up thodi der me aa raha hai.',
+    );
   }
-
-  @override
-  void dispose() {
-    // _razorpay.clear();
-    super.dispose();
-  }
-
-  CoinPurchaseRequest? _pendingRequest;
-
-  Future<void> _startPurchase() async {
-    if (_selectedPack == null) return;
-    setState(() {
-      _processing = true;
-      _error = null;
-    });
-    try {
-      // 🔥 FIX — `initiatePurchase()` ko `gatewayReference` (idempotency
-      // key — same reference dobara bhejne pe backend wahi pending
-      // request lauta deta hai, duplicate nahi banata) aur `amount`
-      // (rupees, coins * kCoinToInrRate) bhi chahiye — pehle sirf `coins`
-      // bheja jaa raha tha.
-      final gatewayReference = const Uuid().v4();
-      final amount = _selectedPack! * kCoinToInrRate;
-      final request = await WalletService.instance.initiatePurchase(
-        gatewayReference: gatewayReference,
-        amount: amount,
-        coins: _selectedPack!,
-      );
-      _pendingRequest = request;
-
-      // 🔥 FIX — `CoinPurchaseRequest` (wallet_models.dart) ke paas
-      // `razorpayOrderId` naam ka koi field nahi hai — sirf
-      // id/gateway/gatewayReference/amount/coins/status/failureReason/
-      // createdAt/updatedAt. Razorpay order kahan/kaise banta hai wallet_
-      // service.dart ke header ke hisaab se abhi is upload me confirm
-      // nahi hai ("CONFIRM WITH BACKEND"), isliye us field ka null-check
-      // yahan hata diya — jab backend confirm ho jaaye ki order-id kis
-      // field me aata hai, yahan wapas guard add karna.
-
-      // TODO: uncomment jab razorpay_flutter add ho jaaye —
-      // var options = {
-      //   'key': '<RAZORPAY_KEY_ID>', // TODO: apna Razorpay publishable key
-      //   'amount': (request.amount * 100).toInt(), // paise me
-      //   'order_id': request.gatewayReference, // TODO: confirm real order-id field
-      //   'name': 'LearnScroll',
-      //   'description': '${request.coins} coins top-up',
-      // };
-      // _razorpay.open(options);
-
-      setState(() => _processing = false);
-    } catch (e) {
-      setState(() {
-        _processing = false;
-        _error = 'Purchase start nahi ho paya, dobara try karo.';
-      });
-    }
-  }
-
-  // void _onPaymentSuccess(PaymentSuccessResponse response) async {
-  //   if (_pendingRequest == null) return;
-  //   setState(() => _processing = true);
-  //   try {
-  //     await WalletService.instance.verifyPurchase(
-  //       orderId: _pendingRequest!.id,
-  //       paymentId: response.paymentId!,
-  //       signature: response.signature!,
-  //     );
-  //     if (mounted) {
-  //       lsSnack(context, 'Coins add ho gaye!');
-  //       Navigator.pop(context);
-  //     }
-  //   } catch (_) {
-  //     setState(() => _error = 'Payment verify nahi ho paya. Support se contact karo agar amount deduct hua ho.');
-  //   } finally {
-  //     if (mounted) setState(() => _processing = false);
-  //   }
-  // }
-
-  // void _onPaymentError(PaymentFailureResponse response) {
-  //   setState(() => _error = 'Payment cancel/fail ho gaya.');
-  // }
 
   @override
   Widget build(BuildContext context) {
@@ -148,15 +80,30 @@ class _WalletTopupScreenState extends State<WalletTopupScreen> {
                 );
               }).toList(),
             ),
-            const SizedBox(height: 24),
-            if (_error != null)
-              Padding(
-                padding: const EdgeInsets.only(bottom: 12),
-                child: Text(_error!, style: const TextStyle(color: Colors.redAccent)),
+            const SizedBox(height: 16),
+            Container(
+              padding: const EdgeInsets.all(12),
+              decoration: BoxDecoration(
+                color: scheme.surfaceVariant.withOpacity(0.5),
+                borderRadius: BorderRadius.circular(12),
               ),
+              child: Row(
+                children: [
+                  Icon(Icons.info_outline, size: 18, color: scheme.onSurfaceVariant),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: Text(
+                      'Coin top-up abhi coming soon hai — payment gateway is samay setup nahi hai.',
+                      style: TextStyle(color: scheme.onSurfaceVariant, fontSize: 12.5),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            const SizedBox(height: 24),
             LsPrimaryButton(
-              label: _processing ? 'Processing...' : 'Continue to Pay',
-              onPressed: (_selectedPack != null && !_processing) ? _startPurchase : null,
+              label: 'Continue to Pay',
+              onPressed: _selectedPack != null ? _continueToPay : null,
             ),
           ],
         ),

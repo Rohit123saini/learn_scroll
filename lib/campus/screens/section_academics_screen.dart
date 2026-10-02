@@ -1,6 +1,8 @@
 import 'package:flutter/material.dart';
 
 import '../../l10n/app_localizations.dart';
+import '../../leaderboard/models/leaderboard_models.dart';
+import '../../leaderboard/screens/leaderboard_screen.dart';
 import '../../widgets/ls_ui.dart';
 import '../models/campus_models.dart';
 import '../services/campus_service.dart';
@@ -219,6 +221,40 @@ class _SectionAcademicsScreenState extends State<SectionAcademicsScreen> {
                             ),
                           ),
                 ),
+            ]),
+          ),
+
+          // ---- Leaderboard (TASK G7 — growth_and_feature_tasks.md) ----
+          // Same tile for both student and staff view — attendance/
+          // academic standing is exactly the "campus/section" scope
+          // leaderboard.permissions.can_view_campus_section_board
+          // already restricts to people with a real stake in this
+          // section (enrolled student here, staff of this campus, or a
+          // linked parent), so no extra widget.isStudentView branching
+          // is needed on top of that.
+          const SizedBox(height: 10),
+          LsCard(
+            child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+              Row(children: [
+                Icon(Icons.leaderboard_rounded, size: 17, color: cs.primary),
+                const SizedBox(width: 8),
+                Text('Class Leaderboard', style: LsType.head(context, size: 14)),
+              ]),
+              const SizedBox(height: 10),
+              LsOutlineButton(
+                label: 'View Leaderboard',
+                icon: Icons.emoji_events_outlined,
+                onPressed: () => Navigator.push(
+                  context,
+                  MaterialPageRoute(
+                    builder: (_) => LeaderboardScreen(
+                      scope: LeaderboardScope.campusSection,
+                      scopeId: widget.sectionId,
+                      title: '${widget.sectionLabel} Leaderboard',
+                    ),
+                  ),
+                ),
+              ),
             ]),
           ),
         ],

@@ -13,8 +13,8 @@
 // single lost/stolen phone can be revoked on its own, leaving the
 // code and every other device on it untouched.
 //
-// Entry point: profile screen → "more" sheet → Parent/Guardian Access
-// (profile/screens/profile.dart).
+// Entry point: profile screen (⋯) → Settings → General → Parent/Guardian
+// Access (profile/screens/profile.dart → settings_screen.dart).
 //
 // 🌐 LANGUAGE FIX — every user-visible string now comes from AppLocalizations
 // (ARB keys `parentAccess*`; they existed in app_en/app_hi.arb but this screen
@@ -31,6 +31,7 @@ import 'package:flutter/services.dart';
 import 'package:http/http.dart' as http;
 import 'package:intl/intl.dart' show DateFormat;
 import 'package:timeago/timeago.dart' as timeago;
+import 'package:share_plus/share_plus.dart'; // 🔥 TASK 11 — real "shareable" UX for the code
 import '../../l10n/app_localizations.dart';
 import '../../services/auth_service.dart';
 import '../../utils/api.dart';
@@ -182,6 +183,20 @@ class _ManageParentAccessScreenState extends State<ManageParentAccessScreen> {
     }
   }
 
+  // 🔧 TASK 11 — "Saved Posts" was removed from the profile/settings menu
+  // and Parent Access took over that slot on its own (see profile.dart /
+  // settings_screen.dart). This dialog is the other half of that task:
+  // the code was previously only copyable, with no real "share" affordance
+  // at all — a parent had to be told the code out loud or over a
+  // separate message the student typed themselves. It now also opens the
+  // OS share sheet (same `share_plus` package/pattern `profile.dart`'s
+  // `_shareProfile()` already uses) with a ready-made invite message, so
+  // the code can go straight to WhatsApp/SMS/email in one tap, the same
+  // "shareable" UX a post or profile link already gets elsewhere in the
+  // app. The underlying access model is unchanged on purpose — this is
+  // still the existing reveal-once code, verified once by the parent and
+  // then explicitly approved by the student (see `views_parent.py`), not
+  // a second, parallel accept-flow.
   void _showCodeDialog(String code) {
     final l10n = AppLocalizations.of(context)!;
     showDialog(
@@ -194,12 +209,18 @@ class _ManageParentAccessScreenState extends State<ManageParentAccessScreen> {
             Text(code, style: const TextStyle(fontSize: 24, fontWeight: FontWeight.bold, letterSpacing: 3)),
             IconButton(
               icon: const Icon(Icons.copy),
+              tooltip: l10n.parentAccessCodeCopied,
               onPressed: () {
                 Clipboard.setData(ClipboardData(text: code));
                 ScaffoldMessenger.of(dialogContext).showSnackBar(
                   SnackBar(content: Text(l10n.parentAccessCodeCopied)),
                 );
               },
+            ),
+            IconButton(
+              icon: const Icon(Icons.share_outlined),
+              tooltip: l10n.parentAccessShareAction,
+              onPressed: () => Share.share(l10n.parentAccessShareMessage(code)),
             ),
           ],
         ),

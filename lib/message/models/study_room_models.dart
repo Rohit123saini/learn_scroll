@@ -133,38 +133,151 @@ class TextElement {
   }
 }
 
+/// Sticky note ke "field groups" — backend `sticky_notes.py` ke groups ke
+/// saath 1:1. Har group ka apna last-write-wins timestamp hota hai
+/// (`StickyNoteModel.fieldTs`), taaki ek banda note MOVE kare aur doosra
+/// usi waqt TEXT edit kare to dono survive karein.
+class StickyGroup {
+  static const String pos = 'pos'; // x, y
+  static const String size = 'size'; // width, height
+  static const String color = 'color';
+  static const String text = 'text';
+  static const String z = 'z'; // z_index (server assign karta hai)
+  static const List<String> all = [pos, size, color, text, z];
+}
+
+/// 🔥 NAYA (production) — collaborative sticky note. Ab ye whiteboard
+/// snapshot JSON ka hissa NAHI hai: backend `StudyRoomNote` table (har note
+/// alag row) se `GET /message/study-room/<id>/notes/` ke through load hota
+/// hai, aur realtime `note_*` study_room_events se sync hota hai (see
+/// `services/sticky_note_sync.dart`).
 class StickyNoteModel {
+  static const double defaultWidth = 160;
+  static const double defaultHeight = 160;
+  static const double minWidth = 80;
+  static const double maxWidth = 800;
+  static const double minHeight = 60;
+  static const double maxHeight = 800;
+  static const int maxTextLength = 2000;
+  static const int defaultColorValue = 0xFFFFF59D;
+
   final String id;
-  final String userId;
+  final String userId; // creator
+  String pageId;
   String text;
   Offset position;
+  Size size;
   Color color;
+  int zIndex;
+  DateTime? updatedAt;
+
+  /// Har field-group ka last-write timestamp (epoch ms, server-clock
+  /// corrected). Server ki `fieldTs` se same shape.
+  final Map<String, int> fieldTs;
+
+  /// Local change abhi server-confirm (ack) nahi hua — UI me chhota
+  /// "syncing" indicator dikhata hai.
+  bool isPending;
 
   StickyNoteModel({
     required this.id,
     required this.userId,
-    required this.text,
+    this.pageId = 'page_1',
+    this.text = '',
     required this.position,
+    this.size = const Size(defaultWidth, defaultHeight),
     required this.color,
-  });
+    this.zIndex = 0,
+    this.updatedAt,
+    Map<String, int>? fieldTs,
+    this.isPending = false,
+  }) : fieldTs = fieldTs ?? <String, int>{};
 
+  /// `note_add` ke payload me jaata hai (server z_index khud assign karta hai).
   Map<String, dynamic> toJson() => {
     'id': id,
+    'pageId': pageId,
     'userId': userId,
-    'text': text,
-    'dx': position.dx,
-    'dy': position.dy,
+    'x': position.dx,
+    'y': position.dy,
+    'width': size.width,
+    'height': size.height,
     'color': color.value,
+    'text': text,
   };
 
+  /// Naye server format (`x`/`y`/`width`/`height`) aur purane snapshot
+  /// format (`dx`/`dy`) dono padh leta hai.
   factory StickyNoteModel.fromJson(Map<String, dynamic> json) {
+    double numOr(dynamic v, double fallback) => v is num ? v.toDouble() : fallback;
+    final ts = <String, int>{};
+    final rawTs = json['fieldTs'];
+    if (rawTs is Map) {
+      rawTs.forEach((k, v) {
+        if (v is num) ts[k.toString()] = v.toInt();
+      });
+    }
     return StickyNoteModel(
       id: json['id'].toString(),
-      userId: json['userId'].toString(),
+      userId: json['userId']?.toString() ?? '',
+      pageId: json['pageId']?.toString() ?? 'page_1',
       text: json['text']?.toString() ?? '',
-      position: Offset((json['dx'] as num).toDouble(), (json['dy'] as num).toDouble()),
-      color: Color(json['color']),
+      position: Offset(numOr(json['x'] ?? json['dx'], 100), numOr(json['y'] ?? json['dy'], 100)),
+      size: Size(numOr(json['width'], defaultWidth), numOr(json['height'], defaultHeight)),
+      color: Color((json['color'] as num?)?.toInt() ?? defaultColorValue),
+      zIndex: (json['zIndex'] as num?)?.toInt() ?? 0,
+      updatedAt: DateTime.tryParse(json['updatedAt']?.toString() ?? ''),
+      fieldTs: ts,
     );
+  }
+
+  /// Server state ko per-group last-write-wins se merge karo.
+  ///  * server ka group tab jeetta hai jab uska ts >= mera ts,
+  ///  * `force` me diye groups server ke hi maane jaate hain (ack me
+  ///    "rejected" groups — server authoritative hai),
+  ///  * `skip` me diye groups ko chhua nahi jaata (e.g. jab main khud
+  ///    is note ko drag kar raha hoon to remote position mere haath ke
+  ///    neeche se note ko na khinche),
+  ///  * `adoptZ`: z_index hamesha server ka (ack ke baad).
+  /// Kuch badla ho to true.
+  bool mergeFrom(
+    StickyNoteModel s, {
+    Set<String> force = const {},
+    Set<String> skip = const {},
+    bool adoptZ = false,
+  }) {
+    bool wins(String g) {
+      if (skip.contains(g)) return false;
+      return force.contains(g) || (s.fieldTs[g] ?? 0) >= (fieldTs[g] ?? 0);
+    }
+
+    var changed = false;
+    if (wins(StickyGroup.pos) && position != s.position) {
+      position = s.position;
+      changed = true;
+    }
+    if (wins(StickyGroup.size) && size != s.size) {
+      size = s.size;
+      changed = true;
+    }
+    if (wins(StickyGroup.color) && color != s.color) {
+      color = s.color;
+      changed = true;
+    }
+    if (wins(StickyGroup.text) && text != s.text) {
+      text = s.text;
+      changed = true;
+    }
+    if ((adoptZ || wins(StickyGroup.z)) && zIndex != s.zIndex) {
+      zIndex = s.zIndex;
+      changed = true;
+    }
+    for (final g in StickyGroup.all) {
+      if (wins(g) && s.fieldTs.containsKey(g)) fieldTs[g] = s.fieldTs[g]!;
+    }
+    updatedAt = s.updatedAt ?? updatedAt;
+    pageId = s.pageId;
+    return changed;
   }
 }
 
@@ -209,7 +322,8 @@ class UserProfileWindowModel {
 }
 
 /// 🔥 NAYA — MULTI-PAGE WHITEBOARD
-/// Har page apna khud ka strokes/shapes/texts/sticky-notes rakhta hai,
+/// Har page apna khud ka strokes/shapes/texts rakhta hai (sticky notes ab
+/// alag `StudyRoomNote` table + `StickyNoteSync` me hain, snapshot me nahi),
 /// jaise PDF/slides ke beech switch karte ho waise hi whiteboard pages ke
 /// beech switch hota hai. `userStrokeIndices` sirf local undo-bookkeeping
 /// ke liye hai — backend save/restore me include NAHI hota (isliye
@@ -219,7 +333,6 @@ class WhiteboardPage {
   List<List<DrawingPoint>> strokes;
   List<ShapeElement> shapes;
   List<TextElement> texts;
-  List<StickyNoteModel> stickyNotes;
   Map<String, List<int>> userStrokeIndices = {};
 
   // 🔥 NAYA — is page pe agar koi PDF/image load kiya gaya hai to uska
@@ -241,20 +354,17 @@ class WhiteboardPage {
     List<List<DrawingPoint>>? strokes,
     List<ShapeElement>? shapes,
     List<TextElement>? texts,
-    List<StickyNoteModel>? stickyNotes,
     this.fileUrl,
     this.fileType,
   })  : strokes = strokes ?? [],
         shapes = shapes ?? [],
-        texts = texts ?? [],
-        stickyNotes = stickyNotes ?? [];
+        texts = texts ?? [];
 
   Map<String, dynamic> toJson() => {
     'id': id,
     'strokes': strokes.map((stroke) => stroke.map((p) => p.toJson()).toList()).toList(),
     'shapes': shapes.map((s) => s.toJson()).toList(),
     'texts': texts.map((t) => t.toJson()).toList(),
-    'stickyNotes': stickyNotes.map((n) => n.toJson()).toList(),
     if (fileUrl != null) 'fileUrl': fileUrl,
     if (fileType != null) 'fileType': fileType,
   };
@@ -269,8 +379,6 @@ class WhiteboardPage {
           .toList(),
       shapes: ((json['shapes'] as List?) ?? []).map((s) => ShapeElement.fromJson(s)).toList(),
       texts: ((json['texts'] as List?) ?? []).map((t) => TextElement.fromJson(t)).toList(),
-      stickyNotes:
-          ((json['stickyNotes'] as List?) ?? []).map((n) => StickyNoteModel.fromJson(n)).toList(),
       fileUrl: json['fileUrl']?.toString(),
       fileType: json['fileType']?.toString(),
     );

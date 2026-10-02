@@ -52,6 +52,15 @@ class AppLocalizationsEn extends AppLocalizations {
   String get following => 'Following';
 
   @override
+  String get feedTabForYou => 'For you';
+
+  @override
+  String get feedBadgeSuggested => 'Suggested for you';
+
+  @override
+  String get feedBadgeTrending => 'Trending';
+
+  @override
   String get addFriends => 'Add Friends';
 
   @override
@@ -1234,6 +1243,25 @@ class AppLocalizationsEn extends AppLocalizations {
   String get noticeScopeSection => 'Section';
 
   @override
+  String get noticeBoardTitle => 'Notice Board';
+
+  @override
+  String get noticeBoardEmpty => 'No notices yet';
+
+  @override
+  String get noticeBoardEmptySubtitle =>
+      'Campus and tuition-class notices will show up here.';
+
+  @override
+  String get noticeBoardLoadFailed => 'Couldn\'t load the notice board';
+
+  @override
+  String get noticeBoardSourceCampus => 'Campus';
+
+  @override
+  String get noticeBoardSourceTuitionClass => 'Tuition Class';
+
+  @override
   String get attendanceWholeDay => 'Whole day';
 
   @override
@@ -1544,6 +1572,34 @@ class AppLocalizationsEn extends AppLocalizations {
   String get addCaptionHint => 'Add a caption…';
 
   @override
+  String get storyAudienceYourStory => 'Your story';
+
+  @override
+  String get closeFriends => 'Close Friends';
+
+  @override
+  String get closeFriendsEditList => 'Edit list';
+
+  @override
+  String get closeFriendsSearchHint => 'Search followers and following';
+
+  @override
+  String get closeFriendsEmpty => 'No people found';
+
+  @override
+  String get closeFriendsInfo =>
+      'Only people on this list can see your Close Friends stories. They won\'t be notified when you add or remove them.';
+
+  @override
+  String get closeFriendsLoadFailed => 'Couldn\'t load your list';
+
+  @override
+  String get closeFriendsUpdateFailed => 'Couldn\'t update your list';
+
+  @override
+  String get closeFriendsDone => 'Done';
+
+  @override
   String get download => 'Download';
 
   @override
@@ -1593,13 +1649,21 @@ class AppLocalizationsEn extends AppLocalizations {
   String get noViewsYet => 'No views yet.';
 
   @override
+  String replyToStoryHint(String username) {
+    return 'Reply to $username...';
+  }
+
+  @override
+  String get replySentToStory => 'Reply sent';
+
+  @override
   String get tsSourceIndividual => 'Individual';
 
   @override
   String get tsSourceCampus => 'Campus';
 
   @override
-  String get tsSourceLiveClass => 'Live Class';
+  String get tsSourceTuitionClass => 'Tuition Class';
 
   @override
   String get tsSearchHint => 'Search test series';
@@ -1842,7 +1906,7 @@ class AppLocalizationsEn extends AppLocalizations {
       'Turning a category off still shows it in your notification list — it just won\'t send a push, email, SMS or WhatsApp alert.';
 
   @override
-  String get notifCategoryLiveClasses => 'Live classes & sessions';
+  String get notifCategoryTuitionClasses => 'Tuition classes & sessions';
 
   @override
   String get notifCategoryAssignmentsTests => 'Assignments & tests';
@@ -1878,7 +1942,7 @@ class AppLocalizationsEn extends AppLocalizations {
   String get themeSystem => 'System default';
 
   @override
-  String get liveClassesTitle => 'Live Classes';
+  String get tuitionClassesTitle => 'Tuition Classes';
 
   @override
   String get searchClassroomsHint => 'Search classrooms';
@@ -1900,6 +1964,39 @@ class AppLocalizationsEn extends AppLocalizations {
 
   @override
   String get tryDifferentSearch => 'Try a different search or filter';
+
+  @override
+  String get createTuitionClassCta => 'Create class';
+
+  @override
+  String get createClassroomTitle => 'Create classroom';
+
+  @override
+  String get classroomTitleLabel => 'Title';
+
+  @override
+  String get classroomTitleHint => 'e.g. Class 10 Physics — Batch A';
+
+  @override
+  String get classroomTitleRequired => 'Enter a title for your classroom';
+
+  @override
+  String get classroomSubjectLabel => 'Subject (optional)';
+
+  @override
+  String get classroomDescriptionLabel => 'Description (optional)';
+
+  @override
+  String get classroomLanguageLabel => 'Language';
+
+  @override
+  String get createClassroomSubmit => 'Create';
+
+  @override
+  String get createClassroomSuccess => 'Classroom created';
+
+  @override
+  String get createClassroomFailed => 'Couldn\'t create classroom. Try again.';
 
   @override
   String enrolledCountLabel(int count) {
@@ -2075,6 +2172,15 @@ class AppLocalizationsEn extends AppLocalizations {
 
   @override
   String get commissionEarnedLabel => 'Commission earned';
+
+  @override
+  String get commissionRateLabel => 'Commission rate';
+
+  @override
+  String get pendingCommissionLabel => 'Pending commission';
+
+  @override
+  String get studentsReferredLabel => 'Students referred';
 
   @override
   String get couldNotLoadAssignments => 'Couldn\'t load assignments';
@@ -2440,7 +2546,7 @@ class AppLocalizationsEn extends AppLocalizations {
   String get visibilityNetwork => 'Network';
 
   @override
-  String get visibilityPrivate => 'Private';
+  String get visibilityPrivate => 'Only me';
 
   @override
   String get quickPostTitle => 'Quick Post';
@@ -3601,6 +3707,14 @@ class AppLocalizationsEn extends AppLocalizations {
   String get parentAccessRevokeDeviceFailed => 'Couldn\'t revoke the device.';
 
   @override
+  String get parentAccessShareAction => 'Share';
+
+  @override
+  String parentAccessShareMessage(String code) {
+    return 'You\'ve been invited to Parent/Guardian Access on LearnScroll.\n\n1. Install the LearnScroll app\n2. On the login screen, choose \"I\'m a parent\"\n3. Enter this code: $code';
+  }
+
+  @override
   String get chatYou => 'You';
 
   @override
@@ -3767,6 +3881,18 @@ class AppLocalizationsEn extends AppLocalizations {
 
   @override
   String get chatUnmuteNotifications => 'Unmute notifications';
+
+  @override
+  String get chatEnableTranslate => 'Enable message translate';
+
+  @override
+  String get chatDisableTranslate => 'Disable message translate';
+
+  @override
+  String get chatTranslateEnabled => 'Message translate turned on';
+
+  @override
+  String get chatTranslateDisabled => 'Message translate turned off';
 
   @override
   String get chatThisUser => 'this user';
@@ -4231,6 +4357,12 @@ class AppLocalizationsEn extends AppLocalizations {
   String get chatPreviewPoll => '📊 Poll';
 
   @override
+  String get chatRepliedToYourStory => 'Replied to your story';
+
+  @override
+  String get chatPreviewStoryReply => '📷 Replied to your story';
+
+  @override
   String get chatToday => 'Today';
 
   @override
@@ -4479,6 +4611,64 @@ class AppLocalizationsEn extends AppLocalizations {
   String get waitingForTeacher => 'Waiting for the teacher to start video…';
 
   @override
+  String get trialBadge => 'Trial';
+
+  @override
+  String get trialInProgressBanner =>
+      'You\'re in a trial preview. Enrolled classes get the full experience.';
+
+  @override
+  String get joinFullClassCta => 'Join full class';
+
+  @override
+  String get maybeLaterCta => 'Maybe later';
+
+  @override
+  String get trialEndedTitle => 'Your trial ended';
+
+  @override
+  String get trialEndedMessage =>
+      'Hope you liked the class! Join fully to keep learning with this teacher.';
+
+  @override
+  String get tryTrialCta => 'Try a free trial';
+
+  @override
+  String get trialPasswordLabel => 'Trial password';
+
+  @override
+  String get trialPasswordHint => 'Enter the code your teacher shared';
+
+  @override
+  String get trialAlreadyUsedNotice =>
+      'You\'ve already used your trial for this class.';
+
+  @override
+  String get trialDurationLabel => 'Trial duration (minutes)';
+
+  @override
+  String get enableTrialAccessLabel => 'Enable trial access';
+
+  @override
+  String get trialAccessSettingsTitle => 'Trial access';
+
+  @override
+  String get trialSettingsSaved => 'Trial settings saved.';
+
+  @override
+  String get setTrialPasswordFirst =>
+      'Set a trial password before enabling trial access.';
+
+  @override
+  String get freeTrialClassesTitle => 'Free trial classes';
+
+  @override
+  String get liveNowBadge => 'LIVE NOW';
+
+  @override
+  String get recommendedForYouBadge => 'For you';
+
+  @override
   String get savedPostsTitle => 'Saved posts';
 
   @override
@@ -4501,6 +4691,33 @@ class AppLocalizationsEn extends AppLocalizations {
 
   @override
   String get postDeleteFailed => 'Couldn\'t delete the post';
+
+  @override
+  String get editPostCta => 'Edit post';
+
+  @override
+  String get postTitleFieldLabel => 'Title (optional)';
+
+  @override
+  String get postUpdated => 'Post updated';
+
+  @override
+  String get postUpdateFailed => 'Couldn\'t update the post';
+
+  @override
+  String get postEditedLabel => 'Edited';
+
+  @override
+  String get changePrivacyCta => 'Change privacy';
+
+  @override
+  String get changePrivacyTitle => 'Who can see this post?';
+
+  @override
+  String get privacyUpdated => 'Privacy updated';
+
+  @override
+  String get privacyUpdateFailed => 'Couldn\'t update privacy';
 
   @override
   String get allCaughtUp => 'You\'re all caught up';
@@ -4551,6 +4768,18 @@ class AppLocalizationsEn extends AppLocalizations {
   String documentsTabLabel(int count) {
     return 'Documents ($count)';
   }
+
+  @override
+  String repostsTabLabel(int count) {
+    return 'Reposts ($count)';
+  }
+
+  @override
+  String get noRepostsYetTitle => 'No reposts yet';
+
+  @override
+  String get noRepostsYetSubtitle =>
+      'Posts this user reposts will show up here.';
 
   @override
   String get noDocumentsYetTitle => 'No documents yet';
@@ -4670,6 +4899,46 @@ class AppLocalizationsEn extends AppLocalizations {
 
   @override
   String get assignmentNoSubmissions => 'No submissions yet';
+
+  @override
+  String get assignmentPossibleDuplicate => 'Possible duplicate';
+
+  @override
+  String get assignmentSimilarityFlagsTitle => 'Possible duplicates';
+
+  @override
+  String get assignmentMatchesWith => 'Matches with';
+
+  @override
+  String get assignmentSimilarityScoreLabel => 'Similarity';
+
+  @override
+  String get assignmentThisStudentAnswer => 'This submission';
+
+  @override
+  String get assignmentOtherStudentAnswer => 'Matching submission';
+
+  @override
+  String get assignmentConfirmDuplicate => 'Confirm duplicate';
+
+  @override
+  String get assignmentDismissFlag => 'Dismiss';
+
+  @override
+  String get assignmentFlagStatusConfirmed => 'Confirmed duplicate';
+
+  @override
+  String get assignmentFlagStatusDismissed => 'Dismissed (false positive)';
+
+  @override
+  String get assignmentFlagStatusPending => 'Pending review';
+
+  @override
+  String get assignmentSimilarityFlagsLoadFailed =>
+      'Could not load duplicate flags';
+
+  @override
+  String get assignmentNoSimilarityFlags => 'No possible duplicates found';
 
   @override
   String get assignmentNotSubmitted => 'Not submitted';
@@ -5062,6 +5331,23 @@ class AppLocalizationsEn extends AppLocalizations {
   String get feePaymentModeLabel => 'Payment mode';
 
   @override
+  String get feeReceiptDownload => 'Download receipt';
+
+  @override
+  String get feeReceiptDownloadFailed =>
+      'Couldn\'t download the receipt — try again in a bit.';
+
+  @override
+  String get feeReceiptUnavailable =>
+      'Receipts aren\'t available on this campus yet.';
+
+  @override
+  String get feeReceiptsCta => 'View receipts';
+
+  @override
+  String get feeReceiptsTitle => 'Receipts';
+
+  @override
   String get feeRecordPayment => 'Record payment';
 
   @override
@@ -5227,5 +5513,385 @@ class AppLocalizationsEn extends AppLocalizations {
   @override
   String mutualFriendsCount(int count) {
     return '$count mutual';
+  }
+
+  @override
+  String get repostAlready => 'You\'ve already reposted this';
+
+  @override
+  String get repostOriginalUnavailable => 'This post is no longer available';
+
+  @override
+  String get repostDone => 'Reposted';
+
+  @override
+  String get repostUndo => 'Undo';
+
+  @override
+  String get repostFailed => 'Couldn\'t repost. Please try again.';
+
+  @override
+  String get repostRemoved => 'Repost removed';
+
+  @override
+  String get repostAction => 'Repost';
+
+  @override
+  String repostedBy(String username) {
+    return 'Reposted by $username';
+  }
+
+  @override
+  String get repostWithCaption => 'Repost with caption';
+
+  @override
+  String get repostCaptionHint => 'Add a caption (optional)';
+
+  @override
+  String get completeProfileSkip => 'Skip';
+
+  @override
+  String savedTabLabel(int count) {
+    return 'Saved ($count)';
+  }
+
+  @override
+  String get noSavedPostsYetTitle => 'No saved posts yet';
+
+  @override
+  String get noSavedPostsYetSubtitle => 'Posts you save will show up here.';
+
+  @override
+  String get parentSendToAllCta => 'Send to all students';
+
+  @override
+  String get addParentCta => 'Add parent';
+
+  @override
+  String get skipCta => 'Skip';
+
+  @override
+  String get parentStatusInvited => 'Invited';
+
+  @override
+  String get parentStatusLinked => 'Linked';
+
+  @override
+  String get parentStatusSkipped => 'Skipped';
+
+  @override
+  String parentLinkSentMessage(int sent, int total) {
+    return 'Parent-add link sent to $sent of $total students.';
+  }
+
+  @override
+  String get reelsTab => 'Reels';
+
+  @override
+  String get reelsEmpty => 'No reels yet';
+
+  @override
+  String get reelNotInterested => 'Not interested';
+
+  @override
+  String get reelShowFewer => 'Show fewer like this';
+
+  @override
+  String get reelWhySeeing => 'Why am I seeing this';
+
+  @override
+  String get reelHidden => 'Reel hidden';
+
+  @override
+  String get reelFewerDone => 'We\'ll show fewer like this';
+
+  @override
+  String get reelCaptionMore => 'more';
+
+  @override
+  String get reelCaptionLess => 'less';
+
+  @override
+  String get storyAddSticker => 'Add sticker';
+
+  @override
+  String get stickerMention => 'Mention';
+
+  @override
+  String get stickerLink => 'Link';
+
+  @override
+  String get stickerPoll => 'Poll';
+
+  @override
+  String get stickerQuestion => 'Question';
+
+  @override
+  String get stickerLimitReached => 'Limit reached';
+
+  @override
+  String get stickerMentionSearchHint => 'Search people to mention';
+
+  @override
+  String get stickerMentionEmpty => 'No people found';
+
+  @override
+  String get stickerMentionCloseFriendsNote =>
+      'Only Close Friends can be mentioned in a Close Friends story';
+
+  @override
+  String get stickerLoadFailed => 'Couldn\'t load. Please try again.';
+
+  @override
+  String get stickerLinkUrlHint => 'Paste a link';
+
+  @override
+  String get stickerLinkLabelHint => 'Label (optional)';
+
+  @override
+  String get stickerLinkInvalid => 'Enter a valid http or https link';
+
+  @override
+  String get stickerPollQuestionHint => 'Ask a question';
+
+  @override
+  String stickerPollOptionHint(int number) {
+    return 'Option $number';
+  }
+
+  @override
+  String get stickerPollAddOption => 'Add option';
+
+  @override
+  String get stickerPollInvalid =>
+      'Add a question and at least 2 different options';
+
+  @override
+  String get stickerQuestionPromptHint => 'Ask me anything';
+
+  @override
+  String get stickerQuestionInvalid => 'Write what you want to ask';
+
+  @override
+  String get stickerAddButton => 'Add to story';
+
+  @override
+  String get stickerDragToRemove => 'Drag here to remove';
+
+  @override
+  String get stickerCloseFriendsMentionWarn =>
+      'Only Close Friends can be mentioned in a Close Friends story. Your mention stickers will be removed.';
+
+  @override
+  String get stickerRemoveMentions => 'Remove mentions';
+
+  @override
+  String stickerPollVotes(int count) {
+    String _temp0 = intl.Intl.pluralLogic(
+      count,
+      locale: localeName,
+      other: '$count votes',
+      one: '1 vote',
+    );
+    return '$_temp0';
+  }
+
+  @override
+  String get stickerQuestionTapToAnswer => 'Tap to answer';
+
+  @override
+  String get stickerQuestionAnswered => 'Answer sent';
+
+  @override
+  String stickerQuestionAnswersCount(int count) {
+    String _temp0 = intl.Intl.pluralLogic(
+      count,
+      locale: localeName,
+      other: '$count answers',
+      one: '1 answer',
+    );
+    return '$_temp0';
+  }
+
+  @override
+  String get stickerOwnerTapToView => 'Tap to see responses';
+
+  @override
+  String get stickerAnswerHint => 'Type your answer…';
+
+  @override
+  String get stickerSendAnswer => 'Send';
+
+  @override
+  String get stickerResponsesTitle => 'Responses';
+
+  @override
+  String get stickerNoResponses => 'No responses yet';
+
+  @override
+  String get stickerLoadMore => 'Load more';
+
+  @override
+  String get stickerOpenLinkTitle => 'Open this link?';
+
+  @override
+  String get stickerOpenLink => 'Open';
+
+  @override
+  String get stickerLinkOpenFailed => 'Couldn\'t open the link';
+
+  @override
+  String get storyMentionUnavailable => 'This story is no longer available';
+
+  @override
+  String get acctSectionTitle => 'Accounts';
+
+  @override
+  String get acctSwitchAccount => 'Switch account';
+
+  @override
+  String acctCountSubtitle(int count, int max) {
+    return '$count of $max accounts on this device';
+  }
+
+  @override
+  String get acctAddAccount => 'Add account';
+
+  @override
+  String acctMaxReached(int max) {
+    return 'You can keep up to $max accounts on this device.';
+  }
+
+  @override
+  String get acctSessionExpiredTap => 'Session expired — tap to log in again';
+
+  @override
+  String acctSwitchExpired(String username) {
+    return 'Session for @$username has expired. Tap the account to log in again.';
+  }
+
+  @override
+  String get acctSwitchNoConnection =>
+      'No connection. Could not switch account.';
+
+  @override
+  String get acctSwitchInCall => 'End the call before switching accounts.';
+
+  @override
+  String get acctSwitchFailed => 'Could not switch account. Please try again.';
+
+  @override
+  String get acctAddFailed => 'Cannot add another account right now.';
+
+  @override
+  String get settingsEditProfileSub => 'Name, bio, profile photo';
+
+  @override
+  String get settingsPrivateAccount => 'Private account';
+
+  @override
+  String get settingsPrivateAccountSub =>
+      'Only approved followers can see your posts';
+
+  @override
+  String get settingsGeneralSection => 'General';
+
+  @override
+  String get settingsParentAccessSub =>
+      'Link a parent/guardian to this account';
+
+  @override
+  String get settingsInviteEarnSub =>
+      'Share your code, earn bonus coins for every friend who joins';
+
+  @override
+  String get settingsActivitySection => 'Activity';
+
+  @override
+  String get settingsYourActivity => 'Your activity';
+
+  @override
+  String get settingsYourActivitySub =>
+      'Time spent, likes, comments and saved posts';
+
+  @override
+  String get settingsYourWeek => 'Your Week';
+
+  @override
+  String get settingsYourWeekSub =>
+      'Tests, classes, likes and your streak, recapped';
+
+  @override
+  String get settingsLeaderboard => 'Leaderboard';
+
+  @override
+  String get settingsLeaderboardSub => 'See how you rank across LearnScroll';
+
+  @override
+  String get settingsPrivacySection => 'Privacy';
+
+  @override
+  String get settingsReadReceipts => 'Read receipts';
+
+  @override
+  String get settingsReadReceiptsSub =>
+      'Control who sees when you’ve read a message';
+
+  @override
+  String get settingsBlockedAccounts => 'Blocked accounts';
+
+  @override
+  String get settingsBlockedAccountsSub => 'Manage people you’ve blocked';
+
+  @override
+  String get settingsNotificationsSub => 'Push, email, SMS, WhatsApp & digest';
+
+  @override
+  String get settingsSecuritySection => 'Security';
+
+  @override
+  String get settingsChangePassword => 'Change password';
+
+  @override
+  String get settingsChangePasswordSub =>
+      'Update the password for this account';
+
+  @override
+  String get notifPauseSectionTitle => 'Pause notifications';
+
+  @override
+  String get notifPause1h => '1 hour';
+
+  @override
+  String get notifPause8h => '8 hours';
+
+  @override
+  String get notifPause24h => '24 hours';
+
+  @override
+  String get notifPauseResume => 'Resume notifications';
+
+  @override
+  String get notifQuietSectionTitle => 'Quiet hours';
+
+  @override
+  String get notifQuietToggle => 'Enable quiet hours';
+
+  @override
+  String get notifQuietFrom => 'From';
+
+  @override
+  String get notifQuietTo => 'To';
+
+  @override
+  String get notifQuietHint =>
+      'No notifications will make a sound during these hours.';
+
+  @override
+  String get notifQuietSameTime => 'Start and end time can\'t be the same';
+
+  @override
+  String notifPausedUntil(String until) {
+    return 'Paused until $until';
   }
 }

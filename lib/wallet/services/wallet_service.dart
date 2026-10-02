@@ -229,6 +229,61 @@ class WalletService {
         .map((e) => CoinWithdrawalRequest.fromJson(Map<String, dynamic>.from(e as Map)))
         .toList();
   }
+
+  // ---------------- Admin withdrawal review ----------------
+  // Feature: Admin Coin-Withdrawal Review Dashboard. Staff-only
+  // (`IsAdminUser`) — the caller must be logged in as a staff account,
+  // same auth flow as everything else in this service (`AuthService.
+  // getValidToken()`); a non-staff token gets a 403 from the backend,
+  // surfaced here as a normal `WalletApiException`.
+
+  /// `GET /profile/coin-withdrawals/admin/` — `CoinWithdrawalAdminListView`.
+  /// Every user's withdrawal requests, newest first. Unlike
+  /// `getWithdrawals()` above, this one IS paginated (project-wide
+  /// `StandardPagination`) — `_asList` already tolerates both a plain
+  /// list and a `{"results": [...]}` page, so no extra handling needed
+  /// here for page 1. `status` — comma-separated `CoinWithdrawalStatus`
+  /// values (e.g. `'pending,processing'`) — is optional; omit for every
+  /// status.
+  Future<List<AdminCoinWithdrawalRequest>> getAdminWithdrawals({String? status}) async {
+    final uri = Uri.parse('$_base/coin-withdrawals/admin/').replace(
+      queryParameters: (status != null && status.isNotEmpty) ? {'status': status} : null,
+    );
+    final res = await http.get(uri, headers: await _authHeaders()).timeout(kApiTimeout);
+    if (res.statusCode != 200) _fail(res);
+    final decoded = jsonDecode(utf8.decode(res.bodyBytes));
+    final data = decoded is Map ? decoded['data'] : null;
+    return _asList(data)
+        .map((e) => AdminCoinWithdrawalRequest.fromJson(Map<String, dynamic>.from(e as Map)))
+        .toList();
+  }
+
+  /// `POST /profile/coin-withdrawals/<id>/action/` — `CoinWithdrawalAdminActionView`.
+  /// `action` is one of `'processing'`, `'success'`, `'reject'`;
+  /// `reason` is only meaningful (and only sent) for `'reject'`. Returns
+  /// the updated row so the caller can refresh its local list without a
+  /// second round-trip.
+  ///   - 409 — invalid state transition (e.g. rejecting an already-SUCCESS
+  ///     request) — surfaced via `WalletApiException.isConflict`.
+  ///   - 404 — no such withdrawal request.
+  Future<AdminCoinWithdrawalRequest> adminWithdrawalAction({
+    required int withdrawalId,
+    required String action,
+    String reason = '',
+  }) async {
+    final res = await http
+        .post(
+          Uri.parse('$_base/coin-withdrawals/$withdrawalId/action/'),
+          headers: await _authHeaders(),
+          body: jsonEncode({
+            'action': action,
+            if (action == 'reject') 'reason': reason,
+          }),
+        )
+        .timeout(kApiTimeout);
+    if (res.statusCode != 200) _fail(res);
+    return AdminCoinWithdrawalRequest.fromJson(_unwrap(res));
+  }
 }
 
 class WalletApiException implements Exception {
@@ -242,6 +297,10 @@ class WalletApiException implements Exception {
 
   /// Withdrawal request: seedha insufficient balance (402).
   bool get isInsufficientBalance => statusCode == 402;
+
+  /// Admin action: invalid state transition (e.g. approving/rejecting an
+  /// already-terminal SUCCESS/REJECTED request) — 409.
+  bool get isConflict => statusCode == 409;
 
   bool get isNotAuthenticated => statusCode == 401;
 

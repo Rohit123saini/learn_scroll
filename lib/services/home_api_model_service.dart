@@ -3,6 +3,7 @@ import 'package:http/http.dart' as http;
 import 'package:shared_preferences/shared_preferences.dart';
 import '../utils/api.dart';
 import 'auth_service.dart';
+import 'crash_reporting_service.dart';
 
 // ===================== MODELS =====================
 
@@ -10,10 +11,30 @@ class UserModel {
   final String id;
   final String username;
   final String? profilePicture;
-  UserModel({required this.id, required this.username, this.profilePicture});
+  // TASK 2 — feed post cards need a Follow button on the author. Backend
+  // (`PostListSerializer.get_user`) now sends both alongside the post,
+  // so the card knows up front whether to show Follow / nothing (own
+  // post) without a separate lookup. `isFollowing` is mutable so the
+  // button can flip in place once the API call in `_toggleFollowFromFeed`
+  // (home.dart) resolves, without needing a full feed refresh.
+  bool isFollowing;
+  final bool isOwnPost;
+  UserModel({
+    required this.id,
+    required this.username,
+    this.profilePicture,
+    this.isFollowing = false,
+    this.isOwnPost = false,
+  });
   factory UserModel.fromJson(Map<String, dynamic> j) {
     String? pic = j['profilePicture'] ?? j['profile_picture'] ?? j['profile_photo'];
-    return UserModel(id: j['id'].toString(), username: j['username'] ?? '', profilePicture: pic);
+    return UserModel(
+      id: j['id'].toString(),
+      username: j['username'] ?? '',
+      profilePicture: pic,
+      isFollowing: j['is_following'] ?? false,
+      isOwnPost: j['is_own_post'] ?? false,
+    );
   }
 }
 
@@ -26,11 +47,115 @@ class PostMediaModel {
   final int? width;
   final int? height;
   final int? durationSeconds;
-  PostMediaModel({required this.id, required this.mediaType, required this.file, this.thumbnail, required this.fileName, this.width, this.height, this.durationSeconds});
+  // C4-BE/C4-FE — responsive variants + placeholder (thumb ~320px, medium ~720px).
+  // All optional: an older backend simply doesn't send them.
+  final String? thumbUrl;
+  final String? mediumUrl;
+  final String? blurhash;
+  PostMediaModel({
+    required this.id,
+    required this.mediaType,
+    required this.file,
+    this.thumbnail,
+    required this.fileName,
+    this.width,
+    this.height,
+    this.durationSeconds,
+    this.thumbUrl,
+    this.mediumUrl,
+    this.blurhash,
+  });
+
+  /// Feed-card sized image (~720px); falls back to the original file.
+  String get feedUrl => (mediumUrl != null && mediumUrl!.isNotEmpty) ? mediumUrl! : file;
+
+  /// Grid / preview sized image (~320px); falls back to the original file.
+  String get gridUrl => (thumbUrl != null && thumbUrl!.isNotEmpty) ? thumbUrl! : file;
+
   factory PostMediaModel.fromJson(Map<String, dynamic> json) {
     return PostMediaModel(
       id: json['id']?.toString() ?? '', mediaType: json['media_type'] ?? 'image', file: json['file'] ?? '',
       thumbnail: json['thumbnail'], fileName: json['file_name'] ?? '', width: json['width'], height: json['height'], durationSeconds: json['duration_seconds'],
+      thumbUrl: json['thumb_url']?.toString(),
+      mediumUrl: json['medium_url']?.toString(),
+      blurhash: json['blurhash']?.toString(),
+    );
+  }
+}
+
+// TASK G6 (growth_and_feature_tasks.md) — Poll voting (live results).
+// Poll CREATION already existed on the composer side; this is the
+// read/vote side (`PostPollSerializer` on the backend).
+class PostPollOptionModel {
+  final String id;
+  final String text;
+  final int votesCount;
+  PostPollOptionModel({required this.id, required this.text, required this.votesCount});
+  factory PostPollOptionModel.fromJson(Map<String, dynamic> json) {
+    return PostPollOptionModel(
+      id: json['id']?.toString() ?? '',
+      text: json['text'] ?? '',
+      votesCount: json['votes_count'] ?? 0,
+    );
+  }
+}
+
+class PostPollModel {
+  final String id;
+  final List<PostPollOptionModel> options;
+  final int totalVotesCount;
+  final bool isExpired;
+  // Non-null once the viewer has voted — the option id they picked.
+  String? myVoteOptionId;
+  PostPollModel({
+    required this.id,
+    required this.options,
+    required this.totalVotesCount,
+    required this.isExpired,
+    this.myVoteOptionId,
+  });
+  factory PostPollModel.fromJson(Map<String, dynamic> json) {
+    return PostPollModel(
+      id: json['id']?.toString() ?? '',
+      options: (json['options'] as List<dynamic>?)
+              ?.map((e) => PostPollOptionModel.fromJson(Map<String, dynamic>.from(e as Map)))
+              .toList() ??
+          [],
+      totalVotesCount: json['total_votes_count'] ?? 0,
+      isExpired: json['is_expired'] ?? false,
+      myVoteOptionId: json['my_vote_option_id']?.toString(),
+    );
+  }
+}
+
+// TASK G6 — "Ask a doubt" post type. One answer under a doubt post; the
+// asker can pin one as `isBestAnswer` (PostAnswerMarkBestAPIView).
+class PostAnswerModel {
+  final String id;
+  final UserModel user;
+  final String content;
+  bool isBestAnswer;
+  final int likesCount;
+  final DateTime createdAt;
+  final bool isOwnAnswer;
+  PostAnswerModel({
+    required this.id,
+    required this.user,
+    required this.content,
+    required this.isBestAnswer,
+    required this.likesCount,
+    required this.createdAt,
+    required this.isOwnAnswer,
+  });
+  factory PostAnswerModel.fromJson(Map<String, dynamic> json) {
+    return PostAnswerModel(
+      id: json['id']?.toString() ?? '',
+      user: UserModel.fromJson(Map<String, dynamic>.from(json['user'] ?? {})),
+      content: json['content'] ?? '',
+      isBestAnswer: json['is_best_answer'] ?? false,
+      likesCount: json['likes_count'] ?? 0,
+      createdAt: DateTime.tryParse(json['created_at'] ?? '') ?? DateTime.now(),
+      isOwnAnswer: json['is_own_answer'] ?? false,
     );
   }
 }
@@ -41,9 +166,30 @@ class PostModel {
   int likesCount; int commentsCount; int sharesCount; int viewsCount; int savesCount;
   int likeCount; int confuseCount; int wrongCount; int impCount; int explainCount;
   String? myReaction; bool isLiked; bool isSaved; final DateTime createdAt; final List<PostMediaModel> media;
-  PostModel({required this.id, required this.user, this.title, this.content, required this.category, required this.postType, required this.visibility, required this.hashtags, this.location, required this.likesCount, required this.commentsCount, required this.sharesCount, required this.viewsCount, required this.savesCount, required this.likeCount, required this.confuseCount, required this.wrongCount, required this.impCount, required this.explainCount, this.myReaction, required this.isLiked, required this.isSaved, required this.createdAt, required this.media});
+  // Repost feature. A repost is a normal post row with postType == 'repost'
+  // whose `originalPost` is the (one-level, already flattened) source post.
+  // `originalPost == null` on a repost means the original is gone or not
+  // visible to this viewer (backend sends `{id, is_unavailable: true}`).
+  // `repostsCount` / `isRepostedByMe` describe THIS post as a repost target;
+  // on a repost card the Repost button reads them off `originalPost`.
+  final String? repostCaption; final PostModel? originalPost; int repostsCount; bool isRepostedByMe;
+  bool get isRepost => postType == 'repost';
+  // TASK G6 — poll (present only when this post has one, any post_type)
+  // and doubt fields (only meaningful when postType == 'doubt').
+  PostPollModel? poll;
+  int answersCount;
+  PostAnswerModel? bestAnswer;
+  bool get isDoubt => postType == 'doubt';
+  // Home-feed discovery mix (backend post/feed_mix.py): 'following' |
+  // 'recommended' | 'trending'. null = post did not come from the mixed
+  // feed (old cache / other endpoints) -> no badge is shown.
+  final String? feedSource;
+  bool get isSuggested => feedSource == 'recommended';
+  bool get isTrending => feedSource == 'trending';
+  PostModel({this.feedSource, this.repostCaption, this.originalPost, this.repostsCount = 0, this.isRepostedByMe = false, required this.id, required this.user, this.title, this.content, required this.category, required this.postType, required this.visibility, required this.hashtags, this.location, required this.likesCount, required this.commentsCount, required this.sharesCount, required this.viewsCount, required this.savesCount, required this.likeCount, required this.confuseCount, required this.wrongCount, required this.impCount, required this.explainCount, this.myReaction, required this.isLiked, required this.isSaved, required this.createdAt, required this.media, this.poll, this.answersCount = 0, this.bestAnswer});
   factory PostModel.fromJson(Map<String, dynamic> json) {
     return PostModel(
+      feedSource: json['feed_source'] is String ? json['feed_source'] as String : null,
       id: json['id']?.toString() ?? '', user: UserModel.fromJson(json['user'] ?? {}), title: json['title'], content: json['content'],
       category: json['category'] ?? 'general', postType: json['post_type'] ?? 'text', visibility: json['visibility'] ?? 'public',
       hashtags: List<String>.from(json['hashtags'] ?? []), location: json['location'],
@@ -52,6 +198,17 @@ class PostModel {
       myReaction: json['my_reaction'], isLiked: json['is_liked'] ?? json['my_reaction'] != null, isSaved: json['is_saved'] ?? false,
       createdAt: DateTime.tryParse(json['created_at'] ?? '') ?? DateTime.now(),
       media: (json['media'] as List<dynamic>?)?.map((e) => PostMediaModel.fromJson(e)).toList() ?? [],
+      repostCaption: json['repost_caption'],
+      originalPost: json['original_post'] is Map && json['original_post']['is_unavailable'] != true
+          ? PostModel.fromJson(Map<String, dynamic>.from(json['original_post'] as Map))
+          : null,
+      repostsCount: json['reposts_count'] ?? 0,
+      isRepostedByMe: json['is_reposted_by_me'] ?? false,
+      poll: json['poll'] is Map ? PostPollModel.fromJson(Map<String, dynamic>.from(json['poll'] as Map)) : null,
+      answersCount: json['answers_count'] ?? 0,
+      bestAnswer: json['best_answer'] is Map
+          ? PostAnswerModel.fromJson(Map<String, dynamic>.from(json['best_answer'] as Map))
+          : null,
     );
   }
 }
@@ -114,7 +271,7 @@ class ClassroomModel {
 
 // 3.2 — "Live now" cards
 //
-// ✅ CONFIRMED (Task 3) — real shape of GET /liveclass/sessions/live-now/
+// ✅ CONFIRMED (Task 3) — real shape of GET /tuitionclass/sessions/live-now/
 // (LiveNowSessionSerializer, backend). NOT the same shape as the old mock
 // (`title`/`teacher_name`/`subject`/`viewers_count`/`thumbnail_url` flat on
 // the session) — a session has no title of its own, so `title` here is the
@@ -122,7 +279,7 @@ class ClassroomModel {
 // cover_image/teacher), same "card" shape ClassroomMiniSerializer already
 // uses elsewhere. `id` is the ClassSession id (needed for the join call,
 // NOT the classroom id — see classroomId below for that).
-class LiveClassModel {
+class TuitionClassModel {
   final String id; // ClassSession id
   final String classroomId;
   final String title; // classroom title
@@ -131,7 +288,7 @@ class LiveClassModel {
   final int viewersCount; // live participant_count
   final String? thumbnailUrl; // classroom cover_image
   final String? roomId;
-  LiveClassModel({
+  TuitionClassModel({
     required this.id,
     required this.classroomId,
     required this.title,
@@ -141,10 +298,10 @@ class LiveClassModel {
     this.thumbnailUrl,
     this.roomId,
   });
-  factory LiveClassModel.fromJson(Map<String, dynamic> json) {
+  factory TuitionClassModel.fromJson(Map<String, dynamic> json) {
     final classroom = json['classroom'] as Map<String, dynamic>? ?? {};
     final teacher = classroom['teacher'] as Map<String, dynamic>?;
-    return LiveClassModel(
+    return TuitionClassModel(
       id: json['id']?.toString() ?? '',
       classroomId: classroom['id']?.toString() ?? '',
       title: classroom['title'] ?? '',
@@ -254,54 +411,89 @@ class ReferLinkModel {
 /// Task 11.3 — sab home calls ke liye ek hi timeout.
 const Duration kApiTimeout = Duration(seconds: 15);
 
-class HomeFeedService {
-  static const String _feedCacheKey = 'cached_feed_raw_v2';
+/// Which home-feed tab a request/cache belongs to.
+///   mixed     -> "For you" tab  (GET /post/feed/, 60/30/10 blend)
+///   following -> "Following" tab (GET /post/feed/?source=following)
+class FeedSource {
+  FeedSource._();
+  static const String mixed = 'mixed';
+  static const String following = 'following';
+}
 
-  static Future<FeedResponse?> getCachedFeed() async {
+class HomeFeedService {
+  // v3: cache is now kept PER SOURCE. The old single `cached_feed_raw_v2`
+  // key is dropped on purpose — it had no `feed_source` on its posts, and
+  // with two tabs one shared key would show the "For you" posts inside the
+  // "Following" tab (and vice-versa) until the network answered.
+  static const String _legacyFeedCacheKey = 'cached_feed_raw_v2';
+  static const String _feedCachePrefix = 'cached_feed_raw_v3_';
+
+  static String _normalize(String source) =>
+      source == FeedSource.following ? FeedSource.following : FeedSource.mixed;
+
+  static String _cacheKeyFor(String source) => '$_feedCachePrefix${_normalize(source)}';
+
+  static Future<FeedResponse?> getCachedFeed({String source = FeedSource.mixed}) async {
     try {
       final prefs = await SharedPreferences.getInstance();
-      final cached = prefs.getString(_feedCacheKey);
+      final cached = prefs.getString(_cacheKeyFor(source));
       if (cached != null && cached.isNotEmpty) return FeedResponse.fromJson(jsonDecode(cached));
-    } catch (e) { print("Feed cache parse error: $e"); }
+    } catch (e, st) {
+      CrashReportingService.logError("HomeApiModelService.getCachedFeed", e, stackTrace: st);
+    }
     return null;
   }
 
-  static Future<FeedResponse> getFeedFromAPI({int page = 1, int pageSize = 20}) async {
+  static Future<FeedResponse> getFeedFromAPI({int page = 1, int pageSize = 20, String source = FeedSource.mixed}) async {
     final token = await AuthService.getValidToken();
     if (token == null) throw Exception('User not authenticated');
-    final url = Uri.parse("${Api.baseUrl}/post/feed/?page=$page&page_size=$pageSize");
+    final src = _normalize(source);
+    // `source` param is sent only for the Following tab; the mixed feed is
+    // the backend default.
+    final sourceQuery = src == FeedSource.following ? '&source=following' : '';
+    final url = Uri.parse("${Api.baseUrl}/post/feed/?page=$page&page_size=$pageSize$sourceQuery");
     final response = await http
         .get(url, headers: {"Authorization": "Bearer $token", "Content-Type": "application/json"})
         .timeout(kApiTimeout); // Task 11.3
     if (response.statusCode == 200) {
+      final feed = FeedResponse.fromJson(jsonDecode(response.body));
       if (page == 1) {
         final prefs = await SharedPreferences.getInstance();
-        await prefs.setString(_feedCacheKey, response.body);
+        await prefs.setString(_cacheKeyFor(src), response.body);
+        await prefs.remove(_legacyFeedCacheKey);
       }
-      return FeedResponse.fromJson(jsonDecode(response.body));
+      return feed;
     } else { throw Exception('Failed to load feed: ${response.statusCode}'); }
   }
 
-  static Future<FeedResponse> getHomeFeed({int page = 1, int pageSize = 20}) async {
+  static Future<FeedResponse> getHomeFeed({int page = 1, int pageSize = 20, String source = FeedSource.mixed}) async {
     if (page == 1) {
       final prefs = await SharedPreferences.getInstance();
-      final cached = prefs.getString(_feedCacheKey);
+      final cached = prefs.getString(_cacheKeyFor(source));
       if (cached != null && cached.isNotEmpty) {
         try {
           final cachedFeed = FeedResponse.fromJson(jsonDecode(cached));
-          getFeedFromAPI(page: page, pageSize: pageSize).catchError((e) => print("Background refresh failed: $e"));
+          getFeedFromAPI(page: page, pageSize: pageSize, source: source).catchError(
+            (e) => CrashReportingService.logError("HomeApiModelService.backgroundRefresh", e),
+          );
           return cachedFeed;
-        } catch (e) { print("Cache decode failed: $e"); }
+        } catch (e, st) {
+          CrashReportingService.logError("HomeApiModelService.getHomeFeed.cacheDecode", e, stackTrace: st);
+        }
       }
     }
-    return await getFeedFromAPI(page: page, pageSize: pageSize);
+    return await getFeedFromAPI(page: page, pageSize: pageSize, source: source);
   }
 
-  static Future<FeedResponse> refreshFeed({int page = 1, int pageSize = 20}) async => await getFeedFromAPI(page: page, pageSize: pageSize);
+  static Future<FeedResponse> refreshFeed({int page = 1, int pageSize = 20, String source = FeedSource.mixed}) async =>
+      await getFeedFromAPI(page: page, pageSize: pageSize, source: source);
 
+  /// Clears the cache of BOTH tabs (used e.g. after a post is deleted).
   static Future<void> clearFeedCache() async {
     final prefs = await SharedPreferences.getInstance();
-    await prefs.remove(_feedCacheKey);
+    await prefs.remove(_cacheKeyFor(FeedSource.mixed));
+    await prefs.remove(_cacheKeyFor(FeedSource.following));
+    await prefs.remove(_legacyFeedCacheKey);
   }
 
   static Future<bool> toggleLike(String postId) async {
@@ -372,6 +564,58 @@ class HomeFeedService {
       return {};
     }
   }
+  // TASK G6 — cast/change a vote on a post's poll. Returns the poll's
+  // fresh state (fresh vote counts + my_vote_option_id) so the card can
+  // show live results immediately.
+  static Future<PostPollModel> votePoll(String postId, String optionId) async {
+    final token = await AuthService.getValidToken();
+    if (token == null) throw Exception('User not authenticated');
+    final url = Uri.parse("${Api.baseUrl}/post/$postId/poll/vote/");
+    final response = await http
+        .post(url,
+            headers: {"Authorization": "Bearer $token", "Content-Type": "application/json"},
+            body: jsonEncode({"option_id": optionId}))
+        .timeout(kApiTimeout);
+    if (response.statusCode == 200) return PostPollModel.fromJson(jsonDecode(response.body));
+    throw Exception('Vote failed: ${response.body}');
+  }
+
+  // TASK G6 — "Ask a doubt" answers.
+  static Future<List<PostAnswerModel>> getAnswers(String postId) async {
+    final url = Uri.parse("${Api.baseUrl}/post/$postId/answers/");
+    final response = await http.get(url).timeout(kApiTimeout);
+    if (response.statusCode != 200) throw Exception('Failed to load answers: ${response.body}');
+    final decoded = jsonDecode(response.body);
+    final results = (decoded is Map && decoded['results'] != null) ? decoded['results'] : decoded;
+    return (results as List<dynamic>)
+        .map((e) => PostAnswerModel.fromJson(Map<String, dynamic>.from(e as Map)))
+        .toList();
+  }
+
+  static Future<PostAnswerModel> postAnswer(String postId, String content) async {
+    final token = await AuthService.getValidToken();
+    if (token == null) throw Exception('User not authenticated');
+    final url = Uri.parse("${Api.baseUrl}/post/$postId/answers/");
+    final response = await http
+        .post(url,
+            headers: {"Authorization": "Bearer $token", "Content-Type": "application/json"},
+            body: jsonEncode({"content": content}))
+        .timeout(kApiTimeout);
+    if (response.statusCode == 201) return PostAnswerModel.fromJson(jsonDecode(response.body));
+    throw Exception('Answer failed: ${response.body}');
+  }
+
+  // Pin/unpin the best answer — asker-only (backend enforces this too).
+  static Future<Map<String, dynamic>> markBestAnswer(String answerId) async {
+    final token = await AuthService.getValidToken();
+    if (token == null) throw Exception('User not authenticated');
+    final url = Uri.parse("${Api.baseUrl}/post/answers/$answerId/mark-best/");
+    final response = await http
+        .post(url, headers: {"Authorization": "Bearer $token", "Content-Type": "application/json"})
+        .timeout(kApiTimeout);
+    if (response.statusCode == 200) return jsonDecode(response.body);
+    throw Exception('Mark-best failed: ${response.body}');
+  }
 }
 
 // NEW — SujhaavFayda1 item 3. Ad/interstitial cadence used to be two
@@ -398,16 +642,16 @@ class FeedConfigService {
 
 // ===================== HOME EXTRAS (Task 4) =====================
 //
-// Status per LEARNSCROLL_LIVECLASS.md / campus_app_design.md (docs upload,
+// Status per LEARNSCROLL_TUITIONCLASS.md / campus_app_design.md (docs upload,
 // Sept 2026):
 //   - getInviteInfo()/getReferLink() → ✅ Task 5 — REAL endpoints confirmed,
 //     wired below (was assumed coins_per_referral/invite_link shape before;
 //     see InviteEarnModel/ReferLinkModel doc comments for the real, class-
 //     level ongoing-commission shape).
 //   - getMyClassrooms() → ✅ Task 2 — REAL endpoint confirmed
-//     (GET /liveclass/classrooms/?mine=true), wired below.
+//     (GET /tuitionclass/classrooms/?mine=true), wired below.
 //   - getLiveNow() → ✅ Task 3 — REAL endpoint confirmed (a new backend
-//     action, GET /liveclass/sessions/live-now/, was added since no
+//     action, GET /tuitionclass/sessions/live-now/, was added since no
 //     existing endpoint matched the shape this screen needs — see
 //     ClassSessionViewSet.live_now() in views.py), wired below.
 //   - getStories() → MOVED to `StoryService.getStories()` in
@@ -416,7 +660,7 @@ class FeedConfigService {
 //     `StoryModel`/`StoryGroup`/`groupStories()` moved to
 //     `post/models/story_model.dart`.
 class HomeExtrasService {
-  // ✅ CONFIRMED (Task 2) — GET /liveclass/classrooms/?mine=true, caller ki
+  // ✅ CONFIRMED (Task 2) — GET /tuitionclass/classrooms/?mine=true, caller ki
   // khud ki enrolled/teaching classrooms. Response DRF-paginated ho sakta
   // hai ({"results":[...]}) ya plain list — dono handle kiya hai neeche.
   //
@@ -440,8 +684,9 @@ class HomeExtrasService {
           _getMyClassroomsFromAPI().catchError((e) => <ClassroomModel>[]); // background refresh
           return data.map((e) => ClassroomModel.fromJson(e as Map<String, dynamic>)).toList();
         }
-      } catch (e) {
-        print("Classrooms cache parse error: $e"); // corrupt cache — fresh fetch neeche ho jaayega
+      } catch (e, st) {
+        // corrupt cache — fresh fetch neeche ho jaayega
+        CrashReportingService.logError("HomeApiModelService.getMyClassrooms.cacheParse", e, stackTrace: st);
       }
     }
     return await _getMyClassroomsFromAPI();
@@ -450,7 +695,7 @@ class HomeExtrasService {
   static Future<List<ClassroomModel>> _getMyClassroomsFromAPI() async {
     final token = await AuthService.getValidToken();
     if (token == null) throw Exception('User not authenticated');
-    final url = Uri.parse("${Api.baseUrl}/liveclass/classrooms/?mine=true");
+    final url = Uri.parse("${Api.baseUrl}/tuitionclass/classrooms/?mine=true");
     final response = await http
         .get(url, headers: {"Authorization": "Bearer $token", "Content-Type": "application/json"})
         .timeout(kApiTimeout);
@@ -468,7 +713,7 @@ class HomeExtrasService {
     }
   }
 
-  // ✅ CONFIRMED (Task 2) — GET /liveclass/classrooms/{id}/. Detail response
+  // ✅ CONFIRMED (Task 2) — GET /tuitionclass/classrooms/{id}/. Detail response
   // is a superset of the list-row fields (id, name, is_live, is_active) that
   // `ClassroomModel.fromJson` already parses; classroom-detail screen ke
   // liye abhi bas yehi confirmed fields use kiye hain. Richer fields (agar
@@ -478,7 +723,7 @@ class HomeExtrasService {
   static Future<ClassroomModel> getClassroomDetail(String id) async {
     final token = await AuthService.getValidToken();
     if (token == null) throw Exception('User not authenticated');
-    final url = Uri.parse("${Api.baseUrl}/liveclass/classrooms/$id/");
+    final url = Uri.parse("${Api.baseUrl}/tuitionclass/classrooms/$id/");
     final response = await http
         .get(url, headers: {"Authorization": "Bearer $token", "Content-Type": "application/json"})
         .timeout(kApiTimeout);
@@ -489,7 +734,7 @@ class HomeExtrasService {
     }
   }
 
-  // ✅ CONFIRMED (Task 3) — GET /liveclass/sessions/live-now/, NEW backend
+  // ✅ CONFIRMED (Task 3) — GET /tuitionclass/sessions/live-now/, NEW backend
   // action (ClassSessionViewSet.live_now, see views.py) built specifically
   // for this card row — neither of the two candidates the task doc flagged
   // (`sessions/?status=live` cross-classroom filter, or a per-classroom
@@ -500,16 +745,16 @@ class HomeExtrasService {
   // getMyClassrooms above): "who's live right now" is exactly the kind of
   // data a short-TTL cache would go stale on fastest, and this row is meant
   // to be refetched on every home-resume per the task doc's polling note.
-  static Future<List<LiveClassModel>> getLiveNow({int limit = 10}) async {
+  static Future<List<TuitionClassModel>> getLiveNow({int limit = 10}) async {
     final token = await AuthService.getValidToken();
     if (token == null) throw Exception('User not authenticated');
-    final url = Uri.parse("${Api.baseUrl}/liveclass/sessions/live-now/?limit=$limit");
+    final url = Uri.parse("${Api.baseUrl}/tuitionclass/sessions/live-now/?limit=$limit");
     final response = await http
         .get(url, headers: {"Authorization": "Bearer $token", "Content-Type": "application/json"})
         .timeout(kApiTimeout);
     if (response.statusCode == 200) {
       final List raw = jsonDecode(response.body) as List;
-      return raw.map((e) => LiveClassModel.fromJson(e as Map<String, dynamic>)).toList();
+      return raw.map((e) => TuitionClassModel.fromJson(e as Map<String, dynamic>)).toList();
     } else {
       throw Exception('Failed to load live-now sessions: ${response.statusCode}');
     }
@@ -519,7 +764,7 @@ class HomeExtrasService {
   // revalidate cache pattern that used to be documented here) now live as
   // `StoryService.getStories()` in `post/services/story_service.dart`.
 
-  // ✅ CONFIRMED (Task 5) — GET /liveclass/referrals/class-referral-summary/.
+  // ✅ CONFIRMED (Task 5) — GET /tuitionclass/referrals/class-referral-summary/.
   // FIX: was hitting `referrals/my-code/` — that's the separate, signup-
   // level "invite a friend to the app" program (flat REFERRAL_BONUS_COINS
   // per signup), a real endpoint but the WRONG one for this strip. The
@@ -530,7 +775,7 @@ class HomeExtrasService {
   static Future<InviteEarnModel> getInviteInfo() async {
     final token = await AuthService.getValidToken();
     if (token == null) throw Exception('User not authenticated');
-    final url = Uri.parse("${Api.baseUrl}/liveclass/referrals/class-referral-summary/");
+    final url = Uri.parse("${Api.baseUrl}/tuitionclass/referrals/class-referral-summary/");
     final response = await http
         .get(url, headers: {"Authorization": "Bearer $token", "Content-Type": "application/json"})
         .timeout(kApiTimeout);
@@ -541,7 +786,7 @@ class HomeExtrasService {
     }
   }
 
-  // NEW (Task 5) — GET /liveclass/classrooms/{id}/refer-link/. Generates
+  // NEW (Task 5) — GET /tuitionclass/classrooms/{id}/refer-link/. Generates
   // (or re-fetches — it's idempotent server-side, same code every call)
   // the caller's own share-link for ONE classroom, plus that classroom's
   // current %commission so the UI can show "earn X%" before the person
@@ -551,7 +796,7 @@ class HomeExtrasService {
   static Future<ReferLinkModel> getReferLink(String classroomId) async {
     final token = await AuthService.getValidToken();
     if (token == null) throw Exception('User not authenticated');
-    final url = Uri.parse("${Api.baseUrl}/liveclass/classrooms/$classroomId/refer-link/");
+    final url = Uri.parse("${Api.baseUrl}/tuitionclass/classrooms/$classroomId/refer-link/");
     final response = await http
         .get(url, headers: {"Authorization": "Bearer $token", "Content-Type": "application/json"})
         .timeout(kApiTimeout);

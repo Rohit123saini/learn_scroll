@@ -16,7 +16,7 @@ import '../services/assignment_service.dart';
 // This is the piece that was missing end-to-end: everything else in this
 // module assumed an assignment already existed. `AssignmentService
 // .createAssignment()` (`POST {mount}/assigmentss/`) is the *only* create
-// entry point the backend exposes to a mobile client — campus/liveclass
+// entry point the backend exposes to a mobile client — campus/tuitionclass
 // assignments are created by those apps' own bridge, not here.
 //
 // Because `assigmentsViewSet.perform_create()` hard-wires

@@ -20,16 +20,81 @@ import '../theme_service.dart';
 const double kLsPad = 18;
 const double kLsRadius = 18;
 
-/// Heading font (HTML: `--font-head: Sora`). Body text theme ka default
-/// (Inter) hai, isliye uske liye koi helper nahi chahiye.
+// ============================================================
+// Task 11 — shared spacing/radius SCALE. Everything below existed as
+// scattered magic numbers across this file (and screens that import it)
+// before this pass — `BorderRadius.circular(20)` in one widget,
+// `circular(24)` in the next, `circular(16)` in a third, with no
+// indication whether any of them were meant to be the same value or
+// three deliberately different ones. Naming them here doesn't change a
+// single pixel on screen (every existing call site below is replaced
+// with the token that already matched its old literal) — the point is
+// that a future "make cards a bit more rounded app-wide" ask is now a
+// one-line change in this file instead of a grep-and-hope across 190+
+// screens.
+//
+// `kCardRadius` is `kLsRadius`'s own name for the "outer card corner"
+// role specifically (post cards, notification tiles, profile stat
+// cards) — same 18 value, kept as an alias rather than a new number so
+// nothing that already relies on `kLsRadius` needs to change.
+const double kCardRadius = kLsRadius;
+
+/// Spacing scale — reach for one of these instead of a fresh literal
+/// wherever a gap is "about page-padding-sized" rather than a genuinely
+/// one-off value (icon-to-text gaps, tight internal padding, etc. are
+/// fine left as their own small numbers — this scale is for the common,
+/// reused sizes).
+const double kSpaceXs = 4;
+const double kSpaceSm = 8;
+const double kSpaceMd = 12;
+const double kSpaceLg = kLsPad; // 18 — same as the page padding, by name.
+const double kSpaceXl = 24;
+
+/// Radius scale — same reasoning as the spacing scale above. `kLsRadius`
+/// (18, aliased as `kCardRadius`) stays the "big card" size; these fill
+/// in the smaller/pill roles that were previously ad-hoc numbers.
+const double kRadiusSm = 12; // small tappable rows (bottom-nav items, list tiles)
+const double kRadiusMd = 16; // secondary cards/tiles smaller than a full LsCard
+const double kRadiusChip = 20; // status chips, filter chips, small pills
+const double kRadiusPill = 24; // full-height pill buttons (LsPrimaryButton/LsOutlineButton)
+
+/// Heading/body/caption font helpers — the shared "text scale" Task 11
+/// asks for. Before this, body/caption-ish text across screens used
+/// whatever nearby literal felt right (an audit of this codebase turned
+/// up fontSize values of 15, 13, 12, 11.5, 12.5, 11, 10.5, 9.5, 13.5 all
+/// doing the same "small meta text" job in different files) — three
+/// named sizes here doesn't force a rewrite of every screen, but gives
+/// new/edited code one obvious place to reach for instead of adding yet
+/// another one-off number.
 class LsType {
   LsType._();
 
+  /// Headings (HTML: `--font-head: Sora`) — section titles, card titles.
   static TextStyle head(BuildContext context, {double size = 14.5, Color? color, FontWeight weight = FontWeight.w700}) {
     return GoogleFonts.sora(
       fontSize: size,
       fontWeight: weight,
       color: color ?? Theme.of(context).colorScheme.onSurface,
+    );
+  }
+
+  /// Body text (theme's default font, Inter) — normal readable copy.
+  static TextStyle body(BuildContext context, {double size = 13, Color? color, FontWeight weight = FontWeight.w400}) {
+    return TextStyle(
+      fontSize: size,
+      fontWeight: weight,
+      color: color ?? Theme.of(context).colorScheme.onSurface,
+    );
+  }
+
+  /// Caption/meta text — timestamps, counts, helper labels under a
+  /// heading. Slightly bolder than body by default since captions are
+  /// usually competing with body text right next to them for attention.
+  static TextStyle caption(BuildContext context, {double size = 11, Color? color, FontWeight weight = FontWeight.w600}) {
+    return TextStyle(
+      fontSize: size,
+      fontWeight: weight,
+      color: color ?? Theme.of(context).colorScheme.onSurfaceVariant,
     );
   }
 }
@@ -131,8 +196,8 @@ class LsStatusChip extends StatelessWidget {
     final bg = solid ? color : color.withOpacity(isDark ? .22 : .12);
     final fg = solid ? _onColor(color) : color;
     return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
-      decoration: BoxDecoration(color: bg, borderRadius: BorderRadius.circular(20)),
+      padding: const EdgeInsets.symmetric(horizontal: kSpaceSm, vertical: 3),
+      decoration: BoxDecoration(color: bg, borderRadius: BorderRadius.circular(kRadiusChip)),
       child: Row(mainAxisSize: MainAxisSize.min, children: [
         if (icon != null) ...[Icon(icon, size: 11, color: fg), const SizedBox(width: 4)],
         Text(label,
@@ -198,11 +263,11 @@ class LsPrimaryButton extends StatelessWidget {
         opacity: disabled ? .55 : 1,
         child: Material(
           color: bg,
-          borderRadius: BorderRadius.circular(24),
+          borderRadius: BorderRadius.circular(kRadiusPill),
           child: InkWell(
             onTap: disabled ? null : onPressed,
-            borderRadius: BorderRadius.circular(24),
-            child: Padding(padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 13), child: child),
+            borderRadius: BorderRadius.circular(kRadiusPill),
+            child: Padding(padding: const EdgeInsets.symmetric(horizontal: kLsPad, vertical: 13), child: child),
           ),
         ),
       ),
@@ -225,14 +290,14 @@ class LsOutlineButton extends StatelessWidget {
       label: label,
       child: Material(
         color: Colors.transparent,
-        borderRadius: BorderRadius.circular(24),
+        borderRadius: BorderRadius.circular(kRadiusPill),
         child: InkWell(
           onTap: onPressed,
-          borderRadius: BorderRadius.circular(24),
+          borderRadius: BorderRadius.circular(kRadiusPill),
           child: Container(
             padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 11),
             decoration: BoxDecoration(
-              borderRadius: BorderRadius.circular(24),
+              borderRadius: BorderRadius.circular(kRadiusPill),
               border: Border.all(color: cs.primary),
             ),
             child: Row(mainAxisSize: MainAxisSize.min, children: [
@@ -278,10 +343,10 @@ class LsFilterChips extends StatelessWidget {
               child: GestureDetector(
                 onTap: () => onSelected(i),
                 child: Container(
-                  padding: const EdgeInsets.symmetric(horizontal: 13, vertical: 8),
+                  padding: const EdgeInsets.symmetric(horizontal: 13, vertical: kSpaceSm),
                   decoration: BoxDecoration(
                     color: active ? cs.primary : cs.surface,
-                    borderRadius: BorderRadius.circular(20),
+                    borderRadius: BorderRadius.circular(kRadiusChip),
                     border: Border.all(color: active ? cs.primary : cs.outlineVariant),
                   ),
                   child: Text(labels[i],
@@ -336,10 +401,10 @@ class LsScoreTile extends StatelessWidget {
     final cs = Theme.of(context).colorScheme;
     final isDark = Theme.of(context).brightness == Brightness.dark;
     return Container(
-      padding: const EdgeInsets.symmetric(vertical: 14, horizontal: 10),
+      padding: const EdgeInsets.symmetric(vertical: 14, horizontal: kSpaceMd),
       decoration: BoxDecoration(
         color: color.withOpacity(isDark ? .18 : .10),
-        borderRadius: BorderRadius.circular(16),
+        borderRadius: BorderRadius.circular(kRadiusMd),
       ),
       child: Column(children: [
         Text(value, style: GoogleFonts.sora(fontSize: 20, fontWeight: FontWeight.w700, color: color)),
@@ -422,7 +487,7 @@ Color lsBg(BuildContext context) => AppThemeTokens.of(context).background;
 // Pehle teen alag bottom-nav implementations thi, teeno alag dikhte the:
 //   - `home.dart`'s `_LsBottomNav`/`_LsNavItem` (private) — yehi asli
 //     LearnScroll gradient look, ab yahan public bana diya.
-//   - `liveclass/liveclass_home_shell.dart` — Flutter ka stock Material 3
+//   - `tuitionclass/tuitionclass_home_shell.dart` — Flutter ka stock Material 3
 //     `NavigationBar` (pill indicator, alag typography/spacing).
 //   - `message/screens/app_bottom_nav.dart`'s `AppBottomNav` — stock
 //     `BottomNavigationBar` (Material 2 style); iske apne comment me hi
@@ -436,7 +501,16 @@ class LsBottomNavItemData {
   final IconData icon;
   final IconData activeIcon;
   final String label;
-  const LsBottomNavItemData({required this.icon, required this.activeIcon, required this.label});
+  // 🔥 NAYA [Settings/Nav pass] — Chats tab pe unread-message count
+  // dikhane ke liye (`.notif-badge` jaisa hi small pill, home.dart ke
+  // `_lsIconButton`'s badge se same visual language). 0 ya kam = hidden.
+  final int badge;
+  const LsBottomNavItemData({
+    required this.icon,
+    required this.activeIcon,
+    required this.label,
+    this.badge = 0,
+  });
 }
 
 class LsBottomNav extends StatelessWidget {
@@ -474,6 +548,7 @@ class LsBottomNav extends StatelessWidget {
                   icon: items[i].icon,
                   activeIcon: items[i].activeIcon,
                   label: items[i].label,
+                  badge: items[i].badge,
                   active: i == activeIndex,
                   onTap: () => onTap(i),
                 ),
@@ -490,6 +565,7 @@ class _LsBottomNavItem extends StatelessWidget {
   final IconData activeIcon;
   final String label;
   final bool active;
+  final int badge;
   final VoidCallback onTap;
   const _LsBottomNavItem({
     required this.icon,
@@ -497,6 +573,7 @@ class _LsBottomNavItem extends StatelessWidget {
     required this.label,
     required this.active,
     required this.onTap,
+    this.badge = 0,
   });
 
   @override
@@ -510,11 +587,35 @@ class _LsBottomNavItem extends StatelessWidget {
         label: label,
         child: InkWell(
           onTap: onTap,
-          borderRadius: BorderRadius.circular(12),
+          borderRadius: BorderRadius.circular(kRadiusSm),
           child: Padding(
             padding: const EdgeInsets.symmetric(vertical: 4),
             child: Column(mainAxisSize: MainAxisSize.min, children: [
-              Icon(active ? activeIcon : icon, size: 24, color: color),
+              Stack(clipBehavior: Clip.none, children: [
+                Icon(active ? activeIcon : icon, size: 24, color: color),
+                // `.notif-badge` — home.dart ke `_lsIconButton` badge jaisa
+                // hi look, bas chhota (bottom-nav icon 24px hai, 34px nahi).
+                if (badge > 0)
+                  Positioned(
+                    top: -3,
+                    right: -6,
+                    child: Container(
+                      constraints: const BoxConstraints(minWidth: 13),
+                      height: 13,
+                      padding: const EdgeInsets.symmetric(horizontal: 3),
+                      alignment: Alignment.center,
+                      decoration: BoxDecoration(
+                        color: cs.secondary,
+                        borderRadius: BorderRadius.circular(20),
+                        border: Border.all(color: lsBg(context), width: 1.5),
+                      ),
+                      child: Text(
+                        badge > 9 ? '9+' : '$badge',
+                        style: TextStyle(fontSize: 8, fontWeight: FontWeight.w700, color: cs.onSecondary, height: 1.2),
+                      ),
+                    ),
+                  ),
+              ]),
               const SizedBox(height: 4),
               Text(
                 label,

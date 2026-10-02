@@ -24,6 +24,13 @@ class MessageType {
   // poora data (question/options/votes) is message ke `meta['poll']` ke
   // andar rehta hai — dekho neeche PollModel.
   static const poll = 'poll';
+  // 🔥 NAYA — story reply (backend `MessageType.STORY_REPLY` =
+  // 'story_reply'). A normal message in every other respect — same
+  // conversation, same delivery/read pipeline — carrying `story_reply`
+  // data (see MessageModel.storyReply below) so the chat bubble can show
+  // the little story-thumbnail-+-reply layout instead of a plain text
+  // bubble.
+  static const storyReply = 'story_reply';
 }
 
 // ======================================================================
@@ -410,6 +417,12 @@ class MessageModel {
   // seedha replace ho sake bina poori message list reload kiye.
   PollModel? poll;
 
+  // 🔥 NAYA — story reply (post app bridge). Only non-null when
+  // `type == MessageType.storyReply` (backend `MessageSerializer.
+  // story_reply`, same "top-level field, not stuffed in meta" pattern the
+  // comment above just established for `poll`).
+  StoryReplyInfo? storyReply;
+
   // Local-only UI state (offline retry / upload progress ke liye) — server
   // se nahi aata, sirf frontend ke andar use hota hai.
   bool isSending;
@@ -447,6 +460,7 @@ class MessageModel {
     this.localFilePaths,
     List<UserMini>? mentionedUsers,
     this.poll,
+    this.storyReply,
     this.isAnnouncement = false,
   })  : reactions = reactions ?? [],
         mentionedUsers = mentionedUsers ?? [];
@@ -516,6 +530,13 @@ class MessageModel {
       poll: json['poll'] != null
           ? PollModel.fromJson(json['poll'] as Map<String, dynamic>)
           : null,
+      // 🔥 NAYA — story reply. REST/history sends this as a nested
+      // top-level object (`MessageSerializer.story_reply`), same pattern
+      // as `poll` above — null for every message type except
+      // MessageType.storyReply.
+      storyReply: json['story_reply'] != null
+          ? StoryReplyInfo.fromJson(json['story_reply'] as Map<String, dynamic>)
+          : null,
       // 🔥 NAYA (Feature 11) — see field doc above; backend serializer
       // doesn't send this key yet, so this safely parses to `false` until
       // `serializers.py`'s `MessageSerializer.fields` adds it.
@@ -575,6 +596,23 @@ class MessageModel {
       poll: json['poll'] != null
           ? PollModel.fromJson(json['poll'] as Map<String, dynamic>)
           : null,
+      // 🔥 NAYA — story reply. The `chat_message` WS event carries this
+      // FLAT (`story_id`/`story_reply_snapshot`, see
+      // `message/services.py`'s `create_message_and_broadcast`), not
+      // nested like the REST `story_reply` object above — build the same
+      // `StoryReplyInfo` shape from those two keys so the chat UI doesn't
+      // need to care which path a story-reply message arrived from.
+      // `story_available` isn't known live (only the REST serializer
+      // computes it from the DB), so it defaults to true — a story that
+      // expires mid-conversation is a rare edge case the next REST
+      // refresh/pagination will correct.
+      storyReply: json['story_id'] != null
+          ? StoryReplyInfo(
+              storyId: json['story_id'].toString(),
+              storyAvailable: true,
+              snapshotUrl: json['story_reply_snapshot']?.toString(),
+            )
+          : null,
       // 🔥 NAYA (Feature 11) — live socket payload key, matches
       // `views.py`'s broadcast dict (`is_announcement=is_announcement`).
       isAnnouncement: json['is_announcement'] ?? false,
@@ -610,6 +648,7 @@ class MessageModel {
         'updated_at': updatedAt?.toIso8601String(),
         'mentioned_users': mentionedUsers.map((u) => u.toJson()).toList(),
         'poll': poll?.toJson(),
+        'story_reply': storyReply?.toJson(),
         'is_announcement': isAnnouncement,
       };
 }
@@ -710,6 +749,39 @@ class PollOptionModel {
         'order': order,
         'vote_count': voteCount,
         'voted_by_me': votedByMe,
+      };
+}
+
+// ======================================================================
+// STORY REPLY — see `MessageModel.storyReply` above. Backend
+// `MessageSerializer.get_story_reply` (post/message bridge).
+// ======================================================================
+class StoryReplyInfo {
+  final String? storyId;
+  // False once the original Story has expired/been soft-deleted — the
+  // chat bubble should still render `snapshotUrl` either way, just hide
+  // any "View story" tap-through when this is false.
+  final bool storyAvailable;
+  final String? snapshotUrl;
+
+  const StoryReplyInfo({
+    this.storyId,
+    this.storyAvailable = false,
+    this.snapshotUrl,
+  });
+
+  factory StoryReplyInfo.fromJson(Map<String, dynamic> json) {
+    return StoryReplyInfo(
+      storyId: json['story_id']?.toString(),
+      storyAvailable: json['story_available'] == true,
+      snapshotUrl: json['snapshot_url']?.toString(),
+    );
+  }
+
+  Map<String, dynamic> toJson() => {
+        'story_id': storyId,
+        'story_available': storyAvailable,
+        'snapshot_url': snapshotUrl,
       };
 }
 

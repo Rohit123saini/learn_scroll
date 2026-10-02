@@ -123,8 +123,10 @@ Colors kahin bhi hardcoded nahi — sab `Theme.of(context).colorScheme` se (Task
 
 - `initState()` parallel calls karta hai: `_initAds()`, `_loadFeed()`, `_loadSaved()`, `_loadMyUsername()`, `_loadHomeExtras()`, aur session-expiry listener attach.
 - **Feed loading (`_loadFeed`)**: pehle cached feed (SharedPreferences) turant dikhaata hai agar available ho, phir background me fresh feed fetch karta hai aur silently update karta hai (Instagram-jaisa behavior — agar cache dikh raha hai to fail hone par error-state nahi dikhata, stale data ke saath chup-chaap rehta hai).
+- **Feed tabs — "For you" / "Following" (Discovery Mix Part 2)**: `_buildFeedTitle` ke neeche do tabs (`_buildFeedTabs`). State `_feedSource` (`FeedSource.mixed` = For you, default; `FeedSource.following` = `GET /post/feed/?source=following`). Tab badalne pe `_switchFeedSource()` purani posts hata deta hai, `_loadFeed()` (jo `_feedGen` bump karta hai, isliye purane tab ka in-flight load-more/refresh discard ho jaata hai) us tab ke **apne cache** se turant dikhata hai, phir network. `_loadFeed` / `_loadMore` dono request ke waqt ka `_feedSource` snapshot lete hain.
+- **Source badge**: backend har post pe `feed_source` deta hai (`PostModel.feedSource`). `recommended` -> "Suggested for you", `trending` -> "Trending" strip card ke top pe (`_buildFeedSourceBadge`). `following` ya `null` (purana cache / dusre endpoints) pe badge nahi.
 - **Infinite scroll (`_onScroll`)**: threshold 300px se badhaakar 700px kiya gaya (300 pe premature spinner dikh jaata tha, 700 pe agla page usually load ho chuka hota hai) — Task 10.5.
-- **Home extras (`_loadHomeExtras`)**: classrooms, live-classes, stories, invite-info — har section apna independent try/catch leke chalta hai (`Future.wait` + per-call `catchError`), taaki ek section fail ho to baaki dikhte rahein.
+- **Home extras (`_loadHomeExtras`)**: classrooms, tuition-classes, stories, invite-info — har section apna independent try/catch leke chalta hai (`Future.wait` + per-call `catchError`), taaki ek section fail ho to baaki dikhte rahein.
 - **Notifications badge**: hardcoded `0` hai kyunki uploaded backend docs me koi global unread-notifications endpoint confirm nahi hua. Endpoint milte hi `_unreadNotifications` set karna hai.
 
 ### 6.3 Feed Slots — Ads & Interstitial cadence (Task 6.2)
@@ -172,12 +174,14 @@ const int kInterstitialEveryPosts = 18; // har 18th post ke baad interstitial ("
 ## 7. `home_api_model_service.dart` — Models + API
 
 ### Models
-`PostModel`, `FeedResponse`, `ClassroomModel`, `LiveClassModel`, `StoryModel`, `InviteEarnModel`.
+`PostModel`, `FeedResponse`, `ClassroomModel`, `TuitionClassModel`, `StoryModel`, `InviteEarnModel`.
 
 ### `HomeFeedService`
 - `kApiTimeout = 15s` — **Task 11.3**: pehle koi timeout hi nahi tha, server hang hone par app hamesha spinner dikhata reh jaata.
 - Saare token lookups ab `AuthService.getValidToken()` use karte hain, plain `getToken()` nahi — **Task 8.4** (expiry-aware; refresh-token bhi mar chuka ho to force-logout chain trigger hoti hai — dekho §3).
-- `getCachedFeed()` / `getHomeFeed()` / `refreshFeed()` / `clearFeedCache()` — cache-first strategy, page 1 par background refresh.
+- `getCachedFeed()` / `getHomeFeed()` / `refreshFeed()` / `getFeedFromAPI()` — sab ab `source:` (`FeedSource.mixed` | `FeedSource.following`) lete hain; cache-first strategy, page 1 par background refresh.
+- **Cache source ke hisaab se**: key `cached_feed_raw_v3_<source>` (`..._mixed`, `..._following`) — dono tab ka cache alag hai, isliye "For you" ki posts "Following" me nahi dikhti. Purani single key `cached_feed_raw_v2` retire hai (naye fetch / `clearFeedCache()` pe hat jaati hai). `clearFeedCache()` dono tabs ka cache saaf karta hai.
+- `PostModel.feedSource` + `isSuggested` / `isTrending` getters (`feed_source` JSON field se).
 - `toggleLike`, `toggleSave` (collection support), `toggleReaction` — sab POST calls, JWT bearer header ke saath.
 
 ### `HomeExtrasService` (Task 4/5 — mock/pending)

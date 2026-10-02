@@ -4,6 +4,7 @@ import '../services/api_service.dart';
 import '../services/auth_service.dart';
 import '../home.dart';
 import 'complete_profile_screen.dart'; // ✅ Google signup ke baad phone lene ke liye
+import '../onboarding/screens/onboarding_screen.dart'; // 🔥 TASK G18 — post-signup onboarding
 // 🔥 NAYA — dark mode + i18n (home.dart jaisa hi pattern).
 import '../l10n/app_localizations.dart';
 import 'auth_widgets.dart';
@@ -137,7 +138,11 @@ class _SignupScreenState extends State<SignupScreen> {
       _isLoading = true;
     });
 
-    String fullPhoneNumber = "$_selectedCountryCode${_phoneController.text.trim()}";
+    // Phone is optional now — only prefix the country code when the user
+    // actually typed a number, otherwise we'd end up sending just "91"
+    // (the bare country code) as if it were a real phone number.
+    final rawPhone = _phoneController.text.trim();
+    final String? fullPhoneNumber = rawPhone.isEmpty ? null : "$_selectedCountryCode$rawPhone";
 
     try {
       final res = await _apiService.signup(
@@ -222,10 +227,22 @@ class _SignupScreenState extends State<SignupScreen> {
 
       if (!mounted) return;
 
-      if (res.phoneMissing == true) {
+      // Phone is optional now -> only offer the (skippable) phone step right
+      // after a brand-new Google signup, not on every later Google login.
+      if (res.phoneMissing == true && res.isNewUser == true) {
         Navigator.pushReplacement(
           context,
           MaterialPageRoute(builder: (context) => const CompleteProfileScreen()),
+        );
+      } else if (res.isNewUser == true) {
+        // 🔥 TASK G18 — brand-new Google signup with no phone step needed
+        // (phone wasn't missing) still gets the onboarding flow, same as
+        // the CompleteProfileScreen path below eventually does. An
+        // EXISTING user logging in via Google (isNewUser == false) skips
+        // straight to Home, same as before.
+        Navigator.pushReplacement(
+          context,
+          MaterialPageRoute(builder: (context) => const OnboardingScreen()),
         );
       } else {
         Navigator.pushReplacement(
@@ -560,7 +577,11 @@ class _SignupScreenState extends State<SignupScreen> {
                       ),
                     ),
                     validator: (val) {
-                      if (val == null || val.trim().isEmpty) return l10n.signupContactRequired;
+                      // Phone is optional now — empty is allowed. Only
+                      // validate format when the user actually typed
+                      // something, so a half-entered number still gets
+                      // caught.
+                      if (val == null || val.trim().isEmpty) return null;
                       if (val.trim().length < 10) return l10n.signupContactInvalid;
                       return null;
                     },

@@ -31,7 +31,7 @@
   },
   "liveNow": "Live Now",
   "@liveNow": {
-    "description": "Section header for live classes/streams"
+    "description": "Section header for tuition classes/streams"
   },
   "liveBadge": "LIVE",
   "@liveBadge": {
@@ -39,7 +39,7 @@
   },
   "liveNowCardSubtitle": "{teacher} · {viewers} watching",
   "@liveNowCardSubtitle": {
-    "description": "Subtitle for live class card",
+    "description": "Subtitle for tuition class card",
     "placeholders": {
       "teacher": {
         "type": "String"
@@ -55,7 +55,7 @@
   },
   "join": "Join",
   "@join": {
-    "description": "Button to join a live class/session"
+    "description": "Button to join a tuition class/session"
   },
   "yourFeed": "Your Feed",
   "@yourFeed": {
@@ -64,6 +64,18 @@
   "following": "Following",
   "@following": {
     "description": "Feed tab label for followed creators/content"
+  },
+  "feedTabForYou": "For you",
+  "@feedTabForYou": {
+    "description": "Home feed tab label for the mixed (following + suggested + trending) feed"
+  },
+  "feedBadgeSuggested": "Suggested for you",
+  "@feedBadgeSuggested": {
+    "description": "Badge on a feed post recommended from an account the user does not follow"
+  },
+  "feedBadgeTrending": "Trending",
+  "@feedBadgeTrending": {
+    "description": "Badge on a feed post that is trending platform-wide"
   },
   "addFriends": "Add Friends",
   "@addFriends": {
@@ -1200,6 +1212,12 @@
   "noticeScopeClass": "Class",
   "noticeScopeDepartment": "Department",
   "noticeScopeSection": "Section",
+  "noticeBoardTitle": "Notice Board",
+  "noticeBoardEmpty": "No notices yet",
+  "noticeBoardEmptySubtitle": "Campus and tuition-class notices will show up here.",
+  "noticeBoardLoadFailed": "Couldn't load the notice board",
+  "noticeBoardSourceCampus": "Campus",
+  "noticeBoardSourceTuitionClass": "Tuition Class",
   "attendanceWholeDay": "Whole day",
   "attendanceSubjectLabel": "Subject",
   "attendancePresent": "Present",
@@ -1363,7 +1381,7 @@
   },
   "couldNotOpenClass": "Could not open this class.",
   "@couldNotOpenClass": {
-    "description": "Shown when tapping a live class card fails to open it"
+    "description": "Shown when tapping a tuition class card fails to open it"
   },
   "camera": "Camera",
   "@camera": {
@@ -1624,6 +1642,42 @@
   "@addCaptionHint": {
     "description": "Hint text on the story caption input"
   },
+  "storyAudienceYourStory": "Your story",
+  "@storyAudienceYourStory": {
+    "description": "Audience option: share the story with all followers"
+  },
+  "closeFriends": "Close Friends",
+  "@closeFriends": {
+    "description": "Close Friends list title / audience option / story badge"
+  },
+  "closeFriendsEditList": "Edit list",
+  "@closeFriendsEditList": {
+    "description": "Button that opens the Close Friends list editor"
+  },
+  "closeFriendsSearchHint": "Search followers and following",
+  "@closeFriendsSearchHint": {
+    "description": "Search hint on the Close Friends screen"
+  },
+  "closeFriendsEmpty": "No people found",
+  "@closeFriendsEmpty": {
+    "description": "Empty state on the Close Friends screen"
+  },
+  "closeFriendsInfo": "Only people on this list can see your Close Friends stories. They won't be notified when you add or remove them.",
+  "@closeFriendsInfo": {
+    "description": "Privacy note at the top of the Close Friends screen"
+  },
+  "closeFriendsLoadFailed": "Couldn't load your list",
+  "@closeFriendsLoadFailed": {
+    "description": "Error when the Close Friends list fails to load"
+  },
+  "closeFriendsUpdateFailed": "Couldn't update your list",
+  "@closeFriendsUpdateFailed": {
+    "description": "Error when adding/removing a close friend fails"
+  },
+  "closeFriendsDone": "Done",
+  "@closeFriendsDone": {
+    "description": "Button that closes the Close Friends screen"
+  },
   "download": "Download",
   "@download": {
     "description": "Generic download button label"
@@ -1687,6 +1741,19 @@
   "@noViewsYet": {
     "description": "Shown when a story has no viewers yet"
   },
+  "replyToStoryHint": "Reply to {username}...",
+  "@replyToStoryHint": {
+    "description": "Hint text on the story-reply text field, {username} is the story owner",
+    "placeholders": {
+      "username": {
+        "type": "String"
+      }
+    }
+  },
+  "replySentToStory": "Reply sent",
+  "@replySentToStory": {
+    "description": "Snackbar shown after a story reply is sent successfully"
+  },
   "tsSourceIndividual": "Individual",
   "@tsSourceIndividual": {
     "description": "Source filter chip / badge: a test series created by an individual creator"
@@ -1695,9 +1762,9 @@
   "@tsSourceCampus": {
     "description": "Source filter chip / badge: a test series published by a campus"
   },
-  "tsSourceLiveClass": "Live Class",
-  "@tsSourceLiveClass": {
-    "description": "Source filter chip / badge: a test series attached to a live class"
+  "tsSourceTuitionClass": "Tuition Class",
+  "@tsSourceTuitionClass": {
+    "description": "Source filter chip / badge: a test series attached to a tuition class"
   },
   "tsSearchHint": "Search test series",
   "@tsSearchHint": {
@@ -1974,7 +2041,7 @@
   "notifDigestWeekly": "Weekly",
   "notifCategoriesSectionTitle": "Notify me about",
   "notifCategoriesHint": "Turning a category off still shows it in your notification list — it just won't send a push, email, SMS or WhatsApp alert.",
-  "notifCategoryLiveClasses": "Live classes & sessions",
+  "notifCategoryTuitionClasses": "Tuition classes & sessions",
   "notifCategoryAssignmentsTests": "Assignments & tests",
   "notifCategoryMessagesCalls": "Messages & calls",
   "notifCategorySocial": "Posts & reviews",
@@ -1986,8 +2053,8 @@
   "themeLight": "Light",
   "themeDark": "Dark",
   "themeSystem": "System default",
-  "liveClassesTitle": "Live Classes",
-  "@liveClassesTitle": {
+  "tuitionClassesTitle": "Tuition Classes",
+  "@tuitionClassesTitle": {
     "description": "Classrooms browse screen title"
   },
   "searchClassroomsHint": "Search classrooms",
@@ -1997,6 +2064,17 @@
   "checkConnectionRetry": "Check your connection and try again",
   "noClassroomsFound": "No classrooms found",
   "tryDifferentSearch": "Try a different search or filter",
+  "createTuitionClassCta": "Create class",
+  "createClassroomTitle": "Create classroom",
+  "classroomTitleLabel": "Title",
+  "classroomTitleHint": "e.g. Class 10 Physics — Batch A",
+  "classroomTitleRequired": "Enter a title for your classroom",
+  "classroomSubjectLabel": "Subject (optional)",
+  "classroomDescriptionLabel": "Description (optional)",
+  "classroomLanguageLabel": "Language",
+  "createClassroomSubmit": "Create",
+  "createClassroomSuccess": "Classroom created",
+  "createClassroomFailed": "Couldn't create classroom. Try again.",
   "enrolledCountLabel": "{count} enrolled",
   "@enrolledCountLabel": {
     "description": "Enrolled student count on a classroom card",
@@ -2082,6 +2160,9 @@
   "classroomReportsTab": "Classroom Reports",
   "closeBreakoutCta": "Close rooms",
   "commissionEarnedLabel": "Commission earned",
+  "commissionRateLabel": "Commission rate",
+  "pendingCommissionLabel": "Pending commission",
+  "studentsReferredLabel": "Students referred",
   "couldNotLoadAssignments": "Couldn't load assignments",
   "couldNotLoadModerationData": "Couldn't load moderation data",
   "couldNotLoadPasses": "Couldn't load passes",
@@ -2378,7 +2459,7 @@
   "@visibilityNetwork": {
     "description": "Post visibility option: connections only"
   },
-  "visibilityPrivate": "Private",
+  "visibilityPrivate": "Only me",
   "@visibilityPrivate": {
     "description": "Post visibility option: only me"
   },
@@ -3312,6 +3393,19 @@
   "@parentAccessRevokeDeviceFailed": {
     "description": "Snackbar when revoking a single device fails"
   },
+  "parentAccessShareAction": "Share",
+  "@parentAccessShareAction": {
+    "description": "Button/tooltip to share the parent-access code via the OS share sheet"
+  },
+  "parentAccessShareMessage": "You've been invited to Parent/Guardian Access on LearnScroll.\n\n1. Install the LearnScroll app\n2. On the login screen, choose \"I'm a parent\"\n3. Enter this code: {code}",
+  "@parentAccessShareMessage": {
+    "description": "Text shared through the OS share sheet (WhatsApp/SMS/email) when a student shares a parent-access code",
+    "placeholders": {
+      "code": {
+        "type": "String"
+      }
+    }
+  },
   "chatYou": "You",
   "@chatYou": {
     "description": "Sender label for your own messages in a chat"
@@ -3545,6 +3639,22 @@
   "chatUnmuteNotifications": "Unmute notifications",
   "@chatUnmuteNotifications": {
     "description": "3-dot menu item (1:1 chats)"
+  },
+  "chatEnableTranslate": "Enable message translate",
+  "@chatEnableTranslate": {
+    "description": "3-dot menu item — turns on the per-message translate button"
+  },
+  "chatDisableTranslate": "Disable message translate",
+  "@chatDisableTranslate": {
+    "description": "3-dot menu item — turns off the per-message translate button"
+  },
+  "chatTranslateEnabled": "Message translate turned on",
+  "@chatTranslateEnabled": {
+    "description": "Snackbar shown after enabling translate from the 3-dot menu"
+  },
+  "chatTranslateDisabled": "Message translate turned off",
+  "@chatTranslateDisabled": {
+    "description": "Snackbar shown after disabling translate from the 3-dot menu"
   },
   "chatThisUser": "this user",
   "@chatThisUser": {
@@ -4191,6 +4301,14 @@
   "@chatPreviewPoll": {
     "description": "Reply/last-message preview for a poll"
   },
+  "chatRepliedToYourStory": "Replied to your story",
+  "@chatRepliedToYourStory": {
+    "description": "Shown in a story-reply chat bubble, above the story thumbnail"
+  },
+  "chatPreviewStoryReply": "📷 Replied to your story",
+  "@chatPreviewStoryReply": {
+    "description": "Conversation-list / app-bar preview text for a story-reply message"
+  },
   "chatToday": "Today",
   "@chatToday": {
     "description": "Date separator between messages"
@@ -4478,6 +4596,24 @@
   "removedFromSession": "You were removed from this session.",
   "waitlistedNotice": "The class is full — you are on the waitlist and will be let in automatically.",
   "waitingForTeacher": "Waiting for the teacher to start video…",
+  "trialBadge": "Trial",
+  "trialInProgressBanner": "You're in a trial preview. Enrolled classes get the full experience.",
+  "joinFullClassCta": "Join full class",
+  "maybeLaterCta": "Maybe later",
+  "trialEndedTitle": "Your trial ended",
+  "trialEndedMessage": "Hope you liked the class! Join fully to keep learning with this teacher.",
+  "tryTrialCta": "Try a free trial",
+  "trialPasswordLabel": "Trial password",
+  "trialPasswordHint": "Enter the code your teacher shared",
+  "trialAlreadyUsedNotice": "You've already used your trial for this class.",
+  "trialDurationLabel": "Trial duration (minutes)",
+  "enableTrialAccessLabel": "Enable trial access",
+  "trialAccessSettingsTitle": "Trial access",
+  "trialSettingsSaved": "Trial settings saved.",
+  "setTrialPasswordFirst": "Set a trial password before enabling trial access.",
+  "freeTrialClassesTitle": "Free trial classes",
+  "liveNowBadge": "LIVE NOW",
+  "recommendedForYouBadge": "For you",
   "savedPostsTitle": "Saved posts",
   "explorePostsTitle": "Explore",
   "noPostsHere": "No posts here yet",
@@ -4486,6 +4622,15 @@
   "deletePostConfirm": "Delete this post? This can’t be undone.",
   "postDeleted": "Post deleted",
   "postDeleteFailed": "Couldn't delete the post",
+  "editPostCta": "Edit post",
+  "postTitleFieldLabel": "Title (optional)",
+  "postUpdated": "Post updated",
+  "postUpdateFailed": "Couldn't update the post",
+  "postEditedLabel": "Edited",
+  "changePrivacyCta": "Change privacy",
+  "changePrivacyTitle": "Who can see this post?",
+  "privacyUpdated": "Privacy updated",
+  "privacyUpdateFailed": "Couldn't update privacy",
   "allCaughtUp": "You're all caught up",
   "back": "Back",
   "bioLabel": "Bio",
@@ -4515,6 +4660,16 @@
       }
     }
   },
+  "repostsTabLabel": "Reposts ({count})",
+  "@repostsTabLabel": {
+    "placeholders": {
+      "count": {
+        "type": "int"
+      }
+    }
+  },
+  "noRepostsYetTitle": "No reposts yet",
+  "noRepostsYetSubtitle": "Posts this user reposts will show up here.",
   "noDocumentsYetTitle": "No documents yet",
   "noDocumentsYetSubtitle": "Documents you share will appear here.",
   "noMediaYetTitle": "No media yet",
@@ -4581,6 +4736,19 @@
   "assignmentFeedbackLabel": "Feedback",
   "assignmentGradeLabel": "Grade",
   "assignmentNoSubmissions": "No submissions yet",
+  "assignmentPossibleDuplicate": "Possible duplicate",
+  "assignmentSimilarityFlagsTitle": "Possible duplicates",
+  "assignmentMatchesWith": "Matches with",
+  "assignmentSimilarityScoreLabel": "Similarity",
+  "assignmentThisStudentAnswer": "This submission",
+  "assignmentOtherStudentAnswer": "Matching submission",
+  "assignmentConfirmDuplicate": "Confirm duplicate",
+  "assignmentDismissFlag": "Dismiss",
+  "assignmentFlagStatusConfirmed": "Confirmed duplicate",
+  "assignmentFlagStatusDismissed": "Dismissed (false positive)",
+  "assignmentFlagStatusPending": "Pending review",
+  "assignmentSimilarityFlagsLoadFailed": "Could not load duplicate flags",
+  "assignmentNoSimilarityFlags": "No possible duplicates found",
   "assignmentNotSubmitted": "Not submitted",
   "assignmentSubmitCta": "Submit",
   "assignmentsAdd": "Add assignment",
@@ -4747,6 +4915,11 @@
   "feePaySuccess": "Payment successful",
   "feePaymentHistory": "Payment history",
   "feePaymentModeLabel": "Payment mode",
+  "feeReceiptDownload": "Download receipt",
+  "feeReceiptDownloadFailed": "Couldn't download the receipt — try again in a bit.",
+  "feeReceiptUnavailable": "Receipts aren't available on this campus yet.",
+  "feeReceiptsCta": "View receipts",
+  "feeReceiptsTitle": "Receipts",
   "feeRecordPayment": "Record payment",
   "feeRefund": "Refund",
   "feeStatusOverdue": "Overdue",
@@ -4818,6 +4991,357 @@
     "placeholders": {
       "count": {
         "type": "int"
+      }
+    }
+  },
+  "repostAlready": "You've already reposted this",
+  "@repostAlready": {
+    "description": "Snackbar shown when trying to repost a post that was already reposted"
+  },
+  "repostOriginalUnavailable": "This post is no longer available",
+  "@repostOriginalUnavailable": {
+    "description": "Snackbar shown when the original post of a repost can't be found"
+  },
+  "repostDone": "Reposted",
+  "@repostDone": {
+    "description": "Snackbar shown after successfully reposting a post"
+  },
+  "repostUndo": "Undo",
+  "@repostUndo": {
+    "description": "Action label to undo a repost, shown in a snackbar"
+  },
+  "repostFailed": "Couldn't repost. Please try again.",
+  "@repostFailed": {
+    "description": "Snackbar shown when reposting a post fails"
+  },
+  "repostRemoved": "Repost removed",
+  "@repostRemoved": {
+    "description": "Snackbar shown after a repost is removed"
+  },
+  "repostAction": "Repost",
+  "@repostAction": {
+    "description": "Label for the repost action button"
+  },
+  "repostedBy": "Reposted by {username}",
+  "@repostedBy": {
+    "description": "Label showing who reposted a post",
+    "placeholders": {
+      "username": {
+        "type": "String"
+      }
+    }
+  },
+  "repostWithCaption": "Repost with caption",
+  "@repostWithCaption": {
+    "description": "Title of the sheet for reposting a post with an added caption"
+  },
+  "repostCaptionHint": "Add a caption (optional)",
+  "@repostCaptionHint": {
+    "description": "Hint text for the repost caption input field"
+  },
+  "completeProfileSkip": "Skip",
+  "@completeProfileSkip": {
+    "description": "Button label to skip completing the profile"
+  },
+  "savedTabLabel": "Saved ({count})",
+  "@savedTabLabel": {
+    "description": "Label for the saved posts tab with a count",
+    "placeholders": {
+      "count": {
+        "type": "int"
+      }
+    }
+  },
+  "noSavedPostsYetTitle": "No saved posts yet",
+  "@noSavedPostsYetTitle": {
+    "description": "Title shown when the user has no saved posts"
+  },
+  "noSavedPostsYetSubtitle": "Posts you save will show up here.",
+  "@noSavedPostsYetSubtitle": {
+    "description": "Subtitle shown when the user has no saved posts"
+  },
+  "parentSendToAllCta": "Send to all students",
+  "@parentSendToAllCta": {
+    "description": "Button: send parent-add link to every student without a parent"
+  },
+  "addParentCta": "Add parent",
+  "@addParentCta": {
+    "description": "Roster row action: invite a parent for this student"
+  },
+  "skipCta": "Skip",
+  "@skipCta": {
+    "description": "Roster row action: skip adding a parent for this student"
+  },
+  "parentStatusInvited": "Invited",
+  "@parentStatusInvited": {
+    "description": "Parent status chip: invite sent"
+  },
+  "parentStatusLinked": "Linked",
+  "@parentStatusLinked": {
+    "description": "Parent status chip: parent linked"
+  },
+  "parentStatusSkipped": "Skipped",
+  "@parentStatusSkipped": {
+    "description": "Parent status chip: teacher skipped adding a parent"
+  },
+  "parentLinkSentMessage": "Parent-add link sent to {sent} of {total} students.",
+  "@parentLinkSentMessage": {
+    "description": "Snackbar after sending the parent-add link in bulk",
+    "placeholders": {
+      "sent": {
+        "type": "int"
+      },
+      "total": {
+        "type": "int"
+      }
+    }
+  },
+  "reelsTab": "Reels",
+  "reelsEmpty": "No reels yet",
+  "reelNotInterested": "Not interested",
+  "reelShowFewer": "Show fewer like this",
+  "reelWhySeeing": "Why am I seeing this",
+  "reelHidden": "Reel hidden",
+  "reelFewerDone": "We'll show fewer like this",
+  "reelCaptionMore": "more",
+  "reelCaptionLess": "less",
+  "storyAddSticker": "Add sticker",
+  "@storyAddSticker": {
+    "description": "Title of the sticker tray in the story composer"
+  },
+  "stickerMention": "Mention",
+  "@stickerMention": {
+    "description": "Sticker type: @mention a person"
+  },
+  "stickerLink": "Link",
+  "@stickerLink": {
+    "description": "Sticker type: tappable link"
+  },
+  "stickerPoll": "Poll",
+  "@stickerPoll": {
+    "description": "Sticker type: poll"
+  },
+  "stickerQuestion": "Question",
+  "@stickerQuestion": {
+    "description": "Sticker type: question box"
+  },
+  "stickerLimitReached": "Limit reached",
+  "@stickerLimitReached": {
+    "description": "Shown under a sticker type that cannot be added any more"
+  },
+  "stickerMentionSearchHint": "Search people to mention",
+  "@stickerMentionSearchHint": {
+    "description": "Search hint in the mention picker"
+  },
+  "stickerMentionEmpty": "No people found",
+  "@stickerMentionEmpty": {
+    "description": "Empty state of the mention picker"
+  },
+  "stickerMentionCloseFriendsNote": "Only Close Friends can be mentioned in a Close Friends story",
+  "@stickerMentionCloseFriendsNote": {
+    "description": "Note in the mention picker for a Close Friends story"
+  },
+  "stickerLoadFailed": "Couldn't load. Please try again.",
+  "@stickerLoadFailed": {
+    "description": "Generic load error inside sticker sheets"
+  },
+  "stickerLinkUrlHint": "Paste a link",
+  "@stickerLinkUrlHint": {
+    "description": "Hint of the link URL field"
+  },
+  "stickerLinkLabelHint": "Label (optional)",
+  "@stickerLinkLabelHint": {
+    "description": "Hint of the link label field"
+  },
+  "stickerLinkInvalid": "Enter a valid http or https link",
+  "@stickerLinkInvalid": {
+    "description": "Validation error for the link sticker"
+  },
+  "stickerPollQuestionHint": "Ask a question",
+  "@stickerPollQuestionHint": {
+    "description": "Hint of the poll question field"
+  },
+  "stickerPollOptionHint": "Option {number}",
+  "@stickerPollOptionHint": {
+    "description": "Hint of a poll option field, {number} is 1-based",
+    "placeholders": {
+      "number": {
+        "type": "int"
+      }
+    }
+  },
+  "stickerPollAddOption": "Add option",
+  "@stickerPollAddOption": {
+    "description": "Button that adds one more poll option"
+  },
+  "stickerPollInvalid": "Add a question and at least 2 different options",
+  "@stickerPollInvalid": {
+    "description": "Validation error for the poll sticker"
+  },
+  "stickerQuestionPromptHint": "Ask me anything",
+  "@stickerQuestionPromptHint": {
+    "description": "Hint of the question sticker prompt field"
+  },
+  "stickerQuestionInvalid": "Write what you want to ask",
+  "@stickerQuestionInvalid": {
+    "description": "Validation error for the question sticker"
+  },
+  "stickerAddButton": "Add to story",
+  "@stickerAddButton": {
+    "description": "Primary button of the sticker input sheets"
+  },
+  "stickerDragToRemove": "Drag here to remove",
+  "@stickerDragToRemove": {
+    "description": "Hint on the trash zone while dragging a sticker"
+  },
+  "stickerCloseFriendsMentionWarn": "Only Close Friends can be mentioned in a Close Friends story. Your mention stickers will be removed.",
+  "@stickerCloseFriendsMentionWarn": {
+    "description": "Dialog text when switching a story with mentions to Close Friends"
+  },
+  "stickerRemoveMentions": "Remove mentions",
+  "@stickerRemoveMentions": {
+    "description": "Dialog button that removes the mention stickers"
+  },
+  "stickerPollVotes": "{count, plural, =1{1 vote} other{{count} votes}}",
+  "@stickerPollVotes": {
+    "description": "Total votes under a poll sticker",
+    "placeholders": {
+      "count": {
+        "type": "int"
+      }
+    }
+  },
+  "stickerQuestionTapToAnswer": "Tap to answer",
+  "@stickerQuestionTapToAnswer": {
+    "description": "Under a question sticker the viewer has not answered"
+  },
+  "stickerQuestionAnswered": "Answer sent",
+  "@stickerQuestionAnswered": {
+    "description": "Question sticker after answering / snackbar"
+  },
+  "stickerQuestionAnswersCount": "{count, plural, =1{1 answer} other{{count} answers}}",
+  "@stickerQuestionAnswersCount": {
+    "description": "Answers count under the owner's question sticker",
+    "placeholders": {
+      "count": {
+        "type": "int"
+      }
+    }
+  },
+  "stickerOwnerTapToView": "Tap to see responses",
+  "@stickerOwnerTapToView": {
+    "description": "Owner hint on poll / question stickers"
+  },
+  "stickerAnswerHint": "Type your answer…",
+  "@stickerAnswerHint": {
+    "description": "Hint of the answer field"
+  },
+  "stickerSendAnswer": "Send",
+  "@stickerSendAnswer": {
+    "description": "Button that sends a question answer"
+  },
+  "stickerResponsesTitle": "Responses",
+  "@stickerResponsesTitle": {
+    "description": "Fallback title of the sticker responses sheet"
+  },
+  "stickerNoResponses": "No responses yet",
+  "@stickerNoResponses": {
+    "description": "Empty state of the sticker responses sheet"
+  },
+  "stickerLoadMore": "Load more",
+  "@stickerLoadMore": {
+    "description": "Pagination button in the responses sheet"
+  },
+  "stickerOpenLinkTitle": "Open this link?",
+  "@stickerOpenLinkTitle": {
+    "description": "Title of the confirm dialog for a link sticker"
+  },
+  "stickerOpenLink": "Open",
+  "@stickerOpenLink": {
+    "description": "Confirm button of the link dialog"
+  },
+  "stickerLinkOpenFailed": "Couldn't open the link",
+  "@stickerLinkOpenFailed": {
+    "description": "Snackbar when a link cannot be opened"
+  },
+  "storyMentionUnavailable": "This story is no longer available",
+  "@storyMentionUnavailable": {
+    "description": "Shown when a story-mention notification points to an expired / hidden story"
+  },
+  "acctSectionTitle": "Accounts",
+  "acctSwitchAccount": "Switch account",
+  "acctCountSubtitle": "{count} of {max} accounts on this device",
+  "@acctCountSubtitle": {
+    "placeholders": {
+      "count": {
+        "type": "int"
+      },
+      "max": {
+        "type": "int"
+      }
+    }
+  },
+  "acctAddAccount": "Add account",
+  "acctMaxReached": "You can keep up to {max} accounts on this device.",
+  "@acctMaxReached": {
+    "placeholders": {
+      "max": {
+        "type": "int"
+      }
+    }
+  },
+  "acctSessionExpiredTap": "Session expired — tap to log in again",
+  "acctSwitchExpired": "Session for @{username} has expired. Tap the account to log in again.",
+  "@acctSwitchExpired": {
+    "placeholders": {
+      "username": {
+        "type": "String"
+      }
+    }
+  },
+  "acctSwitchNoConnection": "No connection. Could not switch account.",
+  "acctSwitchInCall": "End the call before switching accounts.",
+  "acctSwitchFailed": "Could not switch account. Please try again.",
+  "acctAddFailed": "Cannot add another account right now.",
+  "settingsEditProfileSub": "Name, bio, profile photo",
+  "settingsPrivateAccount": "Private account",
+  "settingsPrivateAccountSub": "Only approved followers can see your posts",
+  "settingsGeneralSection": "General",
+  "settingsParentAccessSub": "Link a parent/guardian to this account",
+  "settingsInviteEarnSub": "Share your code, earn bonus coins for every friend who joins",
+  "settingsActivitySection": "Activity",
+  "settingsYourActivity": "Your activity",
+  "settingsYourActivitySub": "Time spent, likes, comments and saved posts",
+  "settingsYourWeek": "Your Week",
+  "settingsYourWeekSub": "Tests, classes, likes and your streak, recapped",
+  "settingsLeaderboard": "Leaderboard",
+  "settingsLeaderboardSub": "See how you rank across LearnScroll",
+  "settingsPrivacySection": "Privacy",
+  "settingsReadReceipts": "Read receipts",
+  "settingsReadReceiptsSub": "Control who sees when you’ve read a message",
+  "settingsBlockedAccounts": "Blocked accounts",
+  "settingsBlockedAccountsSub": "Manage people you’ve blocked",
+  "settingsNotificationsSub": "Push, email, SMS, WhatsApp & digest",
+  "settingsSecuritySection": "Security",
+  "settingsChangePassword": "Change password",
+  "settingsChangePasswordSub": "Update the password for this account",
+  "notifPauseSectionTitle": "Pause notifications",
+  "notifPause1h": "1 hour",
+  "notifPause8h": "8 hours",
+  "notifPause24h": "24 hours",
+  "notifPauseResume": "Resume notifications",
+  "notifQuietSectionTitle": "Quiet hours",
+  "notifQuietToggle": "Enable quiet hours",
+  "notifQuietFrom": "From",
+  "notifQuietTo": "To",
+  "notifQuietHint": "No notifications will make a sound during these hours.",
+  "notifQuietSameTime": "Start and end time can't be the same",
+  "notifPausedUntil": "Paused until {until}",
+  "@notifPausedUntil": {
+    "description": "Shows when notifications resume",
+    "placeholders": {
+      "until": {
+        "type": "String"
       }
     }
   }

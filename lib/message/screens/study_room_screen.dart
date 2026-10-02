@@ -6,6 +6,7 @@ import 'dart:typed_data';
 import 'dart:ui' as ui;
 import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart';
+import 'package:cached_network_image/cached_network_image.dart'; // TASK G17 — cached avatar provider for the participant grid
 import 'package:flutter/services.dart';
 import 'package:file_selector/file_selector.dart';
 import 'package:image_picker/image_picker.dart'; // 🔥 NAYA — camera se seedha photo capture karne ke liye
@@ -26,6 +27,8 @@ import 'package:wakelock_plus/wakelock_plus.dart';
 
 import '../models/study_room_models.dart';
 import '../services/chat_socket_service.dart';
+import '../services/sticky_note_sync.dart'; // 🔥 NAYA — collaborative sticky notes
+import '../widgets/sticky_notes_layer.dart'; // 🔥 NAYA
 import '../services/call_api_service.dart';
 import '../services/call_manager.dart';
 import '../services/study_room_call_manager.dart';
@@ -201,6 +204,14 @@ class _StudyRoomScreenState extends State<StudyRoomScreen> {
   final ChatSocketService _socket = ChatSocketService();
   final TransformationController _transformCtrl = TransformationController();
 
+  // 🔥 NAYA — collaborative sticky notes (state + sync: services/sticky_note_sync.dart,
+  // UI: widgets/sticky_notes_layer.dart). Ab notes whiteboard snapshot JSON me nahi,
+  // backend `StudyRoomNote` table me persist hote hain aur `note_*` events se sync.
+  late final StickyNoteSync _notesSync;
+  StreamSubscription<bool>? _socketOpenSub;
+  bool _notesLoadStarted = false;
+  Size _boardAreaSize = Size.zero;
+
   // ============================================================
   // MULTI-PAGE WHITEBOARD STATE
   // ============================================================
@@ -218,6 +229,22 @@ class _StudyRoomScreenState extends State<StudyRoomScreen> {
   Color _selectedColor = Colors.black;
   double _strokeWidth = 3.0;
   List<DrawingPoint> _currentStroke = [];
+
+  // 🔥 NAYA — custom color picker (palette ke alawa koi bhi rang) ka
+  // state. `_customColors` = user ke banaye hue recent custom rang (sheet
+  // me palette ke neeche dikhte hain, max 8, sirf is session tak),
+  // `_customHsv` = HSV sliders ki current position, `_showCustomColorPanel`
+  // = sliders wala panel khula hai ya nahi.
+  final List<Color> _customColors = [];
+  HSVColor _customHsv = const HSVColor.fromAHSV(1, 210, 0.85, 0.9);
+  bool _showCustomColorPanel = false;
+
+  // 🔥 NAYA — doosre participants ke chal rahe (abhi complete nahi hue)
+  // strokes: key = "<pageId>|<userId>". Pehle receiver sirf `strokes.last`
+  // me point jodta tha, isliye do log ek saath draw karte to ek ke points
+  // doosre ke stroke me ghus jaate the (alag color/tool ki lines ke beech
+  // zigzag). Ab har remote user ka apna stroke alag track hota hai.
+  final Map<String, List<DrawingPoint>> _remoteStrokes = {};
 
   // Shape drag-in-progress
   Offset? _shapeDragStart;
@@ -516,6 +543,18 @@ class _StudyRoomScreenState extends State<StudyRoomScreen> {
     // participants ko bhi ye user room me hai ye pata hi nahi chalta tha.
     // Ab yahan defensively apna window guaranteed bana dete hain.
     _ensureSelfWindow();
+    // 🔥 NAYA — sticky notes engine. `_connectSocket()` se PEHLE banana zaroori hai
+    // (socket events aate hi `_notesSync.handleEvent` call hota hai).
+    _notesSync = StickyNoteSync(
+      currentUserId: widget.currentUserId,
+      sendEvent: _sendRoomEvent,
+      isSocketConnected: () => _socket.isConnected,
+      fetchNotes: () => MessageApiService.getStudyRoomNotes(widget.conversationId),
+      onNotice: _showNoteNotice,
+    );
+    // Nayi session me server join par purane notes purge karta hai — isliye wahan
+    // load join ke baad hota hai (see `_joinStudyRoomMedia`); existing session me turant.
+    if (!widget.startNewSession) _loadNotesOnce();
     _timerRemaining = _timer.totalDuration;
     // 🔥 FIX — pehle yahan hamesha unconditionally purana whiteboard state
     // restore ho jaata tha, chahe user "Study Room" icon se bilkul NAYI
@@ -551,7 +590,7 @@ class _StudyRoomScreenState extends State<StudyRoomScreen> {
     // floating profile/camera window bhi hata do (pehle stale window
     // hamesha ke liye "camera off" state me pada reh jaata tha).
     _roomCall.onParticipantLeft = _onRemoteParticipantLeft;
-    _joinStudyRoomMedia();
+    _joinStudyRoomMedia().whenComplete(_loadNotesOnce); // fallback: join fail ho tab bhi notes load ho
 
     // 🔥 NAYA — jab tak study room screen khuli hai, phone khud-ba-khud
     // lock/sleep nahi hona chahiye (whiteboard use karte waqt beech me
@@ -662,6 +701,7 @@ class _StudyRoomScreenState extends State<StudyRoomScreen> {
   Future<void> _joinStudyRoomMedia() async {
     try {
       final data = await CallApiService.joinStudyRoom(widget.conversationId, newSession: widget.startNewSession);
+      _loadNotesOnce(); // server-side purge (new session) ho chuka — ab safe
       final livekitUrl = data['livekit_url']?.toString();
       final livekitToken = data['livekit_token']?.toString();
       if (livekitUrl == null || livekitToken == null) {
@@ -750,6 +790,9 @@ class _StudyRoomScreenState extends State<StudyRoomScreen> {
     _stickerTimers.clear();
     _chatInputController.dispose();
     _copilotQuestionController.dispose(); // 🔥 NAYA
+    _socketOpenSub?.cancel();
+    _notesSync.flushAll(); // pending typed text socket band hone se pehle bhej do
+    _notesSync.dispose();
     _socket.dispose();
     CallManager.instance.removeListener(_onCallManagerChanged);
     _roomCall.removeListener(_onCallManagerChanged);
@@ -766,6 +809,8 @@ class _StudyRoomScreenState extends State<StudyRoomScreen> {
   Future<void> _connectSocket() async {
     await _socket.connect(widget.conversationId);
     _socket.events.listen(_handleRoomEvent);
+    // 🔥 NAYA — socket (re)open par pending note ops resend + missed updates resync.
+    _socketOpenSub = _socket.onOpen.listen((isReconnect) => _notesSync.onSocketOpen(isReconnect: isReconnect));
   }
 
   // ============================================================
@@ -792,6 +837,15 @@ class _StudyRoomScreenState extends State<StudyRoomScreen> {
       return;
     }
 
+    // 🔥 NAYA — sticky notes events (persisted + last-write-wins, see
+    // services/sticky_note_sync.dart). Yahan setState NAHI: `note_drag` ~12/sec
+    // aata hai, poori screen rebuild karna bhaari padta — `StickyNoteSync`
+    // khud notify karta hai aur sirf `StickyNotesLayer` rebuild hota hai.
+    if (const {'note_ack', 'note_upsert', 'note_removed', 'note_drag'}.contains(action)) {
+      _notesSync.handleEvent(action as String, data);
+      return;
+    }
+
     setState(() {
       switch (action) {
         case 'draw_point':
@@ -800,7 +854,21 @@ class _StudyRoomScreenState extends State<StudyRoomScreen> {
             if (page == null) return;
             final point = DrawingPoint.fromJson(data['point']);
             final isNew = data['isNew'] == true;
-            if (isNew || page.strokes.isEmpty) {
+            final remoteUserId = data['userId']?.toString();
+            if (remoteUserId != null && remoteUserId.isNotEmpty) {
+              // Naye clients `userId` bhejte hain -> is user ka apna
+              // current stroke (color/tool/width point ke saath aata hai).
+              final key = '${page.id}|$remoteUserId';
+              final current = _remoteStrokes[key];
+              if (isNew || current == null) {
+                final fresh = <DrawingPoint>[point];
+                page.strokes.add(fresh);
+                _remoteStrokes[key] = fresh;
+              } else {
+                current.add(point);
+              }
+            } else if (isNew || page.strokes.isEmpty) {
+              // Purane clients (userId nahi bhejte) — pehle jaisa behaviour.
               page.strokes.add([point]);
             } else {
               page.strokes.last.add(point);
@@ -823,7 +891,7 @@ class _StudyRoomScreenState extends State<StudyRoomScreen> {
             page.strokes.clear();
             page.shapes.clear();
             page.texts.clear();
-            page.stickyNotes.clear();
+            _notesSync.clearPageLocal(page.id);
             page.userStrokeIndices.clear();
             _myActionsByPage.remove(page.id);
             break;
@@ -835,7 +903,7 @@ class _StudyRoomScreenState extends State<StudyRoomScreen> {
             if (page == null) return;
             page.strokes.clear();
             page.shapes.clear();
-            page.stickyNotes.clear();
+            _notesSync.clearPageLocal(page.id);
             page.userStrokeIndices.clear();
             _myActionsByPage[page.id]?.removeWhere((a) => a.type != _BoardActionType.text);
             break;
@@ -854,28 +922,6 @@ class _StudyRoomScreenState extends State<StudyRoomScreen> {
             final page = _findPage(data['pageId']);
             if (page == null) return;
             page.texts.removeWhere((t) => t.id == data['textId']);
-            break;
-          }
-
-        case 'undo_user_sticky':
-          {
-            final page = _findPage(data['pageId']);
-            if (page == null) return;
-            page.stickyNotes.removeWhere((n) => n.id == data['noteId']);
-            break;
-          }
-
-        case 'add_sticky_note':
-          {
-            final page = _findPage(data['pageId']);
-            if (page == null) return;
-            final incoming = StickyNoteModel.fromJson(data['note'] ?? data);
-            final idx = page.stickyNotes.indexWhere((n) => n.id == incoming.id);
-            if (idx != -1) {
-              page.stickyNotes[idx] = incoming;
-            } else {
-              page.stickyNotes.add(incoming);
-            }
             break;
           }
 
@@ -1029,6 +1075,7 @@ class _StudyRoomScreenState extends State<StudyRoomScreen> {
               _myActionsByPage.remove(removedId);
               _pageFileSourceUrl.remove(removedId);
               _unvisitedPageIds.remove(removedId);
+              _notesSync.clearPageLocal(removedId); // 🔥 NAYA
             }
             break;
           }
@@ -1244,8 +1291,8 @@ class _StudyRoomScreenState extends State<StudyRoomScreen> {
           _sendRoomEvent('undo_user_text', {'userId': widget.currentUserId, 'pageId': _page.id, 'textId': action.refId});
           break;
         case _BoardActionType.stickyNote:
-          _page.stickyNotes.removeWhere((n) => n.id == action.refId);
-          _sendRoomEvent('undo_user_sticky', {'userId': widget.currentUserId, 'pageId': _page.id, 'noteId': action.refId});
+          // 🔥 NAYA — note ab server-persisted hai, isliye undo = `note_delete` op.
+          if (action.refId != null) _notesSync.deleteNote(action.refId!);
           break;
       }
       _isDirty = true;
@@ -1287,7 +1334,12 @@ class _StudyRoomScreenState extends State<StudyRoomScreen> {
       _isDirty = true;
     });
 
-    _sendRoomEvent('draw_point', {'point': point.toJson(), 'isNew': true, 'pageId': _page.id});
+    _sendRoomEvent('draw_point', {
+      'point': point.toJson(),
+      'isNew': true,
+      'pageId': _page.id,
+      'userId': widget.currentUserId,
+    });
   }
 
   void _onPanUpdate(DragUpdateDetails details) {
@@ -1312,7 +1364,12 @@ class _StudyRoomScreenState extends State<StudyRoomScreen> {
       _isDirty = true;
     });
 
-    _sendRoomEvent('draw_point', {'point': point.toJson(), 'isNew': false, 'pageId': _page.id});
+    _sendRoomEvent('draw_point', {
+      'point': point.toJson(),
+      'isNew': false,
+      'pageId': _page.id,
+      'userId': widget.currentUserId,
+    });
   }
 
   void _onPanEnd(DragEndDetails details) {
@@ -1357,7 +1414,7 @@ class _StudyRoomScreenState extends State<StudyRoomScreen> {
       _page.strokes.clear();
       _page.shapes.clear();
       _page.texts.clear();
-      _page.stickyNotes.clear();
+      _notesSync.clearPageLocal(_page.id);
       _page.userStrokeIndices.clear();
       _myActionsByPage.remove(_page.id);
       _isDirty = true;
@@ -1371,7 +1428,7 @@ class _StudyRoomScreenState extends State<StudyRoomScreen> {
     setState(() {
       _page.strokes.clear();
       _page.shapes.clear();
-      _page.stickyNotes.clear();
+      _notesSync.clearPageLocal(_page.id);
       _page.userStrokeIndices.clear();
       _myActionsByPage[_page.id]?.removeWhere((a) => a.type != _BoardActionType.text);
       _isDirty = true;
@@ -1463,6 +1520,7 @@ class _StudyRoomScreenState extends State<StudyRoomScreen> {
       _pageImagePaths.remove(removedId);
       _pageFileSourceUrl.remove(removedId);
       _unvisitedPageIds.remove(removedId);
+      _notesSync.clearPageLocal(removedId); // 🔥 NAYA
       _isDirty = true;
     });
     _sendRoomEvent('remove_page', {'pageId': removedId});
@@ -2878,7 +2936,8 @@ class _StudyRoomScreenState extends State<StudyRoomScreen> {
     return LayoutBuilder(
       builder: (context, constraints) {
         final areaSize = Size(constraints.maxWidth, constraints.maxHeight);
-        return Listener(
+        _boardAreaSize = areaSize; // new-note spawn position ke liye (visible centre)
+        final board = Listener(
           onPointerDown: (_) => setState(() => _activePointers++),
           onPointerUp: (_) => setState(() => _activePointers = (_activePointers - 1).clamp(0, 10)),
           onPointerCancel: (_) => setState(() => _activePointers = (_activePointers - 1).clamp(0, 10)),
@@ -2996,13 +3055,24 @@ class _StudyRoomScreenState extends State<StudyRoomScreen> {
                 ),
 
                 ..._page.texts.map((t) => _buildTextWidget(t)),
-                ..._page.stickyNotes.map((note) => _buildStickyNoteWidget(note)),
+                // 🔥 NAYA — collaborative sticky notes (drag / resize / color / inline edit / delete / z-order)
+                Positioned.fill(
+                  child: StickyNotesLayer(sync: _notesSync, pageId: _page.id, dragEnabled: !_panZoomMode),
+                ),
               ],
             ),
           ),
         ),
       ),
     );
+        return Stack(
+          fit: StackFit.expand,
+          children: [
+            board,
+            // Viewport-anchored loading / retry / empty-state chip (zoom/pan ke saath nahi hilta).
+            StickyNotesStatusOverlay(sync: _notesSync, pageId: _page.id),
+          ],
+        );
       },
     );
   }
@@ -3411,7 +3481,7 @@ class _StudyRoomScreenState extends State<StudyRoomScreen> {
                                 CircleAvatar(
                                   radius: 48,
                                   backgroundColor: Colors.white24,
-                                  backgroundImage: focused.avatarUrl != null ? NetworkImage(focused.avatarUrl!) : null,
+                                  backgroundImage: focused.avatarUrl != null ? CachedNetworkImageProvider(focused.avatarUrl!) : null,
                                   child: focused.avatarUrl == null
                                       ? const Icon(Icons.person, size: 44, color: Colors.white)
                                       : null,
@@ -3569,7 +3639,7 @@ class _StudyRoomScreenState extends State<StudyRoomScreen> {
                         CircleAvatar(
                           radius: 28,
                           backgroundColor: Colors.white24,
-                          backgroundImage: win.avatarUrl != null ? NetworkImage(win.avatarUrl!) : null,
+                          backgroundImage: win.avatarUrl != null ? CachedNetworkImageProvider(win.avatarUrl!) : null,
                           child: win.avatarUrl == null ? const Icon(Icons.person, color: Colors.white) : null,
                         ),
                         const SizedBox(height: 6),
@@ -3700,7 +3770,7 @@ class _StudyRoomScreenState extends State<StudyRoomScreen> {
                             children: [
                               CircleAvatar(
                                 radius: win.size.width * 0.2,
-                                backgroundImage: win.avatarUrl != null ? NetworkImage(win.avatarUrl!) : null,
+                                backgroundImage: win.avatarUrl != null ? CachedNetworkImageProvider(win.avatarUrl!) : null,
                                 child: win.avatarUrl == null ? const Icon(Icons.person, color: Colors.white) : null,
                               ),
                               const SizedBox(height: 6),
@@ -3794,63 +3864,50 @@ class _StudyRoomScreenState extends State<StudyRoomScreen> {
     );
   }
 
-  // --- STICKY NOTE WIDGET ---
-  Widget _buildStickyNoteWidget(StickyNoteModel note) {
-    return Positioned(
-      left: note.position.dx,
-      top: note.position.dy,
-      child: GestureDetector(
-        onPanUpdate: (details) {
-          setState(() {
-            note.position += details.delta;
-            _isDirty = true;
-          });
-          _sendRoomEvent('add_sticky_note', {'note': note.toJson(), 'pageId': _page.id});
-        },
-        child: Container(
-          width: 140,
-          height: 140,
-          padding: const EdgeInsets.all(8),
-          decoration: BoxDecoration(
-            color: note.color,
-            borderRadius: BorderRadius.circular(8),
-            boxShadow: const [BoxShadow(color: Colors.black26, blurRadius: 4)],
-          ),
-          child: Focus(
-            onFocusChange: (hasFocus) {
-              if (!hasFocus) {
-                _isDirty = true;
-                _sendRoomEvent('add_sticky_note', {'note': note.toJson(), 'pageId': _page.id});
-              }
-            },
-            child: TextField(
-              controller: TextEditingController(text: note.text),
-              maxLines: null,
-              style: const TextStyle(fontSize: 12, color: Colors.black),
-              decoration: const InputDecoration(border: InputBorder.none, hintText: 'Type note...'),
-              onChanged: (val) => note.text = val,
-            ),
-          ),
-        ),
-      ),
+  // --- STICKY NOTES (collaborative) ---
+  // Render: widgets/sticky_notes_layer.dart | State + sync: services/sticky_note_sync.dart
+
+  void _loadNotesOnce() {
+    if (_notesLoadStarted) return;
+    _notesLoadStarted = true;
+    unawaited(_notesSync.load());
+  }
+
+  void _showNoteNotice(String message) {
+    if (!mounted) return;
+    ScaffoldMessenger.of(context)
+      ..hideCurrentSnackBar()
+      ..showSnackBar(SnackBar(content: Text(message), duration: const Duration(seconds: 3)));
+  }
+
+  /// Naya note board ke abhi VISIBLE hisse ke beech me aata hai (zoom/pan ke baad bhi),
+  /// har naya note thoda cascade hokar — pehle sab (100,100) pe ek ke upar ek girte the.
+  Offset _nextNoteSpawnPosition() {
+    var center = const Offset(160, 160);
+    if (_boardAreaSize != Size.zero) {
+      center = _transformCtrl.toScene(Offset(_boardAreaSize.width / 2, _boardAreaSize.height / 2));
+    }
+    final cascade = (_notesSync.notesForPage(_page.id).length % 6) * 18.0;
+    return Offset(
+      center.dx - StickyNoteModel.defaultWidth / 2 + cascade,
+      center.dy - StickyNoteModel.defaultHeight / 2 + cascade,
     );
   }
 
-  void _addStickyNote() {
-    final note = StickyNoteModel(
-      id: const Uuid().v4(),
-      userId: widget.currentUserId,
-      text: 'New Note',
-      position: const Offset(100, 100),
-      color: Colors.yellow.shade200,
+  void _createStickyNote({required String text, required Color color}) {
+    final note = _notesSync.addNote(
+      pageId: _page.id,
+      position: _nextNoteSpawnPosition(),
+      text: text,
+      color: color,
     );
+    if (note == null) return; // limit hit — notice already dikha diya gaya
     setState(() {
-      _page.stickyNotes.add(note);
       _recordMyAction(_BoardActionType.stickyNote, refId: note.id);
-      _isDirty = true;
     });
-    _sendRoomEvent('add_sticky_note', {'note': note.toJson(), 'pageId': _page.id});
   }
+
+  void _addStickyNote() => _createStickyNote(text: '', color: Colors.yellow.shade200);
 
   // ============================================================
   // AI SUMMARY NOTES + QUIZ
@@ -3869,7 +3926,7 @@ class _StudyRoomScreenState extends State<StudyRoomScreen> {
       for (final t in page.texts) {
         if (t.text.trim().isNotEmpty) buffer.writeln(t.text.trim());
       }
-      for (final n in page.stickyNotes) {
+      for (final n in _notesSync.notesForPage(page.id)) {
         if (n.text.trim().isNotEmpty) buffer.writeln(n.text.trim());
       }
     }
@@ -4236,20 +4293,14 @@ class _StudyRoomScreenState extends State<StudyRoomScreen> {
   }
 
   void _saveTextAsStickyNote(String text) {
-    if (text.trim().isEmpty) return;
-    final note = StickyNoteModel(
-      id: const Uuid().v4(),
-      userId: widget.currentUserId,
-      text: text.trim(),
-      position: const Offset(100, 100),
+    final trimmed = text.trim();
+    if (trimmed.isEmpty) return;
+    _createStickyNote(
+      text: trimmed.length > StickyNoteModel.maxTextLength
+          ? trimmed.substring(0, StickyNoteModel.maxTextLength)
+          : trimmed,
       color: Colors.tealAccent.shade100,
     );
-    setState(() {
-      _page.stickyNotes.add(note);
-      _recordMyAction(_BoardActionType.stickyNote, refId: note.id);
-      _isDirty = true;
-    });
-    _sendRoomEvent('add_sticky_note', {'note': note.toJson(), 'pageId': _page.id});
   }
 
   // ============================================================
@@ -4388,91 +4439,286 @@ class _StudyRoomScreenState extends State<StudyRoomScreen> {
     );
   }
 
+  // 🔥 NAYA — color picker ab 3 cheezein deta hai: (1) ready palette,
+  // (2) user ke apne banaye recent custom colors, (3) "+" se poora HSV
+  // custom picker (Hue / Saturation / Brightness sliders). Selected color
+  // freehand strokes, shapes aur text — teeno me use hota hai, aur har
+  // stroke point ke saath `color` bhi doosre participants ko jaata hai.
+  String _hexLabel(Color c) =>
+      '#${(c.value & 0xFFFFFF).toRadixString(16).padLeft(6, '0').toUpperCase()}';
+
+  void _rememberCustomColor(Color c) {
+    _customColors.removeWhere((x) => x.value == c.value);
+    _customColors.insert(0, c);
+    if (_customColors.length > 8) {
+      _customColors.removeRange(8, _customColors.length);
+    }
+  }
+
+  /// Chhota gradient slider (0..1). Material `Slider` ke track-shape quirks
+  /// se bachne ke liye custom banaya hai — track gradient aur thumb ki
+  /// position hamesha exactly align rehti hai.
+  Widget _gradientSlider({
+    required double value,
+    required List<Color> colors,
+    required ValueChanged<double> onChanged,
+    VoidCallback? onChangeEnd,
+  }) {
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final width = constraints.maxWidth;
+        void update(double dx) => onChanged((dx / width).clamp(0.0, 1.0));
+        return GestureDetector(
+          behavior: HitTestBehavior.opaque,
+          onTapDown: (d) => update(d.localPosition.dx),
+          onTapUp: (_) => onChangeEnd?.call(),
+          onHorizontalDragStart: (d) => update(d.localPosition.dx),
+          onHorizontalDragUpdate: (d) => update(d.localPosition.dx),
+          onHorizontalDragEnd: (_) => onChangeEnd?.call(),
+          child: SizedBox(
+            height: 30,
+            child: Stack(
+              alignment: Alignment.centerLeft,
+              clipBehavior: Clip.none,
+              children: [
+                Container(
+                  height: 14,
+                  decoration: BoxDecoration(
+                    gradient: LinearGradient(colors: colors),
+                    borderRadius: BorderRadius.circular(7),
+                    border: Border.all(color: Colors.white24),
+                  ),
+                ),
+                Positioned(
+                  left: value.clamp(0.0, 1.0) * width - 11,
+                  child: Container(
+                    width: 22,
+                    height: 22,
+                    decoration: BoxDecoration(
+                      shape: BoxShape.circle,
+                      border: Border.all(color: Colors.white, width: 3),
+                      boxShadow: const [BoxShadow(color: Colors.black54, blurRadius: 3)],
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        );
+      },
+    );
+  }
+
   void _openColorAndSizePicker() {
+    _showCustomColorPanel = false;
     showModalBottomSheet(
       context: context,
+      isScrollControlled: true,
       backgroundColor: const Color(0xFF1E1E2C),
       shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(20))),
       builder: (sheetContext) {
         return StatefulBuilder(
           builder: (sheetContext, sheetSetState) {
-            return Padding(
-              padding: const EdgeInsets.all(20),
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  const Text('Color', style: TextStyle(color: Colors.white70, fontSize: 13, fontWeight: FontWeight.bold)),
-                  const SizedBox(height: 10),
-                  Wrap(
-                    spacing: 12,
-                    runSpacing: 12,
-                    children: _colorPalette.map((color) {
-                      final isSelected = _selectedColor.value == color.value;
-                      return GestureDetector(
-                        onTap: () {
-                          setState(() => _selectedColor = color);
-                          sheetSetState(() {});
-                        },
-                        child: Container(
-                          width: 34,
-                          height: 34,
-                          decoration: BoxDecoration(
-                            color: color,
-                            shape: BoxShape.circle,
-                            border: Border.all(
-                              color: isSelected ? Colors.blueAccent : Colors.white24,
-                              width: isSelected ? 3 : 1,
-                            ),
-                          ),
-                        ),
-                      );
-                    }).toList(),
+            void pickColor(Color color) {
+              setState(() => _selectedColor = color);
+              sheetSetState(() {});
+            }
+
+            void applyHsv(HSVColor hsv) {
+              _customHsv = hsv;
+              pickColor(hsv.toColor());
+            }
+
+            Widget swatch(Color color) {
+              final isSelected = _selectedColor.value == color.value;
+              return GestureDetector(
+                onTap: () {
+                  _customHsv = HSVColor.fromColor(color);
+                  pickColor(color);
+                },
+                child: Container(
+                  width: 34,
+                  height: 34,
+                  decoration: BoxDecoration(
+                    color: color,
+                    shape: BoxShape.circle,
+                    border: Border.all(
+                      color: isSelected ? Colors.blueAccent : Colors.white24,
+                      width: isSelected ? 3 : 1,
+                    ),
                   ),
-                  const SizedBox(height: 20),
-                  const Text('Stroke Size', style: TextStyle(color: Colors.white70, fontSize: 13, fontWeight: FontWeight.bold)),
-                  const SizedBox(height: 10),
-                  Row(
-                    children: _strokeSizes.map((size) {
-                      final isSelected = _strokeWidth == size;
-                      return Expanded(
-                        child: GestureDetector(
+                ),
+              );
+            }
+
+            Widget sliderLabel(String text) => Padding(
+                  padding: const EdgeInsets.only(top: 6, bottom: 2),
+                  child: Text(text, style: const TextStyle(color: Colors.white54, fontSize: 12)),
+                );
+
+            final hueColors = <Color>[
+              for (var h = 0; h <= 360; h += 60) HSVColor.fromAHSV(1, h.toDouble(), 1, 1).toColor(),
+            ];
+
+            return SafeArea(
+              child: SingleChildScrollView(
+                padding: const EdgeInsets.all(20),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    const Text('Color', style: TextStyle(color: Colors.white70, fontSize: 13, fontWeight: FontWeight.bold)),
+                    const SizedBox(height: 10),
+                    Wrap(
+                      spacing: 12,
+                      runSpacing: 12,
+                      children: [
+                        ..._colorPalette.map(swatch),
+                        // 🔥 NAYA — user ke recent custom colors
+                        ..._customColors.map(swatch),
+                        // 🔥 NAYA — "+" : custom color picker khol/band karta hai
+                        GestureDetector(
                           onTap: () {
-                            setState(() => _strokeWidth = size);
-                            sheetSetState(() {});
+                            if (!_showCustomColorPanel) {
+                              // Achromatic (black/white/grey) se shuru karne
+                              // par Hue slider ka koi asar nahi dikhta, isliye
+                              // wahan ek vivid starting color le lete hain.
+                              final base = HSVColor.fromColor(_selectedColor);
+                              _customHsv = base.saturation < 0.05
+                                  ? const HSVColor.fromAHSV(1, 210, 0.85, 0.9)
+                                  : base;
+                              setState(() => _selectedColor = _customHsv.toColor());
+                            }
+                            sheetSetState(() => _showCustomColorPanel = !_showCustomColorPanel);
                           },
                           child: Container(
-                            margin: const EdgeInsets.symmetric(horizontal: 4),
-                            padding: const EdgeInsets.symmetric(vertical: 10),
+                            width: 34,
+                            height: 34,
                             decoration: BoxDecoration(
-                              color: isSelected ? Colors.blueAccent.withOpacity(0.25) : Colors.white10,
-                              borderRadius: BorderRadius.circular(12),
-                              border: Border.all(color: isSelected ? Colors.blueAccent : Colors.transparent),
+                              shape: BoxShape.circle,
+                              gradient: const SweepGradient(
+                                colors: [
+                                  Colors.red,
+                                  Colors.yellow,
+                                  Colors.green,
+                                  Colors.cyan,
+                                  Colors.blue,
+                                  Colors.purple,
+                                  Colors.red,
+                                ],
+                              ),
+                              border: Border.all(
+                                color: _showCustomColorPanel ? Colors.blueAccent : Colors.white24,
+                                width: _showCustomColorPanel ? 3 : 1,
+                              ),
                             ),
-                            child: Center(
-                              child: Container(
-                                width: size.clamp(2.0, 22.0),
-                                height: size.clamp(2.0, 22.0),
-                                decoration: BoxDecoration(color: _selectedColor, shape: BoxShape.circle),
+                            child: const Icon(Icons.add, size: 18, color: Colors.white),
+                          ),
+                        ),
+                      ],
+                    ),
+                    if (_showCustomColorPanel) ...[
+                      const SizedBox(height: 16),
+                      Row(
+                        children: [
+                          Container(
+                            width: 34,
+                            height: 34,
+                            decoration: BoxDecoration(
+                              color: _selectedColor,
+                              shape: BoxShape.circle,
+                              border: Border.all(color: Colors.white54, width: 1.5),
+                            ),
+                          ),
+                          const SizedBox(width: 12),
+                          Text(
+                            _hexLabel(_selectedColor),
+                            style: const TextStyle(color: Colors.white70, fontSize: 13, fontWeight: FontWeight.w600),
+                          ),
+                        ],
+                      ),
+                      sliderLabel('Hue'),
+                      _gradientSlider(
+                        value: _customHsv.hue / 360,
+                        colors: hueColors,
+                        onChanged: (t) => applyHsv(_customHsv.withHue(t * 360)),
+                        onChangeEnd: () {
+                          _rememberCustomColor(_selectedColor);
+                          sheetSetState(() {});
+                        },
+                      ),
+                      sliderLabel('Saturation'),
+                      _gradientSlider(
+                        value: _customHsv.saturation,
+                        colors: [
+                          HSVColor.fromAHSV(1, _customHsv.hue, 0, _customHsv.value).toColor(),
+                          HSVColor.fromAHSV(1, _customHsv.hue, 1, _customHsv.value).toColor(),
+                        ],
+                        onChanged: (t) => applyHsv(_customHsv.withSaturation(t)),
+                        onChangeEnd: () {
+                          _rememberCustomColor(_selectedColor);
+                          sheetSetState(() {});
+                        },
+                      ),
+                      sliderLabel('Brightness'),
+                      _gradientSlider(
+                        value: _customHsv.value,
+                        colors: [
+                          HSVColor.fromAHSV(1, _customHsv.hue, _customHsv.saturation, 0).toColor(),
+                          HSVColor.fromAHSV(1, _customHsv.hue, _customHsv.saturation, 1).toColor(),
+                        ],
+                        onChanged: (t) => applyHsv(_customHsv.withValue(t)),
+                        onChangeEnd: () {
+                          _rememberCustomColor(_selectedColor);
+                          sheetSetState(() {});
+                        },
+                      ),
+                    ],
+                    const SizedBox(height: 20),
+                    const Text('Stroke Size', style: TextStyle(color: Colors.white70, fontSize: 13, fontWeight: FontWeight.bold)),
+                    const SizedBox(height: 10),
+                    Row(
+                      children: _strokeSizes.map((size) {
+                        final isSelected = _strokeWidth == size;
+                        return Expanded(
+                          child: GestureDetector(
+                            onTap: () {
+                              setState(() => _strokeWidth = size);
+                              sheetSetState(() {});
+                            },
+                            child: Container(
+                              margin: const EdgeInsets.symmetric(horizontal: 4),
+                              padding: const EdgeInsets.symmetric(vertical: 10),
+                              decoration: BoxDecoration(
+                                color: isSelected ? Colors.blueAccent.withOpacity(0.25) : Colors.white10,
+                                borderRadius: BorderRadius.circular(12),
+                                border: Border.all(color: isSelected ? Colors.blueAccent : Colors.transparent),
+                              ),
+                              child: Center(
+                                child: Container(
+                                  width: size.clamp(2.0, 22.0),
+                                  height: size.clamp(2.0, 22.0),
+                                  decoration: BoxDecoration(color: _selectedColor, shape: BoxShape.circle),
+                                ),
                               ),
                             ),
                           ),
-                        ),
-                      );
-                    }).toList(),
-                  ),
-                  const SizedBox(height: 8),
-                  Slider(
-                    value: _strokeWidth.clamp(1.0, 20.0),
-                    min: 1.0,
-                    max: 20.0,
-                    activeColor: Colors.blueAccent,
-                    onChanged: (v) {
-                      setState(() => _strokeWidth = v);
-                      sheetSetState(() {});
-                    },
-                  ),
-                ],
+                        );
+                      }).toList(),
+                    ),
+                    const SizedBox(height: 8),
+                    Slider(
+                      value: _strokeWidth.clamp(1.0, 20.0),
+                      min: 1.0,
+                      max: 20.0,
+                      activeColor: Colors.blueAccent,
+                      onChanged: (v) {
+                        setState(() => _strokeWidth = v);
+                        sheetSetState(() {});
+                      },
+                    ),
+                  ],
+                ),
               ),
             );
           },

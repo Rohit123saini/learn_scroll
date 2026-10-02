@@ -1,6 +1,6 @@
 import 'package:flutter/material.dart';
 import '../services/api_service.dart';
-import '../home.dart';
+import '../onboarding/screens/onboarding_screen.dart'; // 🔥 TASK G18 — post-signup onboarding
 // 🔥 NAYA — dark mode + i18n (home.dart jaisa hi pattern).
 import '../l10n/app_localizations.dart';
 import 'auth_widgets.dart';
@@ -46,9 +46,13 @@ class _CompleteProfileScreenState extends State<CompleteProfileScreen> {
 
       if (!mounted) return;
 
+      // 🔥 TASK G18 — this screen only ever runs for a brand-new signup
+      // (see its own callers in signup_screen.dart/login_screen.dart,
+      // both gated on `isNewUser == true`), so both the submit path here
+      // and `_skip()` below route into onboarding, never straight Home.
       Navigator.pushReplacement(
         context,
-        MaterialPageRoute(builder: (context) => const HomeScreen()),
+        MaterialPageRoute(builder: (context) => const OnboardingScreen()),
       );
     } catch (e) {
       if (!mounted) return;
@@ -57,6 +61,15 @@ class _CompleteProfileScreenState extends State<CompleteProfileScreen> {
         _phoneError = e.toString().replaceAll("Exception:", "").trim();
       });
     }
+  }
+
+  // Phone is optional — let the user go straight to Home without one. They
+  // can add it later; nothing on the backend depends on it being present.
+  void _skip() {
+    Navigator.pushReplacement(
+      context,
+      MaterialPageRoute(builder: (context) => const OnboardingScreen()),
+    );
   }
 
   @override
@@ -181,6 +194,18 @@ class _CompleteProfileScreenState extends State<CompleteProfileScreen> {
                                   l10n.completeProfileContinue,
                                   style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
                                 ),
+                        ),
+                      ),
+                      const SizedBox(height: 12),
+                      TextButton(
+                        onPressed: _isLoading ? null : _skip,
+                        child: Text(
+                          l10n.completeProfileSkip,
+                          style: TextStyle(
+                            fontSize: 15,
+                            fontWeight: FontWeight.w600,
+                            color: cs.onSurfaceVariant,
+                          ),
                         ),
                       ),
                       const SizedBox(height: 20),

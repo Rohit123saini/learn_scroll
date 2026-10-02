@@ -2,12 +2,23 @@ import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
+import 'services/user_preferences_api.dart';
+
 /// App-wide theme state — Dark/Light mode ke liye reactive service.
 ///
 /// Pattern `auth_service.dart` jaisa hi hai: singleton `.instance` +
 /// `SharedPreferences` me persist. UI side pe `ValueListenableBuilder`
 /// `themeMode` notifier ko sunta hai, isliye `setThemeMode()` / `toggle()`
 /// call karte hi poori app turant rebuild ho jaati hai.
+///
+/// 🔥 FIX (settings-persistence bug, root cause #1) — pehle sirf
+/// `SharedPreferences` (device-local) tha, backend `UserPreference`
+/// (already production-ready — see `services/user_preferences_api.dart`'s
+/// header) ko kabhi call hi nahi kiya jaata tha. Isliye reinstall / naye
+/// device pe theme hamesha default pe reset ho jaata — user ko lagta
+/// "settings save nahi ho rahi". Ab dono jagah save hota hai: local value
+/// pehle jaisa hi turant/offline-safe hai (first-frame flash-free rehta
+/// hai), account-level sync sirf ek best-effort upgrade hai upar se.
 class ThemeService {
   ThemeService._internal();
   static final ThemeService instance = ThemeService._internal();
@@ -15,6 +26,13 @@ class ThemeService {
   static const String _prefsKey = 'theme_mode';
 
   final ValueNotifier<ThemeMode> themeMode = ValueNotifier<ThemeMode>(ThemeMode.dark);
+
+  /// Jab tak user khud koi change na kare, `init()` ka background backend-
+  /// pull result apply karna safe hai. User ke pehle `setThemeMode()` call
+  /// ke baad se ye false ho jaata hai — taaki ek der se aaya (slow network)
+  /// purana server response, user ke turant baad wale local choice ko
+  /// overwrite na kar de.
+  bool _acceptBackendSync = true;
 
   Future<void> init() async {
     try {
@@ -24,6 +42,27 @@ class ThemeService {
     } catch (e) {
       themeMode.value = ThemeMode.dark;
     }
+    // Fire-and-forget — ऊपर wala local value already first frame paint
+    // kar chuka hai, ye sirf ek best-effort account-wide upgrade hai
+    // (e.g. reinstall/naya device jahan local cache khaali hai).
+    _syncFromBackend();
+  }
+
+  /// P15-FE — re-pull this account's saved preference after an account switch.
+  Future<void> resyncFromBackend() => _syncFromBackend();
+
+  Future<void> _syncFromBackend() async {
+    final data = await UserPreferencesApi.fetch();
+    if (!_acceptBackendSync) return; // user ne is beech khud change kar diya
+    final serverTheme = _fromString(data?['theme'] as String?);
+    if (serverTheme == null || serverTheme == themeMode.value) return;
+    themeMode.value = serverTheme;
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setString(_prefsKey, _toString(serverTheme));
+    } catch (_) {
+      // Local cache update fail ho to bhi in-memory state sahi hai.
+    }
   }
 
   Future<void> toggle() async {
@@ -32,6 +71,7 @@ class ThemeService {
   }
 
   Future<void> setThemeMode(ThemeMode mode) async {
+    _acceptBackendSync = false;
     themeMode.value = mode;
     try {
       final prefs = await SharedPreferences.getInstance();
@@ -39,6 +79,11 @@ class ThemeService {
     } catch (e) {
       // Persist fail ho to bhi in-memory state already updated hai.
     }
+    // 🔥 FIX — account-level sync, best-effort/fire-and-forget (see file
+    // header + user_preferences_api.dart). Local state upar already set
+    // ho chuka hai, isliye caller ko is call ka wait karne ki zaroorat
+    // nahi — UI turant respond karti hai jaisa pehle karti thi.
+    UserPreferencesApi.update({'theme': _toString(mode)});
   }
 
   bool get isDark => themeMode.value == ThemeMode.dark;

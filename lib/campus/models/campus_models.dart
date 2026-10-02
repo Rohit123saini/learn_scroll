@@ -494,6 +494,84 @@ class ParentChildEnrollment {
   String get label => schoolClassName.isNotEmpty ? '$schoolClassName · $sectionName' : sectionName;
 }
 
+/// [ADDED — Task 13/G13] `CampusInviteCodeSerializer` — section-scoped,
+/// reusable "invite your classmates" join code. Unlike `CampusParentLink`
+/// above, `code` is always the real plaintext (not masked) — this code
+/// is meant to be shared openly within a batch (WhatsApp group etc),
+/// not kept private to one person.
+class CampusInviteCode {
+  final String id;
+  final String campusId;
+  final String sectionId;
+  final String sectionName;
+  final String schoolClassName;
+  final String code;
+  final String label;
+  final bool isActive;
+  final int? maxUses;
+  final int usesCount;
+  final DateTime? expiresAt;
+  final DateTime? createdAt;
+  final MinimalUser? createdBy;
+  final bool isUsable;
+  final bool isExpired;
+
+  /// Only present right after a fresh generate/reuse call — a
+  /// ready-to-forward message for the class WhatsApp group. Not part
+  /// of the stored model, so it's `null` on rows fetched via the
+  /// plain management list.
+  final String? shareText;
+
+  const CampusInviteCode({
+    required this.id,
+    required this.campusId,
+    required this.sectionId,
+    required this.sectionName,
+    required this.schoolClassName,
+    required this.code,
+    required this.isActive,
+    required this.usesCount,
+    required this.isUsable,
+    required this.isExpired,
+    this.label = '',
+    this.maxUses,
+    this.expiresAt,
+    this.createdAt,
+    this.createdBy,
+    this.shareText,
+  });
+
+  /// e.g. "10-A" — matches `ParentChildEnrollment.label`'s "class · section" shape.
+  String get sectionLabel =>
+      schoolClassName.isNotEmpty ? '$schoolClassName - $sectionName' : sectionName;
+
+  factory CampusInviteCode.fromJson(Map<String, dynamic> j) {
+    final sectionDetail = j['section_detail'] is Map
+        ? Map<String, dynamic>.from(j['section_detail'] as Map)
+        : const <String, dynamic>{};
+    return CampusInviteCode(
+      id: j['id'].toString(),
+      campusId: j['campus'].toString(),
+      sectionId: j['section'].toString(),
+      sectionName: sectionDetail['name']?.toString() ?? '',
+      schoolClassName: sectionDetail['school_class_name']?.toString() ?? '',
+      code: (j['code'] ?? '').toString(),
+      label: (j['label'] ?? '').toString(),
+      isActive: j['is_active'] == true,
+      maxUses: j['max_uses'] == null ? null : int.tryParse(j['max_uses'].toString()),
+      usesCount: int.tryParse((j['uses_count'] ?? 0).toString()) ?? 0,
+      expiresAt: _date(j['expires_at']),
+      createdAt: _date(j['created_at']),
+      createdBy: j['created_by_detail'] is Map
+          ? MinimalUser.fromJson(Map<String, dynamic>.from(j['created_by_detail'] as Map))
+          : null,
+      isUsable: j['is_usable'] == true,
+      isExpired: j['is_expired'] == true,
+      shareText: j['share_text']?.toString(),
+    );
+  }
+}
+
 // ------------------------------------------------------------
 // Phase 3 — notices
 // ------------------------------------------------------------
@@ -1322,7 +1400,7 @@ class CampusAccess {
   /// nahi lagta.
   bool get canGrowMembership => canManageCampusSetup && campus.isApproved;
   bool get canCreateAssignment => role.canTeach || isManagement;
-  bool get canScheduleLiveClass => role.canTeach || isManagement;
+  bool get canScheduleTuitionClass => role.canTeach || isManagement;
 
   /// Jin sections pe mujhe kuch na kuch access hai — hub screen isi list
   /// se cards banata hai.

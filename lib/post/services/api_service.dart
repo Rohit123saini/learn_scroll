@@ -1,5 +1,6 @@
 import 'dart:convert';
 import 'dart:io';
+import 'dart:typed_data'; // 🔧 FIX (Task 7) — BytesBuilder for race-free chunk reads
 import 'package:http/http.dart' as http;
 import 'package:crypto/crypto.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -83,11 +84,20 @@ class ApiService {
     try {
       var streamedResponse = await request.send();
       var response = await http.Response.fromStream(streamedResponse);
-      var data = jsonDecode(response.body);
+      // Non-JSON body (proxy/HTML error page) must not surface as a raw
+      // FormatException — show a readable status instead.
+      dynamic data;
+      try {
+        data = jsonDecode(utf8.decode(response.bodyBytes));
+      } catch (_) {
+        throw Exception('Server error (${response.statusCode}). Please try again.');
+      }
       if (response.statusCode == 201) {
         return data;
       } else {
-        throw Exception(data['message']?? 'Failed to create post');
+        // Backend sends a field-specific `message` on 400 (e.g. which
+        // category value was rejected) — surface that, not a generic text.
+        throw Exception((data is Map ? data['message'] : null) ?? 'Failed to create post');
       }
     } catch (e) {
       if (e is Exception) rethrow;
@@ -298,50 +308,111 @@ class ApiService {
     void reportProgress() => onProgress?.call(completedCount / totalChunks);
     reportProgress();
 
-    final raf = await file.open(mode: FileMode.read);
-    try {
-      // Parallel batches me upload karo (sequential ki jagah) — bade file
-      // ke liye kaafi tez hota hai. Ek chunk fail ho (checksum mismatch ya
-      // transient network issue) to usi chunk ko 2 baar tak retry karte hain
-      // pehle poore upload ko fail maanne se — sirf X baar fail hone pe
-      // exception upar jaati hai (jahan resume state safe rehti hai, agli
-      // baar isi jagah se dubara try hoga).
-      const maxRetriesPerChunk = 2;
-      for (int batchStart = 0; batchStart < pending.length; batchStart += _parallelChunkUploads) {
-        final batch = pending.skip(batchStart).take(_parallelChunkUploads).toList();
-        await Future.wait(batch.map((chunkIndex) async {
-          final start = chunkIndex * _chunkSize;
-          final size = (start + _chunkSize < totalSize) ? _chunkSize : totalSize - start;
-          await raf.setPosition(start);
-          final chunkBytes = await raf.read(size);
+    // 🔧 FIX (Task 7 — video upload bug): this used to open ONE shared
+    // `RandomAccessFile` and do `await raf.setPosition(start); await
+    // raf.read(size);` for every chunk, including the up-to-4 chunks
+    // that run **concurrently** in the `Future.wait` batch below. That
+    // raced: `setPosition` and `read` are two separate awaited calls on
+    // the SAME file handle, so between one chunk-task's `setPosition`
+    // and its own `read`, the event loop could run a DIFFERENT
+    // concurrent chunk-task's `setPosition` first — moving the shared
+    // cursor — and this task's `read` would then return bytes for the
+    // WRONG offset (sometimes another chunk's data, sometimes a
+    // mid-chunk splice). The server correctly caught this as a
+    // `chunk_hash` mismatch (400) and the existing per-chunk retry
+    // above would re-run the same racy read, so it re-corrupted about
+    // as often as it succeeded — exactly the kind of intermittent,
+    // no-clear-repro "video upload issue" this task describes, worse
+    // the bigger/more-parallel the upload. Fixed by reading each
+    // chunk's byte range with `file.openRead(start, end)`, which opens
+    // its own file descriptor per call — concurrent chunk reads no
+    // longer share any mutable position state, so no ordering between
+    // them can corrupt another chunk's bytes.
+    Future<List<int>> readChunk(int start, int end) async {
+      final builder = BytesBuilder(copy: false);
+      await for (final piece in file.openRead(start, end)) {
+        builder.add(piece);
+      }
+      return builder.takeBytes();
+    }
 
-          Object? lastError;
-          for (int attempt = 0; attempt <= maxRetriesPerChunk; attempt++) {
-            try {
-              await uploadPostChunk(uploadId: uploadId!, chunkIndex: chunkIndex, chunkBytes: chunkBytes);
-              lastError = null;
-              break;
-            } catch (e) {
-              lastError = e;
-              if (attempt < maxRetriesPerChunk) {
-                await Future.delayed(Duration(milliseconds: 400 * (attempt + 1)));
-              }
+    // Parallel batches me upload karo (sequential ki jagah) — bade file
+    // ke liye kaafi tez hota hai. Ek chunk fail ho (checksum mismatch ya
+    // transient network issue) to usi chunk ko 2 baar tak retry karte hain
+    // pehle poore upload ko fail maanne se — sirf X baar fail hone pe
+    // exception upar jaati hai (jahan resume state safe rehti hai, agli
+    // baar isi jagah se dubara try hoga).
+    const maxRetriesPerChunk = 2;
+    for (int batchStart = 0; batchStart < pending.length; batchStart += _parallelChunkUploads) {
+      final batch = pending.skip(batchStart).take(_parallelChunkUploads).toList();
+      await Future.wait(batch.map((chunkIndex) async {
+        final start = chunkIndex * _chunkSize;
+        final end = (start + _chunkSize < totalSize) ? start + _chunkSize : totalSize;
+
+        Object? lastError;
+        for (int attempt = 0; attempt <= maxRetriesPerChunk; attempt++) {
+          try {
+            // Re-read the chunk on every attempt (not just once outside
+            // the loop) — cheap for a 5MB slice, and means a retry can't
+            // ever resend bytes captured by a stale/racy read from an
+            // earlier attempt.
+            final chunkBytes = await readChunk(start, end);
+            await uploadPostChunk(uploadId: uploadId!, chunkIndex: chunkIndex, chunkBytes: chunkBytes);
+            lastError = null;
+            break;
+          } catch (e) {
+            lastError = e;
+            if (attempt < maxRetriesPerChunk) {
+              await Future.delayed(Duration(milliseconds: 400 * (attempt + 1)));
             }
           }
-          if (lastError != null) throw lastError;
+        }
+        if (lastError != null) throw lastError;
 
-          completedCount++;
-          reportProgress();
-        }));
-      }
-    } finally {
-      await raf.close();
+        completedCount++;
+        reportProgress();
+      }));
     }
 
     final result = await completePostChunkedUpload(uploadId);
     // Upload poora ho gaya — resume state ab zaroorat nahi, clear kar do.
     await prefs.remove(prefsKey);
     return result;
+  }
+
+  // Both composers (new_post.dart, quick_post.dart) read
+  //   categories[].key/label, subcategories[].key/label, category_subcategory_map
+  // Backend contract: GET /post/categories/ (views.py category_taxonomy).
+  // This normalises whatever comes back into exactly that shape — `key`
+  // falls back to `value`, a missing/oddly-typed subcategories part becomes
+  // an empty list — so a shape drift can never again turn into the string
+  // "null" being sent as `category` or a TypeError that empties the picker.
+  Map<String, dynamic> _normalizeTaxonomy(dynamic raw) {
+    final d = raw is Map ? raw : const {};
+    List<Map<String, dynamic>> pick(dynamic list) {
+      final out = <Map<String, dynamic>>[];
+      if (list is! List) return out;
+      for (final e in list) {
+        if (e is! Map) continue;
+        final key = (e['key'] ?? e['value'])?.toString();
+        if (key == null || key.isEmpty) continue;
+        out.add({'key': key, 'label': (e['label'] ?? key).toString()});
+      }
+      return out;
+    }
+
+    final map = <String, dynamic>{};
+    final rawMap = d['category_subcategory_map'];
+    if (rawMap is Map) {
+      rawMap.forEach((k, v) {
+        map[k.toString()] = v is List ? v.map((x) => x.toString()).toList() : <String>[];
+      });
+    }
+    return {
+      'categories': pick(d['categories']),
+      'subcategories': pick(d['subcategories']),
+      'category_subcategory_map': map,
+    };
   }
 
   // Category + subcategory tree, taaki dropdown backend ke actual
@@ -352,13 +423,79 @@ class ApiService {
       final response = await http.get(url, headers: {'Content-Type': 'application/json'});
       final data = jsonDecode(response.body);
       if (response.statusCode == 200 && data['success'] == true) {
-        return data['data'];
+        final taxonomy = _normalizeTaxonomy(data['data']);
+        if ((taxonomy['categories'] as List).isEmpty) {
+          throw Exception('Category list is empty');
+        }
+        return taxonomy;
       } else {
         throw Exception(data['message'] ?? 'Failed to load categories');
       }
     } catch (e) {
       throw Exception('Error: $e');
     }
+  }
+
+  // TASK 3 (production_readiness_tasks.md) — feed personalization chip
+  // picker. Backend contract: GET /post/interests/ (views.py
+  // UserInterestsAPIView.get) -> {selected_categories: [...], categories:
+  // [{key,label,selected}, ...]}. Returns the raw `categories` list so the
+  // interests screen doesn't need a second call to getCategoryTaxonomy().
+  Future<List<Map<String, dynamic>>> getMyInterests() async {
+    final token = await AuthService.getValidToken();
+    if (token == null) throw Exception('User not logged in');
+    final url = Uri.parse('${Api.baseUrl}/post/interests/');
+    final response = await http.get(url, headers: {'Authorization': 'Bearer $token'});
+    final data = jsonDecode(response.body);
+    if (response.statusCode == 200 && data['success'] == true) {
+      final list = (data['data']?['categories'] as List?) ?? const [];
+      return list
+          .whereType<Map>()
+          .map((e) => {
+                'key': (e['key'] ?? '').toString(),
+                'label': (e['label'] ?? e['key'] ?? '').toString(),
+                'selected': e['selected'] == true,
+              })
+          .toList();
+    }
+    throw Exception(data['message'] ?? 'Failed to load interests');
+  }
+
+  // Replaces the caller's full interest set in one call — the interests
+  // screen sends every currently-toggled-on chip together, not one
+  // add/remove call per chip. Backend contract: PUT /post/interests/
+  // (views.py UserInterestsAPIView.put), body {"categories": [...]}.
+  Future<void> updateMyInterests(List<String> categoryKeys) async {
+    final token = await AuthService.getValidToken();
+    if (token == null) throw Exception('User not logged in');
+    final url = Uri.parse('${Api.baseUrl}/post/interests/');
+    final response = await http.put(
+      url,
+      headers: {'Authorization': 'Bearer $token', 'Content-Type': 'application/json'},
+      body: jsonEncode({'categories': categoryKeys}),
+    );
+    final data = jsonDecode(response.body);
+    if (!(response.statusCode == 200 && data['success'] == true)) {
+      throw Exception(data['message'] ?? 'Failed to update interests');
+    }
+  }
+
+  // TASK G4 (growth_and_feature_tasks.md) — feed video watch progress, so
+  // the backend's HomeFeedView/ExploreFeedAPIView can rank by real
+  // video-completion-rate instead of just views_count. Best-effort by
+  // design: called from _MediaCarousel (home.dart) on pause/dispose, not
+  // per-frame, and a failure here should never interrupt playback — the
+  // caller wraps this in try/catch and ignores the result.
+  // Backend: POST /post/<id>/video-progress/ (views.py PostVideoProgressAPIView).
+  Future<void> reportVideoProgress(String postId, double watchedSeconds) async {
+    final token = await AuthService.getValidToken();
+    if (token == null) return;
+    final url = Uri.parse('${Api.baseUrl}/post/$postId/video-progress/');
+    await http.post(
+      url,
+      headers: {'Authorization': 'Bearer $token', 'Content-Type': 'application/json'},
+      body: jsonEncode({'watched_seconds': watchedSeconds}),
+    );
   }
 
   // 🔥 NAYA — Freesound music search (media editor "Add Music" feature).

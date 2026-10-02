@@ -30,10 +30,12 @@
 
 import 'dart:async';
 import 'dart:convert';
+import 'package:flutter/foundation.dart'; // ValueNotifier — requests badge
 import 'package:web_socket_channel/web_socket_channel.dart';
 
 import '../../utils/api.dart';
 import '../../services/auth_service.dart';
+import 'message_api_service.dart'; // 🔥 NAYA (M1-FE) — requests count sync
 
 class InboxSocketService {
   InboxSocketService._internal();
@@ -48,6 +50,72 @@ class InboxSocketService {
   // 🔥 NAYA — backoff state
   Timer? _reconnectTimer;
   int _reconnectAttempts = 0;
+  DateTime? _connectedAt; // N10-FE — connection kitni der zinda raha (backoff reset ke liye)
+
+  // 🔥 NAYA (N10-FE) — live bell badge. Backend `notification_badge`
+  // event ({"type": "notification_badge", "unread_count": N}) har
+  // Notification create/read/delete pe aata hai. Ye stream use SIGNAL ki
+  // tarah emit karta hai: listener (home bell, NotificationsScreen) apna
+  // REST refetch kare. `unread_count` payload TOTAL hai (sab sources), jabki
+  // bell sirf `source=tuitionclass` dikhata hai aur Chats badge
+  // `source=message` — isliye payload ko seedha bell me mat daalo.
+  //
+  // Har successful (re)connect pe ek synthetic event (`synthetic: true`)
+  // bhi aata hai: disconnect ke beech chhute events ka catch-up.
+  final _notificationSync = StreamController<Map<String, dynamic>>.broadcast();
+  Stream<Map<String, dynamic>> get notificationSync => _notificationSync.stream;
+
+  // 🔥 NAYA (M1-FE) — "Message requests (N)" ka live count. Singleton me
+  // rakha hai taaki ConversationsScreen / MessageRequestsScreen dono ek hi
+  // source dekhein. Backend `message_request` event HAR naye message pe aata
+  // hai (sirf pehle pe nahi), isliye conversation_id se dedupe karte hain.
+  final ValueNotifier<int> pendingRequestCount = ValueNotifier<int>(0);
+  final Set<String> _pendingRequestIds = {};
+  // true = `_pendingRequestIds` me SAARI pending requests hain (page 1 me
+  // sab aa gayi). false = aur bhi hain jo yahan nahi -> unknown id pe
+  // andaza lagane ki jagah API se dobara sync karo.
+  bool _requestIdsComplete = false;
+
+  /// API se page 1 laake count + ids sync karo. Fail ho to chup-chaap ignore.
+  Future<void> refreshRequestCount() async {
+    try {
+      applyRequestsPage(await MessageApiService.getMessageRequests());
+    } catch (_) {}
+  }
+
+  /// `MessageRequestsScreen` apna page 1 load karke yahi call karti hai —
+  /// dobara network call ki zaroorat nahi.
+  void applyRequestsPage(MessageRequestsPage page) {
+    _pendingRequestIds
+      ..clear()
+      ..addAll(page.items.map((c) => c.id));
+    _requestIdsComplete = !page.hasMore;
+    pendingRequestCount.value = page.total;
+  }
+
+  void _trackRequestEvent(Map<String, dynamic> data) {
+    final type = data['type'];
+    if (type != 'message_request' && type != 'message_request_resolved') return;
+    final id = data['conversation_id']?.toString();
+    if (id == null) return;
+
+    if (type == 'message_request') {
+      if (_pendingRequestIds.contains(id)) return; // isi request ka dusra message
+      if (_requestIdsComplete) {
+        _pendingRequestIds.add(id);
+        pendingRequestCount.value = pendingRequestCount.value + 1;
+      } else {
+        refreshRequestCount();
+      }
+    } else {
+      if (_pendingRequestIds.remove(id)) {
+        final next = pendingRequestCount.value - 1;
+        pendingRequestCount.value = next < 0 ? 0 : next;
+      } else if (!_requestIdsComplete) {
+        refreshRequestCount();
+      }
+    }
+  }
 
   /// Har `inbox_update` event yahan se milta hai.
   Stream<Map<String, dynamic>> get events => _eventController.stream;
@@ -86,12 +154,22 @@ class InboxSocketService {
       _channel = WebSocketChannel.connect(uri);
       _isConnected = true;
       _isConnecting = false;
-      _reconnectAttempts = 0; // successful connect — backoff reset
+      // N10-FE — backoff reset ab yahan NAHI: server auth fail pe accept ke
+      // turant baad 4001 se close kar deta hai, to yahan reset karne se
+      // expired-token loop hamesha 4s pe wapas aa jaata tha. Reset tabhi
+      // hota hai jab connection >= 10s zinda rahe (`_noteDisconnect`).
+      _connectedAt = DateTime.now();
+      _notificationSync.add({'type': 'notification_badge', 'synthetic': true});
+      refreshRequestCount(); // 🔥 NAYA (M1-FE) — disconnect ke beech chhute events ka catch-up
 
       _sub = _channel!.stream.listen(
         (raw) {
           try {
             final data = jsonDecode(raw) as Map<String, dynamic>;
+            _trackRequestEvent(data); // 🔥 NAYA (M1-FE)
+            if (data['type'] == 'notification_badge') {
+              _notificationSync.add(data); // 🔥 NAYA (N10-FE)
+            }
             _eventController.add(data);
           } catch (_) {
             // malformed frame, ignore
@@ -99,10 +177,12 @@ class InboxSocketService {
         },
         onDone: () {
           _isConnected = false;
+          _noteDisconnect();
           _scheduleReconnect();
         },
         onError: (e) {
           _isConnected = false;
+          _noteDisconnect();
           _scheduleReconnect();
         },
       );
@@ -111,6 +191,28 @@ class InboxSocketService {
       _isConnected = false;
       _scheduleReconnect();
     }
+  }
+
+  // N10-FE — stable connection (>=10s) ke baad hi backoff reset.
+  void _noteDisconnect() {
+    final at = _connectedAt;
+    _connectedAt = null;
+    if (at != null && DateTime.now().difference(at) >= const Duration(seconds: 10)) {
+      _reconnectAttempts = 0;
+    }
+  }
+
+  /// N10-FE — app resume pe: OS ne background me socket maar diya ho sakta
+  /// hai (aur `_isConnected` abhi bhi true dikhe), ya reconnect backoff ke
+  /// intezaar me ho. Dead/waiting ho to turant reconnect; connected ho to
+  /// no-op. Logged-out (disconnect() ke baad) me bhi connect() token na
+  /// milne par khud retry-loop me jaata hai, isliye caller ko login-state
+  /// check karke hi call karna chahiye.
+  void reconnectNow() {
+    if (_isConnected || _isConnecting) return;
+    _reconnectTimer?.cancel();
+    _reconnectAttempts = 0;
+    connect();
   }
 
   void _scheduleReconnect() {
@@ -132,6 +234,9 @@ class InboxSocketService {
     _reconnectAttempts = 0;
     _isConnected = false;
     _isConnecting = false;
+    _pendingRequestIds.clear(); // 🔥 NAYA (M1-FE) — logout pe badge reset
+    _requestIdsComplete = false;
+    pendingRequestCount.value = 0;
     _sub?.cancel();
     _channel?.sink.close();
   }

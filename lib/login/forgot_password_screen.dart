@@ -7,7 +7,7 @@ import 'login_screen.dart'; // ✅ Reset ke baad wapas login pe bhejne ke liye
 
 // 🔧 CLEANUP — is file me pehle isi logic ka ek poora commented-out
 // (~380 line) purana draft upar pada hua tha. Dead code hata diya gaya —
-// neeche jo live class hai wahi actually compile/run hoti thi.
+// neeche jo tuition class hai wahi actually compile/run hoti thi.
 //
 // 🔥 FIX (B-7 — backend ke login_app_reference.md §10.8 / views.py check
 // karke) — yeh screen pehle generic send-otp/verify-otp/change-password

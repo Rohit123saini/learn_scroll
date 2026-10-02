@@ -2,9 +2,11 @@ import 'dart:convert';
 import 'package:http/http.dart' as http;
 import 'package:shared_preferences/shared_preferences.dart';
 import 'auth_service.dart';
+import 'account_manager.dart'; // P15-FE
 import '../model/login_model.dart';
 import '../model/signup_model.dart';
 import '../utils/api.dart';
+import 'crash_reporting_service.dart';
 
 class ApiService {
   // ================= LOGIN (username/password) =================
@@ -110,8 +112,13 @@ class ApiService {
     String lastName,
     String password,
     String confirmPassword,
-    String phone,
+    String? phone,
   ) async {
+    // Phone is optional — send null (omitted key would work too, but
+    // explicit null is clearer) instead of an empty string, so the
+    // backend's unique constraint on `phone` never sees two blank
+    // signups collide on "".
+    final trimmedPhone = phone?.trim();
     final response = await http.post(
       Uri.parse("${Api.baseUrl}/login/signup/"),
       headers: {"Content-Type": "application/json"},
@@ -122,7 +129,7 @@ class ApiService {
         "last_name": lastName,
         "password": password,
         "confirm_password": confirmPassword,
-        "phone": phone,
+        "phone": (trimmedPhone == null || trimmedPhone.isEmpty) ? null : trimmedPhone,
       }),
     );
 
@@ -271,8 +278,12 @@ class ApiService {
       if (uid.isNotEmpty) {
         await pref.setString("user_id", uid);
       }
-    } catch (e) {
-      print("user_id save error: $e");
+    } catch (e, st) {
+      CrashReportingService.logError("ApiService.saveUserId", e, stackTrace: st);
     }
+
+    // P15-FE — mirror this session into the multi-account vault (and mark
+    // it active). Never throws; login must not fail because of the vault.
+    await AccountManager.instance.onSessionSaved(data);
   }
 }

@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'dart:io';
 
 import 'package:http/http.dart' as http;
+import 'package:shared_preferences/shared_preferences.dart';
 
 import '../../utils/api.dart';
 import '../../services/auth_service.dart';
@@ -251,11 +252,10 @@ class TestSeriesService {
     return n.toString();
   }
 
-  static Future<TsPage<T>> _getPage<T>(Uri uri, T Function(Map<String, dynamic>) parse) async {
-    final r = await _get(uri);
-    if (r.statusCode != 200) _fail(r);
-    final body = _decode(r);
-
+  /// Factored out of `_getPage` (TASK G16) so the same decode-a-page-body
+  /// logic can also run on a cached raw JSON string, not just a fresh
+  /// `http.Response` — see `_cachedSeriesFirstPage`/`listSeriesPage` below.
+  static TsPage<T> _parsePageBody<T>(dynamic body, T Function(Map<String, dynamic>) parse) {
     List raw = const [];
     String? next;
     if (body is List) {
@@ -268,6 +268,12 @@ class TestSeriesService {
       items: raw.whereType<Map>().map((e) => parse(Map<String, dynamic>.from(e))).toList(),
       nextUrl: next,
     );
+  }
+
+  static Future<TsPage<T>> _getPage<T>(Uri uri, T Function(Map<String, dynamic>) parse) async {
+    final r = await _get(uri);
+    if (r.statusCode != 200) _fail(r);
+    return _parsePageBody<T>(_decode(r), parse);
   }
 
   static Future<List<T>> _getAll<T>(Uri first, T Function(Map<String, dynamic>) parse) async {
@@ -305,17 +311,157 @@ class TestSeriesService {
 
   // ---------------- series ----------------
 
-  /// Ek page (infinite scroll ke liye). `pageUrl` pichhle page ka `nextUrl`.
-  static Future<TsPage<TestSeriesModel>> listSeriesPage({String? source, String? pageUrl}) {
+  // TASK G16 — "All test series" default view (no source filter, first
+  // page) is by far the common case: it's what the Test Series home tab
+  // shows the instant it opens. Cache just that one raw response, same
+  // convention `HomeFeedService` already uses for the feed (store the raw
+  // body string on a successful fetch; on the NEXT cold open, hand back
+  // the parsed cache immediately so the screen never has to sit on a
+  // skeleton while it already has something to show, then let the real
+  // network call behind it correct/refresh it). Filtered/paged requests
+  // aren't cached — they're one tap away from a fresh fetch anyway and
+  // caching every filter combination isn't worth the complexity.
+  static const String _seriesCacheKey = 'ts_series_default_page_v1';
+
+  static bool _isDefaultFirstPage({String? pageUrl, required Map<String, String> extraParams}) =>
+      pageUrl == null && extraParams.isEmpty;
+
+  /// Last cached "All test series" first page, if any — call this BEFORE
+  /// `listSeriesPage()` on screen open so a returning user sees their last
+  /// known list instantly instead of a skeleton.
+  static Future<TsPage<TestSeriesModel>?> getCachedDefaultSeriesPage() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final raw = prefs.getString(_seriesCacheKey);
+      if (raw == null || raw.isEmpty) return null;
+      return _parsePageBody<TestSeriesModel>(jsonDecode(raw), TestSeriesModel.fromJson);
+    } catch (_) {
+      return null; // corrupt/old cache shape -> treat as "no cache", never crash the screen for this.
+    }
+  }
+
+  // Task G9 — search/filter query params shared by `listSeriesPage()` and
+  // the `trending()`/`following()` rails below. `null`/empty entries are
+  // simply left out of the querystring, so an "unset" filter never
+  // narrows the backend's own default ordering/visibility.
+  static Map<String, String> _discoveryParams({
+    String? source,
+    String? subject,
+    String? difficulty,
+    String? price, // 'free' | 'paid'
+    double? minRating,
+    String? search,
+    String? ordering,
+  }) {
+    final q = <String, String>{};
+    if (source != null && source.isNotEmpty) q['source'] = source;
+    if (subject != null && subject.isNotEmpty) q['subject'] = subject;
+    if (difficulty != null && difficulty.isNotEmpty) q['difficulty'] = difficulty;
+    if (price != null && price.isNotEmpty) q['price'] = price;
+    if (minRating != null) q['min_rating'] = minRating.toString();
+    if (search != null && search.isNotEmpty) q['search'] = search;
+    if (ordering != null && ordering.isNotEmpty) q['ordering'] = ordering;
+    return q;
+  }
+
+  /// Ek page (infinite scroll ke liye). `pageUrl` pichhle page ka `nextUrl`
+  /// — jab `pageUrl` diya ho to baaki saare filter args ignore hote hain
+  /// (backend ka `next` URL already poori querystring carry karta hai).
+  ///
+  /// Task G9: `subject`/`difficulty`/`price`/`minRating`/`search`/`ordering`
+  /// sab backend ko forward hote hain (`views.py::TestSeriesViewSet.
+  /// get_queryset()`), taaki search/filter fully server-side ho — screen ab
+  /// already-fetched list ko client-side dobara filter NAHI karti.
+  static Future<TsPage<TestSeriesModel>> listSeriesPage({
+    String? source,
+    String? pageUrl,
+    String? subject,
+    String? difficulty,
+    String? price,
+    double? minRating,
+    String? search,
+    String? ordering,
+  }) async {
+    final params = _discoveryParams(
+      source: source,
+      subject: subject,
+      difficulty: difficulty,
+      price: price,
+      minRating: minRating,
+      search: search,
+      ordering: ordering,
+    );
     final uri = pageUrl != null
         ? Uri.parse(pageUrl)
-        : Uri.parse('$_series/').replace(queryParameters: source == null ? null : {'source': source});
-    return _getPage<TestSeriesModel>(uri, TestSeriesModel.fromJson);
+        : Uri.parse('$_series/').replace(queryParameters: params.isEmpty ? null : params);
+    final r = await _get(uri);
+    if (r.statusCode != 200) _fail(r);
+    final body = _decode(r);
+    if (_isDefaultFirstPage(pageUrl: pageUrl, extraParams: params)) {
+      unawaited(SharedPreferences.getInstance().then((p) => p.setString(_seriesCacheKey, utf8.decode(r.bodyBytes))));
+    }
+    return _parsePageBody<TestSeriesModel>(body, TestSeriesModel.fromJson);
   }
 
   /// Compat: pehla page hi (purane callers ke liye).
   static Future<List<TestSeriesModel>> listSeries({String? source}) async =>
       (await listSeriesPage(source: source)).items;
+
+  /// `views.py`/`views_advanced.py` ke `trending`/`following` actions
+  /// paginated nahi hain — seedha JSON array return karte hain, isliye
+  /// `_getPage`/`_parsePageBody` (jo `{results: [...], next: ...}` expect
+  /// karte hain) ka istemaal nahi hota; ye chhota helper wahi decode karta
+  /// hai jo un dono rails ko chahiye.
+  static List<TestSeriesModel> _parseSeriesList(http.Response r) {
+    final body = _decode(r);
+    if (body is! List) {
+      throw TestSeriesApiException('BAD_RESPONSE', statusCode: r.statusCode, kind: TsErrorKind.server);
+    }
+    return body.whereType<Map>().map((e) => TestSeriesModel.fromJson(Map<String, dynamic>.from(e))).toList();
+  }
+
+  // ---------------- discovery rails (Task G9) ----------------
+
+  /// "Trending" rail — Test Series home. Server-ranked by recent attempt
+  /// velocity (`views_advanced.py::SeriesAdvancedActionsMixin.trending`),
+  /// over whatever this user can already browse. Accepts the same
+  /// subject/difficulty/price/minRating/search filters as
+  /// `listSeriesPage()` so the rail narrows along with the rest of the
+  /// screen. `limit` caps rail size (backend default 20, max 50).
+  static Future<List<TestSeriesModel>> trending({
+    String? subject,
+    String? difficulty,
+    String? price,
+    double? minRating,
+    String? search,
+    int? limit,
+  }) async {
+    final params = _discoveryParams(
+      subject: subject,
+      difficulty: difficulty,
+      price: price,
+      minRating: minRating,
+      search: search,
+    );
+    if (limit != null) params['limit'] = '$limit';
+    final uri = Uri.parse('$_series/trending/').replace(queryParameters: params.isEmpty ? null : params);
+    final r = await _get(uri);
+    if (r.statusCode != 200) _fail(r);
+    return _parseSeriesList(r);
+  }
+
+  /// "New from people you follow" rail — Test Series home. Individual/
+  /// marketplace series only, newest published first, from creators this
+  /// user follows (`views_advanced.py::SeriesAdvancedActionsMixin.
+  /// following`). `limit` caps rail size (backend default 20, max 50).
+  static Future<List<TestSeriesModel>> following({int? limit}) async {
+    final params = <String, String>{};
+    if (limit != null) params['limit'] = '$limit';
+    final uri = Uri.parse('$_series/following/').replace(queryParameters: params.isEmpty ? null : params);
+    final r = await _get(uri);
+    if (r.statusCode != 200) _fail(r);
+    return _parseSeriesList(r);
+  }
 
   static Future<TestSeriesModel> getSeries(String id) async {
     final r = await _get(Uri.parse('$_series/$id/'));
@@ -327,6 +473,50 @@ class TestSeriesService {
     final list = await _getAll<TsQuestion>(Uri.parse('$_series/$seriesId/questions/'), TsQuestion.fromJson);
     list.sort((a, b) => a.order.compareTo(b.order));
     return list;
+  }
+
+  /// TASK 8 — `POST {mount}/testseries/` — any authenticated user can call
+  /// this directly (`TestSeriesViewSet.perform_create` always forces
+  /// `source=individual`, `creator=request.user` server-side; no
+  /// staff/institution check exists on this path — see `permissions.py` /
+  /// `views.py` docstrings). Series is created as a `draft`; add questions
+  /// with [questionsBulk] and call [publishSeries] when ready.
+  ///
+  /// Individual series pricing is policy-enforced as `required`
+  /// (`policy.py`'s `DEFAULT_PRICING_POLICY`) — `isPaid=false` or
+  /// `priceCoins < 1` comes back as a 400 on `is_paid`/`price_coins`
+  /// (surfaced via `TestSeriesApiException.message`). The create screen
+  /// enforces this client-side too, purely so the user gets instant
+  /// feedback instead of a round trip, not as a substitute for the
+  /// server-side rule.
+  static Future<TestSeriesModel> createSeries({
+    required String title,
+    required String description,
+    required bool isPaid,
+    required int priceCoins,
+    int? durationMinutes,
+    int attemptsAllowed = 1,
+  }) async {
+    final body = <String, dynamic>{
+      'title': title,
+      'description': description,
+      'is_paid': isPaid,
+      'price_coins': isPaid ? priceCoins : 0,
+      'attempts_allowed': attemptsAllowed,
+      if (durationMinutes != null) 'duration_minutes': durationMinutes,
+    };
+    final r = await _postJson(Uri.parse('$_series/'), body);
+    if (r.statusCode != 200 && r.statusCode != 201) _fail(r);
+    return TestSeriesModel.fromJson(_asMap(r));
+  }
+
+  /// Draft-only — creator can delete a series that never got published
+  /// (or was never worth finishing) straight from the create flow.
+  static Future<void> deleteSeries(String seriesId) async {
+    final headers = await _headers(json: false);
+    final r = await _client.delete(Uri.parse('$_series/$seriesId/'), headers: headers).timeout(TsConfig.postTimeout);
+    _syncClock(r);
+    if (r.statusCode != 204 && r.statusCode != 200) _fail(r);
   }
 
   // ---------------- attempts ----------------
@@ -505,6 +695,16 @@ class TestSeriesService {
         : const [];
   }
 
+  /// `GET {mount}/testseries/{id}/analytics/` — creator-only class-wide
+  /// dashboard (Task 4): average score/%, pass rate, per-question
+  /// wrong-rate, attempt volume over time. Distinct from `analytics(attemptId)`
+  /// below, which is one student's own result-screen breakdown.
+  static Future<TsSeriesAnalytics> seriesAnalytics(String seriesId) async {
+    final r = await _get(Uri.parse('$_series/$seriesId/analytics/'));
+    if (r.statusCode != 200) _fail(r);
+    return TsSeriesAnalytics.fromJson(_asMap(r));
+  }
+
   /// `GET {mount}/testseries/{id}/certificates/` — creator: every certificate issued.
   static Future<List<TsCertificate>> seriesCertificates(String seriesId) async {
     final r = await _get(Uri.parse('$_series/$seriesId/certificates/'));
@@ -555,7 +755,7 @@ class TestSeriesService {
     return TestSeriesModel.fromJson(_asMap(r));
   }
 
-  // ---------------- creator: live class ----------------
+  // ---------------- creator: tuition class ----------------
 
   /// `POST {mount}/testseries/{id}/live-start/` — host goes live.
   static Future<TsLiveToken> liveStart(String seriesId) async {
@@ -614,6 +814,26 @@ class TestSeriesService {
     return _asMap(r);
   }
 
+  // ---------------- attempt: practice weak areas (Task G8) ----------------
+
+  /// `POST {mount}/attempts/{id}/practice-weak-areas/` — the "Practice weak
+  /// areas" CTA on the result screen. Generates a fresh revision test from
+  /// the questions this student got wrong across their attempts on this
+  /// series (weakest topics first), and starts its first attempt in the
+  /// same call, so the caller can push straight into `TestAttemptScreen`.
+  ///
+  /// Returns `null` when there's nothing to revise — every auto-graded
+  /// question answered so far was correct — same "null is a valid,
+  /// non-error state" contract `downloadCertificateShareCard` above uses;
+  /// the caller should show that as a friendly message, not an error.
+  static Future<TsWeakAreaPractice?> practiceWeakAreas(String attemptId) async {
+    final r = await _postJson(Uri.parse('$_attempts/$attemptId/practice-weak-areas/'), {});
+    if (r.statusCode != 200 && r.statusCode != 201) _fail(r);
+    final body = _asMap(r);
+    if (body['practice_series_id'] == null) return null;
+    return TsWeakAreaPractice.fromJson(body);
+  }
+
   // ---------------- attempt: certificate ----------------
 
   static Future<TsCertificate> attemptCertificate(String attemptId) async {
@@ -638,10 +858,30 @@ class TestSeriesService {
     return r.bodyBytes;
   }
 
+  /// TASK G10 — `GET {mount}/attempts/{id}/certificate-share-card/`, a
+  /// LinkedIn/Instagram-ready PNG with the student's own referral link
+  /// baked in. Returns `null` for ANY failure, INCLUDING the backend's 501
+  /// (Pillow not installed on that deployment) — same "null means nothing
+  /// to show, not an error to surface" contract `RecapService.fetchCardPng`
+  /// uses for the weekly-recap share card; the caller (test_result_screen)
+  /// should just hide/disable the "Share certificate" action on null.
+  static Future<List<int>?> downloadCertificateShareCard(String attemptId) async {
+    try {
+      final headers = await _headers(json: false);
+      final r = await _client
+          .get(Uri.parse('$_attempts/$attemptId/certificate-share-card/'), headers: headers)
+          .timeout(TsConfig.getTimeout);
+      if (r.statusCode != 200) return null;
+      return r.bodyBytes;
+    } catch (_) {
+      return null;
+    }
+  }
+
   // ---------------- attempt: live / proctoring ----------------
 
   /// `POST {mount}/attempts/{id}/live-token/` — student's own join token
-  /// (live-class subscribe token and/or proctor publish token).
+  /// (tuition-class subscribe token and/or proctor publish token).
   static Future<Map<String, TsLiveToken>> attemptLiveToken(String attemptId) async {
     final r = await _postJson(Uri.parse('$_attempts/$attemptId/live-token/'), {});
     if (r.statusCode != 200) _fail(r);

@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:cached_network_image/cached_network_image.dart';
 import 'package:share_plus/share_plus.dart';
 import 'package:path_provider/path_provider.dart';
@@ -11,11 +12,19 @@ import '../../widgets/ls_ui.dart';
 import '../../widgets/skeletons.dart';
 import '../../widgets/error_widgets.dart';
 import '../../widgets/profile_media_tiles.dart';
+import '../../widgets/profile_bio_block.dart'; // P7-FE
+import '../../widgets/badges_ui.dart'; // P13-FE — badges row + "All badges" sheet
+import '../discovery_models.dart'; // P8-FE
 import '../../l10n/app_localizations.dart';
 import '../../post/screens/singlepost.dart';
+import '../../post/screens/reels_screen.dart'; // P13 — video tile -> open in Reels
+import '../../post/widgets/pin_overlay.dart'; // P3-FE — pinned posts (read-only badge here)
 import '../../message/services/message_api_service.dart';
 import '../../message/screens/chat_screen.dart';
 import 'follow_list_screen.dart';
+import '../../post/widgets/highlights_row.dart'; // P1-FE — Highlights row
+import '../../post/models/highlight_model.dart';
+import '../../post/widgets/highlight_launcher.dart'; // P2-FE
 
 // ============================================================
 // TARGET (someone else's) PROFILE — rebuilt on the same ls_ui.dart /
@@ -93,7 +102,22 @@ class _TargetProfilePageState extends State<TargetProfilePage> {
   bool isActionLoading = false;
   int _postsPage = 1;
   int _selectedTab = 0;
+  int _highlightsReload = 0; // P1-FE
   String? errorMessage;
+
+  // ---------- P8-FE ----------
+  // "Followed by X, Y + N others" — loaded after the profile, failures are silent.
+  MutualFollowers _mutuals = MutualFollowers.empty;
+  // P13-FE — their earned badges; loaded after the profile, failures are silent.
+  List<UserBadge> _badges = [];
+  // "Suggested for you" carousel: revealed by a FRESH follow tap, hidden again on unfollow,
+  // and once the user hits X it stays gone for the rest of this visit.
+  List<MiniUser> _suggested = [];
+  bool _suggestionsOpen = false;
+  bool _suggestionsLoading = false;
+  bool _suggestionsDismissed = false;
+  final Map<int, String> _suggFollow = {}; // userId -> 'ACCEPTED' | 'PENDING' (absent = not following)
+  final Set<int> _suggBusy = {};
 
   final ScrollController _scrollController = ScrollController();
 
@@ -109,6 +133,17 @@ class _TargetProfilePageState extends State<TargetProfilePage> {
   List<PostModel> get _documentPosts => targetPosts
       .where((p) => ['document', 'pdf', 'excel', 'docx', 'xls', 'doc'].contains(p.postType))
       .toList();
+
+  // 🔥 NAYA — "Reposts" tab (Task 4 replacement: Saved tab ki jagah, kyunki
+  // saved posts backend me hamesha `request.user`-only hote hain — koi bhi
+  // dusre user ke saves nahi dekh sakta, `SavedPostsListAPIView` aur
+  // `test_saved_list_only_shows_current_users_saves` dono isi ko enforce
+  // karte hain, isliye target profile pe "Saved" dikhana galat/privacy-
+  // breaking hota). Repost `post_type == 'repost'` waala ek normal Post row
+  // hi hai (targetPosts me already aata hai, koi extra API call nahi
+  // chahiye), isliye ye local filter hi kaafi hai.
+  List<PostModel> get _repostPosts =>
+      targetPosts.where((p) => p.postType == 'repost').toList();
 
   @override
   void initState() {
@@ -133,6 +168,7 @@ class _TargetProfilePageState extends State<TargetProfilePage> {
   }
 
   Future<void> _loadProfile() async {
+    _highlightsReload++; // P1-FE — refetch highlights with the profile (follow state may have changed)
     setState(() {
       isLoading = true;
       errorMessage = null;
@@ -144,6 +180,8 @@ class _TargetProfilePageState extends State<TargetProfilePage> {
         targetUser = data;
         isLoading = false;
       });
+      _loadMutuals(data); // P8-FE — fire and forget
+      _loadBadges(data.username); // P13-FE — fire and forget
       if (_isPrivateGated) {
         setState(() => isPostsLoading = false);
       } else {
@@ -157,6 +195,18 @@ class _TargetProfilePageState extends State<TargetProfilePage> {
         });
       }
     }
+  }
+
+  // P13-FE — skipped for a private account I can't see into (same gate as
+  // the posts grid); a failed call just leaves the row hidden.
+  Future<void> _loadBadges(String username) async {
+    if (_isPrivateGated) {
+      if (_badges.isNotEmpty && mounted) setState(() => _badges = []);
+      return;
+    }
+    final list = await BadgeService.fetch(username);
+    if (!mounted) return;
+    setState(() => _badges = list);
   }
 
   Future<void> _loadPostsFirstPage() async {
@@ -209,17 +259,66 @@ class _TargetProfilePageState extends State<TargetProfilePage> {
     }
   }
 
+  // TASK G16 — optimistic follow/unfollow. This used to block the whole
+  // button behind `isActionLoading` and then re-fetch the *entire* profile
+  // (`_loadProfile()`, header + posts + everything) just to reflect a
+  // follow-status flip — by far the heaviest "wait for the network before
+  // the UI moves" spot found in this pass, since every other screen only
+  // ever waits on the one thing it changed. Now the button flips instantly
+  // (using `isPrivate` to guess PENDING vs ACCEPTED for a fresh follow,
+  // same guess feed's follow button makes) and only the true follow/unfollow
+  // path avoids a full profile reload — accept/reject still go through
+  // `_loadProfile()` below since those affect the incoming-request banner,
+  // not something this screen tracks separately.
   Future<void> handleFollow(AppLocalizations l10n) async {
-    if (targetUser == null || isActionLoading) return;
-    setState(() => isActionLoading = true);
+    final current = targetUser;
+    if (current == null || isActionLoading) return;
+    HapticFeedback.selectionClick();
+
+    final wasFollowingBack = current.myFollowStatus == 'ACCEPTED';
+    final isFreshFollow = current.myFollowStatus == null;
+    final optimistic = isFreshFollow
+        ? current.copyWith(
+            myFollowStatus: current.isPrivate ? 'PENDING' : 'ACCEPTED',
+            followers: current.isPrivate ? current.followers : current.followers + 1,
+          )
+        : current.copyWith(
+            clearMyFollowStatus: true,
+            clearMyFollowId: true,
+            followers: wasFollowingBack ? (current.followers > 0 ? current.followers - 1 : 0) : current.followers,
+          );
+    setState(() => targetUser = optimistic);
+
     try {
-      final result = await ApiService.followUser(targetUser!.targetUserId);
-      await _loadProfile();
-      if (mounted && result['message'] != null) lsSnack(context, result['message'].toString());
+      final result = await ApiService.followUser(current.targetUserId);
+      if (!mounted) return;
+      final status = result['status']?.toString(); // null | 'PENDING' | 'ACCEPTED'
+      // Recompute the follower count from the ORIGINAL (pre-tap) number
+      // rather than nudging the optimistic guess — simpler to get right,
+      // and self-corrects the private-account PENDING/ACCEPTED guess above
+      // without a full profile reload.
+      final actualDelta = isFreshFollow
+          ? (status == 'ACCEPTED' ? 1 : 0)
+          : (wasFollowingBack ? -1 : 0);
+      final newFollowers = current.followers + actualDelta;
+      setState(() {
+        targetUser = current.copyWith(
+          myFollowStatus: status,
+          clearMyFollowStatus: status == null,
+          followers: newFollowers < 0 ? 0 : newFollowers,
+        );
+      });
+      if (result['message'] != null) lsSnack(context, result['message'].toString());
+      // P8-FE — a fresh follow opens "Suggested for you"; unfollowing closes it again.
+      if (isFreshFollow) {
+        _openSuggestions();
+      } else if (_suggestionsOpen) {
+        setState(() => _suggestionsOpen = false);
+      }
     } catch (e) {
-      if (mounted) lsSnack(context, l10n.somethingWentWrong, error: true);
-    } finally {
-      if (mounted) setState(() => isActionLoading = false);
+      if (!mounted) return;
+      setState(() => targetUser = current); // rollback to the exact pre-tap snapshot
+      lsSnack(context, l10n.somethingWentWrong, error: true);
     }
   }
 
@@ -249,6 +348,12 @@ class _TargetProfilePageState extends State<TargetProfilePage> {
     } finally {
       if (mounted) setState(() => isActionLoading = false);
     }
+  }
+
+  // P2-FE — read-only highlight viewer (visibility already enforced by the backend).
+  Future<void> _openHighlight(Highlight h) async {
+    final changed = await openHighlightViewer(context, h, myUserId: '${targetUser?.myId}');
+    if (changed && mounted) setState(() => _highlightsReload++);
   }
 
   Future<void> _openChatWithUser(AppLocalizations l10n) async {
@@ -281,6 +386,15 @@ class _TargetProfilePageState extends State<TargetProfilePage> {
 
   void _openSinglePost(String postId) {
     Navigator.push(context, MaterialPageRoute(builder: (context) => SinglePostPage(postId: postId)));
+  }
+
+  // P13 — a video tile opens in Reels (starts on that video, `?start=`); everything else stays a single post.
+  void _openPost(PostModel post) {
+    if (post.postType == 'video' && post.media.isNotEmpty) {
+      ReelsScreen.open(context, startPostId: post.id.toString());
+    } else {
+      _openSinglePost(post.id.toString());
+    }
   }
 
   void _shareProfile() {
@@ -359,9 +473,21 @@ class _TargetProfilePageState extends State<TargetProfilePage> {
               title: _buildTopBar(cs, l10n),
             ),
             SliverToBoxAdapter(child: _buildHeader(cs, l10n)),
+            // P8-FE — slides in under the header after a fresh follow
+            SliverToBoxAdapter(child: _buildSuggestedCarousel(cs, l10n)),
             if (_isPrivateGated)
               SliverToBoxAdapter(child: _privateGateNotice(cs, l10n))
             else ...[
+              // P1-FE — no "New +" here; empty (or hidden by backend
+              // visibility rules) => the row renders nothing.
+              SliverToBoxAdapter(
+                child: HighlightsRow(
+                  userId: targetUser!.targetUserId,
+                  isOwner: false,
+                  reloadToken: _highlightsReload,
+                  onOpen: _openHighlight,
+                ),
+              ),
               SliverToBoxAdapter(child: _buildSegmentedTabs(cs, l10n)),
               ..._buildGridSlivers(cs, l10n),
             ],
@@ -369,6 +495,273 @@ class _TargetProfilePageState extends State<TargetProfilePage> {
           ],
         ),
       ),
+    );
+  }
+
+  // ============================================================
+  // P8-FE — mutual line + "Suggested for you" carousel
+  // ============================================================
+  String _absPhoto(String photo) =>
+      photo.isEmpty ? '' : (photo.startsWith('http') ? photo : '${Api.baseUrl}$photo');
+
+  Future<void> _loadMutuals(TargetProfileModel t) async {
+    if (t.myId == t.targetUserId) return; // no "mutuals" with yourself
+    try {
+      final m = await ApiService.getMutualFollowers(t.username);
+      if (mounted) setState(() => _mutuals = m);
+    } catch (_) {
+      // decorative line — never surface an error for it
+    }
+  }
+
+  Widget _miniAvatar(MiniUser u, double radius, ColorScheme cs) {
+    final url = _absPhoto(u.profilePhoto);
+    return CircleAvatar(
+      radius: radius,
+      backgroundColor: cs.surfaceVariant,
+      backgroundImage: url.isEmpty ? null : CachedNetworkImageProvider(url),
+      child: url.isEmpty
+          ? Text(u.username.isEmpty ? '?' : u.username[0].toUpperCase(),
+              style: TextStyle(fontSize: radius * 0.85, fontWeight: FontWeight.w700, color: cs.onSurfaceVariant))
+          : null,
+    );
+  }
+
+  // "Followed by a, b + 5 others" with up to 3 overlapping avatars.
+  Widget _mutualLine(ColorScheme cs) {
+    final people = _mutuals.preview;
+    final total = _mutuals.total < people.length ? people.length : _mutuals.total;
+    final names = people.take(2).map((u) => u.username).toList();
+    final String label;
+    if (total <= 1 || names.length == 1) {
+      label = 'Followed by ${names.first}';
+    } else if (total == 2) {
+      label = 'Followed by ${names[0]} and ${names[1]}';
+    } else {
+      final others = total - 2;
+      label = 'Followed by ${names[0]}, ${names[1]} + $others other${others == 1 ? '' : 's'}';
+    }
+
+    const r = 11.0;
+    const overlap = 15.0;
+    final shown = people.take(3).toList();
+    return Padding(
+      padding: const EdgeInsets.only(top: 10),
+      child: InkWell(
+        borderRadius: BorderRadius.circular(8),
+        onTap: () => Navigator.push(
+          context,
+          MaterialPageRoute(builder: (_) => FollowListScreen(username: targetUser!.username, followers: true)),
+        ),
+        child: Row(children: [
+          SizedBox(
+            width: r * 2 + (shown.length - 1) * overlap + 4,
+            height: r * 2 + 4,
+            child: Stack(children: [
+              for (int i = 0; i < shown.length; i++)
+                Positioned(
+                  left: i * overlap,
+                  child: Container(
+                    padding: const EdgeInsets.all(2),
+                    decoration: BoxDecoration(color: cs.surface, shape: BoxShape.circle),
+                    child: _miniAvatar(shown[i], r, cs),
+                  ),
+                ),
+            ]),
+          ),
+          const SizedBox(width: 8),
+          Expanded(
+            child: Text(label,
+                maxLines: 2,
+                overflow: TextOverflow.ellipsis,
+                style: TextStyle(fontSize: 12, height: 1.3, color: cs.onSurfaceVariant)),
+          ),
+        ]),
+      ),
+    );
+  }
+
+  void _openSuggestions() {
+    if (_suggestionsDismissed || !mounted) return;
+    setState(() => _suggestionsOpen = true);
+    if (_suggested.isEmpty && !_suggestionsLoading) _loadSuggestions();
+  }
+
+  Future<void> _loadSuggestions() async {
+    final t = targetUser;
+    if (t == null) return;
+    setState(() => _suggestionsLoading = true);
+    try {
+      final list = await ApiService.getSimilarUsers(t.username);
+      if (!mounted) return;
+      setState(() {
+        _suggested = list;
+        _suggestionsLoading = false;
+      });
+    } catch (_) {
+      if (mounted) setState(() => _suggestionsLoading = false); // nothing to show => section hides itself
+    }
+  }
+
+  void _dismissSuggestions() {
+    setState(() {
+      _suggestionsOpen = false;
+      _suggestionsDismissed = true;
+    });
+  }
+
+  Future<void> _toggleFollowSuggestion(MiniUser u, AppLocalizations l10n) async {
+    if (_suggBusy.contains(u.id)) return;
+    HapticFeedback.selectionClick();
+    final before = _suggFollow[u.id];
+    setState(() {
+      _suggBusy.add(u.id);
+      if (before == null) {
+        _suggFollow[u.id] = 'ACCEPTED'; // optimistic; corrected from the response below
+      } else {
+        _suggFollow.remove(u.id);
+      }
+    });
+    try {
+      final result = await ApiService.followUser(u.id);
+      if (!mounted) return;
+      final st = result['status']?.toString(); // null | 'PENDING' | 'ACCEPTED'
+      setState(() {
+        if (st == null) {
+          _suggFollow.remove(u.id);
+        } else {
+          _suggFollow[u.id] = st;
+        }
+      });
+    } catch (_) {
+      if (!mounted) return;
+      setState(() {
+        if (before == null) {
+          _suggFollow.remove(u.id);
+        } else {
+          _suggFollow[u.id] = before;
+        }
+      });
+      lsSnack(context, l10n.somethingWentWrong, error: true);
+    } finally {
+      if (mounted) setState(() => _suggBusy.remove(u.id));
+    }
+  }
+
+  Widget _buildSuggestedCarousel(ColorScheme cs, AppLocalizations l10n) {
+    final visible = _suggestionsOpen && !_suggestionsDismissed && (_suggestionsLoading || _suggested.isNotEmpty);
+    return AnimatedSize(
+      duration: const Duration(milliseconds: 220),
+      curve: Curves.easeOutCubic,
+      alignment: Alignment.topCenter,
+      child: !visible
+          ? const SizedBox(width: double.infinity)
+          : Padding(
+              padding: const EdgeInsets.only(top: 6, bottom: 8),
+              child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(kLsPad, 0, 4, 0),
+                  child: Row(children: [
+                    const Expanded(
+                      child: Text('Suggested for you', style: TextStyle(fontSize: 13.5, fontWeight: FontWeight.w800)),
+                    ),
+                    IconButton(
+                      tooltip: 'Dismiss',
+                      visualDensity: VisualDensity.compact,
+                      icon: Icon(Icons.close_rounded, size: 20, color: cs.onSurfaceVariant),
+                      onPressed: _dismissSuggestions,
+                    ),
+                  ]),
+                ),
+                SizedBox(
+                  height: 196,
+                  child: _suggestionsLoading && _suggested.isEmpty
+                      ? ListView.separated(
+                          scrollDirection: Axis.horizontal,
+                          padding: const EdgeInsets.symmetric(horizontal: kLsPad),
+                          itemCount: 3,
+                          separatorBuilder: (_, __) => const SizedBox(width: 10),
+                          itemBuilder: (_, __) => Container(
+                            width: 142,
+                            decoration: BoxDecoration(
+                              color: cs.surfaceVariant.withOpacity(.5),
+                              borderRadius: BorderRadius.circular(14),
+                            ),
+                          ),
+                        )
+                      : ListView.separated(
+                          scrollDirection: Axis.horizontal,
+                          padding: const EdgeInsets.symmetric(horizontal: kLsPad),
+                          itemCount: _suggested.length,
+                          separatorBuilder: (_, __) => const SizedBox(width: 10),
+                          itemBuilder: (_, i) => _suggestionCard(_suggested[i], cs, l10n),
+                        ),
+                ),
+              ]),
+            ),
+    );
+  }
+
+  Widget _suggestionCard(MiniUser u, ColorScheme cs, AppLocalizations l10n) {
+    final st = _suggFollow[u.id];
+    final following = st != null;
+    final label = st == 'PENDING' ? 'Requested' : (following ? 'Following' : 'Follow');
+    return Container(
+      key: ValueKey('sugg-${u.id}'),
+      width: 142,
+      decoration: BoxDecoration(
+        color: cs.surface,
+        borderRadius: BorderRadius.circular(14),
+        border: Border.all(color: cs.outlineVariant),
+      ),
+      child: Stack(children: [
+        InkWell(
+          borderRadius: BorderRadius.circular(14),
+          onTap: () => Navigator.push(
+            context,
+            MaterialPageRoute(builder: (_) => TargetProfilePage(username: u.username)),
+          ),
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(10, 14, 10, 10),
+            child: Column(children: [
+              _miniAvatar(u, 32, cs),
+              const SizedBox(height: 8),
+              Text(u.username,
+                  maxLines: 1, overflow: TextOverflow.ellipsis, style: const TextStyle(fontSize: 12.5, fontWeight: FontWeight.w700)),
+              const SizedBox(height: 2),
+              Text(u.fullName.isEmpty ? ' ' : u.fullName,
+                  maxLines: 1, overflow: TextOverflow.ellipsis, style: TextStyle(fontSize: 11, color: cs.onSurfaceVariant)),
+              const Spacer(),
+              SizedBox(
+                width: double.infinity,
+                height: 30,
+                child: following
+                    ? OutlinedButton(
+                        onPressed: _suggBusy.contains(u.id) ? null : () => _toggleFollowSuggestion(u, l10n),
+                        style: OutlinedButton.styleFrom(padding: EdgeInsets.zero, visualDensity: VisualDensity.compact),
+                        child: Text(label, style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w700)),
+                      )
+                    : FilledButton(
+                        onPressed: _suggBusy.contains(u.id) ? null : () => _toggleFollowSuggestion(u, l10n),
+                        style: FilledButton.styleFrom(padding: EdgeInsets.zero, visualDensity: VisualDensity.compact),
+                        child: Text(label, style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w700)),
+                      ),
+              ),
+            ]),
+          ),
+        ),
+        Positioned(
+          top: 0,
+          right: 0,
+          child: IconButton(
+            tooltip: 'Remove',
+            visualDensity: VisualDensity.compact,
+            iconSize: 16,
+            icon: Icon(Icons.close_rounded, color: cs.onSurfaceVariant),
+            onPressed: () => setState(() => _suggested = _suggested.where((x) => x.id != u.id).toList()),
+          ),
+        ),
+      ]),
     );
   }
 
@@ -441,12 +834,21 @@ class _TargetProfilePageState extends State<TargetProfilePage> {
           const SizedBox(height: 6),
           LsStatusChip(label: l10n.privateAccountBadge, color: cs.onSurfaceVariant, icon: Icons.lock_rounded),
         ],
-        if (targetUser!.bio.isNotEmpty) ...[
-          const SizedBox(height: 8),
-          Text(targetUser!.bio, style: TextStyle(fontSize: 12.5, height: 1.45, color: cs.onSurface)),
-        ],
+        // P7-FE — see profile.dart. Private/restricted view sends none of these => renders nothing.
+        ProfileBioBlock(
+          bio: targetUser!.bio,
+          pronouns: targetUser!.pronouns,
+          categoryLabel: targetUser!.categoryLabel,
+          links: targetUser!.links,
+        ),
+        if (!_mutuals.isEmpty) _mutualLine(cs), // P8-FE
         const SizedBox(height: 14),
         _followSection(cs, l10n),
+        // P13-FE — top-3 badges + "All" sheet (hidden when none / private-gated).
+        if (_badges.isNotEmpty && !_isPrivateGated) ...[
+          const SizedBox(height: 10),
+          ProfileBadgesRow(badges: _badges, ownerName: targetUser!.username),
+        ],
       ]),
     );
   }
@@ -585,6 +987,14 @@ class _TargetProfilePageState extends State<TargetProfilePage> {
               selected: _selectedTab == 1,
               onTap: () => setState(() => _selectedTab = 1)),
         ),
+        const SizedBox(width: 10),
+        Expanded(
+          child: _segmentButton(cs,
+              icon: Icons.repeat_rounded,
+              label: l10n.repostsTabLabel(_repostPosts.length),
+              selected: _selectedTab == 2,
+              onTap: () => setState(() => _selectedTab = 2)),
+        ),
       ]),
     );
   }
@@ -646,6 +1056,8 @@ class _TargetProfilePageState extends State<TargetProfilePage> {
       ];
     }
 
+    if (_selectedTab == 2) return _buildRepostGridSlivers(cs, l10n);
+
     final list = _selectedTab == 0 ? _mediaPosts : _documentPosts;
 
     if (list.isEmpty) {
@@ -674,18 +1086,24 @@ class _TargetProfilePageState extends State<TargetProfilePage> {
             (context, index) {
               final post = list[index];
               if (_selectedTab == 0) {
-                return MediaGridTile(post: post, l10n: l10n, onTap: () => _openSinglePost(post.id.toString()));
+                return PinnedTileOverlay(
+                  pinned: post.isPinned,
+                  child: MediaGridTile(post: post, l10n: l10n, onTap: () => _openPost(post)),
+                );
               }
               final file = post.media.isNotEmpty ? post.media.first : null;
               if (file == null) return const SizedBox.shrink();
-              return InkWell(
-                borderRadius: BorderRadius.circular(10),
-                onTap: () => _openSinglePost(post.id.toString()),
-                child: DocumentGridTile(
-                  doc: post,
-                  file: file,
-                  l10n: l10n,
-                  onDownload: () => _downloadDocument(file.file, file.fileName, l10n),
+              return PinnedTileOverlay(
+                pinned: post.isPinned,
+                child: InkWell(
+                  borderRadius: BorderRadius.circular(10),
+                  onTap: () => _openSinglePost(post.id.toString()),
+                  child: DocumentGridTile(
+                    doc: post,
+                    file: file,
+                    l10n: l10n,
+                    onDownload: () => _downloadDocument(file.file, file.fileName, l10n),
+                  ),
                 ),
               );
             },
@@ -715,6 +1133,130 @@ class _TargetProfilePageState extends State<TargetProfilePage> {
           ),
         ),
     ];
+  }
+
+  // ---------- Reposts tab grid ----------
+  // Same grid/skeleton/pagination-footer shape as Media/Documents above
+  // (reposts already live inside `targetPosts`/`_loadMorePosts`'s own
+  // pagination — no separate endpoint or page-cursor needed), but each
+  // tile renders the embedded *original* post's preview (Twitter/IG-style
+  // "reposted" card), not the repost row itself.
+  List<Widget> _buildRepostGridSlivers(ColorScheme cs, AppLocalizations l10n) {
+    final list = _repostPosts;
+
+    if (list.isEmpty) {
+      return [
+        SliverToBoxAdapter(
+          child: EmptyStateWidget(
+            icon: Icons.repeat_rounded,
+            title: l10n.noRepostsYetTitle,
+            subtitle: l10n.noRepostsYetSubtitle,
+          ),
+        ),
+      ];
+    }
+
+    return [
+      SliverPadding(
+        padding: const EdgeInsets.symmetric(horizontal: kLsPad),
+        sliver: SliverGrid(
+          gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
+            crossAxisCount: 3,
+            crossAxisSpacing: 6,
+            mainAxisSpacing: 6,
+            childAspectRatio: 1.0,
+          ),
+          delegate: SliverChildBuilderDelegate(
+            (context, index) => _repostTile(list[index], cs, l10n),
+            childCount: list.length,
+          ),
+        ),
+      ),
+      if (isLoadingMorePosts)
+        const SliverToBoxAdapter(
+          child: Padding(
+            padding: EdgeInsets.symmetric(vertical: 18),
+            child: Center(child: SizedBox(width: 22, height: 22, child: CircularProgressIndicator(strokeWidth: 2))),
+          ),
+        )
+      else if (!hasMorePosts && list.length >= 6)
+        SliverToBoxAdapter(
+          child: Padding(
+            padding: const EdgeInsets.symmetric(vertical: 20),
+            child: Center(
+              child: Row(mainAxisSize: MainAxisSize.min, children: [
+                Icon(Icons.check_circle_outline_rounded, size: 14, color: cs.onSurfaceVariant),
+                const SizedBox(width: 6),
+                Text(l10n.allCaughtUp,
+                    style: TextStyle(fontSize: 11, fontWeight: FontWeight.w600, color: cs.onSurfaceVariant)),
+              ]),
+            ),
+          ),
+        ),
+    ];
+  }
+
+  Widget _repostTile(PostModel post, ColorScheme cs, AppLocalizations l10n) {
+    final original = post.originalPost;
+    Widget tile;
+    if (original == null) {
+      // Hard-deleted or unavailable original (see `PostModel.fromJson` —
+      // `is_unavailable` stub never leaks the hidden post's content).
+      tile = InkWell(
+        borderRadius: BorderRadius.circular(10),
+        onTap: () => _openSinglePost(post.id.toString()),
+        child: Container(
+          decoration: BoxDecoration(color: cs.surfaceVariant, borderRadius: BorderRadius.circular(10)),
+          alignment: Alignment.center,
+          child: Icon(Icons.repeat_rounded, color: cs.onSurfaceVariant, size: 22),
+        ),
+      );
+    } else if (original.media.isNotEmpty && (original.postType == 'image' || original.postType == 'video')) {
+      tile = MediaGridTile(post: original, l10n: l10n, onTap: () => _openSinglePost(post.id.toString()));
+    } else {
+      final caption = (original.title?.isNotEmpty == true) ? original.title! : original.content;
+      tile = InkWell(
+        borderRadius: BorderRadius.circular(10),
+        onTap: () => _openSinglePost(post.id.toString()),
+        child: Container(
+          decoration: BoxDecoration(color: cs.surfaceVariant, borderRadius: BorderRadius.circular(10)),
+          padding: const EdgeInsets.all(8),
+          alignment: Alignment.center,
+          child: Text(
+            caption.trim(),
+            maxLines: 6,
+            overflow: TextOverflow.ellipsis,
+            textAlign: TextAlign.center,
+            style: TextStyle(fontSize: 12, color: cs.onSurfaceVariant),
+          ),
+        ),
+      );
+    }
+
+    // Small "repeat" badge, top-right, marks this tile as a repost without
+    // blocking taps on the underlying media/text tile beneath it.
+    return PinnedTileOverlay(
+      key: ValueKey('pin-${post.id}'),
+      pinned: post.isPinned,
+      alignLeft: true, // top-right is taken by the repost badge
+      child: Stack(
+      fit: StackFit.expand,
+      children: [
+        tile,
+        Positioned(
+          top: 4,
+          right: 4,
+          child: IgnorePointer(
+            child: Container(
+              padding: const EdgeInsets.all(4),
+              decoration: const BoxDecoration(color: Colors.black54, shape: BoxShape.circle),
+              child: const Icon(Icons.repeat_rounded, size: 12, color: Colors.white),
+            ),
+          ),
+        ),
+      ],
+    ),
+    );
   }
 
   // ---------- skeletons ----------

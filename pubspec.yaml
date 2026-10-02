@@ -93,6 +93,12 @@ dependencies:
   speech_to_text: ^7.4.0
   timezone: ^0.11.1
   flutter_tts: ^4.2.5
+  flutter_blurhash: ^0.9.1
+  # P9-FE — share-profile QR + learnscroll://u/<username> deep links
+  qr_flutter: ^4.1.0
+  app_links: ^6.4.0
+  flutter_secure_storage: ^10.3.4
+  flutter_timezone: ^5.1.0
  
 dependency_overrides:
   # flutter_callkit_incoming: 2.0.4+2

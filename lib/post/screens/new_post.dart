@@ -15,6 +15,8 @@ import '../services/api_service.dart';
 // as `SearchApi`; this file lives at the same depth, `lib/post/screens/new_post.dart`,
 // so the relative path is identical).
 import '../../search/api_service.dart' as SearchApi;
+import '../services/post_tag_service.dart'; // P5b-FE — tag people
+import '../widgets/tag_people_sheet.dart'; // P5b-FE
 import 'quick_post.dart';
 import 'media_edit_screen.dart';
 import '../../l10n/app_localizations.dart';
@@ -98,6 +100,18 @@ class _NewPostState extends State<NewPost> with TickerProviderStateMixin {
   String _visibility = 'public';
   String? _location;
   DateTime? _scheduledDateTime;
+  // TASK G6 — "Ask a doubt" post type. The question IS the post's own
+  // `content` (no separate field) — this just flags the composer into
+  // doubt mode so `_postType` is sent as 'doubt' on submit, same idea as
+  // `_hasPoll` flagging poll_options along for the ride.
+  bool _isDoubt = false;
+
+  // P5b-FE — "Tag people". List-based tagging always works; x/y (tap-to-tag on the
+  // first photo) is optional. `_tagPhotoPath` remembers WHICH photo the positions were
+  // placed on, so if the first attachment later changes/gets removed the stale x/y are
+  // dropped at submit (tags themselves stay, just without a position).
+  List<PostTagInput> _taggedPeople = [];
+  String? _tagPhotoPath;
 
   // ─── Draft Auto-save ───
   static const String _draftPrefsKey = 'new_post_draft_v1';
@@ -195,6 +209,16 @@ class _NewPostState extends State<NewPost> with TickerProviderStateMixin {
       _contentController.text.trim().isNotEmpty ||
       _attachments.isNotEmpty ||
       _hasPoll;
+
+  // ─── Ask a doubt ───
+  void _toggleDoubt() {
+    HapticFeedback.mediumImpact();
+    setState(() {
+      _isDoubt = !_isDoubt;
+      _updatePostType();
+    });
+    _scheduleAutoSave();
+  }
 
   // ─── Lifecycle ───
   @override
@@ -456,6 +480,13 @@ class _NewPostState extends State<NewPost> with TickerProviderStateMixin {
   }
 
   void _updatePostType() {
+    // TASK G6 — doubt mode wins over the attachment-based type (a doubt
+    // post can still carry attachments, e.g. a photo of the question,
+    // but it's still a 'doubt' post_type so it renders/answers correctly).
+    if (_isDoubt) {
+      _postType = 'doubt';
+      return;
+    }
     if (_attachments.isEmpty) {
       _postType = 'text';
     } else if (_attachments.every((a) => a.type == 'image')) {
@@ -731,6 +762,9 @@ class _NewPostState extends State<NewPost> with TickerProviderStateMixin {
       'location': _location,
       'scheduledAt': _scheduledDateTime?.toIso8601String(),
       'pollOptions': _pollOptions.map((o) => o.controller.text).toList(),
+      'taggedPeople': _taggedPeople
+          .map((t) => {'id': t.userId, 'username': t.username, 'pic': t.profilePicture})
+          .toList(), // P5b-FE — no x/y: drafts don't restore attachments
       'savedAt': DateTime.now().toIso8601String(),
     };
   }
@@ -794,6 +828,18 @@ class _NewPostState extends State<NewPost> with TickerProviderStateMixin {
       for (final text in options) {
         _pollOptions.add(_PollOption(TextEditingController(text: text)));
       }
+
+      // P5b-FE
+      _taggedPeople = [
+        for (final e in (data['taggedPeople'] as List?) ?? const [])
+          if (e is Map && e['id'] != null && e['username'] != null)
+            PostTagInput(
+              userId: e['id'].toString(),
+              username: e['username'].toString(),
+              profilePicture: e['pic']?.toString(),
+            ),
+      ];
+      _tagPhotoPath = null;
 
       final savedAtRaw = data['savedAt'] as String?;
       _lastSavedAt = savedAtRaw != null ? DateTime.tryParse(savedAtRaw) : null;
@@ -967,6 +1013,7 @@ class _NewPostState extends State<NewPost> with TickerProviderStateMixin {
       _category != null ||
       _location != null ||
       _scheduledDateTime != null ||
+      _taggedPeople.isNotEmpty ||
       _visibility != 'public';
 
   Future<void> _clearAll() async {
@@ -1014,6 +1061,9 @@ class _NewPostState extends State<NewPost> with TickerProviderStateMixin {
       _location = null;
       _scheduledDateTime = null;
       _postType = 'text';
+      _isDoubt = false;
+      _taggedPeople = [];
+      _tagPhotoPath = null;
       _lastSavedAt = null;
     });
     _restoringDraft = false;
@@ -1037,6 +1087,12 @@ class _NewPostState extends State<NewPost> with TickerProviderStateMixin {
     if (!_formKey.currentState!.validate()) return;
     if (_contentController.text.trim().isEmpty && _attachments.isEmpty && !_hasPoll) {
       _showError(_l10n.addSomeContentFirst);
+      return;
+    }
+    // TASK G6 — a doubt post's question IS its content; the backend
+    // rejects an empty one even if a poll/attachment is also attached.
+    if (_isDoubt && _contentController.text.trim().isEmpty) {
+      _showError("Write your doubt/question before posting.");
       return;
     }
     if (_category == null) {
@@ -1135,6 +1191,24 @@ class _NewPostState extends State<NewPost> with TickerProviderStateMixin {
         );
       }
 
+      // P5b-FE — tags go in a follow-up PATCH /post/<id>/edit/ (works for normal AND
+      // chunked-upload posts; the chunked init endpoint ignores `tags`). A failure here
+      // must not look like the post failed — it IS published, only the tags are missing.
+      String? tagWarning;
+      if (_taggedPeople.isNotEmpty && _visibility != 'private') {
+        final data = result['data'];
+        final postId = (data is Map ? data['id'] : result['id'])?.toString();
+        if (postId == null || postId.isEmpty) {
+          tagWarning = "Post published, but the tags couldn't be added.";
+        } else {
+          try {
+            await PostTagService.setPostTags(postId, _taggedPeople, withPositions: _tagPositionsValid);
+          } catch (e) {
+            tagWarning = "Post published, but tagging failed: ${e.toString().replaceAll('Exception: ', '')}";
+          }
+        }
+      }
+
       await _clearDraft();
       if (!mounted) return;
 
@@ -1154,7 +1228,11 @@ class _NewPostState extends State<NewPost> with TickerProviderStateMixin {
       if (!mounted) return;
 
       Navigator.pop(context, true);
-      _showSuccess(message);
+      if (tagWarning != null) {
+        _showError(tagWarning);
+      } else {
+        _showSuccess(message);
+      }
     } catch (e) {
       if (!mounted) return;
       setState(() {
@@ -1396,6 +1474,8 @@ class _NewPostState extends State<NewPost> with TickerProviderStateMixin {
                   _stagger(7, _buildScheduleCard()),
                   const SizedBox(height: 16),
                   _stagger(8, _buildLocationCard()),
+                  const SizedBox(height: 16),
+                  _stagger(9, _buildTagPeopleCard()), // P5b-FE
                   const SizedBox(height: 32),
                 ],
               ),
@@ -1870,7 +1950,7 @@ class _NewPostState extends State<NewPost> with TickerProviderStateMixin {
               fontStyle: _isItalic ? FontStyle.italic : FontStyle.normal,
             ),
             decoration: InputDecoration(
-              hintText: _l10n.whatsOnYourMindHashtags,
+              hintText: _isDoubt ? "What's your doubt? Ask it here…" : _l10n.whatsOnYourMindHashtags,
               hintStyle: TextStyle(color: _muted, fontSize: 15),
               border: InputBorder.none,
               isDense: true,
@@ -2034,6 +2114,7 @@ class _NewPostState extends State<NewPost> with TickerProviderStateMixin {
             _toolbarBtn(Icons.format_italic_rounded, _toggleItalic, _isItalic),
             const VerticalDivider(width: 24, indent: 4, endIndent: 4),
             _toolbarBtn(Icons.poll_rounded, _addPoll, false, active: _hasPoll, gold: true),
+            _toolbarBtn(Icons.help_outline_rounded, _toggleDoubt, false, active: _isDoubt, gold: true),
             _toolbarBtn(Icons.location_on_rounded, _showLocationPicker, false, active: _location != null, gold: true),
             if (_category != null) ...[
               const VerticalDivider(width: 24, indent: 4, endIndent: 4),
@@ -2948,6 +3029,99 @@ class _NewPostState extends State<NewPost> with TickerProviderStateMixin {
   }
 
   // ─── Location Card ───
+  // ─── Tag people (P5b-FE) ───
+  bool get _canPlaceTagsOnPhoto => _attachments.isNotEmpty && _attachments.first.type == 'image';
+
+  bool get _tagPositionsValid =>
+      _canPlaceTagsOnPhoto && _tagPhotoPath != null && _attachments.first.file.path == _tagPhotoPath;
+
+  Future<void> _openTagPeople() async {
+    if (_visibility == 'private') return;
+    HapticFeedback.selectionClick();
+    FocusScope.of(context).unfocus();
+    final photo = _canPlaceTagsOnPhoto ? _attachments.first.file : null;
+    // Positions placed on a different photo than the current first one no longer apply.
+    final initial = _tagPositionsValid
+        ? _taggedPeople
+        : _taggedPeople.map((t) => t.copyWith(clearPosition: true)).toList();
+    final result = await showTagPeopleSheet(context, initial: initial, photo: photo);
+    if (result == null || !mounted) return;
+    setState(() {
+      _taggedPeople = result;
+      _tagPhotoPath = (photo != null && result.any((t) => t.hasPosition)) ? photo.path : null;
+    });
+    _scheduleAutoSave();
+  }
+
+  Widget _buildTagPeopleCard() {
+    final disabled = _visibility == 'private';
+    final count = _taggedPeople.length;
+    final subtitle = disabled
+        ? "Not available for \"Only me\" posts"
+        : (count == 0
+            ? 'Tag people in this post'
+            : _taggedPeople.map((t) => '@${t.username}').take(3).join(', ') +
+                (count > 3 ? '  +${count - 3} more' : ''));
+    return Opacity(
+      opacity: disabled ? 0.55 : 1,
+      child: Container(
+        padding: const EdgeInsets.all(18),
+        decoration: _cardDecoration,
+        child: InkWell(
+          onTap: disabled ? null : _openTagPeople,
+          borderRadius: BorderRadius.circular(14),
+          child: Row(
+            children: [
+              Container(
+                padding: const EdgeInsets.all(10),
+                decoration: BoxDecoration(color: _primarySoft, borderRadius: BorderRadius.circular(12)),
+                child: Icon(Icons.person_pin_outlined, color: _primary, size: 20),
+              ),
+              const SizedBox(width: 14),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    _sectionLabel('Tag people'),
+                    const SizedBox(height: 4),
+                    Text(
+                      subtitle,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(
+                        fontSize: 13.5,
+                        fontWeight: FontWeight.w600,
+                        color: count > 0 && !disabled ? _navy : _muted,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              if (count > 0 && !disabled)
+                IconButton(
+                  tooltip: 'Clear tags',
+                  visualDensity: VisualDensity.compact,
+                  icon: Icon(Icons.close_rounded, color: _muted, size: 20),
+                  onPressed: () {
+                    setState(() {
+                      _taggedPeople = [];
+                      _tagPhotoPath = null;
+                    });
+                    _scheduleAutoSave();
+                  },
+                ),
+              Icon(
+                count > 0 && !disabled ? Icons.check_circle_rounded : Icons.chevron_right_rounded,
+                color: count > 0 && !disabled ? _success : _muted,
+                size: 22,
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
   Widget _buildLocationCard() {
     return Container(
       padding: const EdgeInsets.all(18),

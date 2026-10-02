@@ -87,6 +87,21 @@
 			<string>com.googleusercontent.apps.362717733057-1q2o6s0p8i0u67533dc2r1nn057nq0cs</string>
 			</array>
 		</dict>
+		<!-- P9-FE — learnscroll://u/<username> (added to the SAME array as the Google Sign-In
+		     scheme above; a second CFBundleURLTypes key would silently override it). -->
+		<dict>
+			<key>CFBundleTypeRole</key>
+			<string>Editor</string>
+			<key>CFBundleURLName</key>
+			<string>learnscroll</string>
+			<key>CFBundleURLSchemes</key>
+			<array>
+				<string>learnscroll</string>
+			</array>
+		</dict>
 	</array>
+	<!-- P9-FE — app_links handles links itself; turn Flutter's built-in routing off. -->
+	<key>FlutterDeepLinkingEnabled</key>
+	<false/>
 </dict>
 </plist>

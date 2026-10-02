@@ -3,6 +3,7 @@
 #
 
 list(APPEND FLUTTER_PLUGIN_LIST
+  app_links
   audioplayers_windows
   battery_plus
   connectivity_plus
@@ -10,6 +11,8 @@ list(APPEND FLUTTER_PLUGIN_LIST
   file_selector_windows
   firebase_auth
   firebase_core
+  flutter_secure_storage_windows
+  flutter_timezone
   flutter_tts
   flutter_webrtc
   gal

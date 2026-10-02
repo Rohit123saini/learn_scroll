@@ -68,6 +68,19 @@
                 <action android:name="android.intent.action.MAIN"/>
                 <category android:name="android.intent.category.LAUNCHER"/>
             </intent-filter>
+
+            <!-- P9-FE — learnscroll://u/<username> opens that profile (DeepLinkService). -->
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:scheme="learnscroll" android:host="u" />
+            </intent-filter>
+
+            <!-- P9-FE — the app_links plugin reads the link itself; Flutter's built-in
+                 deep-link routing (default ON since 3.27) must be OFF or the same link is
+                 ALSO pushed as a route name and hits "unknown route". -->
+            <meta-data android:name="flutter_deeplinking_enabled" android:value="false" />
         </activity>
 
         <meta-data

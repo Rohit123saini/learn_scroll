@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 
 import '../../l10n/app_localizations.dart';
+import '../../widgets/app_bottom_nav.dart';
 import '../../widgets/error_widgets.dart';
 import '../../widgets/ls_ui.dart';
 import '../../widgets/skeletons.dart';
@@ -10,6 +11,7 @@ import 'attendance_mark_screen.dart';
 import 'attendance_summary_screen.dart';
 import 'analytics_screen.dart';
 import 'campus_create_screen.dart';
+import 'campus_invite_screen.dart' show CampusJoinWithCodeScreen;
 import 'campus_setup_screen.dart';
 import 'digital_id_card_screen.dart';
 import 'fee_office_screen.dart';
@@ -153,6 +155,22 @@ class _CampusScreenState extends State<CampusScreen> {
       appBar: AppBar(
         title: Text(l10n.campusTab, style: LsType.head(context, size: 16)),
         actions: [
+          // 🔥 FIX [Task 13] — "Manage Setup" pehle management-cards ke andar
+          // ek buried outline button tha (neeche scroll karke, Analytics/Fee
+          // Office ke saath ek row me) — student/teacher role me to wo section
+          // hi kabhi render nahi hota, isliye settings tak pahunch hi nahi
+          // thi. Ab ye seedha Campus ke top (AppBar) pe hai, jaisa har doosra
+          // top-level section (home.dart, TuitionClassHomeShell) apna Settings
+          // access top pe deta hai — bottom nav me alag "Settings" tab nahi
+          // banaya, kyunki Campus ka bottom nav app-wide 5-tab `AppBottomNav`
+          // hai aur wahan ek role-specific (management-only) tab add karna
+          // us shared widget ka contract todta.
+          if (_selected != null && _access != null && _access!.canManageCampusSetup)
+            IconButton(
+              tooltip: l10n.campusManageSetupCta,
+              icon: const Icon(Icons.settings_outlined),
+              onPressed: _openCampusSetup,
+            ),
           if (_campuses.length > 1)
             PopupMenuButton<Campus>(
               tooltip: l10n.campusSwitchTooltip,
@@ -176,6 +194,22 @@ class _CampusScreenState extends State<CampusScreen> {
             tooltip: l10n.campusNoneCreateCta,
             icon: const Icon(Icons.add_business_outlined),
             onPressed: _createCampus,
+          ),
+          // Join-with-code (Task 13/G13) — campus-agnostic just like the
+          // parent-link button below (a student may not belong to any
+          // campus yet, so this can't depend on `_selected`). Refresh
+          // `myCampuses` afterwards since a successful join can add a
+          // brand-new campus to the list.
+          IconButton(
+            tooltip: 'Join with code',
+            icon: const Icon(Icons.qr_code_2_rounded),
+            onPressed: () async {
+              final joined = await Navigator.push<bool>(
+                context,
+                MaterialPageRoute(builder: (_) => const CampusJoinWithCodeScreen()),
+              );
+              if (joined == true) _bootstrap();
+            },
           ),
           // Parent-link verify/list — campus-agnostic (ek parent ke bachche
           // alag-alag campuses me ho sakte hain), isliye ye kisi selected
@@ -205,6 +239,20 @@ class _CampusScreenState extends State<CampusScreen> {
         onRefresh: _bootstrap,
         child: _buildBody(cs, l10n),
       ),
+      // 🔥 FIX [Settings/Nav pass] — "campus me vesa hi navigator chiye
+      // jesa home me h" (user report). CampusScreen pehle koi bottom nav
+      // hi nahi dikhata tha (Navigator.push se khulke bas back-arrow ke
+      // bharose reh jaata tha), jabki message module ki tarah ye bhi ek
+      // top-level section hai. Ab wahi shared bar hai jo home.dart aur
+      // Chats screen dikhate hain — Campus tab yahan khud highlighted.
+      // 🔥 AUDIT [Task 13] — checked for a second/nested navigator inside
+      // Campus (e.g. its own Wallet/Settings tab bar like TuitionClassHomeShell
+      // has): none found. Campus pushes each sub-screen (setup, notices,
+      // fees, attendance...) as a normal full-screen route with no bottom
+      // bar of its own, so there's only ever this one `AppBottomNav` — the
+      // exact shared widget/pattern TuitionClassHomeShell's bottom bar also
+      // uses (`LsBottomNav`) — and no Wallet item to remove from it.
+      bottomNavigationBar: const AppBottomNav(current: AppTab.campus),
     );
   }
 
@@ -429,23 +477,13 @@ class _CampusScreenState extends State<CampusScreen> {
               value: '${_subjectsById.length}',
             ),
             const SizedBox(height: 12),
-            Row(children: [
-              Expanded(
-                child: LsPrimaryButton(
-                  label: l10n.campusPostNotice,
-                  icon: Icons.campaign_outlined,
-                  onPressed: _openNotices,
-                ),
-              ),
-              const SizedBox(width: 8),
-              Expanded(
-                child: LsOutlineButton(
-                  label: l10n.campusManageSetupCta,
-                  icon: Icons.settings_outlined,
-                  onPressed: access.canManageCampusSetup ? _openCampusSetup : null,
-                ),
-              ),
-            ]),
+            // "Manage Setup" ab yahan nahi — AppBar ke settings icon pe
+            // move ho gaya (Task 13). Post Notice akele ab full-width.
+            LsPrimaryButton(
+              label: l10n.campusPostNotice,
+              icon: Icons.campaign_outlined,
+              onPressed: _openNotices,
+            ),
             const SizedBox(height: 8),
             Row(children: [
               Expanded(

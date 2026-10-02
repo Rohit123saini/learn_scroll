@@ -1,4 +1,9 @@
 import 'package:flutter/material.dart';
+// [N9] Needed for the device's IANA timezone name (quiet hours are
+// evaluated server-side in it). Add `flutter_timezone` to pubspec.yaml.
+// This assumes <=3.x (`getLocalTimezone()` returns a String); on 4.x use
+// `(await FlutterTimezone.getLocalTimezone()).identifier`.
+import 'package:flutter_timezone/flutter_timezone.dart';
 
 import '../../l10n/app_localizations.dart';
 import '../../widgets/error_widgets.dart';
@@ -137,6 +142,86 @@ class _NotificationSettingsScreenState extends State<NotificationSettingsScreen>
     _patch({'muted_types': current}, p.copyWith(mutedTypes: current));
   }
 
+  // ---- [N9] quiet hours / pause-all --------------------------------
+
+  Future<String?> _deviceTimezone() async {
+    try {
+      // flutter_timezone >= 5 returns a TimezoneInfo (older versions returned a String).
+      final tz = await FlutterTimezone.getLocalTimezone();
+      return tz.identifier;
+    } catch (_) {
+      return null; // backend keeps whatever timezone it already has
+    }
+  }
+
+  String _fmtHm(TimeOfDay t) =>
+      '${t.hour.toString().padLeft(2, '0')}:${t.minute.toString().padLeft(2, '0')}';
+
+  TimeOfDay _parseHm(String hm) {
+    final parts = hm.split(':');
+    return TimeOfDay(hour: int.parse(parts[0]), minute: int.parse(parts[1]));
+  }
+
+  Future<void> _setQuietEnabled(bool on) async {
+    final p = _prefs;
+    if (p == null || _saving) return;
+    if (!on) {
+      _patch({'quiet_start': null, 'quiet_end': null}, p.copyWith(clearQuietHours: true));
+      return;
+    }
+    final tz = await _deviceTimezone();
+    final latest = _prefs;
+    if (!mounted || latest == null || _saving) return;
+    _patch(
+      {'quiet_start': '22:00', 'quiet_end': '07:00', if (tz != null) 'timezone': tz},
+      latest.copyWith(quietStart: '22:00', quietEnd: '07:00', timezone: tz),
+    );
+  }
+
+  Future<void> _pickQuietTime(bool isStart, AppLocalizations t) async {
+    final p = _prefs;
+    if (p == null || _saving || !p.quietHoursEnabled) return;
+    final current = _parseHm((isStart ? p.quietStart : p.quietEnd)!);
+    final picked = await showTimePicker(context: context, initialTime: current);
+    if (picked == null || !mounted) return;
+    final hm = _fmtHm(picked);
+    final other = isStart ? p.quietEnd : p.quietStart;
+    if (hm == other) {
+      lsSnack(context, t.notifQuietSameTime, error: true); // backend rejects start == end
+      return;
+    }
+    final tz = await _deviceTimezone();
+    final latest = _prefs;
+    if (!mounted || latest == null || _saving) return;
+    _patch(
+      {isStart ? 'quiet_start' : 'quiet_end': hm, if (tz != null) 'timezone': tz},
+      isStart
+          ? latest.copyWith(quietStart: hm, timezone: tz)
+          : latest.copyWith(quietEnd: hm, timezone: tz),
+    );
+  }
+
+  /// `minutes == 0` resumes. The server computes the deadline
+  /// (`dnd_for_minutes`), so a wrong phone clock can't over-pause; the
+  /// optimistic value below is replaced by the server's `dnd_until`.
+  void _pauseFor(int minutes) {
+    final p = _prefs;
+    if (p == null || _saving) return;
+    if (minutes == 0) {
+      _patch({'dnd_for_minutes': 0}, p.copyWith(clearDndUntil: true));
+    } else {
+      _patch({'dnd_for_minutes': minutes},
+          p.copyWith(dndUntil: DateTime.now().add(Duration(minutes: minutes))));
+    }
+  }
+
+  String _fmtPausedUntil(BuildContext context, DateTime until) {
+    final time = TimeOfDay.fromDateTime(until).format(context);
+    final now = DateTime.now();
+    final sameDay = until.year == now.year && until.month == now.month && until.day == now.day;
+    return sameDay ? time : '${until.day}/${until.month} $time';
+  }
+
   @override
   Widget build(BuildContext context) {
     final t = AppLocalizations.of(context)!;
@@ -183,6 +268,48 @@ class _NotificationSettingsScreenState extends State<NotificationSettingsScreen>
           ]),
         ),
         const SizedBox(height: 22),
+        LsSectionHead(title: t.notifPauseSectionTitle),
+        LsCard(
+          margin: const EdgeInsets.symmetric(horizontal: kLsPad),
+          padding: const EdgeInsets.all(16),
+          child: p.isDndActive
+              ? Row(children: [
+                  Expanded(
+                    child: Text(t.notifPausedUntil(_fmtPausedUntil(context, p.dndUntil!)),
+                        style: TextStyle(fontSize: 13.5, color: cs.onSurface)),
+                  ),
+                  TextButton(
+                    onPressed: _saving ? null : () => _pauseFor(0),
+                    child: Text(t.notifPauseResume),
+                  ),
+                ])
+              : Wrap(spacing: 8, runSpacing: 8, children: [
+                  ActionChip(label: Text(t.notifPause1h), onPressed: _saving ? null : () => _pauseFor(60)),
+                  ActionChip(label: Text(t.notifPause8h), onPressed: _saving ? null : () => _pauseFor(8 * 60)),
+                  ActionChip(label: Text(t.notifPause24h), onPressed: _saving ? null : () => _pauseFor(24 * 60)),
+                ]),
+        ),
+        const SizedBox(height: 22),
+        LsSectionHead(title: t.notifQuietSectionTitle),
+        Padding(
+          padding: const EdgeInsets.fromLTRB(kLsPad, 0, kLsPad, 10),
+          child: Text(t.notifQuietHint,
+              style: TextStyle(fontSize: 12, color: cs.onSurfaceVariant, height: 1.4)),
+        ),
+        LsCard(
+          margin: const EdgeInsets.symmetric(horizontal: kLsPad),
+          padding: EdgeInsets.zero,
+          child: Column(children: [
+            _switchTile(context, t.notifQuietToggle, p.quietHoursEnabled, _setQuietEnabled),
+            if (p.quietHoursEnabled) ...[
+              Divider(height: 1, color: cs.outlineVariant),
+              _timeTile(context, t.notifQuietFrom, _parseHm(p.quietStart!), () => _pickQuietTime(true, t)),
+              Divider(height: 1, color: cs.outlineVariant),
+              _timeTile(context, t.notifQuietTo, _parseHm(p.quietEnd!), () => _pickQuietTime(false, t)),
+            ],
+          ]),
+        ),
+        const SizedBox(height: 22),
         LsSectionHead(title: t.notifDigestSectionTitle),
         LsCard(
           margin: const EdgeInsets.symmetric(horizontal: kLsPad),
@@ -223,8 +350,8 @@ class _NotificationSettingsScreenState extends State<NotificationSettingsScreen>
 
   String _categoryLabel(AppLocalizations t, NotificationCategory cat) {
     switch (cat) {
-      case NotificationCategory.liveClasses:
-        return t.notifCategoryLiveClasses;
+      case NotificationCategory.tuitionClasses:
+        return t.notifCategoryTuitionClasses;
       case NotificationCategory.assignmentsTests:
         return t.notifCategoryAssignmentsTests;
       case NotificationCategory.messagesCalls:
@@ -246,6 +373,21 @@ class _NotificationSettingsScreenState extends State<NotificationSettingsScreen>
         Expanded(child: Text(label, style: TextStyle(fontSize: 13.5, color: cs.onSurface))),
         Switch(value: value, onChanged: _saving ? null : onChanged),
       ]),
+    );
+  }
+
+  Widget _timeTile(BuildContext context, String label, TimeOfDay value, VoidCallback onTap) {
+    final cs = Theme.of(context).colorScheme;
+    return InkWell(
+      onTap: _saving ? null : onTap,
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 13),
+        child: Row(children: [
+          Expanded(child: Text(label, style: TextStyle(fontSize: 13.5, color: cs.onSurface))),
+          Text(value.format(context),
+              style: TextStyle(fontSize: 13.5, color: cs.primary, fontWeight: FontWeight.w600)),
+        ]),
+      ),
     );
   }
 

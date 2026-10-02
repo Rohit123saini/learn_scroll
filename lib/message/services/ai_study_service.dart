@@ -267,6 +267,58 @@ class AiStudyService {
     throw Exception((data as Map)['error'] ?? "Revision deck load nahi hua");
   }
 
+  // ==========================================================================
+  // 🔥 NAYA — Task G15 (growth_and_feature_tasks.md, Section E): generalized
+  // "Ask AI" doubt solver. Unlike `askClassroomCopilot` above (which needs a
+  // study-room `conversationId` + membership), this hits a conversation-
+  // agnostic endpoint — usable from a feed post, a wrong test-series
+  // question, or a chat message, wherever a student taps "Ask AI".
+  // ==========================================================================
+
+  /// `contextType` — one of 'feed_post' | 'test_question' | 'chat' |
+  /// 'general' (backend defaults to 'general' if anything else is passed).
+  /// `contextText` — whatever the doubt is about in plain text: a post's
+  /// caption, the wrong test question + the student's answer + the
+  /// correct answer, a chat message, etc. Optional.
+  /// `sourceId` — post id / question id / message id. Only used
+  /// server-side to key the response cache (so two different posts with
+  /// coincidentally identical caption text don't share a cached answer) —
+  /// never persisted. Optional.
+  ///   POST $baseUrl/message/ai/ask-doubt/
+  ///   response: { "answer": "..." }
+  /// Throttled 20/min/user server-side (AskAIDoubtThrottle).
+  static Future<String> askDoubt({
+    required String question,
+    String contextType = 'general',
+    String contextText = '',
+    String? sourceId,
+  }) async {
+    try {
+      final res = await http.post(
+        Uri.parse("$_baseUrl/message/ai/ask-doubt/"),
+        headers: await _getHeaders(),
+        body: jsonEncode({
+          "question": question,
+          "context_type": contextType,
+          "context_text": contextText,
+          if (sourceId != null && sourceId.isNotEmpty) "source_id": sourceId,
+        }),
+      );
+      final data = jsonDecode(res.body);
+      if (res.statusCode == 200) {
+        return (data['answer'] ?? '').toString();
+      } else if (res.statusCode == 429) {
+        throw Exception("Bahut zyada sawaal pooch liye — thodi der baad try karo");
+      } else if (res.statusCode == 503) {
+        throw Exception("AI abhi available nahi hai");
+      } else {
+        throw Exception((data as Map)['error'] ?? "Ask AI failed");
+      }
+    } catch (e) {
+      throw Exception("Ask AI error: $e");
+    }
+  }
+
   static String _guessAudioMimeType(String fileUrl) {
     final path = fileUrl.split('?').first.toLowerCase();
     if (path.endsWith('.m4a') || path.endsWith('.mp4')) return "audio/mp4";

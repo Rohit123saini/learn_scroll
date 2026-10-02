@@ -10,11 +10,17 @@ import 'package:cached_network_image/cached_network_image.dart';
 import 'package:flutter/material.dart';
 
 import '../../l10n/app_localizations.dart';
-import '../../services/home_api_model_service.dart' show FeedResponse, PostModel;
+import '../../services/home_api_model_service.dart' show FeedResponse, PostModel, PostMediaModel;
 import '../../utils/api.dart';
 import '../../widgets/ls_ui.dart';
+import '../../widgets/skeletons.dart';
+import '../../widgets/error_widgets.dart';
 import '../services/post_extras_service.dart';
+import 'reels_screen.dart';
 import 'singlepost.dart';
+
+const double _kGridGap = 3;
+const double _kGridRadius = 6;
 
 typedef PostPageLoader = Future<FeedResponse> Function(int page);
 
@@ -112,13 +118,22 @@ class _PostListScreenState extends State<PostListScreen> {
   String _abs(String u) => u.startsWith('http') ? u : '${Api.baseUrl}$u';
 
   Widget _tile(PostModel p, ColorScheme cs) {
-    final m = p.media.isNotEmpty ? p.media.first : null;
+    // A repost has no media/text of its own — borrow the original's so the tile isn't blank.
+    final src = p.isRepost ? p.originalPost : null;
+    final List<PostMediaModel> mediaList = p.media.isNotEmpty ? p.media : (src?.media ?? const <PostMediaModel>[]);
+    final m = mediaList.isNotEmpty ? mediaList.first : null;
     final thumb = m == null ? null : (m.thumbnail?.isNotEmpty == true ? m.thumbnail! : (m.mediaType == 'image' ? m.file : null));
-    return InkWell(
+    return ClipRRect(
+      borderRadius: BorderRadius.circular(_kGridRadius),
+      child: InkWell(
+      // Video tile -> "open in Reels" (starts on this video, then continues the Reels feed).
+      // Reposts keep opening the single post (the repost id is not a video id).
       onTap: () => Navigator.of(context)
-          .push(MaterialPageRoute(builder: (_) => SinglePostPage(postId: p.id)))
+          .push(MaterialPageRoute<void>(
+              builder: (_) => (!p.isRepost && m?.mediaType == 'video') ? ReelsScreen(startPostId: p.id) : SinglePostPage(postId: p.id)))
           .then((_) => _refresh()),
-      child: Container(
+      child: Stack(fit: StackFit.expand, children: [
+      Container(
         color: cs.surfaceVariant,
         child: thumb != null && thumb.isNotEmpty
             ? Stack(fit: StackFit.expand, children: [
@@ -130,7 +145,10 @@ class _PostListScreenState extends State<PostListScreen> {
                 padding: const EdgeInsets.all(8),
                 child: Center(
                   child: Text(
-                    (p.title?.isNotEmpty == true ? p.title! : (p.content ?? '')).trim(),
+                    (p.isRepost
+                            ? (p.repostCaption?.isNotEmpty == true ? p.repostCaption! : (src?.content ?? ''))
+                            : (p.title?.isNotEmpty == true ? p.title! : (p.content ?? '')))
+                        .trim(),
                     maxLines: 6,
                     overflow: TextOverflow.ellipsis,
                     textAlign: TextAlign.center,
@@ -138,6 +156,35 @@ class _PostListScreenState extends State<PostListScreen> {
                   ),
                 ),
               ),
+      ),
+      if (p.isRepost)
+        Positioned(
+          left: 6,
+          top: 6,
+          child: Icon(Icons.repeat_rounded, size: 18, color: thumb != null && thumb.isNotEmpty ? Colors.white : cs.onSurfaceVariant),
+        ),
+      ]),
+      ),
+    );
+  }
+
+  Widget _gridSkeleton() {
+    return GridView.builder(
+      physics: const NeverScrollableScrollPhysics(),
+      padding: const EdgeInsets.all(2),
+      gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
+        crossAxisCount: 3,
+        mainAxisSpacing: _kGridGap,
+        crossAxisSpacing: _kGridGap,
+      ),
+      itemCount: 12,
+      itemBuilder: (context, __) => LsShimmer(
+        child: ClipRRect(
+          borderRadius: BorderRadius.circular(_kGridRadius),
+          child: SizedBox.expand(
+            child: Container(color: Theme.of(context).colorScheme.surfaceVariant),
+          ),
+        ),
       ),
     );
   }
@@ -157,17 +204,24 @@ class _PostListScreenState extends State<PostListScreen> {
       body: RefreshIndicator(
         onRefresh: _refresh,
         child: _loading
-            ? const Center(child: CircularProgressIndicator())
+            ? _gridSkeleton()
             : _error != null
                 ? ListView(children: [
-                    const SizedBox(height: 120),
-                    Center(child: Text(t.postsLoadFailed, style: TextStyle(color: cs.onSurfaceVariant))),
-                    Center(child: TextButton(onPressed: _refresh, child: Text(t.retry))),
+                    const SizedBox(height: 60),
+                    ErrorStateWidget(
+                      title: t.postsLoadFailed,
+                      subtitle: t.postsLoadErrorSubtitle,
+                      retryLabel: t.retry,
+                      onRetry: _refresh,
+                    ),
                   ])
                 : _posts.isEmpty
                     ? ListView(children: [
-                        const SizedBox(height: 120),
-                        Center(child: Text(t.noPostsHere, style: TextStyle(color: cs.onSurfaceVariant))),
+                        const SizedBox(height: 60),
+                        EmptyStateWidget(
+                          icon: Icons.grid_view_rounded,
+                          title: t.noPostsHere,
+                        ),
                       ])
                     : GridView.builder(
                         controller: _scroll,
@@ -175,8 +229,8 @@ class _PostListScreenState extends State<PostListScreen> {
                         padding: const EdgeInsets.all(2),
                         gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
                           crossAxisCount: 3,
-                          mainAxisSpacing: 2,
-                          crossAxisSpacing: 2,
+                          mainAxisSpacing: _kGridGap,
+                          crossAxisSpacing: _kGridGap,
                         ),
                         itemCount: _posts.length,
                         itemBuilder: (_, i) => _tile(_posts[i], cs),

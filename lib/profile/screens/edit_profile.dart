@@ -1,10 +1,12 @@
 import 'dart:io';
+import 'package:flutter/foundation.dart' show listEquals;
 import 'package:flutter/material.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:cached_network_image/cached_network_image.dart';
 
 import '../api_service.dart';
 import '../model.dart';
+import '../profile_link.dart'; // P7-FE
 import '../../utils/api.dart';
 import '../../widgets/ls_ui.dart';
 import '../../l10n/app_localizations.dart';
@@ -40,6 +42,19 @@ import '../../l10n/app_localizations.dart';
 //   changePhotoTooltip          "Change photo"
 // ============================================================
 
+// P7-FE — one editable row of the links editor.
+class _LinkRow {
+  final TextEditingController title;
+  final TextEditingController url;
+  _LinkRow({String title = '', String url = ''})
+      : title = TextEditingController(text: title),
+        url = TextEditingController(text: url);
+  void dispose() {
+    title.dispose();
+    url.dispose();
+  }
+}
+
 class EditProfileScreen extends StatefulWidget {
   final ProfileModel user;
   const EditProfileScreen({super.key, required this.user});
@@ -54,6 +69,11 @@ class _EditProfileScreenState extends State<EditProfileScreen> {
   late TextEditingController _firstNameController;
   late TextEditingController _lastNameController;
   late TextEditingController _bioController;
+  // P7-FE — pronouns (<=30), category label (<=40), up to 3 links. Strings are plain
+  // English for now (no new .arb keys needed); move to l10n with the rest when convenient.
+  late TextEditingController _pronounsController;
+  late TextEditingController _categoryController;
+  final List<_LinkRow> _linkRows = [];
 
   File? _selectedImage;
   bool _isSaving = false;
@@ -63,7 +83,18 @@ class _EditProfileScreenState extends State<EditProfileScreen> {
       _usernameController.text.trim() != widget.user.username ||
       _firstNameController.text.trim() != widget.user.firstName ||
       _lastNameController.text.trim() != widget.user.lastName ||
-      _bioController.text.trim() != widget.user.bio;
+      _bioController.text.trim() != widget.user.bio ||
+      _pronounsController.text.trim() != widget.user.pronouns ||
+      _categoryController.text.trim() != widget.user.categoryLabel ||
+      !listEquals(_currentLinks(), widget.user.links);
+
+  /// Rows with anything typed, normalised the same way they'll be sent
+  /// (bare "example.com" -> "https://example.com"). Fully empty rows are dropped.
+  List<ProfileLink> _currentLinks() => [
+        for (final r in _linkRows)
+          if (r.title.text.trim().isNotEmpty || r.url.text.trim().isNotEmpty)
+            ProfileLink(title: r.title.text.trim(), url: normalizeLinkUrl(r.url.text)),
+      ];
 
   @override
   void initState() {
@@ -72,6 +103,11 @@ class _EditProfileScreenState extends State<EditProfileScreen> {
     _firstNameController = TextEditingController(text: widget.user.firstName);
     _lastNameController = TextEditingController(text: widget.user.lastName);
     _bioController = TextEditingController(text: widget.user.bio);
+    _pronounsController = TextEditingController(text: widget.user.pronouns);
+    _categoryController = TextEditingController(text: widget.user.categoryLabel);
+    for (final l in widget.user.links.take(kMaxProfileLinks)) {
+      _linkRows.add(_LinkRow(title: l.title, url: l.url));
+    }
   }
 
   @override
@@ -80,6 +116,11 @@ class _EditProfileScreenState extends State<EditProfileScreen> {
     _firstNameController.dispose();
     _lastNameController.dispose();
     _bioController.dispose();
+    _pronounsController.dispose();
+    _categoryController.dispose();
+    for (final r in _linkRows) {
+      r.dispose();
+    }
     super.dispose();
   }
 
@@ -120,6 +161,9 @@ class _EditProfileScreenState extends State<EditProfileScreen> {
         firstName: _firstNameController.text.trim(),
         lastName: _lastNameController.text.trim(),
         bio: _bioController.text.trim(),
+        pronouns: _pronounsController.text.trim(), // P7-FE
+        categoryLabel: _categoryController.text.trim(), // P7-FE
+        links: _currentLinks(), // P7-FE — [] clears them
         profilePhoto: _selectedImage,
       );
       if (mounted) {
@@ -213,10 +257,111 @@ class _EditProfileScreenState extends State<EditProfileScreen> {
                   ),
                 ),
               ),
+              // ---- P7-FE ----
+              const SizedBox(height: 14),
+              TextFormField(
+                controller: _pronounsController,
+                maxLength: 30,
+                decoration: const InputDecoration(
+                  labelText: 'Pronouns',
+                  hintText: 'e.g. she/her',
+                  counterText: '',
+                  prefixIcon: Icon(Icons.badge_outlined),
+                ),
+              ),
+              const SizedBox(height: 14),
+              TextFormField(
+                controller: _categoryController,
+                maxLength: 40,
+                decoration: const InputDecoration(
+                  labelText: 'Category',
+                  hintText: 'e.g. Teacher, JEE Aspirant',
+                  counterText: '',
+                  prefixIcon: Icon(Icons.local_offer_outlined),
+                ),
+              ),
+              const SizedBox(height: 22),
+              _linksEditor(cs),
+              const SizedBox(height: 24),
             ],
           ),
         ),
       ),
+    );
+  }
+
+  // ---------- links editor (P7-FE) ----------
+  void _addLink() {
+    if (_linkRows.length >= kMaxProfileLinks) return;
+    setState(() => _linkRows.add(_LinkRow()));
+  }
+
+  void _removeLink(int i) {
+    final row = _linkRows[i];
+    setState(() => _linkRows.removeAt(i));
+    // dispose AFTER the frame that stops using the controllers
+    WidgetsBinding.instance.addPostFrameCallback((_) => row.dispose());
+  }
+
+  Widget _linksEditor(ColorScheme cs) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Row(children: [
+          const Text('Links', style: TextStyle(fontSize: 14, fontWeight: FontWeight.w700)),
+          const SizedBox(width: 8),
+          Text('${_linkRows.length}/$kMaxProfileLinks', style: TextStyle(fontSize: 12, color: cs.onSurfaceVariant)),
+        ]),
+        const SizedBox(height: 10),
+        for (int i = 0; i < _linkRows.length; i++)
+          Padding(
+            key: ObjectKey(_linkRows[i]),
+            padding: const EdgeInsets.only(bottom: 12),
+            child: Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Expanded(
+                  child: Column(children: [
+                    TextFormField(
+                      controller: _linkRows[i].title,
+                      maxLength: kProfileLinkTitleMax,
+                      decoration: const InputDecoration(labelText: 'Title', hintText: 'Website', counterText: ''),
+                      validator: (v) => ((v ?? '').trim().isEmpty && _linkRows[i].url.text.trim().isNotEmpty)
+                          ? 'Add a title'
+                          : null,
+                    ),
+                    const SizedBox(height: 8),
+                    TextFormField(
+                      controller: _linkRows[i].url,
+                      keyboardType: TextInputType.url,
+                      autocorrect: false,
+                      decoration: const InputDecoration(labelText: 'URL', hintText: 'https://example.com'),
+                      validator: (v) {
+                        final empty = (v ?? '').trim().isEmpty;
+                        if (empty) return _linkRows[i].title.text.trim().isNotEmpty ? 'Add a URL' : null;
+                        return validateLinkUrl(v);
+                      },
+                    ),
+                  ]),
+                ),
+                IconButton(
+                  tooltip: 'Remove link',
+                  onPressed: () => _removeLink(i),
+                  icon: Icon(Icons.close_rounded, color: cs.onSurfaceVariant),
+                ),
+              ],
+            ),
+          ),
+        if (_linkRows.length < kMaxProfileLinks)
+          Align(
+            alignment: Alignment.centerLeft,
+            child: TextButton.icon(
+              onPressed: _addLink,
+              icon: const Icon(Icons.add_link_rounded, size: 18),
+              label: const Text('Add link'),
+            ),
+          ),
+      ],
     );
   }
 

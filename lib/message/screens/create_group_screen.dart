@@ -27,6 +27,9 @@ class CreateGroupScreen extends StatefulWidget {
 class _CreateGroupScreenState extends State<CreateGroupScreen> {
   final _searchController = TextEditingController();
   final _groupNameController = TextEditingController();
+  // 🔥 NAYA (Task G14) — optional subject/exam tag taaki group baad me
+  // "Study Groups" discovery tab me dhoonda ja sake (e.g. "NEET 2027").
+  final _topicTagController = TextEditingController();
   Timer? _debounce;
 
   List<Map<String, dynamic>> _searchResults = [];
@@ -52,6 +55,7 @@ class _CreateGroupScreenState extends State<CreateGroupScreen> {
     _debounce?.cancel();
     _searchController.dispose();
     _groupNameController.dispose();
+    _topicTagController.dispose();
     super.dispose();
   }
 
@@ -154,6 +158,9 @@ class _CreateGroupScreenState extends State<CreateGroupScreen> {
         name: name,
         memberIds: memberIds,
         isPrivate: _isPrivate, // 🔥 NAYA — chuna hua Public/Private type
+        topicTag: _topicTagController.text.trim().isEmpty
+            ? null
+            : _topicTagController.text.trim(), // 🔥 NAYA (Task G14)
       );
 
       if (!mounted) return;
@@ -198,6 +205,7 @@ class _CreateGroupScreenState extends State<CreateGroupScreen> {
         children: [
           if (_selectedUsers.isNotEmpty) _buildSelectedChips(),
           _buildGroupTypeChoice(), // 🔥 NAYA — Public / Private choose karo
+          if (!_isPrivate) _buildTopicTagField(), // 🔥 NAYA (Task G14) — discovery tag, sirf Public groups ke liye
           _buildSearchField(),
           if (_createError != null)
             Container(
@@ -338,6 +346,30 @@ class _CreateGroupScreenState extends State<CreateGroupScreen> {
               color: selected ? coral : cs.onSurfaceVariant,
             ),
           ],
+        ),
+      ),
+    );
+  }
+
+  // 🔥 NAYA (Task G14) — Study Groups discovery ke liye optional subject/
+  // exam tag. Sirf Public groups ke saath dikhta hai kyunki Private groups
+  // discover tab me kabhi aate hi nahi (invite-code/direct-add hi unka
+  // raasta hai) — is field ka koi matlab nahi rehta agar Private chuna ho.
+  Widget _buildTopicTagField() {
+    final cs = Theme.of(context).colorScheme;
+    return Container(
+      color: cs.surface,
+      padding: const EdgeInsets.fromLTRB(14, 0, 14, 10),
+      child: TextField(
+        controller: _topicTagController,
+        decoration: InputDecoration(
+          hintText: "Subject/exam tag (optional) — e.g. NEET 2027, JEE Mains",
+          hintStyle: TextStyle(color: cs.onSurfaceVariant, fontSize: 13),
+          prefixIcon: Icon(Icons.tag_rounded, color: cs.onSurfaceVariant),
+          filled: true,
+          fillColor: AppThemeTokens.of(context).surface2,
+          contentPadding: const EdgeInsets.symmetric(vertical: 0, horizontal: 12),
+          border: OutlineInputBorder(borderRadius: BorderRadius.circular(12), borderSide: BorderSide.none),
         ),
       ),
     );

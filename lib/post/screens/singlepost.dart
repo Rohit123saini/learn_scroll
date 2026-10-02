@@ -33,12 +33,19 @@ import '../../profile/screens/target_profile.dart';
 import '../../profile/screens/profile.dart';
 import '../../profile/api_service.dart' as ProfileApi;
 import '../../services/auth_service.dart';
+import '../../services/comment_service.dart' show CommentModel, CommentService;
 import '../widgets/comment_sheet.dart';
+import '../widgets/repost_widgets.dart';
+import '../widgets/post_ui.dart';
+import '../widgets/post_media_view.dart';
 import '../../widgets/ls_ui.dart';
+import '../../widgets/ask_ai_sheet.dart';
+import '../../widgets/skeletons.dart';
+import '../../widgets/error_widgets.dart';
 import '../../l10n/app_localizations.dart';
 import '../models/models.dart';
 import '../services/post_extras_service.dart';
-import '../../services/home_api_model_service.dart' show HomeFeedService;
+import '../../services/home_api_model_service.dart' show HomeFeedService, PostModel;
 
 const Map<String, String> kReactionEmoji = {'like': '👍', 'confuse': '🤔', 'wrong': '❗', 'imp': '⭐', 'explain': '💡'};
 const Map<String, Color> kReactionColor = {
@@ -70,7 +77,11 @@ Future<void> downloadWithAuth(String url, String fileName, BuildContext context)
 
 class SinglePostPage extends StatefulWidget {
   final String postId;
-  const SinglePostPage({super.key, required this.postId});
+  /// N7-FE — set when opened from a "commented / replied" notification
+  /// (`data.comment_id`). Once the post has loaded, the comment sheet
+  /// opens by itself and jumps to + highlights this comment (~2s).
+  final String? highlightCommentId;
+  const SinglePostPage({super.key, required this.postId, this.highlightCommentId});
   @override
   State<SinglePostPage> createState() => _SinglePostPageState();
 }
@@ -82,14 +93,31 @@ class _SinglePostPageState extends State<SinglePostPage> {
   String? myReaction;
   Map<String, int> reactionCounts = {'like': 0, 'confuse': 0, 'wrong': 0, 'imp': 0, 'explain': 0, 'total': 0};
   int commentsCount = 0;
+  // 🔥 NAYA — bookmark icon on the detail page, same optimistic-update +
+  // rollback shape _handleReaction already uses below, wired to the
+  // SAME toggle endpoint the home feed's save icon (home.dart's
+  // _toggleSave) and the profile "Saved" tab already use.
+  bool isSaved = false;
+  int savesCount = 0;
+  bool _savePending = false;
+  // Repost feature. On a repost page these describe the ORIGINAL (the Repost
+  // button targets it, same as the backend's chain-flattening).
+  int repostsCount = 0;
+  bool isReposted = false;
+  bool _repostPending = false;
   int currentIndex = 0;
   String fullImageUrl = "";
   String? myUsername;
   PageController pageController = PageController();
+  List<CommentModel> _previewComments = [];
+  // N7-FE — consumed exactly once: reopening the sheet later by hand
+  // must not re-run the jump/highlight.
+  String? _pendingHighlightId;
 
   @override
   void initState() {
     super.initState();
+    _pendingHighlightId = (widget.highlightCommentId?.isNotEmpty ?? false) ? widget.highlightCommentId : null;
     _initAll();
   }
 
@@ -123,12 +151,39 @@ class _SinglePostPageState extends State<SinglePostPage> {
           myReaction = model.myReaction;
           reactionCounts = model.reactionCounts;
           commentsCount = model.commentsCount;
+          isSaved = model.isSaved;
+          savesCount = model.savesCount;
+          repostsCount = model.isRepost ? (model.originalPost?.repostsCount ?? 0) : model.repostsCount;
+          isReposted = model.isRepost ? (model.originalPost?.isRepostedByMe ?? false) : model.isRepostedByMe;
           isLoading = false;
         });
         if (model.username.isNotEmpty) _fetchPhotoFromSearchApi(model.username);
+        _loadCommentsPreview();
+        if (_pendingHighlightId != null) {
+          WidgetsBinding.instance.addPostFrameCallback((_) {
+            if (mounted) _openCommentSheet();
+          });
+        }
       }
     } catch (e) {
       if (mounted) setState(() { error = e.toString(); isLoading = false; });
+    }
+  }
+
+  /// Inline "top comments" preview under the post — a lighter read of
+  /// the same list `CommentBottomSheet` shows in full, so the detail
+  /// screen doesn't need a separate/duplicated comments endpoint.
+  /// Best-effort: a failure here just leaves the preview empty; the
+  /// comment sheet itself (which retries properly) is still reachable.
+  Future<void> _loadCommentsPreview() async {
+    try {
+      final all = await CommentService.getComments(widget.postId);
+      if (!mounted) return;
+      final topLevel = all.where((c) => c.parent == null && !c.isHidden).toList()
+        ..sort((a, b) => b.createdAt.compareTo(a.createdAt));
+      setState(() => _previewComments = topLevel.take(2).toList());
+    } catch (_) {
+      // silent — preview is a bonus, not the primary way to read comments
     }
   }
 
@@ -169,6 +224,135 @@ class _SinglePostPageState extends State<SinglePostPage> {
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(content: Text(AppLocalizations.of(context)!.reactionUpdateFailed), backgroundColor: Theme.of(context).colorScheme.error),
       );
+    }
+  }
+
+  /// Double-tap-on-media: always LIKEs, never toggles a like off — a
+  /// double tap on an already-liked post just replays the heart burst.
+  void _handleDoubleTapLike() {
+    if (myReaction != 'like') {
+      _handleReaction('like');
+    } else {
+      HapticFeedback.lightImpact();
+    }
+  }
+
+  Future<void> _toggleSave() async {
+    if (_savePending) return;
+    HapticFeedback.lightImpact();
+    final oldSaved = isSaved;
+    final oldCount = savesCount;
+    setState(() {
+      _savePending = true;
+      isSaved = !isSaved;
+      savesCount = isSaved ? oldCount + 1 : (oldCount > 0 ? oldCount - 1 : 0);
+    });
+    try {
+      final res = await HomeFeedService.toggleSave(widget.postId);
+      if (!mounted) return;
+      setState(() {
+        isSaved = res['is_saved'] == true;
+        savesCount = (res['saves_count'] as int?) ?? savesCount;
+        _savePending = false;
+      });
+    } catch (e) {
+      if (!mounted) return;
+      setState(() {
+        isSaved = oldSaved;
+        savesCount = oldCount;
+        _savePending = false;
+      });
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text(AppLocalizations.of(context)!.saveFailed), backgroundColor: Theme.of(context).colorScheme.error),
+      );
+    }
+  }
+
+  // ---------------- REPOST ----------------
+  // tap = quick repost, long-press = "Repost with caption" sheet.
+  String? get _repostTargetId =>
+      post == null ? null : (post!.isRepost ? post!.originalPost?.id : post!.id);
+
+  RepostPreview? get _repostTargetPreview {
+    if (post == null) return null;
+    if (!post!.isRepost) return RepostPreview.fromSingle(post!);
+    final PostModel? o = post!.originalPost;
+    return o == null ? null : RepostPreview.fromPost(o);
+  }
+
+  void _repostSnack(String msg, {SnackBarAction? action}) {
+    if (!mounted) return;
+    ScaffoldMessenger.of(context)
+      ..hideCurrentSnackBar()
+      ..showSnackBar(SnackBar(content: Text(msg), action: action));
+  }
+
+  void _onRepostTap() {
+    if (isReposted) {
+      _repostSnack(AppLocalizations.of(context)!.repostAlready);
+      return;
+    }
+    _repostNow();
+  }
+
+  Future<void> _onRepostLongPress() async {
+    final preview = _repostTargetPreview;
+    if (preview == null) {
+      _repostSnack(AppLocalizations.of(context)!.repostOriginalUnavailable);
+      return;
+    }
+    HapticFeedback.selectionClick();
+    final caption = await showRepostCaptionSheet(context, original: preview);
+    if (caption == null || !mounted) return;
+    await _repostNow(caption: caption);
+  }
+
+  Future<void> _repostNow({String? caption}) async {
+    final l10n = AppLocalizations.of(context)!;
+    final targetId = _repostTargetId;
+    if (targetId == null) {
+      _repostSnack(l10n.repostOriginalUnavailable);
+      return;
+    }
+    if (_repostPending) return;
+    HapticFeedback.lightImpact();
+    setState(() => _repostPending = true);
+    try {
+      final res = await PostExtrasService.repost(targetId, caption: caption);
+      if (!mounted) return;
+      setState(() {
+        repostsCount = res.repostsCount;
+        isReposted = true;
+        _repostPending = false;
+      });
+      _repostSnack(l10n.repostDone,
+          action: SnackBarAction(label: l10n.repostUndo, onPressed: () => _undoRepost(res.repostId)));
+    } on RepostException catch (e) {
+      if (mounted) setState(() => _repostPending = false);
+      _repostSnack(e.statusCode == 404 ? l10n.repostOriginalUnavailable : l10n.repostFailed);
+    } catch (_) {
+      if (mounted) setState(() => _repostPending = false);
+      _repostSnack(l10n.repostFailed);
+    }
+  }
+
+  Future<void> _undoRepost(String repostId) async {
+    if (repostId.isEmpty) return;
+    final l10n = AppLocalizations.of(context)!;
+    try {
+      final ok = await PostExtrasService.deletePost(repostId);
+      if (!mounted) return;
+      if (ok) {
+        setState(() {
+          repostsCount = repostsCount > 0 ? repostsCount - 1 : 0;
+          isReposted = false;
+        });
+        _repostSnack(l10n.repostRemoved);
+      } else {
+        _repostSnack(l10n.repostFailed);
+      }
+    } catch (_) {
+      _repostSnack(l10n.repostFailed);
     }
   }
 
@@ -221,6 +405,119 @@ class _SinglePostPageState extends State<SinglePostPage> {
     }
   }
 
+  // NEW — post edit. Owner-only (same as delete above); backend
+  // `PATCH /post/<id>/edit/` 403s for anyone else. Only sends the fields
+  // that actually changed, and re-loads the post on success so every
+  // derived bit of state (hashtags, `is_edited`, etc) reflects what the
+  // server actually saved rather than being patched locally by guess.
+  Future<void> _openEditSheet() async {
+    if (post == null) return;
+    final l10n = AppLocalizations.of(context)!;
+    final titleCtrl = TextEditingController(text: post!.title ?? '');
+    final contentCtrl = TextEditingController(text: post!.caption);
+    final saved = await showModalBottomSheet<bool>(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: Colors.transparent,
+      builder: (ctx) {
+        final cs = Theme.of(ctx).colorScheme;
+        bool saving = false;
+        return StatefulBuilder(
+          builder: (ctx, setSheetState) => Padding(
+            padding: EdgeInsets.only(bottom: MediaQuery.of(ctx).viewInsets.bottom),
+            child: Container(
+              decoration: BoxDecoration(color: cs.surface, borderRadius: const BorderRadius.vertical(top: Radius.circular(24))),
+              padding: const EdgeInsets.fromLTRB(16, 12, 16, 16),
+              child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children: [
+                Center(child: Container(width: 40, height: 4, margin: const EdgeInsets.only(bottom: 16), decoration: BoxDecoration(color: cs.outlineVariant, borderRadius: BorderRadius.circular(2)))),
+                Text(l10n.editPostCta, style: LsType.head(ctx, size: 18)),
+                const SizedBox(height: 16),
+                TextField(controller: titleCtrl, decoration: InputDecoration(labelText: l10n.postTitleFieldLabel, border: const OutlineInputBorder())),
+                const SizedBox(height: 12),
+                TextField(controller: contentCtrl, decoration: InputDecoration(labelText: l10n.captionLabel, border: const OutlineInputBorder()), maxLines: 5, minLines: 3),
+                const SizedBox(height: 16),
+                SizedBox(
+                  width: double.infinity,
+                  child: FilledButton(
+                    onPressed: saving
+                        ? null
+                        : () async {
+                            setSheetState(() => saving = true);
+                            try {
+                              await PostExtrasService.editPost(post!.id, {
+                                'title': titleCtrl.text.trim(),
+                                'content': contentCtrl.text.trim(),
+                              });
+                              if (ctx.mounted) Navigator.pop(ctx, true);
+                            } on PostEditException catch (e) {
+                              setSheetState(() => saving = false);
+                              if (ctx.mounted) ScaffoldMessenger.of(ctx).showSnackBar(SnackBar(content: Text(e.message)));
+                            } catch (_) {
+                              setSheetState(() => saving = false);
+                              if (ctx.mounted) ScaffoldMessenger.of(ctx).showSnackBar(SnackBar(content: Text(l10n.postUpdateFailed)));
+                            }
+                          },
+                    child: saving
+                        ? const SizedBox(width: 18, height: 18, child: CircularProgressIndicator(strokeWidth: 2))
+                        : Text(l10n.save),
+                  ),
+                ),
+              ]),
+            ),
+          ),
+        );
+      },
+    );
+    if (saved == true && mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(l10n.postUpdated)));
+      await _loadPost();
+    }
+  }
+
+  // NEW — visibility change. Same owner-only backend guard as edit/delete.
+  // `PATCH /post/<id>/visibility/` — kept as a separate endpoint/sheet
+  // from edit above since a privacy change doesn't mark the post "edited".
+  Future<void> _openChangePrivacySheet() async {
+    if (post == null) return;
+    final l10n = AppLocalizations.of(context)!;
+    final options = <String, String>{
+      'public': l10n.visibilityPublic,
+      'connections': l10n.visibilityConnections,
+      'private': l10n.visibilityPrivate,
+    };
+    final chosen = await showModalBottomSheet<String>(
+      context: context,
+      backgroundColor: Colors.transparent,
+      builder: (ctx) {
+        final cs = Theme.of(ctx).colorScheme;
+        return Container(
+          decoration: BoxDecoration(color: cs.surface, borderRadius: const BorderRadius.vertical(top: Radius.circular(24))),
+          padding: const EdgeInsets.symmetric(vertical: 12),
+          child: Column(mainAxisSize: MainAxisSize.min, children: [
+            Padding(padding: const EdgeInsets.fromLTRB(16, 4, 16, 12), child: Align(alignment: Alignment.centerLeft, child: Text(l10n.changePrivacyTitle, style: LsType.head(ctx, size: 18)))),
+            for (final entry in options.entries)
+              ListTile(
+                title: Text(entry.value),
+                trailing: post!.visibility == entry.key ? Icon(Icons.check_rounded, color: cs.primary) : null,
+                onTap: () => Navigator.pop(ctx, entry.key),
+              ),
+          ]),
+        );
+      },
+    );
+    if (chosen == null || chosen == post!.visibility || !mounted) return;
+    try {
+      await PostExtrasService.updateVisibility(post!.id, chosen);
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(l10n.privacyUpdated)));
+      await _loadPost();
+    } on PostEditException catch (e) {
+      if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(e.message)));
+    } catch (_) {
+      if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(l10n.privacyUpdateFailed)));
+    }
+  }
+
   Future<void> _goToProfile(String postUsername) async {
     if (postUsername.trim().isEmpty) return;
     if (myUsername == null) await _loadMyUsername();
@@ -236,6 +533,8 @@ class _SinglePostPageState extends State<SinglePostPage> {
   void _openCommentSheet() {
     if (post == null) return;
     final cs = Theme.of(context).colorScheme;
+    final highlightId = _pendingHighlightId;
+    _pendingHighlightId = null; // one-shot
     showModalBottomSheet(
       context: context,
       isScrollControlled: true,
@@ -248,11 +547,64 @@ class _SinglePostPageState extends State<SinglePostPage> {
             postId: widget.postId,
             postOwnerId: post!.userId,
             initialCommentsCount: commentsCount,
+            highlightCommentId: highlightId, // N7-FE — new optional param
             onCommentAdded: () => setState(() => commentsCount++),
             onGoToProfile: _goToProfile,
           ),
         ),
       ),
+    ).then((_) => _loadCommentsPreview());
+  }
+
+  /// A light "top comments" read-out under the post, Instagram-style —
+  /// "View all N comments" plus the 1-2 most recent top-level comments,
+  /// tappable straight into the full `CommentBottomSheet`.
+  Widget _buildCommentPreview(ColorScheme cs, AppLocalizations l10n) {
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(16, 0, 16, 4),
+      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        InkWell(
+          onTap: _openCommentSheet,
+          child: Padding(
+            padding: const EdgeInsets.symmetric(vertical: 4),
+            child: Text(l10n.commentsCount(commentsCount),
+                style: TextStyle(fontSize: 12.5, fontWeight: FontWeight.w600, color: cs.onSurfaceVariant)),
+          ),
+        ),
+        for (final c in _previewComments)
+          Padding(
+            padding: const EdgeInsets.only(bottom: 4),
+            child: InkWell(
+              onTap: _openCommentSheet,
+              child: Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                GestureDetector(
+                  onTap: () => _goToProfile(c.user.username),
+                  child: CircleAvatar(
+                    radius: 12,
+                    backgroundColor: cs.surfaceVariant,
+                    backgroundImage: c.user.profilePicture != null && c.user.profilePicture!.isNotEmpty
+                        ? CachedNetworkImageProvider(c.user.profilePicture!, maxWidth: 64)
+                        : null,
+                    child: c.user.profilePicture == null || c.user.profilePicture!.isEmpty
+                        ? Icon(Icons.person_rounded, size: 13, color: cs.onSurfaceVariant)
+                        : null,
+                  ),
+                ),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: Text.rich(
+                    TextSpan(children: [
+                      TextSpan(text: '${c.user.username}  ', style: TextStyle(fontSize: 13, fontWeight: FontWeight.w700, color: cs.onSurface)),
+                      TextSpan(text: c.content, style: TextStyle(fontSize: 13, color: cs.onSurface.withOpacity(.85))),
+                    ]),
+                    maxLines: 2,
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                ),
+              ]),
+            ),
+          ),
+      ]),
     );
   }
 
@@ -261,14 +613,26 @@ class _SinglePostPageState extends State<SinglePostPage> {
     if (media.isEmpty) return;
     final m = media[currentIndex];
     final fileUrl = buildMediaUrl(m.file);
-    final ext = fileUrl.split('.').last.toLowerCase().split('?').first;
-    final type = m.mediaType.toLowerCase();
-    if (type == 'video' || ['mp4', 'mov', 'mkv'].contains(ext)) {
-      Navigator.push(context, MaterialPageRoute(builder: (_) => FullScreenVideoPage(url: fileUrl)));
-    } else if (['jpg', 'jpeg', 'png', 'webp', 'gif'].contains(ext) || type == 'image') {
-      Navigator.push(context, MaterialPageRoute(builder: (_) => FullScreenImagePage(url: fileUrl)));
-    } else {
-      Navigator.push(context, MaterialPageRoute(builder: (_) => DocumentViewerPage(url: fileUrl, fileName: fileUrl.split('/').last.split('?').first)));
+    switch (PostMediaUtil.kind(m, url: fileUrl)) {
+      case PostMediaKind.video:
+        Navigator.push(context, MaterialPageRoute(builder: (_) => FullScreenVideoPage(url: fileUrl)));
+        break;
+      case PostMediaKind.image:
+        // Swipeable + zoomable gallery over every image of this post.
+        final urls = <String>[];
+        var start = 0;
+        for (var i = 0; i < media.length; i++) {
+          final u = buildMediaUrl(media[i].file);
+          if (PostMediaUtil.kind(media[i], url: u) != PostMediaKind.image) continue;
+          if (i == currentIndex) start = urls.length;
+          urls.add(u);
+        }
+        Navigator.push(context, MaterialPageRoute(builder: (_) => FullScreenImagePage(url: fileUrl, urls: urls, initialIndex: start)));
+        break;
+      case PostMediaKind.pdf:
+      case PostMediaKind.doc:
+        Navigator.push(context, MaterialPageRoute(builder: (_) => DocumentViewerPage(url: fileUrl, fileName: PostMediaUtil.displayName(m, url: fileUrl))));
+        break;
     }
   }
 
@@ -277,18 +641,48 @@ class _SinglePostPageState extends State<SinglePostPage> {
     final cs = Theme.of(context).colorScheme;
     final l10n = AppLocalizations.of(context)!;
 
-    if (isLoading) return Scaffold(backgroundColor: cs.background, body: Center(child: CircularProgressIndicator(color: cs.primary)));
+    if (isLoading) {
+      return Scaffold(
+        backgroundColor: cs.background,
+        appBar: AppBar(backgroundColor: cs.surface, elevation: 0),
+        body: LsShimmer(
+          child: Padding(
+            padding: const EdgeInsets.symmetric(vertical: 12),
+            child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: const [
+              Padding(
+                padding: EdgeInsets.fromLTRB(16, 0, 16, 8),
+                child: Row(children: [
+                  LsSkeletonBox(width: 44, height: 44, radius: 22),
+                  SizedBox(width: 12),
+                  Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                    LsSkeletonBox(width: 120, height: 12, radius: 6),
+                    SizedBox(height: 6),
+                    LsSkeletonBox(width: 70, height: 9, radius: 5),
+                  ]),
+                ]),
+              ),
+              Padding(
+                padding: EdgeInsets.symmetric(horizontal: 12),
+                child: LsSkeletonBox(height: 420, radius: 18),
+              ),
+              Padding(
+                padding: EdgeInsets.fromLTRB(16, 16, 16, 0),
+                child: LsSkeletonBox(height: 10, radius: 5),
+              ),
+            ]),
+          ),
+        ),
+      );
+    }
     if (error != null) {
       return Scaffold(
         backgroundColor: cs.background,
+        appBar: AppBar(backgroundColor: cs.surface, elevation: 0),
         body: Center(
-          child: Padding(
-            padding: const EdgeInsets.all(24),
-            child: Column(mainAxisSize: MainAxisSize.min, children: [
-              Icon(Icons.error_outline_rounded, color: cs.error, size: 40),
-              const SizedBox(height: 12),
-              Text(error!, textAlign: TextAlign.center, style: TextStyle(color: cs.onSurfaceVariant)),
-            ]),
+          child: ErrorStateWidget(
+            title: error!,
+            retryLabel: AppLocalizations.of(context)!.retry,
+            icon: Icons.error_outline_rounded,
           ),
         ),
       );
@@ -313,11 +707,19 @@ class _SinglePostPageState extends State<SinglePostPage> {
             future: AuthService.getUserId(),
             builder: (context, snap) {
               if (snap.data == null || snap.data != post!.userId) return const SizedBox.shrink();
+              // Reposts have no text/category fields of their own and no
+              // separate visibility (PostEditAPIView/PostVisibilityAPIView
+              // both 400 on a repost row) — only offer delete for those.
+              final canEditThis = post != null && !post!.isRepost;
               return PopupMenuButton<String>(
                 onSelected: (v) {
                   if (v == 'delete') _confirmDeletePost();
+                  if (v == 'edit') _openEditSheet();
+                  if (v == 'privacy') _openChangePrivacySheet();
                 },
                 itemBuilder: (_) => [
+                  if (canEditThis) PopupMenuItem(value: 'edit', child: Text(AppLocalizations.of(context)!.editPostCta)),
+                  if (canEditThis) PopupMenuItem(value: 'privacy', child: Text(AppLocalizations.of(context)!.changePrivacyCta)),
                   PopupMenuItem(value: 'delete', child: Text(AppLocalizations.of(context)!.deletePostCta)),
                 ],
               );
@@ -327,6 +729,14 @@ class _SinglePostPageState extends State<SinglePostPage> {
       ),
       body: SingleChildScrollView(
         child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+          if (post!.isRepost)
+            RepostHeader(
+              username: username,
+              createdAt: createdAt,
+              onUserTap: () => _goToProfile(username),
+              padding: const EdgeInsets.fromLTRB(16, 12, 16, 8),
+            )
+          else
           InkWell(
             onTap: () => _goToProfile(username),
             child: Padding(
@@ -344,73 +754,88 @@ class _SinglePostPageState extends State<SinglePostPage> {
                 const SizedBox(width: 12),
                 Expanded(
                   child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                    Text(username, style: TextStyle(fontWeight: FontWeight.w800, fontSize: 14.5, color: cs.onSurface)),
+                    Text(username, style: TextStyle(fontWeight: FontWeight.w800, fontSize: 15, color: cs.onSurface)),
                     if (createdAt != null)
-                      Text(timeago.format(createdAt, locale: Localizations.localeOf(context).languageCode), style: TextStyle(fontSize: 12, color: cs.onSurfaceVariant)),
+                      Text(
+                        // NEW — "edited" tag, same idea as Instagram/Twitter.
+                        // `post!.isEdited` mirrors the backend's `is_edited`
+                        // flag, which PATCH /post/<id>/edit/ now actually sets.
+                        post!.isEdited
+                            ? '${timeago.format(createdAt, locale: Localizations.localeOf(context).languageCode)} · ${AppLocalizations.of(context)!.postEditedLabel}'
+                            : timeago.format(createdAt, locale: Localizations.localeOf(context).languageCode),
+                        style: TextStyle(fontSize: 12, color: cs.onSurfaceVariant),
+                      ),
                   ]),
                 ),
               ]),
             ),
           ),
-          Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 12),
-            child: ClipRRect(
-              borderRadius: BorderRadius.circular(18),
-              child: Container(
-                height: 580,
-                color: Colors.black,
-                child: Stack(children: [
-                  PageView.builder(
-                    controller: pageController,
-                    itemCount: media.length,
-                    onPageChanged: (i) => setState(() => currentIndex = i),
-                    itemBuilder: (c, i) {
-                      final fileUrl = buildMediaUrl(media[i].file);
-                      final ext = fileUrl.split('.').last.toLowerCase().split('?').first;
-                      final type = media[i].mediaType.toLowerCase();
-                      if (type == 'video' || ['mp4', 'mov', 'mkv'].contains(ext)) return SmallVideoPlayer(url: fileUrl);
-                      if (ext == 'pdf' || type == 'pdf') return SmallPdfViewer(url: fileUrl);
-                      if (['doc', 'docx', 'xls', 'xlsx', 'ppt', 'pptx', 'txt'].contains(ext)) {
-                        return DocThumbnail(url: fileUrl, ext: ext, onOpen: _openFullScreen);
-                      }
-                      return CachedNetworkImage(imageUrl: fileUrl, fit: BoxFit.cover, width: double.infinity);
-                    },
-                  ),
-                  if (media.length > 1)
-                    Positioned(
-                      top: 12,
-                      left: 0,
-                      right: 0,
-                      child: Row(
-                        mainAxisAlignment: MainAxisAlignment.center,
-                        children: List.generate(media.length, (i) {
-                          final active = i == currentIndex;
-                          return AnimatedContainer(
-                            duration: const Duration(milliseconds: 200),
-                            margin: const EdgeInsets.symmetric(horizontal: 2.5),
-                            width: active ? 16 : 6,
-                            height: 6,
-                            decoration: BoxDecoration(color: active ? Colors.white : Colors.white38, borderRadius: BorderRadius.circular(4)),
-                          );
-                        }),
-                      ),
-                    ),
-                  Positioned(
-                    top: 10,
-                    right: 10,
-                    child: InkWell(
-                      onTap: _openFullScreen,
-                      borderRadius: BorderRadius.circular(20),
-                      child: Container(
-                        padding: const EdgeInsets.all(7),
-                        decoration: BoxDecoration(color: Colors.black54, borderRadius: BorderRadius.circular(20)),
-                        child: const Icon(Icons.fullscreen_rounded, color: Colors.white, size: 20),
-                      ),
-                    ),
-                  ),
-                ]),
+          if (post!.isRepost) ...[
+            if ((post!.repostCaption ?? '').trim().isNotEmpty)
+              Padding(
+                padding: const EdgeInsets.fromLTRB(16, 4, 16, 10),
+                child: Text(post!.repostCaption!.trim(),
+                    style: TextStyle(fontSize: 14.5, height: 1.4, color: cs.onSurface)),
               ),
+            EmbeddedOriginalPost(
+              preview: post!.originalPost == null ? null : RepostPreview.fromPost(post!.originalPost!),
+              margin: const EdgeInsets.fromLTRB(12, 0, 12, 8),
+              onTap: post!.originalPost == null
+                  ? null
+                  : () => Navigator.push(
+                      context, MaterialPageRoute(builder: (_) => SinglePostPage(postId: post!.originalPost!.id))),
             ),
+          ] else if (media.isNotEmpty)
+          // Same media presentation as the home feed card (shared widgets in
+          // post_media_view.dart): frame height follows the first image/video's
+          // aspect ratio, images are contained (never cropped) over a blurred
+          // backdrop, documents get a proper file card.
+          DoubleTapLikeOverlay(
+            onDoubleTapLike: _handleDoubleTapLike,
+            child: LayoutBuilder(builder: (context, cons) {
+              final height = PostMediaUtil.frameHeight(width: cons.maxWidth, media: media, maxHeight: MediaQuery.of(context).size.height * 0.62);
+              return SizedBox(
+                height: height,
+                child: ColoredBox(
+                  color: Colors.black,
+                  child: Stack(children: [
+                    PageView.builder(
+                      controller: pageController,
+                      itemCount: media.length,
+                      onPageChanged: (i) => setState(() => currentIndex = i),
+                      itemBuilder: (c, i) {
+                        final m = media[i];
+                        final fileUrl = buildMediaUrl(m.file);
+                        switch (PostMediaUtil.kind(m, url: fileUrl)) {
+                          case PostMediaKind.video:
+                            return SmallVideoPlayer(url: fileUrl);
+                          case PostMediaKind.image:
+                            return PostImageTile(url: fileUrl, onTap: _openFullScreen);
+                          case PostMediaKind.pdf:
+                          case PostMediaKind.doc:
+                            final name = PostMediaUtil.displayName(m, url: fileUrl);
+                            return PostDocTile(
+                              fileName: name,
+                              ext: PostMediaUtil.ext(m.fileName.isNotEmpty ? m.fileName : fileUrl),
+                              onOpen: _openFullScreen,
+                              onDownload: () => downloadWithAuth(fileUrl, name.replaceAll(' ', '_'), context),
+                            );
+                        }
+                        // ignore: dead_code
+                        return const SizedBox.shrink();
+                      },
+                    ),
+                    if (media.length > 1)
+                      Positioned(top: 10, left: 10, child: PostMediaCounter(index: currentIndex, count: media.length)),
+                    if (media.length > 1)
+                      Positioned(bottom: 10, left: 0, right: 0, child: Center(child: PostCarouselDots(count: media.length, activeIndex: currentIndex))),
+                    if (PostMediaUtil.kind(media[currentIndex], url: buildMediaUrl(media[currentIndex].file)) != PostMediaKind.doc &&
+                        PostMediaUtil.kind(media[currentIndex], url: buildMediaUrl(media[currentIndex].file)) != PostMediaKind.pdf)
+                      Positioned(top: 10, right: 10, child: PostMediaIconButton(icon: Icons.fullscreen_rounded, onTap: _openFullScreen)),
+                  ]),
+                ),
+              );
+            }),
           ),
           Padding(
             padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
@@ -427,13 +852,72 @@ class _SinglePostPageState extends State<SinglePostPage> {
                 ),
               ),
               Text('$commentsCount', style: TextStyle(fontWeight: FontWeight.w700, color: cs.onSurface, fontSize: 13)),
+              const SizedBox(width: 10),
+              Semantics(
+                button: true,
+                selected: isReposted,
+                label: l10n.repostAction,
+                child: InkWell(
+                  onTap: _onRepostTap,
+                  onLongPress: _onRepostLongPress,
+                  borderRadius: BorderRadius.circular(20),
+                  child: Padding(
+                    padding: const EdgeInsets.all(8),
+                    child: Icon(Icons.repeat_rounded, color: isReposted ? cs.primary : cs.onSurfaceVariant, size: 22),
+                  ),
+                ),
+              ),
+              Text('$repostsCount', style: TextStyle(fontWeight: FontWeight.w700, color: cs.onSurface, fontSize: 13)),
               const Spacer(),
               InkWell(
-                onTap: () => Share.share("${post!.title ?? ''}\n${post!.caption}"),
+                onTap: () => Share.share(post!.isRepost ? (post!.originalPost?.content ?? '') : "${post!.title ?? ''}\n${post!.caption}"),
                 borderRadius: BorderRadius.circular(20),
                 child: Padding(
                   padding: const EdgeInsets.all(8),
                   child: Icon(Icons.share_outlined, color: cs.onSurfaceVariant, size: 21),
+                ),
+              ),
+              Semantics(
+                button: true,
+                selected: isSaved,
+                label: isSaved ? l10n.savedPostsTitle : l10n.save,
+                child: InkWell(
+                  onTap: _toggleSave,
+                  borderRadius: BorderRadius.circular(20),
+                  child: Padding(
+                    padding: const EdgeInsets.all(8),
+                    child: Icon(
+                      isSaved ? Icons.bookmark_rounded : Icons.bookmark_border_rounded,
+                      color: isSaved ? cs.primary : cs.onSurfaceVariant,
+                      size: 22,
+                    ),
+                  ),
+                ),
+              ),
+              // 🔥 NAYA — Task G15 ("AI doubt-solving assistant"): "Ask AI"
+              // entry point from a feed post — for education content this
+              // is often "explain this concept", not just social reactions.
+              // No dedicated 3-dot post menu exists yet in this screen (that's
+              // Task G19 — report/block), so this is added as its own action
+              // icon alongside like/comment/repost/share/save for now; once
+              // G19's menu ships, this can move in there instead.
+              Semantics(
+                button: true,
+                label: 'Ask AI',
+                child: InkWell(
+                  onTap: () => showAskAiSheet(
+                    context,
+                    contextType: 'feed_post',
+                    contextText: '${post!.title ?? ''}\n${post!.caption}'.trim(),
+                    contextPreview: post!.caption.isNotEmpty ? post!.caption : (post!.title ?? ''),
+                    initialQuestion: 'Can you explain this?',
+                    sourceId: post!.id,
+                  ),
+                  borderRadius: BorderRadius.circular(20),
+                  child: Padding(
+                    padding: const EdgeInsets.all(8),
+                    child: Icon(Icons.auto_awesome_rounded, color: cs.onSurfaceVariant, size: 21),
+                  ),
                 ),
               ),
             ]),
@@ -452,31 +936,14 @@ class _SinglePostPageState extends State<SinglePostPage> {
             Padding(
               padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
               child: Wrap(spacing: 8, runSpacing: 8, children: [
-                if ((post!.categoryLabel ?? post!.category).isNotEmpty) _TagChip(label: post!.categoryLabel ?? post!.category, cs: cs, emphasized: true),
-                if ((post!.subcategoryLabel ?? post!.subcategory ?? '').isNotEmpty) _TagChip(label: post!.subcategoryLabel ?? post!.subcategory ?? '', cs: cs),
+                if ((post!.categoryLabel ?? post!.category).isNotEmpty) PostTagChip(label: post!.categoryLabel ?? post!.category, emphasized: true),
+                if ((post!.subcategoryLabel ?? post!.subcategory ?? '').isNotEmpty) PostTagChip(label: post!.subcategoryLabel ?? post!.subcategory ?? ''),
               ]),
             ),
+          if (commentsCount > 0) _buildCommentPreview(cs, l10n),
           const SizedBox(height: 20),
         ]),
       ),
-    );
-  }
-}
-
-class _TagChip extends StatelessWidget {
-  final String label;
-  final ColorScheme cs;
-  final bool emphasized;
-  const _TagChip({required this.label, required this.cs, this.emphasized = false});
-  @override
-  Widget build(BuildContext context) {
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-      decoration: BoxDecoration(
-        color: emphasized ? cs.primary.withOpacity(0.12) : cs.surfaceVariant,
-        borderRadius: BorderRadius.circular(20),
-      ),
-      child: Text(label, style: TextStyle(fontSize: 12, fontWeight: FontWeight.w700, color: emphasized ? cs.primary : cs.onSurfaceVariant)),
     );
   }
 }
@@ -573,8 +1040,9 @@ class SmallVideoPlayer extends StatefulWidget {
 }
 
 class _SmallVideoPlayerState extends State<SmallVideoPlayer> {
-  late VideoPlayerController _c;
+  VideoPlayerController? _c;
   bool _ok = false;
+  bool _failed = false;
   @override
   void initState() {
     super.initState();
@@ -582,29 +1050,56 @@ class _SmallVideoPlayerState extends State<SmallVideoPlayer> {
   }
 
   Future<void> _init() async {
-    final token = await AuthService.getToken();
-    final headers = token != null ? {'Authorization': 'Bearer $token'} : <String, String>{};
-    _c = VideoPlayerController.networkUrl(Uri.parse(widget.url), httpHeaders: headers);
-    await _c.initialize();
-    await _c.setLooping(true);
-    await _c.play();
-    if (mounted) setState(() => _ok = true);
+    try {
+      final token = await AuthService.getToken();
+      final headers = token != null ? {'Authorization': 'Bearer $token'} : <String, String>{};
+      final c = VideoPlayerController.networkUrl(Uri.parse(widget.url), httpHeaders: headers);
+      _c = c;
+      await c.initialize();
+      await c.setLooping(true);
+      await c.play();
+      if (mounted) setState(() => _ok = true);
+    } catch (_) {
+      if (mounted) setState(() => _failed = true);
+    }
   }
 
   @override
   void dispose() {
-    _c.dispose();
+    _c?.dispose();
     super.dispose();
   }
 
   @override
   Widget build(BuildContext context) {
-    if (!_ok) return const Center(child: CircularProgressIndicator(color: Colors.white));
+    if (_failed) {
+      return Center(
+        child: IconButton(
+          iconSize: 44,
+          icon: const Icon(Icons.refresh_rounded, color: Colors.white70),
+          onPressed: () {
+            _c?.dispose();
+            _c = null;
+            setState(() { _failed = false; _ok = false; });
+            _init();
+          },
+        ),
+      );
+    }
+    final c = _c;
+    if (!_ok || c == null) return const Center(child: CircularProgressIndicator(strokeWidth: 2.4, color: Colors.white70));
     return GestureDetector(
-      onTap: () { _c.value.isPlaying ? _c.pause() : _c.play(); setState(() {}); },
+      onTap: () { c.value.isPlaying ? c.pause() : c.play(); setState(() {}); },
+      behavior: HitTestBehavior.opaque,
       child: Stack(alignment: Alignment.center, children: [
-        AspectRatio(aspectRatio: _c.value.aspectRatio, child: VideoPlayer(_c)),
-        if (!_c.value.isPlaying) const Icon(Icons.play_circle_fill_rounded, color: Colors.white70, size: 60),
+        Center(child: AspectRatio(aspectRatio: c.value.aspectRatio, child: VideoPlayer(c))),
+        if (!c.value.isPlaying) const Icon(Icons.play_circle_fill_rounded, color: Colors.white70, size: 60),
+        Positioned(
+          left: 0,
+          right: 0,
+          bottom: 0,
+          child: VideoProgressIndicator(c, allowScrubbing: true, padding: EdgeInsets.zero, colors: const VideoProgressColors(playedColor: Colors.white, bufferedColor: Colors.white24, backgroundColor: Colors.white12)),
+        ),
       ]),
     );
   }
@@ -781,18 +1276,118 @@ class _FullScreenVideoPageState extends State<FullScreenVideoPage> {
   }
 }
 
-// Full-screen zoomable image.
-class FullScreenImagePage extends StatelessWidget {
+// Full-screen image viewer: never cropped (BoxFit.contain), pinch + double-tap
+// zoom, swipe between the post's images, close button respects the status bar.
+class FullScreenImagePage extends StatefulWidget {
   final String url;
-  const FullScreenImagePage({super.key, required this.url});
+  final List<String>? urls;
+  final int initialIndex;
+  const FullScreenImagePage({super.key, required this.url, this.urls, this.initialIndex = 0});
+  @override
+  State<FullScreenImagePage> createState() => _FullScreenImagePageState();
+}
+
+class _FullScreenImagePageState extends State<FullScreenImagePage> {
+  late final PageController _pc;
+  late final List<String> _urls;
+  late int _index;
+  bool _zoomed = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _urls = (widget.urls != null && widget.urls!.isNotEmpty) ? widget.urls! : [widget.url];
+    _index = widget.initialIndex.clamp(0, _urls.length - 1).toInt();
+    _pc = PageController(initialPage: _index);
+  }
+
+  @override
+  void dispose() {
+    _pc.dispose();
+    super.dispose();
+  }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
       backgroundColor: Colors.black,
       body: Stack(children: [
-        SizedBox.expand(child: InteractiveViewer(minScale: 0.9, maxScale: 5.0, child: CachedNetworkImage(imageUrl: url, fit: BoxFit.cover, width: double.infinity, height: double.infinity))),
-        Positioned(top: 40, left: 10, child: IconButton(icon: const Icon(Icons.close_rounded, color: Colors.white, size: 28), onPressed: () => Navigator.pop(context))),
+        PageView.builder(
+          controller: _pc,
+          itemCount: _urls.length,
+          physics: _zoomed ? const NeverScrollableScrollPhysics() : const PageScrollPhysics(),
+          onPageChanged: (i) => setState(() { _index = i; _zoomed = false; }),
+          itemBuilder: (_, i) => _ZoomableImage(url: _urls[i], onZoomChanged: (z) { if (z != _zoomed) setState(() => _zoomed = z); }),
+        ),
+        SafeArea(
+          child: Padding(
+            padding: const EdgeInsets.all(6),
+            child: Row(children: [
+              IconButton(icon: const Icon(Icons.close_rounded, color: Colors.white, size: 28), onPressed: () => Navigator.pop(context)),
+              const Spacer(),
+              if (_urls.length > 1)
+                Padding(padding: const EdgeInsets.only(right: 10), child: PostMediaCounter(index: _index, count: _urls.length)),
+            ]),
+          ),
+        ),
       ]),
+    );
+  }
+}
+
+class _ZoomableImage extends StatefulWidget {
+  final String url;
+  final ValueChanged<bool> onZoomChanged;
+  const _ZoomableImage({required this.url, required this.onZoomChanged});
+  @override
+  State<_ZoomableImage> createState() => _ZoomableImageState();
+}
+
+class _ZoomableImageState extends State<_ZoomableImage> {
+  final TransformationController _tc = TransformationController();
+  Offset _tapPos = Offset.zero;
+
+  @override
+  void dispose() {
+    _tc.dispose();
+    super.dispose();
+  }
+
+  bool get _isZoomed => _tc.value.getMaxScaleOnAxis() > 1.02;
+
+  void _doubleTap() {
+    if (_isZoomed) {
+      _tc.value = Matrix4.identity();
+    } else {
+      const scale = 2.6;
+      final x = -_tapPos.dx * (scale - 1);
+      final y = -_tapPos.dy * (scale - 1);
+      _tc.value = Matrix4.identity()
+        ..translate(x, y)
+        ..scale(scale);
+    }
+    widget.onZoomChanged(_isZoomed);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return GestureDetector(
+      onDoubleTapDown: (d) => _tapPos = d.localPosition,
+      onDoubleTap: _doubleTap,
+      child: InteractiveViewer(
+        transformationController: _tc,
+        minScale: 1.0,
+        maxScale: 5.0,
+        onInteractionEnd: (_) => widget.onZoomChanged(_isZoomed),
+        child: SizedBox.expand(
+          child: CachedNetworkImage(
+            imageUrl: widget.url,
+            fit: BoxFit.contain,
+            placeholder: (_, __) => const Center(child: CircularProgressIndicator(strokeWidth: 2.4, color: Colors.white54)),
+            errorWidget: (_, __, ___) => const Center(child: Icon(Icons.broken_image_outlined, color: Colors.white38, size: 56)),
+          ),
+        ),
+      ),
     );
   }
 }

@@ -23,7 +23,7 @@
 // uses for per-message actions.
 
 import 'package:flutter/material.dart';
-import '../services/translate_service.dart';
+import '../services/translate_service.dart'; // TranslateService.instance.translateEnabled — Task 6 permission gate
 import '../services/tts_service.dart';
 import 'language_picker_sheet.dart';
 
@@ -138,6 +138,21 @@ class _TranslateToggleState extends State<TranslateToggle> {
 
   @override
   Widget build(BuildContext context) {
+    // Task 6 — translate is now a chat-level permission (3-dot menu
+    // toggle in chat_screen.dart) instead of always-visible. This
+    // widget also self-gates on the same notifier so any other place
+    // that renders `TranslateToggle` directly stays consistent without
+    // needing its own permission-check wrapper.
+    return ValueListenableBuilder<bool>(
+      valueListenable: TranslateService.instance.translateEnabled,
+      builder: (context, permissionOn, _) {
+        if (!permissionOn) return const SizedBox.shrink();
+        return _buildToggle(context);
+      },
+    );
+  }
+
+  Widget _buildToggle(BuildContext context) {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       mainAxisSize: MainAxisSize.min,

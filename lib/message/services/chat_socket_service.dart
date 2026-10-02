@@ -29,6 +29,13 @@ class ChatSocketService {
   WebSocketChannel? _channel;
   StreamSubscription? _sub;
   final _eventController = StreamController<Map<String, dynamic>>.broadcast();
+  // 🔥 NAYA — socket har baar (pehli baar + har reconnect pe) handshake
+  // complete karke khulne par emit karta hai. Value `true` = ye reconnect
+  // hai (pehle bhi connect ho chuka tha). Study-room sticky notes isse
+  // pending ops resend + missed updates resync karte hain. Alag stream
+  // hai (events stream me nahi) taaki chat screen ke listeners pe koi asar na pade.
+  final _openController = StreamController<bool>.broadcast();
+  bool _hasConnectedBefore = false;
   bool _isConnected = false;
   bool _isConnecting = false;
 
@@ -40,6 +47,7 @@ class ChatSocketService {
 
   /// Har incoming server event yahan se milta hai — {"type": "...", ...}
   Stream<Map<String, dynamic>> get events => _eventController.stream;
+  Stream<bool> get onOpen => _openController.stream;
   bool get isConnected => _isConnected;
 
   /// `Api.baseUrl` http(s):// hai, WebSocket ke liye ws(s):// chahiye.
@@ -88,6 +96,18 @@ class ChatSocketService {
       _isConnected = true;
       _isConnecting = false;
       _reconnectAttempts = 0; // successful connect — backoff reset
+
+      // 🔥 NAYA — handshake complete hone par `onOpen` emit (see upar).
+      final channelForReady = _channel!;
+      channelForReady.ready.then((_) {
+        if (_manuallyDisconnected || _openController.isClosed) return;
+        if (!identical(_channel, channelForReady)) return; // purana, replace ho chuka socket
+        final isReconnect = _hasConnectedBefore;
+        _hasConnectedBefore = true;
+        _openController.add(isReconnect);
+      }).catchError((_) {
+        // handshake fail — stream ka onError/onDone reconnect schedule karega
+      });
 
       _sub = _channel!.stream.listen(
         (raw) {
@@ -215,5 +235,6 @@ class ChatSocketService {
   void dispose() {
     disconnect();
     _eventController.close();
+    _openController.close();
   }
 }

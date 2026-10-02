@@ -121,7 +121,7 @@ AssignmentKind assignmentKindFrom(String? raw) {
 }
 
 /// `assigmentsStatus` — draft/published/archived. Only meaningful for
-/// `source == personal`; campus/liveclass assignments don't use this flow.
+/// `source == personal`; campus/tuitionclass assignments don't use this flow.
 enum AssignmentPublishStatus { draft, published, archived, unknown }
 
 AssignmentPublishStatus assignmentPublishStatusFrom(String? raw) {
@@ -162,7 +162,7 @@ class AssignmentModel {
   final int totalMarks;
   final bool hasStructuredQuestions;
   final String postedBy;
-  final String source; // personal / campus / liveclass
+  final String source; // personal / campus / tuitionclass
   final List<AssignmentQuestion> questions;
   final DateTime? createdAt;
 
@@ -379,6 +379,97 @@ class AssignmentSubmission {
   bool get isSubmitted => status != AssignmentStatus.missing && submittedAt != null;
   bool get isFullyChecked => status == AssignmentStatus.checked;
   bool get isPending => status == AssignmentStatus.missing;
+}
+
+/// `SubmissionSimilarityFlag.Status` — Task 6 Part C.
+enum SimilarityFlagStatus { pending, confirmed, dismissed, unknown }
+
+SimilarityFlagStatus similarityFlagStatusFrom(String? raw) {
+  switch (raw) {
+    case 'pending':
+      return SimilarityFlagStatus.pending;
+    case 'confirmed':
+      return SimilarityFlagStatus.confirmed;
+    case 'dismissed':
+      return SimilarityFlagStatus.dismissed;
+    default:
+      return SimilarityFlagStatus.unknown;
+  }
+}
+
+/// `SubmissionSimilarityFlagSerializer` — Task 6 Part C (frontend half of
+/// the "Assignment Duplicate/Plagiarism Flag" feature; backend Parts A
+/// [`plagiarism.py` engine + `SubmissionSimilarityFlag` model] and B [auto-
+/// run-on-submit + these two teacher endpoints] are already done — see
+/// `backend/assigments/plagiarism.py`'s own docstring for the full split).
+///
+/// One row = one OTHER submission this submission looks like a possible
+/// duplicate of. `otherSubmissionId`/`otherStudent`/`myExcerpt`/
+/// `otherExcerpt` are already computed by the backend "from this
+/// submission's side of the pair" (it sends `viewed_submission_id` as
+/// context) — Flutter never has to figure out which side of `submission_a`
+/// / `submission_b` it's looking at.
+class SimilarityFlag {
+  final String id;
+  final String otherSubmissionId;
+  final String otherStudent;
+
+  /// Set only for a structured `text`-question match; `null` means this
+  /// flag came from comparing whole free-form `written_content` instead
+  /// (mirrors the backend model's own `question` field — null there means
+  /// exactly the same thing).
+  final String? questionId;
+  final String questionText;
+
+  /// 0.0–1.0 `difflib.SequenceMatcher` ratio — `plagiarism.
+  /// SIMILARITY_THRESHOLD` (0.75) is the backend's own cutoff for a flag
+  /// to exist at all, so anything reaching this class is already at or
+  /// above that.
+  final double similarityScore;
+  final String myExcerpt;
+  final String otherExcerpt;
+  final SimilarityFlagStatus status;
+  final String? reviewedBy;
+  final DateTime? reviewedAt;
+  final DateTime? createdAt;
+
+  const SimilarityFlag({
+    required this.id,
+    required this.otherSubmissionId,
+    required this.otherStudent,
+    required this.questionText,
+    required this.similarityScore,
+    required this.myExcerpt,
+    required this.otherExcerpt,
+    required this.status,
+    this.questionId,
+    this.reviewedBy,
+    this.reviewedAt,
+    this.createdAt,
+  });
+
+  factory SimilarityFlag.fromJson(Map<String, dynamic> j) {
+    return SimilarityFlag(
+      id: j['id']?.toString() ?? '',
+      otherSubmissionId: j['other_submission_id']?.toString() ?? '',
+      otherStudent: j['other_student']?.toString() ?? '',
+      questionId: (j['question']?.toString().isNotEmpty ?? false) ? j['question'].toString() : null,
+      questionText: j['question_text']?.toString() ?? '',
+      similarityScore: (j['similarity_score'] as num?)?.toDouble() ?? 0.0,
+      myExcerpt: j['my_excerpt']?.toString() ?? '',
+      otherExcerpt: j['other_excerpt']?.toString() ?? '',
+      status: similarityFlagStatusFrom(j['status']?.toString()),
+      reviewedBy: (j['reviewed_by']?.toString().isNotEmpty ?? false) ? j['reviewed_by'].toString() : null,
+      reviewedAt: DateTime.tryParse(j['reviewed_at']?.toString() ?? ''),
+      createdAt: DateTime.tryParse(j['created_at']?.toString() ?? ''),
+    );
+  }
+
+  bool get isPending => status == SimilarityFlagStatus.pending;
+
+  /// True = whole-submission (free-form `written_content`) comparison;
+  /// false = one specific structured `text` question.
+  bool get isFreeform => questionId == null;
 }
 
 /// Ek assignment + us par MERI submission — list screen ko dono chahiye

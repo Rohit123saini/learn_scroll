@@ -189,6 +189,82 @@ class LsInviteStripSkeleton extends StatelessWidget {
   }
 }
 
+/// TASK G16 — generic list-row placeholder: avatar + title line + subtitle
+/// line, trailing optional. Feed/campus/testseries already had their own
+/// bespoke skeleton shapes before this task; the modules that were still
+/// falling back to a bare `CircularProgressIndicator` on cold start
+/// (conversations list, notifications, study-groups discovery, leaderboard
+/// rows, etc.) were doing so because there was no reusable *generic* row
+/// shape in this file to reach for — every existing shape here is
+/// purpose-built for one specific card. This one and `LsGridCardSkeleton`
+/// below are meant to be the default reach-for-it shapes for any new
+/// "avatar + two lines" or "square card in a grid" list, so the next
+/// screen that needs a skeleton doesn't reinvent one.
+class LsListRowSkeleton extends StatelessWidget {
+  final double sidePad;
+  final double avatarSize;
+  final bool trailingChip;
+  const LsListRowSkeleton({super.key, this.sidePad = 18, this.avatarSize = 44, this.trailingChip = false});
+
+  @override
+  Widget build(BuildContext context) {
+    return LsShimmer(
+      child: Padding(
+        padding: EdgeInsets.symmetric(horizontal: sidePad, vertical: 8),
+        child: Row(children: [
+          LsSkeletonBox(width: avatarSize, height: avatarSize, radius: avatarSize / 2),
+          const SizedBox(width: 12),
+          Expanded(
+            child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+              LsSkeletonBox(width: 150, height: 11, radius: 5),
+              const SizedBox(height: 8),
+              LsSkeletonBox(width: 100, height: 9, radius: 4),
+            ]),
+          ),
+          if (trailingChip) ...[
+            const SizedBox(width: 10),
+            const LsSkeletonBox(width: 44, height: 20, radius: 10),
+          ],
+        ]),
+      ),
+    );
+  }
+}
+
+/// Convenience: N rows of [LsListRowSkeleton] stacked — the shape almost
+/// every cold-start "list of things" screen wants (conversations,
+/// notifications, discovery tabs, leaderboards).
+class LsListSkeleton extends StatelessWidget {
+  final int count;
+  final double sidePad;
+  final bool trailingChip;
+  const LsListSkeleton({super.key, this.count = 6, this.sidePad = 18, this.trailingChip = false});
+
+  @override
+  Widget build(BuildContext context) {
+    return Column(
+      children: List.generate(
+        count,
+        (_) => LsListRowSkeleton(sidePad: sidePad, trailingChip: trailingChip),
+      ),
+    );
+  }
+}
+
+/// Generic square-ish card for a grid (wallet offers, campus section tiles,
+/// leaderboard podium cards) — same reasoning as `LsListRowSkeleton` above.
+class LsGridCardSkeleton extends StatelessWidget {
+  final double height;
+  const LsGridCardSkeleton({super.key, this.height = 96});
+
+  @override
+  Widget build(BuildContext context) {
+    return LsShimmer(
+      child: LsSkeletonBox(height: height, radius: 14),
+    );
+  }
+}
+
 /// `.post-card` ka placeholder — feed ke pehle load pe
 /// CircularProgressIndicator ki jagah (Task 10.1).
 class LsPostCardSkeleton extends StatelessWidget {
@@ -240,4 +316,113 @@ class LsPostCardSkeleton extends StatelessWidget {
       ),
     );
   }
+}
+
+// ============================================================
+// TASK C3 — shared skeletons for profile / grid screens.
+//
+// Naya design nahi banaya: sab kuch upar wale LsShimmer + LsSkeletonBox pe
+// bana hai (same palette, same reduced-motion handling). List-tile ke liye
+// alag widget JAAN-BOOJH kar nahi add kiya — `LsListRowSkeleton` /
+// `LsListSkeleton` (avatar + 2 lines + optional trailing chip) wahi kaam
+// already karta hai; dobara banana duplicate hota.
+// ============================================================
+
+/// Profile screen / grid ke liye post-thumbnail grid placeholder.
+///
+/// Poora grid EK hi [LsShimmer] ke andar hai, to ek hi AnimationController
+/// chalta hai (har tile ka alag controller nahi). `shrinkWrap` + non-scroll
+/// physics hai, isliye ise kisi bhi scroll view (NestedScrollView, Column
+/// in SingleChildScrollView, sliver via SliverToBoxAdapter) me rakh sakte ho.
+class LsPostGridSkeleton extends StatelessWidget {
+  final int count;
+  final int crossAxisCount;
+  final double spacing;
+  final double sidePad;
+  final double aspectRatio;
+  const LsPostGridSkeleton({
+    super.key,
+    this.count = 12,
+    this.crossAxisCount = 3,
+    this.spacing = 2,
+    this.sidePad = 0,
+    this.aspectRatio = 1,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return LsShimmer(
+      child: GridView.builder(
+        shrinkWrap: true,
+        physics: const NeverScrollableScrollPhysics(),
+        padding: EdgeInsets.symmetric(horizontal: sidePad),
+        itemCount: count,
+        gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
+          crossAxisCount: crossAxisCount,
+          mainAxisSpacing: spacing,
+          crossAxisSpacing: spacing,
+          childAspectRatio: aspectRatio,
+        ),
+        itemBuilder: (_, __) => const LsSkeletonBox(height: double.infinity, radius: 2),
+      ),
+    );
+  }
+}
+
+/// Profile header placeholder: avatar + 3 stat columns, name, bio lines,
+/// action button. Dimensions real header ke nazdeek rakhe hain (avatar 86);
+/// agar real profile header ka avatar/padding alag ho to sirf
+/// [avatarSize] / [sidePad] pass karke match kar lo.
+class LsProfileHeaderSkeleton extends StatelessWidget {
+  final double sidePad;
+  final double avatarSize;
+  final bool showActionButton;
+  const LsProfileHeaderSkeleton({
+    super.key,
+    this.sidePad = 18,
+    this.avatarSize = 86,
+    this.showActionButton = true,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return LsShimmer(
+      child: Padding(
+        padding: EdgeInsets.fromLTRB(sidePad, 12, sidePad, 16),
+        child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+          Row(children: [
+            LsSkeletonBox(width: avatarSize, height: avatarSize, radius: avatarSize / 2),
+            const SizedBox(width: 20),
+            const Expanded(
+              child: Row(mainAxisAlignment: MainAxisAlignment.spaceEvenly, children: [
+                _StatSkeleton(),
+                _StatSkeleton(),
+                _StatSkeleton(),
+              ]),
+            ),
+          ]),
+          const SizedBox(height: 14),
+          const LsSkeletonBox(width: 130, height: 12, radius: 6),
+          const SizedBox(height: 8),
+          const LsSkeletonBox(height: 9, radius: 5),
+          const SizedBox(height: 6),
+          const LsSkeletonBox(width: 210, height: 9, radius: 5),
+          if (showActionButton) ...[
+            const SizedBox(height: 14),
+            const LsSkeletonBox(height: 36, radius: 10),
+          ],
+        ]),
+      ),
+    );
+  }
+}
+
+class _StatSkeleton extends StatelessWidget {
+  const _StatSkeleton();
+  @override
+  Widget build(BuildContext context) => const Column(children: [
+        LsSkeletonBox(width: 34, height: 14, radius: 6),
+        SizedBox(height: 6),
+        LsSkeletonBox(width: 48, height: 9, radius: 4),
+      ]);
 }

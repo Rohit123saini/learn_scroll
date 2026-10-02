@@ -5,9 +5,11 @@
 //
 // Security note: Ye screen sirf balance + history dikhati hai — koi bhi
 // payment credential (card, UPI PIN, bank OTP) yahan kabhi capture nahi hoti.
-// Top-up Razorpay ke apne secure checkout SDK se hota hai (wallet_topup_screen.dart),
-// withdrawal sirf payout_details collect karti hai (bank/UPI), koi live-payment
-// credential nahi.
+// 🔥 FIX (per request) — Razorpay hata diya gaya hai (dekho
+// `wallet_topup_screen.dart`'s header): "Add Coins" ab sirf ek coming-soon
+// message deta hai, koi checkout SDK abhi wire nahi hai. Withdrawal ka flow
+// isse alag/unaffected hai — sirf payout_details collect karti hai
+// (bank/UPI), koi live-payment credential nahi.
 //
 // ✅ Endpoints confirmed (user_profile app) — `_load()` neeche `getBalance()`
 // + `getLedger()` dono call karta hai, top-up/withdraw screen se wapas aane

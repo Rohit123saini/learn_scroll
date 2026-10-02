@@ -1,3 +1,5 @@
+import 'profile_link.dart';
+
 class ProfileModel {
   final int id;
   final String username;
@@ -11,6 +13,10 @@ class ProfileModel {
   final int following;
   final int posts;
   final int coin;
+  // P7-FE (backend P6-BE) — bio upgrade fields.
+  final String pronouns;
+  final String categoryLabel;
+  final List<ProfileLink> links;
 
   ProfileModel({
     required this.id,
@@ -25,6 +31,9 @@ class ProfileModel {
     required this.following,
     required this.posts,
     required this.coin,
+    this.pronouns = '',
+    this.categoryLabel = '',
+    this.links = const [],
   });
 
   factory ProfileModel.fromJson(Map<String, dynamic> json) {
@@ -42,6 +51,9 @@ class ProfileModel {
       following: data["following_count"] ?? 0,
       posts: data["posts_count"] ?? 0,
       coin: data["coin"] ?? 0,
+      pronouns: (data["pronouns"] ?? '').toString(),
+      categoryLabel: (data["category_label"] ?? '').toString(),
+      links: ProfileLink.listFrom(data["links"]),
     );
   }
 }
@@ -67,6 +79,10 @@ class TargetProfileModel {
   // 🔥 Target user ne main user ko follow kiya
   final String? theirFollowStatus; // null, PENDING, ACCEPTED
   final int? theirFollowId;
+  // P7-FE (backend P6-BE) — bio upgrade fields.
+  final String pronouns;
+  final String categoryLabel;
+  final List<ProfileLink> links;
 
   TargetProfileModel({
     required this.myId,
@@ -87,7 +103,47 @@ class TargetProfileModel {
     this.myFollowId,
     this.theirFollowStatus,
     this.theirFollowId,
+    this.pronouns = '',
+    this.categoryLabel = '',
+    this.links = const [],
   });
+
+  // TASK G16 — needed so the follow button can update optimistically
+  // (flip state instantly, roll back on failure) instead of always
+  // re-fetching the whole profile after every tap. Every field on this
+  // model is `final`, which is fine for "parsed once from a response" but
+  // means an in-place instant UI update needs a copy, not a mutation.
+  TargetProfileModel copyWith({
+    int? followers,
+    String? myFollowStatus,
+    bool clearMyFollowStatus = false,
+    int? myFollowId,
+    bool clearMyFollowId = false,
+  }) {
+    return TargetProfileModel(
+      myId: myId,
+      myUsername: myUsername,
+      targetUserId: targetUserId,
+      targetUsername: targetUsername,
+      username: username,
+      firstName: firstName,
+      lastName: lastName,
+      profilePhoto: profilePhoto,
+      bio: bio,
+      isPrivate: isPrivate,
+      isVerified: isVerified,
+      followers: followers ?? this.followers,
+      following: following,
+      posts: posts,
+      myFollowStatus: clearMyFollowStatus ? null : (myFollowStatus ?? this.myFollowStatus),
+      myFollowId: clearMyFollowId ? null : (myFollowId ?? this.myFollowId),
+      theirFollowStatus: theirFollowStatus,
+      theirFollowId: theirFollowId,
+      pronouns: pronouns,
+      categoryLabel: categoryLabel,
+      links: links,
+    );
+  }
 
   factory TargetProfileModel.fromJson(Map<String, dynamic> json) {
     final dataMap = json['data'] ?? {};
@@ -110,6 +166,9 @@ class TargetProfileModel {
       myFollowId: json['my_follow_id'],
       theirFollowStatus: json['their_follow_status'],
       theirFollowId: json['their_follow_id'],
+      pronouns: (dataMap['pronouns'] ?? '').toString(),
+      categoryLabel: (dataMap['category_label'] ?? '').toString(),
+      links: ProfileLink.listFrom(dataMap['links']),
     );
   }
 }
@@ -190,6 +249,21 @@ class PostModel {
   final List<PostMediaModel> media;
   final Map<String, dynamic>? user; // 🔥 Add kar de
   final String? thumbnailUrl;
+  // 🔥 NAYA — Repost feature (target-profile "Reposts" tab). `original_post`
+  // backend se ya to (a) null (plain post), (b) a stub `{id, is_unavailable:
+  // true}` (soft-deleted/moderated/no-longer-visible original — see
+  // `get_original_post` in serializers.py), ya (c) poora nested post aata
+  // hai. `originalPost` sirf case (c) me set hota hai; case (b) sirf
+  // `isOriginalUnavailable` se flag hota hai taaki UI "unavailable"
+  // placeholder dikha sake bina kisi hidden content ko leak kiye.
+  final PostModel? originalPost;
+  final bool isOriginalUnavailable;
+  final String? repostCaption;
+  final int repostsCount;
+  final bool isRepostedByMe;
+  // P3-FE — profile pinned posts (backend `is_pinned`, max 3). Not `final`: the
+  // profile screen flips it in place after a successful pin/unpin call.
+  bool isPinned;
   PostModel({
     required this.id,
     this.title,
@@ -208,9 +282,17 @@ class PostModel {
     required this.media,
     this.user, // 🔥 Add kar
     this.thumbnailUrl,
+    this.originalPost,
+    this.isOriginalUnavailable = false,
+    this.repostCaption,
+    this.repostsCount = 0,
+    this.isRepostedByMe = false,
+    this.isPinned = false,
   });
 
   factory PostModel.fromJson(Map<String, dynamic> json) {
+    final rawOriginal = json['original_post'] as Map<String, dynamic>?;
+    final originalIsStub = rawOriginal != null && rawOriginal['is_unavailable'] == true;
     return PostModel(
       id: json['id']?? '',
       title: json['title'],
@@ -232,6 +314,12 @@ class PostModel {
           [],
       user: json['user'], // 🔥 Add kar
       thumbnailUrl: json['thumbnail_url'], 
+      originalPost: (rawOriginal != null && !originalIsStub) ? PostModel.fromJson(rawOriginal) : null,
+      isOriginalUnavailable: originalIsStub,
+      repostCaption: json['repost_caption'],
+      repostsCount: json['reposts_count']?? 0,
+      isRepostedByMe: json['is_reposted_by_me']?? false,
+      isPinned: json['is_pinned'] == true,
     );
   }
 
@@ -248,4 +336,72 @@ class PostsPage {
   final List<PostModel> posts;
   final bool hasMore;
   const PostsPage({required this.posts, required this.hasMore});
+}
+/// [Settings/Nav pass] — Settings > Privacy > Blocked accounts row.
+/// Maps `BlockUserSerializer`'s `{id, blocked, blocked_detail, created_at}`
+/// shape (`user_profile/serializers.py`). `id` yahan **block record** ki id
+/// hai, `blockedUserId` target user ki — unblock backend dono accept karta
+/// hai, isliye UI target-user-id hi bhejta hai (simplest).
+class BlockedUserModel {
+  final int id;
+  final int blockedUserId;
+  final String username;
+  final String profilePhoto;
+
+  const BlockedUserModel({
+    required this.id,
+    required this.blockedUserId,
+    required this.username,
+    required this.profilePhoto,
+  });
+
+  factory BlockedUserModel.fromJson(Map<String, dynamic> json) {
+    final detail = (json['blocked_detail'] as Map?) ?? {};
+    return BlockedUserModel(
+      id: json['id'] ?? 0,
+      blockedUserId: json['blocked'] ?? detail['id'] ?? 0,
+      username: detail['username'] ?? '',
+      profilePhoto: detail['profile_photo'] ?? '',
+    );
+  }
+}
+
+
+/// P3-FE — result of `ApiService.setPostPinned`.
+class PinResult {
+  final bool isPinned;
+  final int pinnedCount;
+  final int maxPinned;
+  const PinResult({required this.isPinned, required this.pinnedCount, required this.maxPinned});
+}
+
+/// 400 / 403 / 404 from the pin endpoint. `message` is already user-readable
+/// (comes from the backend), `code` e.g. "pin_limit_reached".
+class PinException implements Exception {
+  final String message;
+  final String? code;
+  PinException(this.message, {this.code});
+  @override
+  String toString() => message;
+}
+
+/// P3-FE — pinned posts first, then newest first (same order the backend
+/// returns). Used after a local pin/unpin so the grid reorders instantly
+/// without refetching. `List.sort` isn't stable, so the original index is the
+/// final tie-breaker.
+List<PostModel> sortPinnedFirst(List<PostModel> posts) {
+  int byDateDesc(PostModel a, PostModel b) {
+    final da = DateTime.tryParse(a.createdAt);
+    final db = DateTime.tryParse(b.createdAt);
+    if (da != null && db != null) return db.compareTo(da);
+    return b.createdAt.compareTo(a.createdAt);
+  }
+
+  final indexed = posts.asMap().entries.toList();
+  indexed.sort((a, b) {
+    if (a.value.isPinned != b.value.isPinned) return a.value.isPinned ? -1 : 1;
+    final c = byDateDesc(a.value, b.value);
+    return c != 0 ? c : a.key.compareTo(b.key);
+  });
+  return indexed.map((e) => e.value).toList();
 }

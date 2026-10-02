@@ -1,4 +1,9 @@
+import 'dart:io';
+
 import 'package:flutter/material.dart';
+import 'package:intl/intl.dart' show DateFormat;
+import 'package:path_provider/path_provider.dart';
+import 'package:share_plus/share_plus.dart';
 
 import '../../l10n/app_localizations.dart';
 import '../../widgets/error_widgets.dart';
@@ -208,8 +213,24 @@ class _InvoiceTileState extends State<_InvoiceTile> {
               icon: Icons.check_circle_outline_rounded,
               label: l10n.feeAmountPaidLabel,
               value: '₹${invoice.amountPaid.toStringAsFixed(0)}'),
-        if (!invoice.isSettled) ...[
+        if (invoice.amountPaid > 0) ...[
           const SizedBox(height: 10),
+          Align(
+            alignment: Alignment.centerLeft,
+            child: TextButton.icon(
+              icon: const Icon(Icons.receipt_long_outlined, size: 17),
+              label: Text(l10n.feeReceiptsCta),
+              onPressed: () => showModalBottomSheet<void>(
+                context: context,
+                isScrollControlled: true,
+                useSafeArea: true,
+                builder: (_) => _ReceiptsSheet(invoiceId: invoice.id),
+              ),
+            ),
+          ),
+        ],
+        if (!invoice.isSettled) ...[
+          const SizedBox(height: 4),
           LsPrimaryButton(
             label: l10n.feePayCta,
             icon: Icons.wallet_outlined,
@@ -217,6 +238,131 @@ class _InvoiceTileState extends State<_InvoiceTile> {
             onPressed: _paying ? null : _pay,
           ),
         ],
+      ]),
+    );
+  }
+}
+
+// Task 5 subtask 4 — student-facing counterpart to the office's payment
+// history list in `fee_office_screen.dart`, read-only (no record/refund
+// here — this is the payer's own view of what they've already paid).
+class _ReceiptsSheet extends StatefulWidget {
+  final String invoiceId;
+  const _ReceiptsSheet({required this.invoiceId});
+
+  @override
+  State<_ReceiptsSheet> createState() => _ReceiptsSheetState();
+}
+
+class _ReceiptsSheetState extends State<_ReceiptsSheet> {
+  bool _loading = true;
+  List<FeePayment> _payments = const [];
+  String? _downloadingId;
+
+  @override
+  void initState() {
+    super.initState();
+    _load();
+  }
+
+  Future<void> _load() async {
+    try {
+      final rows = await CampusService.feePayments(widget.invoiceId);
+      if (mounted) setState(() {
+        _payments = rows;
+        _loading = false;
+      });
+    } catch (_) {
+      if (mounted) setState(() => _loading = false);
+    }
+  }
+
+  // Same download-to-temp-file, then `Share.shareXFiles` shape
+  // `test_result_screen._shareCertificate` uses for the certificate share
+  // card, and `fee_office_screen._downloadReceipt` uses for reprints.
+  Future<void> _download(FeePayment payment) async {
+    if (_downloadingId != null) return;
+    final l10n = AppLocalizations.of(context)!;
+    setState(() => _downloadingId = payment.id);
+    try {
+      final bytes = await CampusService.downloadFeeReceiptPdf(payment.id);
+      final dir = await getTemporaryDirectory();
+      final file = File('${dir.path}/fee_receipt_${payment.id}.pdf');
+      await file.writeAsBytes(bytes, flush: true);
+      if (mounted) {
+        await Share.shareXFiles([XFile(file.path)], text: l10n.feeReceiptsTitle);
+      }
+    } on CampusApiException catch (e) {
+      if (mounted) {
+        lsSnack(context, e.isReceiptUnavailable ? l10n.feeReceiptUnavailable : e.message, error: true);
+      }
+    } catch (_) {
+      if (mounted) lsSnack(context, l10n.feeReceiptDownloadFailed, error: true);
+    } finally {
+      if (mounted) setState(() => _downloadingId = null);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
+    final l10n = AppLocalizations.of(context)!;
+    final successPayments = _payments.where((p) => p.status == 'success').toList();
+    return Padding(
+      padding: EdgeInsets.only(
+        left: 16,
+        right: 16,
+        top: 18,
+        bottom: MediaQuery.of(context).viewInsets.bottom + 18,
+      ),
+      child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children: [
+        Center(
+          child: Container(
+            width: 36,
+            height: 4,
+            decoration: BoxDecoration(color: cs.outlineVariant, borderRadius: BorderRadius.circular(2)),
+          ),
+        ),
+        const SizedBox(height: 16),
+        Text(l10n.feeReceiptsTitle, style: LsType.head(context, size: 16)),
+        const SizedBox(height: 12),
+        if (_loading)
+          const Padding(
+            padding: EdgeInsets.symmetric(vertical: 10),
+            child: Center(child: CircularProgressIndicator()),
+          )
+        else if (successPayments.isEmpty)
+          Text(l10n.feeNoPayments, style: TextStyle(fontSize: 12.5, color: cs.onSurfaceVariant))
+        else
+          for (final p in successPayments)
+            Padding(
+              padding: const EdgeInsets.only(bottom: 8),
+              child: Row(children: [
+                Expanded(
+                  child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                    Text('₹${p.amount.toStringAsFixed(0)} · ${p.paymentMode.replaceAll('_', ' ')}',
+                        style: const TextStyle(fontSize: 12.5, fontWeight: FontWeight.w600)),
+                    if (p.createdAt != null)
+                      Text(
+                        DateFormat('d MMM y, h:mm a', Localizations.localeOf(context).toString())
+                            .format(p.createdAt!.toLocal()),
+                        style: TextStyle(fontSize: 11, color: cs.onSurfaceVariant),
+                      ),
+                  ]),
+                ),
+                _downloadingId == p.id
+                    ? const Padding(
+                        padding: EdgeInsets.symmetric(horizontal: 10),
+                        child:
+                            SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2)),
+                      )
+                    : IconButton(
+                        icon: const Icon(Icons.download_rounded, size: 19),
+                        tooltip: l10n.feeReceiptDownload,
+                        onPressed: () => _download(p),
+                      ),
+              ]),
+            ),
       ]),
     );
   }

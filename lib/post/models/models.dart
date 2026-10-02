@@ -24,7 +24,7 @@
 // guessing — `singlepost.dart` already falls back to the raw
 // `category`/`subcategory` when the label is null.
 
-import '../../services/home_api_model_service.dart' show UserModel, PostMediaModel;
+import '../../services/home_api_model_service.dart' show UserModel, PostMediaModel, PostModel;
 
 class SinglePostModel {
   final String id;
@@ -41,8 +41,35 @@ class SinglePostModel {
   final String? myReaction;
   final Map<String, int> reactionCounts;
   final int commentsCount;
+  // 🔥 NAYA — Saved tab feature. PostDetailSerializer extends
+  // PostListSerializer (backend), so /post/details/<id>/ already echoes
+  // `is_saved`/`saves_count` — this was just never read into the detail
+  // page's model before.
+  final bool isSaved;
+  final int savesCount;
+  // Repost feature — same fields PostModel carries (PostDetailSerializer
+  // extends PostListSerializer, so /post/details/<id>/ already returns
+  // them). `originalPost` is null for a normal post, and ALSO for a repost
+  // whose original is gone / not visible to this viewer (see PostModel).
+  final String postType;
+  final String? repostCaption;
+  final PostModel? originalPost;
+  final int repostsCount;
+  final bool isRepostedByMe;
+  bool get isRepost => postType == 'repost';
+  // NEW — post edit/visibility feature. `visibility` was already on the
+  // backend (create-time-only before now); `isEdited` mirrors the
+  // `is_edited` flag PATCH /post/<id>/edit/ sets, so the UI can show an
+  // "edited" label the same way Instagram/Twitter do.
+  final String visibility;
+  final bool isEdited;
 
   SinglePostModel({
+    this.postType = 'text',
+    this.repostCaption,
+    this.originalPost,
+    this.repostsCount = 0,
+    this.isRepostedByMe = false,
     required this.id,
     required this.userId,
     required this.username,
@@ -57,6 +84,10 @@ class SinglePostModel {
     this.myReaction,
     required this.reactionCounts,
     required this.commentsCount,
+    this.isSaved = false,
+    this.savesCount = 0,
+    this.visibility = 'public',
+    this.isEdited = false,
   });
 
   factory SinglePostModel.fromJson(Map<String, dynamic> json) {
@@ -107,6 +138,17 @@ class SinglePostModel {
         'total': countOf('total', 'likes_count'),
       },
       commentsCount: (json['comments_count'] as int?) ?? 0,
+      isSaved: json['is_saved'] == true,
+      savesCount: (json['saves_count'] as int?) ?? 0,
+      postType: json['post_type']?.toString() ?? 'text',
+      repostCaption: json['repost_caption']?.toString(),
+      originalPost: json['original_post'] is Map && json['original_post']['is_unavailable'] != true
+          ? PostModel.fromJson(Map<String, dynamic>.from(json['original_post'] as Map))
+          : null,
+      repostsCount: (json['reposts_count'] as int?) ?? 0,
+      isRepostedByMe: json['is_reposted_by_me'] == true,
+      visibility: json['visibility']?.toString() ?? 'public',
+      isEdited: json['is_edited'] == true,
     );
   }
 }

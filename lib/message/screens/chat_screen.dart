@@ -56,6 +56,7 @@ import 'group_profile_screen.dart'; // 🔥 NAYA — Group info screen (public/p
 import 'media_viewer_screen.dart'; // 🔥 NAYA — fullscreen swipeable image viewer (zoom + auto-hide thumbnail strip)
 import '../../widgets/sticker_picker_sheet.dart'; // 🔥 NAYA — apne PNG stickers ka picker (assets/stickers/), chat & comments dono me reusable
 import '../widgets/translatable_message_widgets.dart'; // 🔥 NAYA — Features 9/10 (Listen + Translate), ab actually wired
+import '../services/translate_service.dart'; // 🔥 NAYA — Task 6: Translate ab 3-dot menu se on/off hone wala permission hai
 import '../../theme_service.dart'; // 🎨 THEME FIX — AppThemeTokens
 import 'message_search_screen.dart'; // 🔥 NAYA (Phase 4, §2.1) — in-chat message search
 import 'message_info_screen.dart'; // 🔥 NAYA — "Seen by" / message-info (long-press → Info)
@@ -78,6 +79,21 @@ mixin _L10nCache<T extends StatefulWidget> on State<T> {
 }
 
 const _kEmojis = ['👍', '❤', '😂', '😮', '😢', '🙏'];
+
+// M5-FE — double-tap reaction. `_kEmojis[1]` wala hi string use karte hain
+// (variation selector ke bina) taaki purane aur naye ❤ reactions ek hi chip
+// me group hon.
+const _kDoubleTapEmoji = '❤';
+
+// M5-FE — strip ke "+" button ka extended grid (koi emoji package nahi hai
+// pubspec me, isliye chhoti in-house list).
+const _kMoreEmojis = [
+  '👍', '👎', '❤', '😂', '😮', '😢', '🙏', '🔥',
+  '🎉', '👏', '😍', '🤔', '😅', '😭', '😡', '🥳',
+  '💯', '✅', '❌', '👀', '🙌', '💪', '😎', '🤝',
+  '😊', '😁', '🥹', '😴', '🤯', '😇', '🙄', '😬',
+  '👌', '✌', '🤞', '👋', '🫡', '🤗', '😘', '💔',
+];
 
 // 🔥 NAYA — chat text ke andar URL (http://, https://, ya www. se shuru)
 // detect karne ke liye regex. `_LinkifiedText` widget isse use karta hai.
@@ -294,7 +310,12 @@ class ChatScreen extends StatefulWidget {
   // hi history load hoke, zaroorat pade to purana pagination bhi chalke,
   // us message tak scroll + flash-highlight karega.
   final String? jumpToMessageId;
-  const ChatScreen({super.key, required this.conversation, this.jumpToMessageId});
+  // 🔥 NAYA (M1-FE) — MessageRequestsScreen se khulne par true: neeche
+  // Accept / Delete / Block bar dikhta hai aur reply input band rehta hai
+  // jab tak accept na ho. Kisi aur raste se (push/search) khulne par ye
+  // false hota hai, tab `_loadRequestStatus()` server se status dekh leta hai.
+  final bool isMessageRequest;
+  const ChatScreen({super.key, required this.conversation, this.jumpToMessageId, this.isMessageRequest = false});
 
   @override
   State<ChatScreen> createState() => _ChatScreenState();
@@ -320,6 +341,9 @@ class _ChatScreenState extends State<ChatScreen> with _L10nCache<ChatScreen> {
   String? _myUserId;
   String? _myUsername; // 🔥 NAYA — profile navigation ke liye (isMe check)
   int _clientIdCounter = 0;
+  // M6-FE — socket se bheje text/study-room ka koi ack nahi hota; echo na aaye to
+  // ye timer message ko "failed" mark karta hai (warna clock forever ghumti).
+  final Map<String, Timer> _sendWatchdogs = {};
   // (call-in-progress guard ab IncomingCallScreen ke andar callId-based
   // hai — IncomingCallScreen._activeCallIds — isliye ye local flag hata di.)
 
@@ -342,6 +366,28 @@ class _ChatScreenState extends State<ChatScreen> with _L10nCache<ChatScreen> {
   Duration _recordDuration = Duration.zero;
   Timer? _recordTimer;
   String? _recordPath;
+  // 🔥 NAYA (M4a) — waveform: recording ke dauran `record` ke amplitude stream
+  // (har 100ms) se normalized (0..1) samples jama hote hain; send par 40 bars
+  // me downsample hoke `meta['waveform']` me jaate hain.
+  StreamSubscription<Amplitude>? _ampSub;
+  final List<double> _ampSamples = [];
+
+  // 🔥 NAYA (M4c) — lock-to-record + slide-to-cancel. Gesture raw pointer events
+  // (`Listener`) se handle hota hai, GestureDetector se nahi: recording shuru
+  // hote hi input bar ka UI badal jaata hai (mic button tree se hat jaata hai),
+  // aur widget-level gesture recognizer dispose hote hi release event kho deta.
+  // Stable ancestor `Listener` (`_buildInputBar`) poore gesture ko track karta hai.
+  bool _recordLocked = false;   // upar swipe se lock: haath hata sakte ho
+  bool _recordPaused = false;   // lock mode me pause/resume
+  bool _micStarting = false;    // recorder.start() chal raha hai
+  bool _micReleased = false;    // start ke dauran haath utha liya
+  int? _micPointer;
+  Offset _micStart = Offset.zero;
+  Timer? _micHoldTimer;
+  double _slideDx = 0, _slideDy = 0; // UI feedback (<=0)
+  DateTime _lastMicPointerAt = DateTime.fromMillisecondsSinceEpoch(0); // vanish-swipe se conflict rokne ke liye
+  static const double _kLockDistance = 70;   // itna upar -> lock
+  static const double _kCancelDistance = 110; // itna left -> cancel
 
   // 🔥 NAYA — appbar ke 3-dot menu me mute/unmute notification toggle.
   // Private chat ho ya group, dono ke liye same hi flag hai (per-user
@@ -352,6 +398,11 @@ class _ChatScreenState extends State<ChatScreen> with _L10nCache<ChatScreen> {
   // Sirf 1-to-1 chat me relevant hai (group me nahi dikhta).
   bool _isBlocked = false;
 
+  // 🔥 NAYA (M1-FE) — ye chat mere liye abhi "message request" hai (pending).
+  // True rehte tak input bar ki jagah Accept/Delete/Block bar dikhta hai.
+  bool _isPendingRequest = false;
+  bool _requestBusy = false; // accept/delete/block call chal rahi hai
+
   // 🔥 NAYA — chat filter (3-dot menu se): 'all' | 'text' | 'media' | 'docs' | 'links'
   // 'all' matlab koi filter nahi, poori chat normal dikhti hai.
   String _chatFilter = 'all';
@@ -361,6 +412,16 @@ class _ChatScreenState extends State<ChatScreen> with _L10nCache<ChatScreen> {
   // rakhta hai, isliye yahan bhi wahi default rakha hai jab tak asli value
   // load na ho jaaye (taaki menu me galat "Off" na flash ho ek pal ke liye).
   String _disappearingDuration = '6_months';
+
+  // 🔥 NAYA (M3a-FE) — Vanish mode quick toggle (swipe-up). Backend ke
+  // 🔥 M3b — private chat me vanish mode = BE ka 'after_seen' (padhne + chat
+  // band hone par delete). Group me 'after_seen' allowed nahi (BE reject karta
+  // hai), isliye wahan purana fallback: sabse chhota time-based duration '1_month'.
+  // `_vanishPrevDuration` swipe-off par wapas restore karne ke liye.
+  String get _kVanishDuration => widget.conversation.isGroup ? '1_month' : 'after_seen';
+  bool _vanishMode = false;
+  String? _vanishPrevDuration;
+  bool _vanishBusy = false; // double-swipe pe parallel API calls rokne ke liye
 
   // 🔥 NAYA — "Delete group" option sirf group ke ADMIN (moderator/member
   // nahi) ko dikhane ke liye — apni role group detail se load karte hain.
@@ -379,7 +440,10 @@ class _ChatScreenState extends State<ChatScreen> with _L10nCache<ChatScreen> {
   // hoti hai — ye flags sirf UI ko sahi buttons/banners dikhane ke liye
   // hain, security ka source-of-truth backend hi hai.
   bool _isGroupModerator = false;
-  String _groupMessagePermission = 'everyone'; // 'everyone' | 'admins_mods'
+  // FE canonical values: 'everyone' | 'admins_mods'. Backend model value
+  // 'admins_only' (M9a) aur FE alias 'admins_mods' dono same maane jaate hain —
+  // `_normalizeGroupPermission` har source (REST/WS) pe 'admins_mods' bana deta hai.
+  String _groupMessagePermission = 'everyone';
   int? _groupDailyLimit; // null = no limit
   int _pendingJoinRequestsCount = 0; // admin/mod badge (private group only)
 
@@ -392,6 +456,12 @@ class _ChatScreenState extends State<ChatScreen> with _L10nCache<ChatScreen> {
   DateTime _messagesCounterDay = DateTime.now();
 
   bool get _isGroupAdminOrMod => _isGroupAdmin || _isGroupModerator;
+
+  // M9a-FE — backend 'admins_only' / FE 'admins_mods' -> 'admins_mods'.
+  static String _normalizeGroupPermission(Object? v) {
+    final s = v?.toString() ?? 'everyone';
+    return (s == 'admins_only' || s == 'admins_mods') ? 'admins_mods' : s;
+  }
 
   // group ne "sirf admin/moderator hi bhej sakte hain" set kiya hua hai
   // aur main sirf ek normal member hoon -> composer band, banner dikhao.
@@ -833,7 +903,10 @@ class _ChatScreenState extends State<ChatScreen> with _L10nCache<ChatScreen> {
     _scrollController.addListener(_onScroll); // 🔥 NAYA — top tak scroll hone par purane messages load karne ke liye
     _init();
     _loadMuteStatus(); // 🔥 NAYA
+    TranslateService.instance.loadTranslatePermission(); // 🔥 NAYA — Task 6: translate on/off switch ki saved value load karo
     _loadBlockStatus(); // 🔥 NAYA
+    _isPendingRequest = widget.isMessageRequest; // 🔥 NAYA (M1-FE)
+    _loadRequestStatus(); // 🔥 NAYA (M1-FE)
     _loadDisappearingStatus(); // 🔥 NAYA
     _loadWallpaper(); // 🔥 NAYA — poori chat screen ka background image (agar set hai)
     _loadPinnedMessages(); // 🔥 NAYA — pinned messages banner
@@ -927,7 +1000,7 @@ class _ChatScreenState extends State<ChatScreen> with _L10nCache<ChatScreen> {
       // 🔥 NAYA — access-control fields (message_permission /
       // daily_message_limit) — model field names ke hi hisaab se, defensive
       // fallback ke saath (agar backend response me na ho to defaults).
-      final permission = data['message_permission']?.toString() ?? 'everyone';
+      final permission = _normalizeGroupPermission(data['message_permission']);
       final rawLimit = data['daily_message_limit'];
       final limit = rawLimit is int ? rawLimit : int.tryParse(rawLimit?.toString() ?? '');
 
@@ -1006,6 +1079,24 @@ class _ChatScreenState extends State<ChatScreen> with _L10nCache<ChatScreen> {
         ScaffoldMessenger.of(context)
             .showSnackBar(SnackBar(content: Text(_l10n.chatUpdateFailed(e.toString()))));
       }
+    }
+  }
+
+  // 🔥 NAYA — Task 6: "Translate" ab per-message inline button nahi,
+  // 3-dot menu me ek on/off permission hai. Ye per-device preference
+  // hai (SharedPreferences, `TranslateService.instance` — same jagah
+  // `getPreferredTranslateLang()` apni value store karta hai), poori
+  // app me sab chat ke liye ek hi switch — jaisa hi flip hota hai,
+  // `TranslateToggle` (jo iske `translateEnabled` notifier ko sun raha
+  // hai) turant hide/show ho jaata hai, kisi screen-rebuild ki zaroorat
+  // nahi.
+  Future<void> _toggleTranslatePermission() async {
+    final newValue = !TranslateService.instance.translateEnabled.value;
+    await TranslateService.instance.setTranslateEnabled(newValue);
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+        content: Text(newValue ? _l10n.chatTranslateEnabled : _l10n.chatTranslateDisabled),
+      ));
     }
   }
 
@@ -1089,6 +1180,7 @@ class _ChatScreenState extends State<ChatScreen> with _L10nCache<ChatScreen> {
       case '1_month': return _l10n.chatDisappear1Month;
       case '6_months': return _l10n.chatDisappear6Months;
       case '1_year': return _l10n.chatDisappear1Year;
+      case 'after_seen': return 'After seen'; // TODO(l10n): arb me `chatDisappearAfterSeen`
       case 'none':
       default: return _l10n.chatDisappearingOff;
     }
@@ -1097,9 +1189,9 @@ class _ChatScreenState extends State<ChatScreen> with _L10nCache<ChatScreen> {
   // 🔥 NAYA — optimistic update: pehle UI turant naya duration dikhata hai,
   // phir backend call; fail ho jaaye (e.g. group me non-admin) to purani
   // value pe wapas revert kar do aur error dikhao.
-  Future<void> _setDisappearingDuration(String duration) async {
+  Future<bool> _setDisappearingDuration(String duration) async {
     final previous = _disappearingDuration;
-    if (duration == previous) return;
+    if (duration == previous) return true;
     setState(() => _disappearingDuration = duration);
     try {
       await MessageApiService.setDisappearingMessages(widget.conversation.id, duration);
@@ -1110,13 +1202,64 @@ class _ChatScreenState extends State<ChatScreen> with _L10nCache<ChatScreen> {
               : _l10n.chatDisappearingNewMessages(_disappearingLabel(duration))),
         ));
       }
+      return true;
     } catch (e) {
       if (mounted) setState(() => _disappearingDuration = previous); // revert
       if (mounted) {
         ScaffoldMessenger.of(context)
             .showSnackBar(SnackBar(content: Text(_l10n.chatUpdateFailed(e.toString()))));
       }
+      return false;
     }
+  }
+
+  // 🔥 NAYA (M3a-FE) — swipe-up par vanish mode on/off. Existing
+  // `_setDisappearingDuration` (optimistic + revert on fail, group me
+  // non-admin ko 403) hi reuse hota hai; flag sirf API success par badalta hai.
+  Future<void> _toggleVanishMode() async {
+    if (_vanishBusy) return;
+    _vanishBusy = true;
+    try {
+      if (!_vanishMode) {
+        final prev = _disappearingDuration;
+        if (prev != _kVanishDuration) {
+          final ok = await _setDisappearingDuration(_kVanishDuration);
+          if (!ok || !mounted) return;
+          _vanishPrevDuration = prev;
+        } else {
+          _vanishPrevDuration = null; // pehle se sabse chhota duration tha
+        }
+        HapticFeedback.mediumImpact();
+        if (mounted) setState(() => _vanishMode = true);
+      } else {
+        final restore = _vanishPrevDuration;
+        if (restore != null && _disappearingDuration == _kVanishDuration) {
+          final ok = await _setDisappearingDuration(restore);
+          if (!ok || !mounted) return;
+        }
+        HapticFeedback.lightImpact();
+        if (mounted) setState(() { _vanishMode = false; _vanishPrevDuration = null; });
+      }
+    } finally {
+      _vanishBusy = false;
+    }
+  }
+
+  Widget _buildVanishBanner() {
+    final cs = Theme.of(context).colorScheme;
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+      color: cs.inverseSurface,
+      child: Row(mainAxisAlignment: MainAxisAlignment.center, children: [
+        Icon(Icons.visibility_off_outlined, size: 16, color: cs.onInverseSurface),
+        const SizedBox(width: 8),
+        // TODO(l10n): arb me `chatVanishModeOn` / `chatVanishModeHint` add karke _l10n se replace karo
+        Text('Vanish mode on', style: TextStyle(color: cs.onInverseSurface, fontWeight: FontWeight.w600, fontSize: 13)),
+        const SizedBox(width: 8),
+        Text('· swipe up to turn off', style: TextStyle(color: cs.onInverseSurface.withOpacity(0.7), fontSize: 12)),
+      ]),
+    );
   }
 
   // 🔥 NAYA — 3-dot menu ke "Disappearing messages" tap hone par ye bottom
@@ -1147,6 +1290,8 @@ class _ChatScreenState extends State<ChatScreen> with _L10nCache<ChatScreen> {
             {'value': '1_month', 'label': _l10n.chatDisappear1Month},
             {'value': '6_months', 'label': _l10n.chatDisappear6Months},
             {'value': '1_year', 'label': _l10n.chatDisappear1Year},
+            // 🔥 M3b — sirf private chat (group me BE 'after_seen' reject karta hai)
+            if (!widget.conversation.isGroup) {'value': 'after_seen', 'label': 'After seen'}, // TODO(l10n)
           ])
             ListTile(
               leading: Icon(
@@ -1457,6 +1602,8 @@ class _ChatScreenState extends State<ChatScreen> with _L10nCache<ChatScreen> {
     );
     if (result == true && mounted) {
       Navigator.of(context).pop(true);
+    } else if (mounted) {
+      _loadGroupRole(); // M9a-FE — profile me permission/role badla ho to composer sync
     }
   }
 
@@ -1560,7 +1707,10 @@ class _ChatScreenState extends State<ChatScreen> with _L10nCache<ChatScreen> {
       );
       if (mounted) {
         setState(() {
-          _messages = data.reversed.toList();
+          // M6-FE — history load ke dauran bheje gaye (abhi server list me nahi) bubbles overwrite na hon.
+          final serverClientIds = data.map((m) => m.clientId).whereType<String>().toSet();
+          final unsent = _messages.where((m) => (m.isSending || m.sendFailed) && m.clientId != null && !serverClientIds.contains(m.clientId)).toList();
+          _messages = data.reversed.toList()..addAll(unsent);
           _isLoading = false;
           _currentPage = 1;
           // Agar backend se ek page se kam messages aaye, matlab aur purane
@@ -1569,6 +1719,7 @@ class _ChatScreenState extends State<ChatScreen> with _L10nCache<ChatScreen> {
         });
         _scrollToBottom();
         _scanAlreadyDownloaded(); // 🔥 NAYA — WhatsApp jaisa: purane downloaded files pe "Open" dikhao
+        _restorePending(data); // M6-FE — outbox ke unsent messages wapas + auto-retry
       }
       MessageCacheService.saveMessages(widget.conversation.id, data); // fire-and-forget, 1 week tak valid
     } catch (e) {
@@ -1734,7 +1885,10 @@ class _ChatScreenState extends State<ChatScreen> with _L10nCache<ChatScreen> {
       case 'disappearing_messages_updated':
         final duration = event['duration']?.toString();
         if (duration != null && mounted) {
-          setState(() => _disappearingDuration = duration);
+          setState(() {
+            _disappearingDuration = duration;
+            if (duration != _kVanishDuration) { _vanishMode = false; _vanishPrevDuration = null; }
+          });
           if (event['updated_by']?.toString() != _myUserId) {
             ScaffoldMessenger.of(context).showSnackBar(SnackBar(
               content: Text(duration == 'none'
@@ -1762,6 +1916,11 @@ class _ChatScreenState extends State<ChatScreen> with _L10nCache<ChatScreen> {
         _handleCallEvent(event);
         break;
       case 'error':
+        // M9a-FE — socket se bheja message admin-only ki wajah se reject hua.
+        if (event['code']?.toString() == 'admins_only') {
+          _onAdminOnlyBlocked(event['message']?.toString());
+          break;
+        }
         if (mounted) {
           ScaffoldMessenger.of(context).showSnackBar(
             SnackBar(content: Text(event['message']?.toString() ?? _l10n.chatGenericError)),
@@ -1957,37 +2116,74 @@ class _ChatScreenState extends State<ChatScreen> with _L10nCache<ChatScreen> {
     );
     setState(() => _messages.add(optimistic));
     _scrollToBottom();
-    if (_isSocketConnected) {
-      _socket.sendMessage(text: _l10n.chatStudyRoom, messageType: MessageType.studyRoom, clientId: clientId);
-    } else {
-      MessageApiService.sendMessageRest(
-        widget.conversation.id,
-        type: MessageType.studyRoom,
-        text: _l10n.chatStudyRoom,
-        clientId: clientId,
-      ).then((sent) {
-        if (mounted) {
-          setState(() {
-            final idx = _messages.indexWhere((m) => m.clientId == clientId);
-            if (idx != -1) _messages[idx] = sent;
-          });
-        }
-      }).catchError((e) {
-        if (mounted) {
-          setState(() {
-            final idx = _messages.indexWhere((m) => m.clientId == clientId);
-            if (idx != -1) _messages[idx].sendFailed = true;
-          });
-        }
-      });
-    }
+    _dispatch(
+      PendingMessage(clientId: clientId, conversationId: widget.conversation.id, type: MessageType.studyRoom, text: _l10n.chatStudyRoom, createdAt: optimistic.createdAt),
+      viaSocket: _isSocketConnected,
+    );
   }
 
   // ============================================================
   // MESSAGE HANDLERS
   // ============================================================
+  // M9a-FE — admin ne `message_permission` badli: backend system message
+  // (`meta.system_event == 'message_permission_changed'`) group_send karta hai
+  // jisme `message_permission` ('admins_only' | 'everyone') bhi hota hai.
+  // Isse member ka input bar / banner bina reload ke turant badal jaata hai.
+  void _applyPermissionFromEvent(Map<String, dynamic> event) {
+    if (!widget.conversation.isGroup) return;
+    final convId = event['conversation_id']?.toString();
+    if (convId != null && convId != widget.conversation.id.toString()) return;
+    final meta = event['meta'];
+    if (meta is! Map || meta['system_event'] != 'message_permission_changed') return;
+    final raw = event['message_permission'] ?? meta['message_permission'];
+    if (raw == null || !mounted) return;
+    final next = _normalizeGroupPermission(raw);
+    if (next == _groupMessagePermission) return;
+    setState(() => _groupMessagePermission = next);
+    // Composer lock ho gaya (member ke liye) — keyboard band karo.
+    if (_isMessagingRestrictedForMe) FocusManager.instance.primaryFocus?.unfocus();
+  }
+
+  // M9a-FE — send 403/`admins_only` (REST) ya socket error `admins_only`:
+  // local setting stale thi. Banner dikhao, in-flight message hatao (outbox se
+  // bhi, warna flush/reopen pe baar-baar retry hoga), aur role/setting
+  // server se refresh karo (agar admin/mod ko ye aaya to role stale tha).
+  void _onAdminOnlyBlocked(String? reason, {String? clientId}) {
+    if (!mounted || !widget.conversation.isGroup) return;
+    final removedIds = <String>[];
+    setState(() {
+      if (!_isGroupAdminOrMod) _groupMessagePermission = 'admins_mods';
+      _messages.removeWhere((m) {
+        final inFlight = m.isSending && !m.sendFailed;
+        final match = clientId != null
+            ? m.clientId == clientId
+            : (inFlight && m.sender?.id == _myUserId);
+        if (match && m.clientId != null) removedIds.add(m.clientId!);
+        return match;
+      });
+    });
+    for (final id in removedIds) {
+      _sendWatchdogs.remove(id)?.cancel();
+      MessageCacheService.removePending(id);
+    }
+    FocusManager.instance.primaryFocus?.unfocus();
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+      content: Text((reason != null && reason.isNotEmpty) ? reason : _l10n.chatAdminsOnlyBanner),
+    ));
+    _loadGroupRole();
+  }
+
   void _onIncomingMessage(Map<String, dynamic> event) {
+    _applyPermissionFromEvent(event); // M9a-FE
     final incoming = MessageModel.fromSocketEvent(event);
+    // M6-FE — apna bheja message server se echo ho gaya: watchdog band, outbox se hatao.
+    final inCid = incoming.clientId;
+    if (inCid != null && inCid.isNotEmpty) {
+      _sendWatchdogs.remove(inCid)?.cancel();
+      if (_messages.any((m) => m.clientId == inCid && (m.isSending || m.sendFailed))) {
+        MessageCacheService.removePending(inCid);
+      }
+    }
     setState(() {
       final idx = _messages.indexWhere((m) => m.clientId != null && m.clientId == incoming.clientId);
       if (idx != -1) {
@@ -2485,17 +2681,203 @@ class _ChatScreenState extends State<ChatScreen> with _L10nCache<ChatScreen> {
       return ConversationSettings();
     });
     _scrollToBottom();
-    if (_isSocketConnected) {
-      _socket.sendMessage(text: text, clientId: clientId, replyTo: replyToId);
-    } else {
-      MessageApiService.sendMessageRest(widget.conversation.id, type: MessageType.text, text: text, replyTo: replyToId, clientId: clientId).then((sent) {
-        if (mounted) setState(() { final idx = _messages.indexWhere((m) => m.clientId == clientId); if (idx != -1) _messages[idx] = sent; });
-        _bumpSentTodayCounter(); // 🔥 NAYA
-      }).catchError((e) {
-        if (mounted) setState(() { final idx = _messages.indexWhere((m) => m.clientId == clientId); if (idx != -1) _messages[idx].sendFailed = true; });
-        _maybeShowGroupSendBlockedDialog(e); // 🔥 NAYA
-      });
+    _dispatch(
+      PendingMessage(clientId: clientId, conversationId: widget.conversation.id, type: MessageType.text, text: text, replyTo: replyToId, createdAt: optimistic.createdAt),
+      viaSocket: _isSocketConnected,
+    );
+  }
+
+  // ============================================================
+  // 🔥 NAYA (M6-FE) — send state: sending (clock) → sent → failed (red "!")
+  // ============================================================
+  //
+  // State existing MessageModel flags se hi nikalti hai (model change nahi):
+  //   sending = isSending && !sendFailed   (clock / spinner)
+  //   sent    = isSending == false          (server ka message)
+  //   failed  = sendFailed                  (red "!", tap = Resend / Delete)
+  // `isSending` failure me bhi true rehta hai taaki local preview dikhta rahe;
+  // bubble `_inFlight` se spinner decide karta hai.
+  //
+  // Har send pehle outbox (MessageCacheService) me persist hota hai, success
+  // par hata diya jaata hai. App kill / network drop par message bachta hai
+  // aur chat reopen par (ya `MessageApiService.flushOutbox()` se) auto-retry hota hai.
+
+  int _msgIndex(String clientId) => _messages.indexWhere((m) => m.clientId == clientId);
+
+  /// Outbox me daalo, phir bhejo. Kabhi throw nahi karta.
+  Future<void> _dispatch(PendingMessage p, {bool viaSocket = false}) async {
+    await MessageCacheService.upsertPending(p);
+    if (!mounted) return; // screen band — outbox me hai, flush/reopen retry karega
+    if (viaSocket) {
+      // Socket fire-and-forget hai (ack nahi). Echo (`chat_message` with same
+      // clientId) aate hi bubble "sent" ho jaata hai; na aaye to watchdog failed karega.
+      if (p.type == MessageType.text) {
+        _socket.sendMessage(text: p.text ?? '', clientId: p.clientId, replyTo: p.replyTo);
+      } else {
+        _socket.sendMessage(text: p.text ?? '', messageType: p.type, clientId: p.clientId);
+      }
+      _armSendWatchdog(p.clientId);
+      return;
     }
+    await _runSend(p);
+  }
+
+  Future<void> _runSend(PendingMessage p) async {
+    try {
+      final sent = await MessageApiService.sendPending(p, onProgress: (v) {
+        if (!mounted) return;
+        setState(() { final i = _msgIndex(p.clientId); if (i != -1) _messages[i].uploadProgress = v; });
+      });
+      _sendWatchdogs.remove(p.clientId)?.cancel();
+      if (!mounted) return;
+      setState(() { final i = _msgIndex(p.clientId); if (i != -1) _messages[i] = sent; });
+      if (p.type == MessageType.text) _bumpSentTodayCounter();
+    } catch (e) {
+      if (!mounted) return;
+      // M9a-FE — admin-only 403: failed-tick/dialog nahi, composer banner mode me jao.
+      if (widget.conversation.isGroup && e is MessageApiException && e.code == 'admins_only') {
+        _sendWatchdogs.remove(p.clientId)?.cancel();
+        _onAdminOnlyBlocked(e.message, clientId: p.clientId);
+        return;
+      }
+      setState(() { final i = _msgIndex(p.clientId); if (i != -1) _messages[i].sendFailed = true; });
+      _maybeShowGroupSendBlockedDialog(e);
+      if (p.localPaths.isNotEmpty) {
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(_l10n.chatUploadFailed(e.toString()))));
+      }
+    }
+  }
+
+  void _armSendWatchdog(String clientId) {
+    _sendWatchdogs.remove(clientId)?.cancel();
+    _sendWatchdogs[clientId] = Timer(const Duration(seconds: 15), () {
+      _sendWatchdogs.remove(clientId);
+      if (!mounted) return;
+      final i = _msgIndex(clientId);
+      if (i == -1 || !_messages[i].isSending || _messages[i].sendFailed) return;
+      setState(() => _messages[i].sendFailed = true);
+    });
+  }
+
+  // Failed bubble tap / long-press: Resend ya Delete.
+  // TODO(l10n): 'Resend' / 'Delete' ke liye chatResend / chatDiscard keys .arb me add karo.
+  void _showFailedMessageSheet(MessageModel msg) {
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: Theme.of(context).colorScheme.surface,
+      shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(18))),
+      builder: (_) => SafeArea(child: Column(mainAxisSize: MainAxisSize.min, children: [
+        ListTile(leading: const Icon(Icons.refresh), title: const Text('Resend'), onTap: () { Navigator.pop(context); _resendMessage(msg); }),
+        ListTile(leading: const Icon(Icons.delete_outline, color: Colors.red), title: const Text('Delete', style: TextStyle(color: Colors.red)), onTap: () { Navigator.pop(context); _discardFailed(msg); }),
+      ])),
+    );
+  }
+
+  Future<void> _resendMessage(MessageModel msg) async {
+    final cid = msg.clientId;
+    if (cid == null) return;
+    PendingMessage? p;
+    for (final x in await MessageCacheService.getPending(widget.conversation.id)) {
+      if (x.clientId == cid) p = x;
+    }
+    // Outbox write fail hua ho to bubble se hi rebuild (upload dobara hoga).
+    p ??= PendingMessage(
+      clientId: cid,
+      conversationId: widget.conversation.id,
+      type: msg.type,
+      text: msg.text,
+      replyTo: msg.replyTo,
+      meta: msg.meta,
+      localPaths: msg.localFilePaths ?? (msg.localFilePath != null ? [msg.localFilePath!] : const []),
+      createdAt: msg.createdAt,
+    );
+    p = p.copyWith(permanentFailure: false);
+    await MessageCacheService.upsertPending(p);
+    if (!mounted) return;
+    setState(() {
+      final i = _msgIndex(cid);
+      if (i != -1) { _messages[i].sendFailed = false; _messages[i].uploadProgress = 0.0; }
+    });
+    // Resend hamesha REST se (socket ack nahi deta, failure pata nahi chalta).
+    await _runSend(p);
+  }
+
+  Future<void> _discardFailed(MessageModel msg) async {
+    final cid = msg.clientId;
+    if (cid != null) _sendWatchdogs.remove(cid)?.cancel();
+    setState(() => _messages.removeWhere((m) => identical(m, msg) || (cid != null && m.clientId == cid)));
+    if (cid != null) await MessageCacheService.removePending(cid);
+  }
+
+  MessageModel _optimisticFromPending(PendingMessage p) {
+    final multi = p.localPaths.length > 1 || (p.meta?.containsKey('count') ?? false);
+    return MessageModel(
+      id: p.clientId,
+      conversationId: p.conversationId,
+      sender: UserMini(id: _myUserId ?? '', displayName: _l10n.chatYou),
+      type: p.type,
+      text: p.text ?? '',
+      replyTo: p.replyTo,
+      meta: p.meta,
+      clientId: p.clientId,
+      createdAt: p.createdAt,
+      isSending: true,
+      uploadProgress: p.localPaths.isNotEmpty ? 0.0 : null,
+      localFilePath: (!multi && p.localPaths.length == 1) ? p.localPaths.first : null,
+      localFilePaths: multi ? p.localPaths : null,
+    );
+  }
+
+  /// Chat khulte hi: outbox ke is conversation ke messages wapas bubble me
+  /// laao aur retry-eligible ko auto-retry karo. Jo server pe already hain
+  /// (app kill se pehle pahunch gaye the) unhe outbox se hata do.
+  Future<void> _restorePending(List<MessageModel> serverMessages) async {
+    final serverIds = serverMessages.map((m) => m.clientId).whereType<String>().toSet();
+    final pending = await MessageCacheService.getPending(widget.conversation.id);
+    if (pending.isEmpty || !mounted) return;
+    final added = <MessageModel>[];
+    final needFlush = <String>{};
+    final joining = <PendingMessage>[];
+    for (final p in pending) {
+      if (serverIds.contains(p.clientId)) { await MessageCacheService.removePending(p.clientId); continue; }
+      if (_msgIndex(p.clientId) != -1) continue; // isi session ka message, screen pe hai
+      final m = _optimisticFromPending(p);
+      if (!p.canAutoRetry) {
+        m.sendFailed = true;
+      } else if (MessageApiService.isSending(p.clientId)) {
+        joining.add(p); // pehle se chal rahi send (flush) — uska result sunna hai
+      } else {
+        needFlush.add(p.clientId);
+      }
+      added.add(m);
+    }
+    if (!mounted || added.isEmpty) return;
+    setState(() => _messages.addAll(added));
+    _scrollToBottom();
+    for (final p in joining) { _runSend(p); }
+    if (needFlush.isEmpty) return;
+    await MessageApiService.flushOutbox(); // sequential, server-reconcile ke saath
+    await _reconcileRestored(needFlush);
+  }
+
+  /// Flush ke baad restored bubbles ko sach se match karo: server pe mila =
+  /// sent, outbox me abhi bhi hai = failed.
+  Future<void> _reconcileRestored(Set<String> clientIds) async {
+    if (!mounted) return;
+    List<MessageModel> server = const [];
+    try {
+      server = await MessageApiService.getMessages(widget.conversation.id, page: 1, pageSize: _kPageSize + clientIds.length);
+    } catch (_) {}
+    if (!mounted) return;
+    setState(() {
+      for (final cid in clientIds) {
+        final i = _msgIndex(cid);
+        if (i == -1 || !_messages[i].isSending) continue;
+        MessageModel? match;
+        for (final m in server) { if (m.clientId == cid) match = m; }
+        if (match != null) { _messages[i] = match; } else { _messages[i].sendFailed = true; }
+      }
+    });
   }
 
   // 🔥 NAYA — day rollover pe local "aaj bheje messages" counter reset.
@@ -2589,29 +2971,16 @@ class _ChatScreenState extends State<ChatScreen> with _L10nCache<ChatScreen> {
     final clientId = _newClientId();
     final optimistic = MessageModel(id: clientId, conversationId: widget.conversation.id, sender: UserMini(id: _myUserId ?? '', displayName: _l10n.chatYou), type: messageType, text: text ?? '', meta: {'file_name': fileName, ...?extraMeta}, clientId: clientId, createdAt: DateTime.now(), isSending: true, uploadProgress: 0.0, localFilePath: path);
     setState(() => _messages.add(optimistic)); _scrollToBottom();
-    try {
-      // 🔥 NAYA: onProgress se optimistic message ka uploadProgress
-      // live update hota hai — bubble me actual % dikhta hai jab tak
-      // file backend tak pura upload nahi ho jaata.
-      final uploaded = await MessageApiService.uploadFile(
-        file,
-        onProgress: (p) {
-          if (!mounted) return;
-          setState(() {
-            final idx = _messages.indexWhere((m) => m.clientId == clientId);
-            if (idx != -1) _messages[idx].uploadProgress = p;
-          });
-        },
-      );
-      final sent = await MessageApiService.sendMessageRest(widget.conversation.id, type: messageType, text: text, fileUrl: uploaded.fileUrl, meta: {'file_name': uploaded.fileName, 'size': uploaded.fileSize, 'mime_type': uploaded.mimeType, ...?extraMeta}, clientId: clientId);
-      if (mounted) setState(() { final idx = _messages.indexWhere((m) => m.clientId == clientId); if (idx != -1) _messages[idx] = sent; });
-    } catch (e) {
-      if (mounted) {
-        setState(() { final idx = _messages.indexWhere((m) => m.clientId == clientId); if (idx != -1) _messages[idx].sendFailed = true; });
-        _maybeShowGroupSendBlockedDialog(e); // 🔥 NAYA
-        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(_l10n.chatUploadFailed(e.toString()))));
-      }
-    }
+    // M6-FE — upload + send + failure/retry ab outbox pipeline (`_dispatch`) se.
+    await _dispatch(PendingMessage(
+      clientId: clientId,
+      conversationId: widget.conversation.id,
+      type: messageType,
+      text: text,
+      meta: {'file_name': fileName, ...?extraMeta},
+      localPaths: [path],
+      createdAt: optimistic.createdAt,
+    ));
   }
 
   // 🔥 NAYA — apna PNG sticker bhejna: sticker_picker_sheet se ek
@@ -2640,7 +3009,17 @@ class _ChatScreenState extends State<ChatScreen> with _L10nCache<ChatScreen> {
   // ============================================================
   // 🔥 NAYA: VOICE NOTE RECORDING — seedha chat input bar ke mic se
   // ============================================================
-  Future<void> _startRecording() async {
+  Future<void> _startRecording({bool locked = false}) async {
+    if (_isRecording || _micStarting) return;
+    _micStarting = true;
+    try {
+      await _startRecordingInner(locked: locked);
+    } finally {
+      _micStarting = false;
+    }
+  }
+
+  Future<void> _startRecordingInner({required bool locked}) async {
     var micStatus = await Permission.microphone.status;
     if (!micStatus.isGranted) micStatus = await Permission.microphone.request();
     if (!micStatus.isGranted) {
@@ -2651,18 +3030,132 @@ class _ChatScreenState extends State<ChatScreen> with _L10nCache<ChatScreen> {
     final path = "${tempDir.path}/voice_${DateTime.now().millisecondsSinceEpoch}.m4a";
     await _recorder.start(const RecordConfig(encoder: AudioEncoder.aacLc), path: path);
     _recordPath = path;
+    // 🔥 M4a — amplitude sampling (dBFS: -160..0; -60 se neeche ko silence maante hain)
+    _ampSamples.clear();
+    await _ampSub?.cancel();
+    _ampSub = _recorder
+        .onAmplitudeChanged(const Duration(milliseconds: 100))
+        .listen((a) { if (!_recordPaused) _ampSamples.add(((a.current + 60) / 60).clamp(0.0, 1.0)); });
     _recordDuration = Duration.zero;
     _recordTimer?.cancel();
     _recordTimer = Timer.periodic(const Duration(seconds: 1), (_) {
-      if (mounted) setState(() => _recordDuration += const Duration(seconds: 1));
+      if (mounted && !_recordPaused) setState(() => _recordDuration += const Duration(seconds: 1));
     });
+    _recordLocked = locked;
+    _recordPaused = false;
+    _slideDx = 0; _slideDy = 0;
     if (mounted) setState(() => _isRecording = true);
+  }
+
+  // 🔥 M4c — lock mode: pause / resume
+  Future<void> _togglePauseRecording() async {
+    if (!_isRecording) return;
+    try {
+      if (_recordPaused) {
+        await _recorder.resume();
+      } else {
+        await _recorder.pause();
+      }
+      if (mounted) setState(() => _recordPaused = !_recordPaused);
+    } catch (_) {}
+  }
+
+  void _resetRecordGestureState() {
+    _recordLocked = false;
+    _recordPaused = false;
+    _slideDx = 0; _slideDy = 0;
+    _micPointer = null;
+    _micReleased = false;
+    _micHoldTimer?.cancel();
+  }
+
+  // ---- raw pointer handlers (mic button: down | stable ancestor: move/up/cancel) ----
+  void _onMicDown(PointerDownEvent e) {
+    if (_isRecording || _micStarting) return;
+    _micPointer = e.pointer;
+    _micStart = e.position;
+    _micReleased = false;
+    _lastMicPointerAt = DateTime.now();
+    _micHoldTimer?.cancel();
+    // 200ms hold = "hold-to-record"; usse pehle haath utha liya = tap (neeche _onMicUp)
+    _micHoldTimer = Timer(const Duration(milliseconds: 200), () async {
+      _micHoldTimer = null;
+      HapticFeedback.selectionClick();
+      await _startRecording();
+      if (!mounted) return;
+      if (!_isRecording) { _resetRecordGestureState(); return; } // permission denied etc.
+      if (_micReleased && !_recordLocked) {
+        // start hote-hote haath utha liya
+        _resetRecordGestureState();
+        await _stopRecordingAndSend();
+      }
+    });
+  }
+
+  void _onMicMove(PointerMoveEvent e) {
+    if (e.pointer != _micPointer) return;
+    _lastMicPointerAt = DateTime.now();
+    final d = e.position - _micStart;
+    if (_micHoldTimer != null) {
+      // hold se pehle zyada hila diya = scroll/accidental, recording nahi
+      if (d.distance > 24) { _micHoldTimer?.cancel(); _micHoldTimer = null; _micPointer = null; }
+      return;
+    }
+    if (!_isRecording || _recordLocked) return;
+    setState(() {
+      _slideDx = d.dx.clamp(-_kCancelDistance * 1.5, 0.0);
+      _slideDy = d.dy.clamp(-_kLockDistance * 1.5, 0.0);
+    });
+    if (d.dy < -_kLockDistance && d.dy.abs() > d.dx.abs()) {
+      HapticFeedback.mediumImpact();
+      setState(() { _recordLocked = true; _slideDx = 0; _slideDy = 0; });
+      _micPointer = null;
+    } else if (d.dx < -_kCancelDistance) {
+      HapticFeedback.mediumImpact();
+      _micPointer = null;
+      _resetRecordGestureState();
+      _cancelRecording();
+    }
+  }
+
+  void _onMicUp(PointerUpEvent e) {
+    if (e.pointer != _micPointer) return;
+    _micPointer = null;
+    _lastMicPointerAt = DateTime.now();
+    if (_micHoldTimer != null) {
+      // TAP (hold nahi): purane behaviour jaisa — recording shuru, lekin LOCKED
+      // (hands-free), taaki delete / pause / send buttons se control ho.
+      _micHoldTimer?.cancel();
+      _micHoldTimer = null;
+      _startRecording(locked: true);
+      return;
+    }
+    if (_micStarting) { _micReleased = true; return; }
+    if (_isRecording && !_recordLocked) {
+      _resetRecordGestureState();
+      _stopRecordingAndSend(); // hold-release = send
+    }
+  }
+
+  void _onMicCancel(PointerCancelEvent e) {
+    if (e.pointer != _micPointer) return;
+    _micPointer = null;
+    _micHoldTimer?.cancel();
+    _micHoldTimer = null;
+    // System ne gesture cheen li (call/notification): recording DELETE mat karo,
+    // lock kar do — user khud send/delete chune.
+    if (_isRecording && !_recordLocked) setState(() { _recordLocked = true; _slideDx = 0; _slideDy = 0; });
   }
 
   Future<void> _stopRecordingAndSend() async {
     _recordTimer?.cancel();
+    await _ampSub?.cancel();
+    _ampSub = null;
+    final waveform = _buildWaveform(_ampSamples); // 🔥 M4a — ~40 bars, 0..100
+    _ampSamples.clear();
     final path = await _recorder.stop();
     final duration = _recordDuration;
+    _resetRecordGestureState();
     if (mounted) setState(() { _isRecording = false; _recordDuration = Duration.zero; });
     if (path == null) return;
     // bahut chhota (accidental tap) recording ho to mat bhejo
@@ -2671,12 +3164,19 @@ class _ChatScreenState extends State<ChatScreen> with _L10nCache<ChatScreen> {
       return;
     }
     final fileName = "voice_note_${DateTime.now().millisecondsSinceEpoch}.m4a";
-    await _uploadAndSendFile(File(path), MessageType.audio, fileName, extraMeta: {'duration_seconds': duration.inSeconds});
+    await _uploadAndSendFile(File(path), MessageType.audio, fileName, extraMeta: {
+      'duration_seconds': duration.inSeconds,
+      if (waveform.isNotEmpty) 'waveform': waveform, // 🔥 M4a — BE max 64 ints sanitize karta hai
+    });
   }
 
   Future<void> _cancelRecording() async {
     _recordTimer?.cancel();
+    await _ampSub?.cancel();
+    _ampSub = null;
+    _ampSamples.clear();
     final path = await _recorder.stop();
+    _resetRecordGestureState();
     if (mounted) setState(() { _isRecording = false; _recordDuration = Duration.zero; });
     if (path != null) {
       try { await File(path).delete(); } catch (_) {}
@@ -2693,8 +3193,7 @@ class _ChatScreenState extends State<ChatScreen> with _L10nCache<ChatScreen> {
       final pos = await Geolocator.getCurrentPosition(); final clientId = _newClientId();
       final optimistic = MessageModel(id: clientId, conversationId: widget.conversation.id, sender: UserMini(id: _myUserId ?? '', displayName: _l10n.chatYou), type: MessageType.location, text: _l10n.locationLabel, meta: {'lat': pos.latitude, 'lng': pos.longitude}, clientId: clientId, createdAt: DateTime.now(), isSending: true);
       setState(() => _messages.add(optimistic)); _scrollToBottom();
-      final sent = await MessageApiService.sendMessageRest(widget.conversation.id, type: MessageType.location, text: _l10n.locationLabel, meta: {'lat': pos.latitude, 'lng': pos.longitude}, clientId: clientId);
-      if (mounted) setState(() { final idx = _messages.indexWhere((m) => m.clientId == clientId); if (idx != -1) _messages[idx] = sent; });
+      await _dispatch(PendingMessage(clientId: clientId, conversationId: widget.conversation.id, type: MessageType.location, text: _l10n.locationLabel, meta: {'lat': pos.latitude, 'lng': pos.longitude}, createdAt: optimistic.createdAt));
     } catch (e) {
       if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(_l10n.chatLocationShareFailed(e.toString()))));
     }
@@ -2820,56 +3319,15 @@ class _ChatScreenState extends State<ChatScreen> with _L10nCache<ChatScreen> {
     setState(() => _messages.add(optimistic));
     _scrollToBottom();
 
-    final progressPerFile = List<double>.filled(files.length, 0.0);
-    void updateOverallProgress() {
-      if (!mounted) return;
-      final avg = progressPerFile.reduce((a, b) => a + b) / progressPerFile.length;
-      setState(() {
-        final idx = _messages.indexWhere((m) => m.clientId == clientId);
-        if (idx != -1) _messages[idx].uploadProgress = avg;
-      });
-    }
-
-    try {
-      // Sab files EK SAATH (parallel) upload hoti hain — ek ke liye ruk
-      // ke doosri ka wait nahi karna padta.
-      final uploaded = await Future.wait(List.generate(files.length, (i) {
-        return MessageApiService.uploadFile(
-          File(files[i].path),
-          onProgress: (p) {
-            progressPerFile[i] = p;
-            updateOverallProgress();
-          },
-        );
-      }));
-
-      final urls = uploaded.map((u) => u.fileUrl).toList();
-      final sent = await MessageApiService.sendMessageRest(
-        widget.conversation.id,
-        type: MessageType.image,
-        text: caption,
-        fileUrls: urls,
-        meta: {
-          'count': urls.length,
-          'items': uploaded.map((u) => {'file_name': u.fileName, 'size': u.fileSize, 'mime_type': u.mimeType}).toList(),
-        },
-        clientId: clientId,
-      );
-      if (mounted) {
-        setState(() {
-          final idx = _messages.indexWhere((m) => m.clientId == clientId);
-          if (idx != -1) _messages[idx] = sent;
-        });
-      }
-    } catch (e) {
-      if (mounted) {
-        setState(() {
-          final idx = _messages.indexWhere((m) => m.clientId == clientId);
-          if (idx != -1) _messages[idx].sendFailed = true;
-        });
-        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(_l10n.chatUploadFailed(e.toString()))));
-      }
-    }
+    await _dispatch(PendingMessage(
+      clientId: clientId,
+      conversationId: widget.conversation.id,
+      type: MessageType.image,
+      text: caption,
+      meta: {'count': files.length},
+      localPaths: localPaths,
+      createdAt: optimistic.createdAt,
+    ));
   }
 
   // 🔥 NAYA — "Camera" tap karte hi Photo ya Video khinchne ka chhota chooser
@@ -2911,11 +3369,49 @@ class _ChatScreenState extends State<ChatScreen> with _L10nCache<ChatScreen> {
     setState(() => _mentionQuery = null);
   }
 
+  // M5-FE — strip ke "+" se khulta hai: extended emoji grid. Pehle yahi
+  // 6-emoji ka bottom sheet tha (long-press -> React tile -> sheet).
   void _showReactionPicker(MessageModel msg) {
+    final cs = Theme.of(context).colorScheme;
     final myCurrent = msg.myReaction(_myUserId ?? '');
-    // Reaction bar plain emoji dikhata hai (WhatsApp jaisa asli reaction
-    // bar) — backend me wahi purana emoji string save/bheja jaata hai.
-    showModalBottomSheet(context: context, backgroundColor: Theme.of(context).colorScheme.surface, shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(18))), builder: (_) => SafeArea(child: Padding(padding: const EdgeInsets.symmetric(vertical: 18), child: Row(mainAxisAlignment: MainAxisAlignment.spaceEvenly, children: _kEmojis.map((emoji) { final selected = emoji == myCurrent; return GestureDetector(onTap: () { Navigator.pop(context); _toggleReaction(msg, emoji); }, child: Container(padding: const EdgeInsets.all(6), decoration: BoxDecoration(color: selected ? Theme.of(context).colorScheme.primary.withOpacity(0.12) : null, shape: BoxShape.circle), child: Text(emoji, style: const TextStyle(fontSize: 30)))); }).toList()))));
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: cs.surface,
+      isScrollControlled: true,
+      shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(18))),
+      builder: (_) => SafeArea(
+        child: ConstrainedBox(
+          constraints: BoxConstraints(maxHeight: MediaQuery.of(context).size.height * 0.5),
+          child: GridView.count(
+            shrinkWrap: true,
+            crossAxisCount: 8,
+            padding: const EdgeInsets.fromLTRB(12, 16, 12, 16),
+            children: _kMoreEmojis.map((emoji) {
+              final selected = emoji == myCurrent;
+              return GestureDetector(
+                behavior: HitTestBehavior.opaque,
+                onTap: () { Navigator.pop(context); _toggleReaction(msg, emoji); },
+                child: Container(
+                  alignment: Alignment.center,
+                  decoration: BoxDecoration(color: selected ? cs.primary.withOpacity(0.12) : null, shape: BoxShape.circle),
+                  child: Text(emoji, style: const TextStyle(fontSize: 26)),
+                ),
+              );
+            }).toList(),
+          ),
+        ),
+      ),
+    );
+  }
+
+  // M5-FE — double-tap = ❤. Agar pehle se ❤ laga hai to kuch nahi karte
+  // (accidental double-tap se reaction hat jaana bura UX hoga); hatane ke
+  // liye chip tap karo.
+  void _onDoubleTapReact(MessageModel msg) {
+    if (msg.deletedForEveryone || msg.deletedForMe) return;
+    if (msg.myReaction(_myUserId ?? '') == _kDoubleTapEmoji) return;
+    HapticFeedback.lightImpact();
+    _toggleReaction(msg, _kDoubleTapEmoji);
   }
 
   void _toggleReaction(MessageModel msg, String emoji) async {
@@ -2924,9 +3420,40 @@ class _ChatScreenState extends State<ChatScreen> with _L10nCache<ChatScreen> {
     else { setState(() { final idx = msg.reactions.indexWhere((r) => r.user.id == _myUserId); final mine = MessageReactionModel(id: idx != -1 ? msg.reactions[idx].id : '${msg.id}-me', user: UserMini(id: _myUserId ?? '', displayName: _l10n.chatYou), emoji: emoji, createdAt: DateTime.now()); if (idx != -1) msg.reactions[idx] = mine; else msg.reactions.add(mine); }); _socket.sendReaction(msg.id, emoji); }
   }
 
-  void _showMessageActions(MessageModel msg, bool isMe) {
+  // M5-FE — long-press: bubble ke upar emoji strip (6 emoji + "+"), neeche
+  // alag bottom-sheet me baaki menu (reply/copy/forward/...). Dono ek hi
+  // dialog route me hain, taaki barrier-tap se saath me band hon.
+  void _showMessageActions(MessageModel msg, bool isMe, {Rect? anchor}) {
     if (msg.deletedForEveryone || msg.deletedForMe) return;
-    showModalBottomSheet(context: context, backgroundColor: Theme.of(context).colorScheme.surface, shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(18))), builder: (_) => SafeArea(child: Column(mainAxisSize: MainAxisSize.min, children: [
+    // M6-FE — failed: Resend/Delete sheet. Sending: abhi real message id nahi
+    // (id == clientId), isliye react/reply/forward/delete server pe bhejna galat hoga.
+    if (msg.sendFailed) { _showFailedMessageSheet(msg); return; }
+    if (msg.isSending) return;
+    HapticFeedback.mediumImpact();
+    final size = MediaQuery.of(context).size;
+    final menuTiles = _messageActionTiles(msg, isMe);
+    final myCurrent = msg.myReaction(_myUserId ?? '');
+    showGeneralDialog(
+      context: context,
+      useRootNavigator: false, // tiles `Navigator.pop(context)` State-context se karte hain
+      barrierDismissible: true,
+      barrierLabel: MaterialLocalizations.of(context).modalBarrierDismissLabel,
+      barrierColor: Colors.black26,
+      transitionDuration: const Duration(milliseconds: 140),
+      transitionBuilder: (_, anim, __, child) => FadeTransition(opacity: anim, child: child),
+      pageBuilder: (dialogCtx, _, __) => _ReactionMenuOverlay(
+        anchor: anchor ?? Rect.fromLTWH(0, size.height * 0.4, size.width, 0),
+        isMe: isMe,
+        myReaction: myCurrent,
+        menuTiles: menuTiles,
+        onPick: (emoji) { Navigator.pop(dialogCtx); _toggleReaction(msg, emoji); },
+        onMore: () { Navigator.pop(dialogCtx); _showReactionPicker(msg); },
+      ),
+    );
+  }
+
+  List<Widget> _messageActionTiles(MessageModel msg, bool isMe) {
+    return [
       ListTile(leading: const Icon(Icons.reply), title: Text(_l10n.reply), onTap: () { Navigator.pop(context); _startReply(msg); }),
       // NEW — forward just this one message straight to a picker.
       // 🔧 FIX (Phase 3, §4.3) — poll messages forward nahi ho sakte
@@ -2934,7 +3461,18 @@ class _ChatScreenState extends State<ChatScreen> with _L10nCache<ChatScreen> {
       // UI me pehle hi rok dena better UX hai.
       if (msg.type != MessageType.poll)
         ListTile(leading: const Icon(Icons.forward), title: Text(_l10n.chatForward), onTap: () { Navigator.pop(context); _forwardOne(msg); }),
-      ListTile(leading: const Icon(Icons.emoji_emotions_outlined), title: Text(_l10n.chatReact), onTap: () { Navigator.pop(context); _showReactionPicker(msg); }),
+      // M5-FE — Copy: pehle menu me tha hi nahi. TODO(l10n): 'Copy'/'Copied'
+      // ke liye chatCopy/chatCopied keys .arb me add karke yahan lagao.
+      if (msg.text != null && msg.text!.trim().isNotEmpty)
+        ListTile(
+          leading: const Icon(Icons.copy_outlined),
+          title: const Text('Copy'),
+          onTap: () {
+            Navigator.pop(context);
+            Clipboard.setData(ClipboardData(text: msg.text!));
+            ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Copied'), duration: Duration(seconds: 1)));
+          },
+        ),
       // 🔥 NAYA — "Seen by" / message-info (WhatsApp-style). Sirf apne
       // bheje hue messages pe — dusre ka message "kisne dekha" tum nahi
       // pooch sakte. Preview line ke liye plain text ya type-label bhejte
@@ -2990,7 +3528,7 @@ class _ChatScreenState extends State<ChatScreen> with _L10nCache<ChatScreen> {
         }),
       ListTile(leading: const Icon(Icons.delete_outline, color: Colors.red), title: Text(_l10n.chatDeleteForMe, style: TextStyle(color: Colors.red)), onTap: () { Navigator.pop(context); _deleteMessage(msg, forEveryone: false); }),
       if (isMe) ListTile(leading: const Icon(Icons.delete_forever_outlined, color: Colors.red), title: Text(_l10n.chatDeleteForEveryone, style: TextStyle(color: Colors.red)), onTap: () { Navigator.pop(context); _deleteMessage(msg, forEveryone: true); }),
-    ])));
+    ];
   }
 
   // ============================================================
@@ -3230,10 +3768,21 @@ class _ChatScreenState extends State<ChatScreen> with _L10nCache<ChatScreen> {
     if (PushNotificationService.currentOpenConversationId == widget.conversation.id) {
       PushNotificationService.currentOpenConversationId = null;
     }
+    // 🔥 NAYA (M3b) — vanish ('after_seen') chat se nikalte hi local cache saaf:
+    // warna 1-week MessageCacheService purane (BE se delete ho chuke) messages
+    // agli baar turant dikha deta. Cache sirf cache hai — server source of truth,
+    // isliye saaf karna safe hai. Fire-and-forget (dispose async nahi ho sakta).
+    if (_disappearingDuration == 'after_seen') {
+      MessageCacheService.saveMessages(widget.conversation.id, []);
+    }
+    for (final t in _sendWatchdogs.values) { t.cancel(); } // M6-FE
+    _sendWatchdogs.clear();
     _socket.dispose();
     _textController.dispose();
     _scrollController.dispose();
     _recordTimer?.cancel();
+    _ampSub?.cancel(); // 🔥 M4a
+    _micHoldTimer?.cancel(); // 🔥 M4c
     _recorder.dispose(); // 🔥 NAYA
     _highlightTimer?.cancel(); // 🔥 NAYA (Phase 4, §2.1)
     _draftSaveTimer?.cancel(); // 🔥 NAYA (Phase 3, §7.10)
@@ -3334,6 +3883,7 @@ class _ChatScreenState extends State<ChatScreen> with _L10nCache<ChatScreen> {
             icon: Icon(Icons.more_vert, color: cs.onPrimary),
             onSelected: (value) {
               if (value == 'toggle_mute') _toggleMuteNotifications();
+              if (value == 'toggle_translate') _toggleTranslatePermission(); // 🔥 NAYA — Task 6
               if (value == 'filter') _showFilterSheet();
               if (value == 'wallpaper') _showWallpaperSheet();
               if (value == 'toggle_block') _toggleBlockUser();
@@ -3360,6 +3910,28 @@ class _ChatScreenState extends State<ChatScreen> with _L10nCache<ChatScreen> {
                       ? (widget.conversation.isGroup ? _l10n.chatUnmuteGroup : _l10n.chatUnmuteNotifications)
                       : (widget.conversation.isGroup ? _l10n.chatMuteGroup : _l10n.chatMuteNotifications)),
                 ]),
+              ),
+              // 🔥 NAYA — Task 6: Translate ab per-message inline button
+              // nahi, ek on/off permission hai (poori app me ek hi
+              // switch — per-device, SharedPreferences me store hota
+              // hai). ON hone par hi `TranslateToggle` kisi bhi message
+              // ke niche dikhega.
+              PopupMenuItem<String>(
+                value: 'toggle_translate',
+                child: ValueListenableBuilder<bool>(
+                  valueListenable: TranslateService.instance.translateEnabled,
+                  builder: (context, translateOn, _) {
+                    return Row(children: [
+                      Icon(
+                        Icons.translate,
+                        color: translateOn ? Theme.of(context).colorScheme.primary : Theme.of(context).colorScheme.onSurface,
+                        size: 20,
+                      ),
+                      const SizedBox(width: 10),
+                      Text(translateOn ? _l10n.chatDisableTranslate : _l10n.chatEnableTranslate),
+                    ]);
+                  },
+                ),
               ),
               // 🔥 NAYA — Filter messages: Text / Media / Docs / Links
               PopupMenuItem<String>(
@@ -3523,13 +4095,14 @@ class _ChatScreenState extends State<ChatScreen> with _L10nCache<ChatScreen> {
               : CustomPaint(painter: _ChatWallpaperPainter(color: cs.outlineVariant.withOpacity(0.6))),
         ),
         Column(children: [
+          if (_vanishMode && _disappearingDuration == _kVanishDuration) _buildVanishBanner(), // 🔥 NAYA (M3a-FE)
           if (_pinnedMessages.isNotEmpty) _buildPinnedBanner(), // 🔥 NAYA
           Expanded(child: _buildMessageList()),
           _buildReplyPreview(),
           // 🔥 NAYA (Phase 3, §2.2) — @mention suggestion overlay, compose
           // box ke bilkul upar. Sirf group chat me aur jab `@query` active
           // ho tab dikhta hai; text field ke upar "floating card" jaisa.
-          if (!_isBlocked && !_isMessagingRestrictedForMe && _mentionQuery != null)
+          if (!_isBlocked && !_isPendingRequest && !_isMessagingRestrictedForMe && _mentionQuery != null)
             Padding(
               padding: const EdgeInsets.only(bottom: 4),
               child: MentionSuggestionsOverlay(
@@ -3542,7 +4115,7 @@ class _ChatScreenState extends State<ChatScreen> with _L10nCache<ChatScreen> {
           // karne se chip ka text seedha compose box me daal deta hai
           // (send NAHI hota — WhatsApp/Gmail jaisa hi, user chahe to edit
           // kar sakta hai bhejne se pehle).
-          if (!_isBlocked && !_isMessagingRestrictedForMe && _smartReplies.isNotEmpty)
+          if (!_isBlocked && !_isPendingRequest && !_isMessagingRestrictedForMe && _smartReplies.isNotEmpty)
             Padding(
               padding: const EdgeInsets.only(left: 10, right: 10, bottom: 6),
               child: SizedBox(
@@ -3567,9 +4140,25 @@ class _ChatScreenState extends State<ChatScreen> with _L10nCache<ChatScreen> {
                 ),
               ),
             ),
-          _isBlocked
-              ? _buildBlockedBanner()
-              : (_isMessagingRestrictedForMe ? _buildRestrictedBanner() : _buildInputBar()),
+          // 🔥 NAYA (M3a-FE) — bottom bar pe swipe-up = vanish mode toggle.
+          // Gesture sirf neeche ke bar pe hai (message ListView pe nahi) taaki
+          // chat scroll se conflict na ho. Blocked/pending/restricted me
+          // vanish mode nahi — wahan kuch bhejna hi nahi hota.
+          GestureDetector(
+            behavior: HitTestBehavior.translucent,
+            onVerticalDragEnd: (_isBlocked || _isPendingRequest || _isMessagingRestrictedForMe)
+                ? null
+                : (d) {
+                    // 🔥 M4c — mic ke lock-swipe (upar) se vanish toggle na ho
+                    if (_isRecording || DateTime.now().difference(_lastMicPointerAt) < const Duration(milliseconds: 900)) return;
+                    if ((d.primaryVelocity ?? 0) < -400) _toggleVanishMode();
+                  },
+            child: _isBlocked
+                ? _buildBlockedBanner()
+                : (_isPendingRequest
+                    ? _buildRequestBar() // 🔥 NAYA (M1-FE) — accept hone tak reply band
+                    : (_isMessagingRestrictedForMe ? _buildRestrictedBanner() : _buildInputBar())),
+          ),
         ]),
         // 🔥 NAYA — wallpaper upload chalte waqt chhota top banner
         if (_wallpaperUploading)
@@ -3613,6 +4202,170 @@ class _ChatScreenState extends State<ChatScreen> with _L10nCache<ChatScreen> {
         ),
         const SizedBox(width: 4),
       ],
+    );
+  }
+
+  // ------------------------------------------------------------------
+  // 🔥 NAYA (M1-FE) — MESSAGE REQUEST bottom bar
+  // ------------------------------------------------------------------
+
+  // Request-list se na khuli ho (push tap, search...) to bhi server se
+  // pending status dekh lo. Group me request hoti hi nahi. Error = normal chat.
+  Future<void> _loadRequestStatus() async {
+    if (widget.conversation.isGroup || widget.isMessageRequest) return;
+    final status = await MessageApiService.getConversationRequestStatus(widget.conversation.id);
+    if (mounted && status == 'pending') setState(() => _isPendingRequest = true);
+  }
+
+  Future<void> _acceptRequest() async {
+    if (_requestBusy) return;
+    setState(() => _requestBusy = true);
+    try {
+      await MessageApiService.acceptMessageRequest(widget.conversation.id);
+      if (!mounted) return;
+      // Input bar wapas aa jaata hai — ab reply de sakte ho.
+      setState(() {
+        _isPendingRequest = false;
+        _requestBusy = false;
+      });
+    } catch (e) {
+      if (!mounted) return;
+      setState(() => _requestBusy = false);
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Accept nahi ho paya: $e')));
+    }
+  }
+
+  Future<void> _deleteRequest() async {
+    if (_requestBusy) return;
+    final otherName = widget.conversation.otherParticipant?.displayName ?? _l10n.chatThisUser;
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+        title: const Text('Delete request?'),
+        content: Text('Ye request hat jaayegi. $otherName ko iske baare me kuch nahi pata chalega.'),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(ctx, false), child: Text(_l10n.cancel)),
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            child: Text('Delete', style: TextStyle(color: Theme.of(ctx).colorScheme.error)),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true || !mounted) return;
+
+    setState(() => _requestBusy = true);
+    final messenger = ScaffoldMessenger.of(context);
+    try {
+      await MessageApiService.declineMessageRequest(widget.conversation.id);
+      if (!mounted) return;
+      Navigator.pop(context, 'declined');
+      messenger.showSnackBar(const SnackBar(content: Text('Request delete ho gayi')));
+    } catch (e) {
+      if (!mounted) return;
+      setState(() => _requestBusy = false);
+      messenger.showSnackBar(SnackBar(content: Text('Delete nahi ho paya: $e')));
+    }
+  }
+
+  Future<void> _blockRequest() async {
+    if (_requestBusy) return;
+    final otherId = widget.conversation.otherParticipant?.id;
+    if (otherId == null || otherId.isEmpty) return;
+    final otherName = widget.conversation.otherParticipant?.displayName ?? _l10n.chatThisUser;
+
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+        title: Text(_l10n.chatBlockTitle),
+        content: Text(_l10n.chatBlockBody(otherName)),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(ctx, false), child: Text(_l10n.cancel)),
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            child: Text(_l10n.chatBlock, style: const TextStyle(color: Colors.red)),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true || !mounted) return;
+
+    setState(() => _requestBusy = true);
+    final messenger = ScaffoldMessenger.of(context);
+    try {
+      await MessageApiService.blockUser(otherId);
+    } catch (e) {
+      if (!mounted) return;
+      setState(() => _requestBusy = false);
+      messenger.showSnackBar(SnackBar(content: Text(_l10n.chatBlockFailed(e.toString()))));
+      return;
+    }
+    // Block ho gaya — ab request ko bhi list se hata do. Ye fail ho jaye
+    // (e.g. already declined) to bhi block ka kaam ho chuka, isliye ignore.
+    try {
+      await MessageApiService.declineMessageRequest(widget.conversation.id);
+    } catch (_) {}
+    if (!mounted) return;
+    Navigator.pop(context, 'blocked');
+    messenger.showSnackBar(SnackBar(content: Text(_l10n.chatUserBlocked)));
+  }
+
+  // Reply input band; sirf Accept / Delete / Block. Accept ke baad
+  // `_isPendingRequest = false` hota hai aur normal `_buildInputBar()` aa jaata hai.
+  Widget _buildRequestBar() {
+    final cs = Theme.of(context).colorScheme;
+    final otherName = widget.conversation.otherParticipant?.displayName ?? _l10n.chatThisUser;
+    return SafeArea(
+      top: false,
+      child: Container(
+        padding: const EdgeInsets.fromLTRB(16, 12, 16, 12),
+        decoration: BoxDecoration(
+          color: cs.surface,
+          border: Border(top: BorderSide(color: cs.outlineVariant)),
+        ),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Text(
+              '$otherName aapko message bhejna chahta hai. Accept karne par ye chat aapke inbox me aa jaayegi aur aap reply kar paoge.',
+              textAlign: TextAlign.center,
+              style: TextStyle(fontSize: 12.5, color: cs.onSurfaceVariant),
+            ),
+            const SizedBox(height: 10),
+            Row(children: [
+              Expanded(
+                child: ElevatedButton(
+                  onPressed: _requestBusy ? null : _acceptRequest,
+                  style: ElevatedButton.styleFrom(backgroundColor: cs.primary, foregroundColor: cs.onPrimary),
+                  child: _requestBusy
+                      ? SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2, color: cs.onPrimary))
+                      : const Text('Accept'),
+                ),
+              ),
+              const SizedBox(width: 8),
+              Expanded(
+                child: OutlinedButton(
+                  onPressed: _requestBusy ? null : _deleteRequest,
+                  child: const Text('Delete'),
+                ),
+              ),
+              const SizedBox(width: 8),
+              Expanded(
+                child: OutlinedButton(
+                  onPressed: _requestBusy ? null : _blockRequest,
+                  style: OutlinedButton.styleFrom(
+                    foregroundColor: cs.error,
+                    side: BorderSide(color: cs.error.withOpacity(0.5)),
+                  ),
+                  child: const Text('Block'),
+                ),
+              ),
+            ]),
+          ],
+        ),
+      ),
     );
   }
 
@@ -3702,6 +4455,7 @@ class _ChatScreenState extends State<ChatScreen> with _L10nCache<ChatScreen> {
       case MessageType.location: return _l10n.chatPreviewLocation;
       case MessageType.studyRoom: return _l10n.chatPreviewStudyRoom;
       case MessageType.poll: return _l10n.chatPreviewPoll; // 🔥 NAYA
+      case MessageType.storyReply: return _l10n.chatPreviewStoryReply; // 🔥 NAYA
       default: return msg.text ?? '';
     }
   }
@@ -3804,8 +4558,11 @@ class _ChatScreenState extends State<ChatScreen> with _L10nCache<ChatScreen> {
                         replyPreview: replyPreview,
                         isReadByOther: _readByOtherIds.contains(msg.id),
                         isDownloaded: _isDownloaded(msg), // 🔥 NAYA
-                        onLongPress: () => _showMessageActions(msg, isMe),
-                        onReactionTap: () => _showReactionPicker(msg),
+                        onLongPress: (anchor) => _showMessageActions(msg, isMe, anchor: anchor),
+                        onDoubleTap: () => _onDoubleTapReact(msg), // M5-FE
+                        onFailedTap: () => _showFailedMessageSheet(msg), // M6-FE — failed bubble tap = Resend / Delete
+                        onReactionTap: (emoji) => _toggleReaction(msg, emoji), // M5-FE — chip tap = toggle
+                        myReaction: msg.myReaction(_myUserId ?? ''), // M5-FE — apna chip highlight
                         onDownload: () => _downloadMedia(context, msg),
                         onDownloadUrl: (url) => _downloadMediaUrl(context, msg, url), // 🔥 NAYA — multi-image grid ke ek specific photo ke liye
                         isUrlDownloaded: (url) => _downloadedIds.contains('${msg.id}::$url'), // 🔥 NAYA
@@ -3935,36 +4692,124 @@ class _ChatScreenState extends State<ChatScreen> with _L10nCache<ChatScreen> {
     return "$m:$s";
   }
 
+  // 🔥 NAYA (M4c) — recording bar. Do mode:
+  //  - HOLD (unlocked): timer + "slide to cancel" (slide ke saath fade) + mic circle
+  //    jahan abhi finger hai; upar "lock" hint jo upar swipe ke saath bada hota hai.
+  //  - LOCKED: delete | timer + status | pause/resume | send — haath hata sakte ho.
+  Widget _buildRecordingBar(ColorScheme cs) {
+    final locked = _recordLocked;
+    final cancelProgress = (-_slideDx / _kCancelDistance).clamp(0.0, 1.0);
+    final lockProgress = (-_slideDy / _kLockDistance).clamp(0.0, 1.0);
+    final timer = Text(_fmtRecordDuration(_recordDuration), style: TextStyle(fontSize: 15, color: cs.onSurface, fontWeight: FontWeight.w600));
+    final dot = Icon(Icons.fiber_manual_record, color: _recordPaused ? cs.onSurfaceVariant : cs.error, size: 14);
+
+    final bar = Container(
+      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+      decoration: BoxDecoration(
+        color: cs.surface,
+        borderRadius: BorderRadius.circular(28),
+        boxShadow: [BoxShadow(color: Colors.black.withOpacity(0.08), blurRadius: 10, offset: const Offset(0, 3))],
+      ),
+      child: locked
+          ? Row(children: [
+              IconButton(icon: Icon(Icons.delete_outline, color: cs.error), onPressed: _cancelRecording),
+              Expanded(child: Row(children: [
+                dot,
+                const SizedBox(width: 8),
+                timer,
+                const SizedBox(width: 8),
+                // TODO(l10n): arb me `chatRecordingPaused` add karo
+                Text(_recordPaused ? 'Paused' : _l10n.chatRecording, style: TextStyle(color: cs.onSurfaceVariant, fontSize: 13)),
+              ])),
+              IconButton(
+                icon: Icon(_recordPaused ? Icons.mic : Icons.pause_circle_outline, color: cs.primary),
+                onPressed: _togglePauseRecording,
+              ),
+              const SizedBox(width: 4),
+              Container(
+                decoration: BoxDecoration(shape: BoxShape.circle, boxShadow: [BoxShadow(color: cs.primary.withOpacity(0.35), blurRadius: 8, offset: const Offset(0, 2))]),
+                child: CircleAvatar(backgroundColor: cs.primary, child: IconButton(icon: Icon(Icons.send, color: cs.onPrimary), onPressed: _stopRecordingAndSend)),
+              ),
+            ])
+          : Row(children: [
+              dot,
+              const SizedBox(width: 8),
+              timer,
+              Expanded(
+                child: Opacity(
+                  opacity: (1 - cancelProgress).clamp(0.0, 1.0),
+                  child: Transform.translate(
+                    offset: Offset(_slideDx * 0.5, 0),
+                    child: Row(mainAxisAlignment: MainAxisAlignment.center, children: [
+                      Icon(Icons.chevron_left, size: 18, color: cs.onSurfaceVariant),
+                      // TODO(l10n): arb me `chatSlideToCancel` add karo
+                      Text('Slide to cancel', style: TextStyle(color: cs.onSurfaceVariant, fontSize: 13)),
+                    ]),
+                  ),
+                ),
+              ),
+              // mic circle: finger isi jagah (right) hai; slide ke saath thoda saath chalta hai
+              Transform.translate(
+                offset: Offset(_slideDx * 0.6, _slideDy * 0.4),
+                child: CircleAvatar(
+                  radius: 23 + 4 * lockProgress,
+                  backgroundColor: cs.error,
+                  child: Icon(Icons.mic, color: cs.onError),
+                ),
+              ),
+            ]),
+    );
+
+    return SafeArea(child: Padding(
+      padding: const EdgeInsets.fromLTRB(10, 6, 10, 10),
+      child: Stack(clipBehavior: Clip.none, children: [
+        bar,
+        if (!locked)
+          // lock hint: bar ke upar floating (layout nahi badalta); upar swipe ke saath gadha/bada
+          Positioned(
+            right: 8,
+            top: -78,
+            child: IgnorePointer(
+              child: Opacity(
+                opacity: 0.55 + 0.45 * lockProgress,
+                child: Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 10),
+                  decoration: BoxDecoration(
+                    color: cs.surface,
+                    borderRadius: BorderRadius.circular(22),
+                    boxShadow: [BoxShadow(color: Colors.black.withOpacity(0.12), blurRadius: 8)],
+                  ),
+                  child: Column(mainAxisSize: MainAxisSize.min, children: [
+                    Icon(Icons.lock_outline, size: 18 + 4 * lockProgress, color: cs.onSurface),
+                    const SizedBox(height: 2),
+                    Icon(Icons.keyboard_arrow_up, size: 18, color: cs.onSurfaceVariant),
+                  ]),
+                ),
+              ),
+            ),
+          ),
+      ]),
+    ));
+  }
+
+  // 🔥 M4c — stable `Listener` ancestor: mic gesture (move/up/cancel) yahin track
+  // hota hai, chahe neeche ka bar normal <-> recording UI me badal jaaye.
   Widget _buildInputBar() {
+    return Listener(
+      onPointerMove: _onMicMove,
+      onPointerUp: _onMicUp,
+      onPointerCancel: _onMicCancel,
+      child: _buildInputBarContent(),
+    );
+  }
+
+  Widget _buildInputBarContent() {
     final cs = Theme.of(context).colorScheme;
     // 🔥 NAYA — recording chal rahi ho to poora bar ek "Slide to cancel"
     // jaisa recording indicator ban jaata hai (WhatsApp jaisa).
     if (_isRecording) {
-      return SafeArea(child: Padding(padding: const EdgeInsets.fromLTRB(10, 6, 10, 10), child: Container(
-        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
-        decoration: BoxDecoration(
-          color: cs.surface,
-          borderRadius: BorderRadius.circular(28),
-          boxShadow: [BoxShadow(color: Colors.black.withOpacity(0.08), blurRadius: 10, offset: const Offset(0, 3))],
-        ),
-        child: Row(children: [
-          IconButton(icon: Icon(Icons.delete_outline, color: cs.error), onPressed: _cancelRecording),
-          Expanded(child: Row(children: [
-            Icon(Icons.fiber_manual_record, color: cs.error, size: 14),
-            const SizedBox(width: 8),
-            Text(_fmtRecordDuration(_recordDuration), style: TextStyle(fontSize: 15, color: cs.onSurface, fontWeight: FontWeight.w600)),
-            const SizedBox(width: 8),
-            Text(_l10n.chatRecording, style: TextStyle(color: cs.onSurfaceVariant, fontSize: 13)),
-          ])),
-          const SizedBox(width: 8),
-          Container(
-            decoration: BoxDecoration(shape: BoxShape.circle, boxShadow: [BoxShadow(color: cs.primary.withOpacity(0.35), blurRadius: 8, offset: const Offset(0, 2))]),
-            child: CircleAvatar(backgroundColor: cs.primary, child: IconButton(icon: Icon(Icons.send, color: cs.onPrimary), onPressed: _stopRecordingAndSend)),
-          ),
-        ]),
-      )));
+      return _buildRecordingBar(cs);
     }
-
     // 🔥 NAYA — attach + emoji + text field ab ek hi floating white "card"
     // ke andar hain (subtle shadow, fully rounded) — flat/dated bar ki
     // jagah modern messaging-app jaisa look. Send/mic button bahar,
@@ -4007,10 +4852,15 @@ class _ChatScreenState extends State<ChatScreen> with _L10nCache<ChatScreen> {
             child: CircleAvatar(
               radius: 23,
               backgroundColor: cs.primary,
-              child: IconButton(
-                icon: Icon(hasText ? Icons.send : Icons.mic, color: cs.onPrimary),
-                onPressed: hasText ? _sendMessage : _startRecording,
-              ),
+              child: hasText
+                  ? IconButton(icon: Icon(Icons.send, color: cs.onPrimary), onPressed: _sendMessage)
+                  // 🔥 M4c — mic: hold = record (upar swipe = lock, left swipe = cancel,
+                  // haath hatao = send); tap = locked recording. Move/up `_buildInputBar` ka Listener sambhalta hai.
+                  : Listener(
+                      behavior: HitTestBehavior.opaque,
+                      onPointerDown: _onMicDown,
+                      child: SizedBox(width: 48, height: 48, child: Icon(Icons.mic, color: cs.onPrimary)),
+                    ),
             ),
           );
         },
@@ -4173,8 +5023,11 @@ class _MessageBubble extends StatelessWidget {
   final MessageModel? replyPreview; // 🔥 NAYA — jis message ka reply hai, uska data
   final bool isReadByOther; // 🔥 NAYA — blue tick ke liye
   final bool isDownloaded; // 🔥 NAYA — true ho to icon/label "Open" dikhayenge, dobara "Download" nahi
-  final VoidCallback onLongPress;
-  final VoidCallback onReactionTap;
+  final ValueChanged<Rect?> onLongPress; // M5-FE — bubble ka global rect (strip anchor ke liye)
+  final VoidCallback? onDoubleTap; // M5-FE — double-tap = ❤
+  final VoidCallback? onFailedTap; // M6-FE — failed message tap = Resend / Delete
+  final ValueChanged<String> onReactionTap; // M5-FE — chip tap = toggle us emoji ko
+  final String? myReaction; // M5-FE — current user ka reaction (chip highlight)
   final VoidCallback onDownload;
   final void Function(String url)? onDownloadUrl; // 🔥 NAYA — multi-image message me ek specific photo download karne ke liye
   final bool Function(String url)? isUrlDownloaded; // 🔥 NAYA
@@ -4205,7 +5058,10 @@ class _MessageBubble extends StatelessWidget {
     this.isReadByOther = false,
     this.isDownloaded = false,
     required this.onLongPress,
+    this.onDoubleTap,
+    this.onFailedTap,
     required this.onReactionTap,
+    this.myReaction,
     required this.onDownload,
     this.onDownloadUrl,
     this.isUrlDownloaded,
@@ -4255,7 +5111,9 @@ class _MessageBubble extends StatelessWidget {
     final Color highlightStart = AppThemeTokens.of(context).warning.withOpacity(0.55);
 
     return GestureDetector(
-      onLongPress: message.deletedForEveryone ? null : onLongPress,
+      onLongPress: message.deletedForEveryone ? null : () => _handleLongPress(context),
+      onTap: message.sendFailed ? onFailedTap : null, // M6-FE
+      onDoubleTap: (message.deletedForEveryone || message.isSending) ? null : onDoubleTap, // M6-FE — unsent pe react nahi
       child: Align(
         alignment: isMe ? Alignment.centerRight : Alignment.centerLeft,
         child: Column(crossAxisAlignment: isMe ? CrossAxisAlignment.end : CrossAxisAlignment.start, children: [
@@ -4331,7 +5189,7 @@ class _MessageBubble extends StatelessWidget {
             ]),
           ),
           ),
-          if (message.reactions.isNotEmpty) _buildReactionRow(),
+          if (message.reactions.isNotEmpty) _buildReactionRow(context),
         ]),
       ),
     );
@@ -4365,7 +5223,9 @@ class _MessageBubble extends StatelessWidget {
     }
 
     return GestureDetector(
-      onLongPress: message.deletedForEveryone ? null : onLongPress,
+      onLongPress: message.deletedForEveryone ? null : () => _handleLongPress(context),
+      onTap: message.sendFailed ? onFailedTap : null, // M6-FE
+      onDoubleTap: (message.deletedForEveryone || message.isSending) ? null : onDoubleTap, // M6-FE — unsent pe react nahi
       child: Align(
         alignment: isMe ? Alignment.centerRight : Alignment.centerLeft,
         child: Column(crossAxisAlignment: isMe ? CrossAxisAlignment.end : CrossAxisAlignment.start, children: [
@@ -4384,7 +5244,7 @@ class _MessageBubble extends StatelessWidget {
               height: size,
               child: Stack(alignment: Alignment.bottomRight, children: [
                 image,
-                if (message.isSending)
+                if (_inFlight)
                   SizedBox(
                     width: size,
                     height: size,
@@ -4412,7 +5272,7 @@ class _MessageBubble extends StatelessWidget {
               ]),
             ),
           ),
-          if (message.reactions.isNotEmpty) _buildReactionRow(),
+          if (message.reactions.isNotEmpty) _buildReactionRow(context),
         ]),
       ),
     );
@@ -4435,7 +5295,7 @@ class _MessageBubble extends StatelessWidget {
   // 🔥 NAYA — WhatsApp jaisa tick logic: clock = sending, ek grey tick =
   // sent, 2 blue tick = read. Failed pe red "!" icon.
   Widget _buildTick(BuildContext context) {
-    if (message.sendFailed) return const Icon(Icons.error_outline, size: 13, color: Colors.redAccent);
+    if (message.sendFailed) return const Icon(Icons.error, size: 15, color: Colors.redAccent); // M6-FE — laal "!"
     final onBubble = Theme.of(context).colorScheme.onPrimary.withOpacity(0.7);
     if (message.isSending) return Icon(Icons.access_time, size: 12, color: onBubble);
     if (isReadByOther) return const Icon(Icons.done_all, size: 15, color: Color(0xFF34B7F1)); // blue double tick — WhatsApp-jaisa universal "read" indicator, jaan-boojh kar fixed
@@ -4455,6 +5315,7 @@ class _MessageBubble extends StatelessWidget {
       case MessageType.location: preview = AppLocalizations.of(context)!.chatPreviewLocation; break;
       case MessageType.studyRoom: preview = AppLocalizations.of(context)!.chatPreviewStudyRoom; break;
       case MessageType.poll: preview = AppLocalizations.of(context)!.chatPreviewPoll; break; // 🔥 NAYA
+      case MessageType.storyReply: preview = AppLocalizations.of(context)!.chatPreviewStoryReply; break; // 🔥 NAYA
       default: preview = r.text ?? '';
     }
     return GestureDetector(
@@ -4479,7 +5340,52 @@ class _MessageBubble extends StatelessWidget {
     );
   }
 
-  Widget _buildReactionRow() { final counts = <String, int>{}; for (final r in message.reactions) { counts[r.emoji] = (counts[r.emoji] ?? 0) + 1; } return GestureDetector(onTap: onReactionTap, child: Container(margin: const EdgeInsets.only(top: 2), padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3), decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(12), boxShadow: [BoxShadow(color: Colors.black.withOpacity(0.06), blurRadius: 3)]), child: Row(mainAxisSize: MainAxisSize.min, children: counts.entries.map((e) => Padding(padding: const EdgeInsets.symmetric(horizontal: 2), child: Text("${e.key} ${e.value > 1 ? e.value : ''}", style: const TextStyle(fontSize: 12)))).toList()))); }
+  // M6-FE — sending (spinner) = isSending && !sendFailed. Failed me local preview rehta hai, spinner nahi.
+  bool get _inFlight => message.isSending && !message.sendFailed;
+
+  // M5-FE — long-press par bubble ka global rect nikalke parent ko do.
+  void _handleLongPress(BuildContext context) {
+    final box = context.findRenderObject();
+    Rect? rect;
+    if (box is RenderBox && box.hasSize) {
+      rect = box.localToGlobal(Offset.zero) & box.size;
+    }
+    onLongPress(rect);
+  }
+
+  // M5-FE — bubble ke neeche per-emoji chips (emoji + count). Chip tap =
+  // us emoji ko toggle. Apna reaction primary-tint se highlight.
+  Widget _buildReactionRow(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
+    final counts = <String, int>{};
+    for (final r in message.reactions) {
+      counts[r.emoji] = (counts[r.emoji] ?? 0) + 1;
+    }
+    return Padding(
+      padding: const EdgeInsets.only(top: 2),
+      child: Wrap(
+        spacing: 4,
+        runSpacing: 4,
+        alignment: isMe ? WrapAlignment.end : WrapAlignment.start,
+        children: counts.entries.map((e) {
+          final mine = e.key == myReaction;
+          return GestureDetector(
+            onTap: () => onReactionTap(e.key),
+            child: Container(
+              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+              decoration: BoxDecoration(
+                color: mine ? cs.primary.withOpacity(0.14) : cs.surface,
+                borderRadius: BorderRadius.circular(12),
+                border: Border.all(color: mine ? cs.primary : cs.outlineVariant, width: mine ? 1.2 : 0.8),
+                boxShadow: [BoxShadow(color: Colors.black.withOpacity(0.06), blurRadius: 3)],
+              ),
+              child: Text('${e.key} ${e.value}', style: TextStyle(fontSize: 12, color: cs.onSurface)),
+            ),
+          );
+        }).toList(),
+      ),
+    );
+  }
 
   Widget _buildContent(BuildContext context, Color textColor) {
     if (message.deletedForEveryone) return Text(AppLocalizations.of(context)!.chatMessageDeleted, style: TextStyle(color: Colors.grey, fontStyle: FontStyle.italic, fontSize: 14.5));
@@ -4494,6 +5400,7 @@ class _MessageBubble extends StatelessWidget {
       case MessageType.location: return _locationContent(context, textColor);
       case MessageType.studyRoom: return _studyRoomCard(context); // 🔥 NAYA
       case MessageType.poll: return _pollContent(context, textColor); // 🔥 NAYA
+      case MessageType.storyReply: return _storyReplyContent(context, textColor); // 🔥 NAYA
       // 🔥 NAYA — plain text ab _LinkifiedText se render hota hai, taaki
       // agar message me koi URL (http/https/www.) ho to wo clickable
       // link ki tarah dikhe (blue + underline) aur tap karne par khul
@@ -4616,6 +5523,82 @@ class _MessageBubble extends StatelessWidget {
     );
   }
 
+  // 🔥 NAYA — STORY REPLY bubble. Instagram-style: small square story
+  // thumbnail (from `message.storyReply.snapshotUrl` — survives the story
+  // itself expiring, see StoryReplyInfo's doc comment) + the reply text
+  // underneath, in a bordered "quoted" card rather than a plain bubble so
+  // it visually reads as "this message is about that story", same idea
+  // `_buildReplyPreview` already uses for quoted replies elsewhere in
+  // this file.
+  Widget _storyReplyContent(BuildContext context, Color textColor) {
+    final story = message.storyReply;
+    final snapshot = story?.snapshotUrl;
+    final l10n = AppLocalizations.of(context)!;
+    return Container(
+      width: 220,
+      padding: const EdgeInsets.all(8),
+      decoration: BoxDecoration(
+        color: (isMe ? Theme.of(context).colorScheme.onPrimary : Theme.of(context).colorScheme.onSurface)
+            .withOpacity(0.06),
+        borderRadius: BorderRadius.circular(12),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Row(
+            children: [
+              Icon(Icons.reply_rounded, size: 14, color: textColor.withOpacity(0.6)),
+              const SizedBox(width: 4),
+              Text(
+                l10n.chatRepliedToYourStory,
+                style: TextStyle(fontSize: 11.5, color: textColor.withOpacity(0.6), fontWeight: FontWeight.w600),
+              ),
+            ],
+          ),
+          const SizedBox(height: 6),
+          GestureDetector(
+            onTap: snapshot == null
+                ? null
+                : () => Navigator.push(
+                      context,
+                      MaterialPageRoute(
+                        builder: (_) => MediaViewerScreen(urls: [snapshot], initialIndex: 0, onDownload: (_) => onDownload()),
+                      ),
+                    ),
+            child: ClipRRect(
+              borderRadius: BorderRadius.circular(8),
+              child: snapshot != null
+                  ? CachedNetworkImage(
+                      imageUrl: snapshot,
+                      width: 70,
+                      height: 90,
+                      fit: BoxFit.cover,
+                      placeholder: (_, __) => const SizedBox(
+                        width: 70,
+                        height: 90,
+                        child: Center(child: CircularProgressIndicator(strokeWidth: 2)),
+                      ),
+                      errorWidget: (_, __, ___) =>
+                          const SizedBox(width: 70, height: 90, child: Icon(Icons.broken_image, color: Colors.grey)),
+                    )
+                  : Container(
+                      width: 70,
+                      height: 90,
+                      color: textColor.withOpacity(0.08),
+                      child: Icon(Icons.image_not_supported_outlined, color: textColor.withOpacity(0.4)),
+                    ),
+            ),
+          ),
+          if ((message.text ?? '').trim().isNotEmpty) ...[
+            const SizedBox(height: 8),
+            Text(message.text!.trim(), style: TextStyle(color: textColor, fontSize: 14.5)),
+          ],
+        ],
+      ),
+    );
+  }
+
   // 🔥 NAYA — POLL bubble
   // 🔧 FIX (Phase 1 model fix) — `message.poll` ab top-level field hai
   // (§3), `message.meta?['poll']` nahi. Purana poll (jo history se scroll
@@ -4695,7 +5678,7 @@ class _MessageBubble extends StatelessWidget {
         ),
         // 🔥 FIX: pehle sirf indeterminate spinner dikhta tha — ab actual
         // upload % (agar available hai) dikhta hai, WhatsApp jaisa.
-        if (message.isSending) Container(width: 200, height: 200, color: Colors.black26, child: Center(child: Column(mainAxisSize: MainAxisSize.min, children: [
+        if (_inFlight) Container(width: 200, height: 200, color: Colors.black26, child: Center(child: Column(mainAxisSize: MainAxisSize.min, children: [
           CircularProgressIndicator(color: Colors.white, value: (message.uploadProgress != null && message.uploadProgress! > 0) ? message.uploadProgress : null),
           if (message.uploadProgress != null && message.uploadProgress! > 0) Padding(padding: const EdgeInsets.only(top: 6), child: Text("${(message.uploadProgress! * 100).toStringAsFixed(0)}%", style: const TextStyle(color: Colors.white, fontSize: 12))),
         ]))),
@@ -4790,7 +5773,7 @@ class _MessageBubble extends StatelessWidget {
             itemCount: tilesToShow,
             itemBuilder: (_, i) => tileFor(i),
           ),
-          if (message.isSending)
+          if (_inFlight)
             Positioned.fill(
               child: Container(
                 color: Colors.black26,
@@ -4820,12 +5803,12 @@ class _MessageBubble extends StatelessWidget {
     return GestureDetector(
       onTap: (url != null && url.isNotEmpty && !message.isSending) ? onDownload : null,
       child: Row(mainAxisSize: MainAxisSize.min, children: [
-        Container(padding: const EdgeInsets.all(8), decoration: BoxDecoration(color: textColor.withOpacity(0.18), shape: BoxShape.circle), child: message.isSending ? SizedBox(width: 20, height: 20, child: CircularProgressIndicator(strokeWidth: 2, color: textColor, value: (message.uploadProgress != null && message.uploadProgress! > 0) ? message.uploadProgress : null)) : Icon(icon, color: textColor)),
+        Container(padding: const EdgeInsets.all(8), decoration: BoxDecoration(color: textColor.withOpacity(0.18), shape: BoxShape.circle), child: _inFlight ? SizedBox(width: 20, height: 20, child: CircularProgressIndicator(strokeWidth: 2, color: textColor, value: (message.uploadProgress != null && message.uploadProgress! > 0) ? message.uploadProgress : null)) : Icon(icon, color: textColor)),
         const SizedBox(width: 8),
         Flexible(child: Column(crossAxisAlignment: CrossAxisAlignment.start, mainAxisSize: MainAxisSize.min, children: [
           Text(fileName, style: TextStyle(color: textColor, fontSize: 14), overflow: TextOverflow.ellipsis),
           // 🔥 NAYA: sending ke dauraan "42% uploading..." dikhega
-          if (message.isSending && message.uploadProgress != null && message.uploadProgress! > 0)
+          if (_inFlight && message.uploadProgress != null && message.uploadProgress! > 0)
             Text(AppLocalizations.of(context)!.chatUploadingPercent((message.uploadProgress! * 100).round()), style: TextStyle(color: textColor.withOpacity(0.7), fontSize: 11)),
         ])),
         if (!message.isSending && url != null && url.isNotEmpty) ...[
@@ -4842,7 +5825,7 @@ class _MessageBubble extends StatelessWidget {
   Widget _videoContent(BuildContext context, Color textColor) {
     final url = message.fileUrl;
     final thumb = message.thumbnailUrl;
-    if (message.isSending) {
+    if (_inFlight) {
       return SizedBox(
         width: 200, height: 130,
         child: Stack(alignment: Alignment.center, children: [
@@ -5255,6 +6238,90 @@ Route<T> _fadeScaleRoute<T>(Widget page) {
 // 🔥 NAYA: WhatsApp jaisa inline voice-note player — play/pause button,
 // seekable progress bar, aur live time. Seedha URL se stream karta hai,
 // download ka wait nahi karna padta. Sending state me upload % dikhta hai.
+// 🔥 NAYA (M4a) — recording ke amplitude samples (0..1) ko `bars` (default 40)
+// buckets me downsample karta hai (har bucket ka peak), phir loudest bar ko 100
+// maan ke scale karta hai taaki dheemi recording bhi shape dikhaye. Har bar
+// minimum 6 (chhoti si line, silence bhi dikhe). Khali input -> khali list.
+List<int> _buildWaveform(List<double> samples, {int bars = 40}) {
+  if (samples.isEmpty) return const [];
+  final out = <double>[];
+  for (var i = 0; i < bars; i++) {
+    final from = (i * samples.length / bars).floor();
+    var to = ((i + 1) * samples.length / bars).ceil();
+    if (to <= from) to = from + 1;
+    if (from >= samples.length) { out.add(out.isEmpty ? 0 : out.last); continue; }
+    var peak = 0.0;
+    for (var j = from; j < to && j < samples.length; j++) {
+      if (samples[j] > peak) peak = samples[j];
+    }
+    out.add(peak);
+  }
+  final maxV = out.reduce((a, b) => a > b ? a : b);
+  if (maxV <= 0) return List<int>.filled(bars, 6);
+  return out.map((v) => ((v / maxV) * 100).round().clamp(6, 100)).toList();
+}
+
+// 🔥 NAYA (M4a) — voice-note waveform: played bars `color`, baaki halka.
+// `bars == null` => purana voice note, flat (barabar height) bars.
+class _VoiceWaveform extends StatelessWidget {
+  final List<int>? bars;
+  final double progress; // 0..1
+  final Color color;
+  final bool enabled;
+  final ValueChanged<double> onSeek;
+  const _VoiceWaveform({required this.bars, required this.progress, required this.color, required this.enabled, required this.onSeek});
+
+  @override
+  Widget build(BuildContext context) {
+    return LayoutBuilder(builder: (context, c) {
+      void seekAt(double dx) {
+        if (!enabled || c.maxWidth <= 0) return;
+        onSeek((dx / c.maxWidth).clamp(0.0, 1.0));
+      }
+      return GestureDetector(
+        behavior: HitTestBehavior.opaque,
+        onTapDown: (d) => seekAt(d.localPosition.dx),
+        onHorizontalDragUpdate: (d) => seekAt(d.localPosition.dx),
+        child: SizedBox(
+          height: 30,
+          width: double.infinity,
+          child: CustomPaint(painter: _WaveformPainter(bars: bars, progress: progress, color: color)),
+        ),
+      );
+    });
+  }
+}
+
+class _WaveformPainter extends CustomPainter {
+  final List<int>? bars;
+  final double progress;
+  final Color color;
+  _WaveformPainter({required this.bars, required this.progress, required this.color});
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final values = (bars == null || bars!.isEmpty) ? List<int>.filled(40, 20) : bars!;
+    final n = values.length;
+    final slot = size.width / n;
+    final barW = (slot * 0.6).clamp(1.5, 4.0);
+    final played = Paint()..color = color;
+    final rest = Paint()..color = color.withOpacity(0.35);
+    for (var i = 0; i < n; i++) {
+      final h = (values[i] / 100 * size.height).clamp(3.0, size.height);
+      final x = i * slot + (slot - barW) / 2;
+      final rect = RRect.fromRectAndRadius(
+        Rect.fromLTWH(x, (size.height - h) / 2, barW, h),
+        Radius.circular(barW / 2),
+      );
+      canvas.drawRRect(rect, (i + 0.5) / n <= progress ? played : rest);
+    }
+  }
+
+  @override
+  bool shouldRepaint(_WaveformPainter old) =>
+      old.progress != progress || old.color != color || old.bars != bars;
+}
+
 class _AudioBubble extends StatefulWidget {
   final MessageModel message;
   final Color textColor;
@@ -5272,6 +6339,21 @@ class _AudioBubbleState extends State<_AudioBubble> with _L10nCache<_AudioBubble
   Duration _duration = Duration.zero;
   bool _loading = false;
   bool _transcribing = false; // 🔥 NAYA — manual "Transcribe" tap ke liye
+
+  // 🔥 NAYA (M4b) — playback speed 1x -> 1.5x -> 2x -> 1x. `static` hai taaki
+  // choice app session me saare voice-note bubbles me yaad rahe (naya bubble
+  // bhi last chuni speed se shuru hota hai); app restart pe 1x pe reset.
+  static double _sessionRate = 1.0;
+  static const List<double> _kRates = [1.0, 1.5, 2.0];
+  double _rate = _sessionRate;
+
+  String _rateLabel(double r) => r == r.roundToDouble() ? '${r.toInt()}x' : '${r}x';
+
+  Future<void> _cycleRate() async {
+    final next = _kRates[(_kRates.indexOf(_rate) + 1) % _kRates.length];
+    setState(() { _rate = next; _sessionRate = next; });
+    try { await _player.setPlaybackRate(next); } catch (_) {}
+  }
 
   @override
   void initState() {
@@ -5317,6 +6399,8 @@ class _AudioBubbleState extends State<_AudioBubble> with _L10nCache<_AudioBubble
       } else {
         await _player.play(UrlSource(url));
       }
+      // 🔥 M4b — session speed (play ke baad set karna sab platforms pe reliable hai)
+      if (_rate != 1.0) await _player.setPlaybackRate(_rate);
     } catch (e) {
       if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(_l10n.chatAudioPlayFailed(e.toString()))));
     } finally {
@@ -5328,6 +6412,13 @@ class _AudioBubbleState extends State<_AudioBubble> with _L10nCache<_AudioBubble
     final m = d.inMinutes.toString().padLeft(1, '0');
     final s = (d.inSeconds % 60).toString().padLeft(2, '0');
     return "$m:$s";
+  }
+
+  // 🔥 M4a — meta['waveform'] (List<num>) -> 0..100 ints; nahi/invalid ho to null (flat fallback)
+  List<int>? _waveformOf(MessageModel m) {
+    final raw = m.meta?['waveform'];
+    if (raw is! List || raw.isEmpty) return null;
+    return raw.map((e) => e is num ? e.toInt().clamp(0, 100) : 0).toList();
   }
 
   // 🔥 NAYA — manual fallback transcribe (auto-transcription §7.6 already
@@ -5368,7 +6459,7 @@ class _AudioBubbleState extends State<_AudioBubble> with _L10nCache<_AudioBubble
   Widget build(BuildContext context) {
     final msg = widget.message;
     final textColor = widget.textColor;
-    if (msg.isSending) {
+    if (msg.isSending && !msg.sendFailed) {
       return Row(mainAxisSize: MainAxisSize.min, children: [
         SizedBox(width: 20, height: 20, child: CircularProgressIndicator(strokeWidth: 2, color: textColor, value: (msg.uploadProgress != null && msg.uploadProgress! > 0) ? msg.uploadProgress : null)),
         const SizedBox(width: 8),
@@ -5400,29 +6491,39 @@ class _AudioBubbleState extends State<_AudioBubble> with _L10nCache<_AudioBubble
             const SizedBox(width: 8),
             Expanded(
               child: Column(crossAxisAlignment: CrossAxisAlignment.start, mainAxisSize: MainAxisSize.min, children: [
-                SliderTheme(
-                  data: SliderTheme.of(context).copyWith(
-                    trackHeight: 2.5,
-                    thumbShape: const RoundSliderThumbShape(enabledThumbRadius: 5),
-                    overlayShape: SliderComponentShape.noOverlay,
-                    activeTrackColor: textColor,
-                    inactiveTrackColor: textColor.withOpacity(0.25),
-                    thumbColor: textColor,
-                  ),
-                  child: Slider(
-                    value: progress,
-                    onChanged: (url == null || url.isEmpty || total.inMilliseconds == 0) ? null : (v) {
-                      final seekTo = Duration(milliseconds: (v * total.inMilliseconds).round());
-                      _player.seek(seekTo);
-                    },
-                  ),
+                // 🔥 NAYA (M4a) — waveform bars + progress colour. Purane voice notes
+                // (meta me waveform nahi) ke liye flat bars fallback. Tap/drag se seek.
+                _VoiceWaveform(
+                  bars: _waveformOf(msg),
+                  progress: progress,
+                  color: textColor,
+                  enabled: !(url == null || url.isEmpty || total.inMilliseconds == 0),
+                  onSeek: (f) => _player.seek(Duration(milliseconds: (f * total.inMilliseconds).round())),
                 ),
                 Padding(
                   padding: const EdgeInsets.only(left: 4),
-                  child: Text(
-                    total.inMilliseconds > 0 ? "${_fmt(_position)} / ${_fmt(total)}" : _l10n.chatAudioMessage,
-                    style: TextStyle(color: textColor.withOpacity(0.8), fontSize: 11),
-                  ),
+                  child: Row(children: [
+                    Expanded(
+                      child: Text(
+                        total.inMilliseconds > 0 ? "${_fmt(_position)} / ${_fmt(total)}" : _l10n.chatAudioMessage,
+                        style: TextStyle(color: textColor.withOpacity(0.8), fontSize: 11),
+                      ),
+                    ),
+                    // 🔥 NAYA (M4b) — speed chip: tap karke 1x -> 1.5x -> 2x
+                    if (url != null && url.isNotEmpty)
+                      GestureDetector(
+                        onTap: _cycleRate,
+                        behavior: HitTestBehavior.opaque,
+                        child: Container(
+                          padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 2),
+                          decoration: BoxDecoration(
+                            color: textColor.withOpacity(_rate == 1.0 ? 0.14 : 0.28),
+                            borderRadius: BorderRadius.circular(10),
+                          ),
+                          child: Text(_rateLabel(_rate), style: TextStyle(color: textColor, fontSize: 11, fontWeight: FontWeight.w700)),
+                        ),
+                      ),
+                  ]),
                 ),
               ]),
             ),
@@ -5778,4 +6879,115 @@ class _VideoPlayerScreenState extends State<_VideoPlayerScreen> with _L10nCache<
                 ),
     );
   }
+}
+
+// ============================================================
+// M5-FE — long-press overlay: emoji strip (bubble ke upar) + menu sheet (neeche)
+// ============================================================
+
+enum _OverlaySlot { strip, menu }
+
+class _ReactionMenuOverlay extends StatelessWidget {
+  final Rect anchor;
+  final bool isMe;
+  final String? myReaction;
+  final List<Widget> menuTiles;
+  final ValueChanged<String> onPick;
+  final VoidCallback onMore;
+
+  const _ReactionMenuOverlay({
+    required this.anchor,
+    required this.isMe,
+    required this.myReaction,
+    required this.menuTiles,
+    required this.onPick,
+    required this.onMore,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
+    return CustomMultiChildLayout(
+      delegate: _OverlayLayoutDelegate(anchor: anchor, isMe: isMe, topInset: MediaQuery.of(context).padding.top),
+      children: [
+        LayoutId(
+          id: _OverlaySlot.menu,
+          child: Material(
+            color: cs.surface,
+            borderRadius: const BorderRadius.vertical(top: Radius.circular(18)),
+            clipBehavior: Clip.antiAlias,
+            child: SafeArea(
+              top: false,
+              child: SingleChildScrollView(child: Column(mainAxisSize: MainAxisSize.min, children: menuTiles)),
+            ),
+          ),
+        ),
+        LayoutId(
+          id: _OverlaySlot.strip,
+          child: Material(
+            color: cs.surface,
+            elevation: 6,
+            borderRadius: BorderRadius.circular(28),
+            child: Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 5),
+              child: Row(mainAxisSize: MainAxisSize.min, children: [
+                for (final emoji in _kEmojis)
+                  GestureDetector(
+                    onTap: () => onPick(emoji),
+                    child: Container(
+                      padding: const EdgeInsets.all(5),
+                      decoration: BoxDecoration(
+                        color: emoji == myReaction ? cs.primary.withOpacity(0.15) : null,
+                        shape: BoxShape.circle,
+                      ),
+                      child: Text(emoji, style: const TextStyle(fontSize: 26)),
+                    ),
+                  ),
+                GestureDetector(
+                  onTap: onMore,
+                  child: Container(
+                    margin: const EdgeInsets.only(left: 2),
+                    width: 34,
+                    height: 34,
+                    decoration: BoxDecoration(color: cs.onSurface.withOpacity(0.08), shape: BoxShape.circle),
+                    child: Icon(Icons.add, size: 20, color: cs.onSurface),
+                  ),
+                ),
+              ]),
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+class _OverlayLayoutDelegate extends MultiChildLayoutDelegate {
+  final Rect anchor;
+  final bool isMe;
+  final double topInset;
+  _OverlayLayoutDelegate({required this.anchor, required this.isMe, required this.topInset});
+
+  @override
+  void performLayout(Size size) {
+    // 1) menu sheet neeche, max 55% height
+    final menuSize = layoutChild(
+      _OverlaySlot.menu,
+      BoxConstraints(minWidth: size.width, maxWidth: size.width, maxHeight: size.height * 0.55),
+    );
+    final menuTop = size.height - menuSize.height;
+    positionChild(_OverlaySlot.menu, Offset(0, menuTop));
+
+    // 2) strip bubble ke upar; screen ke top aur menu ke top ke beech clamp
+    final stripSize = layoutChild(_OverlaySlot.strip, BoxConstraints.loose(Size(size.width - 16, 60)));
+    final minY = topInset + 6;
+    final maxY = (menuTop - stripSize.height - 6).clamp(minY, double.infinity).toDouble();
+    final y = (anchor.top - stripSize.height - 6).clamp(minY, maxY).toDouble();
+    final x = isMe ? size.width - stripSize.width - 12 : 12.0;
+    positionChild(_OverlaySlot.strip, Offset(x, y));
+  }
+
+  @override
+  bool shouldRelayout(_OverlayLayoutDelegate old) =>
+      old.anchor != anchor || old.isMe != isMe || old.topInset != topInset;
 }

@@ -100,6 +100,16 @@ Future<void> firebaseBackgroundHandler(RemoteMessage message) async {
     return;
   }
 
+  // 🔥 N8-FE — rich push (image + action buttons). Backend `send_rich_push`
+  // data-only bhejta hai aur usme `type` key NAHI hoti (sirf `notif_type`),
+  // isliye ye upar ke kisi branch se match nahi hota. Isko generic chat
+  // fallback se pehle pakadna zaroori hai — warna ye "Reply" wali chat
+  // notification ban jaata.
+  if (_isRichPush(data)) {
+    await _showBackgroundRichNotification(data);
+    return;
+  }
+
   // 🔥 NAYA: chat message ho to background/killed isolate me bhi hamara
   // apna Reply-action wala local notification dikhao — pehle ye sirf
   // foreground `onMessage` listener me hota tha.
@@ -334,6 +344,267 @@ Future<void> _showBackgroundChatNotification(RemoteMessage message) async {
 }
 
 // ============================================================
+// 🔥 N8-FE — RICH PUSH (image + action buttons)
+//
+// Backend contract (message/push_utils.py::send_rich_push, built by
+// core/services.py::build_push_payload) — DATA-ONLY FCM, keys:
+//   title, body, channel_id, image_url?, actions? (JSON string:
+//   [{"id","label","input"?}]), notification_id, notif_type, category,
+//   + deep-link ids (post_id, comment_id, follow_id, actor_id,
+//   conversation_id, ...). `type` key hoti hi nahi — isliye
+//   `_isRichPush` `notif_type` dekhta hai.
+//
+// Flow:
+//   * Action button tap  -> (showsUserInterface:false) Android ise ALAG
+//     background isolate me chalata hai (foreground me bhi) ->
+//     notificationTapBackground -> _handleNotificationResponse ->
+//     _handleRichAction -> token se seedha API call. App nahi khulta.
+//   * Body tap           -> main isolate -> handleTapData() ->
+//     onPushNavigate (N7 deep-link logic, main.dart me wired).
+// ============================================================
+
+const String _kRichChannelId = 'notifications';
+
+// ⚠️ VERIFY (N8-FE): ye endpoints mujhe uploaded files me nahi dikhe —
+// apne real user_profile / comments URLs se replace karo. Sirf yahi ek
+// jagah badalna hai. Paths `Api.baseUrl` ke baad lagte hain.
+const String _kEpConfirmFollow = '/user_profile/follow/confirm/'; // body: {follow_id}
+const String _kEpDeleteFollow = '/user_profile/follow/delete/'; // body: {follow_id}
+const String _kEpFollowBack = '/user_profile/follow/'; // body: {user_id}
+const String _kEpReplyComment = '/post/comments/reply/'; // body: {post_id, parent_id, text}
+
+bool _isRichPush(Map<String, dynamic> d) => d['type'] == null && d['notif_type'] != null;
+
+dynamic _idValue(dynamic v) {
+  final s = v?.toString();
+  if (s == null || s.isEmpty) return null;
+  return int.tryParse(s) ?? s;
+}
+
+List<Map<String, dynamic>> _parseRichActions(dynamic raw) {
+  if (raw is! String || raw.isEmpty) return const [];
+  try {
+    final decoded = jsonDecode(raw);
+    if (decoded is! List) return const [];
+    return decoded
+        .whereType<Map>()
+        .map((m) => Map<String, dynamic>.from(m))
+        .where((m) => m['id'] != null && m['label'] != null)
+        .toList();
+  } catch (_) {
+    return const [];
+  }
+}
+
+// Background isolate me app ka normal init nahi chalta, isliye har baar
+// apna plugin instance (existing _showBackground* helpers jaisa hi).
+Future<FlutterLocalNotificationsPlugin> _initIsolateFln() async {
+  final fln = FlutterLocalNotificationsPlugin();
+  const androidInit = AndroidInitializationSettings('@mipmap/ic_launcher');
+  await fln.initialize(
+    settings: const InitializationSettings(android: androidInit),
+    onDidReceiveNotificationResponse: notificationTapBackground,
+    onDidReceiveBackgroundNotificationResponse: notificationTapBackground,
+  );
+  return fln;
+}
+
+Future<void> _ensureRichChannel(FlutterLocalNotificationsPlugin fln, String channelId) async {
+  await fln
+      .resolvePlatformSpecificImplementation<AndroidFlutterLocalNotificationsPlugin>()
+      ?.createNotificationChannel(AndroidNotificationChannel(
+        channelId,
+        'Notifications',
+        description: 'Follows, comments, likes and other activity',
+        importance: Importance.high,
+      ));
+}
+
+// FCM/APNs jaisa image khud fetch nahi hota data-only me — client hi
+// download karta hai. Fail/slow ho to notification bina image ke jaati hai.
+Future<ByteArrayAndroidBitmap?> _downloadPushImage(String? url) async {
+  if (url == null || !(url.startsWith('https://') || url.startsWith('http://'))) return null;
+  try {
+    final res = await http.get(Uri.parse(url)).timeout(const Duration(seconds: 6));
+    if (res.statusCode == 200 && res.bodyBytes.isNotEmpty && res.bodyBytes.length < 5 * 1024 * 1024) {
+      return ByteArrayAndroidBitmap(res.bodyBytes);
+    }
+  } catch (e) {
+    developer.log("Push image download failed: $e");
+  }
+  return null;
+}
+
+/// Rich notification dikhata hai — background isolate aur foreground
+/// (`_fln`) dono isi ko call karte hain.
+Future<void> showRichPushNotification(
+    FlutterLocalNotificationsPlugin fln, Map<String, dynamic> data) async {
+  final title = data['title']?.toString() ?? '';
+  final body = data['body']?.toString() ?? '';
+  if (title.isEmpty && body.isEmpty) return;
+
+  final channelId = (data['channel_id']?.toString().isNotEmpty ?? false)
+      ? data['channel_id'].toString()
+      : _kRichChannelId;
+  await _ensureRichChannel(fln, channelId);
+
+  final image = await _downloadPushImage(data['image_url']?.toString());
+
+  // Android max 3 action buttons dikhata hai.
+  final actions = _parseRichActions(data['actions']).take(3).map((a) {
+    final isInput = a['input'] == true;
+    return AndroidNotificationAction(
+      a['id'].toString(),
+      a['label'].toString(),
+      inputs: isInput
+          ? const <AndroidNotificationActionInput>[
+              AndroidNotificationActionInput(label: 'Type a reply...'),
+            ]
+          : const <AndroidNotificationActionInput>[],
+      allowGeneratedReplies: isInput,
+      showsUserInterface: false, // app khole bina isolate me API call
+      cancelNotification: true,
+    );
+  }).toList();
+
+  final androidDetails = AndroidNotificationDetails(
+    channelId,
+    'Notifications',
+    importance: Importance.high,
+    priority: Priority.high,
+    largeIcon: image,
+    styleInformation: image == null
+        ? null
+        : BigPictureStyleInformation(
+            image,
+            largeIcon: image,
+            hideExpandedLargeIcon: true,
+            contentTitle: title,
+            summaryText: body,
+          ),
+    actions: actions,
+  );
+
+  await fln.show(
+    // Same notification_id dobara aaye to update ho, duplicate na bane.
+    id: int.tryParse(data['notification_id']?.toString() ?? '') ?? data.hashCode,
+    title: title,
+    body: body,
+    notificationDetails: NotificationDetails(android: androidDetails),
+    // `_rich` marker: `_handleNotificationResponse` isse pehchanta hai.
+    payload: jsonEncode({...data, '_rich': '1'}),
+  );
+}
+
+@pragma('vm:entry-point')
+Future<void> _showBackgroundRichNotification(Map<String, dynamic> data) async {
+  try {
+    final fln = await _initIsolateFln();
+    await showRichPushNotification(fln, data);
+  } catch (e) {
+    developer.log("Background rich notification failed: $e");
+  }
+}
+
+Future<bool> _pushActionPost(String path, Map<String, dynamic> body) async {
+  final authToken = await AuthService.getValidToken();
+  if (authToken == null || authToken.isEmpty) return false;
+  final res = await http
+      .post(
+        Uri.parse("${Api.baseUrl}$path"),
+        headers: {
+          "Content-Type": "application/json",
+          "Authorization": "Bearer $authToken",
+        },
+        body: jsonEncode(body),
+      )
+      .timeout(const Duration(seconds: 15));
+  final ok = res.statusCode >= 200 && res.statusCode < 300;
+  if (!ok) developer.log("Push action $path failed: ${res.statusCode} ${res.body}");
+  return ok;
+}
+
+String _actionLabel(Map<String, dynamic> data, String actionId) {
+  for (final a in _parseRichActions(data['actions'])) {
+    if (a['id'].toString() == actionId) return a['label'].toString();
+  }
+  return 'complete that action';
+}
+
+/// Action button tap — background isolate me (ya foreground me bhi, kyunki
+/// showsUserInterface:false) chalta hai. Token `AuthService` se aata hai.
+Future<void> _handleRichAction(String actionId, String? input, Map<String, dynamic> data) async {
+  bool ok = false;
+  try {
+    switch (actionId) {
+      case 'confirm_follow':
+        ok = await _pushActionPost(_kEpConfirmFollow, {'follow_id': _idValue(data['follow_id'])});
+        break;
+      case 'delete_follow':
+        ok = await _pushActionPost(_kEpDeleteFollow, {'follow_id': _idValue(data['follow_id'])});
+        break;
+      case 'follow_back':
+        ok = await _pushActionPost(_kEpFollowBack, {'user_id': _idValue(data['actor_id'])});
+        break;
+      case 'reply_comment':
+        final text = input?.trim();
+        if (text == null || text.isEmpty) return;
+        ok = await _pushActionPost(_kEpReplyComment, {
+          'post_id': _idValue(data['post_id']),
+          'parent_id': _idValue(data['comment_id']),
+          'text': text,
+        });
+        break;
+      case 'reply_message':
+        final text = input?.trim();
+        final convId = data['conversation_id']?.toString();
+        if (text == null || text.isEmpty || convId == null || convId.isEmpty) return;
+        await MessageApiService.sendMessageRest(
+          convId,
+          type: 'text',
+          text: text,
+          clientId: const Uuid().v4(),
+        );
+        ok = true;
+        break;
+      default:
+        developer.log("Unknown push action: $actionId");
+        return;
+    }
+  } catch (e) {
+    developer.log("Push action $actionId threw: $e");
+    ok = false;
+  }
+
+  if (!ok) await _showActionFailedNotification(data, _actionLabel(data, actionId));
+}
+
+// Action fail hone par user ko silently na chhodo (notification pehle hi
+// cancel ho chuki hoti hai) — tap karke app me retry karne ka rasta do.
+Future<void> _showActionFailedNotification(Map<String, dynamic> data, String label) async {
+  try {
+    final fln = await _initIsolateFln();
+    await _ensureRichChannel(fln, _kRichChannelId);
+    await fln.show(
+      id: int.tryParse(data['notification_id']?.toString() ?? '') ?? data.hashCode,
+      title: "Couldn't ${label.toLowerCase()}",
+      body: 'Tap to open the app and try again',
+      notificationDetails: const NotificationDetails(
+        android: AndroidNotificationDetails(
+          _kRichChannelId,
+          'Notifications',
+          importance: Importance.high,
+          priority: Priority.high,
+        ),
+      ),
+      payload: jsonEncode({...data, '_rich': '1'}), // plain tap -> deep link
+    );
+  } catch (e) {
+    developer.log("Action-failed notification failed: $e");
+  }
+}
+
+// ============================================================
 // 🔥 NAYA: Notification pe hi "Reply" dabane se ye chalta hai.
 // Android ise ALAG ISOLATE me chalata hai (chahe app foreground me ho ya
 // nahi), isliye ye function TOP-LEVEL hona zaroori hai (class ke andar
@@ -360,6 +631,18 @@ Future<void> _handleNotificationResponse(NotificationResponse response) async {
   try {
     data = jsonDecode(payload) as Map<String, dynamic>;
   } catch (_) {
+    return;
+  }
+
+  // 🔥 N8-FE — rich push: action button -> API call (isolate), warna
+  // body tap -> app me deep-link (N7 logic).
+  if (data['_rich'] == '1') {
+    final actionId = response.actionId;
+    if (actionId != null && actionId.isNotEmpty) {
+      await _handleRichAction(actionId, response.input, data);
+    } else {
+      PushNotificationService.instance.handleTapData(data);
+    }
     return;
   }
 
@@ -447,6 +730,30 @@ class PushNotificationService {
   static String? currentOpenConversationId;
   void Function(String conversationId)? onNotificationTap;
 
+  // 🔥 N8-FE — rich push body-tap navigation. main.dart me N7 deep-link
+  // logic se wired. Agar tap hook set hone se PEHLE aa jaye (cold start),
+  // data hold hota hai aur hook assign hote hi flush hota hai.
+  Future<void> Function(Map<String, dynamic> data)? _onPushNavigate;
+  Map<String, dynamic>? _pendingTapData;
+
+  set onPushNavigate(Future<void> Function(Map<String, dynamic> data)? cb) {
+    _onPushNavigate = cb;
+    final pending = _pendingTapData;
+    if (cb != null && pending != null) {
+      _pendingTapData = null;
+      cb(pending);
+    }
+  }
+
+  void handleTapData(Map<String, dynamic> data) {
+    final nav = _onPushNavigate;
+    if (nav != null) {
+      nav(data);
+    } else {
+      _pendingTapData = data;
+    }
+  }
+
   Future<void> init() async {
     await _fcm.requestPermission(alert: true, badge: true, sound: true);
     await Permission.notification.request();
@@ -526,6 +833,27 @@ class PushNotificationService {
         .resolvePlatformSpecificImplementation<AndroidFlutterLocalNotificationsPlugin>()
         ?.createNotificationChannel(mentionsChannel);
 
+    // 🔥 N8-FE — rich push ka default channel.
+    await _ensureRichChannel(_fln, _kRichChannelId);
+
+    // 🔥 N8-FE — TERMINATED state: user ne rich notification ki body tap
+    // karke app launch ki. Data-only push hai, to FCM `getInitialMessage`
+    // yahan khaali hota hai — launch details local notification se aate
+    // hain. Sirf `_rich` payloads handle kiye (purane chat/call taps ka
+    // behaviour jaisa tha waisa hi).
+    try {
+      final launch = await _fln.getNotificationAppLaunchDetails();
+      final resp = launch?.notificationResponse;
+      if ((launch?.didNotificationLaunchApp ?? false) && resp != null && resp.payload != null) {
+        final d = jsonDecode(resp.payload!);
+        if (d is Map && d['_rich'] == '1' && (resp.actionId == null || resp.actionId!.isEmpty)) {
+          handleTapData(Map<String, dynamic>.from(d));
+        }
+      }
+    } catch (e) {
+      developer.log("Launch-details check failed: $e");
+    }
+
     FirebaseMessaging.onMessage.listen((message) {
       // 🔥 FIX: call ka payload aaye to Instagram/WhatsApp jaisa CallKit
       // popup dikhao — app foreground me hone par bhi chat-jaisi simple
@@ -584,6 +912,14 @@ class PushNotificationService {
         return;
       }
 
+      // 🔥 N8-FE — rich push foreground me: wahi notification (image +
+      // buttons). Body tap normal navigation (handleTapData), buttons
+      // wahi isolate API path.
+      if (_isRichPush(message.data)) {
+        showRichPushNotification(_fln, message.data);
+        return;
+      }
+
       // 🔥 NAYA — kisi ne mere message pe reaction diya, foreground me
       // (chahe app kisi bhi screen pe ho) turant notification aani chahiye.
       if (message.data['type'] == 'reaction') {
@@ -622,12 +958,18 @@ class PushNotificationService {
     });
 
     FirebaseMessaging.onMessageOpenedApp.listen((message) {
+      if (_isRichPush(message.data)) {
+        handleTapData(message.data); // N8-FE
+        return;
+      }
       final convId = message.data['conversation_id'];
       if (convId != null) onNotificationTap?.call(convId);
     });
 
     final initialMessage = await _fcm.getInitialMessage();
-    if (initialMessage != null) {
+    if (initialMessage != null && _isRichPush(initialMessage.data)) {
+      handleTapData(initialMessage.data); // N8-FE
+    } else if (initialMessage != null) {
       final convId = initialMessage.data['conversation_id'];
       if (convId != null) onNotificationTap?.call(convId);
     }
