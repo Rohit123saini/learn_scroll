@@ -4,10 +4,12 @@
 // `true` when the Highlights row should be reloaded.
 //
 //   openHighlightViewer(context, h, {myUserId})   circle tap
-//   editHighlightFlow(context, h)                 circle long-press (own profile)
+//   editHighlightFlow(context, h)                 circle long-press (own profile):
+//                                                 sheet -> edit stories/cover | rename | delete
 //   createHighlightFlow(context)                  "New +" circle
 
 import 'package:flutter/material.dart';
+import '../../l10n/app_localizations.dart';
 import '../models/highlight_model.dart';
 import '../models/story_model.dart' show StoryGroup;
 import '../screens/story_viewer_screen.dart';
@@ -38,15 +40,15 @@ Future<bool> openHighlightViewer(BuildContext context, Highlight h, {String? myU
   try {
     detail = await _fetchDetail(context, h.id);
   } on HighlightUnavailableException {
-    if (context.mounted) _snack(context, 'This highlight is no longer available.');
+    if (context.mounted) _snack(context, AppLocalizations.of(context)!.hlUnavailable);
     return true; // it is gone — refresh the row
   } catch (_) {
-    if (context.mounted) _snack(context, "Couldn't open highlight. Check your connection.");
+    if (context.mounted) _snack(context, AppLocalizations.of(context)!.hlOpenFailed);
     return false;
   }
   if (!context.mounted) return false;
   if (detail.stories.isEmpty) {
-    _snack(context, 'This highlight is empty.');
+    _snack(context, AppLocalizations.of(context)!.hlEmpty);
     return true;
   }
 
@@ -72,12 +74,54 @@ Future<bool> openHighlightViewer(BuildContext context, Highlight h, {String? myU
   return changed == true;
 }
 
+enum _HlAction { edit, rename, delete }
+
 Future<bool> editHighlightFlow(BuildContext context, Highlight h) async {
+  final l10n = AppLocalizations.of(context)!;
+  final cs = Theme.of(context).colorScheme;
+  final action = await showModalBottomSheet<_HlAction>(
+    context: context,
+    showDragHandle: true,
+    builder: (c) => SafeArea(
+      child: Column(mainAxisSize: MainAxisSize.min, children: [
+        ListTile(
+          leading: const Icon(Icons.photo_library_outlined),
+          title: Text(l10n.hlEditStoriesCover),
+          onTap: () => Navigator.pop(c, _HlAction.edit),
+        ),
+        ListTile(
+          leading: const Icon(Icons.edit_outlined),
+          title: Text(l10n.hlRename),
+          onTap: () => Navigator.pop(c, _HlAction.rename),
+        ),
+        ListTile(
+          leading: Icon(Icons.delete_outline_rounded, color: cs.error),
+          title: Text(l10n.hlDeleteAction, style: TextStyle(color: cs.error)),
+          onTap: () => Navigator.pop(c, _HlAction.delete),
+        ),
+      ]),
+    ),
+  );
+  if (action == null || !context.mounted) return false;
+  switch (action) {
+    case _HlAction.edit:
+      return _openEditor(context, h);
+    case _HlAction.rename:
+      return _rename(context, h);
+    case _HlAction.delete:
+      return _delete(context, h);
+  }
+}
+
+Future<bool> _openEditor(BuildContext context, Highlight h) async {
   Highlight detail;
   try {
     detail = await _fetchDetail(context, h.id);
+  } on HighlightUnavailableException {
+    if (context.mounted) _snack(context, AppLocalizations.of(context)!.hlUnavailable);
+    return true;
   } catch (_) {
-    if (context.mounted) _snack(context, "Couldn't open highlight. Check your connection.");
+    if (context.mounted) _snack(context, AppLocalizations.of(context)!.hlOpenFailed);
     return false;
   }
   if (!context.mounted) return false;
@@ -85,6 +129,93 @@ Future<bool> editHighlightFlow(BuildContext context, Highlight h) async {
     MaterialPageRoute(builder: (_) => HighlightEditorScreen(existing: detail)),
   );
   return changed == true;
+}
+
+Future<bool> _rename(BuildContext context, Highlight h) async {
+  final name = await showDialog<String>(context: context, builder: (_) => _RenameDialog(initial: h.title));
+  if (name == null || name == h.title || !context.mounted) return false;
+  try {
+    await HighlightService.updateHighlight(h.id, title: name);
+    return true;
+  } catch (e) {
+    if (context.mounted) _snack(context, e.toString().replaceFirst('Exception: ', ''));
+    return false;
+  }
+}
+
+Future<bool> _delete(BuildContext context, Highlight h) async {
+  final l10n = AppLocalizations.of(context)!;
+  final ok = await showDialog<bool>(
+    context: context,
+    builder: (c) => AlertDialog(
+      title: Text(l10n.hlDeleteQuestion),
+      content: Text(l10n.hlDeleteBody),
+      actions: [
+        TextButton(onPressed: () => Navigator.pop(c, false), child: Text(l10n.cancel)),
+        TextButton(
+          onPressed: () => Navigator.pop(c, true),
+          child: Text(l10n.delete, style: TextStyle(color: Theme.of(c).colorScheme.error)),
+        ),
+      ],
+    ),
+  );
+  if (ok != true) return false;
+  try {
+    await HighlightService.deleteHighlight(h.id);
+    return true;
+  } catch (e) {
+    if (context.mounted) _snack(context, e.toString().replaceFirst('Exception: ', ''));
+    return false;
+  }
+}
+
+/// Owns its controller so it is disposed with the dialog (no use-after-dispose
+/// during the close animation).
+class _RenameDialog extends StatefulWidget {
+  final String initial;
+  const _RenameDialog({required this.initial});
+
+  @override
+  State<_RenameDialog> createState() => _RenameDialogState();
+}
+
+class _RenameDialogState extends State<_RenameDialog> {
+  late final TextEditingController _ctrl = TextEditingController(text: widget.initial);
+
+  @override
+  void initState() {
+    super.initState();
+    _ctrl.addListener(() => setState(() {}));
+  }
+
+  @override
+  void dispose() {
+    _ctrl.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final l10n = AppLocalizations.of(context)!;
+    final name = _ctrl.text.trim();
+    return AlertDialog(
+      title: Text(l10n.hlRenameTitle),
+      content: TextField(
+        controller: _ctrl,
+        autofocus: true,
+        maxLength: 30, // post/highlights.py::MAX_TITLE_LENGTH
+        textCapitalization: TextCapitalization.sentences,
+        decoration: InputDecoration(labelText: l10n.hlTitleLabel),
+        onSubmitted: (_) {
+          if (name.isNotEmpty) Navigator.pop(context, name);
+        },
+      ),
+      actions: [
+        TextButton(onPressed: () => Navigator.pop(context), child: Text(l10n.cancel)),
+        TextButton(onPressed: name.isEmpty ? null : () => Navigator.pop(context, name), child: Text(l10n.save)),
+      ],
+    );
+  }
 }
 
 Future<bool> createHighlightFlow(BuildContext context) async {

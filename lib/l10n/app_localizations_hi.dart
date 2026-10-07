@@ -3261,6 +3261,24 @@ class AppLocalizationsHi extends AppLocalizations {
   String get cropFailed => 'क्रॉप नहीं हो सका।';
 
   @override
+  String get ratioOriginal => 'मूल';
+
+  @override
+  String get ratioPickerLabel => 'फ़ोटो का अनुपात';
+
+  @override
+  String get ratioCropTitle => 'फ़ोटो क्रॉप करें';
+
+  @override
+  String get cropHintDrag => 'ज़ूम के लिए पिंच करें, जगह बदलने के लिए खींचें';
+
+  @override
+  String get storyCropTitle => 'स्टोरी में फ़िट करें (9:16)';
+
+  @override
+  String get avatarCropTitle => 'प्रोफ़ाइल फ़ोटो क्रॉप करें';
+
+  @override
   String get dateLabel => 'तारीख़';
 
   @override
@@ -3900,6 +3918,30 @@ class AppLocalizationsHi extends AppLocalizations {
   String get chatTranslateDisabled => 'मैसेज ट्रांसलेट बंद कर दिया गया';
 
   @override
+  String get chatEnableListen => 'मैसेज सुनना चालू करें';
+
+  @override
+  String get chatDisableListen => 'मैसेज सुनना बंद करें';
+
+  @override
+  String get chatListenEnabled => 'मैसेज सुनना चालू कर दिया गया';
+
+  @override
+  String get chatListenDisabled => 'मैसेज सुनना बंद कर दिया गया';
+
+  @override
+  String get chatEnableTranscribe => 'वॉइस नोट ट्रांसक्राइब चालू करें';
+
+  @override
+  String get chatDisableTranscribe => 'वॉइस नोट ट्रांसक्राइब बंद करें';
+
+  @override
+  String get chatTranscribeEnabled => 'वॉइस नोट ट्रांसक्राइब चालू कर दिया गया';
+
+  @override
+  String get chatTranscribeDisabled => 'वॉइस नोट ट्रांसक्राइब बंद कर दिया गया';
+
+  @override
   String get chatThisUser => 'यह यूज़र';
 
   @override
@@ -3941,6 +3983,109 @@ class AppLocalizationsHi extends AppLocalizations {
 
   @override
   String get chatUnblock => 'अनब्लॉक करें';
+
+  @override
+  String get profileBlockedByMeTitle => 'आपने इस अकाउंट को ब्लॉक किया है';
+
+  @override
+  String get profileBlockedByMeSubtitle =>
+      'वे आपकी प्रोफ़ाइल, पोस्ट या स्टोरी नहीं देख सकते और आपको मैसेज नहीं कर सकते। उनका कंटेंट फिर से देखने के लिए अनब्लॉक करें।';
+
+  @override
+  String get profileRestrict => 'प्रतिबंधित करें';
+
+  @override
+  String get profileUnrestrict => 'प्रतिबंध हटाएँ';
+
+  @override
+  String get profileRestrictedSnack =>
+      'प्रतिबंधित किया। आपकी पोस्ट पर उनके कमेंट अब छिपे रहेंगे।';
+
+  @override
+  String get profileUnrestrictedSnack => 'प्रतिबंध हटा दिया गया';
+
+  @override
+  String get profileMute => 'पोस्ट और स्टोरी म्यूट करें';
+
+  @override
+  String get profileUnmute => 'पोस्ट और स्टोरी अनम्यूट करें';
+
+  @override
+  String get profileMutedSnack =>
+      'म्यूट किया। उनकी पोस्ट और स्टोरी आपको नहीं दिखेंगी।';
+
+  @override
+  String get profileUnmutedSnack => 'अनम्यूट किया';
+
+  @override
+  String profileMoreFailed(String error) {
+    return 'कुछ गड़बड़ हो गई: $error';
+  }
+
+  @override
+  String get reportAction => 'रिपोर्ट करें';
+
+  @override
+  String get reportTitle => 'आप इसे क्यों रिपोर्ट कर रहे हैं?';
+
+  @override
+  String get reportReasonSpam => 'स्पैम';
+
+  @override
+  String get reportReasonHarassment => 'उत्पीड़न या बुलिंग';
+
+  @override
+  String get reportReasonHate => 'नफरत भरी बातें';
+
+  @override
+  String get reportReasonNudity => 'नग्नता या यौन सामग्री';
+
+  @override
+  String get reportReasonViolence => 'हिंसा या खतरनाक सामग्री';
+
+  @override
+  String get reportReasonSelfHarm => 'खुद को नुकसान पहुँचाना';
+
+  @override
+  String get reportReasonScam => 'स्कैम या धोखाधड़ी';
+
+  @override
+  String get reportReasonImpersonation => 'किसी और का रूप धरना';
+
+  @override
+  String get reportReasonOther => 'कुछ और';
+
+  @override
+  String get reportAlsoReport => 'इस अकाउंट को रिपोर्ट भी करें';
+
+  @override
+  String get reportBlockNewAccounts => 'उनके बनाए नए अकाउंट भी ब्लॉक करें';
+
+  @override
+  String get reportSubmit => 'रिपोर्ट भेजें';
+
+  @override
+  String get reportThanks => 'धन्यवाद। हम इसकी समीक्षा करेंगे।';
+
+  @override
+  String get reportAlreadySent => 'आप इसे पहले ही रिपोर्ट कर चुके हैं।';
+
+  @override
+  String reportFailed(String error) {
+    return 'रिपोर्ट नहीं भेज पाए: $error';
+  }
+
+  @override
+  String get blockedSearchHint => 'ब्लॉक किए अकाउंट खोजें';
+
+  @override
+  String get blockedNoMatches => 'आपकी खोज से कोई ब्लॉक अकाउंट नहीं मिला।';
+
+  @override
+  String get blockedUndo => 'पूर्ववत करें';
+
+  @override
+  String get blockMenuBlockUser => 'ब्लॉक करें';
 
   @override
   String get chatDisappearingOff => 'बंद';
@@ -5898,5 +6043,493 @@ class AppLocalizationsHi extends AppLocalizations {
   @override
   String notifPausedUntil(String until) {
     return '$until तक रोका गया';
+  }
+
+  @override
+  String get classTestsTab => 'टेस्ट';
+
+  @override
+  String get classTestsEmpty => 'इस क्लास में अभी कोई टेस्ट नहीं है';
+
+  @override
+  String get classTestsEmptyHint =>
+      'जब आपके टीचर कोई टेस्ट पब्लिश करेंगे, वह यहाँ दिखेगा।';
+
+  @override
+  String get classTestsLoadFailed => 'टेस्ट लोड नहीं हो सके';
+
+  @override
+  String get classTestFree => 'मुफ़्त';
+
+  @override
+  String classTestQuestions(int count) {
+    return '$count प्रश्न';
+  }
+
+  @override
+  String classTestMinutes(int minutes) {
+    return '$minutes मिनट';
+  }
+
+  @override
+  String get classTestOpen => 'टेस्ट खोलें';
+
+  @override
+  String get classTestStatusLive => 'अभी लाइव';
+
+  @override
+  String get classTestStatusUpcoming => 'आने वाला';
+
+  @override
+  String get classTestStatusEnded => 'समाप्त';
+
+  @override
+  String get hlNew => 'नया';
+
+  @override
+  String get hlDefaultTitle => 'हाइलाइट्स';
+
+  @override
+  String get hlNewHighlight => 'नई हाइलाइट';
+
+  @override
+  String get hlEditHighlight => 'हाइलाइट बदलें';
+
+  @override
+  String get hlCreate => 'बनाएँ';
+
+  @override
+  String get hlTitleLabel => 'शीर्षक';
+
+  @override
+  String get hlYourStories => 'आपकी स्टोरी';
+
+  @override
+  String hlSelectedCount(int count) {
+    return 'चुनी गई ($count) · क्रम बदलने के लिए दबाकर खींचें';
+  }
+
+  @override
+  String get hlCoverHint => 'कवर बनाने के लिए फ़ोटो पर टैप करें';
+
+  @override
+  String get hlCoverAutomatic => 'ऑटोमैटिक';
+
+  @override
+  String get hlAdjustCover => 'कवर एडजस्ट करें';
+
+  @override
+  String get hlCropHint =>
+      'खिसकाने के लिए खींचें, ज़ूम के लिए पिंच करें या स्लाइडर चलाएँ';
+
+  @override
+  String get hlReset => 'रीसेट';
+
+  @override
+  String get hlDone => 'हो गया';
+
+  @override
+  String get hlDeleteQuestion => 'हाइलाइट हटाएँ?';
+
+  @override
+  String get hlDeleteBody => 'स्टोरी खुद नहीं हटेंगी।';
+
+  @override
+  String get hlDeleteAction => 'हाइलाइट हटाएँ';
+
+  @override
+  String get hlEditStoriesCover => 'स्टोरी और कवर बदलें';
+
+  @override
+  String get hlRename => 'नाम बदलें';
+
+  @override
+  String get hlRenameTitle => 'हाइलाइट का नाम बदलें';
+
+  @override
+  String get hlNoStories =>
+      'अभी जोड़ने के लिए कोई स्टोरी नहीं है। स्टोरी पोस्ट करें, वह यहाँ दिखेगी।';
+
+  @override
+  String get hlLoadStoriesFailed => 'आपकी स्टोरी लोड नहीं हो सकीं।';
+
+  @override
+  String get hlUnavailable => 'यह हाइलाइट अब उपलब्ध नहीं है।';
+
+  @override
+  String get hlOpenFailed => 'हाइलाइट नहीं खुल सकी। अपना कनेक्शन जाँचें।';
+
+  @override
+  String get hlEmpty => 'यह हाइलाइट खाली है।';
+
+  @override
+  String get msgSearchHintAll => 'चैट, लोग, ग्रुप और मैसेज खोजें';
+
+  @override
+  String get msgSearchHintChat => 'इस चैट में खोजें';
+
+  @override
+  String get msgSearchSectionChats => 'चैट';
+
+  @override
+  String get msgSearchSectionPeople => 'लोग';
+
+  @override
+  String get msgSearchSectionGroups => 'ग्रुप';
+
+  @override
+  String get msgSearchSectionMessages => 'मैसेज';
+
+  @override
+  String get msgSearchMutual => 'म्यूचुअल';
+
+  @override
+  String get msgSearchFollowing => 'फ़ॉलो कर रहे हैं';
+
+  @override
+  String get msgSearchFollowsYou => 'आपको फ़ॉलो करता है';
+
+  @override
+  String msgSearchMembers(int count) {
+    return '$count सदस्य';
+  }
+
+  @override
+  String get msgSearchNoResults => 'कोई परिणाम नहीं मिला';
+
+  @override
+  String get msgSearchNoMessages => 'कोई मैसेज नहीं मिला';
+
+  @override
+  String get msgSearchMinChars => 'खोजने के लिए कम से कम 2 अक्षर लिखें';
+
+  @override
+  String get msgSearchTooMany =>
+      'बहुत ज़्यादा खोजें हो गईं — कृपया थोड़ी देर रुककर फिर कोशिश करें।';
+
+  @override
+  String get msgSearchFailed => 'अभी खोज नहीं हो पाई। फिर कोशिश करें।';
+
+  @override
+  String get msgSearchOpenChatFailed => 'अभी वह चैट नहीं खुल पाई।';
+
+  @override
+  String get msgSearchFiltersNote => 'फ़िल्टर सिर्फ़ मैसेज पर लागू होते हैं';
+
+  @override
+  String get tsTrue => 'सही';
+
+  @override
+  String get tsFalse => 'गलत';
+
+  @override
+  String get answerHintTrueFalse =>
+      'सही या गलत चुनें। हटाने के लिए फिर से टैप करें।';
+
+  @override
+  String get answerHintFillBlank => 'छूटा हुआ शब्द या वाक्यांश लिखें';
+
+  @override
+  String get answerHintNumeric => 'संख्या लिखें';
+
+  @override
+  String get tsFillBlankInputHint => 'आपका उत्तर';
+
+  @override
+  String get tsNumericInputHint => 'संख्या लिखें, जैसे 3.14';
+
+  @override
+  String get tsOptionImage => 'विकल्प का चित्र';
+
+  @override
+  String get tsTypeMcq => 'एकल विकल्प';
+
+  @override
+  String get tsTypeMsq => 'बहु-विकल्प';
+
+  @override
+  String get tsTypeText => 'लिखित';
+
+  @override
+  String get tsTypeTrueFalse => 'सही / गलत';
+
+  @override
+  String get tsTypeFillBlank => 'रिक्त स्थान';
+
+  @override
+  String get tsTypeNumeric => 'संख्यात्मक';
+
+  @override
+  String get tsBuilderCorrectAnswer => 'सही उत्तर';
+
+  @override
+  String get tsAcceptedAnswers => 'स्वीकार्य उत्तर';
+
+  @override
+  String get tsAcceptedAnswersHelper =>
+      'प्रति पंक्ति एक। इनमें से कोई भी सही माना जाएगा।';
+
+  @override
+  String get tsCaseSensitive => 'अक्षर-संवेदी (बड़े/छोटे अक्षर)';
+
+  @override
+  String get tsCorrectNumber => 'सही संख्या';
+
+  @override
+  String get tsTolerance => 'अनुमत अंतर (±)';
+
+  @override
+  String get tsToleranceHelper => '0 का मतलब उत्तर बिल्कुल मिलना चाहिए';
+
+  @override
+  String get tsAddOptionImage => 'चित्र जोड़ें';
+
+  @override
+  String get tsRemoveOptionImage => 'चित्र हटाएँ';
+
+  @override
+  String tsOptionHint(int number) {
+    return 'विकल्प $number';
+  }
+
+  @override
+  String get tsQuestionIncomplete =>
+      'सेव करने से पहले प्रश्न का पाठ और सही उत्तर जोड़ें।';
+
+  @override
+  String get tsUploadingOptionImages => 'विकल्प के चित्र अपलोड हो रहे हैं…';
+
+  @override
+  String tsSummaryPenalty(int marks) {
+    return 'नेगेटिव मार्किंग: −$marks';
+  }
+
+  @override
+  String tsPenaltyShort(int marks) {
+    return '−$marks कटौती';
+  }
+
+  @override
+  String tsNegativeMarkingNote(int marks) {
+    return 'गलत उत्तर पर $marks अंक कटेंगे। छोड़े गए प्रश्नों पर कोई कटौती नहीं।';
+  }
+
+  @override
+  String classTimeStartsIn(String duration) {
+    return '$duration में शुरू';
+  }
+
+  @override
+  String get classTimeLiveNow => 'अभी लाइव';
+
+  @override
+  String get classTimeStartingSoon => 'जल्द शुरू होगी';
+
+  @override
+  String get classTimeEnded => 'समाप्त';
+
+  @override
+  String get classTimeCancelled => 'रद्द';
+
+  @override
+  String classTimeDays(int d) {
+    return '$d दिन';
+  }
+
+  @override
+  String classTimeDaysHours(int d, int h) {
+    return '$d दिन $h घं';
+  }
+
+  @override
+  String classTimeHours(int h) {
+    return '$h घं';
+  }
+
+  @override
+  String classTimeHoursMinutes(int h, int m) {
+    return '$h घं $m मि';
+  }
+
+  @override
+  String classTimeMinutes(int m) {
+    return '$m मि';
+  }
+
+  @override
+  String get homeNextClass => 'अगली क्लास';
+
+  @override
+  String get shareAndEarnCta => 'शेयर करें और कमाएँ';
+
+  @override
+  String get referralLinkCopied => 'रेफ़रल लिंक कॉपी हो गया';
+
+  @override
+  String get referralCouldNotCreateLink => 'आपका रेफ़रल लिंक नहीं बन पाया';
+
+  @override
+  String get referralCopyLinkCta => 'लिंक कॉपी करें';
+
+  @override
+  String get referralYourLinkTitle => 'आपका रेफ़रल लिंक';
+
+  @override
+  String get referralTotalCommissionLabel => 'कुल कमीशन कमाया';
+
+  @override
+  String get referralTestSeriesCommissionLabel => 'टेस्ट सीरीज़ कमीशन';
+
+  @override
+  String get referralClassCommissionLabel => 'क्लास कमीशन';
+
+  @override
+  String get referralPeopleAttributedLabel => 'आपके लिंक से आए लोग';
+
+  @override
+  String get referralPeopleConvertedLabel => 'इनमें से खरीदारी करने वाले';
+
+  @override
+  String get referralRecentCommissionsTitle => 'हाल के कमीशन';
+
+  @override
+  String get referralNoCommissionsYet => 'अभी कोई कमीशन नहीं';
+
+  @override
+  String get referralEarningsTitle => 'आपकी कमीशन कमाई';
+
+  @override
+  String get referralTestSeriesKind => 'टेस्ट सीरीज़';
+
+  @override
+  String get referralClassKind => 'क्लास';
+
+  @override
+  String referralShareEarnHint(String percent) {
+    return 'जब आपके रेफ़र किया हुआ कोई इस टेस्ट सीरीज़ को खरीदे तो $percent% कमाएँ।';
+  }
+
+  @override
+  String referralClassEarnHint(String percent) {
+    return 'जब कोई आपके लिंक से जुड़े तो $percent% कमीशन कमाएँ।';
+  }
+
+  @override
+  String referralWindowNote(int days) {
+    return 'उनके आपका लिंक खोलने के बाद $days दिन तक क्रेडिट मिलता है।';
+  }
+
+  @override
+  String referralClassCommissionPercentNote(String percent) {
+    return 'इस लिंक से हुई खरीदारी पर आप $percent% कमाते हैं।';
+  }
+
+  @override
+  String get shareTargetTitle => 'LearnScroll पर शेयर करें';
+
+  @override
+  String get shareTargetCaptionHint => 'कैप्शन जोड़ें (वैकल्पिक)';
+
+  @override
+  String get shareTargetMessageHint => 'संदेश';
+
+  @override
+  String get shareTargetSearchHint => 'चैट खोजें';
+
+  @override
+  String get shareTargetSending => 'भेजा जा रहा है...';
+
+  @override
+  String shareTargetSendTo(int count) {
+    return '$count चैट में भेजें';
+  }
+
+  @override
+  String shareTargetSent(int count) {
+    return '$count चैट में भेज दिया';
+  }
+
+  @override
+  String shareTargetSentPartial(int done, int total) {
+    return '$total में से $done चैट में भेजा गया';
+  }
+
+  @override
+  String get shareTargetSendFailed => 'भेज नहीं पाए। कृपया दोबारा कोशिश करें।';
+
+  @override
+  String get shareTargetLoadFailed => 'आपकी चैट लोड नहीं हो पाईं';
+
+  @override
+  String get shareTargetNoChats => 'कोई चैट नहीं मिली';
+
+  @override
+  String get shareTargetFileMissing => 'शेयर की गई फ़ाइल अब उपलब्ध नहीं है';
+
+  @override
+  String get shareLinkCopied => 'लिंक कॉपी हो गया';
+
+  @override
+  String get shareCardFailed => 'कार्ड नहीं बन सका। फिर से कोशिश करें।';
+
+  @override
+  String get shareCopyLink => 'लिंक कॉपी करें';
+
+  @override
+  String get shareLinkAction => 'लिंक साझा करें';
+
+  @override
+  String get shareCardImage => 'कार्ड की इमेज साझा करें';
+
+  @override
+  String get shareScanToOpen => 'LearnScroll पर खोलने के लिए स्कैन करें';
+
+  @override
+  String get scanQrTitle => 'QR स्कैन करें';
+
+  @override
+  String get scanQrTorch => 'फ़्लैशलाइट';
+
+  @override
+  String get scanQrUnsupported => 'यह QR कोड LearnScroll का नहीं है।';
+
+  @override
+  String get scanQrNoCodeInImage => 'उस इमेज में कोई QR कोड नहीं मिला।';
+
+  @override
+  String get scanQrHint => 'कैमरा किसी LearnScroll QR कोड की ओर करें';
+
+  @override
+  String get scanQrGallery => 'गैलरी से चुनें';
+
+  @override
+  String get scanQrPermissionDenied =>
+      'QR कोड स्कैन करने के लिए कैमरा एक्सेस ज़रूरी है।';
+
+  @override
+  String get scanQrOpenSettings => 'सेटिंग्स खोलें';
+
+  @override
+  String get scanQrGrantAccess => 'कैमरा अनुमति दें';
+
+  @override
+  String get parentEntryScanQr => 'QR कोड स्कैन करें';
+
+  @override
+  String get parentLinkNotAParentQr => 'यह QR कोड पैरेंट इनवाइट का नहीं है।';
+
+  @override
+  String get parentLinkScanQr => 'QR स्कैन करें';
+
+  @override
+  String get parentLinkPasteLink => 'लिंक पेस्ट करें';
+
+  @override
+  String get parentAccessQrHint =>
+      'आपके पैरेंट यह QR स्कैन कर सकते हैं या शेयर किया गया लिंक खोल सकते हैं।';
+
+  @override
+  String parentAccessShareMessageLink(String code, String link) {
+    return 'आपको LearnScroll पर पैरेंट/गार्जियन एक्सेस के लिए आमंत्रित किया गया है।\n\nखोलने के लिए यह लिंक टैप करें: $link\n\nया ऐप इंस्टॉल करें, लॉगिन स्क्रीन पर \"मैं पैरेंट हूँ\" चुनें और यह कोड दर्ज करें: $code';
   }
 }

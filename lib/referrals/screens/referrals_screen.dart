@@ -38,6 +38,7 @@ class _ReferralsScreenState extends State<ReferralsScreen> {
   Map<String, dynamic>? _myCode;
   List<dynamic> _ledger = const [];
   Map<String, dynamic>? _classSummary;
+  Map<String, dynamic>? _earnings; // TASK 12 — commission totals + recent payouts
   final _redeemCtrl = TextEditingController();
   bool _loading = true;
   bool _redeeming = false;
@@ -65,12 +66,14 @@ class _ReferralsScreenState extends State<ReferralsScreen> {
         _api.myReferralCode(),
         _api.myReferrals(),
         _api.classReferralSummary(),
+        _api.earnings(),
       ]);
       if (!mounted) return;
       setState(() {
         _myCode = results[0] as Map<String, dynamic>;
         _ledger = results[1] as List;
         _classSummary = results[2] as Map<String, dynamic>;
+        _earnings = results[3] as Map<String, dynamic>;
         _loading = false;
       });
     } catch (e) {
@@ -107,6 +110,71 @@ class _ReferralsScreenState extends State<ReferralsScreen> {
     Share.share(
       'Join me on LearnScroll! Use my referral code $code when you sign up.$bonusLine',
     );
+  }
+
+  List<Widget> _buildEarnings(AppLocalizations t, ColorScheme cs) {
+    final e = _earnings!;
+    final recent = (e['recent'] as List?) ?? const [];
+    return [
+      LsSectionHead(title: t.referralEarningsTitle, padding: EdgeInsets.zero),
+      LsCard(
+        child: Column(children: [
+          LsMetaRow(
+            icon: Icons.monetization_on_outlined,
+            label: t.referralTotalCommissionLabel,
+            value: '${e['total_commission_earned'] ?? 0}',
+          ),
+          const SizedBox(height: 8),
+          LsMetaRow(
+            icon: Icons.quiz_outlined,
+            label: t.referralTestSeriesCommissionLabel,
+            value: '${e['testseries_commission'] ?? 0}',
+          ),
+          const SizedBox(height: 8),
+          LsMetaRow(
+            icon: Icons.groups_rounded,
+            label: t.referralClassCommissionLabel,
+            value: '${e['classroom_commission'] ?? 0}',
+          ),
+          const SizedBox(height: 8),
+          LsMetaRow(
+            icon: Icons.link_rounded,
+            label: t.referralPeopleAttributedLabel,
+            value: '${e['people_attributed'] ?? 0}',
+          ),
+          const SizedBox(height: 8),
+          LsMetaRow(
+            icon: Icons.shopping_bag_outlined,
+            label: t.referralPeopleConvertedLabel,
+            value: '${e['people_converted'] ?? 0}',
+          ),
+          const SizedBox(height: 10),
+          Text(
+            t.referralWindowNote((e['attribution_days'] as num?)?.toInt() ?? 30),
+            style: TextStyle(fontSize: 11.5, color: cs.onSurfaceVariant),
+          ),
+        ]),
+      ),
+      const SizedBox(height: 12),
+      LsSectionHead(title: t.referralRecentCommissionsTitle, padding: EdgeInsets.zero),
+      if (recent.isEmpty)
+        EmptyStateWidget(title: t.referralNoCommissionsYet, icon: Icons.savings_outlined)
+      else
+        ...recent.map((r) {
+          final m = Map<String, dynamic>.from(r as Map);
+          final who = m['referee'] as Map?;
+          final name = who?['full_name']?.toString() ?? who?['username']?.toString() ?? '';
+          final kind = m['kind'] == 'testseries' ? t.referralTestSeriesKind : t.referralClassKind;
+          return LsCard(
+            margin: const EdgeInsets.only(top: 8),
+            child: LsMetaRow(
+              icon: m['kind'] == 'testseries' ? Icons.quiz_outlined : Icons.groups_rounded,
+              label: name.isEmpty ? kind : '$kind · $name',
+              value: '+${m['commission_coins'] ?? 0}',
+            ),
+          );
+        }),
+    ];
   }
 
   @override
@@ -157,6 +225,10 @@ class _ReferralsScreenState extends State<ReferralsScreen> {
                         onPressed: _redeem,
                       ),
                     ]),
+                    const SizedBox(height: 20),
+                    // TASK 12 / 12.5 — commission earnings across test series
+                    // AND classes, plus the funnel (opened your link -> bought).
+                    if (_earnings != null) ..._buildEarnings(t, cs),
                     const SizedBox(height: 20),
                     LsSectionHead(title: t.classroomReferralSummaryTitle, padding: EdgeInsets.zero),
                     // TASK 2 — totals row now shows BOTH earned and pending

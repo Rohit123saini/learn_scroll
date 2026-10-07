@@ -7,6 +7,7 @@ import 'package:open_filex/open_filex.dart';
 
 import '../api_service.dart';
 import '../model.dart';
+import '../widgets/block_report.dart'; // block dialog / report sheet
 import '../../utils/api.dart';
 import '../../widgets/ls_ui.dart';
 import '../../widgets/skeletons.dart';
@@ -100,6 +101,8 @@ class _TargetProfilePageState extends State<TargetProfilePage> {
   bool hasMorePosts = true;
   bool postsLoadFailed = false;
   bool isActionLoading = false;
+  bool _blockBusy = false; // block / unblock call in flight
+  bool _notFound = false; // 404: no such user, or they blocked me
   int _postsPage = 1;
   int _selectedTab = 0;
   int _highlightsReload = 0; // P1-FE
@@ -126,6 +129,12 @@ class _TargetProfilePageState extends State<TargetProfilePage> {
       targetUser!.isPrivate &&
       targetUser!.myFollowStatus != 'ACCEPTED' &&
       targetUser!.myId != targetUser!.targetUserId;
+
+  bool get _isBlockedByMe => targetUser?.isBlockedByMe ?? false;
+
+  // Posts / highlights / badges are not shown for a private account I can't
+  // see into, nor for an account I blocked.
+  bool get _contentHidden => _isPrivateGated || _isBlockedByMe;
 
   List<PostModel> get _mediaPosts =>
       targetPosts.where((p) => p.postType == 'image' || p.postType == 'video').toList();
@@ -172,6 +181,7 @@ class _TargetProfilePageState extends State<TargetProfilePage> {
     setState(() {
       isLoading = true;
       errorMessage = null;
+      _notFound = false;
     });
     try {
       final data = await ApiService.getTargetProfile(widget.username);
@@ -179,18 +189,35 @@ class _TargetProfilePageState extends State<TargetProfilePage> {
       setState(() {
         targetUser = data;
         isLoading = false;
+        if (data.isBlockedByMe) {
+          // Everything about them disappears the moment I block.
+          targetPosts = [];
+          hasMorePosts = false;
+          _mutuals = MutualFollowers.empty;
+          _badges = [];
+          _suggested = [];
+          _suggestionsOpen = false;
+        }
       });
-      _loadMutuals(data); // P8-FE — fire and forget
+      if (!data.isBlockedByMe) {
+        _loadMutuals(data); // P8-FE — fire and forget
+      }
       _loadBadges(data.username); // P13-FE — fire and forget
-      if (_isPrivateGated) {
+      if (_contentHidden) {
         setState(() => isPostsLoading = false);
       } else {
+        hasMorePosts = true;
         await _loadPostsFirstPage();
       }
     } catch (e) {
       if (mounted) {
         setState(() {
-          errorMessage = e.toString();
+          if (e is ProfileNotFoundException) {
+            _notFound = true;
+            targetUser = null;
+          } else {
+            errorMessage = e.toString();
+          }
           isLoading = false;
         });
       }
@@ -200,7 +227,7 @@ class _TargetProfilePageState extends State<TargetProfilePage> {
   // P13-FE — skipped for a private account I can't see into (same gate as
   // the posts grid); a failed call just leaves the row hidden.
   Future<void> _loadBadges(String username) async {
-    if (_isPrivateGated) {
+    if (_contentHidden) {
       if (_badges.isNotEmpty && mounted) setState(() => _badges = []);
       return;
     }
@@ -240,7 +267,7 @@ class _TargetProfilePageState extends State<TargetProfilePage> {
   }
 
   Future<void> _loadMorePosts() async {
-    if (targetUser == null || isLoadingMorePosts || !hasMorePosts || isPostsLoading || _isPrivateGated) return;
+    if (targetUser == null || isLoadingMorePosts || !hasMorePosts || isPostsLoading || _contentHidden) return;
     setState(() => isLoadingMorePosts = true);
     final nextPage = _postsPage + 1;
     try {
@@ -427,6 +454,19 @@ class _TargetProfilePageState extends State<TargetProfilePage> {
       );
     }
 
+    if (_notFound && targetUser == null) {
+      return Scaffold(
+        backgroundColor: lsBg(context),
+        appBar: AppBar(
+          backgroundColor: lsBg(context),
+          surfaceTintColor: Colors.transparent,
+          elevation: 0,
+          leading: BackButton(onPressed: () => Navigator.maybePop(context)),
+        ),
+        body: SafeArea(child: Center(child: Text(l10n.noProfileFound))),
+      );
+    }
+
     if (errorMessage != null && targetUser == null) {
       return Scaffold(
         backgroundColor: lsBg(context),
@@ -475,7 +515,9 @@ class _TargetProfilePageState extends State<TargetProfilePage> {
             SliverToBoxAdapter(child: _buildHeader(cs, l10n)),
             // P8-FE — slides in under the header after a fresh follow
             SliverToBoxAdapter(child: _buildSuggestedCarousel(cs, l10n)),
-            if (_isPrivateGated)
+            if (_isBlockedByMe)
+              SliverToBoxAdapter(child: _blockedNotice(cs, l10n))
+            else if (_isPrivateGated)
               SliverToBoxAdapter(child: _privateGateNotice(cs, l10n))
             else ...[
               // P1-FE — no "New +" here; empty (or hidden by backend
@@ -491,7 +533,8 @@ class _TargetProfilePageState extends State<TargetProfilePage> {
               SliverToBoxAdapter(child: _buildSegmentedTabs(cs, l10n)),
               ..._buildGridSlivers(cs, l10n),
             ],
-            const SliverToBoxAdapter(child: SizedBox(height: 40)),
+            // 4.1 — keep the last row clear of the system gesture bar / any bottom overlay.
+            SliverToBoxAdapter(child: SizedBox(height: 24 + MediaQuery.paddingOf(context).bottom)),
           ],
         ),
       ),
@@ -797,7 +840,176 @@ class _TargetProfilePageState extends State<TargetProfilePage> {
           ],
         ]),
       ),
+      if (targetUser!.myId != targetUser!.targetUserId)
+        Semantics(
+          button: true,
+          label: l10n.moreOptions,
+          child: Tooltip(
+            message: l10n.moreOptions,
+            child: InkWell(
+              onTap: _blockBusy ? null : _openMoreMenu,
+              customBorder: const CircleBorder(),
+              child: Container(
+                width: 34,
+                height: 34,
+                decoration: BoxDecoration(shape: BoxShape.circle, color: cs.surface, border: Border.all(color: cs.outlineVariant)),
+                child: Icon(Icons.more_horiz_rounded, size: 18, color: cs.onSurface),
+              ),
+            ),
+          ),
+        ),
     ]);
+  }
+
+  // ============================================================
+  // BLOCK / UNBLOCK (Instagram-style)
+  //  * ⋮ menu -> Block user / Unblock user
+  //  * block asks for confirmation, unblock is instant (same as chat screen)
+  //  * after either one the profile is reloaded, so the screen flips between
+  //    the normal profile and the "You've blocked this account" card
+  //  * backend: POST /profile/blocked-users/, DELETE /profile/blocked-users/<id>/
+  // ============================================================
+  Future<void> _openMoreMenu() async {
+    final t = targetUser;
+    if (t == null || t.myId == t.targetUserId) return;
+    final l10n = AppLocalizations.of(context)!;
+    final blocked = t.isBlockedByMe;
+    final errorColor = Theme.of(context).colorScheme.error;
+
+    final action = await showModalBottomSheet<String>(
+      context: context,
+      showDragHandle: true,
+      builder: (ctx) => SafeArea(
+        child: Column(mainAxisSize: MainAxisSize.min, children: [
+          // Blocked: the only things that make sense are Unblock and Report.
+          if (!blocked) ...[
+            ListTile(
+              leading: const Icon(Icons.visibility_off_outlined),
+              title: Text(t.isMutedByMe ? l10n.profileUnmute : l10n.profileMute),
+              onTap: () => Navigator.pop(ctx, t.isMutedByMe ? 'unmute' : 'mute'),
+            ),
+            ListTile(
+              leading: const Icon(Icons.shield_outlined),
+              title: Text(t.amIRestricting ? l10n.profileUnrestrict : l10n.profileRestrict),
+              onTap: () => Navigator.pop(ctx, t.amIRestricting ? 'unrestrict' : 'restrict'),
+            ),
+          ],
+          ListTile(
+            leading: const Icon(Icons.flag_outlined),
+            title: Text(l10n.reportAction),
+            onTap: () => Navigator.pop(ctx, 'report'),
+          ),
+          ListTile(
+            leading: Icon(blocked ? Icons.lock_open_rounded : Icons.block_rounded, color: blocked ? null : errorColor),
+            title: Text(
+              blocked ? l10n.chatUnblockUser : l10n.chatBlockUser,
+              style: blocked ? null : TextStyle(color: errorColor),
+            ),
+            onTap: () => Navigator.pop(ctx, blocked ? 'unblock' : 'block'),
+          ),
+        ]),
+      ),
+    );
+    if (!mounted || action == null) return;
+    switch (action) {
+      case 'block':
+        await _blockTarget(l10n);
+        break;
+      case 'unblock':
+        await _unblockTarget(l10n);
+        break;
+      case 'mute':
+      case 'unmute':
+      case 'restrict':
+      case 'unrestrict':
+        await _toggleSoftAction(action, l10n);
+        break;
+      case 'report':
+        await showReportSheet(context, targetType: 'user', targetId: '${t.targetUserId}');
+        break;
+    }
+  }
+
+  /// Mute / Restrict (and their undo): reversible, silent, no confirmation.
+  /// The profile is reloaded so the menu shows the opposite action next time.
+  Future<void> _toggleSoftAction(String action, AppLocalizations l10n) async {
+    final t = targetUser;
+    if (t == null || _blockBusy) return;
+    setState(() => _blockBusy = true);
+    final messenger = ScaffoldMessenger.of(context);
+    try {
+      switch (action) {
+        case 'mute':
+          await ApiService.muteUser(t.targetUserId);
+          break;
+        case 'unmute':
+          await ApiService.unmuteUser(t.targetUserId);
+          break;
+        case 'restrict':
+          await ApiService.restrictUser(t.targetUserId);
+          break;
+        default:
+          await ApiService.unrestrictUser(t.targetUserId);
+      }
+    } catch (e) {
+      if (!mounted) return;
+      setState(() => _blockBusy = false);
+      messenger.showSnackBar(SnackBar(content: Text(l10n.profileMoreFailed(e.toString()))));
+      return;
+    }
+    if (!mounted) return;
+    setState(() => _blockBusy = false);
+    final msg = {
+      'mute': l10n.profileMutedSnack,
+      'unmute': l10n.profileUnmutedSnack,
+      'restrict': l10n.profileRestrictedSnack,
+      'unrestrict': l10n.profileUnrestrictedSnack,
+    }[action]!;
+    messenger.showSnackBar(SnackBar(content: Text(msg)));
+    await _loadProfile();
+  }
+
+  Future<void> _blockTarget(AppLocalizations l10n) async {
+    final t = targetUser;
+    if (t == null || _blockBusy) return;
+
+    setState(() => _blockBusy = true);
+    // Shared flow: confirm (+ "also report" / "also block new accounts") -> API -> snackbar.
+    final ok = await blockUserFlow(context, userId: t.targetUserId, username: t.username);
+    if (!mounted) return;
+    setState(() => _blockBusy = false);
+    if (ok) await _loadProfile(); // comes back as the minimal "blocked" card
+  }
+
+  Future<void> _unblockTarget(AppLocalizations l10n) async {
+    final t = targetUser;
+    if (t == null || _blockBusy) return;
+
+    setState(() => _blockBusy = true);
+    final messenger = ScaffoldMessenger.of(context);
+    try {
+      await ApiService.unblockUser(t.targetUserId);
+    } catch (e) {
+      if (!mounted) return;
+      setState(() => _blockBusy = false);
+      messenger.showSnackBar(SnackBar(content: Text(l10n.chatUnblockFailed(e.toString()))));
+      return;
+    }
+    if (!mounted) return;
+    setState(() => _blockBusy = false);
+    messenger.showSnackBar(SnackBar(content: Text(l10n.chatUserUnblocked)));
+    await _loadProfile(); // full profile + posts are back
+  }
+
+  Widget _blockedNotice(ColorScheme cs, AppLocalizations l10n) {
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(kLsPad, 24, kLsPad, 24),
+      child: EmptyStateWidget(
+        icon: Icons.block_rounded,
+        title: l10n.profileBlockedByMeTitle,
+        subtitle: l10n.profileBlockedByMeSubtitle,
+      ),
+    );
   }
 
   Widget _buildHeader(ColorScheme cs, AppLocalizations l10n) {
@@ -806,9 +1018,11 @@ class _TargetProfilePageState extends State<TargetProfilePage> {
       child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
         Row(crossAxisAlignment: CrossAxisAlignment.center, children: [
           _avatar(cs),
-          const SizedBox(width: 18),
+          const SizedBox(width: 20),
           Expanded(
-            child: Row(children: [
+            child: _isBlockedByMe
+                ? const SizedBox.shrink()
+                : Row(children: [
               _statColumn('${targetUser!.posts}', l10n.postsStat, cs),
               _statColumn('${targetUser!.followers}', l10n.followersStat, cs,
                   onTap: () => Navigator.push(context,
@@ -845,7 +1059,7 @@ class _TargetProfilePageState extends State<TargetProfilePage> {
         const SizedBox(height: 14),
         _followSection(cs, l10n),
         // P13-FE — top-3 badges + "All" sheet (hidden when none / private-gated).
-        if (_badges.isNotEmpty && !_isPrivateGated) ...[
+        if (_badges.isNotEmpty && !_contentHidden) ...[
           const SizedBox(height: 10),
           ProfileBadgesRow(badges: _badges, ownerName: targetUser!.username),
         ],
@@ -857,8 +1071,8 @@ class _TargetProfilePageState extends State<TargetProfilePage> {
     final photo = targetUser!.profilePhoto;
     final url = photo.isEmpty ? '' : (photo.startsWith('http') ? photo : '${Api.baseUrl}$photo');
     return Container(
-      width: 84,
-      height: 84,
+      width: 86,
+      height: 86,
       padding: const EdgeInsets.all(2),
       decoration: BoxDecoration(shape: BoxShape.circle, border: Border.all(color: cs.outlineVariant, width: 2)),
       child: ClipOval(
@@ -866,8 +1080,8 @@ class _TargetProfilePageState extends State<TargetProfilePage> {
             ? Container(color: cs.surfaceVariant, child: Icon(Icons.person_rounded, size: 40, color: cs.onSurfaceVariant))
             : CachedNetworkImage(
                 imageUrl: url,
-                width: 80,
-                height: 80,
+                width: double.infinity,
+                height: double.infinity,
                 fit: BoxFit.cover,
                 placeholder: (c, u) => Container(color: cs.surfaceVariant),
                 errorWidget: (c, u, e) =>
@@ -887,7 +1101,7 @@ class _TargetProfilePageState extends State<TargetProfilePage> {
           Text(label,
               maxLines: 1,
               overflow: TextOverflow.ellipsis,
-              style: TextStyle(fontSize: 10.5, fontWeight: FontWeight.w600, color: cs.onSurfaceVariant)),
+              style: TextStyle(fontSize: 11.5, fontWeight: FontWeight.w500, color: cs.onSurface)),
         ]),
       ),
     );
@@ -898,6 +1112,15 @@ class _TargetProfilePageState extends State<TargetProfilePage> {
     // opened on your own username, show nothing rather than a Follow
     // button pointed at yourself.
     if (targetUser!.myId == targetUser!.targetUserId) return const SizedBox.shrink();
+
+    // Blocked by me: no Follow / Message / Share — just a way back.
+    if (_isBlockedByMe) {
+      return LsPrimaryButton(
+        label: l10n.chatUnblock,
+        loading: _blockBusy,
+        onPressed: _blockBusy ? null : () => _unblockTarget(l10n),
+      );
+    }
 
     final myStatus = targetUser!.myFollowStatus;
     final theirStatus = targetUser!.theirFollowStatus;
@@ -915,7 +1138,7 @@ class _TargetProfilePageState extends State<TargetProfilePage> {
           ),
           const SizedBox(width: 10),
           Expanded(
-            child: LsOutlineButton(label: l10n.delete, onPressed: isActionLoading ? null : () => handleRejectRequest(l10n)),
+            child: ProfileActionButton(label: l10n.delete, onPressed: isActionLoading ? null : () => handleRejectRequest(l10n)),
           ),
         ]),
         const SizedBox(height: 10),
@@ -927,15 +1150,14 @@ class _TargetProfilePageState extends State<TargetProfilePage> {
       const SizedBox(height: 10),
       Row(children: [
         Expanded(
-          child: LsOutlineButton(
+          child: ProfileActionButton(
             label: l10n.messageButton,
-            icon: Icons.mail_outline_rounded,
             onPressed: isActionLoading ? null : () => _openChatWithUser(l10n),
           ),
         ),
-        const SizedBox(width: 10),
+        const SizedBox(width: 8),
         Expanded(
-          child: LsOutlineButton(label: l10n.shareProfileButton, icon: Icons.ios_share_rounded, onPressed: _shareProfile),
+          child: ProfileActionButton(label: l10n.shareProfileButton, onPressed: _shareProfile),
         ),
       ]),
     ]);

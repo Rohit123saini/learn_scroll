@@ -53,6 +53,9 @@ class TsDraft {
   final Map<String, List<String>> order;
   final Set<String> orderTouched;
   final Map<String, Map<String, String>> match;
+
+  /// true_false jawab (Task 8) — qid -> true/false.
+  final Map<String, bool> tf;
   final Map<String, String> text;
   final Map<String, String> filePaths;
   final Set<String> marked;
@@ -66,6 +69,7 @@ class TsDraft {
     Map<String, List<String>>? order,
     Set<String>? orderTouched,
     Map<String, Map<String, String>>? match,
+    Map<String, bool>? tf,
     Map<String, String>? text,
     Map<String, String>? filePaths,
     Set<String>? marked,
@@ -76,6 +80,7 @@ class TsDraft {
         order = order ?? {},
         orderTouched = orderTouched ?? {},
         match = match ?? {},
+        tf = tf ?? {},
         text = text ?? {},
         filePaths = filePaths ?? {},
         marked = marked ?? {};
@@ -89,6 +94,7 @@ class TsDraft {
         'order': order,
         'orderTouched': orderTouched.toList(),
         'match': match,
+        'tf': tf,
         'text': text,
         'files': filePaths,
         'marked': marked.toList(),
@@ -108,6 +114,7 @@ class TsDraft {
       order: (j['order'] as Map? ?? const {}).map((k, v) => MapEntry(k.toString(), _strList(v))),
       orderTouched: _strList(j['orderTouched']).toSet(),
       match: (j['match'] as Map? ?? const {}).map((k, v) => MapEntry(k.toString(), strMap(v))),
+      tf: (j['tf'] as Map? ?? const {}).map((k, v) => MapEntry(k.toString(), v == true)),
       text: strMap(j['text']),
       filePaths: strMap(j['files']),
       marked: _strList(j['marked']).toSet(),

@@ -110,4 +110,24 @@ class ReferralsApi {
   /// coin, not because this API is Tuition-Class-only.
   Future<Map<String, dynamic>> classReferralSummary() async =>
       Map<String, dynamic>.from(await _get('/class-referral-summary/') as Map);
+
+  /// TASK 12 — link attribution: tell the backend "I arrived through this
+  /// referral code" (first touch wins, expires server-side). Expected refusals
+  /// (bad code, existing customer, ...) come back as 200 with
+  /// `attributed: false`, so callers never need to show an error for them.
+  Future<Map<String, dynamic>> attribute(
+    String code, {
+    String sourceType = 'app',
+    String sourceId = '',
+  }) async =>
+      Map<String, dynamic>.from(await _post('/attribute/', body: {
+        'code': code,
+        'source_type': sourceType,
+        'source_id': sourceId,
+      }) as Map);
+
+  /// TASK 12 — commission totals (test series + classroom) and the most
+  /// recent PAID commissions.
+  Future<Map<String, dynamic>> earnings() async =>
+      Map<String, dynamic>.from(await _get('/earnings/') as Map);
 }

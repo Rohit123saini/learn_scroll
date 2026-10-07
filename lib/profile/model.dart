@@ -83,6 +83,12 @@ class TargetProfileModel {
   final String pronouns;
   final String categoryLabel;
   final List<ProfileLink> links;
+  // Block system — true when *I* blocked this account (backend then sends a
+  // minimal card: photo + name only). If *they* blocked me the API 404s instead.
+  final bool isBlockedByMe;
+  // I restricted / muted this account (profile ⋮ menu shows the opposite action).
+  final bool amIRestricting;
+  final bool isMutedByMe;
 
   TargetProfileModel({
     required this.myId,
@@ -106,6 +112,9 @@ class TargetProfileModel {
     this.pronouns = '',
     this.categoryLabel = '',
     this.links = const [],
+    this.isBlockedByMe = false,
+    this.amIRestricting = false,
+    this.isMutedByMe = false,
   });
 
   // TASK G16 — needed so the follow button can update optimistically
@@ -119,6 +128,9 @@ class TargetProfileModel {
     bool clearMyFollowStatus = false,
     int? myFollowId,
     bool clearMyFollowId = false,
+    bool? isBlockedByMe,
+    bool? amIRestricting,
+    bool? isMutedByMe,
   }) {
     return TargetProfileModel(
       myId: myId,
@@ -142,6 +154,9 @@ class TargetProfileModel {
       pronouns: pronouns,
       categoryLabel: categoryLabel,
       links: links,
+      isBlockedByMe: isBlockedByMe ?? this.isBlockedByMe,
+      amIRestricting: amIRestricting ?? this.amIRestricting,
+      isMutedByMe: isMutedByMe ?? this.isMutedByMe,
     );
   }
 
@@ -169,6 +184,9 @@ class TargetProfileModel {
       pronouns: (dataMap['pronouns'] ?? '').toString(),
       categoryLabel: (dataMap['category_label'] ?? '').toString(),
       links: ProfileLink.listFrom(dataMap['links']),
+      isBlockedByMe: json['is_blocked_by_me'] == true,
+      amIRestricting: json['am_i_restricting'] == true,
+      isMutedByMe: json['is_muted_by_me'] == true,
     );
   }
 }
@@ -342,17 +360,28 @@ class PostsPage {
 /// shape (`user_profile/serializers.py`). `id` yahan **block record** ki id
 /// hai, `blockedUserId` target user ki — unblock backend dono accept karta
 /// hai, isliye UI target-user-id hi bhejta hai (simplest).
+/// One page of `ApiService.getBlockedUsersPage`.
+class BlockedPage {
+  final List<BlockedUserModel> items;
+  final bool hasMore;
+  final int? nextOffset;
+  const BlockedPage({required this.items, required this.hasMore, this.nextOffset});
+}
+
 class BlockedUserModel {
   final int id;
   final int blockedUserId;
   final String username;
   final String profilePhoto;
+  // "Also block new accounts" was on for this block — kept so Undo restores it.
+  final bool blockNewAccounts;
 
   const BlockedUserModel({
     required this.id,
     required this.blockedUserId,
     required this.username,
     required this.profilePhoto,
+    this.blockNewAccounts = false,
   });
 
   factory BlockedUserModel.fromJson(Map<String, dynamic> json) {
@@ -362,6 +391,7 @@ class BlockedUserModel {
       blockedUserId: json['blocked'] ?? detail['id'] ?? 0,
       username: detail['username'] ?? '',
       profilePhoto: detail['profile_photo'] ?? '',
+      blockNewAccounts: json['block_new_accounts'] == true,
     );
   }
 }

@@ -35,6 +35,7 @@ import 'package:url_launcher/url_launcher.dart';
 import '../models/tuitionclass_models.dart';
 import '../services/tuitionclass_api_service.dart';
 import '../theme/tuitionclass_theme.dart';
+import '../widgets/class_time_chip.dart'; // TASK 10.3
 import 'live_session_screen.dart';
 import 'waitlist_screen.dart';
 import 'session_engagement_report_screen.dart';
@@ -562,6 +563,11 @@ class _SessionsListScreenState extends State<SessionsListScreen> {
           const SizedBox(height: 3),
           Text('${_fmtTime(s.scheduledStart, context)} – ${_fmtTime(s.scheduledEnd, context)}',
               style: TextStyle(fontSize: 12.5, color: Colors.grey.shade600)),
+          // TASK 10.3 — live countdown / "Live now" in the viewer's local time.
+          if (s.status == SessionStatus.scheduled || s.status == SessionStatus.live) ...[
+            const SizedBox(height: 6),
+            ClassTimeChip.session(s, showTime: false, compact: true),
+          ],
           if (s.roomId.isNotEmpty) ...[
             const SizedBox(height: 3),
             Text('Room: ${s.roomId}', style: TextStyle(fontSize: 11, color: Colors.grey.shade400)),

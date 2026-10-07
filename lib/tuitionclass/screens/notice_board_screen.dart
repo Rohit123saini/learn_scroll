@@ -11,6 +11,8 @@
 
 import 'package:flutter/material.dart';
 
+import '../../l10n/app_localizations.dart';
+import '../../testseries/screens/test_series_detail_screen.dart';
 import '../models/tuitionclass_models.dart';
 import '../services/tuitionclass_api_service.dart';
 import '../theme/tuitionclass_theme.dart';
@@ -312,6 +314,24 @@ class _NoticeBoardScreenState extends State<NoticeBoardScreen> {
                                   ),
                                   const SizedBox(height: 6),
                                   Text(n.message, style: const TextStyle(fontSize: 13)),
+                                  // TASK 9.2/9.3: the automatic "new test" notice links to the test.
+                                  if (n.isTestNotice)
+                                    Align(
+                                      alignment: Alignment.centerLeft,
+                                      child: TextButton.icon(
+                                        style: TextButton.styleFrom(
+                                          foregroundColor: TuitionClassColors.navy,
+                                          padding: EdgeInsets.zero,
+                                          minimumSize: const Size(0, 36),
+                                        ),
+                                        onPressed: () => Navigator.push(
+                                          context,
+                                          MaterialPageRoute(builder: (_) => TestSeriesDetailScreen(seriesId: n.sourceId!)),
+                                        ),
+                                        icon: const Icon(Icons.quiz_outlined, size: 18),
+                                        label: Text(AppLocalizations.of(context)!.classTestOpen),
+                                      ),
+                                    ),
                                   const SizedBox(height: 10),
                                   Row(
                                     children: [

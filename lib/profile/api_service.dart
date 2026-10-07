@@ -12,6 +12,14 @@ import '../services/auth_service.dart';
 import '../services/crash_reporting_service.dart';
 import 'package:path_provider/path_provider.dart';
 
+/// Thrown by `ApiService.getTargetProfile` on HTTP 404 — the user doesn't
+/// exist OR they blocked the viewer (the backend deliberately looks identical).
+class ProfileNotFoundException implements Exception {
+  const ProfileNotFoundException();
+  @override
+  String toString() => 'Profile not found';
+}
+
 class ApiService {
   static const String _profileCacheKey = 'cached_profile';
 
@@ -107,6 +115,9 @@ class ApiService {
 
     if (response.statusCode == 200) {
       return TargetProfileModel.fromJson(jsonDecode(response.body));
+    } else if (response.statusCode == 404) {
+      // Also what the backend returns when that person blocked you.
+      throw const ProfileNotFoundException();
     } else {
       throw Exception('Failed to load target profile: ${response.body}');
     }
@@ -614,6 +625,147 @@ static Future<List<BlockedUserModel>> getBlockedUsers() async {
     return results.map((e) => BlockedUserModel.fromJson(e)).toList();
   }
   throw Exception(_extractErrorMessage(response, fallback: 'Failed to load blocked accounts'));
+}
+
+/// POST /profile/blocked-users/ {"blocked": <user_id>} — block karo (profile
+/// ka ⋮ menu). Idempotent: dobara block karne par backend 200 deta hai.
+///
+/// Optional extras (the block dialog's checkboxes):
+///  * [blockNewAccounts] — "Also block new accounts they may create".
+///  * [reportReason]    — also report the account in the same request
+///    (one of: spam, harassment, hate, nudity, violence, self_harm, scam,
+///    impersonation, other). Returns true if a report was filed.
+static Future<bool> blockUser(
+  int userId, {
+  bool blockNewAccounts = false,
+  String? reportReason,
+}) async {
+  final token = await AuthService.getValidToken();
+  final url = Uri.parse("${Api.baseUrl}/profile/blocked-users/");
+  final response = await http.post(
+    url,
+    headers: {
+      "Authorization": "Bearer $token",
+      "Content-Type": "application/json",
+    },
+    body: jsonEncode({
+      "blocked": userId,
+      if (blockNewAccounts) "block_new_accounts": true,
+      if (reportReason != null) "report_reason": reportReason,
+    }),
+  );
+  if (response.statusCode != 200 && response.statusCode != 201) {
+    throw Exception(_extractErrorMessage(response, fallback: 'Failed to block user'));
+  }
+  try {
+    return (jsonDecode(response.body) as Map)['report_filed'] == true;
+  } catch (_) {
+    return false;
+  }
+}
+
+/// One page of the blocked list: GET /profile/blocked-users/?q=&limit=&offset=
+static Future<BlockedPage> getBlockedUsersPage({
+  String query = '',
+  int offset = 0,
+  int limit = 30,
+}) async {
+  final token = await AuthService.getValidToken();
+  final url = Uri.parse("${Api.baseUrl}/profile/blocked-users/").replace(queryParameters: {
+    if (query.trim().isNotEmpty) 'q': query.trim(),
+    'limit': '$limit',
+    'offset': '$offset',
+  });
+  final response = await http.get(url, headers: {
+    "Authorization": "Bearer $token",
+    "Content-Type": "application/json",
+  });
+  if (response.statusCode != 200) {
+    throw Exception(_extractErrorMessage(response, fallback: 'Failed to load blocked accounts'));
+  }
+  final data = jsonDecode(response.body) as Map<String, dynamic>;
+  final List results = data['data'] ?? [];
+  return BlockedPage(
+    items: results.map((e) => BlockedUserModel.fromJson(e)).toList(),
+    hasMore: data['has_more'] == true,
+    nextOffset: data['next_offset'] as int?,
+  );
+}
+
+/// POST /profile/restricted-users/ {"restricted": id} — silent, one-way.
+static Future<void> restrictUser(int userId) async {
+  final token = await AuthService.getValidToken();
+  final response = await http.post(
+    Uri.parse("${Api.baseUrl}/profile/restricted-users/"),
+    headers: {"Authorization": "Bearer $token", "Content-Type": "application/json"},
+    body: jsonEncode({"restricted": userId}),
+  );
+  if (response.statusCode != 200 && response.statusCode != 201) {
+    throw Exception(_extractErrorMessage(response, fallback: 'Failed to restrict user'));
+  }
+}
+
+/// DELETE /profile/restricted-users/<id>/
+static Future<void> unrestrictUser(int userId) async {
+  final token = await AuthService.getValidToken();
+  final response = await http.delete(
+    Uri.parse("${Api.baseUrl}/profile/restricted-users/$userId/"),
+    headers: {"Authorization": "Bearer $token", "Content-Type": "application/json"},
+  );
+  if (response.statusCode != 200 && response.statusCode != 204) {
+    throw Exception(_extractErrorMessage(response, fallback: 'Failed to unrestrict user'));
+  }
+}
+
+/// POST /post/muted-accounts/ {"user_id": id} — hides their posts AND stories
+/// from my feed / story tray; follow, profile and chat stay as they were.
+static Future<void> muteUser(int userId) async {
+  final token = await AuthService.getValidToken();
+  final response = await http.post(
+    Uri.parse("${Api.baseUrl}/post/muted-accounts/"),
+    headers: {"Authorization": "Bearer $token", "Content-Type": "application/json"},
+    body: jsonEncode({"user_id": userId}),
+  );
+  if (response.statusCode != 200 && response.statusCode != 201) {
+    throw Exception(_extractErrorMessage(response, fallback: 'Failed to mute user'));
+  }
+}
+
+/// DELETE /post/muted-accounts/<id>/ (idempotent)
+static Future<void> unmuteUser(int userId) async {
+  final token = await AuthService.getValidToken();
+  final response = await http.delete(
+    Uri.parse("${Api.baseUrl}/post/muted-accounts/$userId/"),
+    headers: {"Authorization": "Bearer $token", "Content-Type": "application/json"},
+  );
+  if (response.statusCode != 200) {
+    throw Exception(_extractErrorMessage(response, fallback: 'Failed to unmute user'));
+  }
+}
+
+/// POST /profile/reports/ — report an account / post / comment / story.
+/// [targetType]: user | post | comment | story. Returns true when the report
+/// is new, false when I had already reported the same thing.
+static Future<bool> reportContent({
+  required String targetType,
+  required String targetId,
+  required String reason,
+  String details = '',
+}) async {
+  final token = await AuthService.getValidToken();
+  final response = await http.post(
+    Uri.parse("${Api.baseUrl}/profile/reports/"),
+    headers: {"Authorization": "Bearer $token", "Content-Type": "application/json"},
+    body: jsonEncode({
+      "target_type": targetType,
+      "target_id": targetId,
+      "reason": reason,
+      if (details.trim().isNotEmpty) "details": details.trim(),
+    }),
+  );
+  if (response.statusCode == 201) return true;
+  if (response.statusCode == 200) return false;
+  throw Exception(_extractErrorMessage(response, fallback: 'Failed to send report'));
 }
 
 /// DELETE /profile/blocked-users/<id>/ — `<id>` target user ki id bhi ho

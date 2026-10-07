@@ -15,7 +15,9 @@ import 'package:cached_network_image/cached_network_image.dart';
 import 'package:flutter/material.dart';
 
 import '../../l10n/app_localizations.dart';
+import '../../widgets/ls_network_image.dart';
 import '../../services/home_api_model_service.dart' show PostMediaModel;
+import 'post_media_ratio.dart';
 
 enum PostMediaKind { image, video, pdf, doc }
 
@@ -61,8 +63,9 @@ class PostMediaUtil {
   /// Height of the whole media frame for a post.
   ///
   /// Like Instagram/Threads the FIRST visual (image/video) decides the frame
-  /// ratio for the whole carousel, clamped between 16:9 and 4:5 so a tall
-  /// portrait never eats the screen and a panorama never becomes a sliver.
+  /// ratio for the whole carousel, clamped between 1.91:1 (widest) and 4:5
+  /// (tallest) — see post_media_ratio.dart — so a tall portrait never eats the
+  /// screen and a panorama never becomes a sliver.
   /// Anything with a different ratio is letterboxed *inside* the frame (see
   /// [PostImageTile]) instead of being cropped. Documents-only posts get a
   /// compact fixed card height.
@@ -85,12 +88,15 @@ class PostMediaUtil {
     if (w != null && h != null && w > 0 && h > 0) {
       ratio = w / h;
     } else {
-      ratio = kind(first) == PostMediaKind.video ? 16 / 9 : 1.0;
+      ratio = kind(first) == PostMediaKind.video ? 16 / 9 : kPostMediaDefaultRatio;
     }
-    ratio = ratio.clamp(0.8, 16 / 9).toDouble();
-    final height = width / ratio;
-    final upper = maxHeight < width * 0.5625 ? width * 0.5625 : maxHeight;
-    return height.clamp(width * 0.5625, upper).toDouble();
+    ratio = ratio.clamp(kPostMediaMinRatio, kPostMediaMaxRatio).toDouble();
+    // Never shorter than the widest allowed frame (1.91:1); the screen-height
+    // cap can only shrink a tall frame down to that floor, not below it.
+    final minHeight = width / kPostMediaMaxRatio;
+    var height = width / ratio;
+    if (maxHeight > 0 && height > maxHeight) height = maxHeight;
+    return height < minHeight ? minHeight : height;
   }
 }
 
@@ -136,6 +142,52 @@ class PostImageTile extends StatelessWidget {
           errorWidget: (_, __, ___) => const Center(
             child: Icon(Icons.broken_image_outlined, color: Colors.white38, size: 44),
           ),
+        ),
+      ]),
+    );
+  }
+}
+
+/// Feed-card image: the ~720px variant (BlurHash placeholder, original as
+/// fallback) shown with BoxFit.contain over a blurred, dimmed copy of itself —
+/// the same look as [PostImageTile], so feed and single post match. The
+/// background reuses the same cached file (no second download).
+class PostFeedImage extends StatelessWidget {
+  final String url;
+  final String? fallbackUrl;
+  final String? blurhash;
+  final VoidCallback? onTap;
+  const PostFeedImage({super.key, required this.url, this.fallbackUrl, this.blurhash, this.onTap});
+
+  @override
+  Widget build(BuildContext context) {
+    final bgUrl = url.isNotEmpty ? url : (fallbackUrl ?? '');
+    return GestureDetector(
+      onTap: onTap,
+      behavior: HitTestBehavior.opaque,
+      child: Stack(fit: StackFit.expand, children: [
+        if (bgUrl.isNotEmpty)
+          ImageFiltered(
+            imageFilter: ImageFilter.blur(sigmaX: 28, sigmaY: 28),
+            child: CachedNetworkImage(
+              imageUrl: bgUrl,
+              fit: BoxFit.cover,
+              memCacheWidth: 160,
+              fadeInDuration: Duration.zero,
+              placeholder: (_, __) => const ColoredBox(color: Colors.black),
+              errorWidget: (_, __, ___) => const ColoredBox(color: Colors.black),
+            ),
+          )
+        else
+          const ColoredBox(color: Colors.black),
+        const ColoredBox(color: Color(0x55000000)),
+        LsNetworkImage(
+          url: url,
+          fallbackUrl: fallbackUrl,
+          blurhash: blurhash,
+          fit: BoxFit.contain,
+          width: double.infinity,
+          height: double.infinity,
         ),
       ]),
     );

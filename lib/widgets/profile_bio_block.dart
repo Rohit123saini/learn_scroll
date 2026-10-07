@@ -112,3 +112,131 @@ class _LinkChip extends StatelessWidget {
     );
   }
 }
+
+// ============================================================
+// 4.1/4.2 — shared header controls (own profile + someone else's).
+//
+// ProfileActionButton: Instagram-style tonal button. Unlike `LsOutlineButton`
+// (an unconstrained `Row` + `Text`), its label is `Flexible` + ellipsis, so a
+// long Hindi label ("प्रोफ़ाइल संपादित करें") in a half-width slot can no longer
+// throw the yellow/black RenderFlex overflow stripes.
+//
+// ProfileMiniChip: small pill for coins / streak / invite / weekly recap —
+// replaces the four full-width cards that used to push the grid off-screen.
+// ============================================================
+
+class ProfileActionButton extends StatelessWidget {
+  final String label;
+  final IconData? icon;
+  final VoidCallback? onPressed;
+  final bool filled; // primary-colour (e.g. Follow / Confirm) vs tonal grey
+  final bool loading;
+
+  const ProfileActionButton({
+    super.key,
+    required this.label,
+    this.icon,
+    this.onPressed,
+    this.filled = false,
+    this.loading = false,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
+    final bg = filled ? cs.primary : cs.surfaceVariant;
+    final fg = filled ? cs.onPrimary : cs.onSurface;
+    final enabled = onPressed != null && !loading;
+    return Semantics(
+      button: true,
+      enabled: enabled,
+      label: label,
+      child: Opacity(
+        opacity: onPressed == null ? .55 : 1,
+        child: Material(
+          color: bg,
+          borderRadius: BorderRadius.circular(10),
+          child: InkWell(
+            borderRadius: BorderRadius.circular(10),
+            onTap: enabled ? onPressed : null,
+            child: ConstrainedBox(
+              constraints: const BoxConstraints(minHeight: 36),
+              child: Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+                child: Center(
+                  child: loading
+                      ? SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2, color: fg))
+                      : Row(mainAxisSize: MainAxisSize.min, children: [
+                          if (icon != null) ...[Icon(icon, size: 15, color: fg), const SizedBox(width: 6)],
+                          Flexible(
+                            child: Text(
+                              label,
+                              maxLines: 1,
+                              softWrap: false,
+                              overflow: TextOverflow.ellipsis,
+                              style: TextStyle(fontSize: 12.5, fontWeight: FontWeight.w700, color: fg),
+                            ),
+                          ),
+                        ]),
+                ),
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class ProfileMiniChip extends StatelessWidget {
+  final Widget leading; // small icon or emoji
+  final String label;
+  final String? semanticLabel;
+  final VoidCallback onTap;
+
+  const ProfileMiniChip({
+    super.key,
+    required this.leading,
+    required this.label,
+    required this.onTap,
+    this.semanticLabel,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
+    final text = semanticLabel ?? label;
+    return Semantics(
+      button: true,
+      label: text,
+      child: Tooltip(
+        message: text,
+        child: InkWell(
+          borderRadius: BorderRadius.circular(16),
+          onTap: onTap,
+          child: Container(
+            constraints: const BoxConstraints(minHeight: 30),
+            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+            decoration: BoxDecoration(
+              color: cs.surface,
+              borderRadius: BorderRadius.circular(16),
+              border: Border.all(color: cs.outlineVariant),
+            ),
+            child: Row(mainAxisSize: MainAxisSize.min, children: [
+              leading,
+              const SizedBox(width: 5),
+              Flexible(
+                child: Text(
+                  label,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(fontSize: 11.5, fontWeight: FontWeight.w700, color: cs.onSurface),
+                ),
+              ),
+            ]),
+          ),
+        ),
+      ),
+    );
+  }
+}

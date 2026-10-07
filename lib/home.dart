@@ -49,11 +49,15 @@ import 'post/services/story_service.dart';
 import 'post/models/story_model.dart';
 import 'post/widgets/story_caption_sheet.dart';
 import 'tuitionclass/screens/classroom_detail_screen.dart';
+import 'tuitionclass/services/tuitionclass_api_service.dart' as tc_api show TuitionClassApi; // TASK 10.3
+import 'tuitionclass/models/tuitionclass_models.dart' as tc_models show ClassSession; // TASK 10.3
+import 'tuitionclass/widgets/class_time_chip.dart' show ClassTimeChip; // TASK 10.3
 import 'referrals/screens/referrals_screen.dart'; // TASK 1 — home invite strip -> full Refer & Earn page
 import 'post/screens/post_list_screen.dart';
 import 'post/screens/singlepost.dart' show SinglePostPage, FullScreenImagePage, FullScreenVideoPage, DocumentViewerPage, downloadWithAuth;
 import 'post/screens/reels_screen.dart' show ReelsScreen; // P13 — Reels nav tab
 import 'post/widgets/post_media_view.dart';
+import 'post/screens/ratio_crop_screen.dart';
 import 'post/services/post_extras_service.dart' show PostExtrasService, RepostException;
 import 'post/widgets/repost_widgets.dart' show EmbeddedOriginalPost, RepostActionButton, RepostHeader, RepostPreview, showRepostCaptionSheet;
 
@@ -220,6 +224,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
   // Top sections ka state (Task 4/5).
   List<ClassroomModel> _classrooms = [];
   List<TuitionClassModel> _tuitionClasses = [];
+  tc_models.ClassSession? _nextClass; // TASK 10.3 — main Home "Next class" card
   List<StoryModel> _stories = [];
   InviteEarnModel? _inviteInfo;
   bool _extrasLoading = true;
@@ -393,6 +398,11 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
       HomeExtrasService.getLiveNow().catchError((e) => <TuitionClassModel>[]),
       StoryService.getStories().catchError((e) => <StoryModel>[]),
       HomeExtrasService.getInviteInfo().then<InviteEarnModel?>((v) => v).catchError((e) => null),
+      // TASK 10.3 — soonest upcoming/live class (also syncs ServerClock).
+      tc_api.TuitionClassApi.dashboard().then<tc_models.ClassSession?>((d) {
+        final l = d.upcomingSessions.toList()..sort((a, b) => a.scheduledStart.compareTo(b.scheduledStart));
+        return l.isEmpty ? null : l.first;
+      }).catchError((e) => null),
     ]);
     if (!mounted) return;
     setState(() {
@@ -400,6 +410,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
       _tuitionClasses = results[1] as List<TuitionClassModel>;
       _stories = results[2] as List<StoryModel>;
       _inviteInfo = results[3] as InviteEarnModel?;
+      _nextClass = results[4] as tc_models.ClassSession?;
       _extrasLoading = false;
     });
   }
@@ -1832,7 +1843,14 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     }
     if (picked == null || !mounted) return;
 
-    final file = File(picked.path);
+    var file = File(picked.path);
+    // 1.3-FE — stories are 9:16: photos go through the fixed-ratio crop first
+    // (cancel = don't post). Videos are not cropped; the viewer letterboxes them.
+    if (mediaType == 'image') {
+      final cropped = await showRatioCrop(context, file, aspect: 9 / 16, title: l10n.storyCropTitle, outputWidth: 1080);
+      if (cropped == null || !mounted) return;
+      file = cropped;
+    }
     // Task 11 — caption step. `StoryService.createStory` already accepted
     // an optional caption; the flow just never asked for one before this.
     final composed = await showStoryCaptionSheet(context, media: file, mediaType: mediaType);
@@ -1855,6 +1873,47 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     } finally {
       if (mounted) setState(() { _storyUploadBusy = false; _storyUploadProgress = 0; });
     }
+  }
+
+  /// TASK 10.3 — "Next class": the user's soonest upcoming/live class with a
+  /// local-time chip ("Starts in 2h 10m" / "Live now"). Hidden when none.
+  Widget _buildNextClass(ColorScheme cs, AppLocalizations l10n) {
+    final s = _nextClass;
+    if (s == null) return const SizedBox.shrink();
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(kLsPad, 0, kLsPad, 20),
+      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        _sectionTitle(l10n.homeNextClass, cs),
+        const SizedBox(height: 10),
+        Material(
+          color: cs.surfaceContainerHighest.withValues(alpha: 0.5),
+          borderRadius: BorderRadius.circular(14),
+          child: InkWell(
+            borderRadius: BorderRadius.circular(14),
+            onTap: () => Navigator.push(
+              context,
+              MaterialPageRoute(builder: (_) => ClassroomDetailScreen(classroomId: s.classroomId)),
+            ),
+            child: Padding(
+              padding: const EdgeInsets.all(14),
+              child: Row(children: [
+                Icon(Icons.event_available_rounded, color: cs.primary),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                    Text(s.classroomTitle,
+                        maxLines: 1, overflow: TextOverflow.ellipsis, style: const TextStyle(fontWeight: FontWeight.w700, fontSize: 14)),
+                    const SizedBox(height: 6),
+                    ClassTimeChip.session(s, compact: true),
+                  ]),
+                ),
+                Icon(Icons.chevron_right_rounded, color: cs.onSurfaceVariant),
+              ]),
+            ),
+          ),
+        ),
+      ]),
+    );
   }
 
   /// `.section` (Live now) — `.live-card` horizontal row.
@@ -2652,6 +2711,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
               _buildInviteStrip(cs, l10n),
               _buildStories(cs, l10n),
               const SizedBox(height: 6),
+              _buildNextClass(cs, l10n),
               _buildLiveNow(cs, l10n),
               _buildQuickActionsGrid(cs, l10n),
               _buildFeedTitle(cs, l10n),
@@ -3052,11 +3112,9 @@ class _MediaCarouselState extends State<_MediaCarousel> {
         // old posts / animated GIFs) with a BlurHash placeholder until it loads. The original
         // is only downloaded when the user taps through to full screen (_openFullScreen below).
         // Was: PostImageTile(url: media.file, onTap: () => _openFullScreen(context, index));
-        return GestureDetector(
-          onTap: () => _openFullScreen(context, index),
-          behavior: HitTestBehavior.opaque,
-          child: LsNetworkImage(url: media.feedUrl, fallbackUrl: media.file, blurhash: media.blurhash, fit: BoxFit.contain),
-        );
+        // 1.2-FE — now blur + contain (PostFeedImage), same look as the single-post
+        // screen, instead of a bare contain on a flat background.
+        return PostFeedImage(url: media.feedUrl, fallbackUrl: media.file, blurhash: media.blurhash, onTap: () => _openFullScreen(context, index));
       case PostMediaKind.pdf:
       case PostMediaKind.doc:
         final name = PostMediaUtil.displayName(media);

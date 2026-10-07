@@ -794,14 +794,13 @@ class _ReelsScreenState extends State<ReelsScreen> with WidgetsBindingObserver, 
         Center(
           child: Column(mainAxisSize: MainAxisSize.min, children: [
             Text(_failed ? l10n.somethingWentWrong : l10n.reelsEmpty, style: const TextStyle(color: Colors.white70, fontSize: 15)),
-            if (_failed) ...[
-              const SizedBox(height: 12),
-              OutlinedButton(
-                onPressed: _loadFirstPage,
-                style: OutlinedButton.styleFrom(foregroundColor: Colors.white, side: const BorderSide(color: Colors.white54)),
-                child: Text(l10n.retry),
-              ),
-            ],
+            // Retry on BOTH error and empty ("No reels yet"): the user can always refresh.
+            const SizedBox(height: 12),
+            OutlinedButton(
+              onPressed: _loadFirstPage,
+              style: OutlinedButton.styleFrom(foregroundColor: Colors.white, side: const BorderSide(color: Colors.white54)),
+              child: Text(l10n.retry),
+            ),
           ]),
         ),
         const _TopBar(),

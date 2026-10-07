@@ -6,10 +6,10 @@
 // Backend (post/highlight_views.py):
 //   GET    /post/highlights/?user_id=            list (omit user_id = mine). {"count","results"}
 //                                                 Not allowed to see => EMPTY list (200), never 403.
-//   POST   /post/highlights/                     {title?, story_ids[], cover_story_id?} -> 201 detail
+//   POST   /post/highlights/                     {title?, story_ids[], cover_story_id?, cover_x?, cover_y?, cover_zoom?} -> 201 detail
 //   GET    /post/highlights/<id>/                detail (+ `stories`), 404 = hidden/gone
 //   PATCH  /post/highlights/<id>/                owner: {title?, story_ids? (ordered, replaces set),
-//                                                 cover_story_id? (null = automatic)} -> detail
+//                                                 cover_story_id? (null = automatic), cover_x/y/zoom? (need explicit cover)} -> detail
 //   DELETE /post/highlights/<id>/                owner: 204
 //   POST   /post/highlights/<id>/stories/        owner: {story_id} -> 201 added / 200 already there
 //   DELETE /post/highlights/<id>/stories/<sid>/  owner: idempotent; last story deletes the highlight
@@ -78,6 +78,7 @@ class HighlightService {
     String? title,
     required List<String> storyIds,
     String? coverStoryId,
+    HighlightCrop? crop,
   }) async {
     final res = await http
         .post(
@@ -87,6 +88,7 @@ class HighlightService {
             if (title != null && title.trim().isNotEmpty) 'title': title.trim(),
             'story_ids': storyIds,
             if (coverStoryId != null) 'cover_story_id': coverStoryId,
+            if (coverStoryId != null && crop != null) ...crop.toJson(),
           }),
         )
         .timeout(kApiTimeout);
@@ -94,13 +96,15 @@ class HighlightService {
   }
 
   /// Only what is passed is sent. `updateCover: true` sends `cover_story_id`
-  /// even when null (null = back to the automatic cover).
+  /// even when null (null = back to the automatic cover). [crop] is only sent
+  /// together with an explicit cover.
   static Future<Highlight> updateHighlight(
     String highlightId, {
     String? title,
     List<String>? storyIds,
     bool updateCover = false,
     String? coverStoryId,
+    HighlightCrop? crop,
   }) async {
     final res = await http
         .patch(
@@ -110,6 +114,7 @@ class HighlightService {
             if (title != null) 'title': title,
             if (storyIds != null) 'story_ids': storyIds,
             if (updateCover) 'cover_story_id': coverStoryId,
+            if (updateCover && coverStoryId != null && crop != null) ...crop.toJson(),
           }),
         )
         .timeout(kApiTimeout);
@@ -158,6 +163,18 @@ class HighlightService {
     } catch (_) {}
     return null;
   }
+}
+
+/// Round-cover crop: focus point (-1..1) + zoom (1..3). Uncropped = (0, 0, 1).
+class HighlightCrop {
+  final double x;
+  final double y;
+  final double zoom;
+  const HighlightCrop({this.x = 0.0, this.y = 0.0, this.zoom = 1.0});
+
+  static const HighlightCrop none = HighlightCrop();
+
+  Map<String, dynamic> toJson() => {'cover_x': x, 'cover_y': y, 'cover_zoom': zoom};
 }
 
 class StoryArchivePage {

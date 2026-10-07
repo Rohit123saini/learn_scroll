@@ -60,47 +60,57 @@ class TranslateService {
   // explicitly turn it off, and new users get translate available by
   // default too.
   static const _kTranslatePermissionKey = 'translate_permission_enabled';
+  static const _kListenPermissionKey = 'listen_permission_enabled';
+  static const _kTranscribePermissionKey = 'transcribe_permission_enabled';
 
-  /// Whether the translate toggle should currently be shown on
-  /// messages. Widgets that render `TranslateToggle` should listen to
-  /// this so they update immediately when the setting is flipped from
-  /// the chat menu, without needing a screen rebuild.
-  final ValueNotifier<bool> translateEnabled = ValueNotifier<bool>(true);
+  // Task 7.1 — Translate, Listen aur Transcribe teeno ab chat 3-dot menu
+  // ke on/off toggles hain. Teeno ka default OFF hai (naye users ko
+  // bubbles saaf dikhein), aur value per-device persist hoti hai.
+  // Pehle se saved value (agar user ne translate ON/OFF kiya tha) waisi
+  // hi rehti hai — default sirf tab lagta hai jab kuch saved na ho.
+  //
+  // Widgets in notifiers ko sunte hain, isliye toggle flip hote hi
+  // saare visible bubbles turant update ho jaate hain.
+  final ValueNotifier<bool> translateEnabled = ValueNotifier<bool>(false);
+  final ValueNotifier<bool> listenEnabled = ValueNotifier<bool>(false);
+  final ValueNotifier<bool> transcribeEnabled = ValueNotifier<bool>(false);
 
   bool _permissionLoaded = false;
 
-  /// Loads the saved preference from disk into [translateEnabled].
-  /// Safe to call multiple times (e.g. once per chat screen open) —
-  /// after the first successful load it's a no-op so repeated screen
-  /// opens don't cause a flash back to the default while the real
-  /// value is (still) being fetched.
+  /// Saved preferences disk se load karta hai (teeno toggles). Multiple
+  /// baar call karna safe hai — pehli successful load ke baad no-op.
   Future<void> loadTranslatePermission() async {
     if (_permissionLoaded) return;
     try {
       final prefs = await SharedPreferences.getInstance();
-      translateEnabled.value =
-          prefs.getBool(_kTranslatePermissionKey) ?? true;
+      translateEnabled.value = prefs.getBool(_kTranslatePermissionKey) ?? false;
+      listenEnabled.value = prefs.getBool(_kListenPermissionKey) ?? false;
+      transcribeEnabled.value = prefs.getBool(_kTranscribePermissionKey) ?? false;
       _permissionLoaded = true;
     } catch (_) {
-      // Keep the default (true) if prefs can't be read for some reason.
+      // Default (false) hi rehne do agar prefs read na ho paaye.
     }
   }
 
-  /// Persists the new on/off state and updates [translateEnabled]
-  /// immediately so every currently-visible `TranslateToggle` (across
-  /// all open message bubbles) hides/shows without waiting on a
-  /// network round-trip.
-  Future<void> setTranslateEnabled(bool value) async {
-    translateEnabled.value = value;
+  Future<void> _persist(String key, ValueNotifier<bool> notifier, bool value) async {
+    notifier.value = value;
     _permissionLoaded = true;
     try {
       final prefs = await SharedPreferences.getInstance();
-      await prefs.setBool(_kTranslatePermissionKey, value);
+      await prefs.setBool(key, value);
     } catch (_) {
-      // Best-effort persistence — in-memory value above still applies
-      // for the rest of this app session even if the write fails.
+      // Best-effort — in-memory value is session me phir bhi lagu rehti hai.
     }
   }
+
+  Future<void> setTranslateEnabled(bool value) =>
+      _persist(_kTranslatePermissionKey, translateEnabled, value);
+
+  Future<void> setListenEnabled(bool value) =>
+      _persist(_kListenPermissionKey, listenEnabled, value);
+
+  Future<void> setTranscribeEnabled(bool value) =>
+      _persist(_kTranscribePermissionKey, transcribeEnabled, value);
 
   // In-memory cache for this app session — avoids re-hitting the network
   // if the user toggles a translated bubble off/on repeatedly. The

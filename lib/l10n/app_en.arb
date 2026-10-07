@@ -2954,6 +2954,12 @@
   "coverPreviewUnavailable": "Cover preview isn't available",
   "coverTabLabel": "Cover",
   "cropFailed": "Crop failed.",
+  "ratioOriginal": "Original",
+  "ratioPickerLabel": "Photo ratio",
+  "ratioCropTitle": "Crop photo",
+  "cropHintDrag": "Pinch to zoom, drag to reposition",
+  "storyCropTitle": "Fit to story (9:16)",
+  "avatarCropTitle": "Crop profile photo",
   "dateLabel": "Date",
   "deleteLabel": "Delete",
   "downloadFailedCode": "Download failed ({code})",
@@ -3656,6 +3662,38 @@
   "@chatTranslateDisabled": {
     "description": "Snackbar shown after disabling translate from the 3-dot menu"
   },
+  "chatEnableListen": "Enable message listen",
+  "@chatEnableListen": {
+    "description": "3-dot menu item — turns on the per-message listen (read aloud) button"
+  },
+  "chatDisableListen": "Disable message listen",
+  "@chatDisableListen": {
+    "description": "3-dot menu item — turns off the per-message listen (read aloud) button"
+  },
+  "chatListenEnabled": "Message listen turned on",
+  "@chatListenEnabled": {
+    "description": "Snackbar shown after enabling listen from the 3-dot menu"
+  },
+  "chatListenDisabled": "Message listen turned off",
+  "@chatListenDisabled": {
+    "description": "Snackbar shown after disabling listen from the 3-dot menu"
+  },
+  "chatEnableTranscribe": "Enable voice note transcribe",
+  "@chatEnableTranscribe": {
+    "description": "3-dot menu item — turns on voice note transcript and the Transcribe button"
+  },
+  "chatDisableTranscribe": "Disable voice note transcribe",
+  "@chatDisableTranscribe": {
+    "description": "3-dot menu item — turns off voice note transcript and the Transcribe button"
+  },
+  "chatTranscribeEnabled": "Voice note transcribe turned on",
+  "@chatTranscribeEnabled": {
+    "description": "Snackbar shown after enabling transcribe from the 3-dot menu"
+  },
+  "chatTranscribeDisabled": "Voice note transcribe turned off",
+  "@chatTranscribeDisabled": {
+    "description": "Snackbar shown after disabling transcribe from the 3-dot menu"
+  },
   "chatThisUser": "this user",
   "@chatThisUser": {
     "description": "Fallback name in the block dialog"
@@ -3718,6 +3756,144 @@
   "chatUnblock": "Unblock",
   "@chatUnblock": {
     "description": "Button in the blocked banner"
+  },
+  "profileBlockedByMeTitle": "You've blocked this account",
+  "@profileBlockedByMeTitle": {
+    "description": "Title on a profile the viewer has blocked"
+  },
+  "profileBlockedByMeSubtitle": "They can't see your profile, posts or stories, or message you. Unblock to see their content again.",
+  "@profileBlockedByMeSubtitle": {
+    "description": "Subtitle on a profile the viewer has blocked"
+  },
+  "profileRestrict": "Restrict",
+  "@profileRestrict": {
+    "description": "Profile menu: restrict this account"
+  },
+  "profileUnrestrict": "Unrestrict",
+  "@profileUnrestrict": {
+    "description": "Profile menu: undo restrict"
+  },
+  "profileRestrictedSnack": "Restricted. Their comments on your posts are now hidden.",
+  "@profileRestrictedSnack": {
+    "description": "Snackbar after restricting"
+  },
+  "profileUnrestrictedSnack": "Restriction removed",
+  "@profileUnrestrictedSnack": {
+    "description": "Snackbar after unrestricting"
+  },
+  "profileMute": "Mute posts & stories",
+  "@profileMute": {
+    "description": "Profile menu: mute this account"
+  },
+  "profileUnmute": "Unmute posts & stories",
+  "@profileUnmute": {
+    "description": "Profile menu: unmute this account"
+  },
+  "profileMutedSnack": "Muted. Their posts and stories won't show up for you.",
+  "@profileMutedSnack": {
+    "description": "Snackbar after muting"
+  },
+  "profileUnmutedSnack": "Unmuted",
+  "@profileUnmutedSnack": {
+    "description": "Snackbar after unmuting"
+  },
+  "profileMoreFailed": "Something went wrong: {error}",
+  "@profileMoreFailed": {
+    "description": "Generic error for profile menu actions",
+    "placeholders": {
+      "error": {
+        "type": "String"
+      }
+    }
+  },
+  "reportAction": "Report",
+  "@reportAction": {
+    "description": "Menu item: report"
+  },
+  "reportTitle": "Why are you reporting this?",
+  "@reportTitle": {
+    "description": "Report sheet title"
+  },
+  "reportReasonSpam": "Spam",
+  "@reportReasonSpam": {
+    "description": "Report reason"
+  },
+  "reportReasonHarassment": "Harassment or bullying",
+  "@reportReasonHarassment": {
+    "description": "Report reason"
+  },
+  "reportReasonHate": "Hate speech",
+  "@reportReasonHate": {
+    "description": "Report reason"
+  },
+  "reportReasonNudity": "Nudity or sexual content",
+  "@reportReasonNudity": {
+    "description": "Report reason"
+  },
+  "reportReasonViolence": "Violence or dangerous content",
+  "@reportReasonViolence": {
+    "description": "Report reason"
+  },
+  "reportReasonSelfHarm": "Self-harm",
+  "@reportReasonSelfHarm": {
+    "description": "Report reason"
+  },
+  "reportReasonScam": "Scam or fraud",
+  "@reportReasonScam": {
+    "description": "Report reason"
+  },
+  "reportReasonImpersonation": "Pretending to be someone else",
+  "@reportReasonImpersonation": {
+    "description": "Report reason"
+  },
+  "reportReasonOther": "Something else",
+  "@reportReasonOther": {
+    "description": "Report reason"
+  },
+  "reportAlsoReport": "Also report this account",
+  "@reportAlsoReport": {
+    "description": "Checkbox in the block dialog"
+  },
+  "reportBlockNewAccounts": "Also block new accounts they may create",
+  "@reportBlockNewAccounts": {
+    "description": "Checkbox in the block dialog"
+  },
+  "reportSubmit": "Submit report",
+  "@reportSubmit": {
+    "description": "Report sheet button"
+  },
+  "reportThanks": "Thanks. We'll review this.",
+  "@reportThanks": {
+    "description": "Snackbar after a report is sent"
+  },
+  "reportAlreadySent": "You already reported this.",
+  "@reportAlreadySent": {
+    "description": "Snackbar when re-reporting"
+  },
+  "reportFailed": "Couldn't send the report: {error}",
+  "@reportFailed": {
+    "description": "Report error",
+    "placeholders": {
+      "error": {
+        "type": "String"
+      }
+    }
+  },
+  "blockedSearchHint": "Search blocked accounts",
+  "@blockedSearchHint": {
+    "description": "Search field on the blocked accounts screen"
+  },
+  "blockedNoMatches": "No blocked accounts match your search.",
+  "@blockedNoMatches": {
+    "description": "Empty search result on blocked accounts"
+  },
+  "blockedUndo": "Undo",
+  "@blockedUndo": {
+    "description": "Undo action on the unblock snackbar"
+  },
+  "blockMenuBlockUser": "Block",
+  "@blockMenuBlockUser": {
+    "description": "Short \"Block\" item in comment / viewers / notification menus"
   },
   "chatDisappearingOff": "Off",
   "@chatDisappearingOff": {
@@ -5341,6 +5517,539 @@
     "description": "Shows when notifications resume",
     "placeholders": {
       "until": {
+        "type": "String"
+      }
+    }
+  },
+  "classTestsTab": "Tests",
+  "classTestsEmpty": "No tests in this class yet",
+  "classTestsEmptyHint": "When your teacher publishes a test, it will show up here.",
+  "classTestsLoadFailed": "Could not load tests",
+  "classTestFree": "Free",
+  "classTestQuestions": "{count} questions",
+  "@classTestQuestions": {
+    "placeholders": {
+      "count": {
+        "type": "int"
+      }
+    }
+  },
+  "classTestMinutes": "{minutes} min",
+  "@classTestMinutes": {
+    "placeholders": {
+      "minutes": {
+        "type": "int"
+      }
+    }
+  },
+  "classTestOpen": "Open test",
+  "classTestStatusLive": "Live now",
+  "classTestStatusUpcoming": "Upcoming",
+  "classTestStatusEnded": "Ended",
+  "hlNew": "New",
+  "@hlNew": {
+    "description": "Highlights row: label of the create circle"
+  },
+  "hlDefaultTitle": "Highlights",
+  "@hlDefaultTitle": {
+    "description": "Fallback title for a highlight without a name"
+  },
+  "hlNewHighlight": "New highlight",
+  "@hlNewHighlight": {
+    "description": "Highlight editor title (create)"
+  },
+  "hlEditHighlight": "Edit highlight",
+  "@hlEditHighlight": {
+    "description": "Highlight editor title (edit)"
+  },
+  "hlCreate": "Create",
+  "@hlCreate": {
+    "description": "Highlight editor create button"
+  },
+  "hlTitleLabel": "Title",
+  "@hlTitleLabel": {
+    "description": "Highlight title field label"
+  },
+  "hlYourStories": "Your stories",
+  "@hlYourStories": {
+    "description": "Highlight editor: archive grid heading"
+  },
+  "hlSelectedCount": "Selected ({count}) · hold and drag to reorder",
+  "@hlSelectedCount": {
+    "description": "Highlight editor: selected strip caption",
+    "placeholders": {
+      "count": {
+        "type": "int"
+      }
+    }
+  },
+  "hlCoverHint": "Tap a photo to use it as cover",
+  "@hlCoverHint": {
+    "description": "Highlight editor: cover hint"
+  },
+  "hlCoverAutomatic": "Automatic",
+  "@hlCoverAutomatic": {
+    "description": "Highlight editor: automatic cover chip"
+  },
+  "hlAdjustCover": "Adjust cover",
+  "@hlAdjustCover": {
+    "description": "Cover crop dialog title / button"
+  },
+  "hlCropHint": "Drag to move, pinch or use the slider to zoom",
+  "@hlCropHint": {
+    "description": "Cover crop dialog hint"
+  },
+  "hlReset": "Reset",
+  "@hlReset": {
+    "description": "Cover crop reset button"
+  },
+  "hlDone": "Done",
+  "@hlDone": {
+    "description": "Cover crop confirm button"
+  },
+  "hlDeleteQuestion": "Delete highlight?",
+  "@hlDeleteQuestion": {
+    "description": "Delete highlight dialog title"
+  },
+  "hlDeleteBody": "The stories themselves are not deleted.",
+  "@hlDeleteBody": {
+    "description": "Delete highlight dialog body"
+  },
+  "hlDeleteAction": "Delete highlight",
+  "@hlDeleteAction": {
+    "description": "Delete highlight button / action"
+  },
+  "hlEditStoriesCover": "Edit stories and cover",
+  "@hlEditStoriesCover": {
+    "description": "Highlight actions sheet: open editor"
+  },
+  "hlRename": "Rename",
+  "@hlRename": {
+    "description": "Highlight actions sheet: rename"
+  },
+  "hlRenameTitle": "Rename highlight",
+  "@hlRenameTitle": {
+    "description": "Rename dialog title"
+  },
+  "hlNoStories": "No stories to add yet. Post a story and it shows up here.",
+  "@hlNoStories": {
+    "description": "Highlight editor: empty archive"
+  },
+  "hlLoadStoriesFailed": "Couldn't load your stories.",
+  "@hlLoadStoriesFailed": {
+    "description": "Highlight editor: archive load error"
+  },
+  "hlUnavailable": "This highlight is no longer available.",
+  "@hlUnavailable": {
+    "description": "Snack: highlight deleted / hidden"
+  },
+  "hlOpenFailed": "Couldn't open highlight. Check your connection.",
+  "@hlOpenFailed": {
+    "description": "Snack: highlight open failed"
+  },
+  "hlEmpty": "This highlight is empty.",
+  "@hlEmpty": {
+    "description": "Snack: highlight has no visible stories"
+  },
+  "msgSearchHintAll": "Search chats, people, groups & messages",
+  "@msgSearchHintAll": {
+    "description": "Search bar hint on the global message search screen"
+  },
+  "msgSearchHintChat": "Search in this chat",
+  "@msgSearchHintChat": {
+    "description": "Search bar hint when searching inside one chat"
+  },
+  "msgSearchSectionChats": "Chats",
+  "@msgSearchSectionChats": {
+    "description": "Message search section header — existing chats"
+  },
+  "msgSearchSectionPeople": "People",
+  "@msgSearchSectionPeople": {
+    "description": "Message search section header — followers/following/mutual people"
+  },
+  "msgSearchSectionGroups": "Groups",
+  "@msgSearchSectionGroups": {
+    "description": "Message search section header — groups I am in"
+  },
+  "msgSearchSectionMessages": "Messages",
+  "@msgSearchSectionMessages": {
+    "description": "Message search section header — matching messages"
+  },
+  "msgSearchMutual": "Mutual",
+  "@msgSearchMutual": {
+    "description": "Badge on a person who follows me and I follow back"
+  },
+  "msgSearchFollowing": "Following",
+  "@msgSearchFollowing": {
+    "description": "Label on a person I follow"
+  },
+  "msgSearchFollowsYou": "Follows you",
+  "@msgSearchFollowsYou": {
+    "description": "Label on a person who follows me"
+  },
+  "msgSearchMembers": "{count} members",
+  "@msgSearchMembers": {
+    "description": "Group member count in search results",
+    "placeholders": {
+      "count": {
+        "type": "int"
+      }
+    }
+  },
+  "msgSearchNoResults": "No results found",
+  "@msgSearchNoResults": {
+    "description": "Empty state of global message search"
+  },
+  "msgSearchNoMessages": "No messages found",
+  "@msgSearchNoMessages": {
+    "description": "Empty state of in-chat message search"
+  },
+  "msgSearchMinChars": "Type at least 2 characters to search",
+  "@msgSearchMinChars": {
+    "description": "Hint before the user typed enough to search"
+  },
+  "msgSearchTooMany": "Too many searches — please wait a moment and try again.",
+  "@msgSearchTooMany": {
+    "description": "Shown when search is rate limited"
+  },
+  "msgSearchFailed": "Couldn't search right now. Try again.",
+  "@msgSearchFailed": {
+    "description": "Generic search failure"
+  },
+  "msgSearchOpenChatFailed": "Couldn't open that chat right now.",
+  "@msgSearchOpenChatFailed": {
+    "description": "Failure opening a chat from a search result"
+  },
+  "msgSearchFiltersNote": "Filters apply to messages only",
+  "@msgSearchFiltersNote": {
+    "description": "Note shown while message filters are active"
+  },
+  "tsTrue": "True",
+  "@tsTrue": {
+    "description": "True option of a true/false question"
+  },
+  "tsFalse": "False",
+  "@tsFalse": {
+    "description": "False option of a true/false question"
+  },
+  "answerHintTrueFalse": "Select True or False. Tap again to clear.",
+  "@answerHintTrueFalse": {
+    "description": "Hint under a true/false question"
+  },
+  "answerHintFillBlank": "Type the missing word or phrase",
+  "@answerHintFillBlank": {
+    "description": "Hint under a fill-in-the-blank question"
+  },
+  "answerHintNumeric": "Enter a number",
+  "@answerHintNumeric": {
+    "description": "Hint under a numeric-answer question"
+  },
+  "tsFillBlankInputHint": "Your answer",
+  "@tsFillBlankInputHint": {
+    "description": "Placeholder of the fill-in-the-blank input"
+  },
+  "tsNumericInputHint": "Enter a number, e.g. 3.14",
+  "@tsNumericInputHint": {
+    "description": "Placeholder of the numeric answer input"
+  },
+  "tsOptionImage": "Option image",
+  "@tsOptionImage": {
+    "description": "Accessibility label of an image inside an answer option"
+  },
+  "tsTypeMcq": "Single choice",
+  "@tsTypeMcq": {
+    "description": "Question type name in the test builder"
+  },
+  "tsTypeMsq": "Multi-select",
+  "@tsTypeMsq": {
+    "description": "Question type name in the test builder"
+  },
+  "tsTypeText": "Text",
+  "@tsTypeText": {
+    "description": "Question type name in the test builder"
+  },
+  "tsTypeTrueFalse": "True / False",
+  "@tsTypeTrueFalse": {
+    "description": "Question type name in the test builder"
+  },
+  "tsTypeFillBlank": "Fill in the blank",
+  "@tsTypeFillBlank": {
+    "description": "Question type name in the test builder"
+  },
+  "tsTypeNumeric": "Numeric",
+  "@tsTypeNumeric": {
+    "description": "Question type name in the test builder"
+  },
+  "tsBuilderCorrectAnswer": "Correct answer",
+  "@tsBuilderCorrectAnswer": {
+    "description": "Label above the correct-answer picker in the test builder"
+  },
+  "tsAcceptedAnswers": "Accepted answers",
+  "@tsAcceptedAnswers": {
+    "description": "Field label in the fill-in-the-blank builder"
+  },
+  "tsAcceptedAnswersHelper": "One per line. Any one of them counts as correct.",
+  "@tsAcceptedAnswersHelper": {
+    "description": "Helper text of the accepted answers field"
+  },
+  "tsCaseSensitive": "Case sensitive",
+  "@tsCaseSensitive": {
+    "description": "Switch label in the fill-in-the-blank builder"
+  },
+  "tsCorrectNumber": "Correct number",
+  "@tsCorrectNumber": {
+    "description": "Field label in the numeric builder"
+  },
+  "tsTolerance": "Allowed difference (±)",
+  "@tsTolerance": {
+    "description": "Field label of the numeric tolerance"
+  },
+  "tsToleranceHelper": "0 means the answer must match exactly",
+  "@tsToleranceHelper": {
+    "description": "Helper text of the numeric tolerance field"
+  },
+  "tsAddOptionImage": "Add image",
+  "@tsAddOptionImage": {
+    "description": "Button to attach an image to an answer option"
+  },
+  "tsRemoveOptionImage": "Remove image",
+  "@tsRemoveOptionImage": {
+    "description": "Button to remove an image from an answer option"
+  },
+  "tsOptionHint": "Option {number}",
+  "@tsOptionHint": {
+    "description": "Placeholder of an option text field",
+    "placeholders": {
+      "number": {
+        "type": "int"
+      }
+    }
+  },
+  "tsQuestionIncomplete": "Add the question text and its correct answer before saving.",
+  "@tsQuestionIncomplete": {
+    "description": "Snack shown when a question in the builder is incomplete"
+  },
+  "tsUploadingOptionImages": "Uploading option images…",
+  "@tsUploadingOptionImages": {
+    "description": "Progress label while option images upload during publish"
+  },
+  "tsSummaryPenalty": "Negative marking: −{marks}",
+  "@tsSummaryPenalty": {
+    "description": "Result summary chip: total marks deducted for wrong answers",
+    "placeholders": {
+      "marks": {
+        "type": "int"
+      }
+    }
+  },
+  "tsPenaltyShort": "−{marks} penalty",
+  "@tsPenaltyShort": {
+    "description": "Per-question chip: marks deducted for a wrong answer",
+    "placeholders": {
+      "marks": {
+        "type": "int"
+      }
+    }
+  },
+  "tsNegativeMarkingNote": "{marks} marks are deducted for a wrong answer. Unanswered questions are never penalised.",
+  "@tsNegativeMarkingNote": {
+    "description": "Hint in the test player: negative marking applies to this question",
+    "placeholders": {
+      "marks": {
+        "type": "int"
+      }
+    }
+  },
+  "classTimeStartsIn": "Starts in {duration}",
+  "@classTimeStartsIn": {
+    "description": "Countdown chip on a class that has not started yet",
+    "placeholders": {
+      "duration": {
+        "type": "String"
+      }
+    }
+  },
+  "classTimeLiveNow": "Live now",
+  "@classTimeLiveNow": {
+    "description": "Chip on a class that is currently running"
+  },
+  "classTimeStartingSoon": "Starting soon",
+  "@classTimeStartingSoon": {
+    "description": "Chip when a class starts in under a minute"
+  },
+  "classTimeEnded": "Ended",
+  "@classTimeEnded": {
+    "description": "Chip on a class whose time has passed"
+  },
+  "classTimeCancelled": "Cancelled",
+  "@classTimeCancelled": {
+    "description": "Chip on a cancelled class"
+  },
+  "classTimeDays": "{d}d",
+  "@classTimeDays": {
+    "description": "Compact duration: days only",
+    "placeholders": {
+      "d": {
+        "type": "int"
+      }
+    }
+  },
+  "classTimeDaysHours": "{d}d {h}h",
+  "@classTimeDaysHours": {
+    "description": "Compact duration: days and hours",
+    "placeholders": {
+      "d": {
+        "type": "int"
+      },
+      "h": {
+        "type": "int"
+      }
+    }
+  },
+  "classTimeHours": "{h}h",
+  "@classTimeHours": {
+    "description": "Compact duration: hours only",
+    "placeholders": {
+      "h": {
+        "type": "int"
+      }
+    }
+  },
+  "classTimeHoursMinutes": "{h}h {m}m",
+  "@classTimeHoursMinutes": {
+    "description": "Compact duration: hours and minutes",
+    "placeholders": {
+      "h": {
+        "type": "int"
+      },
+      "m": {
+        "type": "int"
+      }
+    }
+  },
+  "classTimeMinutes": "{m}m",
+  "@classTimeMinutes": {
+    "description": "Compact duration: minutes only",
+    "placeholders": {
+      "m": {
+        "type": "int"
+      }
+    }
+  },
+  "homeNextClass": "Next class",
+  "@homeNextClass": {
+    "description": "Home screen card title for the user's next upcoming class"
+  },
+  "shareAndEarnCta": "Share & earn",
+  "referralLinkCopied": "Referral link copied",
+  "referralCouldNotCreateLink": "Couldn't create your referral link",
+  "referralCopyLinkCta": "Copy link",
+  "referralYourLinkTitle": "Your referral link",
+  "referralTotalCommissionLabel": "Total commission earned",
+  "referralTestSeriesCommissionLabel": "Test series commission",
+  "referralClassCommissionLabel": "Class commission",
+  "referralPeopleAttributedLabel": "People who opened your link",
+  "referralPeopleConvertedLabel": "Of them, bought something",
+  "referralRecentCommissionsTitle": "Recent commissions",
+  "referralNoCommissionsYet": "No commissions yet",
+  "referralEarningsTitle": "Your commission earnings",
+  "referralTestSeriesKind": "Test series",
+  "referralClassKind": "Class",
+  "referralShareEarnHint": "Earn {percent}% when someone you refer buys this test series.",
+  "@referralShareEarnHint": {
+    "placeholders": {
+      "percent": {
+        "type": "String"
+      }
+    }
+  },
+  "referralClassEarnHint": "Refer & earn {percent}% commission when someone joins through your link.",
+  "@referralClassEarnHint": {
+    "placeholders": {
+      "percent": {
+        "type": "String"
+      }
+    }
+  },
+  "referralWindowNote": "Credit lasts {days} days after they open your link.",
+  "@referralWindowNote": {
+    "placeholders": {
+      "days": {
+        "type": "int"
+      }
+    }
+  },
+  "referralClassCommissionPercentNote": "You earn {percent}% on purchases made through this link.",
+  "@referralClassCommissionPercentNote": {
+    "placeholders": {
+      "percent": {
+        "type": "String"
+      }
+    }
+  },
+  "shareTargetTitle": "Share to LearnScroll",
+  "shareTargetCaptionHint": "Add a caption (optional)",
+  "shareTargetMessageHint": "Message",
+  "shareTargetSearchHint": "Search chats",
+  "shareTargetSending": "Sending...",
+  "shareTargetSendTo": "Send to {count} chat(s)",
+  "@shareTargetSendTo": {
+    "placeholders": {
+      "count": {
+        "type": "int"
+      }
+    }
+  },
+  "shareTargetSent": "Sent to {count} chat(s)",
+  "@shareTargetSent": {
+    "placeholders": {
+      "count": {
+        "type": "int"
+      }
+    }
+  },
+  "shareTargetSentPartial": "Sent to {done} of {total} chats",
+  "@shareTargetSentPartial": {
+    "placeholders": {
+      "done": {
+        "type": "int"
+      },
+      "total": {
+        "type": "int"
+      }
+    }
+  },
+  "shareTargetSendFailed": "Couldn't send. Please try again.",
+  "shareTargetLoadFailed": "Couldn't load your chats",
+  "shareTargetNoChats": "No chats found",
+  "shareTargetFileMissing": "The shared file is no longer available",
+  "shareLinkCopied": "Link copied",
+  "shareCardFailed": "Couldn't create the card. Try again.",
+  "shareCopyLink": "Copy link",
+  "shareLinkAction": "Share link",
+  "shareCardImage": "Share card image",
+  "shareScanToOpen": "Scan to open on LearnScroll",
+  "scanQrTitle": "Scan QR",
+  "scanQrTorch": "Flashlight",
+  "scanQrUnsupported": "This QR code isn't a LearnScroll code.",
+  "scanQrNoCodeInImage": "No QR code found in that image.",
+  "scanQrHint": "Point the camera at a LearnScroll QR code",
+  "scanQrGallery": "Pick from gallery",
+  "scanQrPermissionDenied": "Camera access is needed to scan QR codes.",
+  "scanQrOpenSettings": "Open settings",
+  "scanQrGrantAccess": "Allow camera",
+  "parentEntryScanQr": "Scan QR code",
+  "parentLinkNotAParentQr": "That QR code isn't a parent invite.",
+  "parentLinkScanQr": "Scan QR",
+  "parentLinkPasteLink": "Paste link",
+  "parentAccessQrHint": "Your parent can scan this QR, or open the shared link.",
+  "parentAccessShareMessageLink": "You've been invited to Parent/Guardian Access on LearnScroll.\n\nTap this link to open it: {link}\n\nOr install the app, choose \"I'm a parent\" on the login screen and enter this code: {code}",
+  "@parentAccessShareMessageLink": {
+    "placeholders": {
+      "code": {
+        "type": "String"
+      },
+      "link": {
         "type": "String"
       }
     }

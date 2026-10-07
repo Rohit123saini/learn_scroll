@@ -1031,6 +1031,95 @@ class SearchResultModel {
 }
 
 // ======================================================================
+// 🔥 NAYA (6.2) — PEOPLE + GROUPS SEARCH
+// GET /message/search/directory/?q=...&type=all|people|groups
+// ======================================================================
+class DirectoryPersonModel {
+  final String id;
+  final String username;
+  final String displayName;
+  final String? profilePhoto;
+  final bool isMutual;
+  final String relation; // "mutual" | "following" | "follower"
+
+  DirectoryPersonModel({
+    required this.id,
+    required this.username,
+    required this.displayName,
+    this.profilePhoto,
+    this.isMutual = false,
+    this.relation = 'follower',
+  });
+
+  factory DirectoryPersonModel.fromJson(Map<String, dynamic> json) {
+    final username = json['username']?.toString() ?? '';
+    final display = json['display_name']?.toString() ?? '';
+    return DirectoryPersonModel(
+      id: json['id']?.toString() ?? '',
+      username: username,
+      displayName: display.isNotEmpty ? display : (username.isNotEmpty ? username : 'Unknown'),
+      profilePhoto: json['profile_photo']?.toString(),
+      isMutual: json['is_mutual'] == true,
+      relation: json['relation']?.toString() ?? 'follower',
+    );
+  }
+}
+
+class DirectoryGroupModel {
+  final String id;
+  final String conversationId; // chat kholne ke liye yahi chahiye
+  final String name;
+  final String? photoUrl;
+  final String? topicTag;
+  final int membersCount;
+
+  DirectoryGroupModel({
+    required this.id,
+    required this.conversationId,
+    required this.name,
+    this.photoUrl,
+    this.topicTag,
+    this.membersCount = 0,
+  });
+
+  factory DirectoryGroupModel.fromJson(Map<String, dynamic> json) {
+    return DirectoryGroupModel(
+      id: json['id']?.toString() ?? '',
+      conversationId: json['conversation_id']?.toString() ?? '',
+      name: json['name']?.toString() ?? 'Group',
+      photoUrl: json['photo_url']?.toString(),
+      topicTag: json['topic_tag']?.toString(),
+      membersCount: (json['members_count'] as num?)?.toInt() ?? 0,
+    );
+  }
+}
+
+class DirectorySearchResult {
+  final List<DirectoryPersonModel> people;
+  final bool peopleHasMore;
+  final List<DirectoryGroupModel> groups;
+  final bool groupsHasMore;
+
+  const DirectorySearchResult({
+    this.people = const [],
+    this.peopleHasMore = false,
+    this.groups = const [],
+    this.groupsHasMore = false,
+  });
+
+  factory DirectorySearchResult.fromJson(Map<String, dynamic> json) {
+    List<T> parse<T>(dynamic raw, T Function(Map<String, dynamic>) f) =>
+        raw is List ? raw.whereType<Map<String, dynamic>>().map(f).toList() : <T>[];
+    return DirectorySearchResult(
+      people: parse(json['people'], DirectoryPersonModel.fromJson),
+      peopleHasMore: json['people_has_more'] == true,
+      groups: parse(json['groups'], DirectoryGroupModel.fromJson),
+      groupsHasMore: json['groups_has_more'] == true,
+    );
+  }
+}
+
+// ======================================================================
 // 🔥 NAYA (Phase 1, §3) — SMART REPLY — POST /message/ai/smart-replies/
 // ======================================================================
 class SmartReplyModel {

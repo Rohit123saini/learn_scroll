@@ -1100,6 +1100,28 @@ class _ChatScreenState extends State<ChatScreen> with _L10nCache<ChatScreen> {
     }
   }
 
+  // 🔥 NAYA — Task 7.1: Listen aur Transcribe bhi Translate jaise hi
+  // 3-dot menu toggles hain (default OFF, per-device persist).
+  Future<void> _toggleListenPermission() async {
+    final newValue = !TranslateService.instance.listenEnabled.value;
+    await TranslateService.instance.setListenEnabled(newValue);
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+        content: Text(newValue ? _l10n.chatListenEnabled : _l10n.chatListenDisabled),
+      ));
+    }
+  }
+
+  Future<void> _toggleTranscribePermission() async {
+    final newValue = !TranslateService.instance.transcribeEnabled.value;
+    await TranslateService.instance.setTranscribeEnabled(newValue);
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+        content: Text(newValue ? _l10n.chatTranscribeEnabled : _l10n.chatTranscribeDisabled),
+      ));
+    }
+  }
+
   // 🔥 NAYA — block/unblock ke liye current status backend se le aao.
   // Group chat me ye sawal hi nahi uthta, aur agar `otherParticipant`
   // kisi wajah se null ho (data abhi load nahi hua) to bhi silently
@@ -1909,6 +1931,12 @@ class _ChatScreenState extends State<ChatScreen> with _L10nCache<ChatScreen> {
           );
           Navigator.of(context).pop(true);
         }
+        break;
+      // Block / unblock between the two people of this chat (server sends
+      // the same event to both and never says who did it). Re-check
+      // my block state so the menu / banner follow immediately.
+      case 'block_changed':
+        _loadBlockStatus();
         break;
       // 🔥 CALL EVENTS — backend se call_event type me aate hain
       case 'call_event':
@@ -3884,6 +3912,8 @@ class _ChatScreenState extends State<ChatScreen> with _L10nCache<ChatScreen> {
             onSelected: (value) {
               if (value == 'toggle_mute') _toggleMuteNotifications();
               if (value == 'toggle_translate') _toggleTranslatePermission(); // 🔥 NAYA — Task 6
+              if (value == 'toggle_listen') _toggleListenPermission(); // 🔥 NAYA — Task 7.1
+              if (value == 'toggle_transcribe') _toggleTranscribePermission(); // 🔥 NAYA — Task 7.1
               if (value == 'filter') _showFilterSheet();
               if (value == 'wallpaper') _showWallpaperSheet();
               if (value == 'toggle_block') _toggleBlockUser();
@@ -3929,6 +3959,41 @@ class _ChatScreenState extends State<ChatScreen> with _L10nCache<ChatScreen> {
                       ),
                       const SizedBox(width: 10),
                       Text(translateOn ? _l10n.chatDisableTranslate : _l10n.chatEnableTranslate),
+                    ]);
+                  },
+                ),
+              ),
+              // 🔥 NAYA — Task 7.1: Listen + Transcribe toggles (default OFF)
+              PopupMenuItem<String>(
+                value: 'toggle_listen',
+                child: ValueListenableBuilder<bool>(
+                  valueListenable: TranslateService.instance.listenEnabled,
+                  builder: (context, isOn, _) {
+                    return Row(children: [
+                      Icon(
+                        Icons.volume_up_outlined,
+                        color: isOn ? Theme.of(context).colorScheme.primary : Theme.of(context).colorScheme.onSurface,
+                        size: 20,
+                      ),
+                      const SizedBox(width: 10),
+                      Text(isOn ? _l10n.chatDisableListen : _l10n.chatEnableListen),
+                    ]);
+                  },
+                ),
+              ),
+              PopupMenuItem<String>(
+                value: 'toggle_transcribe',
+                child: ValueListenableBuilder<bool>(
+                  valueListenable: TranslateService.instance.transcribeEnabled,
+                  builder: (context, isOn, _) {
+                    return Row(children: [
+                      Icon(
+                        Icons.subtitles_outlined,
+                        color: isOn ? Theme.of(context).colorScheme.primary : Theme.of(context).colorScheme.onSurface,
+                        size: 20,
+                      ),
+                      const SizedBox(width: 10),
+                      Text(isOn ? _l10n.chatDisableTranscribe : _l10n.chatEnableTranscribe),
                     ]);
                   },
                 ),
@@ -5417,18 +5482,33 @@ class _MessageBubble extends StatelessWidget {
         // bubble ke text render path me hi missing piece the, in par koi
         // dependency nahi thi.
         final txt = message.text ?? '';
+        // Task 7.1 — Listen/Translate dono off ho to row bilkul nahi
+        // dikhti (extra padding bhi nahi). Dono widgets khud bhi apne
+        // notifier se gated hain.
         final actionRow = txt.trim().isEmpty
             ? null
-            : Padding(
-                padding: const EdgeInsets.only(top: 2),
-                child: Row(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    ListenButton(messageId: message.id, text: txt),
-                    const SizedBox(width: 4),
-                    TranslateToggle(messageId: message.id, text: txt),
-                  ],
-                ),
+            : AnimatedBuilder(
+                animation: Listenable.merge([
+                  TranslateService.instance.listenEnabled,
+                  TranslateService.instance.translateEnabled,
+                ]),
+                builder: (context, _) {
+                  if (!TranslateService.instance.listenEnabled.value &&
+                      !TranslateService.instance.translateEnabled.value) {
+                    return const SizedBox.shrink();
+                  }
+                  return Padding(
+                    padding: const EdgeInsets.only(top: 2),
+                    child: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        ListenButton(messageId: message.id, text: txt),
+                        const SizedBox(width: 4),
+                        TranslateToggle(messageId: message.id, text: txt),
+                      ],
+                    ),
+                  );
+                },
               );
         if (message.linkPreview != null) {
           return Column(
@@ -6537,13 +6617,20 @@ class _AudioBubbleState extends State<_AudioBubble> with _L10nCache<_AudioBubble
         // `/message/ai/transcribe/` via `AiStudyService.transcribe`,
         // §17.4) taaki purane voice notes ya auto-transcription miss
         // hone ki soorat me bhi user transcript pa sake.
-        if (msg.transcript != null && msg.transcript!.trim().isNotEmpty)
-          Padding(
-            padding: const EdgeInsets.only(top: 4),
-            child: _TranscriptText(text: msg.transcript!.trim(), textColor: textColor),
-          )
-        else if (url != null && url.isNotEmpty && !msg.isSending)
-          Padding(
+        // 🔥 Task 7.1 — transcript + manual Transcribe button ab 3-dot
+        // menu ke "transcribe" toggle ke peeche hain (default OFF).
+        ValueListenableBuilder<bool>(
+          valueListenable: TranslateService.instance.transcribeEnabled,
+          builder: (context, transcribeOn, _) {
+            if (!transcribeOn) return const SizedBox.shrink();
+            if (msg.transcript != null && msg.transcript!.trim().isNotEmpty) {
+              return Padding(
+                padding: const EdgeInsets.only(top: 4),
+                child: _TranscriptText(text: msg.transcript!.trim(), textColor: textColor),
+              );
+            }
+            if (url != null && url.isNotEmpty && !msg.isSending) {
+              return Padding(
             padding: const EdgeInsets.only(top: 4, left: 4),
             child: GestureDetector(
               onTap: _transcribing ? null : _transcribe,
@@ -6571,7 +6658,11 @@ class _AudioBubbleState extends State<_AudioBubble> with _L10nCache<_AudioBubble
                 ],
               ),
             ),
-          ),
+          );
+            }
+            return const SizedBox.shrink();
+          },
+        ),
       ],
     );
   }

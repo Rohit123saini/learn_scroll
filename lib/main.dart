@@ -26,7 +26,7 @@ import 'services/auth_service.dart';
 import 'services/account_manager.dart'; // P15-FE — multi-account
 import 'profile/api_service.dart' as profile_api; // P15-FE — clearProfileCache hook
 import 'services/session_service.dart';
-import 'services/deep_link_service.dart'; // P9-FE — learnscroll://u/<username>
+import 'services/deep_link_service.dart'; // P9-FE / TASK 11 — profile + parent-invite links, QR payloads
 import 'services/activity_service.dart'; // P14-FE — foreground-time heartbeat
 // 🔥 NAYA — sliding-expiry session: global 401 "TOKEN_EXPIRED"
 // interceptor (backend/login/authentication.py). Ek hi jagah likha hai —
@@ -519,7 +519,7 @@ class _MyAppState extends State<MyApp> with WidgetsBindingObserver {
               // isliye ye named route register hona ZAROORI hai. Pehle
               // `routes:` map tha hi nahi, to wo call exception deti.
               routes: {
-                '/login': (_) => const LoginScreen(),
+                '/login': (_) => const DeepLinkGate(child: LoginScreen()), // TASK 11 — loginless parent links
                 '/home': (_) => const DeepLinkGate(child: HomeScreen()), // P9-FE
               },
               // 🔥 NAYA — WhatsApp-style floating call bar jo call minimize karne
@@ -545,7 +545,7 @@ class _MyAppState extends State<MyApp> with WidgetsBindingObserver {
                   if (snapshot.hasData && snapshot.data == true) {
                     return const DeepLinkGate(child: HomeScreen()); // P9-FE
                   } else {
-                    return const LoginScreen();
+                    return const DeepLinkGate(child: LoginScreen()); // TASK 11 — loginless parent links
                   }
                 },
               ),

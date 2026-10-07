@@ -40,6 +40,7 @@ import '../../services/auth_service.dart';
 import '../models/tuitionclass_models.dart';
 import '../services/tuitionclass_api_service.dart';
 import '../theme/tuitionclass_theme.dart';
+import '../widgets/class_time_chip.dart'; // TASK 10.3
 import '../utils/tuitionclass_datetime.dart';
 import '../utils/tuitionclass_upload_limits.dart';
 import 'banned_students_screen.dart';
@@ -85,6 +86,10 @@ import 'doubts_screen.dart';
 import 'assignments_screen.dart';
 import 'classroom_purchases_screen.dart';
 import 'waitlist_screen.dart';
+// TASK 9.3 — the class's own tests (Tests tab) + "Open test" on the auto notice.
+import '../../testseries/screens/test_series_detail_screen.dart';
+import '../../testseries/services/testseries_models.dart';
+import '../../testseries/services/testseries_service.dart';
 
 // FIX (design-system drift): this file already imported tuitionclass_theme.dart
 // but ALSO kept its own locally-duplicated literal color consts — two
@@ -119,7 +124,10 @@ class ClassroomDetailScreen extends StatefulWidget {
   /// Optional — pass the card's [Classroom] from Explore for an instant
   /// first paint; the screen still refetches fresh data on open.
   final Classroom? initial;
-  const ClassroomDetailScreen({super.key, required this.classroomId, this.initial});
+  /// Optional — name of the tab to open first ('Tests' from a "new test"
+  /// notification). Ignored when this user can't see that tab.
+  final String? initialTab;
+  const ClassroomDetailScreen({super.key, required this.classroomId, this.initial, this.initialTab});
 
   @override
   State<ClassroomDetailScreen> createState() => _ClassroomDetailScreenState();
@@ -601,7 +609,8 @@ class _ClassroomDetailScreenState extends State<ClassroomDetailScreen> {
                     const SizedBox(width: 8),
                     Expanded(
                       child: Text(
-                        'Refer & Earn ${_classroom!.referralCommissionPercent.toStringAsFixed(0)}% commission when someone joins through your link.',
+                        AppLocalizations.of(context)!
+                            .referralClassEarnHint(_classroom!.referralCommissionPercent.toStringAsFixed(0)),
                         style: const TextStyle(fontSize: 12.5, fontWeight: FontWeight.w600),
                       ),
                     ),
@@ -615,7 +624,7 @@ class _ClassroomDetailScreenState extends State<ClassroomDetailScreen> {
                       Navigator.pop(ctx);
                       _openReferLink();
                     },
-                    child: const Text('Get My Referral Link'),
+                    child: Text(AppLocalizations.of(context)!.shareAndEarnCta),
                   ),
                 ),
               ],
@@ -640,9 +649,9 @@ class _ClassroomDetailScreenState extends State<ClassroomDetailScreen> {
             mainAxisSize: MainAxisSize.min,
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              const Text('Your Referral Link', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
+              Text(AppLocalizations.of(ctx)!.referralYourLinkTitle, style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
               const SizedBox(height: 4),
-              Text('You earn ${link.commissionPercent.toStringAsFixed(0)}% on purchases made through this link.',
+              Text(AppLocalizations.of(ctx)!.referralClassCommissionPercentNote(link.commissionPercent.toStringAsFixed(0)),
                   style: TextStyle(fontSize: 12, color: Colors.grey.shade600)),
               const SizedBox(height: 14),
               Container(
@@ -652,23 +661,42 @@ class _ClassroomDetailScreenState extends State<ClassroomDetailScreen> {
                 child: Text(link.webUrl, style: const TextStyle(fontSize: 12.5)),
               ),
               const SizedBox(height: 12),
-              SizedBox(
-                width: double.infinity,
-                child: ElevatedButton(
-                  style: ElevatedButton.styleFrom(backgroundColor: _kNavy, foregroundColor: Colors.white),
-                  onPressed: () async {
-                    await Clipboard.setData(ClipboardData(text: link.webUrl));
-                    _snack('Referral link copied.');
-                  },
-                  child: const Text('Copy Link'),
-                ),
+              Row(
+                children: [
+                  Expanded(
+                    child: OutlinedButton(
+                      onPressed: () async {
+                        await Clipboard.setData(ClipboardData(text: link.webUrl));
+                        _snack(AppLocalizations.of(ctx)!.referralLinkCopied);
+                      },
+                      child: Text(AppLocalizations.of(ctx)!.referralCopyLinkCta),
+                    ),
+                  ),
+                  const SizedBox(width: 10),
+                  Expanded(
+                    child: ElevatedButton(
+                      style: ElevatedButton.styleFrom(backgroundColor: _kNavy, foregroundColor: Colors.white),
+                      onPressed: () async {
+                        // TASK 12 / 12.5: real share sheet, clipboard fallback.
+                        final text = link.shareText.isNotEmpty ? link.shareText : link.webUrl;
+                        try {
+                          await SharePlus.instance.share(ShareParams(text: text));
+                        } catch (_) {
+                          await Clipboard.setData(ClipboardData(text: text));
+                          _snack(AppLocalizations.of(ctx)!.referralLinkCopied);
+                        }
+                      },
+                      child: Text(AppLocalizations.of(ctx)!.shareAndEarnCta),
+                    ),
+                  ),
+                ],
               ),
             ],
           ),
         ),
       );
     } catch (e) {
-      _snack(e is TuitionClassApiException ? e.message : 'Could not create your referral link.');
+      _snack(e is TuitionClassApiException ? e.message : AppLocalizations.of(context)!.referralCouldNotCreateLink);
     }
   }
 
@@ -1150,7 +1178,7 @@ class _ClassroomDetailScreenState extends State<ClassroomDetailScreen> {
 
     final classroom = _classroom!;
     final tabs = _hasFullAccess || _canManage
-        ? const ['About', 'Schedule', 'Materials', 'Notices', 'Doubts', 'Reviews', 'Assignments']
+        ? const ['About', 'Schedule', 'Materials', 'Notices', 'Doubts', 'Reviews', 'Assignments', 'Tests']
         : const ['About', 'Reviews'];
 
     return Scaffold(
@@ -1172,6 +1200,7 @@ class _ClassroomDetailScreenState extends State<ClassroomDetailScreen> {
       body: DefaultTabController(
         key: ValueKey('tabs-${tabs.length}'),
         length: tabs.length,
+        initialIndex: (widget.initialTab != null && tabs.contains(widget.initialTab)) ? tabs.indexOf(widget.initialTab!) : 0,
         child: NestedScrollView(
           headerSliverBuilder: (context, innerBoxIsScrolled) => [
             _buildSliverAppBar(classroom),
@@ -1184,7 +1213,7 @@ class _ClassroomDetailScreenState extends State<ClassroomDetailScreen> {
                 unselectedLabelColor: Colors.grey,
                 indicatorColor: _kNavy,
                 labelStyle: const TextStyle(fontWeight: FontWeight.bold, fontSize: 13),
-                tabs: tabs.map((t) => Tab(text: t)).toList(),
+                tabs: tabs.map((t) => Tab(text: t == 'Tests' ? AppLocalizations.of(context)!.classTestsTab : t)).toList(),
               )),
             ),
           ],
@@ -1406,6 +1435,8 @@ class _ClassroomDetailScreenState extends State<ClassroomDetailScreen> {
         );
       case 'Assignments':
         return _AssignmentsTab(classroomId: widget.classroomId, canManage: _canManage, canSubmit: _hasFullAccess && !_canManage);
+      case 'Tests':
+        return _TestsTab(classroomId: widget.classroomId);
       default:
         return const SizedBox.shrink();
     }
@@ -1905,6 +1936,16 @@ class _ScheduleTabState extends State<_ScheduleTab> with AutomaticKeepAliveClien
                 // surface cross-timezone scheduling).
                 Text('${TuitionClassDateTime.of(context).scheduleTimeLabel(s)} · ${s.durationMinutes} min',
                     style: TextStyle(fontSize: 12, color: Colors.grey.shade600)),
+                // TASK 10.3 — next occurrence (server-computed, DST-safe) in
+                // the viewer's local time + live countdown.
+                if (s.isActive && s.nextStart != null) ...[
+                  const SizedBox(height: 6),
+                  ClassTimeChip(
+                    start: s.nextStart!,
+                    end: s.nextStart!.add(Duration(minutes: s.durationMinutes)),
+                    compact: true,
+                  ),
+                ],
               ],
             ),
           ),
@@ -1984,6 +2025,11 @@ class _ScheduleTabState extends State<_ScheduleTab> with AutomaticKeepAliveClien
                             : 'NOT JOINABLE YET',
                         style: TextStyle(fontSize: 11, color: color, fontWeight: FontWeight.bold),
                       ),
+                      // TASK 10.3 — "Starts in 2h 10m" / "Live now".
+                      if (s.status == SessionStatus.scheduled || s.status == SessionStatus.live) ...[
+                        const SizedBox(height: 4),
+                        ClassTimeChip.session(s, showTime: false, compact: true),
+                      ],
                     ],
                   ),
                 ),
@@ -2485,6 +2531,17 @@ class _NoticesTabState extends State<_NoticesTab> with AutomaticKeepAliveClientM
                       ),
                       const SizedBox(height: 4),
                       Text(n.message, style: const TextStyle(fontSize: 13, height: 1.4)),
+                      // TASK 9.2/9.3: the automatic "new test" notice links to the test.
+                      if (n.isTestNotice)
+                        Align(
+                          alignment: Alignment.centerLeft,
+                          child: TextButton.icon(
+                            style: TextButton.styleFrom(foregroundColor: _kNavy, padding: EdgeInsets.zero, minimumSize: const Size(0, 36)),
+                            onPressed: () => _openClassTest(context, n.sourceId!),
+                            icon: const Icon(Icons.quiz_outlined, size: 18),
+                            label: Text(AppLocalizations.of(context)!.classTestOpen),
+                          ),
+                        ),
                       const SizedBox(height: 6),
                       Text('${n.postedBy.fullName} · ${_fmtDate(n.createdAt)}', style: TextStyle(fontSize: 11, color: Colors.grey.shade600)),
                     ],
@@ -3182,6 +3239,156 @@ Widget _dropdown({required String value, required Map<String, String> items, req
     items: items.entries.map((e) => DropdownMenuItem(value: e.key, child: Text(e.value))).toList(),
     onChanged: onChanged,
   );
+}
+
+// ===========================================================================
+// TASK 9.3 — Tests tab: the test series that belong to THIS class.
+//
+// Class tests are always free (backend: testseries.policy.ALWAYS_FREE_SOURCES),
+// so no price is ever shown, only a "Free" chip. The list is the normal
+// `/testseries/` endpoint narrowed with context_type/context_id; the server
+// already hides it from non-members, so this tab needs no access logic of its
+// own. Tapping a test opens the regular test-series detail screen (start /
+// attempts / results all live there).
+// ===========================================================================
+void _openClassTest(BuildContext context, String seriesId, {TestSeriesModel? series}) {
+  Navigator.push(
+    context,
+    MaterialPageRoute(builder: (_) => TestSeriesDetailScreen(seriesId: seriesId, initialSeries: series)),
+  );
+}
+
+class _TestsTab extends StatefulWidget {
+  final int classroomId;
+  const _TestsTab({required this.classroomId});
+
+  @override
+  State<_TestsTab> createState() => _TestsTabState();
+}
+
+class _TestsTabState extends State<_TestsTab> with AutomaticKeepAliveClientMixin {
+  List<TestSeriesModel> _items = [];
+  bool _loading = true;
+  bool _failed = false;
+
+  @override
+  bool get wantKeepAlive => true;
+
+  @override
+  void initState() {
+    super.initState();
+    _load();
+  }
+
+  Future<void> _load() async {
+    setState(() {
+      _loading = true;
+      _failed = false;
+    });
+    try {
+      final all = await TestSeriesService.listForContext(contextType: 'classroom', contextId: widget.classroomId);
+      if (!mounted) return;
+      setState(() {
+        // Drafts belong to the teacher's own editor; the class only shows live tests.
+        _items = all.where((s) => s.status == 'published').toList();
+        _loading = false;
+      });
+    } catch (_) {
+      if (!mounted) return;
+      setState(() {
+        _loading = false;
+        _failed = true;
+      });
+    }
+  }
+
+  Widget _chip(String label, Color color) => Container(
+        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+        decoration: BoxDecoration(color: color.withValues(alpha: 0.12), borderRadius: BorderRadius.circular(20)),
+        child: Text(label, style: TextStyle(fontSize: 11, fontWeight: FontWeight.w700, color: color)),
+      );
+
+  Widget _statusChip(TestSeriesModel s, AppLocalizations l10n) {
+    switch (s.windowState) {
+      case 'not_started':
+        return _chip(l10n.classTestStatusUpcoming, Colors.orange.shade800);
+      case 'ended':
+      case 'late_closed':
+        return _chip(l10n.classTestStatusEnded, Colors.grey.shade600);
+      default:
+        return s.isLive ? _chip(l10n.classTestStatusLive, Colors.red.shade600) : const SizedBox.shrink();
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    super.build(context);
+    final l10n = AppLocalizations.of(context)!;
+    return RefreshIndicator(
+      color: _kNavy,
+      onRefresh: _load,
+      child: ListView(
+        physics: const AlwaysScrollableScrollPhysics(),
+        padding: const EdgeInsets.fromLTRB(16, 16, 16, 24),
+        children: [
+          if (_loading)
+            const Padding(padding: EdgeInsets.only(top: 60), child: TuitionClassLoading())
+          else if (_failed)
+            TuitionClassErrorState(message: l10n.classTestsLoadFailed, onRetry: _load)
+          else if (_items.isEmpty)
+            _InlineMessage(icon: Icons.quiz_outlined, title: l10n.classTestsEmpty, subtitle: l10n.classTestsEmptyHint)
+          else
+            ..._items.map((s) {
+              final meta = <String>[
+                l10n.classTestQuestions(s.questionCount),
+                if (s.durationMinutes != null) l10n.classTestMinutes(s.durationMinutes!),
+              ].join(' · ');
+              return InkWell(
+                borderRadius: BorderRadius.circular(12),
+                onTap: () => _openClassTest(context, s.id, series: s),
+                child: Container(
+                  margin: const EdgeInsets.only(bottom: 10),
+                  padding: const EdgeInsets.all(14),
+                  decoration: BoxDecoration(
+                    color: Colors.white,
+                    borderRadius: BorderRadius.circular(12),
+                    boxShadow: [BoxShadow(color: Colors.black.withValues(alpha: 0.04), blurRadius: 6, offset: const Offset(0, 2))],
+                  ),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Row(
+                        children: [
+                          const Icon(Icons.quiz_outlined, size: 18, color: _kNavy),
+                          const SizedBox(width: 8),
+                          Expanded(child: Text(s.title, style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 14))),
+                          const Icon(Icons.chevron_right_rounded, color: Colors.grey),
+                        ],
+                      ),
+                      if (s.description.trim().isNotEmpty) ...[
+                        const SizedBox(height: 6),
+                        Text(s.description, maxLines: 2, overflow: TextOverflow.ellipsis, style: TextStyle(fontSize: 12.5, color: Colors.grey.shade700, height: 1.35)),
+                      ],
+                      const SizedBox(height: 10),
+                      Wrap(
+                        spacing: 8,
+                        runSpacing: 6,
+                        crossAxisAlignment: WrapCrossAlignment.center,
+                        children: [
+                          _chip(l10n.classTestFree, Colors.green.shade700),
+                          _statusChip(s, l10n),
+                          Text(meta, style: TextStyle(fontSize: 11.5, color: Colors.grey.shade600)),
+                        ],
+                      ),
+                    ],
+                  ),
+                ),
+              );
+            }),
+        ],
+      ),
+    );
+  }
 }
 
 class _InlineMessage extends StatelessWidget {

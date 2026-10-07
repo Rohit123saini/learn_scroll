@@ -11,16 +11,21 @@ import 'package:share_plus/share_plus.dart';
 
 import '../l10n/app_localizations.dart';
 import '../services/deep_link_service.dart';
+import 'scan_qr_screen.dart';
 
 // ============================================================
-// P9-FE — "Share profile" sheet.
+// P9-FE — "Share profile" sheet.   (TASK 11.2: https link + scan button + l10n)
 //
 //   showShareProfileSheet(context, username: .., fullName: .., photoUrl: ..)
 //
-//   • a card (avatar, name, @username, QR of learnscroll://u/<username>)
+//   • a card (avatar, name, @username, QR of https://<webHost>/u/<username>)
+//       The QR/link is now an https link: any phone camera / WhatsApp / browser can open it
+//       (installed app -> opens the profile via App Links / Universal Links; otherwise the web
+//       page). The in-app scanner and DeepLinkService still accept learnscroll://u/<username>.
 //   • Share card  -> card rendered to a PNG (RepaintBoundary) + system share sheet
 //   • Share link  -> system share with the link as text
 //   • Copy link   -> clipboard
+//   • Scan QR     -> opens the in-app scanner (ScanQrScreen)
 // ============================================================
 
 Future<void> showShareProfileSheet(
@@ -92,7 +97,7 @@ class _ShareProfileSheetState extends State<_ShareProfileSheet> {
     await Clipboard.setData(ClipboardData(text: _link));
     if (!mounted) return;
     HapticFeedback.selectionClick();
-    ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Link copied')));
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(AppLocalizations.of(context)!.shareLinkCopied)));
   }
 
   Future<void> _shareLink() async {
@@ -118,6 +123,7 @@ class _ShareProfileSheetState extends State<_ShareProfileSheet> {
     if (_busy) return;
     setState(() => _busy = true);
     final messenger = ScaffoldMessenger.of(context);
+    final cardFailed = AppLocalizations.of(context)!.shareCardFailed;
     try {
       final file = await _renderCard();
       if (file == null) throw Exception('render failed');
@@ -127,7 +133,7 @@ class _ShareProfileSheetState extends State<_ShareProfileSheet> {
         sharePositionOrigin: _origin(),
       ));
     } catch (_) {
-      messenger.showSnackBar(const SnackBar(content: Text("Couldn't create the card. Try again.")));
+      messenger.showSnackBar(SnackBar(content: Text(cardFailed)));
     } finally {
       if (mounted) setState(() => _busy = false);
     }
@@ -156,7 +162,7 @@ class _ShareProfileSheetState extends State<_ShareProfileSheet> {
                 child: OutlinedButton.icon(
                   onPressed: _copy,
                   icon: const Icon(Icons.link_rounded, size: 18),
-                  label: const Text('Copy link'),
+                  label: Text(l10n.shareCopyLink),
                 ),
               ),
               const SizedBox(width: 10),
@@ -164,7 +170,7 @@ class _ShareProfileSheetState extends State<_ShareProfileSheet> {
                 child: OutlinedButton.icon(
                   onPressed: _shareLink,
                   icon: const Icon(Icons.ios_share_rounded, size: 18),
-                  label: const Text('Share link'),
+                  label: Text(l10n.shareLinkAction),
                 ),
               ),
             ]),
@@ -176,7 +182,21 @@ class _ShareProfileSheetState extends State<_ShareProfileSheet> {
                 icon: _busy
                     ? const SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2))
                     : const Icon(Icons.image_outlined, size: 18),
-                label: const Text('Share card image'),
+                label: Text(l10n.shareCardImage),
+              ),
+            ),
+            const SizedBox(height: 10),
+            SizedBox(
+              width: double.infinity,
+              child: OutlinedButton.icon(
+                onPressed: () {
+                  // Close the sheet first, then open the scanner on the root navigator.
+                  final nav = Navigator.of(context);
+                  nav.pop();
+                  nav.push(MaterialPageRoute(builder: (_) => const ScanQrScreen()));
+                },
+                icon: const Icon(Icons.qr_code_scanner_rounded, size: 18),
+                label: Text(l10n.scanQrTitle),
               ),
             ),
           ],
@@ -238,8 +258,8 @@ class _ShareProfileSheetState extends State<_ShareProfileSheet> {
           ),
         ),
         const SizedBox(height: 14),
-        const Text('Scan to open on LearnScroll',
-            style: TextStyle(fontSize: 12, fontWeight: FontWeight.w600, color: Colors.white70)),
+        Text(AppLocalizations.of(context)!.shareScanToOpen,
+            style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w600, color: Colors.white70)),
       ]),
     );
   }

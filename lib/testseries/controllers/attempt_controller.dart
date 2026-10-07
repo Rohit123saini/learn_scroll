@@ -75,6 +75,7 @@ class TestAttemptController extends ChangeNotifier {
   final Map<String, List<String>> _order = {};
   final Set<String> _orderTouched = {};
   final Map<String, Map<String, String>> _match = {};
+  final Map<String, bool> _tf = {};
   final Map<String, TextEditingController> _text = {};
   final Map<String, String> _lastText = {};
   final Map<String, File> _files = {};
@@ -168,7 +169,10 @@ class TestAttemptController extends ChangeNotifier {
   void _setQuestions(List<TsQuestion> qs) {
     questions = qs;
     for (final q in qs) {
-      if (q.type == TsQuestionType.text) {
+      // text + fill_blank + numeric teeno ek TextEditingController se chalte hain.
+      if (q.type == TsQuestionType.text ||
+          q.type == TsQuestionType.fillBlank ||
+          q.type == TsQuestionType.numeric) {
         _text.putIfAbsent(q.id, () => TextEditingController());
       }
       if (q.type == TsQuestionType.list && q.listMode == TsListMode.order) {
@@ -227,6 +231,11 @@ class TestAttemptController extends ChangeNotifier {
       if (keep.isNotEmpty) _match[qid] = keep;
     });
 
+    d.tf.forEach((qid, v) {
+      final q = byId[qid];
+      if (q != null && q.type == TsQuestionType.trueFalse) _tf[qid] = v;
+    });
+
     d.text.forEach((qid, t) {
       final c = _text[qid];
       if (c != null && t.isNotEmpty) {
@@ -237,6 +246,7 @@ class TestAttemptController extends ChangeNotifier {
 
     var lostFile = false;
     d.filePaths.forEach((qid, path) {
+      if (byId[qid]?.type != TsQuestionType.text) return; // photo sirf subjective jawab me
       if (!_text.containsKey(qid)) return;
       final f = File(path);
       if (f.existsSync()) {
@@ -254,6 +264,7 @@ class TestAttemptController extends ChangeNotifier {
     draftRestored = _mcq.isNotEmpty ||
         _msq.isNotEmpty ||
         _match.isNotEmpty ||
+        _tf.isNotEmpty ||
         _orderTouched.isNotEmpty ||
         _lastText.isNotEmpty ||
         _files.isNotEmpty;
@@ -380,6 +391,11 @@ class TestAttemptController extends ChangeNotifier {
         return _orderTouched.contains(q.id);
       case TsQuestionType.text:
         return (_text[q.id]?.text.trim().isNotEmpty ?? false) || _files.containsKey(q.id);
+      case TsQuestionType.trueFalse:
+        return _tf.containsKey(q.id);
+      case TsQuestionType.fillBlank:
+      case TsQuestionType.numeric:
+        return _text[q.id]?.text.trim().isNotEmpty ?? false;
       case TsQuestionType.unknown:
         return false;
     }
@@ -389,6 +405,7 @@ class TestAttemptController extends ChangeNotifier {
 
   String? mcqSelection(String qid) => _mcq[qid];
   Set<String> msqSelection(String qid) => _msq[qid] ?? const <String>{};
+  bool? trueFalseSelection(String qid) => _tf[qid];
   List<String> orderOf(TsQuestion q) => _order[q.id] ?? q.choices.map((o) => o.id).toList();
   bool orderTouched(String qid) => _orderTouched.contains(qid);
   Map<String, String> matchPairs(String qid) => _match[qid] ?? const <String, String>{};
@@ -409,6 +426,16 @@ class TestAttemptController extends ChangeNotifier {
 
   void clearMcq(String qid) {
     if (_mcq.remove(qid) != null) _touch();
+  }
+
+  /// `value == null` → jawab hata do (blank = koi negative marking nahi).
+  void setTrueFalse(String qid, bool? value) {
+    if (value == null) {
+      if (_tf.remove(qid) != null) _touch();
+      return;
+    }
+    _tf[qid] = value;
+    _touch();
   }
 
   void toggleMsq(String qid, String optionId) {
@@ -493,6 +520,18 @@ class TestAttemptController extends ChangeNotifier {
           // `answer_<question_id>` file ko isi entry pe merge karta hai.
           out[q.id] = TestSeriesService.textAnswer(_text[q.id]?.text.trim() ?? '');
           break;
+        case TsQuestionType.trueFalse:
+          final v = _tf[q.id];
+          out[q.id] = v == null ? <String, dynamic>{} : TestSeriesService.trueFalseAnswer(v);
+          break;
+        case TsQuestionType.fillBlank:
+          final t = _text[q.id]?.text.trim() ?? '';
+          out[q.id] = t.isEmpty ? <String, dynamic>{} : TestSeriesService.fillBlankAnswer(t);
+          break;
+        case TsQuestionType.numeric:
+          final t = _text[q.id]?.text.trim() ?? '';
+          out[q.id] = t.isEmpty ? <String, dynamic>{} : TestSeriesService.numericAnswer(t);
+          break;
         case TsQuestionType.unknown:
           break; // is app version ko is type ka pata nahi — jhooti entry nahi bhejte
       }
@@ -517,6 +556,7 @@ class TestAttemptController extends ChangeNotifier {
       order: {for (final e in _order.entries) e.key: List<String>.from(e.value)},
       orderTouched: Set<String>.from(_orderTouched),
       match: {for (final e in _match.entries) e.key: Map<String, String>.from(e.value)},
+      tf: Map<String, bool>.from(_tf),
       text: {
         for (final e in _text.entries)
           if (e.value.text.isNotEmpty) e.key: e.value.text,

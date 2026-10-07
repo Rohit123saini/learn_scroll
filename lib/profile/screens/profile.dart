@@ -925,7 +925,10 @@ class _ProfileScreenState extends State<ProfileScreen> {
             ),
             if (_tab == 0) SliverToBoxAdapter(child: _buildGridFilterChips(cs, l10n)),
             ..._buildGridSlivers(cs, l10n),
-            const SliverToBoxAdapter(child: SizedBox(height: 40)),
+            // 4.1 — home.dart uses `extendBody: true`, so the bottom nav floats OVER
+            // this tab; MediaQuery's bottom padding already includes its height.
+            // A fixed 40px spacer left the last grid row hidden behind it.
+            SliverToBoxAdapter(child: SizedBox(height: 24 + MediaQuery.paddingOf(context).bottom)),
           ],
         ),
       ),
@@ -1007,18 +1010,19 @@ class _ProfileScreenState extends State<ProfileScreen> {
 
   // ---------- header ----------
 
+  // 4.2 — Instagram-style header: avatar + stats, then name / bio, then the
+  // two main actions side by side, then ONE slim row of small chips
+  // (coins · streak · invite · weekly recap) instead of four full-width cards.
   Widget _buildHeader(ColorScheme cs, AppLocalizations l10n) {
     return Padding(
       padding: const EdgeInsets.fromLTRB(kLsPad, 6, kLsPad, 4),
       child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
         Row(crossAxisAlignment: CrossAxisAlignment.center, children: [
           _avatar(cs),
-          const SizedBox(width: 18),
+          const SizedBox(width: 20),
           Expanded(
             child: Row(children: [
-              // Task 9 — Posts stat is now tappable too (jumps to the
-              // Photos/Videos tab, same tap-to-navigate pattern the
-              // followers/following columns already had).
+              // Task 9 — Posts stat is tappable too (jumps to the Photos/Videos tab).
               _statColumn('${user!.posts}', l10n.postsStat, cs,
                   onTap: () => setState(() {
                         _tab = 0;
@@ -1033,18 +1037,20 @@ class _ProfileScreenState extends State<ProfileScreen> {
             ]),
           ),
         ]),
-        const SizedBox(height: 12),
+        const SizedBox(height: 10),
         Text(
           (user!.firstName.isEmpty && user!.lastName.isEmpty)
               ? l10n.noNameYet
               : '${user!.firstName} ${user!.lastName}'.trim(),
+          maxLines: 2,
+          overflow: TextOverflow.ellipsis,
           style: LsType.head(context, size: 14.5),
         ),
         if (user!.isPrivate) ...[
           const SizedBox(height: 6),
           LsStatusChip(label: l10n.privateAccountBadge, color: cs.onSurfaceVariant, icon: Icons.lock_rounded),
         ],
-        // P7-FE — was a plain Text(bio): now category/pronouns + tappable @/#/URL + link chips.
+        // P7-FE — category/pronouns + tappable @/#/URL + link chips.
         ProfileBioBlock(
           bio: user!.bio,
           pronouns: user!.pronouns,
@@ -1055,147 +1061,63 @@ class _ProfileScreenState extends State<ProfileScreen> {
           const SizedBox(height: 10),
           _staleBanner(cs, l10n),
         ],
-        const SizedBox(height: 14),
+        const SizedBox(height: 12),
         Row(children: [
-          Expanded(
-            child: LsOutlineButton(
-              label: l10n.editProfileButton,
-              icon: Icons.edit_outlined,
-              onPressed: _goToEditProfile,
-            ),
-          ),
-          const SizedBox(width: 10),
-          Expanded(
-            child: LsOutlineButton(
-              label: l10n.shareProfileButton,
-              icon: Icons.ios_share_rounded,
-              onPressed: _shareProfile,
-            ),
-          ),
+          Expanded(child: ProfileActionButton(label: l10n.editProfileButton, onPressed: _goToEditProfile)),
+          const SizedBox(width: 8),
+          Expanded(child: ProfileActionButton(label: l10n.shareProfileButton, onPressed: _shareProfile)),
         ]),
         const SizedBox(height: 10),
-        _coinsRow(cs, l10n),
-        const SizedBox(height: 8),
-        _inviteEarnRow(cs, l10n),
-        // Task 8/9 — streak now lives here as a proper stats card instead
-        // of a home app-bar chip + bottom sheet.
-        if (_streak != null && _streak!.currentStreak > 0) ...[
-          const SizedBox(height: 8),
-          _streakCard(cs),
-        ],
-        // Task 9 — "Your Week" recap used to be buried inside Settings;
-        // it's now a first-class entry point on the profile itself.
-        const SizedBox(height: 8),
-        _weeklyRecapRow(cs, l10n),
+        _quickChips(cs, l10n),
         // P13-FE — top-3 badges + "All" sheet (hidden until I've earned one).
         if (_badges.isNotEmpty) ...[
-          const SizedBox(height: 8),
+          const SizedBox(height: 10),
           ProfileBadgesRow(badges: _badges, ownerName: user!.username, isOwner: true),
         ],
       ]),
     );
   }
 
-  // Task 9 — streak as a "stats card", not a bare number: a small
-  // progress ring (current streak vs. the best one, capped at a 7-day
-  // window so day 1 doesn't look like a sliver) gives it a bit of the
-  // "premium" visual weight the task asks for, without inventing a full
-  // achievements/badges system that hasn't been scoped/confirmed yet.
-  Widget _streakCard(ColorScheme cs) {
-    final streak = _streak!;
-    final ringTarget = streak.longestStreak > 0 ? streak.longestStreak : 7;
-    final progress = (streak.currentStreak / ringTarget).clamp(0.0, 1.0);
-    return Semantics(
-      button: true,
-      label: '${streak.currentStreak} day streak, tap for details',
-      child: InkWell(
-        borderRadius: BorderRadius.circular(kLsRadius),
-        onTap: () => _showStreakDetailsSheet(streak),
-        child: Container(
-          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
-          decoration: BoxDecoration(
-            color: cs.surface,
-            borderRadius: BorderRadius.circular(kLsRadius),
-            border: Border.all(color: cs.outlineVariant),
-          ),
-          child: Row(children: [
-            SizedBox(
-              width: 38,
-              height: 38,
-              child: Stack(alignment: Alignment.center, children: [
-                TweenAnimationBuilder<double>(
-                  tween: Tween(begin: 0, end: progress),
-                  duration: const Duration(milliseconds: 700),
-                  curve: Curves.easeOutCubic,
-                  builder: (context, value, _) => CircularProgressIndicator(
-                    value: value,
-                    strokeWidth: 3,
-                    backgroundColor: cs.surfaceVariant,
-                    valueColor: AlwaysStoppedAnimation(_lsAmber),
-                  ),
-                ),
-                const Text('🔥', style: TextStyle(fontSize: 15)),
-              ]),
-            ),
-            const SizedBox(width: 12),
-            Expanded(
-              child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                Text('${streak.currentStreak}-day streak',
-                    style: LsType.body(context, size: 13, weight: FontWeight.w700, color: cs.onSurface)),
-                const SizedBox(height: 2),
-                Text('Best ${streak.longestStreak} · ${streak.totalActiveDays} active days',
-                    style: LsType.caption(context, weight: FontWeight.w400, color: cs.onSurfaceVariant)),
-              ]),
-            ),
-            Icon(Icons.chevron_right_rounded, size: 18, color: cs.onSurfaceVariant),
-          ]),
-        ),
+  // 4.2 — coins / streak / invite / "Your Week" as small pills. Same targets
+  // the old cards had: Wallet, streak details sheet, shared ReferralsScreen
+  // (Task G12 — referrals are app-wide, not Tuition-Class-only) and the
+  // weekly recap. Reuses existing l10n keys (coinsBalance, streakLabel,
+  // inviteEarn, settingsYourWeek) — no new strings. The streak pill only
+  // shows the number (+ 🔥); its full label is the tooltip / screen-reader text.
+  Widget _quickChips(ColorScheme cs, AppLocalizations l10n) {
+    final streak = _streak;
+    return Wrap(spacing: 8, runSpacing: 8, children: [
+      ProfileMiniChip(
+        leading: Icon(Icons.currency_rupee_rounded, size: 14, color: _lsAmber),
+        label: l10n.coinsBalance(user!.coin),
+        onTap: () => Navigator.push(context, MaterialPageRoute(builder: (_) => const WalletScreen())),
       ),
-    );
-  }
-
-  // Task 9 — dedicated "Your Week" entry point, same row style as
-  // _coinsRow/_inviteEarnRow above so it reads as part of the same set
-  // rather than a bolted-on extra.
-  Widget _weeklyRecapRow(ColorScheme cs, AppLocalizations l10n) {
-    return Semantics(
-      button: true,
-      label: 'Your Week recap',
-      child: InkWell(
-        borderRadius: BorderRadius.circular(kLsRadius),
+      if (streak != null && streak.currentStreak > 0)
+        ProfileMiniChip(
+          leading: const Text('🔥', style: TextStyle(fontSize: 13)),
+          label: '${streak.currentStreak}',
+          semanticLabel: '${streak.currentStreak} ${l10n.streakLabel}',
+          onTap: () => _showStreakDetailsSheet(streak),
+        ),
+      ProfileMiniChip(
+        leading: Icon(Icons.card_giftcard_rounded, size: 14, color: cs.primary),
+        label: l10n.inviteEarn,
+        onTap: () => Navigator.push(context, MaterialPageRoute(builder: (_) => const ReferralsScreen())),
+      ),
+      ProfileMiniChip(
+        leading: Icon(Icons.auto_graph_rounded, size: 14, color: cs.tertiary),
+        label: l10n.settingsYourWeek,
         onTap: () => Navigator.push(context, MaterialPageRoute(builder: (_) => const WeeklyRecapScreen())),
-        child: Container(
-          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 11),
-          decoration: BoxDecoration(
-            color: cs.surface,
-            borderRadius: BorderRadius.circular(kLsRadius),
-            border: Border.all(color: cs.outlineVariant),
-          ),
-          child: Row(children: [
-            Container(
-              width: 30,
-              height: 30,
-              decoration: BoxDecoration(color: cs.tertiary.withOpacity(.15), shape: BoxShape.circle),
-              child: Icon(Icons.auto_graph_rounded, size: 16, color: cs.tertiary),
-            ),
-            const SizedBox(width: 10),
-            Expanded(
-              child: Text('Your Week',
-                  style: LsType.body(context, size: 13, weight: FontWeight.w700, color: cs.onSurface)),
-            ),
-            Icon(Icons.chevron_right_rounded, size: 18, color: cs.onSurfaceVariant),
-          ]),
-        ),
       ),
-    );
+    ]);
   }
 
   Widget _avatar(ColorScheme cs) {
     final photo = user!.profilePhoto;
     final url = photo.isEmpty ? '' : (photo.startsWith('http') ? photo : '${Api.baseUrl}$photo');
     return Container(
-      width: 84,
-      height: 84,
+      width: 86,
+      height: 86,
       padding: const EdgeInsets.all(2),
       decoration: BoxDecoration(shape: BoxShape.circle, border: Border.all(color: cs.outlineVariant, width: 2)),
       child: ClipOval(
@@ -1206,8 +1128,8 @@ class _ProfileScreenState extends State<ProfileScreen> {
               )
             : CachedNetworkImage(
                 imageUrl: url,
-                width: 80,
-                height: 80,
+                width: double.infinity,
+                height: double.infinity,
                 fit: BoxFit.cover,
                 placeholder: (c, u) => Container(color: cs.surfaceVariant),
                 errorWidget: (c, u, e) => Container(
@@ -1243,7 +1165,7 @@ class _ProfileScreenState extends State<ProfileScreen> {
             Text(label,
                 maxLines: 1,
                 overflow: TextOverflow.ellipsis,
-                style: TextStyle(fontSize: 10.5, fontWeight: FontWeight.w600, color: cs.onSurfaceVariant)),
+                style: TextStyle(fontSize: 11.5, fontWeight: FontWeight.w500, color: cs.onSurface)),
           ]),
         ),
       ),
@@ -1261,77 +1183,6 @@ class _ProfileScreenState extends State<ProfileScreen> {
           child: Text(l10n.showingSavedProfileData, style: TextStyle(fontSize: 11, color: cs.onSurfaceVariant)),
         ),
       ]),
-    );
-  }
-
-  Widget _coinsRow(ColorScheme cs, AppLocalizations l10n) {
-    final label = l10n.coinsBalance(user!.coin);
-    return Semantics(
-      button: true,
-      label: label,
-      child: InkWell(
-        borderRadius: BorderRadius.circular(kLsRadius),
-        onTap: () => Navigator.push(context, MaterialPageRoute(builder: (_) => const WalletScreen())),
-        child: Container(
-          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 11),
-          decoration: BoxDecoration(
-            color: cs.surface,
-            borderRadius: BorderRadius.circular(kLsRadius),
-            border: Border.all(color: cs.outlineVariant),
-          ),
-          child: Row(children: [
-            Container(
-              width: 30,
-              height: 30,
-              decoration: BoxDecoration(color: _lsAmber.withOpacity(.15), shape: BoxShape.circle),
-              child: Icon(Icons.currency_rupee_rounded, size: 16, color: _lsAmber),
-            ),
-            const SizedBox(width: 10),
-            Expanded(
-              child: Text(label, style: TextStyle(fontSize: 12.5, fontWeight: FontWeight.w700, color: cs.onSurface)),
-            ),
-            Icon(Icons.chevron_right_rounded, size: 18, color: cs.onSurfaceVariant),
-          ]),
-        ),
-      ),
-    );
-  }
-
-  // Task G12 (growth list) — "referrals should be an app-wide growth
-  // lever, not scoped to one module". The feature itself (code, redeem,
-  // ledger) already worked generically in the backend (see
-  // backend/tuitionclass/referral_urls.py); this is the Profile entry point
-  // that was missing — same row style as _coinsRow above, one tap into
-  // the shared ReferralsScreen (no Tuition Class dependency).
-  Widget _inviteEarnRow(ColorScheme cs, AppLocalizations l10n) {
-    return Semantics(
-      button: true,
-      label: l10n.inviteEarn,
-      child: InkWell(
-        borderRadius: BorderRadius.circular(kLsRadius),
-        onTap: () => Navigator.push(context, MaterialPageRoute(builder: (_) => const ReferralsScreen())),
-        child: Container(
-          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 11),
-          decoration: BoxDecoration(
-            color: cs.surface,
-            borderRadius: BorderRadius.circular(kLsRadius),
-            border: Border.all(color: cs.outlineVariant),
-          ),
-          child: Row(children: [
-            Container(
-              width: 30,
-              height: 30,
-              decoration: BoxDecoration(color: cs.primary.withOpacity(.15), shape: BoxShape.circle),
-              child: Icon(Icons.card_giftcard_rounded, size: 16, color: cs.primary),
-            ),
-            const SizedBox(width: 10),
-            Expanded(
-              child: Text(l10n.inviteEarn, style: TextStyle(fontSize: 12.5, fontWeight: FontWeight.w700, color: cs.onSurface)),
-            ),
-            Icon(Icons.chevron_right_rounded, size: 18, color: cs.onSurfaceVariant),
-          ]),
-        ),
-      ),
     );
   }
 

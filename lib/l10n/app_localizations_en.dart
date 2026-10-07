@@ -3257,6 +3257,24 @@ class AppLocalizationsEn extends AppLocalizations {
   String get cropFailed => 'Crop failed.';
 
   @override
+  String get ratioOriginal => 'Original';
+
+  @override
+  String get ratioPickerLabel => 'Photo ratio';
+
+  @override
+  String get ratioCropTitle => 'Crop photo';
+
+  @override
+  String get cropHintDrag => 'Pinch to zoom, drag to reposition';
+
+  @override
+  String get storyCropTitle => 'Fit to story (9:16)';
+
+  @override
+  String get avatarCropTitle => 'Crop profile photo';
+
+  @override
   String get dateLabel => 'Date';
 
   @override
@@ -3895,6 +3913,30 @@ class AppLocalizationsEn extends AppLocalizations {
   String get chatTranslateDisabled => 'Message translate turned off';
 
   @override
+  String get chatEnableListen => 'Enable message listen';
+
+  @override
+  String get chatDisableListen => 'Disable message listen';
+
+  @override
+  String get chatListenEnabled => 'Message listen turned on';
+
+  @override
+  String get chatListenDisabled => 'Message listen turned off';
+
+  @override
+  String get chatEnableTranscribe => 'Enable voice note transcribe';
+
+  @override
+  String get chatDisableTranscribe => 'Disable voice note transcribe';
+
+  @override
+  String get chatTranscribeEnabled => 'Voice note transcribe turned on';
+
+  @override
+  String get chatTranscribeDisabled => 'Voice note transcribe turned off';
+
+  @override
   String get chatThisUser => 'this user';
 
   @override
@@ -3936,6 +3978,110 @@ class AppLocalizationsEn extends AppLocalizations {
 
   @override
   String get chatUnblock => 'Unblock';
+
+  @override
+  String get profileBlockedByMeTitle => 'You\'ve blocked this account';
+
+  @override
+  String get profileBlockedByMeSubtitle =>
+      'They can\'t see your profile, posts or stories, or message you. Unblock to see their content again.';
+
+  @override
+  String get profileRestrict => 'Restrict';
+
+  @override
+  String get profileUnrestrict => 'Unrestrict';
+
+  @override
+  String get profileRestrictedSnack =>
+      'Restricted. Their comments on your posts are now hidden.';
+
+  @override
+  String get profileUnrestrictedSnack => 'Restriction removed';
+
+  @override
+  String get profileMute => 'Mute posts & stories';
+
+  @override
+  String get profileUnmute => 'Unmute posts & stories';
+
+  @override
+  String get profileMutedSnack =>
+      'Muted. Their posts and stories won\'t show up for you.';
+
+  @override
+  String get profileUnmutedSnack => 'Unmuted';
+
+  @override
+  String profileMoreFailed(String error) {
+    return 'Something went wrong: $error';
+  }
+
+  @override
+  String get reportAction => 'Report';
+
+  @override
+  String get reportTitle => 'Why are you reporting this?';
+
+  @override
+  String get reportReasonSpam => 'Spam';
+
+  @override
+  String get reportReasonHarassment => 'Harassment or bullying';
+
+  @override
+  String get reportReasonHate => 'Hate speech';
+
+  @override
+  String get reportReasonNudity => 'Nudity or sexual content';
+
+  @override
+  String get reportReasonViolence => 'Violence or dangerous content';
+
+  @override
+  String get reportReasonSelfHarm => 'Self-harm';
+
+  @override
+  String get reportReasonScam => 'Scam or fraud';
+
+  @override
+  String get reportReasonImpersonation => 'Pretending to be someone else';
+
+  @override
+  String get reportReasonOther => 'Something else';
+
+  @override
+  String get reportAlsoReport => 'Also report this account';
+
+  @override
+  String get reportBlockNewAccounts =>
+      'Also block new accounts they may create';
+
+  @override
+  String get reportSubmit => 'Submit report';
+
+  @override
+  String get reportThanks => 'Thanks. We\'ll review this.';
+
+  @override
+  String get reportAlreadySent => 'You already reported this.';
+
+  @override
+  String reportFailed(String error) {
+    return 'Couldn\'t send the report: $error';
+  }
+
+  @override
+  String get blockedSearchHint => 'Search blocked accounts';
+
+  @override
+  String get blockedNoMatches => 'No blocked accounts match your search.';
+
+  @override
+  String get blockedUndo => 'Undo';
+
+  @override
+  String get blockMenuBlockUser => 'Block';
 
   @override
   String get chatDisappearingOff => 'Off';
@@ -5893,5 +6039,492 @@ class AppLocalizationsEn extends AppLocalizations {
   @override
   String notifPausedUntil(String until) {
     return 'Paused until $until';
+  }
+
+  @override
+  String get classTestsTab => 'Tests';
+
+  @override
+  String get classTestsEmpty => 'No tests in this class yet';
+
+  @override
+  String get classTestsEmptyHint =>
+      'When your teacher publishes a test, it will show up here.';
+
+  @override
+  String get classTestsLoadFailed => 'Could not load tests';
+
+  @override
+  String get classTestFree => 'Free';
+
+  @override
+  String classTestQuestions(int count) {
+    return '$count questions';
+  }
+
+  @override
+  String classTestMinutes(int minutes) {
+    return '$minutes min';
+  }
+
+  @override
+  String get classTestOpen => 'Open test';
+
+  @override
+  String get classTestStatusLive => 'Live now';
+
+  @override
+  String get classTestStatusUpcoming => 'Upcoming';
+
+  @override
+  String get classTestStatusEnded => 'Ended';
+
+  @override
+  String get hlNew => 'New';
+
+  @override
+  String get hlDefaultTitle => 'Highlights';
+
+  @override
+  String get hlNewHighlight => 'New highlight';
+
+  @override
+  String get hlEditHighlight => 'Edit highlight';
+
+  @override
+  String get hlCreate => 'Create';
+
+  @override
+  String get hlTitleLabel => 'Title';
+
+  @override
+  String get hlYourStories => 'Your stories';
+
+  @override
+  String hlSelectedCount(int count) {
+    return 'Selected ($count) · hold and drag to reorder';
+  }
+
+  @override
+  String get hlCoverHint => 'Tap a photo to use it as cover';
+
+  @override
+  String get hlCoverAutomatic => 'Automatic';
+
+  @override
+  String get hlAdjustCover => 'Adjust cover';
+
+  @override
+  String get hlCropHint => 'Drag to move, pinch or use the slider to zoom';
+
+  @override
+  String get hlReset => 'Reset';
+
+  @override
+  String get hlDone => 'Done';
+
+  @override
+  String get hlDeleteQuestion => 'Delete highlight?';
+
+  @override
+  String get hlDeleteBody => 'The stories themselves are not deleted.';
+
+  @override
+  String get hlDeleteAction => 'Delete highlight';
+
+  @override
+  String get hlEditStoriesCover => 'Edit stories and cover';
+
+  @override
+  String get hlRename => 'Rename';
+
+  @override
+  String get hlRenameTitle => 'Rename highlight';
+
+  @override
+  String get hlNoStories =>
+      'No stories to add yet. Post a story and it shows up here.';
+
+  @override
+  String get hlLoadStoriesFailed => 'Couldn\'t load your stories.';
+
+  @override
+  String get hlUnavailable => 'This highlight is no longer available.';
+
+  @override
+  String get hlOpenFailed => 'Couldn\'t open highlight. Check your connection.';
+
+  @override
+  String get hlEmpty => 'This highlight is empty.';
+
+  @override
+  String get msgSearchHintAll => 'Search chats, people, groups & messages';
+
+  @override
+  String get msgSearchHintChat => 'Search in this chat';
+
+  @override
+  String get msgSearchSectionChats => 'Chats';
+
+  @override
+  String get msgSearchSectionPeople => 'People';
+
+  @override
+  String get msgSearchSectionGroups => 'Groups';
+
+  @override
+  String get msgSearchSectionMessages => 'Messages';
+
+  @override
+  String get msgSearchMutual => 'Mutual';
+
+  @override
+  String get msgSearchFollowing => 'Following';
+
+  @override
+  String get msgSearchFollowsYou => 'Follows you';
+
+  @override
+  String msgSearchMembers(int count) {
+    return '$count members';
+  }
+
+  @override
+  String get msgSearchNoResults => 'No results found';
+
+  @override
+  String get msgSearchNoMessages => 'No messages found';
+
+  @override
+  String get msgSearchMinChars => 'Type at least 2 characters to search';
+
+  @override
+  String get msgSearchTooMany =>
+      'Too many searches — please wait a moment and try again.';
+
+  @override
+  String get msgSearchFailed => 'Couldn\'t search right now. Try again.';
+
+  @override
+  String get msgSearchOpenChatFailed => 'Couldn\'t open that chat right now.';
+
+  @override
+  String get msgSearchFiltersNote => 'Filters apply to messages only';
+
+  @override
+  String get tsTrue => 'True';
+
+  @override
+  String get tsFalse => 'False';
+
+  @override
+  String get answerHintTrueFalse => 'Select True or False. Tap again to clear.';
+
+  @override
+  String get answerHintFillBlank => 'Type the missing word or phrase';
+
+  @override
+  String get answerHintNumeric => 'Enter a number';
+
+  @override
+  String get tsFillBlankInputHint => 'Your answer';
+
+  @override
+  String get tsNumericInputHint => 'Enter a number, e.g. 3.14';
+
+  @override
+  String get tsOptionImage => 'Option image';
+
+  @override
+  String get tsTypeMcq => 'Single choice';
+
+  @override
+  String get tsTypeMsq => 'Multi-select';
+
+  @override
+  String get tsTypeText => 'Text';
+
+  @override
+  String get tsTypeTrueFalse => 'True / False';
+
+  @override
+  String get tsTypeFillBlank => 'Fill in the blank';
+
+  @override
+  String get tsTypeNumeric => 'Numeric';
+
+  @override
+  String get tsBuilderCorrectAnswer => 'Correct answer';
+
+  @override
+  String get tsAcceptedAnswers => 'Accepted answers';
+
+  @override
+  String get tsAcceptedAnswersHelper =>
+      'One per line. Any one of them counts as correct.';
+
+  @override
+  String get tsCaseSensitive => 'Case sensitive';
+
+  @override
+  String get tsCorrectNumber => 'Correct number';
+
+  @override
+  String get tsTolerance => 'Allowed difference (±)';
+
+  @override
+  String get tsToleranceHelper => '0 means the answer must match exactly';
+
+  @override
+  String get tsAddOptionImage => 'Add image';
+
+  @override
+  String get tsRemoveOptionImage => 'Remove image';
+
+  @override
+  String tsOptionHint(int number) {
+    return 'Option $number';
+  }
+
+  @override
+  String get tsQuestionIncomplete =>
+      'Add the question text and its correct answer before saving.';
+
+  @override
+  String get tsUploadingOptionImages => 'Uploading option images…';
+
+  @override
+  String tsSummaryPenalty(int marks) {
+    return 'Negative marking: −$marks';
+  }
+
+  @override
+  String tsPenaltyShort(int marks) {
+    return '−$marks penalty';
+  }
+
+  @override
+  String tsNegativeMarkingNote(int marks) {
+    return '$marks marks are deducted for a wrong answer. Unanswered questions are never penalised.';
+  }
+
+  @override
+  String classTimeStartsIn(String duration) {
+    return 'Starts in $duration';
+  }
+
+  @override
+  String get classTimeLiveNow => 'Live now';
+
+  @override
+  String get classTimeStartingSoon => 'Starting soon';
+
+  @override
+  String get classTimeEnded => 'Ended';
+
+  @override
+  String get classTimeCancelled => 'Cancelled';
+
+  @override
+  String classTimeDays(int d) {
+    return '${d}d';
+  }
+
+  @override
+  String classTimeDaysHours(int d, int h) {
+    return '${d}d ${h}h';
+  }
+
+  @override
+  String classTimeHours(int h) {
+    return '${h}h';
+  }
+
+  @override
+  String classTimeHoursMinutes(int h, int m) {
+    return '${h}h ${m}m';
+  }
+
+  @override
+  String classTimeMinutes(int m) {
+    return '${m}m';
+  }
+
+  @override
+  String get homeNextClass => 'Next class';
+
+  @override
+  String get shareAndEarnCta => 'Share & earn';
+
+  @override
+  String get referralLinkCopied => 'Referral link copied';
+
+  @override
+  String get referralCouldNotCreateLink =>
+      'Couldn\'t create your referral link';
+
+  @override
+  String get referralCopyLinkCta => 'Copy link';
+
+  @override
+  String get referralYourLinkTitle => 'Your referral link';
+
+  @override
+  String get referralTotalCommissionLabel => 'Total commission earned';
+
+  @override
+  String get referralTestSeriesCommissionLabel => 'Test series commission';
+
+  @override
+  String get referralClassCommissionLabel => 'Class commission';
+
+  @override
+  String get referralPeopleAttributedLabel => 'People who opened your link';
+
+  @override
+  String get referralPeopleConvertedLabel => 'Of them, bought something';
+
+  @override
+  String get referralRecentCommissionsTitle => 'Recent commissions';
+
+  @override
+  String get referralNoCommissionsYet => 'No commissions yet';
+
+  @override
+  String get referralEarningsTitle => 'Your commission earnings';
+
+  @override
+  String get referralTestSeriesKind => 'Test series';
+
+  @override
+  String get referralClassKind => 'Class';
+
+  @override
+  String referralShareEarnHint(String percent) {
+    return 'Earn $percent% when someone you refer buys this test series.';
+  }
+
+  @override
+  String referralClassEarnHint(String percent) {
+    return 'Refer & earn $percent% commission when someone joins through your link.';
+  }
+
+  @override
+  String referralWindowNote(int days) {
+    return 'Credit lasts $days days after they open your link.';
+  }
+
+  @override
+  String referralClassCommissionPercentNote(String percent) {
+    return 'You earn $percent% on purchases made through this link.';
+  }
+
+  @override
+  String get shareTargetTitle => 'Share to LearnScroll';
+
+  @override
+  String get shareTargetCaptionHint => 'Add a caption (optional)';
+
+  @override
+  String get shareTargetMessageHint => 'Message';
+
+  @override
+  String get shareTargetSearchHint => 'Search chats';
+
+  @override
+  String get shareTargetSending => 'Sending...';
+
+  @override
+  String shareTargetSendTo(int count) {
+    return 'Send to $count chat(s)';
+  }
+
+  @override
+  String shareTargetSent(int count) {
+    return 'Sent to $count chat(s)';
+  }
+
+  @override
+  String shareTargetSentPartial(int done, int total) {
+    return 'Sent to $done of $total chats';
+  }
+
+  @override
+  String get shareTargetSendFailed => 'Couldn\'t send. Please try again.';
+
+  @override
+  String get shareTargetLoadFailed => 'Couldn\'t load your chats';
+
+  @override
+  String get shareTargetNoChats => 'No chats found';
+
+  @override
+  String get shareTargetFileMissing => 'The shared file is no longer available';
+
+  @override
+  String get shareLinkCopied => 'Link copied';
+
+  @override
+  String get shareCardFailed => 'Couldn\'t create the card. Try again.';
+
+  @override
+  String get shareCopyLink => 'Copy link';
+
+  @override
+  String get shareLinkAction => 'Share link';
+
+  @override
+  String get shareCardImage => 'Share card image';
+
+  @override
+  String get shareScanToOpen => 'Scan to open on LearnScroll';
+
+  @override
+  String get scanQrTitle => 'Scan QR';
+
+  @override
+  String get scanQrTorch => 'Flashlight';
+
+  @override
+  String get scanQrUnsupported => 'This QR code isn\'t a LearnScroll code.';
+
+  @override
+  String get scanQrNoCodeInImage => 'No QR code found in that image.';
+
+  @override
+  String get scanQrHint => 'Point the camera at a LearnScroll QR code';
+
+  @override
+  String get scanQrGallery => 'Pick from gallery';
+
+  @override
+  String get scanQrPermissionDenied =>
+      'Camera access is needed to scan QR codes.';
+
+  @override
+  String get scanQrOpenSettings => 'Open settings';
+
+  @override
+  String get scanQrGrantAccess => 'Allow camera';
+
+  @override
+  String get parentEntryScanQr => 'Scan QR code';
+
+  @override
+  String get parentLinkNotAParentQr => 'That QR code isn\'t a parent invite.';
+
+  @override
+  String get parentLinkScanQr => 'Scan QR';
+
+  @override
+  String get parentLinkPasteLink => 'Paste link';
+
+  @override
+  String get parentAccessQrHint =>
+      'Your parent can scan this QR, or open the shared link.';
+
+  @override
+  String parentAccessShareMessageLink(String code, String link) {
+    return 'You\'ve been invited to Parent/Guardian Access on LearnScroll.\n\nTap this link to open it: $link\n\nOr install the app, choose \"I\'m a parent\" on the login screen and enter this code: $code';
   }
 }

@@ -18,6 +18,16 @@
 // Filters (sender/date range/media type/has-media) ek bottom-sheet me hain
 // (`_SearchFiltersSheet`) — apply hote hi current query re-run hoti hai.
 //
+// 🔥 NAYA (6.2) — global mode ab 4 sections dikhata hai:
+//   Chats (meri existing chats, local cache se naam-match) /
+//   People (followers, following, mutual — "Mutual" badge) /
+//   Groups (jinme main member hoon) / Messages (purana message search).
+//   People+Groups ek hi call me aate hain (`GET /message/search/directory/`),
+//   Messages alag call me — dono parallel; ek fail ho to dusra phir bhi dikhta hai.
+//   Message filters (sender/date/media) sirf Messages pe lagte hain, isliye
+//   filter active hone par baaki sections hide ho jaate hain.
+//   Person tap -> `startPrivateChat`, Group tap -> `getConversation`, Chat tap -> seedha ChatScreen.
+//
 // NOTE: backend kam se kam 2-char query pe hi 200 deta hai, warna 400 —
 // isliye client-side bhi 2-char se pehle search fire nahi karte.
 
@@ -29,7 +39,9 @@ import 'package:timeago/timeago.dart' as timeago;
 
 import '../models/message_models.dart';
 import '../services/message_api_service.dart';
+import '../services/message_cache_service.dart';
 import 'chat_screen.dart';
+import '../../l10n/app_localizations.dart';
 import '../../theme_service.dart'; // 🎨 THEME FIX — AppThemeTokens
 
 class MessageSearchScreen extends StatefulWidget {
@@ -58,6 +70,17 @@ class _MessageSearchScreenState extends State<MessageSearchScreen> {
   // list-building/UI code duplicate na ho.
   List<SearchResultModel> _results = [];
 
+  // 🔥 NAYA (6.2) — global mode ke extra sections.
+  List<ConversationModel> _allChats = []; // cached conversations (one-time load)
+  List<ConversationModel> _chatMatches = [];
+  List<DirectoryPersonModel> _people = [];
+  List<DirectoryGroupModel> _groups = [];
+  bool _peopleHasMore = false;
+  bool _groupsHasMore = false;
+  bool _loadingMorePeople = false;
+  bool _loadingMoreGroups = false;
+  bool _opening = false; // double-tap guard jab chat open ho rahi ho
+
   bool get _isGlobal => widget.conversationId == null;
 
   @override
@@ -66,6 +89,36 @@ class _MessageSearchScreenState extends State<MessageSearchScreen> {
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (mounted) _focusNode.requestFocus();
     });
+    if (_isGlobal) _loadChatsOnce();
+  }
+
+  Future<void> _loadChatsOnce() async {
+    var chats = await MessageCacheService.getCachedConversations();
+    if (chats.isEmpty) {
+      try {
+        chats = await MessageApiService.getConversations();
+      } catch (_) {}
+    }
+    if (!mounted) return;
+    _allChats = chats;
+    if (_lastQuery.length >= 2) setState(() => _chatMatches = _matchChats(_lastQuery));
+  }
+
+  List<ConversationModel> _matchChats(String q) {
+    final needle = q.toLowerCase();
+    return _allChats
+        .where((c) => c.displayTitle.toLowerCase().contains(needle))
+        .take(5)
+        .toList();
+  }
+
+  void _resetResults() {
+    _results = [];
+    _chatMatches = [];
+    _people = [];
+    _groups = [];
+    _peopleHasMore = false;
+    _groupsHasMore = false;
   }
 
   @override
@@ -88,7 +141,7 @@ class _MessageSearchScreenState extends State<MessageSearchScreen> {
 
     if (q.length < 2) {
       setState(() {
-        _results = [];
+        _resetResults();
         _error = null;
         _loading = false;
         _searchedOnce = false;
@@ -103,34 +156,112 @@ class _MessageSearchScreenState extends State<MessageSearchScreen> {
     });
 
     try {
-      List<SearchResultModel> results;
       if (_isGlobal) {
-        results = await MessageApiService.searchAllMessages(q, filters: _filters);
+        await _runGlobalSearch(q);
       } else {
         final msgs = await MessageApiService.searchMessages(
           widget.conversationId!,
           q,
           filters: _filters,
         );
-        results = msgs.map((m) => SearchResultModel(message: m)).toList();
+        // Stale response guard — user ne tab tak aur type kar diya ho sakta hai.
+        if (!mounted || q != _lastQuery) return;
+        setState(() {
+          _results = msgs.map((m) => SearchResultModel(message: m)).toList();
+          _loading = false;
+        });
       }
-
-      // Stale response guard — user ne tab tak aur type kar diya ho sakta hai.
-      if (!mounted || q != _lastQuery) return;
-      setState(() {
-        _results = results;
-        _loading = false;
-      });
     } catch (e) {
       if (!mounted || q != _lastQuery) return;
+      final t = AppLocalizations.of(context)!;
       final throttled = e is MessageApiException && e.statusCode == 429;
       setState(() {
         _loading = false;
-        _results = [];
-        _error = throttled
-            ? "Too many searches — please wait a moment and try again."
-            : "Couldn't search right now. Try again.";
+        _resetResults();
+        _error = throttled ? t.msgSearchTooMany : t.msgSearchFailed;
       });
+    }
+  }
+
+  /// Global mode: Messages + (People, Groups) parallel. Filters active ho to
+  /// sirf Messages (filters sirf messages pe meaningful hain). Ek call fail
+  /// ho to dusre ke results phir bhi dikhte hain; dono fail hon tabhi error.
+  Future<void> _runGlobalSearch(String q) async {
+    final filtersActive = !_filters.isEmpty;
+    final messagesF = MessageApiService.searchAllMessages(q, filters: _filters)
+        .then<List<SearchResultModel>?>((v) => v)
+        .catchError((Object e) {
+      if (e is MessageApiException && e.statusCode == 429) throw e;
+      return null;
+    });
+    final dirF = filtersActive
+        ? Future<DirectorySearchResult?>.value(null)
+        : MessageApiService.searchDirectory(q)
+            .then<DirectorySearchResult?>((v) => v)
+            .catchError((Object e) {
+            if (e is MessageApiException && e.statusCode == 429) throw e;
+            return null;
+          });
+
+    // Future.wait: dono ek saath listen hote hain (ek jaldi fail ho to "unhandled" nahi banta).
+    final both = await Future.wait<Object?>([messagesF, dirF]);
+    final messages = both[0] as List<SearchResultModel>?;
+    final dir = both[1] as DirectorySearchResult?;
+    if (!mounted || q != _lastQuery) return;
+
+    if (messages == null && dir == null && !filtersActive) {
+      throw MessageApiException('search failed');
+    }
+    if (messages == null && filtersActive) {
+      throw MessageApiException('search failed');
+    }
+    setState(() {
+      _results = messages ?? [];
+      _people = dir?.people ?? [];
+      _peopleHasMore = dir?.peopleHasMore ?? false;
+      final chatMatches = filtersActive ? <ConversationModel>[] : _matchChats(q);
+      _chatMatches = chatMatches;
+      // Chats me jo group already dikh raha hai use Groups section me repeat nahi karte.
+      final chatIds = chatMatches.map((c) => c.id).toSet();
+      _groups = (dir?.groups ?? []).where((g) => !chatIds.contains(g.conversationId)).toList();
+      _groupsHasMore = dir?.groupsHasMore ?? false;
+      _loading = false;
+    });
+  }
+
+  Future<void> _seeAllPeople() async {
+    if (_loadingMorePeople) return;
+    final q = _lastQuery;
+    setState(() => _loadingMorePeople = true);
+    try {
+      final r = await MessageApiService.searchDirectory(q, type: 'people', limit: 50);
+      if (!mounted || q != _lastQuery) return;
+      setState(() {
+        _people = r.people;
+        _peopleHasMore = false;
+      });
+    } catch (_) {
+      // silent — pehle wali list screen pe hai
+    } finally {
+      if (mounted) setState(() => _loadingMorePeople = false);
+    }
+  }
+
+  Future<void> _seeAllGroups() async {
+    if (_loadingMoreGroups) return;
+    final q = _lastQuery;
+    setState(() => _loadingMoreGroups = true);
+    try {
+      final r = await MessageApiService.searchDirectory(q, type: 'groups', limit: 50);
+      if (!mounted || q != _lastQuery) return;
+      final chatIds = _chatMatches.map((c) => c.id).toSet();
+      setState(() {
+        _groups = r.groups.where((g) => !chatIds.contains(g.conversationId)).toList();
+        _groupsHasMore = false;
+      });
+    } catch (_) {
+    } finally {
+      if (mounted) setState(() => _loadingMoreGroups = false);
     }
   }
 
@@ -150,35 +281,41 @@ class _MessageSearchScreenState extends State<MessageSearchScreen> {
     }
   }
 
+  /// Chat kholne ka common flow (loading dialog + error snackbar). `loader`
+  /// ConversationModel laata hai; success pe search screen replace ho jaati hai.
+  Future<void> _openChat(Future<ConversationModel> Function() loader, {String? jumpToMessageId}) async {
+    if (_opening) return;
+    _opening = true;
+    final t = AppLocalizations.of(context)!;
+    showDialog(
+      context: context,
+      barrierDismissible: false,
+      builder: (_) => Center(child: CircularProgressIndicator(color: Theme.of(context).colorScheme.primary)),
+    );
+    try {
+      final conversation = await loader();
+      if (!mounted) return;
+      Navigator.pop(context); // loading dialog band karo
+      Navigator.pushReplacement(
+        context,
+        MaterialPageRoute(
+          builder: (_) => ChatScreen(conversation: conversation, jumpToMessageId: jumpToMessageId),
+        ),
+      );
+    } catch (_) {
+      if (!mounted) return;
+      Navigator.pop(context); // loading dialog band karo
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(t.msgSearchOpenChatFailed)));
+    } finally {
+      _opening = false;
+    }
+  }
+
   Future<void> _onResultTap(SearchResultModel result) async {
     if (_isGlobal) {
       final preview = result.conversationPreview;
       if (preview == null) return;
-      // Loading feedback — global search se conversation open hone me ek
-      // extra REST round-trip lagta hai (poora ConversationModel chahiye,
-      // preview me sirf id/name/photo hote hain).
-      showDialog(
-        context: context,
-        barrierDismissible: false,
-        builder: (_) => Center(child: CircularProgressIndicator(color: Theme.of(context).colorScheme.primary)),
-      );
-      try {
-        final conversation = await MessageApiService.getConversation(preview.id);
-        if (!mounted) return;
-        Navigator.pop(context); // loading dialog band karo
-        Navigator.pushReplacement(
-          context,
-          MaterialPageRoute(
-            builder: (_) => ChatScreen(conversation: conversation, jumpToMessageId: result.message.id),
-          ),
-        );
-      } catch (_) {
-        if (!mounted) return;
-        Navigator.pop(context); // loading dialog band karo
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text("Couldn't open that chat right now.")),
-        );
-      }
+      await _openChat(() => MessageApiService.getConversation(preview.id), jumpToMessageId: result.message.id);
     } else {
       Navigator.pop(context, result.message.id);
     }
@@ -204,7 +341,7 @@ class _MessageSearchScreenState extends State<MessageSearchScreen> {
             style: TextStyle(color: cs.onPrimary, fontSize: 14.5),
             cursorColor: cs.onPrimary,
             decoration: InputDecoration(
-              hintText: _isGlobal ? "Search all chats" : "Search in this chat",
+              hintText: _isGlobal ? AppLocalizations.of(context)!.msgSearchHintAll : AppLocalizations.of(context)!.msgSearchHintChat,
               hintStyle: TextStyle(color: cs.onPrimary.withOpacity(0.6), fontSize: 14.5),
               border: InputBorder.none,
               contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
@@ -215,7 +352,8 @@ class _MessageSearchScreenState extends State<MessageSearchScreen> {
                         _queryController.clear();
                         _debounce?.cancel();
                         setState(() {
-                          _results = [];
+                          _resetResults();
+                          _lastQuery = '';
                           _searchedOnce = false;
                           _error = null;
                         });
@@ -272,7 +410,17 @@ class _MessageSearchScreenState extends State<MessageSearchScreen> {
     return Container(
       width: double.infinity,
       padding: const EdgeInsets.fromLTRB(10, 8, 10, 0),
-      child: Wrap(spacing: 6, runSpacing: 6, children: chips),
+      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        Wrap(spacing: 6, runSpacing: 6, children: chips),
+        if (_isGlobal)
+          Padding(
+            padding: const EdgeInsets.only(top: 4, left: 2),
+            child: Text(
+              AppLocalizations.of(context)!.msgSearchFiltersNote,
+              style: TextStyle(fontSize: 11, color: Theme.of(context).colorScheme.onSurfaceVariant),
+            ),
+          ),
+      ]),
     );
   }
 
@@ -295,6 +443,7 @@ class _MessageSearchScreenState extends State<MessageSearchScreen> {
 
   Widget _buildBody() {
     final cs = Theme.of(context).colorScheme;
+    final t = AppLocalizations.of(context)!;
     if (_loading) {
       return Center(child: CircularProgressIndicator(color: cs.primary));
     }
@@ -308,25 +457,141 @@ class _MessageSearchScreenState extends State<MessageSearchScreen> {
     }
     if (!_searchedOnce) {
       return Center(
-        child: Text(
-          "Type at least 2 characters to search",
-          style: TextStyle(color: cs.onSurfaceVariant, fontSize: 13),
-        ),
+        child: Text(t.msgSearchMinChars, style: TextStyle(color: cs.onSurfaceVariant, fontSize: 13)),
       );
     }
-    if (_results.isEmpty) {
+    final nothing = _results.isEmpty && _chatMatches.isEmpty && _people.isEmpty && _groups.isEmpty;
+    if (nothing) {
       return Center(
         child: Text(
-          "No messages found",
+          _isGlobal ? t.msgSearchNoResults : t.msgSearchNoMessages,
           style: TextStyle(color: cs.onSurfaceVariant, fontSize: 13),
         ),
       );
     }
-    return ListView.separated(
-      padding: const EdgeInsets.symmetric(vertical: 6),
-      itemCount: _results.length,
-      separatorBuilder: (_, __) => Divider(height: 1, color: cs.outlineVariant, indent: 72),
-      itemBuilder: (context, i) => _buildResultTile(_results[i]),
+    if (!_isGlobal) {
+      return ListView.separated(
+        padding: const EdgeInsets.symmetric(vertical: 6),
+        itemCount: _results.length,
+        separatorBuilder: (_, __) => Divider(height: 1, color: cs.outlineVariant, indent: 72),
+        itemBuilder: (context, i) => _buildResultTile(_results[i]),
+      );
+    }
+
+    // Global: sections — Chats / People / Groups / Messages
+    final children = <Widget>[];
+    if (_chatMatches.isNotEmpty) {
+      children.add(_sectionHeader(t.msgSearchSectionChats));
+      children.addAll(_chatMatches.map(_buildChatTile));
+    }
+    if (_people.isNotEmpty) {
+      children.add(_sectionHeader(t.msgSearchSectionPeople));
+      children.addAll(_people.map(_buildPersonTile));
+      if (_peopleHasMore) children.add(_seeAllButton(_seeAllPeople, _loadingMorePeople));
+    }
+    if (_groups.isNotEmpty) {
+      children.add(_sectionHeader(t.msgSearchSectionGroups));
+      children.addAll(_groups.map(_buildGroupTile));
+      if (_groupsHasMore) children.add(_seeAllButton(_seeAllGroups, _loadingMoreGroups));
+    }
+    if (_results.isNotEmpty) {
+      children.add(_sectionHeader(t.msgSearchSectionMessages));
+      children.addAll(_results.map(_buildResultTile));
+    }
+    return ListView(padding: const EdgeInsets.only(bottom: 16), children: children);
+  }
+
+  Widget _sectionHeader(String title) {
+    final cs = Theme.of(context).colorScheme;
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(16, 14, 16, 4),
+      child: Text(title, style: TextStyle(fontSize: 12.5, fontWeight: FontWeight.w700, color: cs.onSurfaceVariant)),
+    );
+  }
+
+  Widget _seeAllButton(VoidCallback onTap, bool busy) {
+    final t = AppLocalizations.of(context)!;
+    return Align(
+      alignment: Alignment.centerLeft,
+      child: TextButton(
+        onPressed: busy ? null : onTap,
+        child: busy
+            ? const SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2))
+            : Text(t.seeAll),
+      ),
+    );
+  }
+
+  Widget _avatar(String? photo, String fallbackName, {IconData? fallbackIcon}) {
+    final cs = Theme.of(context).colorScheme;
+    final has = photo != null && photo.isNotEmpty;
+    return CircleAvatar(
+      radius: 22,
+      backgroundColor: AppThemeTokens.of(context).surface2,
+      backgroundImage: has ? CachedNetworkImageProvider(photo) : null,
+      child: has
+          ? null
+          : (fallbackIcon != null
+              ? Icon(fallbackIcon, color: cs.onSurfaceVariant)
+              : Text(fallbackName.isNotEmpty ? fallbackName[0].toUpperCase() : '?',
+                  style: TextStyle(color: cs.onSurfaceVariant, fontWeight: FontWeight.w600))),
+    );
+  }
+
+  Widget _buildChatTile(ConversationModel c) {
+    final cs = Theme.of(context).colorScheme;
+    return ListTile(
+      leading: _avatar(c.displayPhoto, c.displayTitle, fallbackIcon: c.isGroup ? Icons.group : null),
+      title: Text(c.displayTitle, maxLines: 1, overflow: TextOverflow.ellipsis, style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w600)),
+      subtitle: (c.lastMessageText != null && c.lastMessageText!.trim().isNotEmpty)
+          ? Text(c.lastMessageText!.trim(), maxLines: 1, overflow: TextOverflow.ellipsis, style: TextStyle(fontSize: 12.5, color: cs.onSurfaceVariant))
+          : null,
+      onTap: () => _openChat(() async => c),
+    );
+  }
+
+  Widget _buildPersonTile(DirectoryPersonModel p) {
+    final cs = Theme.of(context).colorScheme;
+    final t = AppLocalizations.of(context)!;
+    final coral = AppThemeTokens.of(context).coral;
+    final relationLabel = p.relation == 'following'
+        ? t.msgSearchFollowing
+        : (p.relation == 'follower' ? t.msgSearchFollowsYou : null);
+    return ListTile(
+      leading: _avatar(p.profilePhoto, p.displayName),
+      title: Row(children: [
+        Flexible(child: Text(p.displayName, maxLines: 1, overflow: TextOverflow.ellipsis, style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w600))),
+        if (p.isMutual) ...[
+          const SizedBox(width: 6),
+          Container(
+            padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 1),
+            decoration: BoxDecoration(color: coral.withOpacity(0.12), borderRadius: BorderRadius.circular(8)),
+            child: Text(t.msgSearchMutual, style: TextStyle(fontSize: 10.5, color: coral, fontWeight: FontWeight.w600)),
+          ),
+        ],
+      ]),
+      subtitle: Text(
+        [if (p.username.isNotEmpty) '@${p.username}', if (relationLabel != null) relationLabel].join(' · '),
+        maxLines: 1,
+        overflow: TextOverflow.ellipsis,
+        style: TextStyle(fontSize: 12, color: cs.onSurfaceVariant),
+      ),
+      onTap: () => _openChat(() => MessageApiService.startPrivateChat(p.id)),
+    );
+  }
+
+  Widget _buildGroupTile(DirectoryGroupModel g) {
+    final cs = Theme.of(context).colorScheme;
+    final t = AppLocalizations.of(context)!;
+    final sub = [
+      t.msgSearchMembers(g.membersCount),
+      if (g.topicTag != null && g.topicTag!.isNotEmpty) g.topicTag!,
+    ].join(' · ');
+    return ListTile(
+      leading: _avatar(g.photoUrl, g.name, fallbackIcon: Icons.group),
+      title: Text(g.name, maxLines: 1, overflow: TextOverflow.ellipsis, style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w600)),
+      subtitle: Text(sub, maxLines: 1, overflow: TextOverflow.ellipsis, style: TextStyle(fontSize: 12, color: cs.onSurfaceVariant)),
+      onTap: () => _openChat(() => MessageApiService.getConversation(g.conversationId)),
     );
   }
 

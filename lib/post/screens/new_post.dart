@@ -19,6 +19,7 @@ import '../services/post_tag_service.dart'; // P5b-FE — tag people
 import '../widgets/tag_people_sheet.dart'; // P5b-FE
 import 'quick_post.dart';
 import 'media_edit_screen.dart';
+import 'ratio_crop_screen.dart';
 import '../../l10n/app_localizations.dart';
 
 /// ═══════════════════════════════════════════════════════════════════
@@ -146,6 +147,11 @@ class _NewPostState extends State<NewPost> with TickerProviderStateMixin {
   int _suggestionRequestId = 0;
 
   final List<_MediaAttachment> _attachments = [];
+  // 1.3-FE — photo ratio picker. 'original' = untouched; otherwise every IMAGE
+  // attachment is cropped to that ratio through RatioCropScreen (videos are
+  // never cropped — the feed frame letterboxes them).
+  String _ratioPreset = 'original';
+  static const Map<String, double> _ratioAspects = {'1:1': 1.0, '4:5': 4 / 5, '16:9': 16 / 9};
   final List<_PollOption> _pollOptions = [];
   final List<Map<String, String>> _categories = [];
   final List<Map<String, String>> _allSubcategories = [];
@@ -434,10 +440,12 @@ class _NewPostState extends State<NewPost> with TickerProviderStateMixin {
     try {
       final shot = await _picker.pickImage(source: ImageSource.camera, imageQuality: 90);
       if (shot != null) {
+        final firstNew = _attachments.length;
         setState(() {
           _attachments.add(_MediaAttachment(File(shot.path), 'image'));
           _updatePostType();
         });
+        _applyRatio(from: firstNew);
       }
     } catch (e) {
       _showError(_l10n.cameraError(e.toString()));
@@ -468,6 +476,7 @@ class _NewPostState extends State<NewPost> with TickerProviderStateMixin {
   void _addMediaFiles(List<XFile> files, String type) {
     final remaining = _maxAttachments - _attachments.length;
     final toAdd = files.take(remaining).toList();
+    final firstNew = _attachments.length;
     setState(() {
       for (final f in toAdd) {
         _attachments.add(_MediaAttachment(File(f.path), type));
@@ -477,6 +486,69 @@ class _NewPostState extends State<NewPost> with TickerProviderStateMixin {
     if (files.length > remaining) {
       _showError(_l10n.onlyNMoreFilesCouldBeAdded(remaining));
     }
+    if (type == 'image') _applyRatio(from: firstNew);
+  }
+
+  // ─── 1.3-FE: photo ratio (Original / 1:1 / 4:5 / 16:9) ───
+  bool get _hasImageAttachment => _attachments.any((a) => a.type == 'image');
+
+  Future<void> _setRatioPreset(String preset) async {
+    if (preset == _ratioPreset) return;
+    HapticFeedback.selectionClick();
+    setState(() => _ratioPreset = preset);
+    await _applyRatio();
+  }
+
+  /// Crops (or, for 'original', restores) every image attachment from index
+  /// [from] on. Always starts from the untouched source file, so switching
+  /// 1:1 -> 4:5 never crops an already-cropped photo twice. A cancelled crop
+  /// leaves that photo as it was.
+  Future<void> _applyRatio({int from = 0}) async {
+    for (var i = from; i < _attachments.length; i++) {
+      if (!mounted) return;
+      final att = _attachments[i];
+      if (att.type != 'image') continue;
+      final source = att.source ?? att.file;
+      if (_ratioPreset == 'original') {
+        if (att.source != null) {
+          setState(() => _attachments[i] = _MediaAttachment(source, 'image', caption: att.caption));
+        }
+        continue;
+      }
+      final aspect = _ratioAspects[_ratioPreset];
+      if (aspect == null) continue;
+      final cropped = await showRatioCrop(context, source, aspect: aspect, title: _l10n.ratioCropTitle);
+      if (cropped == null || !mounted) continue;
+      setState(() => _attachments[i] = _MediaAttachment(cropped, 'image', caption: att.caption, source: source));
+    }
+  }
+
+  Widget _buildRatioPicker() {
+    final presets = <String>['original', ..._ratioAspects.keys];
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 12),
+      child: Row(children: [
+        Text(_l10n.ratioPickerLabel, style: const TextStyle(fontSize: 12.5, fontWeight: FontWeight.w700)),
+        const SizedBox(width: 10),
+        Expanded(
+          child: SingleChildScrollView(
+            scrollDirection: Axis.horizontal,
+            child: Row(children: [
+              for (final preset in presets)
+                Padding(
+                  padding: const EdgeInsets.only(right: 8),
+                  child: ChoiceChip(
+                    label: Text(preset == 'original' ? _l10n.ratioOriginal : preset),
+                    selected: _ratioPreset == preset,
+                    onSelected: (_) => _setRatioPreset(preset),
+                    visualDensity: VisualDensity.compact,
+                  ),
+                ),
+            ]),
+          ),
+        ),
+      ]),
+    );
   }
 
   void _updatePostType() {
@@ -578,7 +650,7 @@ class _NewPostState extends State<NewPost> with TickerProviderStateMixin {
     );
     if (edited == null || !mounted) return;
     setState(() {
-      _attachments[index] = _MediaAttachment(edited, att.type, caption: att.caption);
+      _attachments[index] = _MediaAttachment(edited, att.type, caption: att.caption, source: att.source);
     });
   }
 
@@ -2191,6 +2263,7 @@ class _NewPostState extends State<NewPost> with TickerProviderStateMixin {
               TextButton.icon(
                 onPressed: () => setState(() {
                   _attachments.clear();
+                  _ratioPreset = 'original';
                   _updatePostType();
                 }),
                 icon: Icon(Icons.delete_outline_rounded, size: 16, color: _error),
@@ -2200,6 +2273,7 @@ class _NewPostState extends State<NewPost> with TickerProviderStateMixin {
             ],
           ),
           const SizedBox(height: 10),
+          if (_hasImageAttachment) _buildRatioPicker(),
           ClipRRect(
             borderRadius: BorderRadius.circular(4),
             child: TweenAnimationBuilder<double>(
@@ -3172,9 +3246,11 @@ class _NewPostState extends State<NewPost> with TickerProviderStateMixin {
 // ═══════════════════════════════════════════════════════════════════
 
 class _MediaAttachment {
-  _MediaAttachment(this.file, this.type, {this.caption = ''});
+  _MediaAttachment(this.file, this.type, {this.caption = '', this.source});
   final File file;
   final String type;
+  // 1.3-FE: the untouched picked file when [file] is a ratio-cropped copy.
+  final File? source;
   String caption;
   bool removing = false;
 }

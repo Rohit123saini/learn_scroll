@@ -32,6 +32,8 @@ import 'package:http/http.dart' as http;
 import 'package:intl/intl.dart' show DateFormat;
 import 'package:timeago/timeago.dart' as timeago;
 import 'package:share_plus/share_plus.dart'; // 🔥 TASK 11 — real "shareable" UX for the code
+import 'package:qr_flutter/qr_flutter.dart'; // TASK 11.3 — QR of the invite link
+import '../../services/deep_link_service.dart';
 import '../../l10n/app_localizations.dart';
 import '../../services/auth_service.dart';
 import '../../utils/api.dart';
@@ -173,7 +175,11 @@ class _ManageParentAccessScreenState extends State<ManageParentAccessScreen> {
       if (res.statusCode != 201) throw Exception('Generate failed');
       await _fetchCodes();
       final data = jsonDecode(res.body);
-      if (mounted) _showCodeDialog(data['code']);
+      if (mounted) {
+        final code = data['code'].toString();
+        final link = (data['link'] ?? '').toString();
+        _showCodeDialog(code, link.isEmpty ? DeepLinkService.parentInviteLink(code) : link);
+      }
     } catch (_) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
@@ -197,32 +203,59 @@ class _ManageParentAccessScreenState extends State<ManageParentAccessScreen> {
   // still the existing reveal-once code, verified once by the parent and
   // then explicitly approved by the student (see `views_parent.py`), not
   // a second, parallel accept-flow.
-  void _showCodeDialog(String code) {
+  //
+  // TASK 11.3 — the dialog now also shows a QR of the invite LINK
+  // (`https://<host>/parent-link?code=…`) and shares that link: the parent can scan the QR
+  // from the student's screen, or tap the shared link (opens Parent Mode with the code
+  // pre-filled and verified). The plain code stays visible for people who'd rather type it.
+  void _showCodeDialog(String code, String link) {
     final l10n = AppLocalizations.of(context)!;
     showDialog(
       context: context,
       builder: (dialogContext) => AlertDialog(
         title: Text(l10n.parentAccessShareCodeTitle),
-        content: Row(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Text(code, style: const TextStyle(fontSize: 24, fontWeight: FontWeight.bold, letterSpacing: 3)),
-            IconButton(
-              icon: const Icon(Icons.copy),
-              tooltip: l10n.parentAccessCodeCopied,
-              onPressed: () {
-                Clipboard.setData(ClipboardData(text: code));
-                ScaffoldMessenger.of(dialogContext).showSnackBar(
-                  SnackBar(content: Text(l10n.parentAccessCodeCopied)),
-                );
-              },
-            ),
-            IconButton(
-              icon: const Icon(Icons.share_outlined),
-              tooltip: l10n.parentAccessShareAction,
-              onPressed: () => Share.share(l10n.parentAccessShareMessage(code)),
-            ),
-          ],
+        content: SingleChildScrollView(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Container(
+                padding: const EdgeInsets.all(10),
+                decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(12)),
+                child: QrImageView(
+                  data: link,
+                  version: QrVersions.auto,
+                  size: 170,
+                  backgroundColor: Colors.white,
+                  errorCorrectionLevel: QrErrorCorrectLevel.M,
+                ),
+              ),
+              const SizedBox(height: 4),
+              Text(l10n.parentAccessQrHint,
+                  textAlign: TextAlign.center, style: const TextStyle(fontSize: 12)),
+              const SizedBox(height: 8),
+              Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Text(code, style: const TextStyle(fontSize: 24, fontWeight: FontWeight.bold, letterSpacing: 3)),
+                  IconButton(
+                    icon: const Icon(Icons.copy),
+                    tooltip: l10n.parentAccessCodeCopied,
+                    onPressed: () {
+                      Clipboard.setData(ClipboardData(text: code));
+                      ScaffoldMessenger.of(dialogContext).showSnackBar(
+                        SnackBar(content: Text(l10n.parentAccessCodeCopied)),
+                      );
+                    },
+                  ),
+                  IconButton(
+                    icon: const Icon(Icons.share_outlined),
+                    tooltip: l10n.parentAccessShareAction,
+                    onPressed: () => Share.share(l10n.parentAccessShareMessageLink(code, link)),
+                  ),
+                ],
+              ),
+            ],
+          ),
         ),
         actions: [
           TextButton(onPressed: () => Navigator.pop(dialogContext), child: Text(l10n.doneCta)),

@@ -192,7 +192,13 @@ class _DocumentGridTileState extends State<DocumentGridTile> {
     final cs = Theme.of(context).colorScheme;
     final isPdf = widget.file.file.toLowerCase().endsWith('.pdf');
     final title = widget.doc.title ?? widget.file.fileName;
-    return Column(
+    // 4.1 — the tile's height is fixed by the grid's childAspectRatio, so big
+    // system font sizes used to push the 2 caption lines past the bottom
+    // ("BOTTOM OVERFLOWED BY n PIXELS"). Cap the caption scale at 1.0.
+    final mq = MediaQuery.of(context);
+    return MediaQuery(
+      data: mq.copyWith(textScaler: mq.textScaler.clamp(maxScaleFactor: 1.0)),
+      child: Column(
       children: [
         Expanded(
           child: Container(
@@ -263,6 +269,7 @@ class _DocumentGridTileState extends State<DocumentGridTile> {
             style: TextStyle(fontSize: 9, color: cs.onSurfaceVariant),
           ),
       ],
+    ),
     );
   }
 }

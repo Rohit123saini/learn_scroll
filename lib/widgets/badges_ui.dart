@@ -122,7 +122,7 @@ class ProfileBadgesRow extends StatelessWidget {
         borderRadius: BorderRadius.circular(kLsRadius),
         onTap: () => showAllBadgesSheet(context, badges, ownerName: ownerName, isOwner: isOwner),
         child: Container(
-          padding: const EdgeInsets.fromLTRB(14, 10, 10, 10),
+          padding: const EdgeInsets.fromLTRB(12, 8, 8, 8),
           decoration: BoxDecoration(
             color: cs.surface,
             borderRadius: BorderRadius.circular(kLsRadius),
@@ -134,14 +134,14 @@ class ProfileBadgesRow extends StatelessWidget {
                 for (final b in top)
                   Expanded(
                     child: Column(mainAxisSize: MainAxisSize.min, children: [
-                      _badgeCircle(cs, b),
-                      const SizedBox(height: 6),
+                      _badgeCircle(cs, b, size: 38),
+                      const SizedBox(height: 4),
                       Text(
                         b.title,
                         maxLines: 1,
                         overflow: TextOverflow.ellipsis,
                         textAlign: TextAlign.center,
-                        style: LsType.caption(context, weight: FontWeight.w600, color: cs.onSurface),
+                        style: LsType.caption(context, size: 10.5, weight: FontWeight.w600, color: cs.onSurface),
                       ),
                     ]),
                   ),

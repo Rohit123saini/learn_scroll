@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import '../post/widgets/post_media_ratio.dart';
 
 // ============================================================
 // SKELETON / SHIMMER PLACEHOLDERS  — Task 10.1
@@ -302,7 +303,17 @@ class LsPostCardSkeleton extends StatelessWidget {
           const LsSkeletonBox(width: 180, height: 9, radius: 5),
           if (withMedia) ...[
             const SizedBox(height: 12),
-            const LsSkeletonBox(height: 160, radius: 12),
+            // 1.2-FE — was a fixed 160px box; now the same default ratio the real
+            // frame uses, so the card doesn't jump when the post loads.
+            AspectRatio(
+              aspectRatio: kPostMediaDefaultRatio,
+              child: Container(
+                decoration: BoxDecoration(
+                  color: cs.surfaceVariant,
+                  borderRadius: BorderRadius.circular(12),
+                ),
+              ),
+            ),
           ],
           const SizedBox(height: 14),
           Row(children: const [

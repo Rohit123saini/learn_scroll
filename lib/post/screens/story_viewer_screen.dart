@@ -60,6 +60,7 @@ import '../widgets/add_to_highlight_sheet.dart'; // P2-FE
 import '../widgets/highlight_editor_screen.dart'; // P2-FE
 import '../models/highlight_model.dart'; // P2-FE
 import '../../l10n/app_localizations.dart';
+import '../../profile/widgets/block_report.dart'; // Block a viewer from the viewers sheet
 import '../../profile/screens/target_profile.dart';
 
 const Duration _kImageStoryDuration = Duration(seconds: 5);
@@ -984,6 +985,8 @@ class _StoryViewersSheet extends StatefulWidget {
 
 class _StoryViewersSheetState extends State<_StoryViewersSheet> {
   late final Future<List<StoryViewerEntry>> _future = StoryService.getStoryViewers(widget.storyId);
+  // Viewers I blocked from this sheet — dropped from the list immediately.
+  final Set<String> _blockedIds = {};
 
   @override
   Widget build(BuildContext context) {
@@ -1029,7 +1032,7 @@ class _StoryViewersSheetState extends State<_StoryViewersSheet> {
                       ),
                     );
                   }
-                  final viewers = snap.data ?? [];
+                  final viewers = (snap.data ?? []).where((v) => !_blockedIds.contains(v.userId)).toList();
                   if (viewers.isEmpty) {
                     return Center(
                       child: Padding(
@@ -1056,6 +1059,18 @@ class _StoryViewersSheetState extends State<_StoryViewersSheet> {
                               : null,
                         ),
                         title: Text(v.username, style: const TextStyle(color: Colors.white, fontWeight: FontWeight.w600)),
+                        trailing: PopupMenuButton<String>(
+                          icon: const Icon(Icons.more_horiz_rounded, color: Colors.white54),
+                          onSelected: (_) async {
+                            final uid = int.tryParse(v.userId);
+                            if (uid == null) return;
+                            final ok = await blockUserFlow(context, userId: uid, username: v.username);
+                            if (ok && mounted) setState(() => _blockedIds.add(v.userId));
+                          },
+                          itemBuilder: (_) => [
+                            PopupMenuItem(value: 'block', child: Text(l10n.blockMenuBlockUser)),
+                          ],
+                        ),
                       );
                     },
                   );

@@ -24,7 +24,7 @@ String tsIdOf(dynamic v) {
   return v.toString();
 }
 
-enum TsQuestionType { text, mcq, msq, list, unknown }
+enum TsQuestionType { text, mcq, msq, list, trueFalse, fillBlank, numeric, unknown }
 
 TsQuestionType tsQuestionTypeFrom(String? raw) {
   switch (raw) {
@@ -36,6 +36,12 @@ TsQuestionType tsQuestionTypeFrom(String? raw) {
       return TsQuestionType.msq;
     case 'list':
       return TsQuestionType.list;
+    case 'true_false':
+      return TsQuestionType.trueFalse;
+    case 'fill_blank':
+      return TsQuestionType.fillBlank;
+    case 'numeric':
+      return TsQuestionType.numeric;
     default:
       return TsQuestionType.unknown;
   }
@@ -97,12 +103,24 @@ class TsPage<T> {
 class TsOption {
   final String id;
   final String text;
-  const TsOption({required this.id, required this.text});
+
+  /// Optional option image (Task 8) — http(s) URL ya site path.
+  final String? image;
+  const TsOption({required this.id, required this.text, this.image});
+
+  bool get hasImage => image != null && image!.isNotEmpty;
 
   factory TsOption.fromAny(dynamic raw, int index) {
     if (raw is Map) {
       final id = (raw['id'] ?? '$index').toString();
-      return TsOption(id: id, text: (raw['text'] ?? id).toString());
+      final img = raw['image']?.toString() ?? '';
+      final txt = raw['text']?.toString() ?? '';
+      // Image-only option: text khaali rehta hai (id ko label nahi banate).
+      return TsOption(
+        id: id,
+        text: txt.isNotEmpty ? txt : (img.isNotEmpty ? '' : id),
+        image: img.isNotEmpty ? img : null,
+      );
     }
     final s = raw?.toString() ?? '$index';
     return TsOption(id: s, text: s);
@@ -409,6 +427,9 @@ class TsResponse {
   final bool isAutoGraded;
   final bool? isCorrect;
   final int? marksAwarded;
+
+  /// Negative marking: wrong + answered par kata hua (backend `penalty`).
+  final int penalty;
   final String reviewerFeedback;
 
   const TsResponse({
@@ -420,6 +441,7 @@ class TsResponse {
     this.answerAttachment,
     this.isCorrect,
     this.marksAwarded,
+    this.penalty = 0,
   });
 
   factory TsResponse.fromJson(Map<String, dynamic> j) {
@@ -432,6 +454,7 @@ class TsResponse {
       isAutoGraded: j['is_auto_graded'] == true,
       isCorrect: j['is_correct'] is bool ? j['is_correct'] as bool : null,
       marksAwarded: (j['marks_awarded'] as num?)?.toInt(),
+      penalty: (j['penalty'] as num?)?.toInt() ?? 0,
       reviewerFeedback: j['reviewer_feedback']?.toString() ?? '',
     );
   }
@@ -453,6 +476,8 @@ class TsResponse {
         if (v is List && v.isNotEmpty) return true;
         if (v is Map && v.isNotEmpty) return true;
       }
+      final v = d['value']; // true_false / numeric
+      if (v != null && v.toString().trim().isNotEmpty) return true;
       final t = d['text'];
       return t != null && t.toString().trim().isNotEmpty;
     }

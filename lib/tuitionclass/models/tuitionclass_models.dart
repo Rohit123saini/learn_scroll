@@ -8,6 +8,8 @@
 // (teacher, student, sender, uploaded_by, created_by, status, etc.)
 // exactly like the serializers' `read_only_fields` do.
 
+import '../utils/server_clock.dart'; // TASK 10.2
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
@@ -278,6 +280,9 @@ class ClassSchedule {
   final String timezone;
   final bool isActive;
   final DateTime? createdAt;
+  /// TASK 10.1/10.2 — next occurrence as an absolute UTC instant, computed
+  /// server-side with real DST rules. Null = inactive / nothing upcoming.
+  final DateTime? nextStart;
 
   ClassSchedule({
     required this.id,
@@ -292,9 +297,15 @@ class ClassSchedule {
     this.timezone = 'Asia/Kolkata',
     this.isActive = true,
     this.createdAt,
+    this.nextStart,
   });
 
-  factory ClassSchedule.fromJson(Map<String, dynamic> j) => ClassSchedule(
+  factory ClassSchedule.fromJson(Map<String, dynamic> j) {
+    ServerClock.sync(j['server_now']);
+    return _classScheduleFromJson(j);
+  }
+
+  static ClassSchedule _classScheduleFromJson(Map<String, dynamic> j) => ClassSchedule(
         id: _int(j['id']),
         classroomId: _int(j['classroom']),
         recurrenceType: j['recurrence_type'] ?? '',
@@ -307,6 +318,7 @@ class ClassSchedule {
         timezone: j['timezone'] ?? 'Asia/Kolkata',
         isActive: j['is_active'] ?? true,
         createdAt: _dt(j['created_at']),
+        nextStart: _dt(j['next_start']),
       );
 
   Map<String, dynamic> toJson() => {
@@ -376,7 +388,12 @@ class ClassSession {
     this.spotlightIdentity,
   });
 
-  factory ClassSession.fromJson(Map<String, dynamic> j) => ClassSession(
+  factory ClassSession.fromJson(Map<String, dynamic> j) {
+    ServerClock.sync(j['server_now']); // TASK 10.2
+    return _classSessionFromJson(j);
+  }
+
+  static ClassSession _classSessionFromJson(Map<String, dynamic> j) => ClassSession(
         id: _int(j['id']),
         classroomId: _int(j['classroom']),
         classroomTitle: j['classroom_title'] ?? '',
@@ -1833,6 +1850,15 @@ class Notice {
   final DateTime? expiresAt;
   final bool isExpired;
 
+  /// TASK 9.2 — set by the server for notices it posted itself, e.g.
+  /// `sourceType == 'testseries'` + `sourceId` = the test's id ("a test was
+  /// published in this class"). Empty/null for notices a teacher typed.
+  final String sourceType;
+  final String? sourceId;
+
+  /// True for the automatic "new test" notice (the UI then offers "Open test").
+  bool get isTestNotice => sourceType == 'testseries' && (sourceId ?? '').isNotEmpty;
+
   Notice({
     required this.id,
     required this.classroomId,
@@ -1844,6 +1870,8 @@ class Notice {
     required this.createdAt,
     this.expiresAt,
     this.isExpired = false,
+    this.sourceType = '',
+    this.sourceId,
   });
 
   factory Notice.fromJson(Map<String, dynamic> j) => Notice(
@@ -1857,6 +1885,8 @@ class Notice {
         createdAt: DateTime.parse(j['created_at']),
         expiresAt: _dt(j['expires_at']),
         isExpired: j['is_expired'] ?? false,
+        sourceType: (j['source_type'] ?? '').toString(),
+        sourceId: j['source_id']?.toString(),
       );
 
   Map<String, dynamic> toJson() => {
@@ -2280,7 +2310,12 @@ class TuitionClassDashboard {
     required this.unreadNotificationsCount,
   });
 
-  factory TuitionClassDashboard.fromJson(Map<String, dynamic> j) => TuitionClassDashboard(
+  factory TuitionClassDashboard.fromJson(Map<String, dynamic> j) {
+    ServerClock.sync(j['server_now']); // TASK 10.2
+    return _dashboardFromJson(j);
+  }
+
+  static TuitionClassDashboard _dashboardFromJson(Map<String, dynamic> j) => TuitionClassDashboard(
         upcomingSessions:
             (j['upcoming_sessions'] as List? ?? []).map((e) => ClassSession.fromJson(e)).toList(),
         teachingClassroomsCount: _int(j['teaching_classrooms_count']),

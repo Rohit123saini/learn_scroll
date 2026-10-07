@@ -53,6 +53,10 @@ class TsResponseCard extends StatelessWidget {
               style: TextStyle(fontSize: 10.5, fontWeight: FontWeight.w700, color: cs.primary)),
           const Spacer(),
           LsStatusChip(label: statusLabel, color: statusColor),
+          if (response.penalty > 0) ...[
+            const SizedBox(width: 6),
+            LsStatusChip(label: l10n.tsPenaltyShort(response.penalty), color: t.danger),
+          ],
           const SizedBox(width: 8),
           // Question load na hua ho to "x of 0" dikhana galat hai — sirf awarded marks.
           Text(
@@ -181,9 +185,14 @@ String tsReadableAnswer(AppLocalizations l10n, dynamic data, TsQuestion? questio
     final q = question;
     if (q == null) return id;
     for (final o in [...q.choices, ...q.matchLeft, ...q.matchRight]) {
-      if (o.id == id) return o.text;
+      if (o.id == id) return o.text.isNotEmpty ? o.text : id.toUpperCase();
     }
     return id;
+  }
+
+  String fmtNum(dynamic v) {
+    if (v is num && v == v.roundToDouble() && v.abs() < 1e15) return v.toInt().toString();
+    return v.toString();
   }
 
   if (data is String) return data.trim().isEmpty ? l10n.answerNotAnswered : data;
@@ -206,6 +215,20 @@ String tsReadableAnswer(AppLocalizations l10n, dynamic data, TsQuestion? questio
           ? l10n.answerNotAnswered
           : pairs.entries.map((e) => '${label(e.key.toString())} → ${label(e.value.toString())}').join('\n');
     }
+    // Task 8 — true_false / numeric (`value`) aur fill_blank key (`answers`).
+    final value = data['value'];
+    if (value != null) {
+      if (value is bool) return value ? l10n.tsTrue : l10n.tsFalse;
+      final s = value.toString().trim();
+      if (s.isEmpty) return l10n.answerNotAnswered;
+      final tol = data['tolerance'];
+      final tolNum = tol is num ? tol : _tsParseNum(tol);
+      return tolNum != null && tolNum != 0 ? '${fmtNum(value is String ? (_tsParseNum(value) ?? value) : value)} (± ${fmtNum(tolNum)})' : s;
+    }
+    final accepted = data['answers'];
+    if (accepted is List) {
+      return accepted.isEmpty ? l10n.answerNotAnswered : accepted.map((e) => e.toString()).join(' / ');
+    }
     final text = data['text'];
     if (text != null) {
       return text.toString().trim().isEmpty ? l10n.answerNotAnswered : text.toString();
@@ -219,3 +242,5 @@ String tsReadableAnswer(AppLocalizations l10n, dynamic data, TsQuestion? questio
   }
   return data.toString();
 }
+
+num? _tsParseNum(dynamic v) => v == null ? null : num.tryParse(v.toString().replaceAll(',', '').trim());

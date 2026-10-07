@@ -53,6 +53,11 @@ class TsQuestionView extends StatelessWidget {
         ],
         const SizedBox(height: 6),
         Text(_hint(l10n), style: TextStyle(fontSize: 10.5, color: cs.onSurfaceVariant)),
+        if (q.negativeMarks > 0 && q.isAutoGraded) ...[
+          const SizedBox(height: 3),
+          Text(l10n.tsNegativeMarkingNote(q.negativeMarks),
+              style: TextStyle(fontSize: 10.5, color: lsTokens(context).danger)),
+        ],
         const SizedBox(height: 12),
         ..._input(context, cs, l10n),
       ]),
@@ -69,6 +74,12 @@ class TsQuestionView extends StatelessWidget {
         return question.listMode == TsListMode.match ? l10n.answerHintMatch : l10n.answerHintArrange;
       case TsQuestionType.text:
         return l10n.answerHintText;
+      case TsQuestionType.trueFalse:
+        return l10n.answerHintTrueFalse;
+      case TsQuestionType.fillBlank:
+        return l10n.answerHintFillBlank;
+      case TsQuestionType.numeric:
+        return l10n.answerHintNumeric;
       case TsQuestionType.unknown:
         return '';
     }
@@ -84,6 +95,8 @@ class TsQuestionView extends StatelessWidget {
         return q.choices
             .map((o) => TsChoiceTile(
                   label: o.text,
+                  imageUrl: o.image,
+                  imageLabel: l10n.tsOptionImage,
                   selected: selected == o.id,
                   multi: false,
                   onTap: () => c.setMcq(q.id, o.id),
@@ -95,6 +108,8 @@ class TsQuestionView extends StatelessWidget {
         return q.choices
             .map((o) => TsChoiceTile(
                   label: o.text,
+                  imageUrl: o.image,
+                  imageLabel: l10n.tsOptionImage,
                   selected: sel.contains(o.id),
                   multi: true,
                   onTap: () => c.toggleMsq(q.id, o.id),
@@ -107,6 +122,53 @@ class TsQuestionView extends StatelessWidget {
 
       case TsQuestionType.text:
         return _textInput(context, cs, l10n);
+
+      case TsQuestionType.trueFalse:
+        final v = c.trueFalseSelection(q.id);
+        return [
+          TsChoiceTile(
+            label: l10n.tsTrue,
+            selected: v == true,
+            multi: false,
+            // Dobara tap = jawab hata do (blank pe negative marking nahi lagti).
+            onTap: () => c.setTrueFalse(q.id, v == true ? null : true),
+          ),
+          TsChoiceTile(
+            label: l10n.tsFalse,
+            selected: v == false,
+            multi: false,
+            onTap: () => c.setTrueFalse(q.id, v == false ? null : false),
+          ),
+        ];
+
+      case TsQuestionType.fillBlank:
+        return [
+          TextField(
+            controller: c.textController(q.id),
+            maxLines: 1,
+            textCapitalization: TextCapitalization.none,
+            autocorrect: false,
+            inputFormatters: [LengthLimitingTextInputFormatter(200)],
+            style: TextStyle(fontSize: 14, color: cs.onSurface),
+            decoration: InputDecoration(hintText: l10n.tsFillBlankInputHint),
+          ),
+        ];
+
+      case TsQuestionType.numeric:
+        return [
+          TextField(
+            controller: c.textController(q.id),
+            maxLines: 1,
+            keyboardType: const TextInputType.numberWithOptions(decimal: true, signed: true),
+            // Digits, ek minus (shuru me), decimal point aur comma/space (1,250) — baaki block.
+            inputFormatters: [
+              FilteringTextInputFormatter.allow(RegExp(r'[0-9.,\-\s]')),
+              LengthLimitingTextInputFormatter(30),
+            ],
+            style: TextStyle(fontSize: 14, color: cs.onSurface),
+            decoration: InputDecoration(hintText: l10n.tsNumericInputHint),
+          ),
+        ];
 
       case TsQuestionType.unknown:
         // Naya question type jo ye app version nahi jaanta — jhoota text
@@ -311,12 +373,18 @@ class TsChoiceTile extends StatelessWidget {
   final bool multi;
   final VoidCallback onTap;
 
+  /// Option image (Task 8) — text ke saath ya akeli.
+  final String? imageUrl;
+  final String? imageLabel;
+
   const TsChoiceTile({
     super.key,
     required this.label,
     required this.selected,
     required this.multi,
     required this.onTap,
+    this.imageUrl,
+    this.imageLabel,
   });
 
   @override
@@ -328,7 +396,7 @@ class TsChoiceTile extends StatelessWidget {
         inMutuallyExclusiveGroup: !multi,
         checked: selected,
         button: true,
-        label: label,
+        label: label.isNotEmpty ? label : (imageLabel ?? ''),
         excludeSemantics: true,
         onTap: onTap,
         child: GestureDetector(
@@ -355,12 +423,20 @@ class TsChoiceTile extends StatelessWidget {
               ),
               const SizedBox(width: 12),
               Expanded(
-                child: Text(label,
-                    style: TextStyle(
-                        fontSize: 13,
-                        height: 1.4,
-                        fontWeight: selected ? FontWeight.w600 : FontWeight.w400,
-                        color: cs.onSurface)),
+                child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                  if (label.isNotEmpty)
+                    Text(label,
+                        style: TextStyle(
+                            fontSize: 13,
+                            height: 1.4,
+                            fontWeight: selected ? FontWeight.w600 : FontWeight.w400,
+                            color: cs.onSurface)),
+                  if (imageUrl != null && imageUrl!.isNotEmpty) ...[
+                    if (label.isNotEmpty) const SizedBox(height: 8),
+                    // Image tap = zoom viewer; baaki tile tap = option select.
+                    TsNetworkImage(url: imageUrl, maxHeight: 140, semanticLabel: imageLabel),
+                  ],
+                ]),
               ),
             ]),
           ),

@@ -5888,6 +5888,42 @@ abstract class AppLocalizations {
   /// **'Crop failed.'**
   String get cropFailed;
 
+  /// No description provided for @ratioOriginal.
+  ///
+  /// In en, this message translates to:
+  /// **'Original'**
+  String get ratioOriginal;
+
+  /// No description provided for @ratioPickerLabel.
+  ///
+  /// In en, this message translates to:
+  /// **'Photo ratio'**
+  String get ratioPickerLabel;
+
+  /// No description provided for @ratioCropTitle.
+  ///
+  /// In en, this message translates to:
+  /// **'Crop photo'**
+  String get ratioCropTitle;
+
+  /// No description provided for @cropHintDrag.
+  ///
+  /// In en, this message translates to:
+  /// **'Pinch to zoom, drag to reposition'**
+  String get cropHintDrag;
+
+  /// No description provided for @storyCropTitle.
+  ///
+  /// In en, this message translates to:
+  /// **'Fit to story (9:16)'**
+  String get storyCropTitle;
+
+  /// No description provided for @avatarCropTitle.
+  ///
+  /// In en, this message translates to:
+  /// **'Crop profile photo'**
+  String get avatarCropTitle;
+
   /// No description provided for @dateLabel.
   ///
   /// In en, this message translates to:
@@ -6908,6 +6944,54 @@ abstract class AppLocalizations {
   /// **'Message translate turned off'**
   String get chatTranslateDisabled;
 
+  /// 3-dot menu item — turns on the per-message listen (read aloud) button
+  ///
+  /// In en, this message translates to:
+  /// **'Enable message listen'**
+  String get chatEnableListen;
+
+  /// 3-dot menu item — turns off the per-message listen (read aloud) button
+  ///
+  /// In en, this message translates to:
+  /// **'Disable message listen'**
+  String get chatDisableListen;
+
+  /// Snackbar shown after enabling listen from the 3-dot menu
+  ///
+  /// In en, this message translates to:
+  /// **'Message listen turned on'**
+  String get chatListenEnabled;
+
+  /// Snackbar shown after disabling listen from the 3-dot menu
+  ///
+  /// In en, this message translates to:
+  /// **'Message listen turned off'**
+  String get chatListenDisabled;
+
+  /// 3-dot menu item — turns on voice note transcript and the Transcribe button
+  ///
+  /// In en, this message translates to:
+  /// **'Enable voice note transcribe'**
+  String get chatEnableTranscribe;
+
+  /// 3-dot menu item — turns off voice note transcript and the Transcribe button
+  ///
+  /// In en, this message translates to:
+  /// **'Disable voice note transcribe'**
+  String get chatDisableTranscribe;
+
+  /// Snackbar shown after enabling transcribe from the 3-dot menu
+  ///
+  /// In en, this message translates to:
+  /// **'Voice note transcribe turned on'**
+  String get chatTranscribeEnabled;
+
+  /// Snackbar shown after disabling transcribe from the 3-dot menu
+  ///
+  /// In en, this message translates to:
+  /// **'Voice note transcribe turned off'**
+  String get chatTranscribeDisabled;
+
   /// Fallback name in the block dialog
   ///
   /// In en, this message translates to:
@@ -6979,6 +7063,198 @@ abstract class AppLocalizations {
   /// In en, this message translates to:
   /// **'Unblock'**
   String get chatUnblock;
+
+  /// Title on a profile the viewer has blocked
+  ///
+  /// In en, this message translates to:
+  /// **'You\'ve blocked this account'**
+  String get profileBlockedByMeTitle;
+
+  /// Subtitle on a profile the viewer has blocked
+  ///
+  /// In en, this message translates to:
+  /// **'They can\'t see your profile, posts or stories, or message you. Unblock to see their content again.'**
+  String get profileBlockedByMeSubtitle;
+
+  /// Profile menu: restrict this account
+  ///
+  /// In en, this message translates to:
+  /// **'Restrict'**
+  String get profileRestrict;
+
+  /// Profile menu: undo restrict
+  ///
+  /// In en, this message translates to:
+  /// **'Unrestrict'**
+  String get profileUnrestrict;
+
+  /// Snackbar after restricting
+  ///
+  /// In en, this message translates to:
+  /// **'Restricted. Their comments on your posts are now hidden.'**
+  String get profileRestrictedSnack;
+
+  /// Snackbar after unrestricting
+  ///
+  /// In en, this message translates to:
+  /// **'Restriction removed'**
+  String get profileUnrestrictedSnack;
+
+  /// Profile menu: mute this account
+  ///
+  /// In en, this message translates to:
+  /// **'Mute posts & stories'**
+  String get profileMute;
+
+  /// Profile menu: unmute this account
+  ///
+  /// In en, this message translates to:
+  /// **'Unmute posts & stories'**
+  String get profileUnmute;
+
+  /// Snackbar after muting
+  ///
+  /// In en, this message translates to:
+  /// **'Muted. Their posts and stories won\'t show up for you.'**
+  String get profileMutedSnack;
+
+  /// Snackbar after unmuting
+  ///
+  /// In en, this message translates to:
+  /// **'Unmuted'**
+  String get profileUnmutedSnack;
+
+  /// Generic error for profile menu actions
+  ///
+  /// In en, this message translates to:
+  /// **'Something went wrong: {error}'**
+  String profileMoreFailed(String error);
+
+  /// Menu item: report
+  ///
+  /// In en, this message translates to:
+  /// **'Report'**
+  String get reportAction;
+
+  /// Report sheet title
+  ///
+  /// In en, this message translates to:
+  /// **'Why are you reporting this?'**
+  String get reportTitle;
+
+  /// Report reason
+  ///
+  /// In en, this message translates to:
+  /// **'Spam'**
+  String get reportReasonSpam;
+
+  /// Report reason
+  ///
+  /// In en, this message translates to:
+  /// **'Harassment or bullying'**
+  String get reportReasonHarassment;
+
+  /// Report reason
+  ///
+  /// In en, this message translates to:
+  /// **'Hate speech'**
+  String get reportReasonHate;
+
+  /// Report reason
+  ///
+  /// In en, this message translates to:
+  /// **'Nudity or sexual content'**
+  String get reportReasonNudity;
+
+  /// Report reason
+  ///
+  /// In en, this message translates to:
+  /// **'Violence or dangerous content'**
+  String get reportReasonViolence;
+
+  /// Report reason
+  ///
+  /// In en, this message translates to:
+  /// **'Self-harm'**
+  String get reportReasonSelfHarm;
+
+  /// Report reason
+  ///
+  /// In en, this message translates to:
+  /// **'Scam or fraud'**
+  String get reportReasonScam;
+
+  /// Report reason
+  ///
+  /// In en, this message translates to:
+  /// **'Pretending to be someone else'**
+  String get reportReasonImpersonation;
+
+  /// Report reason
+  ///
+  /// In en, this message translates to:
+  /// **'Something else'**
+  String get reportReasonOther;
+
+  /// Checkbox in the block dialog
+  ///
+  /// In en, this message translates to:
+  /// **'Also report this account'**
+  String get reportAlsoReport;
+
+  /// Checkbox in the block dialog
+  ///
+  /// In en, this message translates to:
+  /// **'Also block new accounts they may create'**
+  String get reportBlockNewAccounts;
+
+  /// Report sheet button
+  ///
+  /// In en, this message translates to:
+  /// **'Submit report'**
+  String get reportSubmit;
+
+  /// Snackbar after a report is sent
+  ///
+  /// In en, this message translates to:
+  /// **'Thanks. We\'ll review this.'**
+  String get reportThanks;
+
+  /// Snackbar when re-reporting
+  ///
+  /// In en, this message translates to:
+  /// **'You already reported this.'**
+  String get reportAlreadySent;
+
+  /// Report error
+  ///
+  /// In en, this message translates to:
+  /// **'Couldn\'t send the report: {error}'**
+  String reportFailed(String error);
+
+  /// Search field on the blocked accounts screen
+  ///
+  /// In en, this message translates to:
+  /// **'Search blocked accounts'**
+  String get blockedSearchHint;
+
+  /// Empty search result on blocked accounts
+  ///
+  /// In en, this message translates to:
+  /// **'No blocked accounts match your search.'**
+  String get blockedNoMatches;
+
+  /// Undo action on the unblock snackbar
+  ///
+  /// In en, this message translates to:
+  /// **'Undo'**
+  String get blockedUndo;
+
+  /// Short "Block" item in comment / viewers / notification menus
+  ///
+  /// In en, this message translates to:
+  /// **'Block'**
+  String get blockMenuBlockUser;
 
   /// Disappearing messages duration: off
   ///
@@ -10435,6 +10711,876 @@ abstract class AppLocalizations {
   /// In en, this message translates to:
   /// **'Paused until {until}'**
   String notifPausedUntil(String until);
+
+  /// No description provided for @classTestsTab.
+  ///
+  /// In en, this message translates to:
+  /// **'Tests'**
+  String get classTestsTab;
+
+  /// No description provided for @classTestsEmpty.
+  ///
+  /// In en, this message translates to:
+  /// **'No tests in this class yet'**
+  String get classTestsEmpty;
+
+  /// No description provided for @classTestsEmptyHint.
+  ///
+  /// In en, this message translates to:
+  /// **'When your teacher publishes a test, it will show up here.'**
+  String get classTestsEmptyHint;
+
+  /// No description provided for @classTestsLoadFailed.
+  ///
+  /// In en, this message translates to:
+  /// **'Could not load tests'**
+  String get classTestsLoadFailed;
+
+  /// No description provided for @classTestFree.
+  ///
+  /// In en, this message translates to:
+  /// **'Free'**
+  String get classTestFree;
+
+  /// No description provided for @classTestQuestions.
+  ///
+  /// In en, this message translates to:
+  /// **'{count} questions'**
+  String classTestQuestions(int count);
+
+  /// No description provided for @classTestMinutes.
+  ///
+  /// In en, this message translates to:
+  /// **'{minutes} min'**
+  String classTestMinutes(int minutes);
+
+  /// No description provided for @classTestOpen.
+  ///
+  /// In en, this message translates to:
+  /// **'Open test'**
+  String get classTestOpen;
+
+  /// No description provided for @classTestStatusLive.
+  ///
+  /// In en, this message translates to:
+  /// **'Live now'**
+  String get classTestStatusLive;
+
+  /// No description provided for @classTestStatusUpcoming.
+  ///
+  /// In en, this message translates to:
+  /// **'Upcoming'**
+  String get classTestStatusUpcoming;
+
+  /// No description provided for @classTestStatusEnded.
+  ///
+  /// In en, this message translates to:
+  /// **'Ended'**
+  String get classTestStatusEnded;
+
+  /// Highlights row: label of the create circle
+  ///
+  /// In en, this message translates to:
+  /// **'New'**
+  String get hlNew;
+
+  /// Fallback title for a highlight without a name
+  ///
+  /// In en, this message translates to:
+  /// **'Highlights'**
+  String get hlDefaultTitle;
+
+  /// Highlight editor title (create)
+  ///
+  /// In en, this message translates to:
+  /// **'New highlight'**
+  String get hlNewHighlight;
+
+  /// Highlight editor title (edit)
+  ///
+  /// In en, this message translates to:
+  /// **'Edit highlight'**
+  String get hlEditHighlight;
+
+  /// Highlight editor create button
+  ///
+  /// In en, this message translates to:
+  /// **'Create'**
+  String get hlCreate;
+
+  /// Highlight title field label
+  ///
+  /// In en, this message translates to:
+  /// **'Title'**
+  String get hlTitleLabel;
+
+  /// Highlight editor: archive grid heading
+  ///
+  /// In en, this message translates to:
+  /// **'Your stories'**
+  String get hlYourStories;
+
+  /// Highlight editor: selected strip caption
+  ///
+  /// In en, this message translates to:
+  /// **'Selected ({count}) · hold and drag to reorder'**
+  String hlSelectedCount(int count);
+
+  /// Highlight editor: cover hint
+  ///
+  /// In en, this message translates to:
+  /// **'Tap a photo to use it as cover'**
+  String get hlCoverHint;
+
+  /// Highlight editor: automatic cover chip
+  ///
+  /// In en, this message translates to:
+  /// **'Automatic'**
+  String get hlCoverAutomatic;
+
+  /// Cover crop dialog title / button
+  ///
+  /// In en, this message translates to:
+  /// **'Adjust cover'**
+  String get hlAdjustCover;
+
+  /// Cover crop dialog hint
+  ///
+  /// In en, this message translates to:
+  /// **'Drag to move, pinch or use the slider to zoom'**
+  String get hlCropHint;
+
+  /// Cover crop reset button
+  ///
+  /// In en, this message translates to:
+  /// **'Reset'**
+  String get hlReset;
+
+  /// Cover crop confirm button
+  ///
+  /// In en, this message translates to:
+  /// **'Done'**
+  String get hlDone;
+
+  /// Delete highlight dialog title
+  ///
+  /// In en, this message translates to:
+  /// **'Delete highlight?'**
+  String get hlDeleteQuestion;
+
+  /// Delete highlight dialog body
+  ///
+  /// In en, this message translates to:
+  /// **'The stories themselves are not deleted.'**
+  String get hlDeleteBody;
+
+  /// Delete highlight button / action
+  ///
+  /// In en, this message translates to:
+  /// **'Delete highlight'**
+  String get hlDeleteAction;
+
+  /// Highlight actions sheet: open editor
+  ///
+  /// In en, this message translates to:
+  /// **'Edit stories and cover'**
+  String get hlEditStoriesCover;
+
+  /// Highlight actions sheet: rename
+  ///
+  /// In en, this message translates to:
+  /// **'Rename'**
+  String get hlRename;
+
+  /// Rename dialog title
+  ///
+  /// In en, this message translates to:
+  /// **'Rename highlight'**
+  String get hlRenameTitle;
+
+  /// Highlight editor: empty archive
+  ///
+  /// In en, this message translates to:
+  /// **'No stories to add yet. Post a story and it shows up here.'**
+  String get hlNoStories;
+
+  /// Highlight editor: archive load error
+  ///
+  /// In en, this message translates to:
+  /// **'Couldn\'t load your stories.'**
+  String get hlLoadStoriesFailed;
+
+  /// Snack: highlight deleted / hidden
+  ///
+  /// In en, this message translates to:
+  /// **'This highlight is no longer available.'**
+  String get hlUnavailable;
+
+  /// Snack: highlight open failed
+  ///
+  /// In en, this message translates to:
+  /// **'Couldn\'t open highlight. Check your connection.'**
+  String get hlOpenFailed;
+
+  /// Snack: highlight has no visible stories
+  ///
+  /// In en, this message translates to:
+  /// **'This highlight is empty.'**
+  String get hlEmpty;
+
+  /// Search bar hint on the global message search screen
+  ///
+  /// In en, this message translates to:
+  /// **'Search chats, people, groups & messages'**
+  String get msgSearchHintAll;
+
+  /// Search bar hint when searching inside one chat
+  ///
+  /// In en, this message translates to:
+  /// **'Search in this chat'**
+  String get msgSearchHintChat;
+
+  /// Message search section header — existing chats
+  ///
+  /// In en, this message translates to:
+  /// **'Chats'**
+  String get msgSearchSectionChats;
+
+  /// Message search section header — followers/following/mutual people
+  ///
+  /// In en, this message translates to:
+  /// **'People'**
+  String get msgSearchSectionPeople;
+
+  /// Message search section header — groups I am in
+  ///
+  /// In en, this message translates to:
+  /// **'Groups'**
+  String get msgSearchSectionGroups;
+
+  /// Message search section header — matching messages
+  ///
+  /// In en, this message translates to:
+  /// **'Messages'**
+  String get msgSearchSectionMessages;
+
+  /// Badge on a person who follows me and I follow back
+  ///
+  /// In en, this message translates to:
+  /// **'Mutual'**
+  String get msgSearchMutual;
+
+  /// Label on a person I follow
+  ///
+  /// In en, this message translates to:
+  /// **'Following'**
+  String get msgSearchFollowing;
+
+  /// Label on a person who follows me
+  ///
+  /// In en, this message translates to:
+  /// **'Follows you'**
+  String get msgSearchFollowsYou;
+
+  /// Group member count in search results
+  ///
+  /// In en, this message translates to:
+  /// **'{count} members'**
+  String msgSearchMembers(int count);
+
+  /// Empty state of global message search
+  ///
+  /// In en, this message translates to:
+  /// **'No results found'**
+  String get msgSearchNoResults;
+
+  /// Empty state of in-chat message search
+  ///
+  /// In en, this message translates to:
+  /// **'No messages found'**
+  String get msgSearchNoMessages;
+
+  /// Hint before the user typed enough to search
+  ///
+  /// In en, this message translates to:
+  /// **'Type at least 2 characters to search'**
+  String get msgSearchMinChars;
+
+  /// Shown when search is rate limited
+  ///
+  /// In en, this message translates to:
+  /// **'Too many searches — please wait a moment and try again.'**
+  String get msgSearchTooMany;
+
+  /// Generic search failure
+  ///
+  /// In en, this message translates to:
+  /// **'Couldn\'t search right now. Try again.'**
+  String get msgSearchFailed;
+
+  /// Failure opening a chat from a search result
+  ///
+  /// In en, this message translates to:
+  /// **'Couldn\'t open that chat right now.'**
+  String get msgSearchOpenChatFailed;
+
+  /// Note shown while message filters are active
+  ///
+  /// In en, this message translates to:
+  /// **'Filters apply to messages only'**
+  String get msgSearchFiltersNote;
+
+  /// True option of a true/false question
+  ///
+  /// In en, this message translates to:
+  /// **'True'**
+  String get tsTrue;
+
+  /// False option of a true/false question
+  ///
+  /// In en, this message translates to:
+  /// **'False'**
+  String get tsFalse;
+
+  /// Hint under a true/false question
+  ///
+  /// In en, this message translates to:
+  /// **'Select True or False. Tap again to clear.'**
+  String get answerHintTrueFalse;
+
+  /// Hint under a fill-in-the-blank question
+  ///
+  /// In en, this message translates to:
+  /// **'Type the missing word or phrase'**
+  String get answerHintFillBlank;
+
+  /// Hint under a numeric-answer question
+  ///
+  /// In en, this message translates to:
+  /// **'Enter a number'**
+  String get answerHintNumeric;
+
+  /// Placeholder of the fill-in-the-blank input
+  ///
+  /// In en, this message translates to:
+  /// **'Your answer'**
+  String get tsFillBlankInputHint;
+
+  /// Placeholder of the numeric answer input
+  ///
+  /// In en, this message translates to:
+  /// **'Enter a number, e.g. 3.14'**
+  String get tsNumericInputHint;
+
+  /// Accessibility label of an image inside an answer option
+  ///
+  /// In en, this message translates to:
+  /// **'Option image'**
+  String get tsOptionImage;
+
+  /// Question type name in the test builder
+  ///
+  /// In en, this message translates to:
+  /// **'Single choice'**
+  String get tsTypeMcq;
+
+  /// Question type name in the test builder
+  ///
+  /// In en, this message translates to:
+  /// **'Multi-select'**
+  String get tsTypeMsq;
+
+  /// Question type name in the test builder
+  ///
+  /// In en, this message translates to:
+  /// **'Text'**
+  String get tsTypeText;
+
+  /// Question type name in the test builder
+  ///
+  /// In en, this message translates to:
+  /// **'True / False'**
+  String get tsTypeTrueFalse;
+
+  /// Question type name in the test builder
+  ///
+  /// In en, this message translates to:
+  /// **'Fill in the blank'**
+  String get tsTypeFillBlank;
+
+  /// Question type name in the test builder
+  ///
+  /// In en, this message translates to:
+  /// **'Numeric'**
+  String get tsTypeNumeric;
+
+  /// Label above the correct-answer picker in the test builder
+  ///
+  /// In en, this message translates to:
+  /// **'Correct answer'**
+  String get tsBuilderCorrectAnswer;
+
+  /// Field label in the fill-in-the-blank builder
+  ///
+  /// In en, this message translates to:
+  /// **'Accepted answers'**
+  String get tsAcceptedAnswers;
+
+  /// Helper text of the accepted answers field
+  ///
+  /// In en, this message translates to:
+  /// **'One per line. Any one of them counts as correct.'**
+  String get tsAcceptedAnswersHelper;
+
+  /// Switch label in the fill-in-the-blank builder
+  ///
+  /// In en, this message translates to:
+  /// **'Case sensitive'**
+  String get tsCaseSensitive;
+
+  /// Field label in the numeric builder
+  ///
+  /// In en, this message translates to:
+  /// **'Correct number'**
+  String get tsCorrectNumber;
+
+  /// Field label of the numeric tolerance
+  ///
+  /// In en, this message translates to:
+  /// **'Allowed difference (±)'**
+  String get tsTolerance;
+
+  /// Helper text of the numeric tolerance field
+  ///
+  /// In en, this message translates to:
+  /// **'0 means the answer must match exactly'**
+  String get tsToleranceHelper;
+
+  /// Button to attach an image to an answer option
+  ///
+  /// In en, this message translates to:
+  /// **'Add image'**
+  String get tsAddOptionImage;
+
+  /// Button to remove an image from an answer option
+  ///
+  /// In en, this message translates to:
+  /// **'Remove image'**
+  String get tsRemoveOptionImage;
+
+  /// Placeholder of an option text field
+  ///
+  /// In en, this message translates to:
+  /// **'Option {number}'**
+  String tsOptionHint(int number);
+
+  /// Snack shown when a question in the builder is incomplete
+  ///
+  /// In en, this message translates to:
+  /// **'Add the question text and its correct answer before saving.'**
+  String get tsQuestionIncomplete;
+
+  /// Progress label while option images upload during publish
+  ///
+  /// In en, this message translates to:
+  /// **'Uploading option images…'**
+  String get tsUploadingOptionImages;
+
+  /// Result summary chip: total marks deducted for wrong answers
+  ///
+  /// In en, this message translates to:
+  /// **'Negative marking: −{marks}'**
+  String tsSummaryPenalty(int marks);
+
+  /// Per-question chip: marks deducted for a wrong answer
+  ///
+  /// In en, this message translates to:
+  /// **'−{marks} penalty'**
+  String tsPenaltyShort(int marks);
+
+  /// Hint in the test player: negative marking applies to this question
+  ///
+  /// In en, this message translates to:
+  /// **'{marks} marks are deducted for a wrong answer. Unanswered questions are never penalised.'**
+  String tsNegativeMarkingNote(int marks);
+
+  /// Countdown chip on a class that has not started yet
+  ///
+  /// In en, this message translates to:
+  /// **'Starts in {duration}'**
+  String classTimeStartsIn(String duration);
+
+  /// Chip on a class that is currently running
+  ///
+  /// In en, this message translates to:
+  /// **'Live now'**
+  String get classTimeLiveNow;
+
+  /// Chip when a class starts in under a minute
+  ///
+  /// In en, this message translates to:
+  /// **'Starting soon'**
+  String get classTimeStartingSoon;
+
+  /// Chip on a class whose time has passed
+  ///
+  /// In en, this message translates to:
+  /// **'Ended'**
+  String get classTimeEnded;
+
+  /// Chip on a cancelled class
+  ///
+  /// In en, this message translates to:
+  /// **'Cancelled'**
+  String get classTimeCancelled;
+
+  /// Compact duration: days only
+  ///
+  /// In en, this message translates to:
+  /// **'{d}d'**
+  String classTimeDays(int d);
+
+  /// Compact duration: days and hours
+  ///
+  /// In en, this message translates to:
+  /// **'{d}d {h}h'**
+  String classTimeDaysHours(int d, int h);
+
+  /// Compact duration: hours only
+  ///
+  /// In en, this message translates to:
+  /// **'{h}h'**
+  String classTimeHours(int h);
+
+  /// Compact duration: hours and minutes
+  ///
+  /// In en, this message translates to:
+  /// **'{h}h {m}m'**
+  String classTimeHoursMinutes(int h, int m);
+
+  /// Compact duration: minutes only
+  ///
+  /// In en, this message translates to:
+  /// **'{m}m'**
+  String classTimeMinutes(int m);
+
+  /// Home screen card title for the user's next upcoming class
+  ///
+  /// In en, this message translates to:
+  /// **'Next class'**
+  String get homeNextClass;
+
+  /// No description provided for @shareAndEarnCta.
+  ///
+  /// In en, this message translates to:
+  /// **'Share & earn'**
+  String get shareAndEarnCta;
+
+  /// No description provided for @referralLinkCopied.
+  ///
+  /// In en, this message translates to:
+  /// **'Referral link copied'**
+  String get referralLinkCopied;
+
+  /// No description provided for @referralCouldNotCreateLink.
+  ///
+  /// In en, this message translates to:
+  /// **'Couldn\'t create your referral link'**
+  String get referralCouldNotCreateLink;
+
+  /// No description provided for @referralCopyLinkCta.
+  ///
+  /// In en, this message translates to:
+  /// **'Copy link'**
+  String get referralCopyLinkCta;
+
+  /// No description provided for @referralYourLinkTitle.
+  ///
+  /// In en, this message translates to:
+  /// **'Your referral link'**
+  String get referralYourLinkTitle;
+
+  /// No description provided for @referralTotalCommissionLabel.
+  ///
+  /// In en, this message translates to:
+  /// **'Total commission earned'**
+  String get referralTotalCommissionLabel;
+
+  /// No description provided for @referralTestSeriesCommissionLabel.
+  ///
+  /// In en, this message translates to:
+  /// **'Test series commission'**
+  String get referralTestSeriesCommissionLabel;
+
+  /// No description provided for @referralClassCommissionLabel.
+  ///
+  /// In en, this message translates to:
+  /// **'Class commission'**
+  String get referralClassCommissionLabel;
+
+  /// No description provided for @referralPeopleAttributedLabel.
+  ///
+  /// In en, this message translates to:
+  /// **'People who opened your link'**
+  String get referralPeopleAttributedLabel;
+
+  /// No description provided for @referralPeopleConvertedLabel.
+  ///
+  /// In en, this message translates to:
+  /// **'Of them, bought something'**
+  String get referralPeopleConvertedLabel;
+
+  /// No description provided for @referralRecentCommissionsTitle.
+  ///
+  /// In en, this message translates to:
+  /// **'Recent commissions'**
+  String get referralRecentCommissionsTitle;
+
+  /// No description provided for @referralNoCommissionsYet.
+  ///
+  /// In en, this message translates to:
+  /// **'No commissions yet'**
+  String get referralNoCommissionsYet;
+
+  /// No description provided for @referralEarningsTitle.
+  ///
+  /// In en, this message translates to:
+  /// **'Your commission earnings'**
+  String get referralEarningsTitle;
+
+  /// No description provided for @referralTestSeriesKind.
+  ///
+  /// In en, this message translates to:
+  /// **'Test series'**
+  String get referralTestSeriesKind;
+
+  /// No description provided for @referralClassKind.
+  ///
+  /// In en, this message translates to:
+  /// **'Class'**
+  String get referralClassKind;
+
+  /// No description provided for @referralShareEarnHint.
+  ///
+  /// In en, this message translates to:
+  /// **'Earn {percent}% when someone you refer buys this test series.'**
+  String referralShareEarnHint(String percent);
+
+  /// No description provided for @referralClassEarnHint.
+  ///
+  /// In en, this message translates to:
+  /// **'Refer & earn {percent}% commission when someone joins through your link.'**
+  String referralClassEarnHint(String percent);
+
+  /// No description provided for @referralWindowNote.
+  ///
+  /// In en, this message translates to:
+  /// **'Credit lasts {days} days after they open your link.'**
+  String referralWindowNote(int days);
+
+  /// No description provided for @referralClassCommissionPercentNote.
+  ///
+  /// In en, this message translates to:
+  /// **'You earn {percent}% on purchases made through this link.'**
+  String referralClassCommissionPercentNote(String percent);
+
+  /// No description provided for @shareTargetTitle.
+  ///
+  /// In en, this message translates to:
+  /// **'Share to LearnScroll'**
+  String get shareTargetTitle;
+
+  /// No description provided for @shareTargetCaptionHint.
+  ///
+  /// In en, this message translates to:
+  /// **'Add a caption (optional)'**
+  String get shareTargetCaptionHint;
+
+  /// No description provided for @shareTargetMessageHint.
+  ///
+  /// In en, this message translates to:
+  /// **'Message'**
+  String get shareTargetMessageHint;
+
+  /// No description provided for @shareTargetSearchHint.
+  ///
+  /// In en, this message translates to:
+  /// **'Search chats'**
+  String get shareTargetSearchHint;
+
+  /// No description provided for @shareTargetSending.
+  ///
+  /// In en, this message translates to:
+  /// **'Sending...'**
+  String get shareTargetSending;
+
+  /// No description provided for @shareTargetSendTo.
+  ///
+  /// In en, this message translates to:
+  /// **'Send to {count} chat(s)'**
+  String shareTargetSendTo(int count);
+
+  /// No description provided for @shareTargetSent.
+  ///
+  /// In en, this message translates to:
+  /// **'Sent to {count} chat(s)'**
+  String shareTargetSent(int count);
+
+  /// No description provided for @shareTargetSentPartial.
+  ///
+  /// In en, this message translates to:
+  /// **'Sent to {done} of {total} chats'**
+  String shareTargetSentPartial(int done, int total);
+
+  /// No description provided for @shareTargetSendFailed.
+  ///
+  /// In en, this message translates to:
+  /// **'Couldn\'t send. Please try again.'**
+  String get shareTargetSendFailed;
+
+  /// No description provided for @shareTargetLoadFailed.
+  ///
+  /// In en, this message translates to:
+  /// **'Couldn\'t load your chats'**
+  String get shareTargetLoadFailed;
+
+  /// No description provided for @shareTargetNoChats.
+  ///
+  /// In en, this message translates to:
+  /// **'No chats found'**
+  String get shareTargetNoChats;
+
+  /// No description provided for @shareTargetFileMissing.
+  ///
+  /// In en, this message translates to:
+  /// **'The shared file is no longer available'**
+  String get shareTargetFileMissing;
+
+  /// No description provided for @shareLinkCopied.
+  ///
+  /// In en, this message translates to:
+  /// **'Link copied'**
+  String get shareLinkCopied;
+
+  /// No description provided for @shareCardFailed.
+  ///
+  /// In en, this message translates to:
+  /// **'Couldn\'t create the card. Try again.'**
+  String get shareCardFailed;
+
+  /// No description provided for @shareCopyLink.
+  ///
+  /// In en, this message translates to:
+  /// **'Copy link'**
+  String get shareCopyLink;
+
+  /// No description provided for @shareLinkAction.
+  ///
+  /// In en, this message translates to:
+  /// **'Share link'**
+  String get shareLinkAction;
+
+  /// No description provided for @shareCardImage.
+  ///
+  /// In en, this message translates to:
+  /// **'Share card image'**
+  String get shareCardImage;
+
+  /// No description provided for @shareScanToOpen.
+  ///
+  /// In en, this message translates to:
+  /// **'Scan to open on LearnScroll'**
+  String get shareScanToOpen;
+
+  /// No description provided for @scanQrTitle.
+  ///
+  /// In en, this message translates to:
+  /// **'Scan QR'**
+  String get scanQrTitle;
+
+  /// No description provided for @scanQrTorch.
+  ///
+  /// In en, this message translates to:
+  /// **'Flashlight'**
+  String get scanQrTorch;
+
+  /// No description provided for @scanQrUnsupported.
+  ///
+  /// In en, this message translates to:
+  /// **'This QR code isn\'t a LearnScroll code.'**
+  String get scanQrUnsupported;
+
+  /// No description provided for @scanQrNoCodeInImage.
+  ///
+  /// In en, this message translates to:
+  /// **'No QR code found in that image.'**
+  String get scanQrNoCodeInImage;
+
+  /// No description provided for @scanQrHint.
+  ///
+  /// In en, this message translates to:
+  /// **'Point the camera at a LearnScroll QR code'**
+  String get scanQrHint;
+
+  /// No description provided for @scanQrGallery.
+  ///
+  /// In en, this message translates to:
+  /// **'Pick from gallery'**
+  String get scanQrGallery;
+
+  /// No description provided for @scanQrPermissionDenied.
+  ///
+  /// In en, this message translates to:
+  /// **'Camera access is needed to scan QR codes.'**
+  String get scanQrPermissionDenied;
+
+  /// No description provided for @scanQrOpenSettings.
+  ///
+  /// In en, this message translates to:
+  /// **'Open settings'**
+  String get scanQrOpenSettings;
+
+  /// No description provided for @scanQrGrantAccess.
+  ///
+  /// In en, this message translates to:
+  /// **'Allow camera'**
+  String get scanQrGrantAccess;
+
+  /// No description provided for @parentEntryScanQr.
+  ///
+  /// In en, this message translates to:
+  /// **'Scan QR code'**
+  String get parentEntryScanQr;
+
+  /// No description provided for @parentLinkNotAParentQr.
+  ///
+  /// In en, this message translates to:
+  /// **'That QR code isn\'t a parent invite.'**
+  String get parentLinkNotAParentQr;
+
+  /// No description provided for @parentLinkScanQr.
+  ///
+  /// In en, this message translates to:
+  /// **'Scan QR'**
+  String get parentLinkScanQr;
+
+  /// No description provided for @parentLinkPasteLink.
+  ///
+  /// In en, this message translates to:
+  /// **'Paste link'**
+  String get parentLinkPasteLink;
+
+  /// No description provided for @parentAccessQrHint.
+  ///
+  /// In en, this message translates to:
+  /// **'Your parent can scan this QR, or open the shared link.'**
+  String get parentAccessQrHint;
+
+  /// No description provided for @parentAccessShareMessageLink.
+  ///
+  /// In en, this message translates to:
+  /// **'You\'ve been invited to Parent/Guardian Access on LearnScroll.\n\nTap this link to open it: {link}\n\nOr install the app, choose \"I\'m a parent\" on the login screen and enter this code: {code}'**
+  String parentAccessShareMessageLink(String code, String link);
 }
 
 class _AppLocalizationsDelegate

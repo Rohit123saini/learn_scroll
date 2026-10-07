@@ -32,6 +32,7 @@ import '../../services/comment_service.dart';
 import '../../services/auth_service.dart';
 import '../../widgets/ls_ui.dart';
 import '../../l10n/app_localizations.dart';
+import '../../profile/widgets/block_report.dart'; // Report / Block from a comment's ⋮ menu
 
 // ===================== COMMENT SYSTEM - THREAD SERIES LOGIC =====================
 // Decoupled from PostModel: takes postId/postOwnerId/initialCommentsCount
@@ -661,7 +662,18 @@ class _CommentTileState extends State<CommentTile> {
 
   bool get _isMyComment => _myUserId != null && widget.comment.user.id.toString() == _myUserId.toString();
   bool get _isPostOwner => _myUserId != null && widget.postOwnerId == _myUserId.toString();
-  bool get _canShowMenu => _isMyComment || _isPostOwner;
+  // Every signed-in user gets the ⋮ menu: own comment -> edit/delete,
+  // someone else's -> Report / Block (post owner also gets Hide).
+  bool get _canShowMenu => _myUserId != null;
+  // Set once I blocked this commenter from here — the tile disappears at once.
+  bool _blockedHere = false;
+
+  Future<void> _blockCommenter() async {
+    final uid = int.tryParse(widget.comment.user.id.toString());
+    if (uid == null) return;
+    final ok = await blockUserFlow(context, userId: uid, username: widget.comment.user.username);
+    if (ok && mounted) setState(() => _blockedHere = true);
+  }
 
   void _showReactionOverlay(BuildContext context) {
     final cs = Theme.of(context).colorScheme;
@@ -760,6 +772,10 @@ class _CommentTileState extends State<CommentTile> {
     }
     if (_isPostOwner && !_isMyComment) {
       options.add(_AttachOptionTile(icon: Icons.visibility_off_rounded, color: const Color(0xFFEA580C), label: l10n.hideComment, onTap: () { Navigator.pop(context); _hideComment(); }));
+    }
+    if (!_isMyComment) {
+      options.add(_AttachOptionTile(icon: Icons.flag_outlined, color: cs.onSurfaceVariant, label: l10n.reportAction, onTap: () { Navigator.pop(context); showReportSheet(context, targetType: 'comment', targetId: widget.comment.id); }));
+      options.add(_AttachOptionTile(icon: Icons.block_rounded, color: cs.error, label: l10n.blockMenuBlockUser, onTap: () { Navigator.pop(context); _blockCommenter(); }));
     }
     if (options.isEmpty) return;
     showModalBottomSheet(
@@ -891,6 +907,7 @@ class _CommentTileState extends State<CommentTile> {
 
   @override
   Widget build(BuildContext context) {
+    if (_blockedHere) return const SizedBox.shrink();
     final cs = Theme.of(context).colorScheme;
     final l10n = AppLocalizations.of(context)!;
     List<MapEntry<String, int>> sorted = widget.comment.reactionCounts.entries.where((e) => e.value > 0 && e.key != 'total').toList();

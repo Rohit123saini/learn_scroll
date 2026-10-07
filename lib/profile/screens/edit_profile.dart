@@ -10,6 +10,7 @@ import '../profile_link.dart'; // P7-FE
 import '../../utils/api.dart';
 import '../../widgets/ls_ui.dart';
 import '../../l10n/app_localizations.dart';
+import '../../post/screens/ratio_crop_screen.dart'; // 1.3-FE
 
 // ============================================================
 // EDIT PROFILE — reskinned onto the same ls_ui.dart/ColorScheme system as
@@ -127,9 +128,19 @@ class _EditProfileScreenState extends State<EditProfileScreen> {
   Future<void> _pickImage() async {
     final picker = ImagePicker();
     final pickedFile = await picker.pickImage(source: ImageSource.gallery, imageQuality: 80);
-    if (pickedFile != null) {
-      setState(() => _selectedImage = File(pickedFile.path));
-    }
+    if (pickedFile == null || !mounted) return;
+    // 1.3-FE — avatars are always 1:1: crop with a circle guide before it is
+    // set (cancel = keep the current photo). Output is a 720px square JPEG.
+    final cropped = await showRatioCrop(
+      context,
+      File(pickedFile.path),
+      aspect: 1.0,
+      title: AppLocalizations.of(context)!.avatarCropTitle,
+      circleGuide: true,
+      outputWidth: 720,
+    );
+    if (cropped == null || !mounted) return;
+    setState(() => _selectedImage = cropped);
   }
 
   Future<bool> _confirmDiscard(AppLocalizations l10n) async {

@@ -2,8 +2,10 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
 import '../../l10n/app_localizations.dart';
+import '../../services/deep_link_service.dart';
 import '../../widgets/error_widgets.dart';
 import '../../widgets/ls_ui.dart';
+import '../../widgets/scan_qr_screen.dart';
 import '../../widgets/skeletons.dart';
 import '../models/campus_models.dart';
 import '../services/campus_service.dart';
@@ -27,8 +29,14 @@ import 'parent_child_overview_screen.dart';
 // bachche alag-alag campuses me ho sakte hain).
 // ============================================================
 
+// TASK 11.3 — link + QR: a campus invite link
+// (`…/parent-link?campus=12&code=ABCD1234`, tapped or scanned) opens this screen with
+// [initialCampusId]/[initialCode]; the verify sheet then opens straight away, pre-filled,
+// so the parent only has to press "Link". The sheet also has a "Scan QR" button.
 class ParentLinkScreen extends StatefulWidget {
-  const ParentLinkScreen({super.key});
+  final String? initialCampusId;
+  final String? initialCode;
+  const ParentLinkScreen({super.key, this.initialCampusId, this.initialCode});
 
   @override
   State<ParentLinkScreen> createState() => _ParentLinkScreenState();
@@ -43,6 +51,12 @@ class _ParentLinkScreenState extends State<ParentLinkScreen> {
   void initState() {
     super.initState();
     _load();
+    if ((widget.initialCode ?? '').isNotEmpty) {
+      // Open the pre-filled sheet once the first frame is up (needs a mounted Scaffold).
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) _openVerify(campusId: widget.initialCampusId, code: widget.initialCode);
+      });
+    }
   }
 
   Future<void> _load() async {
@@ -66,12 +80,12 @@ class _ParentLinkScreenState extends State<ParentLinkScreen> {
     }
   }
 
-  Future<void> _openVerify() async {
+  Future<void> _openVerify({String? campusId, String? code}) async {
     final linked = await showModalBottomSheet<bool>(
       context: context,
       isScrollControlled: true,
       useSafeArea: true,
-      builder: (_) => const _VerifyLinkSheet(),
+      builder: (_) => _VerifyLinkSheet(initialCampusId: campusId, initialCode: code),
     );
     if (linked == true) _load();
   }
@@ -82,7 +96,7 @@ class _ParentLinkScreenState extends State<ParentLinkScreen> {
     return Scaffold(
       appBar: lsAppBar(context, title: l10n.parentLinkScreenTitle),
       floatingActionButton: FloatingActionButton.extended(
-        onPressed: _openVerify,
+        onPressed: () => _openVerify(),
         icon: const Icon(Icons.link_rounded),
         label: Text(l10n.parentLinkVerifyTitle),
       ),
@@ -117,7 +131,7 @@ class _ParentLinkScreenState extends State<ParentLinkScreen> {
           title: l10n.parentLinkNoChildren,
           subtitle: l10n.parentLinkVerifyHint,
           actionLabel: l10n.parentLinkVerifyTitle,
-          onAction: _openVerify,
+          onAction: () => _openVerify(),
         ),
       ]);
     }
@@ -181,7 +195,9 @@ class _LinkTile extends StatelessWidget {
 }
 
 class _VerifyLinkSheet extends StatefulWidget {
-  const _VerifyLinkSheet();
+  final String? initialCampusId;
+  final String? initialCode;
+  const _VerifyLinkSheet({this.initialCampusId, this.initialCode});
 
   @override
   State<_VerifyLinkSheet> createState() => _VerifyLinkSheetState();
@@ -192,6 +208,13 @@ class _VerifyLinkSheetState extends State<_VerifyLinkSheet> {
   final _token = TextEditingController();
   bool _saving = false;
   String? _error;
+
+  @override
+  void initState() {
+    super.initState();
+    if ((widget.initialCampusId ?? '').isNotEmpty) _campusId.text = widget.initialCampusId!;
+    if ((widget.initialCode ?? '').isNotEmpty) _token.text = widget.initialCode!;
+  }
 
   @override
   void dispose() {
@@ -207,12 +230,36 @@ class _VerifyLinkSheetState extends State<_VerifyLinkSheet> {
   /// parses campus+code out of any pasted URL so the parent never has to
   /// type either by hand.
   void _tryParsePastedLink(String value) {
+    final target = DeepLinkService.parsePayload(value);
+    if (target is ParentInviteTarget) {
+      if (target.campusId != null) _campusId.text = target.campusId!;
+      _token.text = target.code;
+      return;
+    }
     final uri = Uri.tryParse(value.trim());
     if (uri == null || uri.queryParameters.isEmpty) return;
     final campus = uri.queryParameters['campus'];
     final code = uri.queryParameters['code'] ?? uri.queryParameters['token'];
     if (campus != null) _campusId.text = campus;
     if (code != null) _token.text = code;
+  }
+
+  Future<void> _scanQr() async {
+    final raw = await Navigator.push<String>(
+      context,
+      MaterialPageRoute(builder: (_) => const ScanQrScreen(returnRaw: true)),
+    );
+    if (raw == null || !mounted) return;
+    final target = DeepLinkService.parsePayload(raw);
+    if (target is! ParentInviteTarget) {
+      setState(() => _error = AppLocalizations.of(context)!.parentLinkNotAParentQr);
+      return;
+    }
+    setState(() {
+      _error = null;
+      if (target.campusId != null) _campusId.text = target.campusId!;
+      _token.text = target.code;
+    });
   }
 
   Future<void> _submit() async {
@@ -228,7 +275,7 @@ class _VerifyLinkSheetState extends State<_VerifyLinkSheet> {
       // to make here never actually succeeded).
       await CampusService.confirmParentLink(
         campusId: _campusId.text.trim(),
-        code: _token.text.trim(),
+        code: _token.text.trim().toUpperCase(),
       );
       if (mounted) {
         Navigator.pop(context, true);
@@ -290,15 +337,22 @@ class _VerifyLinkSheetState extends State<_VerifyLinkSheet> {
               labelText: l10n.parentLinkTokenLabel,
               hintText: l10n.parentLinkTokenHint,
               border: const OutlineInputBorder(),
-              suffixIcon: IconButton(
-                tooltip: 'Paste link',
-                icon: const Icon(Icons.content_paste_rounded, size: 18),
-                onPressed: () async {
-                  final data = await Clipboard.getData('text/plain');
-                  if (data?.text != null) _tryParsePastedLink(data!.text!);
-                  setState(() {});
-                },
-              ),
+              suffixIcon: Row(mainAxisSize: MainAxisSize.min, children: [
+                IconButton(
+                  tooltip: l10n.parentLinkScanQr,
+                  icon: const Icon(Icons.qr_code_scanner_rounded, size: 20),
+                  onPressed: _saving ? null : _scanQr,
+                ),
+                IconButton(
+                  tooltip: l10n.parentLinkPasteLink,
+                  icon: const Icon(Icons.content_paste_rounded, size: 18),
+                  onPressed: () async {
+                    final data = await Clipboard.getData('text/plain');
+                    if (data?.text != null) _tryParsePastedLink(data!.text!);
+                    setState(() {});
+                  },
+                ),
+              ]),
             ),
             onChanged: (v) {
               // Pasting a full link (not just a short code) auto-fills both

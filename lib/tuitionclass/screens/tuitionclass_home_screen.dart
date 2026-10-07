@@ -46,6 +46,7 @@
 
 import 'package:flutter/material.dart';
 
+import '../models/tuitionclass_models.dart';
 import '../services/tuitionclass_api_service.dart';
 import '../theme/tuitionclass_theme.dart';
 import 'explore_screen.dart';
@@ -58,6 +59,9 @@ import 'certificates_screen.dart';
 import 'join_requests_screen.dart';
 import 'classroom_reports_screen.dart';
 import 'my_reminders_screen.dart';
+import 'classroom_detail_screen.dart';
+import '../widgets/class_time_chip.dart'; // TASK 10.3
+import '../../l10n/app_localizations.dart';
 
 // ===========================================================================
 // SCREEN
@@ -137,11 +141,23 @@ class _MyLearningTab extends StatefulWidget {
 
 class _MyLearningTabState extends State<_MyLearningTab> {
   int? _unread;
+  ClassSession? _next; // TASK 10.3 — soonest upcoming/live session
 
   @override
   void initState() {
     super.initState();
     _loadUnread();
+    _loadNext();
+  }
+
+  Future<void> _loadNext() async {
+    try {
+      final d = await TuitionClassApi.dashboard(); // also syncs ServerClock
+      final list = d.upcomingSessions.toList()..sort((a, b) => a.scheduledStart.compareTo(b.scheduledStart));
+      if (mounted) setState(() => _next = list.isEmpty ? null : list.first);
+    } catch (_) {
+      // Non-fatal — the card just doesn't show.
+    }
   }
 
   Future<void> _loadUnread() async {
@@ -154,7 +170,10 @@ class _MyLearningTabState extends State<_MyLearningTab> {
   }
 
   void _open(Widget screen) {
-    Navigator.push(context, MaterialPageRoute(builder: (_) => screen)).then((_) => _loadUnread());
+    Navigator.push(context, MaterialPageRoute(builder: (_) => screen)).then((_) {
+      _loadUnread();
+      _loadNext();
+    });
   }
 
   @override
@@ -237,16 +256,31 @@ class _MyLearningTabState extends State<_MyLearningTab> {
           const SizedBox(width: 4),
         ],
       ),
-      body: GridView.builder(
-        padding: const EdgeInsets.fromLTRB(14, 14, 14, 24),
-        gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
-          crossAxisCount: 2,
-          crossAxisSpacing: 12,
-          mainAxisSpacing: 12,
-          childAspectRatio: 1.05,
-        ),
-        itemCount: tiles.length,
-        itemBuilder: (_, i) => tiles[i],
+      body: CustomScrollView(
+        slivers: [
+          if (_next != null)
+            SliverToBoxAdapter(
+              child: Padding(
+                padding: const EdgeInsets.fromLTRB(14, 14, 14, 0),
+                child: _NextClassCard(
+                  session: _next!,
+                  onTap: () => _open(ClassroomDetailScreen(classroomId: _next!.classroomId)),
+                ),
+              ),
+            ),
+          SliverPadding(
+            padding: const EdgeInsets.fromLTRB(14, 14, 14, 24),
+            sliver: SliverGrid(
+              gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
+                crossAxisCount: 2,
+                crossAxisSpacing: 12,
+                mainAxisSpacing: 12,
+                childAspectRatio: 1.05,
+              ),
+              delegate: SliverChildBuilderDelegate((_, i) => tiles[i], childCount: tiles.length),
+            ),
+          ),
+        ],
       ),
     );
   }
@@ -283,6 +317,48 @@ class _LearningTile extends StatelessWidget {
               Text(subtitle, style: TextStyle(fontSize: 11, color: Colors.grey.shade600), maxLines: 2, overflow: TextOverflow.ellipsis),
             ],
           ),
+        ),
+      ),
+    );
+  }
+}
+
+// TASK 10.3 — "Next class" card shown on top of My Learning.
+class _NextClassCard extends StatelessWidget {
+  final ClassSession session;
+  final VoidCallback onTap;
+  const _NextClassCard({required this.session, required this.onTap});
+
+  @override
+  Widget build(BuildContext context) {
+    final l10n = AppLocalizations.of(context);
+    return Material(
+      color: Colors.white,
+      borderRadius: BorderRadius.circular(16),
+      child: InkWell(
+        onTap: onTap,
+        borderRadius: BorderRadius.circular(16),
+        child: Container(
+          padding: const EdgeInsets.all(14),
+          decoration: BoxDecoration(borderRadius: BorderRadius.circular(16), boxShadow: const [TuitionClassColors.cardShadow]),
+          child: Row(children: [
+            const TuitionClassIconBadge(icon: Icons.event_available_rounded, size: 40),
+            const SizedBox(width: 12),
+            Expanded(
+              child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                Text(l10n.homeNextClass.toUpperCase(),
+                    style: TextStyle(fontSize: 10, fontWeight: FontWeight.w700, letterSpacing: .4, color: Colors.grey.shade600)),
+                const SizedBox(height: 2),
+                Text(session.classroomTitle,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 14, color: TuitionClassColors.navy)),
+                const SizedBox(height: 6),
+                ClassTimeChip.session(session, compact: true),
+              ]),
+            ),
+            Icon(Icons.chevron_right_rounded, color: Colors.grey.shade400),
+          ]),
         ),
       ),
     );

@@ -32,6 +32,7 @@ import '../../message/services/message_api_service.dart';
 import '../../message/screens/chat_screen.dart';
 import '../../profile/screens/target_profile.dart';
 import '../../profile/api_service.dart' as profile_api;
+import '../../profile/widgets/block_report.dart'; // Block from the notification menu
 import '../../profile/screens/follow_requests_screen.dart'; // N11-FE — P11-FE (class name/path confirm karo)
 // import '../../../widgets/skeletons.dart'; // agar generic list-skeleton chahiye to add karo
 
@@ -51,7 +52,7 @@ import '../../profile/screens/follow_requests_screen.dart'; // N11-FE — P11-FE
 //      `_navigateForNotification` me ek aur case jod dena, isi pattern se.
 // ============================================================
 
-enum _NotifAction { delete, muteActor, muteType }
+enum _NotifAction { delete, muteActor, muteType, blockActor }
 
 const double _kScrollThreshold = 700; // home.dart wala hi 700px convention (Task 10.5)
 
@@ -392,6 +393,15 @@ class _NotificationsScreenState extends State<NotificationsScreen> {
               title: Text('Turn off "$typeLabel"'),
               onTap: () => Navigator.pop(ctx, _NotifAction.muteType),
             ),
+            if (canMuteActor)
+              ListTile(
+                leading: Icon(Icons.person_off_outlined, color: Theme.of(ctx).colorScheme.error),
+                title: Text(
+                  '${AppLocalizations.of(ctx)!.blockMenuBlockUser} @$actorUsername',
+                  style: TextStyle(color: Theme.of(ctx).colorScheme.error),
+                ),
+                onTap: () => Navigator.pop(ctx, _NotifAction.blockActor),
+              ),
           ],
         ),
       ),
@@ -415,6 +425,14 @@ class _NotificationsScreenState extends State<NotificationsScreen> {
           'Muted @$actorUsername',
           () => NotificationService.instance.unmuteUser(mutedId),
         );
+        break;
+      case _NotifAction.blockActor:
+        final blockId = actorId!;
+        final ok = await blockUserFlow(context, userId: blockId, username: actorUsername ?? '');
+        if (!ok || !mounted) return;
+        // Everything this person triggered leaves the bell now (the server
+        // hides them too, and brings them back if the block is lifted).
+        setState(() => _items.removeWhere((x) => _asInt(x.data?['actor_id']) == blockId));
         break;
       case _NotifAction.muteType:
         try {
@@ -519,7 +537,7 @@ class _NotificationsScreenState extends State<NotificationsScreen> {
     }
   }
 
-  Future<void> _openMentionedStory(NotificationModel n) async {
+  Future<void> _openMentionedStory(NotificationModel n, {bool ownStory = false}) async {
     final storyId = n.data?['story_id']?.toString();
     if (storyId == null || storyId.isEmpty) return;
     final l10n = AppLocalizations.of(context)!;
@@ -532,11 +550,17 @@ class _NotificationsScreenState extends State<NotificationsScreen> {
         userProfilePic: story.user.profilePicture,
         stories: [story],
       );
-      // myUserId stays null: a mention is always on someone else's story,
-      // so the viewer shows the react / reply bar, never the owner controls.
+      // Mention: someone else's story -> myUserId stays null, so the viewer shows
+      // the react / reply bar. `story_reaction`: it is MY story -> owner controls.
       Navigator.push(
         context,
-        MaterialPageRoute(builder: (_) => StoryViewerScreen(groups: [group], initialGroupIndex: 0)),
+        MaterialPageRoute(
+          builder: (_) => StoryViewerScreen(
+            groups: [group],
+            initialGroupIndex: 0,
+            myUserId: ownStory ? story.user.id.toString() : null,
+          ),
+        ),
       );
     } on StoryUnavailableException {
       if (mounted) lsSnack(context, l10n.storyMentionUnavailable);
@@ -598,10 +622,17 @@ class _NotificationsScreenState extends State<NotificationsScreen> {
     }
 
     // classroom_id jahan bhi mila, sabse specific destination hai.
+    // TASK 9.3: "new test in your class" opens that class straight on its Tests tab.
     if (n.classroomId != null) {
+      final isClassTest = n.notifType == 'testseries_posted';
       Navigator.push(
         context,
-        MaterialPageRoute(builder: (_) => ClassroomDetailScreen(classroomId: n.classroomId!)),
+        MaterialPageRoute(
+          builder: (_) => ClassroomDetailScreen(
+            classroomId: n.classroomId!,
+            initialTab: isClassTest ? 'Tests' : null,
+          ),
+        ),
       );
       return;
     }
@@ -630,8 +661,14 @@ class _NotificationsScreenState extends State<NotificationsScreen> {
       return;
     }
 
-    // post_tag (P5a: data.post_id) was not routed before.
-    if (type == 'post_liked' || type == 'post_commented' || type == 'post_tag') {
+    // Task 3.4 — "X reacted to your story": open my story with the owner controls.
+    if (type == 'story_reaction') {
+      await _openMentionedStory(n, ownStory: true);
+      return;
+    }
+
+    // post_tag (P5a: data.post_id) was not routed before. post_reposted: data.post_id = the original.
+    if (type == 'post_liked' || type == 'post_commented' || type == 'post_tag' || type == 'post_reposted') {
       _openPost(n);
       return;
     }

@@ -55,6 +55,7 @@ import 'package:intl/intl.dart';
 import 'package:timezone/timezone.dart' as tz;
 import 'package:timezone/data/latest_all.dart' as tz_data;
 
+import '../../l10n/app_localizations.dart';
 import '../models/tuitionclass_models.dart';
 
 class TuitionClassDateTime {
@@ -98,6 +99,19 @@ class TuitionClassDateTime {
   /// Short weekday label for calendar strips, e.g. "Mon" / "lun." / "月".
   String weekdayShort(DateTime d) => DateFormat.E(_locale).format(d);
 
+  /// TASK 10.2 — compact, localized countdown text used by ClassTimeChip:
+  /// "2d 3h" / "2h 10m" / "2h" / "45m". Rounds UP to the next minute so a
+  /// class 20 seconds away reads "1m", never "0m".
+  String shortDuration(Duration d, AppLocalizations l10n) {
+    final totalMinutes = (d.inSeconds / 60).ceil().clamp(1, 1 << 30);
+    final days = totalMinutes ~/ 1440;
+    final hours = (totalMinutes % 1440) ~/ 60;
+    final minutes = totalMinutes % 60;
+    if (days > 0) return hours == 0 ? l10n.classTimeDays(days) : l10n.classTimeDaysHours(days, hours);
+    if (hours > 0) return minutes == 0 ? l10n.classTimeHours(hours) : l10n.classTimeHoursMinutes(hours, minutes);
+    return l10n.classTimeMinutes(minutes);
+  }
+
   // ---------------------------------------------------------------------
   // ClassSchedule — a wall-clock time in a *named* zone, not an instant.
   // ---------------------------------------------------------------------
@@ -113,6 +127,10 @@ class TuitionClassDateTime {
   /// tasks.py's occurrence builder) — so a corrupt/legacy zone name
   /// degrades gracefully instead of crashing the screen.
   DateTime? resolveScheduleInstant(ClassSchedule s, {DateTime? onDate}) {
+    // TASK 10.1/10.2 — the server already computed the next occurrence as an
+    // absolute UTC instant with real DST rules; trust it when no explicit
+    // date was requested.
+    if (onDate == null && s.nextStart != null) return s.nextStart!.toLocal();
     final day = onDate ?? s.startDate;
     final parts = s.startTime.split(':');
     if (parts.isEmpty) return null;

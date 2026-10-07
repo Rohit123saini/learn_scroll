@@ -29,6 +29,8 @@ const Set<String> _kPostPreviewTypes = {
   'post_commented',
   'query_answered',
   'story_mention',
+  'story_reaction',
+  'post_reposted',
 };
 
 class NotificationTile extends StatelessWidget {
@@ -62,7 +64,7 @@ class NotificationTile extends StatelessWidget {
 
     return ListTile(
       tileColor: n.isRead ? null : scheme.primary.withOpacity(0.06),
-      leading: _AvatarStack(actors: _effectiveActors(n)),
+      leading: _leadingFor(n, scheme),
       title: Text(
         n.title,
         maxLines: 2,
@@ -94,6 +96,20 @@ class NotificationTile extends StatelessWidget {
       onTap: onTap,
       onLongPress: onLongPress,
     );
+  }
+
+  /// TASK 9.3 — "new test in your class" has no actor (the system posts it),
+  /// so show a quiz icon instead of the generic person placeholder.
+  static Widget _leadingFor(NotificationModel n, ColorScheme scheme) {
+    final actors = _effectiveActors(n);
+    if (actors.isEmpty && n.notifType == 'testseries_posted') {
+      return CircleAvatar(
+        radius: _kAvatarSize / 2,
+        backgroundColor: scheme.primary.withOpacity(0.12),
+        child: Icon(Icons.quiz_outlined, color: scheme.primary),
+      );
+    }
+    return _AvatarStack(actors: actors);
   }
 
   /// Rows created before N3-BE have no `actors`, but single-actor rows

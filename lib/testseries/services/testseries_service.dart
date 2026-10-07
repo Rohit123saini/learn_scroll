@@ -403,6 +403,23 @@ class TestSeriesService {
     return _parsePageBody<TestSeriesModel>(body, TestSeriesModel.fromJson);
   }
 
+  /// TASK 9.3 — ek class / section ke saare tests (class detail ka "Tests" tab).
+  /// Backend `?context_type=&context_id=` se narrow karta hai; visibility rules
+  /// wahi hain (sirf us class ke members dekh sakte hain), isliye ye list kisi
+  /// aur class ka test kabhi nahi dikhati. `contextId` classroom/section ka
+  /// plain id hai.
+  static Future<List<TestSeriesModel>> listForContext({
+    required String contextType, // 'classroom' | 'section'
+    required int contextId,
+  }) async {
+    final uri = Uri.parse('$_series/').replace(queryParameters: {
+      'context_type': contextType,
+      'context_id': '$contextId',
+      'ordering': 'newest',
+    });
+    return _getAll<TestSeriesModel>(uri, TestSeriesModel.fromJson);
+  }
+
   /// Compat: pehla page hi (purane callers ke liye).
   static Future<List<TestSeriesModel>> listSeries({String? source}) async =>
       (await listSeriesPage(source: source)).items;
@@ -467,6 +484,16 @@ class TestSeriesService {
     final r = await _get(Uri.parse('$_series/$id/'));
     if (r.statusCode != 200) _fail(r);
     return TestSeriesModel.fromJson(_asMap(r));
+  }
+
+  /// TASK 12 — `GET {mount}/testseries/{id}/refer-link/`: the caller's own
+  /// referral link for an individual PAID series. 400 when the series doesn't
+  /// pay commission (or it's the caller's own) — callers treat that as
+  /// "nothing to share", not a crash.
+  static Future<Map<String, dynamic>> referLink(String seriesId) async {
+    final r = await _get(Uri.parse('$_series/$seriesId/refer-link/'));
+    if (r.statusCode != 200) _fail(r);
+    return _asMap(r);
   }
 
   static Future<List<TsQuestion>> getQuestions(String seriesId) async {
@@ -657,6 +684,24 @@ class TestSeriesService {
     return list is List
         ? list.whereType<Map>().map((e) => TsQuestion.fromJson(Map<String, dynamic>.from(e))).toList()
         : const [];
+  }
+
+  /// `POST {mount}/testseries/{id}/option-image/` — ek option ki image upload
+  /// (draft + creator only). Returns the image URL to store in `options[i].image`.
+  static Future<String> uploadOptionImage(String seriesId, File image) async {
+    final token = await AuthService.getValidToken();
+    if (token == null || token.isEmpty) {
+      throw TestSeriesApiException('NOT_AUTHENTICATED', kind: TsErrorKind.unauthorized);
+    }
+    final req = http.MultipartRequest('POST', Uri.parse('$_series/$seriesId/option-image/'))
+      ..headers['Authorization'] = 'Bearer $token';
+    req.files.add(await http.MultipartFile.fromPath('file', image.path));
+    final streamed = await _client.send(req).timeout(TsConfig.uploadTimeout);
+    final r = await http.Response.fromStream(streamed);
+    if (r.statusCode != 200 && r.statusCode != 201) _fail(r);
+    final url = _asMap(r)['url']?.toString() ?? '';
+    if (url.isEmpty) throw TestSeriesApiException('NO_IMAGE_URL');
+    return url;
   }
 
   /// `POST {mount}/testseries/{id}/questions-import/` — CSV with the answer key.
@@ -944,4 +989,9 @@ class TestSeriesService {
   static Map<String, dynamic> matchAnswer(Map<String, String> pairs) =>
       {'list_mode': 'match', 'pairs': pairs};
   static Map<String, dynamic> textAnswer(String text) => {'text': text};
+
+  // Task 8 — naye types. Shapes backend `common/question_grading.py` se.
+  static Map<String, dynamic> trueFalseAnswer(bool value) => {'value': value};
+  static Map<String, dynamic> fillBlankAnswer(String text) => {'text': text};
+  static Map<String, dynamic> numericAnswer(String value) => {'value': value};
 }

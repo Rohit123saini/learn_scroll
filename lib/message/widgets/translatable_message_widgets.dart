@@ -47,6 +47,17 @@ class ListenButton extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    // Task 7.1 — Listen bhi 3-dot menu ke toggle se gated hai (default OFF).
+    return ValueListenableBuilder<bool>(
+      valueListenable: TranslateService.instance.listenEnabled,
+      builder: (context, listenOn, _) {
+        if (!listenOn) return const SizedBox.shrink();
+        return _buildButton();
+      },
+    );
+  }
+
+  Widget _buildButton() {
     return ValueListenableBuilder<String?>(
       valueListenable: TtsService.instance.currentlySpeakingId,
       builder: (context, speakingId, _) {

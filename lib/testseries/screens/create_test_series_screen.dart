@@ -1,5 +1,8 @@
+import 'dart:io';
+
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:image_picker/image_picker.dart';
 
 import '../../l10n/app_localizations.dart';
 import '../../widgets/ls_ui.dart';
@@ -27,14 +30,31 @@ import '../utils/ts_error_text.dart';
 // point later. Kept as plain English strings (no new l10n keys) since
 // regenerating the generated AppLocalizations classes isn't something
 // this change can safely do — see PR notes.
+//
+// Task 8 (question types): ab true/false, fill-in-the-blank, numeric aur
+// option-image bhi banaye ja sakte hain. Naye strings l10n (EN+HI) me hain.
+// Option images series banne ke baad upload hoti hain (endpoint series id
+// maangta hai), phir URL question JSON me jaata hai.
 // ============================================================
 
-enum _QType { text, mcq, msq }
+enum _QType { mcq, msq, trueFalse, fillBlank, numeric, text }
 
 class _OptionDraft {
   String id;
   String text;
-  _OptionDraft({required this.id, this.text = ''});
+
+  /// Image abhi tak upload nahi hui (series draft banne ke baad upload hoti hai).
+  File? imageFile;
+
+  /// Upload ho chuki image ka URL (publish flow me set hota hai).
+  String? imageUrl;
+
+  _OptionDraft({required this.id, this.text = '', this.imageFile, this.imageUrl});
+
+  bool get hasImage => imageFile != null || (imageUrl != null && imageUrl!.isNotEmpty);
+  bool get isFilled => text.trim().isNotEmpty || hasImage;
+
+  _OptionDraft copy() => _OptionDraft(id: id, text: text, imageFile: imageFile, imageUrl: imageUrl);
 }
 
 class _QuestionDraft {
@@ -45,6 +65,13 @@ class _QuestionDraft {
   List<_OptionDraft> options;
   Set<String> correctIds;
 
+  // true_false / fill_blank / numeric (Task 8)
+  bool? tfAnswer;
+  String acceptedAnswers; // ek line = ek accepted answer
+  bool caseSensitive;
+  String numericValue;
+  String tolerance;
+
   _QuestionDraft({
     this.type = _QType.mcq,
     this.text = '',
@@ -52,50 +79,119 @@ class _QuestionDraft {
     this.negativeMarks = 0,
     List<_OptionDraft>? options,
     Set<String>? correctIds,
+    this.tfAnswer,
+    this.acceptedAnswers = '',
+    this.caseSensitive = false,
+    this.numericValue = '',
+    this.tolerance = '',
   })  : options = options ?? [_OptionDraft(id: 'a'), _OptionDraft(id: 'b')],
         correctIds = correctIds ?? {};
 
+  _QuestionDraft copy() => _QuestionDraft(
+        type: type,
+        text: text,
+        marks: marks,
+        negativeMarks: negativeMarks,
+        options: options.map((o) => o.copy()).toList(),
+        correctIds: {...correctIds},
+        tfAnswer: tfAnswer,
+        acceptedAnswers: acceptedAnswers,
+        caseSensitive: caseSensitive,
+        numericValue: numericValue,
+        tolerance: tolerance,
+      );
+
+  bool get isOptionType => type == _QType.mcq || type == _QType.msq;
+  bool get isAutoGraded => type != _QType.text;
+
+  List<String> get acceptedList =>
+      acceptedAnswers.split('\n').map((e) => e.trim()).where((e) => e.isNotEmpty).toList();
+
+  double? get _numeric => double.tryParse(numericValue.trim().replaceAll(',', ''));
+  double? get _tolerance =>
+      tolerance.trim().isEmpty ? 0.0 : double.tryParse(tolerance.trim().replaceAll(',', ''));
+
   bool get isComplete {
     if (text.trim().isEmpty || marks < 1) return false;
-    if (type == _QType.text) return true;
-    final filled = options.where((o) => o.text.trim().isNotEmpty).length;
-    if (filled < 2) return false;
-    return correctIds.isNotEmpty;
+    if (isAutoGraded && negativeMarks > marks) return false; // backend bhi reject karta hai
+    switch (type) {
+      case _QType.text:
+        return true;
+      case _QType.trueFalse:
+        return tfAnswer != null;
+      case _QType.fillBlank:
+        return acceptedList.isNotEmpty;
+      case _QType.numeric:
+        final n = _numeric;
+        final t = _tolerance;
+        return n != null && n.isFinite && t != null && t >= 0;
+      case _QType.mcq:
+      case _QType.msq:
+        final filledIds = options.where((o) => o.isFilled).map((o) => o.id).toSet();
+        if (filledIds.length < 2) return false;
+        final valid = correctIds.where(filledIds.contains);
+        return type == _QType.mcq ? valid.length == 1 : valid.isNotEmpty;
+    }
   }
 
-  String get typeLabel => switch (type) {
-        _QType.text => 'Text / Subjective',
-        _QType.mcq => 'Multiple choice (single answer)',
-        _QType.msq => 'Multiple select',
+  String typeLabel(AppLocalizations l10n) => switch (type) {
+        _QType.text => l10n.tsTypeText,
+        _QType.mcq => l10n.tsTypeMcq,
+        _QType.msq => l10n.tsTypeMsq,
+        _QType.trueFalse => l10n.tsTypeTrueFalse,
+        _QType.fillBlank => l10n.tsTypeFillBlank,
+        _QType.numeric => l10n.tsTypeNumeric,
       };
 
   Map<String, dynamic> toJson() {
-    if (type == _QType.text) {
-      return {
-        'question_type': 'text',
-        'text': text.trim(),
-        'marks': marks,
-        'negative_marks': 0,
-        'options': const [],
-        'correct_answer': const {},
-      };
-    }
-    final opts = options
-        .where((o) => o.text.trim().isNotEmpty)
-        .map((o) => {'id': o.id, 'text': o.text.trim()})
-        .toList();
-    final validIds = opts.map((o) => o['id']).toSet();
-    final correct = correctIds.where(validIds.contains).toList();
-    return {
-      'question_type': type == _QType.mcq ? 'mcq' : 'msq',
+    final base = <String, dynamic>{
       'text': text.trim(),
       'marks': marks,
-      'negative_marks': negativeMarks,
-      'options': opts,
-      'correct_answer': type == _QType.mcq
-          ? {'option_id': correct.isNotEmpty ? correct.first : null}
-          : {'option_ids': correct},
+      'negative_marks': isAutoGraded ? negativeMarks : 0,
     };
+    switch (type) {
+      case _QType.text:
+        return {...base, 'question_type': 'text', 'options': const [], 'correct_answer': const {}};
+      case _QType.trueFalse:
+        return {
+          ...base,
+          'question_type': 'true_false',
+          'options': const [],
+          'correct_answer': {'value': tfAnswer == true},
+        };
+      case _QType.fillBlank:
+        return {
+          ...base,
+          'question_type': 'fill_blank',
+          'options': const [],
+          'correct_answer': {'answers': acceptedList, 'case_sensitive': caseSensitive},
+        };
+      case _QType.numeric:
+        return {
+          ...base,
+          'question_type': 'numeric',
+          'options': const [],
+          'correct_answer': {'value': _numeric, 'tolerance': _tolerance ?? 0},
+        };
+      case _QType.mcq:
+      case _QType.msq:
+        final filled = options.where((o) => o.isFilled).toList();
+        final opts = filled.map((o) {
+          final m = <String, dynamic>{'id': o.id, 'text': o.text.trim()};
+          if (o.imageUrl != null && o.imageUrl!.isNotEmpty) m['image'] = o.imageUrl;
+          return m;
+        }).toList();
+        final validIds = opts.map((o) => o['id']).toSet();
+        final correct = correctIds.where(validIds.contains).toList();
+        return {
+          ...base,
+          'question_type': type == _QType.mcq ? 'mcq' : 'msq',
+          'options': opts,
+          'correct_answer': type == _QType.mcq
+              ? {'option_id': correct.isNotEmpty ? correct.first : null}
+              : {'option_ids': correct},
+        };
+    }
   }
 }
 
@@ -136,16 +232,7 @@ class _CreateTestSeriesScreenState extends State<CreateTestSeriesScreen> {
       _questions.every((q) => q.isComplete);
 
   Future<void> _editQuestion({_QuestionDraft? existing, int? index}) async {
-    final draft = existing == null
-        ? _QuestionDraft()
-        : _QuestionDraft(
-            type: existing.type,
-            text: existing.text,
-            marks: existing.marks,
-            negativeMarks: existing.negativeMarks,
-            options: existing.options.map((o) => _OptionDraft(id: o.id, text: o.text)).toList(),
-            correctIds: {...existing.correctIds},
-          );
+    final draft = existing == null ? _QuestionDraft() : existing.copy();
 
     final result = await showModalBottomSheet<_QuestionDraft>(
       context: context,
@@ -161,6 +248,20 @@ class _CreateTestSeriesScreenState extends State<CreateTestSeriesScreen> {
         _questions.add(result);
       }
     });
+  }
+
+  /// Option images series banne ke baad upload hoti hain; fail hui to poora
+  /// publish ruk jaata hai (series draft rehti hai) — adhoori image ke saath
+  /// question kabhi nahi jaata.
+  Future<void> _uploadPendingOptionImages(String seriesId) async {
+    for (final q in _questions) {
+      if (!q.isOptionType) continue;
+      for (final o in q.options) {
+        final f = o.imageFile;
+        if (f == null || (o.imageUrl != null && o.imageUrl!.isNotEmpty)) continue;
+        o.imageUrl = await TestSeriesService.uploadOptionImage(seriesId, f);
+      }
+    }
   }
 
   Future<void> _submit() async {
@@ -180,6 +281,7 @@ class _CreateTestSeriesScreenState extends State<CreateTestSeriesScreen> {
         durationMinutes: durationMinutes,
         attemptsAllowed: attemptsAllowed < 1 ? 1 : attemptsAllowed,
       );
+      await _uploadPendingOptionImages(created.id);
       await TestSeriesService.questionsBulk(
         created.id,
         _questions.map((q) => q.toJson()).toList(),
@@ -309,7 +411,7 @@ class _CreateTestSeriesScreenState extends State<CreateTestSeriesScreen> {
           style: const TextStyle(fontWeight: FontWeight.w600, fontSize: 13.5),
         ),
         subtitle: Text(
-          '${q.typeLabel} · ${q.marks} mark${q.marks == 1 ? '' : 's'}'
+          '${q.typeLabel(AppLocalizations.of(context)!)} · ${q.marks} mark${q.marks == 1 ? '' : 's'}'
           '${!q.isComplete ? ' · incomplete' : ''}',
           style: TextStyle(
             fontSize: 11.5,
@@ -347,12 +449,18 @@ class _QuestionEditorSheetState extends State<_QuestionEditorSheet> {
   late final _textCtrl = TextEditingController(text: _d.text);
   late final _marksCtrl = TextEditingController(text: '${_d.marks}');
   late final _negCtrl = TextEditingController(text: '${_d.negativeMarks}');
+  late final _acceptedCtrl = TextEditingController(text: _d.acceptedAnswers);
+  late final _numberCtrl = TextEditingController(text: _d.numericValue);
+  late final _tolCtrl = TextEditingController(text: _d.tolerance);
 
   @override
   void dispose() {
     _textCtrl.dispose();
     _marksCtrl.dispose();
     _negCtrl.dispose();
+    _acceptedCtrl.dispose();
+    _numberCtrl.dispose();
+    _tolCtrl.dispose();
     super.dispose();
   }
 
@@ -364,16 +472,48 @@ class _QuestionEditorSheetState extends State<_QuestionEditorSheet> {
     return DateTime.now().millisecondsSinceEpoch.toString();
   }
 
-  void _save() {
+  /// Controllers ki values draft me likh do.
+  void _syncDraft() {
     _d.text = _textCtrl.text;
     _d.marks = int.tryParse(_marksCtrl.text.trim()) ?? 1;
     _d.negativeMarks = int.tryParse(_negCtrl.text.trim()) ?? 0;
+    _d.acceptedAnswers = _acceptedCtrl.text;
+    _d.numericValue = _numberCtrl.text;
+    _d.tolerance = _tolCtrl.text;
+  }
+
+  void _save() {
+    final l10n = AppLocalizations.of(context)!;
+    _syncDraft();
+    if (!_d.isComplete) {
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(l10n.tsQuestionIncomplete)));
+      return;
+    }
     Navigator.pop(context, _d);
   }
+
+  Future<void> _pickOptionImage(_OptionDraft o) async {
+    final img = await ImagePicker().pickImage(source: ImageSource.gallery, maxWidth: 1280, imageQuality: 85);
+    if (img == null || !mounted) return;
+    setState(() {
+      o.imageFile = File(img.path);
+      o.imageUrl = null; // nayi image -> publish pe upload hogi
+    });
+  }
+
+  String _typeLabel(AppLocalizations l10n, _QType t) => switch (t) {
+        _QType.mcq => l10n.tsTypeMcq,
+        _QType.msq => l10n.tsTypeMsq,
+        _QType.trueFalse => l10n.tsTypeTrueFalse,
+        _QType.fillBlank => l10n.tsTypeFillBlank,
+        _QType.numeric => l10n.tsTypeNumeric,
+        _QType.text => l10n.tsTypeText,
+      };
 
   @override
   Widget build(BuildContext context) {
     final cs = Theme.of(context).colorScheme;
+    final l10n = AppLocalizations.of(context)!;
     final mq = MediaQuery.of(context);
     return Padding(
       padding: EdgeInsets.only(bottom: mq.viewInsets.bottom),
@@ -401,14 +541,24 @@ class _QuestionEditorSheetState extends State<_QuestionEditorSheet> {
               ),
               Text('Question', style: TextStyle(fontWeight: FontWeight.w700, fontSize: 15, color: cs.onSurface)),
               const SizedBox(height: 12),
-              SegmentedButton<_QType>(
-                segments: const [
-                  ButtonSegment(value: _QType.mcq, label: Text('Single choice')),
-                  ButtonSegment(value: _QType.msq, label: Text('Multi-select')),
-                  ButtonSegment(value: _QType.text, label: Text('Text')),
+              Wrap(
+                spacing: 8,
+                runSpacing: 6,
+                children: [
+                  for (final t in _QType.values)
+                    ChoiceChip(
+                      label: Text(_typeLabel(l10n, t)),
+                      selected: _d.type == t,
+                      onSelected: (_) => setState(() {
+                        if (_d.type == t) return;
+                        _d.type = t;
+                        // Single-answer type me ek se zyada correct nahi reh sakte.
+                        if (t == _QType.mcq && _d.correctIds.length > 1) {
+                          _d.correctIds = {_d.correctIds.first};
+                        }
+                      }),
+                    ),
                 ],
-                selected: {_d.type},
-                onSelectionChanged: (s) => setState(() => _d.type = s.first),
               ),
               const SizedBox(height: 14),
               TextField(
@@ -426,7 +576,7 @@ class _QuestionEditorSheetState extends State<_QuestionEditorSheet> {
                     decoration: const InputDecoration(labelText: 'Marks'),
                   ),
                 ),
-                if (_d.type != _QType.text) ...[
+                if (_d.isAutoGraded) ...[
                   const SizedBox(width: 12),
                   Expanded(
                     child: TextField(
@@ -438,51 +588,9 @@ class _QuestionEditorSheetState extends State<_QuestionEditorSheet> {
                   ),
                 ],
               ]),
-              if (_d.type != _QType.text) ...[
-                const SizedBox(height: 18),
-                Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [
-                  Text('Options', style: TextStyle(fontWeight: FontWeight.w700, fontSize: 13.5, color: cs.onSurface)),
-                  TextButton.icon(
-                    onPressed: _d.options.length >= 8
-                        ? null
-                        : () => setState(() => _d.options.add(_OptionDraft(id: _nextOptionId()))),
-                    icon: const Icon(Icons.add_rounded, size: 16),
-                    label: const Text('Option'),
-                  ),
-                ]),
-                Text(
-                  _d.type == _QType.mcq
-                      ? 'Tap the radio to mark the correct option.'
-                      : 'Tick every correct option.',
-                  style: TextStyle(fontSize: 11.5, color: cs.onSurface.withOpacity(.6)),
-                ),
-                const SizedBox(height: 4),
-                for (int i = 0; i < _d.options.length; i++) _optionRow(cs, i),
-              ],
+              ..._answerSection(cs, l10n),
               const SizedBox(height: 22),
-              LsPrimaryButton(
-                label: 'Save question',
-                onPressed: () {
-                  _d.text = _textCtrl.text;
-                  _d.marks = int.tryParse(_marksCtrl.text.trim()) ?? 1;
-                  _d.negativeMarks = int.tryParse(_negCtrl.text.trim()) ?? 0;
-                  final tempCheck = _QuestionDraft(
-                    type: _d.type,
-                    text: _d.text,
-                    marks: _d.marks,
-                    negativeMarks: _d.negativeMarks,
-                    options: _d.options,
-                    correctIds: _d.correctIds,
-                  );
-                  if (!tempCheck.isComplete) {
-                    ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
-                      content: Text('Fill the question text, at least 2 options and mark the correct answer(s).'),
-                    ));
-                    return;
-                  }
-                  _save();
-                },
-              ),
+              LsPrimaryButton(label: 'Save question', onPressed: _save),
             ],
           ),
         ),
@@ -490,45 +598,196 @@ class _QuestionEditorSheetState extends State<_QuestionEditorSheet> {
     );
   }
 
-  Widget _optionRow(ColorScheme cs, int i) {
+  List<Widget> _answerSection(ColorScheme cs, AppLocalizations l10n) {
+    switch (_d.type) {
+      case _QType.text:
+        return const [];
+
+      case _QType.trueFalse:
+        return [
+          const SizedBox(height: 18),
+          Text(l10n.tsBuilderCorrectAnswer,
+              style: TextStyle(fontWeight: FontWeight.w700, fontSize: 13.5, color: cs.onSurface)),
+          const SizedBox(height: 8),
+          SegmentedButton<bool>(
+            emptySelectionAllowed: true,
+            segments: [
+              ButtonSegment(value: true, label: Text(l10n.tsTrue)),
+              ButtonSegment(value: false, label: Text(l10n.tsFalse)),
+            ],
+            selected: {if (_d.tfAnswer != null) _d.tfAnswer!},
+            onSelectionChanged: (s) => setState(() => _d.tfAnswer = s.isEmpty ? null : s.first),
+          ),
+        ];
+
+      case _QType.fillBlank:
+        return [
+          const SizedBox(height: 18),
+          TextField(
+            controller: _acceptedCtrl,
+            minLines: 2,
+            maxLines: 6,
+            textCapitalization: TextCapitalization.none,
+            decoration: InputDecoration(
+              labelText: l10n.tsAcceptedAnswers,
+              helperText: l10n.tsAcceptedAnswersHelper,
+              helperMaxLines: 2,
+            ),
+          ),
+          SwitchListTile(
+            contentPadding: EdgeInsets.zero,
+            value: _d.caseSensitive,
+            title: Text(l10n.tsCaseSensitive, style: const TextStyle(fontSize: 13.5)),
+            onChanged: (v) => setState(() => _d.caseSensitive = v),
+          ),
+        ];
+
+      case _QType.numeric:
+        const numFormat = r'[0-9.,\-]';
+        return [
+          const SizedBox(height: 18),
+          Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
+            Expanded(
+              child: TextField(
+                controller: _numberCtrl,
+                keyboardType: const TextInputType.numberWithOptions(decimal: true, signed: true),
+                inputFormatters: [FilteringTextInputFormatter.allow(RegExp(numFormat))],
+                decoration: InputDecoration(labelText: l10n.tsCorrectNumber),
+              ),
+            ),
+            const SizedBox(width: 12),
+            Expanded(
+              child: TextField(
+                controller: _tolCtrl,
+                keyboardType: const TextInputType.numberWithOptions(decimal: true),
+                inputFormatters: [FilteringTextInputFormatter.allow(RegExp(r'[0-9.,]'))],
+                decoration: InputDecoration(
+                  labelText: l10n.tsTolerance,
+                  helperText: l10n.tsToleranceHelper,
+                  helperMaxLines: 2,
+                ),
+              ),
+            ),
+          ]),
+        ];
+
+      case _QType.mcq:
+      case _QType.msq:
+        return [
+          const SizedBox(height: 18),
+          Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [
+            Text('Options', style: TextStyle(fontWeight: FontWeight.w700, fontSize: 13.5, color: cs.onSurface)),
+            TextButton.icon(
+              onPressed: _d.options.length >= 8
+                  ? null
+                  : () => setState(() => _d.options.add(_OptionDraft(id: _nextOptionId()))),
+              icon: const Icon(Icons.add_rounded, size: 16),
+              label: const Text('Option'),
+            ),
+          ]),
+          Text(
+            _d.type == _QType.mcq ? 'Tap the radio to mark the correct option.' : 'Tick every correct option.',
+            style: TextStyle(fontSize: 11.5, color: cs.onSurface.withOpacity(.6)),
+          ),
+          const SizedBox(height: 4),
+          for (int i = 0; i < _d.options.length; i++) _optionRow(cs, l10n, i),
+        ];
+    }
+  }
+
+  Widget _optionRow(ColorScheme cs, AppLocalizations l10n, int i) {
     final o = _d.options[i];
     final selected = _d.correctIds.contains(o.id);
     return Padding(
-      padding: const EdgeInsets.symmetric(vertical: 3),
-      child: Row(children: [
-        _d.type == _QType.mcq
-            ? Radio<String>(
-                value: o.id,
-                groupValue: _d.correctIds.isEmpty ? null : _d.correctIds.first,
-                onChanged: (v) => setState(() => _d.correctIds = {if (v != null) v}),
-              )
-            : Checkbox(
-                value: selected,
-                onChanged: (v) => setState(() {
-                  if (v == true) {
-                    _d.correctIds.add(o.id);
-                  } else {
-                    _d.correctIds.remove(o.id);
-                  }
-                }),
-              ),
-        Expanded(
-          child: TextField(
-            controller: TextEditingController(text: o.text)
-              ..selection = TextSelection.collapsed(offset: o.text.length),
-            onChanged: (v) => o.text = v,
-            decoration: InputDecoration(hintText: 'Option ${i + 1}', isDense: true),
+      key: ValueKey('opt_${o.id}'),
+      padding: const EdgeInsets.symmetric(vertical: 4),
+      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        Row(children: [
+          _d.type == _QType.mcq
+              ? Radio<String>(
+                  value: o.id,
+                  groupValue: _d.correctIds.isEmpty ? null : _d.correctIds.first,
+                  onChanged: (v) => setState(() => _d.correctIds = {if (v != null) v}),
+                )
+              : Checkbox(
+                  value: selected,
+                  onChanged: (v) => setState(() {
+                    if (v == true) {
+                      _d.correctIds.add(o.id);
+                    } else {
+                      _d.correctIds.remove(o.id);
+                    }
+                  }),
+                ),
+          Expanded(
+            child: _OptionTextField(
+              initial: o.text,
+              hint: l10n.tsOptionHint(i + 1),
+              onChanged: (v) => o.text = v,
+            ),
           ),
-        ),
-        if (_d.options.length > 2)
           IconButton(
-            icon: const Icon(Icons.close_rounded, size: 17),
-            onPressed: () => setState(() {
-              _d.correctIds.remove(o.id);
-              _d.options.removeAt(i);
-            }),
+            tooltip: o.hasImage ? l10n.tsRemoveOptionImage : l10n.tsAddOptionImage,
+            icon: Icon(o.hasImage ? Icons.hide_image_outlined : Icons.add_photo_alternate_outlined, size: 19),
+            onPressed: o.hasImage
+                ? () => setState(() {
+                      o.imageFile = null;
+                      o.imageUrl = null;
+                    })
+                : () => _pickOptionImage(o),
+          ),
+          if (_d.options.length > 2)
+            IconButton(
+              icon: const Icon(Icons.close_rounded, size: 17),
+              onPressed: () => setState(() {
+                _d.correctIds.remove(o.id);
+                _d.options.removeAt(i);
+              }),
+            ),
+        ]),
+        if (o.imageFile != null)
+          Padding(
+            padding: const EdgeInsets.only(left: 48, top: 4, bottom: 4),
+            child: ClipRRect(
+              borderRadius: BorderRadius.circular(10),
+              child: Image.file(o.imageFile!,
+                  height: 90, fit: BoxFit.cover, cacheHeight: 270,
+                  semanticLabel: l10n.tsOptionImage,
+                  errorBuilder: (_, __, ___) => Icon(Icons.broken_image_outlined, color: cs.onSurfaceVariant)),
+            ),
           ),
       ]),
+    );
+  }
+}
+
+/// Option ka text field — apna controller rakhta hai taaki har rebuild pe
+/// cursor reset na ho (pehle har build pe naya controller ban jaata tha).
+class _OptionTextField extends StatefulWidget {
+  final String initial;
+  final String hint;
+  final ValueChanged<String> onChanged;
+  const _OptionTextField({required this.initial, required this.hint, required this.onChanged});
+
+  @override
+  State<_OptionTextField> createState() => _OptionTextFieldState();
+}
+
+class _OptionTextFieldState extends State<_OptionTextField> {
+  late final TextEditingController _c = TextEditingController(text: widget.initial);
+
+  @override
+  void dispose() {
+    _c.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return TextField(
+      controller: _c,
+      onChanged: widget.onChanged,
+      decoration: InputDecoration(hintText: widget.hint, isDense: true),
     );
   }
 }

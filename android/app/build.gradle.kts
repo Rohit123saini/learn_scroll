@@ -10,7 +10,8 @@ plugins {
 
 android {
     namespace = "com.learnscroll.app"
-    compileSdk = flutter.compileSdkVersion
+    // compileSdk = flutter.compileSdkVersion
+    compileSdk = 37
     ndkVersion = flutter.ndkVersion
 
     compileOptions {

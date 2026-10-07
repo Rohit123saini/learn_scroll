@@ -259,6 +259,7 @@ class _TestResultScreenState extends State<TestResultScreen> {
     final incorrect = a.responses.where((r) => r.isCorrect == false && r.wasAnswered).length;
     final skipped = a.responses.length - answered;
     final awaiting = a.responses.where((r) => r.awaitingReview && r.wasAnswered).length;
+    final penaltyTotal = a.responses.fold<int>(0, (sum, r) => sum + r.penalty);
 
     return RefreshIndicator(
       color: cs.primary,
@@ -316,6 +317,7 @@ class _TestResultScreenState extends State<TestResultScreen> {
                   LsStatusChip(label: l10n.tsSummaryCorrect(correct), color: t.success),
                   LsStatusChip(label: l10n.tsSummaryIncorrect(incorrect), color: t.danger),
                   LsStatusChip(label: l10n.tsSummarySkipped(skipped), color: cs.onSurfaceVariant),
+                  if (penaltyTotal > 0) LsStatusChip(label: l10n.tsSummaryPenalty(penaltyTotal), color: t.danger),
                   if (awaiting > 0) LsStatusChip(label: l10n.tsSummaryAwaiting(awaiting), color: t.info),
                 ]),
               ],

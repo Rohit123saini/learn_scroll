@@ -1467,6 +1467,23 @@ class MessageApiService {
     return list.map((e) => SearchResultModel.fromJson(e)).toList();
   }
 
+  /// 🔥 NAYA (6.2) — GET /message/search/directory/?q=...&type=all|people|groups&limit=
+  /// People (followers / following / mutual) + meri groups. `type` se sirf
+  /// ek section maangne par (See all) `limit` 50 tak bada sakte hain.
+  static Future<DirectorySearchResult> searchDirectory(
+    String query, {
+    String type = 'all',
+    int limit = 20,
+  }) async {
+    final uri = Uri.parse("$_base/search/directory/").replace(
+      queryParameters: {'q': query, 'type': type, 'limit': '$limit'},
+    );
+    final res = await http.get(uri, headers: await _headers());
+    final data = _decode(res);
+    if (data is Map<String, dynamic>) return DirectorySearchResult.fromJson(data);
+    return const DirectorySearchResult();
+  }
+
   // ==================================================================
   // 🔥 NAYA (Phase 1, §1 #11, §4.4) — SMART-REPLY SUGGESTIONS
   // ==================================================================

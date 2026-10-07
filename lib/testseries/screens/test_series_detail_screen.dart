@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:intl/intl.dart';
+import 'package:share_plus/share_plus.dart';
 
 import '../../l10n/app_localizations.dart';
 import '../../widgets/error_widgets.dart';
@@ -199,6 +200,73 @@ class _TestSeriesDetailScreenState extends State<TestSeriesDetailScreen> {
     if (done.isNotEmpty) _load();
   }
 
+  // ---------------- share & earn (Task 12) ----------------
+
+  Future<void> _shareAndEarn() async {
+    final l10n = AppLocalizations.of(context)!;
+    try {
+      final link = await TestSeriesService.referLink(widget.seriesId);
+      if (!mounted) return;
+      final text = (link['share_text'] ?? link['web_url'] ?? '').toString();
+      if (text.isEmpty) return;
+      final pct = (link['commission_percent'] ?? '').toString();
+      final url = (link['web_url'] ?? '').toString();
+      await showModalBottomSheet<void>(
+        context: context,
+        showDragHandle: true,
+        builder: (ctx) => SafeArea(
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(kLsPad, 4, kLsPad, 20),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(l10n.shareAndEarnCta, style: LsType.head(ctx, size: 16)),
+                const SizedBox(height: 6),
+                Text(l10n.referralShareEarnHint(pct),
+                    style: TextStyle(fontSize: 12.5, color: Theme.of(ctx).colorScheme.onSurfaceVariant)),
+                const SizedBox(height: 12),
+                SelectableText(url, style: const TextStyle(fontSize: 12.5)),
+                const SizedBox(height: 14),
+                Row(children: [
+                  Expanded(
+                    child: LsOutlineButton(
+                      label: l10n.referralCopyLinkCta,
+                      icon: Icons.copy_rounded,
+                      onPressed: () async {
+                        await Clipboard.setData(ClipboardData(text: url));
+                        if (ctx.mounted) Navigator.pop(ctx);
+                        if (mounted) lsSnack(context, l10n.referralLinkCopied);
+                      },
+                    ),
+                  ),
+                  const SizedBox(width: 10),
+                  Expanded(
+                    child: LsPrimaryButton(
+                      label: l10n.shareAndEarnCta,
+                      icon: Icons.ios_share_rounded,
+                      onPressed: () async {
+                        Navigator.pop(ctx);
+                        try {
+                          await Share.share(text);
+                        } catch (_) {
+                          await Clipboard.setData(ClipboardData(text: text));
+                          if (mounted) lsSnack(context, l10n.referralLinkCopied);
+                        }
+                      },
+                    ),
+                  ),
+                ]),
+              ],
+            ),
+          ),
+        ),
+      );
+    } catch (e) {
+      if (mounted) lsSnack(context, l10n.referralCouldNotCreateLink, error: true);
+    }
+  }
+
   // ---------------- build ----------------
 
   @override
@@ -220,6 +288,17 @@ class _TestSeriesDetailScreenState extends State<TestSeriesDetailScreen> {
         actions: _series == null
             ? null
             : [
+                // TASK 12 / 12.5 — "Share & earn": only for series that
+                // actually pay commission (individual + paid + published).
+                if (_series!.sourceType == TsSource.individual &&
+                    _series!.isPaid &&
+                    !_series!.isDraft &&
+                    !_series!.isArchived)
+                  IconButton(
+                    icon: const Icon(Icons.share_rounded),
+                    tooltip: l10n.shareAndEarnCta,
+                    onPressed: _shareAndEarn,
+                  ),
                 IconButton(
                   icon: const Icon(Icons.bar_chart_rounded),
                   tooltip: 'Analytics',

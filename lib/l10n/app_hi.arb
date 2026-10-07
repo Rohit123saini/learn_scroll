@@ -1742,6 +1742,12 @@
   "coverPreviewUnavailable": "कवर प्रीव्यू उपलब्ध नहीं है",
   "coverTabLabel": "कवर",
   "cropFailed": "क्रॉप नहीं हो सका।",
+  "ratioOriginal": "मूल",
+  "ratioPickerLabel": "फ़ोटो का अनुपात",
+  "ratioCropTitle": "फ़ोटो क्रॉप करें",
+  "cropHintDrag": "ज़ूम के लिए पिंच करें, जगह बदलने के लिए खींचें",
+  "storyCropTitle": "स्टोरी में फ़िट करें (9:16)",
+  "avatarCropTitle": "प्रोफ़ाइल फ़ोटो क्रॉप करें",
   "dateLabel": "तारीख़",
   "deleteLabel": "हटाएं",
   "downloadFailedCode": "डाउनलोड विफल ({code})",
@@ -1996,6 +2002,14 @@
   "chatDisableTranslate": "मैसेज ट्रांसलेट बंद करें",
   "chatTranslateEnabled": "मैसेज ट्रांसलेट चालू कर दिया गया",
   "chatTranslateDisabled": "मैसेज ट्रांसलेट बंद कर दिया गया",
+  "chatEnableListen": "मैसेज सुनना चालू करें",
+  "chatDisableListen": "मैसेज सुनना बंद करें",
+  "chatListenEnabled": "मैसेज सुनना चालू कर दिया गया",
+  "chatListenDisabled": "मैसेज सुनना बंद कर दिया गया",
+  "chatEnableTranscribe": "वॉइस नोट ट्रांसक्राइब चालू करें",
+  "chatDisableTranscribe": "वॉइस नोट ट्रांसक्राइब बंद करें",
+  "chatTranscribeEnabled": "वॉइस नोट ट्रांसक्राइब चालू कर दिया गया",
+  "chatTranscribeDisabled": "वॉइस नोट ट्रांसक्राइब बंद कर दिया गया",
   "chatThisUser": "यह यूज़र",
   "chatBlockTitle": "यूज़र को ब्लॉक करें?",
   "chatBlockBody": "{name} आपको कॉल या संदेश नहीं कर पाएगा, और आपको भी उसके संदेश नहीं दिखेंगे।",
@@ -2008,6 +2022,38 @@
   "chatUnblockUser": "यूज़र को अनब्लॉक करें",
   "chatBlockedBanner": "आपने इस यूज़र को ब्लॉक किया है। संदेश भेजने के लिए अनब्लॉक करें।",
   "chatUnblock": "अनब्लॉक करें",
+  "profileBlockedByMeTitle": "आपने इस अकाउंट को ब्लॉक किया है",
+  "profileBlockedByMeSubtitle": "वे आपकी प्रोफ़ाइल, पोस्ट या स्टोरी नहीं देख सकते और आपको मैसेज नहीं कर सकते। उनका कंटेंट फिर से देखने के लिए अनब्लॉक करें।",
+  "profileRestrict": "प्रतिबंधित करें",
+  "profileUnrestrict": "प्रतिबंध हटाएँ",
+  "profileRestrictedSnack": "प्रतिबंधित किया। आपकी पोस्ट पर उनके कमेंट अब छिपे रहेंगे।",
+  "profileUnrestrictedSnack": "प्रतिबंध हटा दिया गया",
+  "profileMute": "पोस्ट और स्टोरी म्यूट करें",
+  "profileUnmute": "पोस्ट और स्टोरी अनम्यूट करें",
+  "profileMutedSnack": "म्यूट किया। उनकी पोस्ट और स्टोरी आपको नहीं दिखेंगी।",
+  "profileUnmutedSnack": "अनम्यूट किया",
+  "profileMoreFailed": "कुछ गड़बड़ हो गई: {error}",
+  "reportAction": "रिपोर्ट करें",
+  "reportTitle": "आप इसे क्यों रिपोर्ट कर रहे हैं?",
+  "reportReasonSpam": "स्पैम",
+  "reportReasonHarassment": "उत्पीड़न या बुलिंग",
+  "reportReasonHate": "नफरत भरी बातें",
+  "reportReasonNudity": "नग्नता या यौन सामग्री",
+  "reportReasonViolence": "हिंसा या खतरनाक सामग्री",
+  "reportReasonSelfHarm": "खुद को नुकसान पहुँचाना",
+  "reportReasonScam": "स्कैम या धोखाधड़ी",
+  "reportReasonImpersonation": "किसी और का रूप धरना",
+  "reportReasonOther": "कुछ और",
+  "reportAlsoReport": "इस अकाउंट को रिपोर्ट भी करें",
+  "reportBlockNewAccounts": "उनके बनाए नए अकाउंट भी ब्लॉक करें",
+  "reportSubmit": "रिपोर्ट भेजें",
+  "reportThanks": "धन्यवाद। हम इसकी समीक्षा करेंगे।",
+  "reportAlreadySent": "आप इसे पहले ही रिपोर्ट कर चुके हैं।",
+  "reportFailed": "रिपोर्ट नहीं भेज पाए: {error}",
+  "blockedSearchHint": "ब्लॉक किए अकाउंट खोजें",
+  "blockedNoMatches": "आपकी खोज से कोई ब्लॉक अकाउंट नहीं मिला।",
+  "blockedUndo": "पूर्ववत करें",
+  "blockMenuBlockUser": "ब्लॉक करें",
   "chatDisappearingOff": "बंद",
   "chatDisappear1Month": "1 महीना",
   "chatDisappear6Months": "6 महीने",
@@ -2718,5 +2764,240 @@
   "notifQuietTo": "तक",
   "notifQuietHint": "इन घंटों में किसी भी नोटिफिकेशन की आवाज़ नहीं आएगी।",
   "notifQuietSameTime": "शुरू और खत्म होने का समय एक जैसा नहीं हो सकता",
-  "notifPausedUntil": "{until} तक रोका गया"
+  "notifPausedUntil": "{until} तक रोका गया",
+  "classTestsTab": "टेस्ट",
+  "classTestsEmpty": "इस क्लास में अभी कोई टेस्ट नहीं है",
+  "classTestsEmptyHint": "जब आपके टीचर कोई टेस्ट पब्लिश करेंगे, वह यहाँ दिखेगा।",
+  "classTestsLoadFailed": "टेस्ट लोड नहीं हो सके",
+  "classTestFree": "मुफ़्त",
+  "classTestQuestions": "{count} प्रश्न",
+  "classTestMinutes": "{minutes} मिनट",
+  "classTestOpen": "टेस्ट खोलें",
+  "classTestStatusLive": "अभी लाइव",
+  "classTestStatusUpcoming": "आने वाला",
+  "classTestStatusEnded": "समाप्त",
+  "hlNew": "नया",
+  "hlDefaultTitle": "हाइलाइट्स",
+  "hlNewHighlight": "नई हाइलाइट",
+  "hlEditHighlight": "हाइलाइट बदलें",
+  "hlCreate": "बनाएँ",
+  "hlTitleLabel": "शीर्षक",
+  "hlYourStories": "आपकी स्टोरी",
+  "hlSelectedCount": "चुनी गई ({count}) · क्रम बदलने के लिए दबाकर खींचें",
+  "hlCoverHint": "कवर बनाने के लिए फ़ोटो पर टैप करें",
+  "hlCoverAutomatic": "ऑटोमैटिक",
+  "hlAdjustCover": "कवर एडजस्ट करें",
+  "hlCropHint": "खिसकाने के लिए खींचें, ज़ूम के लिए पिंच करें या स्लाइडर चलाएँ",
+  "hlReset": "रीसेट",
+  "hlDone": "हो गया",
+  "hlDeleteQuestion": "हाइलाइट हटाएँ?",
+  "hlDeleteBody": "स्टोरी खुद नहीं हटेंगी।",
+  "hlDeleteAction": "हाइलाइट हटाएँ",
+  "hlEditStoriesCover": "स्टोरी और कवर बदलें",
+  "hlRename": "नाम बदलें",
+  "hlRenameTitle": "हाइलाइट का नाम बदलें",
+  "hlNoStories": "अभी जोड़ने के लिए कोई स्टोरी नहीं है। स्टोरी पोस्ट करें, वह यहाँ दिखेगी।",
+  "hlLoadStoriesFailed": "आपकी स्टोरी लोड नहीं हो सकीं।",
+  "hlUnavailable": "यह हाइलाइट अब उपलब्ध नहीं है।",
+  "hlOpenFailed": "हाइलाइट नहीं खुल सकी। अपना कनेक्शन जाँचें।",
+  "hlEmpty": "यह हाइलाइट खाली है।",
+  "msgSearchHintAll": "चैट, लोग, ग्रुप और मैसेज खोजें",
+  "msgSearchHintChat": "इस चैट में खोजें",
+  "msgSearchSectionChats": "चैट",
+  "msgSearchSectionPeople": "लोग",
+  "msgSearchSectionGroups": "ग्रुप",
+  "msgSearchSectionMessages": "मैसेज",
+  "msgSearchMutual": "म्यूचुअल",
+  "msgSearchFollowing": "फ़ॉलो कर रहे हैं",
+  "msgSearchFollowsYou": "आपको फ़ॉलो करता है",
+  "msgSearchMembers": "{count} सदस्य",
+  "msgSearchNoResults": "कोई परिणाम नहीं मिला",
+  "msgSearchNoMessages": "कोई मैसेज नहीं मिला",
+  "msgSearchMinChars": "खोजने के लिए कम से कम 2 अक्षर लिखें",
+  "msgSearchTooMany": "बहुत ज़्यादा खोजें हो गईं — कृपया थोड़ी देर रुककर फिर कोशिश करें।",
+  "msgSearchFailed": "अभी खोज नहीं हो पाई। फिर कोशिश करें।",
+  "msgSearchOpenChatFailed": "अभी वह चैट नहीं खुल पाई।",
+  "msgSearchFiltersNote": "फ़िल्टर सिर्फ़ मैसेज पर लागू होते हैं",
+  "tsTrue": "सही",
+  "tsFalse": "गलत",
+  "answerHintTrueFalse": "सही या गलत चुनें। हटाने के लिए फिर से टैप करें।",
+  "answerHintFillBlank": "छूटा हुआ शब्द या वाक्यांश लिखें",
+  "answerHintNumeric": "संख्या लिखें",
+  "tsFillBlankInputHint": "आपका उत्तर",
+  "tsNumericInputHint": "संख्या लिखें, जैसे 3.14",
+  "tsOptionImage": "विकल्प का चित्र",
+  "tsTypeMcq": "एकल विकल्प",
+  "tsTypeMsq": "बहु-विकल्प",
+  "tsTypeText": "लिखित",
+  "tsTypeTrueFalse": "सही / गलत",
+  "tsTypeFillBlank": "रिक्त स्थान",
+  "tsTypeNumeric": "संख्यात्मक",
+  "tsBuilderCorrectAnswer": "सही उत्तर",
+  "tsAcceptedAnswers": "स्वीकार्य उत्तर",
+  "tsAcceptedAnswersHelper": "प्रति पंक्ति एक। इनमें से कोई भी सही माना जाएगा।",
+  "tsCaseSensitive": "अक्षर-संवेदी (बड़े/छोटे अक्षर)",
+  "tsCorrectNumber": "सही संख्या",
+  "tsTolerance": "अनुमत अंतर (±)",
+  "tsToleranceHelper": "0 का मतलब उत्तर बिल्कुल मिलना चाहिए",
+  "tsAddOptionImage": "चित्र जोड़ें",
+  "tsRemoveOptionImage": "चित्र हटाएँ",
+  "tsOptionHint": "विकल्प {number}",
+  "@tsOptionHint": {
+    "placeholders": {
+      "number": {
+        "type": "int"
+      }
+    }
+  },
+  "tsQuestionIncomplete": "सेव करने से पहले प्रश्न का पाठ और सही उत्तर जोड़ें।",
+  "tsUploadingOptionImages": "विकल्प के चित्र अपलोड हो रहे हैं…",
+  "tsSummaryPenalty": "नेगेटिव मार्किंग: −{marks}",
+  "@tsSummaryPenalty": {
+    "placeholders": {
+      "marks": {
+        "type": "int"
+      }
+    }
+  },
+  "tsPenaltyShort": "−{marks} कटौती",
+  "@tsPenaltyShort": {
+    "placeholders": {
+      "marks": {
+        "type": "int"
+      }
+    }
+  },
+  "tsNegativeMarkingNote": "गलत उत्तर पर {marks} अंक कटेंगे। छोड़े गए प्रश्नों पर कोई कटौती नहीं।",
+  "@tsNegativeMarkingNote": {
+    "placeholders": {
+      "marks": {
+        "type": "int"
+      }
+    }
+  },
+  "classTimeStartsIn": "{duration} में शुरू",
+  "classTimeLiveNow": "अभी लाइव",
+  "classTimeStartingSoon": "जल्द शुरू होगी",
+  "classTimeEnded": "समाप्त",
+  "classTimeCancelled": "रद्द",
+  "classTimeDays": "{d} दिन",
+  "classTimeDaysHours": "{d} दिन {h} घं",
+  "classTimeHours": "{h} घं",
+  "classTimeHoursMinutes": "{h} घं {m} मि",
+  "classTimeMinutes": "{m} मि",
+  "homeNextClass": "अगली क्लास",
+  "shareAndEarnCta": "शेयर करें और कमाएँ",
+  "referralLinkCopied": "रेफ़रल लिंक कॉपी हो गया",
+  "referralCouldNotCreateLink": "आपका रेफ़रल लिंक नहीं बन पाया",
+  "referralCopyLinkCta": "लिंक कॉपी करें",
+  "referralYourLinkTitle": "आपका रेफ़रल लिंक",
+  "referralTotalCommissionLabel": "कुल कमीशन कमाया",
+  "referralTestSeriesCommissionLabel": "टेस्ट सीरीज़ कमीशन",
+  "referralClassCommissionLabel": "क्लास कमीशन",
+  "referralPeopleAttributedLabel": "आपके लिंक से आए लोग",
+  "referralPeopleConvertedLabel": "इनमें से खरीदारी करने वाले",
+  "referralRecentCommissionsTitle": "हाल के कमीशन",
+  "referralNoCommissionsYet": "अभी कोई कमीशन नहीं",
+  "referralEarningsTitle": "आपकी कमीशन कमाई",
+  "referralTestSeriesKind": "टेस्ट सीरीज़",
+  "referralClassKind": "क्लास",
+  "referralShareEarnHint": "जब आपके रेफ़र किया हुआ कोई इस टेस्ट सीरीज़ को खरीदे तो {percent}% कमाएँ।",
+  "@referralShareEarnHint": {
+    "placeholders": {
+      "percent": {
+        "type": "String"
+      }
+    }
+  },
+  "referralClassEarnHint": "जब कोई आपके लिंक से जुड़े तो {percent}% कमीशन कमाएँ।",
+  "@referralClassEarnHint": {
+    "placeholders": {
+      "percent": {
+        "type": "String"
+      }
+    }
+  },
+  "referralWindowNote": "उनके आपका लिंक खोलने के बाद {days} दिन तक क्रेडिट मिलता है।",
+  "@referralWindowNote": {
+    "placeholders": {
+      "days": {
+        "type": "int"
+      }
+    }
+  },
+  "referralClassCommissionPercentNote": "इस लिंक से हुई खरीदारी पर आप {percent}% कमाते हैं।",
+  "@referralClassCommissionPercentNote": {
+    "placeholders": {
+      "percent": {
+        "type": "String"
+      }
+    }
+  },
+  "shareTargetTitle": "LearnScroll पर शेयर करें",
+  "shareTargetCaptionHint": "कैप्शन जोड़ें (वैकल्पिक)",
+  "shareTargetMessageHint": "संदेश",
+  "shareTargetSearchHint": "चैट खोजें",
+  "shareTargetSending": "भेजा जा रहा है...",
+  "shareTargetSendTo": "{count} चैट में भेजें",
+  "@shareTargetSendTo": {
+    "placeholders": {
+      "count": {
+        "type": "int"
+      }
+    }
+  },
+  "shareTargetSent": "{count} चैट में भेज दिया",
+  "@shareTargetSent": {
+    "placeholders": {
+      "count": {
+        "type": "int"
+      }
+    }
+  },
+  "shareTargetSentPartial": "{total} में से {done} चैट में भेजा गया",
+  "@shareTargetSentPartial": {
+    "placeholders": {
+      "done": {
+        "type": "int"
+      },
+      "total": {
+        "type": "int"
+      }
+    }
+  },
+  "shareTargetSendFailed": "भेज नहीं पाए। कृपया दोबारा कोशिश करें।",
+  "shareTargetLoadFailed": "आपकी चैट लोड नहीं हो पाईं",
+  "shareTargetNoChats": "कोई चैट नहीं मिली",
+  "shareTargetFileMissing": "शेयर की गई फ़ाइल अब उपलब्ध नहीं है",
+  "shareLinkCopied": "लिंक कॉपी हो गया",
+  "shareCardFailed": "कार्ड नहीं बन सका। फिर से कोशिश करें।",
+  "shareCopyLink": "लिंक कॉपी करें",
+  "shareLinkAction": "लिंक साझा करें",
+  "shareCardImage": "कार्ड की इमेज साझा करें",
+  "shareScanToOpen": "LearnScroll पर खोलने के लिए स्कैन करें",
+  "scanQrTitle": "QR स्कैन करें",
+  "scanQrTorch": "फ़्लैशलाइट",
+  "scanQrUnsupported": "यह QR कोड LearnScroll का नहीं है।",
+  "scanQrNoCodeInImage": "उस इमेज में कोई QR कोड नहीं मिला।",
+  "scanQrHint": "कैमरा किसी LearnScroll QR कोड की ओर करें",
+  "scanQrGallery": "गैलरी से चुनें",
+  "scanQrPermissionDenied": "QR कोड स्कैन करने के लिए कैमरा एक्सेस ज़रूरी है।",
+  "scanQrOpenSettings": "सेटिंग्स खोलें",
+  "scanQrGrantAccess": "कैमरा अनुमति दें",
+  "parentEntryScanQr": "QR कोड स्कैन करें",
+  "parentLinkNotAParentQr": "यह QR कोड पैरेंट इनवाइट का नहीं है।",
+  "parentLinkScanQr": "QR स्कैन करें",
+  "parentLinkPasteLink": "लिंक पेस्ट करें",
+  "parentAccessQrHint": "आपके पैरेंट यह QR स्कैन कर सकते हैं या शेयर किया गया लिंक खोल सकते हैं।",
+  "parentAccessShareMessageLink": "आपको LearnScroll पर पैरेंट/गार्जियन एक्सेस के लिए आमंत्रित किया गया है।\n\nखोलने के लिए यह लिंक टैप करें: {link}\n\nया ऐप इंस्टॉल करें, लॉगिन स्क्रीन पर \"मैं पैरेंट हूँ\" चुनें और यह कोड दर्ज करें: {code}",
+  "@parentAccessShareMessageLink": {
+    "placeholders": {
+      "code": {
+        "type": "String"
+      },
+      "link": {
+        "type": "String"
+      }
+    }
+  }
 }
