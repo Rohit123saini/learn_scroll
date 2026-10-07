@@ -120,3 +120,112 @@ def user_can_access_series(user, series: TestSeries) -> bool:
         return True
     return series.context_id in ids
 
+
+# ---------------------------------------------------------------------------
+# TASK 12 — Refer & Earn hooks (individual PAID series only)
+#
+# Golden rule: `testseries` never imports `tuitionclass`. The referral tables
+# live in tuitionclass, so — exactly like TESTSERIES_CONTEXT_ACCESS above —
+# they are reached through dotted paths in settings.TESTSERIES_REFERRAL_HOOKS.
+# FAIL-SAFE direction here is the opposite of access control: if a hook is
+# missing or raises, NO commission is paid and the creator keeps 100% (a
+# referral glitch must never break buying a test or paying its creator).
+# ---------------------------------------------------------------------------
+def _referral_hook(name: str):
+    target = (getattr(settings, "TESTSERIES_REFERRAL_HOOKS", None) or {}).get(name)
+    if not target:
+        return None
+    try:
+        return _load(target)
+    except Exception:  # noqa: BLE001
+        logger.exception("TESTSERIES_REFERRAL_HOOKS[%s]=%s could not be imported.", name, target)
+        return None
+
+
+def referral_percent():
+    """Configured commission %, clamped to [0, TESTSERIES_REFERRAL_MAX_PERCENT]."""
+    from decimal import Decimal, InvalidOperation
+
+    try:
+        pct = Decimal(str(getattr(settings, "TESTSERIES_REFERRAL_COMMISSION_PERCENT", "0")))
+        cap = Decimal(str(getattr(settings, "TESTSERIES_REFERRAL_MAX_PERCENT", "50")))
+    except InvalidOperation:
+        return Decimal("0")
+    return max(Decimal("0"), min(pct, cap, Decimal("100")))
+
+
+def series_is_referable(series: TestSeries) -> bool:
+    """Only individually-sold, paid series earn referral commission. Campus
+    series are never paid; class series are covered by the class referral
+    program (Classroom.referral_commission_percent), so counting them here
+    too would double-pay."""
+    return (
+        series.source == TestSeries.Source.INDIVIDUAL
+        and bool(series.is_paid)
+        and series.price_coins > 0
+        and referral_percent() > 0
+    )
+
+
+def referral_code_for_user(user):
+    hook = _referral_hook("code_for_user")
+    if hook is None or not getattr(user, "id", None):
+        return None
+    try:
+        return hook(user=user)
+    except Exception:  # noqa: BLE001
+        logger.exception("referral code_for_user hook failed")
+        return None
+
+
+def referral_snapshot(*, buyer, series: TestSeries):
+    """-> (referrer_id | None, percent Decimal, commission_coins int), taken
+    at purchase time. (None, 0, 0) means "no commission on this purchase"."""
+    from decimal import Decimal, ROUND_FLOOR
+
+    none = (None, Decimal("0"), 0)
+    if not series_is_referable(series) or buyer.id == series.creator_id:
+        return none
+    hook = _referral_hook("resolve_referrer")
+    if hook is None:
+        return none
+    try:
+        referrer_id = hook(buyer=buyer)
+    except Exception:  # noqa: BLE001
+        logger.exception("referral resolve_referrer hook failed")
+        return none
+    # The creator can't earn a "commission" on their own sale.
+    if not referrer_id or referrer_id == series.creator_id or referrer_id == buyer.id:
+        return none
+    pct = referral_percent()
+    coins = int((Decimal(series.price_coins) * pct / 100).to_integral_value(rounding=ROUND_FLOOR))
+    if coins <= 0:
+        return none
+    return referrer_id, pct, coins
+
+
+def pay_referral_commission(purchase) -> int:
+    """Pay `purchase.referral_commission_coins` to its referrer. Returns the
+    coins actually paid (0 if blocked or on any failure). Idempotent per
+    purchase. Runs in its own savepoint so a failure can't poison the
+    caller's transaction."""
+    from django.db import transaction
+
+    hook = _referral_hook("pay_commission")
+    if hook is None:
+        return 0
+    try:
+        with transaction.atomic():
+            paid = hook(
+                referrer_id=purchase.referred_by_id,
+                referee_id=purchase.buyer_id,
+                purchase_id=str(purchase.id),
+                series_id=str(purchase.series_id),
+                gross_coins=purchase.coins_spent,
+                percent=purchase.referral_commission_percent,
+                coins=purchase.referral_commission_coins,
+            )
+        return max(0, min(int(paid or 0), purchase.coins_spent - 1))
+    except Exception:  # noqa: BLE001
+        logger.exception("referral pay_commission hook failed for purchase %s", purchase.id)
+        return 0

@@ -30,7 +30,8 @@ from urllib.parse import urlparse
 
 from django.contrib.postgres.search import SearchQuery, SearchRank, TrigramSimilarity
 from django.db import connection
-from django.db.models import F, Q
+from django.db.models import Case, Exists, F, IntegerField, OuterRef, Q, Value, When
+from django.db.models.functions import Concat
 from django.utils.dateparse import parse_date
 
 # WhatsApp/Insta jaisa — 1 character search bahut noisy/expensive hota hai
@@ -208,3 +209,146 @@ def build_library_items(message, tab):
          'file_size': getattr(message, 'file_size', None)}
         for u in urls
     ]
+
+
+# ----------------------------------------------------------------------
+# 🔥 NAYA (6.1) — People + Groups search (message search screen ke
+# "People" / "Groups" sections)
+#   GET /message/search/directory/?q=...&type=all|people|groups
+# ----------------------------------------------------------------------
+DIRECTORY_DEFAULT_LIMIT = 20
+DIRECTORY_MAX_LIMIT = 50
+DIRECTORY_TYPES = ('all', 'people', 'groups')
+
+
+def clamp_directory_limit(raw):
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        return DIRECTORY_DEFAULT_LIMIT
+    return max(1, min(value, DIRECTORY_MAX_LIMIT))
+
+
+def search_people(user, query, limit=DIRECTORY_DEFAULT_LIMIT):
+    """
+    Followers / following / mutual users jinka naam ya username `query`
+    se match kare. Returns (users_list, has_more). Har user pe 3 annotated
+    attribute hote hain: `i_follow`, `follows_me`, `is_mutual` (serializer
+    inhi se `relation` banata hai) — koi per-row extra query nahi.
+
+    Rules:
+      - Sirf ACCEPTED follow count hota hai (PENDING request = follow nahi).
+      - Private account tabhi aata hai jab main usko (accepted) follow
+        karta hoon — `MessageContactSearchView` wala hi rule, taaki wo log
+        jinki profile mujhe dikhti hi nahi, yahan se leak na hon.
+      - Block dono directions me hide hota hai — dono tables check hote
+        hain (`user_profile.BlockUser` aur `message.BlockedUser`).
+      - Khud ko aur inactive accounts ko exclude karte hain.
+    Ranking: mutual -> following -> follower, phir prefix match, phir username.
+    """
+    # Local import — message app module-load time pe user_profile pe depend
+    # na kare (circular-import safe).
+    from django.contrib.auth import get_user_model
+    from user_profile.models import BlockUser, Follow
+    from .models import BlockedUser
+
+    User = get_user_model()
+    q = query.lstrip('@').strip()
+    if len(q) < MIN_QUERY_LENGTH:
+        return [], False
+
+    accepted = Follow.objects.filter(status=Follow.Status.ACCEPTED)
+    i_follow = Exists(accepted.filter(follower_id=user.id, following_id=OuterRef('pk')))
+    follows_me = Exists(accepted.filter(follower_id=OuterRef('pk'), following_id=user.id))
+    blocked_user_table = Exists(BlockUser.objects.filter(
+        Q(blocker_id=user.id, blocked_id=OuterRef('pk'))
+        | Q(blocker_id=OuterRef('pk'), blocked_id=user.id)
+    ))
+    blocked_chat_table = Exists(BlockedUser.objects.filter(
+        Q(blocker_id=user.id, blocked_id=OuterRef('pk'))
+        | Q(blocker_id=OuterRef('pk'), blocked_id=user.id)
+    ))
+
+    qs = (
+        User.objects.filter(is_active=True)
+        .exclude(pk=user.pk)
+        .annotate(
+            i_follow=i_follow,
+            follows_me=follows_me,
+            _blocked_a=blocked_user_table,
+            _blocked_b=blocked_chat_table,
+            _full_name=Concat('first_name', Value(' '), 'last_name'),
+        )
+        .filter(Q(i_follow=True) | Q(follows_me=True))
+        .filter(Q(is_private=False) | Q(i_follow=True))
+        .filter(_blocked_a=False, _blocked_b=False)
+        .filter(Q(username__icontains=q) | Q(_full_name__icontains=q))
+        .annotate(
+            _relation_rank=Case(
+                When(i_follow=True, follows_me=True, then=Value(0)),
+                When(i_follow=True, then=Value(1)),
+                default=Value(2),
+                output_field=IntegerField(),
+            ),
+            _prefix_rank=Case(
+                When(
+                    Q(username__istartswith=q) | Q(first_name__istartswith=q) | Q(last_name__istartswith=q),
+                    then=Value(0),
+                ),
+                default=Value(1),
+                output_field=IntegerField(),
+            ),
+        )
+        .order_by('_relation_rank', '_prefix_rank', 'username', 'pk')
+    )
+
+    rows = list(qs[:limit + 1])
+    has_more = len(rows) > limit
+    rows = rows[:limit]
+    for u in rows:
+        u.is_mutual = bool(u.i_follow and u.follows_me)
+    return rows, has_more
+
+
+def search_groups(user, query, limit=DIRECTORY_DEFAULT_LIMIT):
+    """
+    Jin groups ka `user` abhi ACTIVE member hai (banned nahi, chat leave
+    nahi kiya, message-request pending/declined nahi) unme se naam /
+    topic_tag match karne wale. Returns (groups_list, has_more).
+    Discoverable-but-not-joined public groups yahan nahi aate (wo
+    `GroupViewSet.discover` ka kaam hai).
+    """
+    from .models import Group, GroupMember, ConversationParticipant, RequestStatus
+
+    q = query.strip()
+    if len(q) < MIN_QUERY_LENGTH:
+        return [], False
+
+    active_group_member = Exists(GroupMember.objects.filter(
+        group_id=OuterRef('pk'), user_id=user.id, is_banned=False,
+    ))
+    active_participant = Exists(ConversationParticipant.objects.filter(
+        conversation_id=OuterRef('conversation_id'), user_id=user.id,
+        left_at__isnull=True, request_status=RequestStatus.ACCEPTED,
+    ))
+
+    qs = (
+        Group.objects.annotate(_member=active_group_member, _participant=active_participant)
+        .filter(_member=True, _participant=True)
+        .filter(Q(name__icontains=q) | Q(topic_tag__icontains=q))
+        .select_related('conversation')
+        .annotate(_prefix_rank=Case(
+            When(name__istartswith=q, then=Value(0)),
+            default=Value(1),
+            output_field=IntegerField(),
+        ))
+        .order_by(
+            '_prefix_rank',
+            F('conversation__last_message_at').desc(nulls_last=True),
+            'name',
+            'pk',
+        )
+    )
+
+    rows = list(qs[:limit + 1])
+    return rows[:limit], len(rows) > limit

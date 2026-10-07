@@ -1086,3 +1086,26 @@ sections above and in the code itself.
 - [ ] `TESTSERIES_ATTACHMENT_EXTENSIONS`/`TESTSERIES_ATTACHMENT_MAX_MB` reviewed (defaults: pdf/jpg/jpeg/png/webp, 10MB) — confirm project's file storage backend is configured
 - [ ] `testseries/tests.py::RegressionLockTests` passing against the real `User` model (verify `_make_user()`'s `create_user()` call shape matches your custom `User` — §14)
 - [ ] Manually smoke-test `ask-query`/`answer-query` end-to-end once §3.7/§3.8 are confirmed — no automated test coverage exists for these yet (§17 item 11, §14)
+
+
+## Addendum - Task 9 (test series <-> class / campus)
+
+**9.1 Always free.** A series whose source is `campus` or `tuitionclass` is never paid. `policy.ALWAYS_FREE_SOURCES`
+is a hard rule - `settings.TESTSERIES_PRICING_POLICY` cannot override it. It is enforced in `TestSeries.save()`,
+`create_context_testseries()`, `tuitionclass.bridge.create_testseries()` (the `is_paid` / `price_coins` arguments are
+ignored), the `publish` action (a legacy paid class draft is corrected, not rejected) and `attempt start` (a legacy row
+that still has `is_paid=True` is never charged). Migration `0002_testseries_announced_at` zeroes old paid class/campus rows.
+
+**9.2 Publish -> announce.** When a class series is published (created through the bridge, or `POST testseries/<id>/publish/`)
+`testseries.bridge.announce_series_published()` runs once after commit. `TestSeries.announced_at` is claimed with one
+conditional UPDATE (exactly-once; released if the hook fails). The owning app does the announcing through
+`settings.TESTSERIES_PUBLISH_HOOKS` (`classroom` -> `tuitionclass.bridge.on_testseries_published`):
+notice-board entry (`Notice.source_type="testseries"`, `source_id=<series id>`, unique per classroom, expires with
+`ends_at`) + bell row `TESTSERIES_POSTED` (linked to the classroom) for active pass holders + one queued push
+(`tuitionclass.notify_testseries_published_push`, preferences / quiet hours honoured through `core.services.channels_for`).
+Campus (`section`) has no hook: it keeps notifying its roster at creation. Individual series are not announced here.
+
+**9.3 API for the app.** `GET testseries/?context_type=classroom&context_id=<classroom id>` lists the tests of one class
+(visibility rules unchanged). `NoticeSerializer` exposes read-only `source_type` / `source_id`.
+
+Tests: `python manage.py test testseries.tests_class_context testseries.tests_pure`.

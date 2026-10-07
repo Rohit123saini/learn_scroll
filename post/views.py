@@ -81,7 +81,8 @@ from.serializers import (
 )
 from.signals import decrement_posts_count_on_soft_delete
 from .services import (
-    notify_post_liked, notify_post_answered, save_uploaded_chunk, assemble_chunks,
+    notify_post_liked, notify_post_answered, notify_post_reposted, unnotify_post_reposted,
+    notify_story_reacted, unnotify_story_reacted, save_uploaded_chunk, assemble_chunks,
     list_received_chunks, CHUNK_UPLOAD_MAX_SIZE, share_post_to_conversation,
     exclude_hidden_and_muted, apply_show_fewer, ShowFewerError,
 )
@@ -794,6 +795,10 @@ class PostListAPIView(generics.ListAPIView):
             target_user = User.objects.get(id=target_user_id)
         except User.DoesNotExist:
             return Post.objects.none()
+        # Block (either direction) => the grid is empty, same as "no such user".
+        from user_profile.views import is_blocked_between
+        if is_blocked_between(request_user, target_user):
+            return Post.objects.none()
         is_following = Follow.objects.filter(follower=request_user,following=target_user,status=Follow.Status.ACCEPTED).exists()
         if target_user.is_private and not is_following:
             return Post.objects.none()
@@ -823,6 +828,10 @@ class PostDetailAPIView(generics.RetrieveAPIView):
         instance = self.get_object()
         if instance.is_deleted:
             return Response({"success": False, "message": "Post not found"}, status=status.HTTP_404_NOT_FOUND)
+        if instance.user_id != request.user.id:
+            from user_profile.views import is_blocked_between
+            if is_blocked_between(request.user, instance.user):
+                return Response({"success": False, "message": "Post not found"}, status=status.HTTP_404_NOT_FOUND)
         if instance.visibility == 'private' and instance.user!= request.user:
             return Response({"success": False, "message": "Post is private"}, status=status.HTTP_403_FORBIDDEN)
         if instance.visibility == 'connections':
@@ -1145,6 +1154,9 @@ class PostRepostAPIView(APIView):
             visibility='public',
         )
 
+        # Task 3.4: tell the original's owner (batched, never raises).
+        notify_post_reposted(repost)
+
         # `update_reposts_count` (signal) already recounted on create.
         original.refresh_from_db(fields=['reposts_count'])
         return Response({
@@ -1179,6 +1191,8 @@ class PostDeleteAPIView(APIView):
         post.deleted_at = timezone.now()
         post.save(update_fields=["is_deleted", "deleted_at"])
         decrement_posts_count_on_soft_delete(post)
+        if post.post_type == "repost" and post.original_post_id:
+            unnotify_post_reposted(post)  # Task 3.4: undo repost drops it from the open batch
 
         return Response({"success": True, "message": "Post deleted"}, status=status.HTTP_204_NO_CONTENT)
 
@@ -1266,6 +1280,10 @@ class PostShareAPIView(APIView):
         post = get_object_or_404(Post, id=id, is_deleted=False)
         if post.visibility == "private" and post.user_id != request.user.id:
             return Response({"success": False, "message": "Post is private"}, status=status.HTTP_403_FORBIDDEN)
+        if post.user_id != request.user.id:
+            from user_profile.views import is_blocked_between
+            if is_blocked_between(request.user, post.user):
+                return Response({"success": False, "message": "Post not found"}, status=status.HTTP_404_NOT_FOUND)
 
         body = PostShareRequestSerializer(data=request.data)
         body.is_valid(raise_exception=True)
@@ -1532,6 +1550,8 @@ class StoryListAPIView(generics.ListAPIView):
                 Story.objects.select_related("user")
                 .filter(is_deleted=False, expires_at__gt=timezone.now())
                 .filter(Q(user_id__in=following_ids) | Q(user=request_user))
+                # Mute covers stories too: a muted account's stories stay out of my tray.
+                .exclude(user_id__in=MutedAccount.objects.filter(user=request_user).values("muted_user_id"))
                 .prefetch_related(story_sticker_prefetch()),
                 request_user,
             )
@@ -1770,11 +1790,14 @@ class StoryReactAPIView(APIView):
         if existing and existing.emoji == emoji:
             existing.delete()
             reacted = False
+            unnotify_story_reacted(story, request.user)  # Task 3.4
         else:
             StoryReaction.objects.update_or_create(
                 story=story, user=request.user, defaults={"emoji": emoji},
             )
             reacted = True
+            if existing is None:  # a changed emoji is not a new reaction
+                notify_story_reacted(story, request.user, emoji)  # Task 3.4
 
         # Real-time — story owner's "who reacted" list/analytics updates
         # immediately, no polling. Same `user_<id>` inbox group
@@ -1867,7 +1890,12 @@ class StoryViewersAPIView(generics.ListAPIView):
         if story.user_id != self.request.user.id:
             raise PermissionDenied("Sirf apni story ke viewers dekh sakte hain.")
         self._story = story
-        return story.views.select_related("user").order_by("-viewed_at")
+        from user_profile.services import blocked_user_ids
+        return (
+            story.views.select_related("user")
+            .exclude(user_id__in=blocked_user_ids(self.request.user))
+            .order_by("-viewed_at")
+        )
 
     def get_serializer_context(self):
         ctx = super().get_serializer_context()
@@ -1980,6 +2008,10 @@ class PostReactionAPIView(APIView):
     def post(self, request, post_id):
         from django.shortcuts import get_object_or_404
         post = get_object_or_404(Post, id=post_id)
+        if post.user_id != request.user.id:
+            from user_profile.views import is_blocked_between
+            if is_blocked_between(request.user, post.user):
+                return Response({"success": False, "message": "Post not found"}, status=status.HTTP_404_NOT_FOUND)
         serializer = ReactionRequestSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         reaction_type = serializer.validated_data['reaction']
@@ -2567,7 +2599,7 @@ class MutedAccountsAPIView(APIView):
 
     Mute != block: the follow relationship, profile access, DMs and search are
     untouched; the account's posts (and reposts of them) just stop appearing
-    in MY Home / Explore / Hashtag feeds.
+    in MY Home / Explore / Hashtag feeds, and its stories drop out of MY story tray.
     """
     permission_classes = [IsAuthenticated]
 

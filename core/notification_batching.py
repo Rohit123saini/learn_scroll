@@ -52,6 +52,7 @@ DEFAULT_BATCH_WINDOWS = {
     "post_commented": 120,
     "new_follower": 6 * 3600,
     "story_reaction": 300,
+    "post_reposted": 120,
 }
 
 
@@ -140,13 +141,24 @@ def _is_restricted(recipient_id, actor_id) -> bool:
 
 
 def _apply_update(notification, current, actor_ids, actor_id, *, title_fn,
-                  message_fn, data_fn, actor_preview_fn):
+                  message_fn, data_fn, actor_preview_fn, bump=False):
     actors = _hydrate_actors(actor_ids)
     latest_actor = actors[-1] if actors else actor_id
     count = len(actor_ids)
 
     notification.title = title_fn(count, actors)
     update_fields = ["title", "data"]
+    if bump:
+        # A NEW event folded into an existing row must look like a new
+        # notification: unread again (badge) and back at the top of the list.
+        # Without this a row the user already opened stays "read" and sinks
+        # down, so "X started following you" never shows up on the bell.
+        from django.utils import timezone
+
+        notification.is_read = False
+        notification.read_at = None
+        notification.created_at = timezone.now()
+        update_fields += ["is_read", "read_at", "created_at"]
     if message_fn is not None:
         notification.message = message_fn(count, actors, latest_actor)
         update_fields.append("message")
@@ -174,6 +186,7 @@ def create_batched_notification(
     window_seconds: int = 120,
     max_age_seconds: int | None = None,
     send_push_fn=None,
+    send_push_row_fn=None,
 ):
     """
     recipient / actor: User instance ya raw id.
@@ -186,6 +199,9 @@ def create_batched_notification(
     extra_data: sirf fresh row pe `data` me jaata hai (aur push payload).
     actor_preview_fn(user) -> dict — `actors_preview` ka ek item (photo yahin).
     send_push_fn(recipient, title, message, data) — SIRF pehle event pe.
+    send_push_row_fn(notification) — SIRF pehle event pe, saved row ke saath
+        (message.push_utils.send_push_for_notification: prefs / quiet hours
+        respect + rich payload + action buttons).
 
     Returns the Notification, or None (restricted actor, or internal failure
     — logged, never raised).
@@ -197,7 +213,7 @@ def create_batched_notification(
             data_fn=data_fn, classroom=classroom, session=session,
             extra_data=extra_data, actor_preview_fn=actor_preview_fn,
             window_seconds=window_seconds, max_age_seconds=max_age_seconds,
-            send_push_fn=send_push_fn,
+            send_push_fn=send_push_fn, send_push_row_fn=send_push_row_fn,
         )
     except Exception:
         logger.exception(
@@ -210,13 +226,20 @@ def create_batched_notification(
 def _create_batched(
     *, recipient, notif_type, actor, target_id, title_fn, message_fn, data_fn,
     classroom, session, extra_data, actor_preview_fn, window_seconds,
-    max_age_seconds, send_push_fn,
+    max_age_seconds, send_push_fn, send_push_row_fn=None,
 ):
     recipient_id = getattr(recipient, "id", recipient)
     actor_id = _norm_id(getattr(actor, "id", actor))
 
     if _is_restricted(recipient_id, actor_id):
         return None
+
+    # Block (either direction): no row, no fold into an open batch.
+    if actor_id is not None:
+        from user_profile.services import is_blocked_pair
+
+        if is_blocked_pair(recipient_id, actor_id):
+            return None
 
     # N6-BE — recipient muted this actor: no row, no fold into an open batch.
     if NotificationMute.is_muted(recipient_id, actor_id):
@@ -280,6 +303,15 @@ def _create_batched(
                 notification.id, recipient_id,
             )
 
+    if send_push_row_fn is not None:
+        try:
+            send_push_row_fn(notification)
+        except Exception:
+            logger.exception(
+                "send_push_row_fn failed for batched notification %s (recipient=%s).",
+                notification.id, recipient_id,
+            )
+
     return notification
 
 
@@ -309,7 +341,7 @@ def _fold_into_open_batch(
         _apply_update(
             notification, current, actor_ids, actor_id, title_fn=title_fn,
             message_fn=message_fn, data_fn=data_fn,
-            actor_preview_fn=actor_preview_fn,
+            actor_preview_fn=actor_preview_fn, bump=True,
         )
 
     # Sliding window — extend from now (opened_at stays for max_age).

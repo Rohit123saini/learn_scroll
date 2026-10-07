@@ -11,6 +11,7 @@ URL map (all under the app's mount, i.e. `/testseries/`):
 
   Series   POST   testseries/{id}/questions-bulk/        JSON answer-key upload
            POST   testseries/{id}/questions-import/      CSV answer-key upload
+           POST   testseries/{id}/option-image/          (Task 8.1) upload one option image -> {url}
            GET    testseries/{id}/answer-key/            is the key complete?
            POST   testseries/{id}/release-results/       manual result release
            GET    testseries/trending/                   (Task G9) "Trending test series" rail
@@ -40,11 +41,14 @@ URL map (all under the app's mount, i.e. `/testseries/`):
            POST   testseries/livekit-webhook/
 """
 import logging
+import os
+import uuid
 
 from datetime import timedelta
 
 from django.conf import settings as django_settings
 from django.core.exceptions import ValidationError as DjangoValidationError
+from django.core.files.storage import default_storage
 from django.db import IntegrityError, transaction
 from django.db.models import Avg, Count, F, Max, Q
 from django.db.models.functions import TruncDate
@@ -96,6 +100,10 @@ def _discovery_limit(request, *, default=DISCOVERY_DEFAULT_LIMIT):
     except (TypeError, ValueError):
         limit = default
     return max(1, min(DISCOVERY_MAX_LIMIT, limit))
+
+
+OPTION_IMAGE_EXTENSIONS = {"jpg", "jpeg", "png", "webp"}
+OPTION_IMAGE_MAX_BYTES = 5 * 1024 * 1024
 
 
 def _is_creator(user, series) -> bool:
@@ -173,7 +181,7 @@ class SeriesAdvancedActionsMixin:
             raise ValidationError({"file": "CSV is larger than 1 MB."})
 
         next_order = (series.questions.aggregate(m=Max("order"))["m"] or 0) + 1
-        result = parse_csv(upload.read(), start_order=next_order)
+        result = parse_csv(upload.read(), start_order=next_order, extended=True)
         if result.errors:
             return Response(
                 {"detail": "The CSV has problems — nothing was imported.",
@@ -181,6 +189,29 @@ class SeriesAdvancedActionsMixin:
                 status=status.HTTP_400_BAD_REQUEST,
             )
         return _create_questions(request, series, result.questions)
+
+    @action(
+        detail=True, methods=["post"], url_path="option-image",
+        parser_classes=[MultiPartParser, FormParser],
+    )
+    def option_image(self, request, pk=None):
+        """Task 8.1 — upload ONE image for an answer option. Returns
+        `{"url": ...}`; the client stores that URL in `options[i].image`
+        of the question it then creates/updates. Creator + draft only,
+        images only (jpg/png/webp), 5 MB max."""
+        series = self.get_object()
+        _require_creator(request.user, series)
+        _require_draft(series)
+        upload = request.FILES.get("file")
+        if upload is None:
+            raise ValidationError({"file": "Attach an image."})
+        ext = os.path.splitext(upload.name or "")[1].lower().lstrip(".")
+        if ext not in OPTION_IMAGE_EXTENSIONS:
+            raise ValidationError({"file": "Only JPG, PNG or WEBP images are allowed."})
+        if upload.size > OPTION_IMAGE_MAX_BYTES:
+            raise ValidationError({"file": "Image is larger than 5 MB."})
+        name = default_storage.save(f"testseries/option_images/{uuid.uuid4().hex}.{ext}", upload)
+        return Response({"url": request.build_absolute_uri(default_storage.url(name))}, status=status.HTTP_201_CREATED)
 
     # ------------------------------------------------------ results
     @action(detail=True, methods=["post"], url_path="release-results")

@@ -30,6 +30,17 @@ CSV columns (header row required, case-insensitive, any order):
     difficulty   easy | medium | hard  (optional)
     explanation  shown to the student with the solution (optional)
 
+Task 8.2 — extra types, only when the caller passes `extended=True`
+(testseries does; `assigments` does not, so it keeps rejecting them):
+
+    type         true_false | fill_blank | numeric
+    correct      true_false -> true/false (also t/f, yes/no)
+                 fill_blank -> accepted answers separated by |   e.g.  Delhi|New Delhi
+                 numeric    -> a number                           e.g.  3.14
+    case_sensitive   fill_blank only: yes/no (default no)
+    tolerance        numeric only: allowed +/- difference (default 0)
+    image_a .. image_h   optional image URL for option_a .. option_h (mcq/msq/order)
+
 `match` (match-the-following) questions have a two-column shape that
 doesn't fit a flat CSV row; create those through the JSON bulk endpoint.
 """
@@ -48,7 +59,15 @@ _TYPE_ALIASES = {
     "order": "order", "ordering": "order", "sequence": "order",
     "text": "text", "subjective": "text", "written": "text",
 }
+_EXTRA_TYPE_ALIASES = {
+    "true_false": "true_false", "truefalse": "true_false", "tf": "true_false", "boolean": "true_false",
+    "fill_blank": "fill_blank", "fill": "fill_blank", "fillblank": "fill_blank", "blank": "fill_blank",
+    "numeric": "numeric", "number": "numeric", "numerical": "numeric",
+}
 _DIFFICULTIES = {"easy", "medium", "hard"}
+_YES = {"yes", "y", "true", "1"}
+_TRUE = {"true", "t", "yes", "y", "1"}
+_FALSE = {"false", "f", "no", "n", "0"}
 
 
 class CsvImportResult:
@@ -73,7 +92,7 @@ def _letters(raw: str) -> list[str]:
     return [p.strip().lower() for p in parts if p.strip()]
 
 
-def parse_csv(content: bytes | str, *, start_order: int = 1) -> CsvImportResult:
+def parse_csv(content: bytes | str, *, start_order: int = 1, extended: bool = False) -> CsvImportResult:
     """Parse CSV text/bytes into question dicts. Never raises on bad
     *content* — every problem is reported per row so the creator can fix the
     sheet in one pass instead of one error at a time."""
@@ -110,9 +129,14 @@ def parse_csv(content: bytes | str, *, start_order: int = 1) -> CsvImportResult:
             result.errors.append((offset, "question is empty."))
             continue
 
-        qtype = _TYPE_ALIASES.get((row.get("type") or "mcq").lower())
+        raw_type = (row.get("type") or "mcq").lower().replace("-", "_").replace(" ", "_")
+        qtype = _TYPE_ALIASES.get(raw_type) or (_EXTRA_TYPE_ALIASES.get(raw_type) if extended else None)
         if qtype is None:
-            result.errors.append((offset, f"Unknown type '{row.get('type')}'. Use mcq, msq, order or text."))
+            hint = (
+                "mcq, msq, order, text, true_false, fill_blank or numeric"
+                if extended else "mcq, msq, order or text"
+            )
+            result.errors.append((offset, f"Unknown type '{row.get('type')}'. Use {hint}."))
             continue
 
         try:
@@ -149,11 +173,69 @@ def parse_csv(content: bytes | str, *, start_order: int = 1) -> CsvImportResult:
             order += 1
             continue
 
+        if qtype == "true_false":
+            word = (row.get("correct") or "").lower()
+            if word in _TRUE:
+                value = True
+            elif word in _FALSE:
+                value = False
+            else:
+                result.errors.append((offset, "correct must be true or false for type=true_false."))
+                continue
+            q.update(question_type="true_false", options=[], correct_answer={"value": value})
+            result.questions.append(q)
+            order += 1
+            continue
+
+        if qtype == "fill_blank":
+            answers = [a.strip() for a in (row.get("correct") or "").split("|") if a.strip()]
+            if not answers:
+                result.errors.append((offset, "correct is empty — list the accepted answers, separated by | ."))
+                continue
+            q.update(
+                question_type="fill_blank", options=[],
+                correct_answer={
+                    "answers": answers,
+                    "case_sensitive": (row.get("case_sensitive") or "").lower() in _YES,
+                },
+            )
+            result.questions.append(q)
+            order += 1
+            continue
+
+        if qtype == "numeric":
+            try:
+                value = float((row.get("correct") or "").replace(",", ""))
+                tolerance = float((row.get("tolerance") or "0").replace(",", ""))
+            except ValueError:
+                result.errors.append((offset, "correct and tolerance must be numbers for type=numeric."))
+                continue
+            if value != value or value in (float("inf"), float("-inf")) or tolerance < 0 or tolerance != tolerance:
+                result.errors.append((offset, "correct must be a finite number and tolerance 0 or more."))
+                continue
+            q.update(
+                question_type="numeric", options=[],
+                correct_answer={"value": value, "tolerance": tolerance},
+            )
+            result.questions.append(q)
+            order += 1
+            continue
+
         options = []
         for i, letter in enumerate(_LETTERS[:MAX_OPTIONS]):
             value = row.get(f"option_{letter}", "")
-            if value:
-                options.append({"id": letter, "text": value})
+            image = row.get(f"image_{letter}", "") if extended else ""
+            if image and not image.startswith(("http://", "https://")):
+                result.errors.append((offset, f"image_{letter} must be an http(s) URL."))
+                options = None
+                break
+            if value or image:
+                opt = {"id": letter, "text": value}
+                if image:
+                    opt["image"] = image
+                options.append(opt)
+        if options is None:
+            continue
         ids = {o["id"] for o in options}
         if len(options) < 2:
             result.errors.append((offset, "At least two options (option_a, option_b, ...) are required."))

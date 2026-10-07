@@ -42,11 +42,27 @@ class PricingPolicyTests(unittest.TestCase):
         )
         self.assertEqual(policy.normalize_pricing(source="campus", is_paid=False, price_coins=0, strict=True), (False, 0))
 
-    def test_tuitionclass_free_or_paid(self):
+    def test_tuitionclass_is_always_free(self):
+        # TASK 9.1: a class series can never be paid (it used to be "teacher may charge").
         self.assertEqual(policy.normalize_pricing(source="tuitionclass", is_paid=False, price_coins=0, strict=True), (False, 0))
-        self.assertEqual(policy.normalize_pricing(source="tuitionclass", is_paid=True, price_coins=25, strict=True), (True, 25))
-        with self.assertRaises(policy.PolicyError):
-            policy.normalize_pricing(source="tuitionclass", is_paid=False, price_coins=5, strict=True)
+        for kwargs in (dict(is_paid=True, price_coins=25), dict(is_paid=False, price_coins=5)):
+            with self.assertRaises(policy.PolicyError):
+                policy.normalize_pricing(source="tuitionclass", strict=True, **kwargs)
+        # non-strict (TestSeries.save()) silently forces free
+        self.assertEqual(policy.normalize_pricing(source="tuitionclass", is_paid=True, price_coins=25, strict=False), (False, 0))
+
+    def test_class_and_campus_free_even_if_config_says_otherwise(self):
+        relaxed = {"campus": {"mode": "optional"}, "tuitionclass": {"mode": "optional", "min_coins": 1}}
+        for source in ("campus", "tuitionclass"):
+            self.assertTrue(policy.is_always_free(source))
+            self.assertEqual(
+                policy.normalize_pricing(source=source, is_paid=True, price_coins=10, strict=False, policy=relaxed),
+                (False, 0),
+            )
+            with self.assertRaises(policy.PolicyError):
+                policy.normalize_pricing(source=source, is_paid=True, price_coins=10, strict=True, policy=relaxed)
+        self.assertFalse(policy.is_always_free("individual"))
+        self.assertFalse(policy.is_always_free(None))
 
     def test_non_strict_never_raises_and_keeps_legacy_free_individual(self):
         # Legacy free individual rows must keep saving (e.g. recompute_total_marks()).
@@ -242,3 +258,104 @@ class CsvImportTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+# ---------------------------------------------------------------------------
+# Task 8 — new question types
+# ---------------------------------------------------------------------------
+from common.question_grading import auto_grade  # noqa: E402
+
+
+def _grade(qtype, correct, answer, marks=4):
+    return auto_grade(question_type=qtype, options=[], correct_answer=correct, answer_data=answer, marks=marks)
+
+
+class NewTypeGradingTests(unittest.TestCase):
+    def test_true_false(self):
+        self.assertEqual(_grade("true_false", {"value": True}, {"value": True}), (True, 4))
+        self.assertEqual(_grade("true_false", {"value": False}, {"value": False}), (True, 4))
+        self.assertEqual(_grade("true_false", {"value": True}, {"value": False}), (False, 0))
+        self.assertEqual(_grade("true_false", {"value": True}, {}), (False, 0))
+        self.assertEqual(_grade("true_false", {"value": True}, {"value": "true"}), (True, 4))
+
+    def test_fill_blank_ignores_case_and_spaces_by_default(self):
+        key = {"answers": ["New Delhi", "Delhi"], "case_sensitive": False}
+        self.assertEqual(_grade("fill_blank", key, {"text": "  new   delhi "}), (True, 4))
+        self.assertEqual(_grade("fill_blank", key, {"text": "DELHI"}), (True, 4))
+        self.assertEqual(_grade("fill_blank", key, {"text": "Mumbai"}), (False, 0))
+        self.assertEqual(_grade("fill_blank", key, {"text": ""}), (False, 0))
+
+    def test_fill_blank_case_sensitive(self):
+        key = {"answers": ["NaCl"], "case_sensitive": True}
+        self.assertEqual(_grade("fill_blank", key, {"text": "NaCl"}), (True, 4))
+        self.assertEqual(_grade("fill_blank", key, {"text": "nacl"}), (False, 0))
+
+    def test_numeric_with_tolerance(self):
+        key = {"value": 3.14, "tolerance": 0.01}
+        self.assertEqual(_grade("numeric", key, {"value": "3.145"}), (True, 4))
+        self.assertEqual(_grade("numeric", key, {"value": 3.2}), (False, 0))
+        self.assertEqual(_grade("numeric", {"value": 1250}, {"value": "1,250"}), (True, 4))
+
+    def test_numeric_garbage_is_wrong_not_a_crash(self):
+        for junk in ("abc", "nan", "inf", [1], None, {"x": 1}, True):
+            self.assertEqual(_grade("numeric", {"value": 1}, {"value": junk}), (False, 0), junk)
+
+    def test_malformed_payloads_never_raise(self):
+        self.assertEqual(_grade("fill_blank", {"answers": ["a"]}, {"text": ["a"]}), (False, 0))
+        self.assertEqual(_grade("true_false", {"value": True}, {"value": [True]}), (False, 0))
+
+    def test_old_types_unchanged(self):
+        self.assertEqual(_grade("mcq", {"option_id": "a"}, {"option_id": "a"}), (True, 4))
+        self.assertEqual(_grade("text", {}, {"text": "x"}), (None, None))
+
+
+class NewTypePenaltyTests(unittest.TestCase):
+    def test_is_answered(self):
+        self.assertTrue(policy.is_answered("true_false", {"value": False}))
+        self.assertFalse(policy.is_answered("true_false", {}))
+        self.assertTrue(policy.is_answered("fill_blank", {"text": "x"}))
+        self.assertFalse(policy.is_answered("fill_blank", {"text": "  "}))
+        self.assertTrue(policy.is_answered("numeric", {"value": 0}))
+        self.assertTrue(policy.is_answered("numeric", {"value": "0"}))
+        self.assertFalse(policy.is_answered("numeric", {"value": ""}))
+
+    def test_negative_marking_only_when_attempted_and_wrong(self):
+        for qtype, ans in (("true_false", {"value": False}), ("fill_blank", {"text": "x"}), ("numeric", {"value": 9})):
+            self.assertEqual(
+                policy.negative_penalty(question_type=qtype, is_correct=False, answer_data=ans, negative_marks=1), 1
+            )
+            self.assertEqual(
+                policy.negative_penalty(question_type=qtype, is_correct=False, answer_data={}, negative_marks=1), 0
+            )
+            self.assertEqual(
+                policy.negative_penalty(question_type=qtype, is_correct=True, answer_data=ans, negative_marks=1), 0
+            )
+
+
+class NewTypeCsvTests(unittest.TestCase):
+    CSV = (
+        "type,question,option_a,option_b,image_a,correct,tolerance,case_sensitive,marks,negative\n"
+        "true_false,Sky is blue,,,,true,,,1,0\n"
+        "fill_blank,Capital of India,,,,Delhi|New Delhi,,no,2,1\n"
+        "numeric,Value of pi,,,,3.14,0.01,,2,1\n"
+        "mcq,Pick one,Cat,Dog,https://x.test/cat.png,B,,,1,0\n"
+    )
+
+    def test_extended_types_parse(self):
+        res = parse_csv(self.CSV, extended=True)
+        self.assertEqual(res.errors, [])
+        tf, fb, num, mcq = res.questions
+        self.assertEqual(tf["question_type"], "true_false")
+        self.assertEqual(tf["correct_answer"], {"value": True})
+        self.assertEqual(fb["correct_answer"], {"answers": ["Delhi", "New Delhi"], "case_sensitive": False})
+        self.assertEqual(num["correct_answer"], {"value": 3.14, "tolerance": 0.01})
+        self.assertEqual(mcq["options"][0], {"id": "a", "text": "Cat", "image": "https://x.test/cat.png"})
+        self.assertEqual(mcq["correct_answer"], {"option_id": "b"})
+
+    def test_not_extended_rejects_new_types(self):
+        res = parse_csv(self.CSV)
+        self.assertTrue(any("Unknown type" in m for _, m in res.errors))
+
+    def test_bad_values_reported(self):
+        res = parse_csv("type,question,correct\ntrue_false,Q,maybe\nnumeric,Q2,abc\nfill_blank,Q3,\n", extended=True)
+        self.assertEqual([r for r, _ in res.errors], [2, 3, 4])

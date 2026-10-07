@@ -35,8 +35,32 @@ debugging/support, just not hand-editable.
 """
 from django.contrib import admin
 from django.contrib.auth.admin import UserAdmin as DjangoUserAdmin
+from django.db.models import Count
 
 from .models import OTPVerification, User
+
+
+class BlockedByManyFilter(admin.SimpleListFilter):
+    """Abuse signal: accounts that many different people blocked.
+
+    One block is noise; a pile of blocks (or blocks plus reports) from
+    unrelated people is how a harasser / spammer shows up. Combine with the
+    "reports" column and the Content reports admin to decide on action.
+    """
+
+    title = "blocked by"
+    parameter_name = "blocked_by"
+
+    def lookups(self, request, model_admin):
+        return (("1", "1 or more people"), ("5", "5 or more"), ("20", "20 or more"), ("50", "50 or more"))
+
+    def queryset(self, request, queryset):
+        if self.value():
+            try:
+                return queryset.filter(blocked_by_n__gte=int(self.value()))
+            except ValueError:
+                return queryset
+        return queryset
 
 
 @admin.register(User)
@@ -92,9 +116,27 @@ class UserAdmin(DjangoUserAdmin):
         "is_staff",
         "is_verified",
         "is_private",
+        "blocked_by_count",
+        "reports_count",
         "date_joined",
     )
-    list_filter = DjangoUserAdmin.list_filter + ("is_private", "is_verified")
+    list_filter = DjangoUserAdmin.list_filter + ("is_private", "is_verified", BlockedByManyFilter)
+
+    def get_queryset(self, request):
+        # Two annotated counts for the abuse columns. distinct=True because
+        # two joins multiply rows against each other.
+        return super().get_queryset(request).annotate(
+            blocked_by_n=Count("blocked_by_relation", distinct=True),
+            reports_n=Count("reports_received", distinct=True),
+        )
+
+    @admin.display(description="Blocked by", ordering="blocked_by_n")
+    def blocked_by_count(self, obj):
+        return obj.blocked_by_n
+
+    @admin.display(description="Reports", ordering="reports_n")
+    def reports_count(self, obj):
+        return obj.reports_n
     search_fields = DjangoUserAdmin.search_fields + ("phone",)
 
 

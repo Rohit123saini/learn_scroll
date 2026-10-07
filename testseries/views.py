@@ -1,5 +1,6 @@
 # testseries/views.py
 import json
+import uuid
 
 from django.core.exceptions import ValidationError as DjangoValidationError
 from django.db import IntegrityError, transaction
@@ -23,7 +24,7 @@ from .views_advanced import (
     AttemptAdvancedActionsMixin, SeriesAdvancedActionsMixin, _questions_missing_answer_key,
     close_proctor_room,
 )
-from .bridge import ask_query_on_series, answer_query_on_series
+from .bridge import announce_series_published, ask_query_on_series, answer_query_on_series
 from .permissions import (
     CanAskQueryOnCheckedAttempt, CanReviewCheckedAttempt, IsSeriesCreatorOrReadOnly,
     user_can_review_attempt,
@@ -96,6 +97,19 @@ class TestSeriesViewSet(SeriesAdvancedActionsMixin, viewsets.ModelViewSet):
         search = params.get("search")
         if search:
             qs = qs.filter(db_models.Q(title__icontains=search) | db_models.Q(description__icontains=search))
+        # TASK 9.3: "the tests of THIS class" for the class detail screen.
+        # `context_id` accepts the stored UUID or the plain classroom/section id
+        # (an integer pk is stored as uuid.UUID(int=pk)). Visibility is still
+        # enforced below by visible_series_q, so this can only narrow the list.
+        context_type = params.get("context_type")
+        if context_type:
+            qs = qs.filter(context_type=context_type)
+        context_id = params.get("context_id")
+        if context_id:
+            try:
+                qs = qs.filter(context_id=uuid.UUID(context_id) if "-" in context_id else uuid.UUID(int=int(context_id)))
+            except (TypeError, ValueError):
+                qs = qs.none()  # a garbage id matches nothing; not a 500
         qs = qs.order_by(self.ORDERING_FIELDS.get(params.get("ordering"), "-created_at"))
 
         # Individual/marketplace discovery is browse-based (§4 — no
@@ -139,8 +153,14 @@ class TestSeriesViewSet(SeriesAdvancedActionsMixin, viewsets.ModelViewSet):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
+        # TASK 9.1: a class / campus draft is ALWAYS published free — a legacy
+        # draft that still carries a price is corrected here instead of blocking.
+        forced_free = policy.is_always_free(series.source) and (series.is_paid or series.price_coins)
+        if forced_free:
+            series.is_paid, series.price_coins = False, 0
+
         # Pricing policy, STRICT (config: settings.TESTSERIES_PRICING_POLICY):
-        # individual = paid, campus = free, tuitionclass = free or paid. Legacy
+        # individual = paid, campus + tuitionclass = always free. Legacy
         # drafts created before the policy existed are caught here, not silently
         # published against the rules.
         try:
@@ -161,7 +181,12 @@ class TestSeriesViewSet(SeriesAdvancedActionsMixin, viewsets.ModelViewSet):
         series.recompute_total_marks(save=False)
         series.ensure_share_slug(save=False)
         series.status = TestSeries.Status.PUBLISHED
-        series.save(update_fields=["status", "total_marks", "share_slug"])
+        series.save(update_fields=["status", "total_marks", "share_slug"] + (["is_paid", "price_coins"] if forced_free else []))
+
+        # TASK 9.2: class / campus series are announced to their context (notice
+        # board entry + notification) exactly once, after the publish commits.
+        if policy.is_always_free(series.source):
+            transaction.on_commit(lambda: announce_series_published(series))
 
         if series.delivery_mode == TestSeries.DeliveryMode.LIVE:
             TestLiveSession.objects.get_or_create(
@@ -184,6 +209,40 @@ class TestSeriesViewSet(SeriesAdvancedActionsMixin, viewsets.ModelViewSet):
             notify_followers_new_testseries.delay(series.id)
 
         return Response(TestSeriesSerializer(series, context={"request": request}).data)
+
+    # TASK 12 / 12.5 — "Share & earn" for an individual PAID series. Returns
+    # the caller's own referral link for this series. Anyone who can SEE the
+    # series may share it (referrer needn't have bought it); only series that
+    # actually pay commission (individual + paid + published + feature on)
+    # get a link — otherwise 400 so the app hides the button.
+    @action(detail=True, methods=["get"], url_path="refer-link")
+    def refer_link(self, request, pk=None):
+        from .access import referral_code_for_user, referral_percent, series_is_referable
+
+        series = self.get_object()
+        if series.status != TestSeries.Status.PUBLISHED or not series_is_referable(series):
+            raise ValidationError("Refer & earn isn't available for this test series.")
+        if series.creator_id == request.user.id:
+            raise ValidationError("You can't earn commission on your own test series.")
+        code = referral_code_for_user(request.user)
+        if not code:
+            raise ValidationError("Refer & earn is temporarily unavailable.")
+
+        series.ensure_share_slug(save=True)
+        base = TestSeriesSerializer(series, context={"request": request}).data.get("share_url")
+        if not base:
+            raise ValidationError("This test series has no share link yet.")
+        web_url = f"{base}{'&' if '?' in base else '?'}ref={code}"
+        pct = referral_percent()
+        return Response(
+            {
+                "referral_code": code,
+                "web_url": web_url,
+                "commission_percent": str(pct.quantize(pct.__class__("0.01"))),
+                "commission_coins_estimate": int(series.price_coins * pct / 100),
+                "share_text": f"Try '{series.title}' on LearnScroll — {web_url}",
+            }
+        )
 
 
 class QuestionViewSet(viewsets.ModelViewSet):
@@ -355,7 +414,9 @@ class TestAttemptViewSet(
         attempt_number = TestAttempt.objects.filter(series=series, student=request.user).count() + 1
 
         try:
-            if series.is_paid:
+            # TASK 9.1: a class / campus series never charges, even if a legacy
+            # row still has is_paid=True stored.
+            if series.is_paid and not policy.is_always_free(series.source):
                 # attempt_number intentionally NOT passed here —
                 # purchase_and_start_attempt() recomputes it itself
                 # under the buyer row lock (see [FIX — Task 28] on that

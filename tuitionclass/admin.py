@@ -43,6 +43,9 @@ from .models import (
     PassPurchase,
     PollResponse,
     Referral,
+    ReferralAttribution,
+    ReferralCode,
+    ReferralCommission,
     SessionParticipant,
     SessionWaitlist,
 )
@@ -586,6 +589,41 @@ class ReferralAdmin(admin.ModelAdmin):
     search_fields = ("referrer__username", "referred__username")
     autocomplete_fields = ["referrer", "referred"]
     readonly_fields = ("created_at",)
+    date_hierarchy = "created_at"
+
+
+# ---------------------------------------------------------------------------
+# TASK 12 — Refer & Earn: code / attribution / commission ledger.
+# Read-only on purpose: these are financial/audit records. Support needs to
+# SEE "why did (or didn't) X get commission" — blocked rows carry block_reason.
+# ---------------------------------------------------------------------------
+class _ReadOnlyAdmin(admin.ModelAdmin):
+    def has_add_permission(self, request):
+        return False
+
+    def has_change_permission(self, request, obj=None):
+        return False
+
+
+@admin.register(ReferralCode)
+class ReferralCodeAdmin(_ReadOnlyAdmin):
+    list_display = ("user", "code", "created_at")
+    search_fields = ("user__username", "code")
+
+
+@admin.register(ReferralAttribution)
+class ReferralAttributionAdmin(_ReadOnlyAdmin):
+    list_display = ("referee", "referrer", "source_type", "created_at", "expires_at", "first_purchase_at")
+    list_filter = ("source_type",)
+    search_fields = ("referee__username", "referrer__username")
+    date_hierarchy = "created_at"
+
+
+@admin.register(ReferralCommission)
+class ReferralCommissionAdmin(_ReadOnlyAdmin):
+    list_display = ("referrer", "referee", "kind", "commission_coins", "status", "block_reason", "created_at")
+    list_filter = ("kind", "status", "block_reason")
+    search_fields = ("referrer__username", "referee__username", "reference")
     date_hierarchy = "created_at"
 
 

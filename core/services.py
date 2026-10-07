@@ -97,6 +97,13 @@ def create_notification(
         if is_restricted_between(recipient_id, actor_id):
             return None
 
+        # Block (either direction): nothing the other person does may reach
+        # my bell. Silent no-op like restrict/mute above.
+        from user_profile.services import is_blocked_pair
+
+        if is_blocked_pair(recipient_id, actor_id):
+            return None
+
         # N6-BE — recipient muted this actor (NotificationMute): same
         # silent no-op as restrict above, no row at all. Runs for every
         # actor-triggered type at once, like the restrict check.
@@ -135,6 +142,41 @@ def create_notification(
             "Failed to create in-app notification (%s) for user %s", notif_type, recipient_id
         )
         return None
+
+
+def unread_badge_count(user_id) -> int:
+    """Total unread bell rows of one user (all sources) - the number the
+    live `notification_badge` socket event carries."""
+    return Notification.objects.for_user(user_id).unread().count()
+
+
+def publish_unread_badge(user_id) -> None:
+    """Task 3.3 - push the user's fresh unread total to the `user_<id>` inbox
+    socket group (message/consumers.py::InboxConsumer.notification_badge), so
+    the bell badge updates live. Runs via transaction.on_commit: the count is
+    taken AFTER the row is really saved, and nothing is sent for a rolled-back
+    action. Never raises (no channel layer / Redis down = badge refreshes on
+    the next app resume instead)."""
+
+    def _send():
+        try:
+            from asgiref.sync import async_to_sync
+            from channels.layers import get_channel_layer
+
+            layer = get_channel_layer()
+            if layer is None:
+                return
+            async_to_sync(layer.group_send)(
+                f"user_{user_id}",
+                {"type": "notification_badge", "unread_count": unread_badge_count(user_id)},
+            )
+        except Exception:
+            logger.exception("publish_unread_badge failed (user=%s)", user_id)
+
+    try:
+        transaction.on_commit(_send)
+    except Exception:  # pragma: no cover
+        logger.exception("publish_unread_badge could not schedule (user=%s)", user_id)
 
 
 def channels_for(recipient, notif_type: str) -> list:
@@ -283,6 +325,8 @@ def create_bulk_notifications(
             ],
             batch_size=500,
         )
+        for rid in recipient_ids:  # bulk_create sends no post_save -> publish by hand
+            publish_unread_badge(rid)
     except Exception:
         logger.exception(
             "Failed to bulk-create in-app notifications (%s) for %d recipients", notif_type, len(recipient_ids)

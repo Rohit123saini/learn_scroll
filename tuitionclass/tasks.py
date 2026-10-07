@@ -171,30 +171,26 @@ def generate_upcoming_sessions():
     ClassSchedule.is_off_on which already existed but had no caller)."""
     from .models import ClassSchedule, ClassSession
 
-    window_start = timezone.localdate()
-    window_end = window_start + timedelta(days=SESSION_GENERATION_WINDOW_DAYS)
-
     created_count = 0
     schedules = ClassSchedule.objects.filter(is_active=True).select_related("classroom")
+    now = timezone.now()
 
     for schedule in schedules:
-        try:
-            tz = zoneinfo.ZoneInfo(schedule.timezone)
-        except Exception:
-            logger.warning(
-                "ClassSchedule %s has invalid timezone %r — falling back to "
-                "project default.", schedule.pk, schedule.timezone,
-            )
-            tz = timezone.get_default_timezone()
+        # TASK 10.1 — the window is "the next N days" as seen in the
+        # SCHEDULE's own timezone, not the server's. With a server-local
+        # window a New York schedule could skip/duplicate "today" around
+        # midnight. The wall-clock -> UTC conversion (and the duration
+        # add, which must happen in UTC to survive DST changes) lives in
+        # ClassSchedule.occurrence_bounds() — see models.py.
+        window_start = schedule.today_in_schedule_tz(now)
+        window_end = window_start + timedelta(days=SESSION_GENERATION_WINDOW_DAYS)
 
         for d in _dates_for_schedule(schedule, window_start, window_end):
             try:
                 if schedule.is_off_on(d):
                     continue
 
-                start_naive = datetime.combine(d, schedule.start_time)
-                scheduled_start = start_naive.replace(tzinfo=tz)
-                scheduled_end = scheduled_start + timedelta(minutes=schedule.duration_minutes)
+                scheduled_start, scheduled_end = schedule.occurrence_bounds(d)
 
                 _, created = ClassSession.objects.get_or_create(
                     schedule=schedule,
@@ -1911,3 +1907,16 @@ def notify_followers_new_classroom(classroom_id):
         len(recipient_ids), classroom_id,
     )
     return len(recipient_ids)
+
+
+# ---------------------------------------------------------------------------
+# TASK 9.2 — push for "a test was published in your class". Queued from
+# bridge.on_testseries_published (one task for the whole class, not one per
+# student); the preference / quiet-hours check happens per user inside
+# notifications.push_testseries_published.
+# ---------------------------------------------------------------------------
+@shared_task(name="tuitionclass.notify_testseries_published_push")
+def notify_testseries_published_push(user_ids, title, body, data):
+    from .notifications import push_testseries_published
+
+    return push_testseries_published(user_ids=user_ids, title=title, body=body, data=data)

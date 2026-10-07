@@ -18,7 +18,7 @@ import re
 MENTION_RE = re.compile(r'@(\w+)')
 
 
-def extract_mentioned_user_ids(text, conversation):
+def extract_mentioned_user_ids(text, conversation, sender_id=None):
     """
     `text` me se "@username" nikaal kar is `conversation` ke active
     members ke against match karta hai (case-insensitive). Match na hone
@@ -37,7 +37,16 @@ def extract_mentioned_user_ids(text, conversation):
         conversation=conversation, left_at__isnull=True,
     ).exclude(user__username__isnull=True).exclude(user__username='').select_related('user')
 
-    return [
+    ids = [
         m.user_id for m in members
         if m.user.username.lower() in mentioned_usernames
     ]
+    # Block (either direction) with the sender: they can't @mention each
+    # other (no mention row, no mention push), even inside a shared group.
+    if ids and sender_id is not None:
+        from user_profile.services import blocked_user_ids
+
+        blocked = blocked_user_ids(sender_id)
+        if blocked:
+            ids = [uid for uid in ids if uid not in blocked]
+    return ids

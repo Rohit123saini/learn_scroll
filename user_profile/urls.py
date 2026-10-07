@@ -22,6 +22,7 @@ from .views import (
     ProfileView,
     RejectFollowRequestView,
     RemoveFollowerView,
+    ContentReportView,
     RestrictedUsersView,
     SimilarUsersView,  # P8-BE
     StreakView,
@@ -60,6 +61,7 @@ urlpatterns = [
     # letting a bad value fall through to the ORM.
     path("blocked-users/<int:id>/", UnblockUserView.as_view(), name="unblock-user"),
     # TASK 18 — same URL shape as blocked-users/ above, for RestrictUser.
+    path("reports/", ContentReportView.as_view(), name="content-report"),
     path("restricted-users/", RestrictedUsersView.as_view(), name="restricted-users"),
     path("restricted-users/<int:id>/", UnrestrictUserView.as_view(), name="unrestrict-user"),
     # TASK 19 — read-only coin transaction history.

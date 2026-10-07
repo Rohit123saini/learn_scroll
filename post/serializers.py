@@ -397,6 +397,18 @@ class PostCreateSerializer(serializers.ModelSerializer):
         ]
         read_only_fields = ["id", "created_at"]
 
+    def validate_mentioned_user_ids(self, ids):
+        """Can't tag / @mention someone in a block relationship with the
+        author (either direction). Dropped silently so a block isn't revealed."""
+        request = self.context.get("request")
+        user = getattr(request, "user", None)
+        if not ids or user is None or not getattr(user, "is_authenticated", False):
+            return ids
+        from user_profile.services import blocked_user_ids
+
+        blocked = {str(i) for i in blocked_user_ids(user)}
+        return [i for i in ids if str(i) not in blocked]
+
     def validate_media_files(self, files):
         # 🔥 FIX: this is the hook that was missing entirely — extension/size
         # now actually get checked before any file touches disk.
@@ -1492,7 +1504,9 @@ class PostHideSerializer(serializers.ModelSerializer):
 
 
 class MuteAccountRequestSerializer(serializers.Serializer):
-    user_id = serializers.UUIDField()
+    # User ids are integers (AutoField) — this was a UUIDField, which made
+    # every mute request fail validation.
+    user_id = serializers.IntegerField(min_value=1)
 
 
 class MutedAccountSerializer(serializers.ModelSerializer):

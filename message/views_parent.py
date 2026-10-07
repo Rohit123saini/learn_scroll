@@ -129,6 +129,7 @@ from rest_framework.views import APIView
 # `message`).
 from core.models import Notification
 from core.services import create_notification
+from common.parent_invite_links import build_parent_invite_link  # TASK 11.3
 
 from .models import (
     assigments,
@@ -250,6 +251,9 @@ class ParentAccessCodeView(APIView):
                 'id': str(code_obj.id),
                 'label': code_obj.label,
                 'code': code_obj.code,
+                # TASK 11.3 — tap-to-open link (also the QR payload). Student-generated
+                # codes are loginless Parent Mode, so no campus/classroom param.
+                'link': build_parent_invite_link(code=code_obj.code),
                 'expires_at': code_obj.expires_at,
             },
             status=status.HTTP_201_CREATED,
@@ -332,7 +336,12 @@ class ParentAccessCodeRevealView(APIView):
 
         access_code.last_revealed_at = timezone.now()
         access_code.save(update_fields=['last_revealed_at', 'updated_at'])
-        return Response({'code': access_code.code, 'last_revealed_at': access_code.last_revealed_at})
+        return Response({
+            'code': access_code.code,
+            # TASK 11.3 — same link the POST returns, so a revealed code can be re-shared / QR'd.
+            'link': build_parent_invite_link(code=access_code.code),
+            'last_revealed_at': access_code.last_revealed_at,
+        })
 
 
 # ======================================================================

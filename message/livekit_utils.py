@@ -139,6 +139,30 @@ async def _start_room_composite_egress(room_name: str, output_filepath: str) -> 
         await lkapi.aclose()
 
 
+async def _delete_room(room_name: str):
+    api_key, api_secret = _get_livekit_credentials()
+    lkapi = api.LiveKitAPI(LIVEKIT_HTTP_URL, api_key, api_secret)
+    try:
+        return await lkapi.room.delete_room(api.DeleteRoomRequest(room=room_name))
+    finally:
+        await lkapi.aclose()
+
+
+def delete_room(room_name: str) -> bool:
+    """Best-effort: close a LiveKit room so everyone in it is disconnected
+    right now (used when a block ends an ongoing call). Never raises —
+    LiveKit being down/unconfigured just means the call UI closes via the
+    socket event instead. Returns True if LiveKit accepted the request."""
+    if not room_name:
+        return False
+    try:
+        _run_async(_delete_room(room_name))
+        return True
+    except Exception:
+        logger.warning("LiveKit delete_room(%s) failed (non-fatal)", room_name, exc_info=True)
+        return False
+
+
 async def _stop_egress(egress_id: str):
     api_key, api_secret = _get_livekit_credentials()
     lkapi = api.LiveKitAPI(LIVEKIT_HTTP_URL, api_key, api_secret)

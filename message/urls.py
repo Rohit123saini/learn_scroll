@@ -34,6 +34,7 @@ from rest_framework.routers import DefaultRouter
 from .views import (
     BlockedUserViewSet,
     CallActionView,
+    ChatDirectorySearchView,  # 🔥 NAYA (6.1) — people + groups search
     CallHistoryViewSet,
     CallInitiateView,
     # 🔥 GAP FIX — TASK 21: fully implemented in views.py but was never
@@ -143,6 +144,9 @@ urlpatterns = [
     path('calls/initiate/', CallInitiateView.as_view(), name='call-initiate'),
     path('calls/<uuid:call_id>/action/', CallActionView.as_view(), name='call-action'),
     path('calls/<uuid:call_id>/recording/', CallRecordingView.as_view(), name='call-recording'),
+
+    # --- People + Groups search (NAYA, 6.1) — message search screen ---
+    path('search/directory/', ChatDirectorySearchView.as_view(), name='chat-directory-search'),
 
     # --- Message requests (NAYA, M1-BE) — anjaan ka pehla DM inbox me nahi, yahan ---
     path('requests/', MessageRequestListView.as_view(), name='message-requests'),
@@ -329,6 +333,7 @@ urlpatterns = [
 #   POST       /conversations/<id>/read_all/
 #   GET        /conversations/<id>/search/?q=...
 #   GET        /conversations/search_all/?q=...
+#   GET        /search/directory/?q=...&type=all|people|groups   (NAYA, 6.1 — followers/following/mutual + my groups)
 #   GET        /conversations/<id>/pinned/
 #   POST       /conversations/<id>/schedule-message/        (NAYA)
 #   GET        /conversations/<id>/scheduled-messages/       (NAYA)

@@ -515,6 +515,46 @@ class MessageSearchResultSerializer(MessageSerializer):
         return {'type': conversation.type, 'name': name, 'photo_url': photo}
 
 
+# ----------------------------------------------------------------------
+# 🔥 NAYA (6.1) — People/Groups search results
+# (`search_utils.search_people` / `search_groups` ke rows ke liye)
+# ----------------------------------------------------------------------
+class DirectoryPersonSerializer(serializers.Serializer):
+    id = serializers.IntegerField(read_only=True)
+    username = serializers.CharField(read_only=True)
+    first_name = serializers.CharField(read_only=True)
+    last_name = serializers.CharField(read_only=True)
+    display_name = serializers.SerializerMethodField()
+    profile_photo = serializers.SerializerMethodField()
+    is_mutual = serializers.SerializerMethodField()
+    relation = serializers.SerializerMethodField()  # "mutual" | "following" | "follower"
+
+    def get_display_name(self, obj):
+        return get_display_name(obj)
+
+    def get_profile_photo(self, obj):
+        return get_profile_photo_url(obj, request=self.context.get('request'))
+
+    def get_is_mutual(self, obj):
+        return bool(getattr(obj, 'is_mutual', False))
+
+    def get_relation(self, obj):
+        if getattr(obj, 'is_mutual', False):
+            return 'mutual'
+        return 'following' if getattr(obj, 'i_follow', False) else 'follower'
+
+
+class DirectoryGroupSerializer(serializers.Serializer):
+    id = serializers.UUIDField(read_only=True)
+    # Chat kholne ke liye yahi chahiye — GET /conversations/<conversation_id>/
+    conversation_id = serializers.UUIDField(read_only=True)
+    name = serializers.CharField(read_only=True)
+    photo_url = serializers.CharField(read_only=True, allow_null=True)
+    topic_tag = serializers.CharField(read_only=True, allow_null=True)
+    members_count = serializers.IntegerField(read_only=True)
+    is_private = serializers.BooleanField(read_only=True)
+
+
 class MessageCreateSerializer(serializers.ModelSerializer):
     """Naya message bhejne ke liye (REST fallback — realtime delivery websocket se hoti hai)."""
 

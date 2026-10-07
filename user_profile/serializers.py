@@ -13,6 +13,7 @@ from common.pagination import get_max_page_size
 
 from .models import (
     BlockUser,
+    ContentReport,
     CoinLedger,
     CoinPurchaseRequest,
     CoinWithdrawalRequest,
@@ -298,6 +299,19 @@ class RestrictedTargetUserProfileSerializer(serializers.ModelSerializer):
         fields = ["id", "username", "first_name", "last_name", "is_private", "is_verified"]
 
 
+class BlockedTargetUserProfileSerializer(serializers.ModelSerializer):
+    """
+    Card shown to the BLOCKER when they open a profile they blocked
+    (Instagram: photo + name, no bio/counts/posts, "Unblock" button).
+    The blocked person never sees this — they get a 404.
+    """
+
+    class Meta:
+        model = User
+        fields = ["id", "username", "first_name", "last_name", "profile_photo", "is_private", "is_verified"]
+        read_only_fields = fields
+
+
 class FollowActionResponseSerializer(serializers.Serializer):
     message = serializers.CharField()
     status = serializers.CharField(allow_null=True)
@@ -423,10 +437,17 @@ class ProfileUpdateSerializer(serializers.ModelSerializer):
 class BlockUserSerializer(serializers.ModelSerializer):
     # Flutter POST body me sirf {"blocked": "<user_id>"} bhejta hai.
     blocked_detail = UserSearchSerializer(source="blocked", read_only=True)
+    # Optional "Block + Report" in one request (block sheet): the reason is
+    # applied as a report against the blocked ACCOUNT. Write-only.
+    report_reason = serializers.ChoiceField(choices=ContentReport.Reason.choices, required=False, write_only=True)
+    report_details = serializers.CharField(required=False, allow_blank=True, max_length=1000, write_only=True)
 
     class Meta:
         model = BlockUser
-        fields = ["id", "blocked", "blocked_detail", "created_at"]
+        fields = [
+            "id", "blocked", "blocked_detail", "created_at",
+            "block_new_accounts", "report_reason", "report_details",
+        ]
         read_only_fields = ["id", "created_at"]
 
     def validate_blocked(self, value):
@@ -434,6 +455,15 @@ class BlockUserSerializer(serializers.ModelSerializer):
         if value == request.user:
             raise serializers.ValidationError("Aap khud ko block nahi kar sakte.")
         return value
+
+
+class ContentReportCreateSerializer(serializers.Serializer):
+    """POST /profile/reports/ — report an account, post, comment or story."""
+
+    target_type = serializers.ChoiceField(choices=ContentReport.TargetType.choices)
+    target_id = serializers.CharField(max_length=64)
+    reason = serializers.ChoiceField(choices=ContentReport.Reason.choices)
+    details = serializers.CharField(required=False, allow_blank=True, max_length=1000)
 
 
 # 🔥 TASK 18 — Restrict / Unrestrict user

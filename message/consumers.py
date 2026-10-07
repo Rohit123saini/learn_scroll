@@ -713,6 +713,12 @@ class ChatConsumer(AsyncWebsocketConsumer):
             return
         await self.send(text_data=json.dumps({'type': 'presence', **event}))
 
+    # Block / unblock happened between the two people of this 1-1 chat
+    # (user_profile/block_live.py). Same payload for both sides — it never
+    # says who blocked whom. Sending is already refused server-side.
+    async def block_changed(self, event):
+        await self.send(text_data=json.dumps(event))
+
     async def call_event(self, event):
         # Channel layer se aaya hua call notification event (e.g. incoming call trigger) frontend tak pass karo
         await self.send(text_data=json.dumps(event))
@@ -887,7 +893,7 @@ class ChatConsumer(AsyncWebsocketConsumer):
         # 🔥 NAYA — @mentions resolve karke message pe attach karo (REST
         # `ConversationViewSet.messages` POST jaisa hi logic — dono jagah
         # `mentions.extract_mentioned_user_ids` hi use karte hain).
-        mentioned_ids = extract_mentioned_user_ids(text, conversation)
+        mentioned_ids = extract_mentioned_user_ids(text, conversation, sender_id=sender_id)
         mentioned_ids = [uid for uid in mentioned_ids if str(uid) != str(sender_id)]
         if mentioned_ids:
             message.mentioned_users.set(mentioned_ids)
@@ -1421,6 +1427,11 @@ class InboxConsumer(AsyncWebsocketConsumer):
     # unread (see core.services.unread_badge_count). Plain passthrough.
     # Server -> Client: {"type": "notification_badge", "unread_count": N}
     async def notification_badge(self, event):
+        await self.send(text_data=json.dumps(event))
+
+    # Block / unblock with someone (user_profile/block_live.py): chat lists
+    # and open profiles refresh. {"type": "block_changed", "other_user_id", "is_blocked"}
+    async def block_changed(self, event):
         await self.send(text_data=json.dumps(event))
 
     # 🔥 NAYA — `ChatConsumer.broadcast_presence_to_partners` ab is user

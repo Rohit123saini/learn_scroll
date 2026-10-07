@@ -570,6 +570,13 @@ def hidden_commenter_ids(post_owner_id, viewer_id=None):
 
     ids = restricted_ids_by(post_owner_id)
     ids.discard(viewer_id)
+    # Block (either direction): a blocked person's comments/replies are
+    # invisible to me and mine to them, on anyone's post. Hidden at read
+    # time, so unblocking brings them back.
+    if viewer_id is not None:
+        from user_profile.services import blocked_user_ids
+
+        ids |= blocked_user_ids(viewer_id)
     return ids
 
 
@@ -631,6 +638,19 @@ def _actor_preview(user):
     }
 
 
+def _push_row(notification):
+    """Rich push for a saved bell row (message.push_utils.send_push_for_notification:
+    push toggle / muted types / quiet hours honoured there). Never raises."""
+    if notification is None:
+        return
+    try:
+        from message.push_utils import send_push_for_notification
+
+        send_push_for_notification(notification)
+    except Exception:  # pragma: no cover - push must never break the action
+        logger.exception("push for notification %s failed", getattr(notification, "id", None))
+
+
 def _liked_title(count, actors):
     return _batch_title(actors, count, "liked your post")
 
@@ -643,7 +663,11 @@ def _story_reacted_title(count, actors):
     return _batch_title(actors, count, "reacted to your story")
 
 
-def notify_post_liked(post, actor, send_push_fn=None):
+def _reposted_title(count, actors):
+    return _batch_title(actors, count, "reposted your post")
+
+
+def notify_post_liked(post, actor, send_push_fn=None, send_push_row_fn=_push_row):
     """Call from PostReactionAPIView.post(), only on the branch where a new
     PostLike was just created (status_msg == 'liked') — not on unlike or
     reaction-change.
@@ -673,6 +697,7 @@ def notify_post_liked(post, actor, send_push_fn=None):
         window_seconds=_get_batch_window("post_liked"),
         max_age_seconds=_get_batch_max_age("post_liked"),
         send_push_fn=send_push_fn,
+        send_push_row_fn=send_push_row_fn,
     )
 
 
@@ -693,7 +718,7 @@ def unnotify_post_liked(post, actor):
     )
 
 
-def notify_post_commented(post, comment, send_push_fn=None):
+def notify_post_commented(post, comment, send_push_fn=None, send_push_row_fn=_push_row):
     """Call from CommentCreateAPIView.post() after a new top-level
     PostComment is created. `comment` is a PostComment instance.
 
@@ -722,10 +747,11 @@ def notify_post_commented(post, comment, send_push_fn=None):
         window_seconds=_get_batch_window("post_commented"),
         max_age_seconds=_get_batch_max_age("post_commented"),
         send_push_fn=send_push_fn,
+        send_push_row_fn=send_push_row_fn,
     )
 
 
-def notify_story_reacted(story, actor, emoji=None, send_push_fn=None):
+def notify_story_reacted(story, actor, emoji=None, send_push_fn=None, send_push_row_fn=_push_row):
     """N2-BE — call right after a NEW story reaction is saved. Batched per
     story (key = story.id). ⚠️ Assumes `NotifType.STORY_REACTION` exists in
     core/models.py; if it doesn't (enum + migration needed), this logs and
@@ -755,6 +781,71 @@ def notify_story_reacted(story, actor, emoji=None, send_push_fn=None):
         window_seconds=_get_batch_window("story_reaction"),
         max_age_seconds=_get_batch_max_age("story_reaction"),
         send_push_fn=send_push_fn,
+        send_push_row_fn=send_push_row_fn,
+    )
+
+
+def unnotify_story_reacted(story, actor):
+    """Task 3.4 - the actor removed their reaction: drop them from the story's
+    OPEN reaction batch (row deleted if they were the only one)."""
+    if _Notification is None or story.user_id == actor.id:
+        return
+    notif_type = getattr(_Notification.NotifType, "STORY_REACTION", None)
+    if notif_type is None:
+        return
+    _remove_actor_from_batch(
+        recipient=story.user, notif_type=notif_type, actor=actor, target_id=story.id,
+        title_fn=_story_reacted_title, actor_preview_fn=_actor_preview,
+        window_seconds=_get_batch_window("story_reaction"),
+    )
+
+
+def notify_post_reposted(repost, send_push_fn=None, send_push_row_fn=_push_row):
+    """Task 3.4 - call after a NEW repost row is created. Batched per ORIGINAL
+    post ("X and 2 others reposted your post"); `data.post_id` is the original
+    so a tap opens it. Own reposts never notify."""
+    original = repost.original_post
+    if original is None or original.user_id == repost.user_id:
+        return
+    if _Notification is None:
+        return
+    notif_type = getattr(_Notification.NotifType, "POST_REPOSTED", None)
+    if notif_type is None:
+        return
+
+    media_url, media_type = _post_preview_media(original)
+    _create_batched_notification(
+        recipient=original.user,
+        notif_type=notif_type,
+        actor=repost.user,
+        target_id=original.id,
+        title_fn=_reposted_title,
+        data_fn=lambda count, actors, latest: {"repost_id": str(repost.id)},
+        extra_data={
+            "post_id": str(original.id), "repost_id": str(repost.id),
+            "media_url": media_url, "media_type": media_type,
+        },
+        actor_preview_fn=_actor_preview,
+        window_seconds=_get_batch_window("post_reposted"),
+        max_age_seconds=_get_batch_max_age("post_reposted"),
+        send_push_fn=send_push_fn,
+        send_push_row_fn=send_push_row_fn,
+    )
+
+
+def unnotify_post_reposted(repost):
+    """Task 3.4 - the repost was deleted: drop the actor from the original's
+    OPEN repost batch."""
+    original = repost.original_post
+    if _Notification is None or original is None or original.user_id == repost.user_id:
+        return
+    notif_type = getattr(_Notification.NotifType, "POST_REPOSTED", None)
+    if notif_type is None:
+        return
+    _remove_actor_from_batch(
+        recipient=original.user, notif_type=notif_type, actor=repost.user, target_id=original.id,
+        title_fn=_reposted_title, actor_preview_fn=_actor_preview,
+        window_seconds=_get_batch_window("post_reposted"),
     )
 
 
@@ -896,15 +987,28 @@ def exclude_hidden_and_muted(qs, user):
     is muted). Anonymous / missing user -> qs unchanged."""
     if not user or not getattr(user, 'pk', None):
         return qs
+    from user_profile.models import BlockUser
+
     from .models import MutedAccount, PostHide
 
     hidden = PostHide.objects.filter(user=user).values('post_id')
     muted = MutedAccount.objects.filter(user=user).values('muted_user_id')
+    # Block, EITHER direction, as sub-selects (no extra round trip). This
+    # runs on every request — including when a frozen feed snapshot is
+    # re-hydrated — so a block takes effect on the very next page instead of
+    # after the snapshot's 15-minute TTL. Reposts whose ORIGINAL author is in
+    # a block relationship are dropped too.
+    i_blocked = BlockUser.objects.filter(blocker=user).values('blocked_id')
+    blocked_me = BlockUser.objects.filter(blocked=user).values('blocker_id')
     return (
         qs.exclude(pk__in=hidden)
         .exclude(original_post_id__in=hidden)
         .exclude(user_id__in=muted)
         .exclude(original_post__user_id__in=muted)
+        .exclude(user_id__in=i_blocked)
+        .exclude(user_id__in=blocked_me)
+        .exclude(original_post__user_id__in=i_blocked)
+        .exclude(original_post__user_id__in=blocked_me)
     )
 
 
@@ -1021,3 +1125,217 @@ def apply_show_fewer(user, post, targets, reason):
         prune_stale_feedback(user)
         rows = [record_feed_feedback(user, kind, key) for kind, key in resolved]
     return hide, hide_created, rows
+
+
+# ---------------------------------------------------------------------------
+# TASK 1.1-BE — guaranteed media dimensions / duration.
+#
+# Before this, `PostMedia.width/height/duration_seconds` were only ever filled
+# for IMAGES, and only after the Celery `generate_image_variants` task had
+# run; videos/audio never got any of them (nothing called ffprobe), so the
+# feed could not reserve the right frame size and reels had no duration.
+#
+# Everything here is split the same way the image-variant code above is:
+#   - pure parsing (`parse_ffprobe_output`, `probe_image_size`) — unit-testable
+#     with no ffmpeg binary and no database;
+#   - `probe_media_file(local_path, media_type)` — runs the probe on a LOCAL
+#     file;
+#   - `fill_media_metadata(media)` — storage/DB glue used by the post_save
+#     receiver (in-request, local files only), the Celery task `probe_media_
+#     metadata` (any storage) and `manage.py backfill_media_dimensions`.
+# It only ever FILLS blanks (None/0) — a value a client or another code path
+# already stored is never overwritten.
+# ---------------------------------------------------------------------------
+FFPROBE_TIMEOUT_SECONDS = 15
+PROBE_MEDIA_TYPES = ("image", "gif", "video", "audio")
+
+
+def media_metadata_missing(media):
+    """True if `media` (a PostMedia) still lacks a value we can probe for."""
+    kind = media.media_type
+    if kind in ("image", "gif"):
+        return not media.width or not media.height
+    if kind == "video":
+        return not media.width or not media.height or not media.duration_seconds
+    if kind == "audio":
+        return not media.duration_seconds
+    return False
+
+
+def _stream_rotation(stream):
+    """Display rotation in degrees (0/90/180/270) from an ffprobe stream.
+    Phone videos are usually stored landscape + a 90deg rotation flag; the
+    frame the viewer actually sees is portrait."""
+    rot = (stream.get("tags") or {}).get("rotate")
+    for side in stream.get("side_data_list") or []:
+        if "rotation" in side:
+            rot = side["rotation"]
+    try:
+        return int(round(float(rot))) % 360
+    except (TypeError, ValueError):
+        return 0
+
+
+def _positive_int(value):
+    try:
+        number = int(float(value))
+    except (TypeError, ValueError):
+        return None
+    return number if number > 0 else None
+
+
+def parse_ffprobe_output(data, media_type):
+    """Pure: ffprobe `-print_format json -show_streams -show_format` output ->
+    {"width", "height", "duration_seconds"} (only keys that are known).
+
+    - width/height are the DISPLAYED size (rotation flag applied) and are only
+      returned for `video` (an audio file's cover-art "video stream" is not a
+      frame).
+    - duration is rounded to whole seconds with a floor of 1 — the column is a
+      PositiveIntegerField and 0 is treated as "unknown" everywhere.
+    """
+    out = {}
+    streams = data.get("streams") or []
+
+    if media_type == "video":
+        video = next(
+            (
+                s for s in streams
+                if s.get("codec_type") == "video"
+                and not (s.get("disposition") or {}).get("attached_pic")
+            ),
+            None,
+        )
+        if video:
+            width, height = _positive_int(video.get("width")), _positive_int(video.get("height"))
+            if width and height:
+                if _stream_rotation(video) in (90, 270):
+                    width, height = height, width
+                out["width"], out["height"] = width, height
+
+    if media_type in ("video", "audio"):
+        candidates = [(data.get("format") or {}).get("duration")]
+        candidates += [s.get("duration") for s in streams]
+        for raw in candidates:
+            try:
+                seconds = float(raw)
+            except (TypeError, ValueError):
+                continue
+            if seconds > 0:
+                out["duration_seconds"] = max(1, int(round(seconds)))
+                break
+    return out
+
+
+def probe_image_size(source):
+    """(width, height) of an image path/file object, EXIF orientation applied
+    (a portrait phone photo stored sideways reports its displayed size).
+    Reads the header only. Raises on a corrupt / non-image file."""
+    from PIL import Image
+
+    with Image.open(source) as img:
+        width, height = img.size
+        try:
+            orientation = img.getexif().get(0x0112)
+        except Exception:
+            orientation = None
+    if orientation in (5, 6, 7, 8):
+        width, height = height, width
+    return width, height
+
+
+def _run_ffprobe(path, timeout=FFPROBE_TIMEOUT_SECONDS):
+    """Run ffprobe on a LOCAL path; parsed JSON dict or None (always logged)."""
+    import json
+
+    if shutil.which("ffprobe") is None:
+        logger.error(
+            "ffprobe binary not found on PATH — cannot read video/audio "
+            "dimensions or duration. It ships in the same package as ffmpeg."
+        )
+        return None
+    cmd = [
+        "ffprobe", "-v", "error", "-print_format", "json",
+        "-show_streams", "-show_format", path,
+    ]
+    try:
+        result = subprocess.run(cmd, capture_output=True, timeout=timeout, check=False)
+    except subprocess.TimeoutExpired:
+        logger.error("ffprobe timed out (%ss) for %s", timeout, path)
+        return None
+    except OSError as exc:
+        logger.exception("ffprobe failed to start for %s: %s", path, exc)
+        return None
+    if result.returncode != 0:
+        logger.error(
+            "ffprobe failed for %s (rc=%s): %s", path, result.returncode,
+            result.stderr.decode(errors="replace")[:500] if result.stderr else "",
+        )
+        return None
+    try:
+        return json.loads(result.stdout.decode("utf-8", "replace"))
+    except ValueError:
+        logger.error("ffprobe returned non-JSON output for %s", path)
+        return None
+
+
+def probe_media_file(local_path, media_type):
+    """Probe a LOCAL file -> {"width","height","duration_seconds"} (known keys
+    only; {} when nothing could be read)."""
+    if media_type in ("image", "gif"):
+        width, height = probe_image_size(local_path)
+        return {"width": width, "height": height} if width and height else {}
+    if media_type in ("video", "audio"):
+        data = _run_ffprobe(local_path)
+        return parse_ffprobe_output(data, media_type) if data else {}
+    return {}
+
+
+def fill_media_metadata(media, *, allow_download=True, raise_errors=False):
+    """Fill the blank width/height/duration_seconds of a PostMedia and return
+    the dict of fields written ({} if nothing changed).
+
+    allow_download=False -> only probes files that already sit on local disk
+    (FileSystemStorage) — what the in-request post_save receiver uses so an
+    upload never waits on a remote download. S3/GCS rows are filled by the
+    Celery task / backfill command instead (allow_download=True).
+    raise_errors=True (task) lets a transient storage error propagate so
+    Celery can retry; otherwise errors are logged and swallowed."""
+    if not media.file or not media_metadata_missing(media):
+        return {}
+
+    local_path, downloaded = None, False
+    try:
+        try:
+            local_path = media.file.path  # FileSystemStorage only
+        except (NotImplementedError, ValueError, AttributeError):
+            local_path = None
+        if local_path is None or not os.path.exists(local_path):
+            if not allow_download:
+                return {}
+            _, ext = os.path.splitext(media.file.name)
+            local_path = download_storage_file_to_temp(media.file, suffix=ext)
+            downloaded = True
+        found = probe_media_file(local_path, media.media_type)
+    except Exception:
+        logger.exception("fill_media_metadata: probing failed for PostMedia %s", media.pk)
+        if raise_errors:
+            raise
+        return {}
+    finally:
+        if downloaded and local_path:
+            try:
+                os.unlink(local_path)
+            except OSError:
+                pass
+
+    updates = {k: v for k, v in found.items() if v and not getattr(media, k)}
+    if not updates:
+        return {}
+    from .models import PostMedia  # local import, same as the other helpers in this module
+
+    # .update(): a row deleted meanwhile affects 0 rows instead of raising.
+    PostMedia.objects.filter(pk=media.pk).update(**updates)
+    for key, value in updates.items():
+        setattr(media, key, value)
+    return updates

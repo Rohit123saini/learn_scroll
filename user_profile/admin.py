@@ -33,6 +33,7 @@ from django.contrib import admin, messages
 
 from .models import (
     BlockUser,
+    ContentReport,
     CoinLedger,
     CoinPurchaseRequest,
     CoinWithdrawalRequest,
@@ -245,9 +246,19 @@ class FollowAdmin(admin.ModelAdmin):
     raw_id_fields = ("follower", "following")
 
 
+@admin.register(ContentReport)
+class ContentReportAdmin(admin.ModelAdmin):
+    list_display = ("id", "reporter", "reported_user", "target_type", "reason", "status", "created_at")
+    list_filter = ("status", "target_type", "reason")
+    search_fields = ("reporter__username", "reported_user__username", "target_id", "details")
+    raw_id_fields = ("reporter", "reported_user")
+    list_editable = ("status",)
+
+
 @admin.register(BlockUser)
 class BlockUserAdmin(admin.ModelAdmin):
-    list_display = ("id", "blocker", "blocked", "created_at")
+    list_display = ("id", "blocker", "blocked", "block_new_accounts", "created_at")
+    list_filter = ("block_new_accounts",)
     search_fields = ("blocker__username", "blocked__username")
     raw_id_fields = ("blocker", "blocked")
 

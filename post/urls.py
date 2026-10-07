@@ -116,7 +116,7 @@ urlpatterns = [
     path("<uuid:post_id>/not-interested/", NotInterestedAPIView.as_view(), name="post-not-interested"),
     path("not-interested/", NotInterestedListAPIView.as_view(), name="post-not-interested-list"),
     path("muted-accounts/", MutedAccountsAPIView.as_view(), name="post-muted-accounts"),
-    path("muted-accounts/<uuid:user_id>/", UnmuteAccountAPIView.as_view(), name="post-unmute-account"),
+    path("muted-accounts/<int:user_id>/", UnmuteAccountAPIView.as_view(), name="post-unmute-account"),
     # Feed feedback controls (Part 2) - see ShowFewerAPIView / WhyAmISeeingThisAPIView.
     path("<uuid:post_id>/show-fewer/", ShowFewerAPIView.as_view(), name="post-show-fewer"),
     path("<uuid:post_id>/why/", WhyAmISeeingThisAPIView.as_view(), name="post-why"),

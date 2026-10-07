@@ -13,6 +13,7 @@ Conventions used throughout:
 """
 
 from django.contrib.auth import get_user_model
+from django.utils import timezone
 from rest_framework import serializers
 
 from .models import (
@@ -52,6 +53,7 @@ from .models import (
     PollResponse,
     PollTemplate,
     Referral,
+    ReferralCommission,
     SessionCaption,
     SessionParticipant,
     SessionReaction,
@@ -208,14 +210,51 @@ class ClassroomSerializer(serializers.ModelSerializer):
 # 2. SCHEDULE
 # ---------------------------------------------------------------------------
 class ClassScheduleSerializer(serializers.ModelSerializer):
+    # TASK 10.1 — `server_now` is the server's clock (UTC ISO-8601) at the
+    # moment this response was built. Clients compute
+    # `offset = server_now - deviceNow` once and use it for every
+    # "Starts in 2h 10m" / "Live now" label, so a phone with a wrong
+    # clock or timezone setting still shows the right countdown.
+    # `next_start` is the next occurrence as an absolute UTC instant,
+    # computed with real DST rules (ClassSchedule.next_occurrence_start),
+    # so clients don't have to re-implement recurrence + zones.
+    server_now = serializers.SerializerMethodField()
+    next_start = serializers.SerializerMethodField()
+
     class Meta:
         model = ClassSchedule
         fields = [
             "id", "classroom", "recurrence_type", "days_of_week", "day_of_month",
             "start_date", "end_date", "start_time", "duration_minutes",
-            "timezone", "is_active", "created_at",
+            "timezone", "is_active", "created_at", "server_now", "next_start",
         ]
-        read_only_fields = ["id", "created_at"]
+        read_only_fields = ["id", "created_at", "server_now", "next_start"]
+
+    def get_server_now(self, obj):
+        return timezone.now().isoformat()
+
+    def get_next_start(self, obj):
+        try:
+            nxt = obj.next_occurrence_start()
+        except Exception:
+            return None
+        return nxt.isoformat() if nxt else None
+
+    def validate_timezone(self, value):
+        # TASK 10.1 — reject anything that is not a real IANA zone name
+        # at write time; a bad name used to be silently replaced by the
+        # server default when sessions were generated, shifting every
+        # class by hours with no error shown to the teacher.
+        import zoneinfo
+
+        value = (value or "").strip()
+        try:
+            zoneinfo.ZoneInfo(value)
+        except Exception:
+            raise serializers.ValidationError(
+                "Unknown timezone. Use an IANA name such as 'Asia/Kolkata' or 'America/New_York'."
+            )
+        return value
 
     def validate(self, attrs):
         recurrence_type = attrs.get("recurrence_type", getattr(self.instance, "recurrence_type", None))
@@ -279,6 +318,9 @@ class ClassSessionSerializer(serializers.ModelSerializer):
     # stop_recording in views.py). Lets the client show a live "REC"
     # indicator without exposing the raw LiveKit egress_id itself.
     is_recording = serializers.SerializerMethodField()
+    # TASK 10.1 — server clock (UTC ISO-8601) at response time; see the
+    # note on ClassScheduleSerializer.server_now.
+    server_now = serializers.SerializerMethodField()
 
     class Meta:
         model = ClassSession
@@ -286,7 +328,7 @@ class ClassSessionSerializer(serializers.ModelSerializer):
             "id", "classroom", "classroom_title", "schedule", "room_id",
             "scheduled_start", "scheduled_end", "actual_start", "actual_end",
             "status", "recording_url", "is_recording", "whiteboard_snapshot",
-            "spotlight_identity", "is_joinable", "created_at",
+            "spotlight_identity", "is_joinable", "created_at", "server_now",
         ]
         # NOTE (fix — whiteboard/spotlight persistence): both fields are
         # read-only here on purpose — writes go through
@@ -296,7 +338,7 @@ class ClassSessionSerializer(serializers.ModelSerializer):
         # participant should be able to autosave strokes). Still returned
         # on every read so a reconnecting/late-joining client can restore
         # both from the plain session GET.
-        read_only_fields = ["id", "room_id", "created_at", "whiteboard_snapshot", "spotlight_identity"]
+        read_only_fields = ["id", "room_id", "created_at", "whiteboard_snapshot", "spotlight_identity", "server_now"]
 
     def get_is_joinable(self, obj):
         # NOTE (fix — CRITICAL): was `obj.is_joinable()` with no `is_host`,
@@ -324,6 +366,9 @@ class ClassSessionSerializer(serializers.ModelSerializer):
 
     def get_is_recording(self, obj):
         return bool(obj.egress_id)
+
+    def get_server_now(self, obj):
+        return timezone.now().isoformat()
 
     def validate(self, attrs):
         # NOTE (fix): scheduled_start/scheduled_end had no cross-field
@@ -1521,8 +1566,11 @@ class NoticeSerializer(serializers.ModelSerializer):
         fields = [
             "id", "classroom", "posted_by", "title", "message",
             "priority", "is_pinned", "created_at", "expires_at", "is_expired",
+            # TASK 9.2: set only by the system (e.g. "testseries" + the test's id)
+            # so the app can show an "Open test" button on that notice.
+            "source_type", "source_id",
         ]
-        read_only_fields = ["id", "posted_by", "created_at"]
+        read_only_fields = ["id", "posted_by", "created_at", "source_type", "source_id"]
         # `posted_by` is set server-side in NoticeViewSet.perform_create from
         # request.user — never accepted from the client.
 
@@ -1725,6 +1773,8 @@ class MyReferralCodeSerializer(serializers.Serializer):
     referral_count = serializers.IntegerField()
     total_bonus_earned = serializers.IntegerField()
     bonus_per_referral = serializers.IntegerField()
+    # TASK 12: all-source commission total (test series + classroom)
+    total_commission_earned = serializers.IntegerField(required=False, default=0)
 
 
 class ReferralRedeemSerializer(serializers.Serializer):
@@ -1735,6 +1785,32 @@ class ReferralRedeemSerializer(serializers.Serializer):
     can't be expressed as a single-field validator."""
 
     code = serializers.CharField(max_length=20)
+
+
+class ReferralAttributeSerializer(serializers.Serializer):
+    """Input for POST /referrals/attribute/ — the app calls this when it
+    opens a link carrying ?ref=<code> (TASK 12 / 12.1). Validation that needs
+    request.user (self-referral, existing customer, fraud rules) lives in the
+    view."""
+
+    code = serializers.CharField(max_length=20)
+    source_type = serializers.ChoiceField(
+        choices=["app", "testseries", "classroom", "certificate"], required=False, default="app"
+    )
+    source_id = serializers.CharField(max_length=64, required=False, allow_blank=True, default="")
+
+
+class ReferralCommissionSerializer(serializers.ModelSerializer):
+    """Read-only row of the referrer's commission ledger. Blocked rows are
+    deliberately NOT exposed with their reason (don't teach people how to
+    dodge the fraud rules) — the view only lists PAID rows."""
+
+    referee = UserMiniSerializer(read_only=True)
+
+    class Meta:
+        model = ReferralCommission
+        fields = ["id", "kind", "source_id", "gross_coins", "percent", "commission_coins", "referee", "created_at"]
+        read_only_fields = fields
 
 
 class ReferralSerializer(serializers.ModelSerializer):

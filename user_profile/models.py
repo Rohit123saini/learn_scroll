@@ -289,6 +289,13 @@ class BlockUser(models.Model):
 
     created_at = models.DateTimeField(auto_now_add=True)
 
+    # Instagram's "Also block new accounts they may create". We have no
+    # reliable identity link between accounts, so the only signal used is a
+    # push (FCM) token that MOVES from the blocked person's account to a
+    # freshly created account (message.views.DeviceTokenView) — i.e. the same
+    # phone just signed up again. Opt-in per block; default off.
+    block_new_accounts = models.BooleanField(default=False)
+
     class Meta:
         ordering = ["-created_at"]
 
@@ -644,6 +651,15 @@ class CoinLedger(models.Model):
         # the app-wide, no-campus-required daily-open streak. "streak_reward"
         # is 13 chars — comfortably under this field's max_length=20.
         STREAK_REWARD = "streak_reward", "Streak Reward"
+
+        # TASK 12 (refer & earn): commission paid to a referrer when someone
+        # they referred buys an individual paid test series
+        # (tuitionclass.bridge.referral_pay_testseries_commission). Its own
+        # type so support can tell it from EARN at a glance. Deliberately NOT
+        # in fraud.eligible_source_types(): referral income is spendable but
+        # never withdrawable as "real money coins". "referral_commission" is
+        # 19 chars — under this field's max_length=20.
+        REFERRAL_COMMISSION = "referral_commission", "Referral Commission"
 
     user = models.ForeignKey(
         settings.AUTH_USER_MODEL,
@@ -1992,3 +2008,63 @@ class DailyUsage(models.Model):
 
     def __str__(self):
         return f"{self.user_id} {self.date}: {self.seconds}s"
+
+
+
+class ContentReport(models.Model):
+    """
+    A user reporting an account, post, comment or story ("Report" sheet next
+    to Block / Restrict / Mute on a profile, and on comments).
+
+    `reported_user` is always the ACCOUNT behind the content so moderators can
+    see everything filed against one person in one place. One report per
+    (reporter, target) — re-reporting the same thing is idempotent.
+    Reporting never tells the reported person anything.
+    """
+
+    class TargetType(models.TextChoices):
+        USER = "user", "Account"
+        POST = "post", "Post"
+        COMMENT = "comment", "Comment"
+        STORY = "story", "Story"
+
+    class Reason(models.TextChoices):
+        SPAM = "spam", "Spam"
+        HARASSMENT = "harassment", "Harassment or bullying"
+        HATE = "hate", "Hate speech"
+        NUDITY = "nudity", "Nudity or sexual content"
+        VIOLENCE = "violence", "Violence or dangerous content"
+        SELF_HARM = "self_harm", "Self-harm"
+        SCAM = "scam", "Scam or fraud"
+        IMPERSONATION = "impersonation", "Pretending to be someone else"
+        OTHER = "other", "Something else"
+
+    class Status(models.TextChoices):
+        OPEN = "open", "Open"
+        REVIEWED = "reviewed", "Reviewed"
+        ACTIONED = "actioned", "Action taken"
+        DISMISSED = "dismissed", "Dismissed"
+
+    reporter = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="reports_filed",
+    )
+    reported_user = models.ForeignKey(
+        settings.AUTH_USER_MODEL, null=True, blank=True, on_delete=models.SET_NULL,
+        related_name="reports_received",
+    )
+    target_type = models.CharField(max_length=10, choices=TargetType.choices)
+    target_id = models.CharField(max_length=64)  # user id (int) or post/comment/story uuid, as text
+    reason = models.CharField(max_length=20, choices=Reason.choices)
+    details = models.TextField(blank=True, default="", max_length=1000)
+    status = models.CharField(max_length=10, choices=Status.choices, default=Status.OPEN, db_index=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+        constraints = [
+            UniqueConstraint(fields=["reporter", "target_type", "target_id"], name="unique_content_report"),
+        ]
+        indexes = [models.Index(fields=["reported_user", "status"], name="report_user_status_idx")]
+
+    def __str__(self):
+        return f"{self.reporter_id} reported {self.target_type}:{self.target_id} ({self.reason})"

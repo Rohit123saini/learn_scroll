@@ -259,3 +259,77 @@ def send_notification(user, title: str, message: str, channel: str = "push", dat
     except Exception:
         logger.exception("Notification send crashed unexpectedly (channel=%s, user=%s)", channel, user.id)
         return False
+
+
+# ---------------------------------------------------------------------------
+# TASK 9.2 — "a test was published in your class".
+#
+# Two separate steps, mirroring the rest of this app (bell row first, push is a
+# SEPARATE best-effort call — core.services never sends a push itself):
+#   notify_testseries_published()  one bulk INSERT of bell rows (cheap, inline)
+#   push_testseries_published()    FCM push, only to users whose preferences
+#                                  allow it right now (mute / push toggle /
+#                                  quiet hours via core.services.channels_for);
+#                                  run from a Celery task so a big class never
+#                                  slows the publish request down.
+# ---------------------------------------------------------------------------
+def testseries_notification_data(*, classroom_id, series_id, notice_id=None) -> dict:
+    """Payload shared by the bell row and the push, so a tap on either opens the
+    class (classroom_id) and knows which test to show (series_id)."""
+    data = {
+        "type": "testseries_posted",
+        "series_id": str(series_id),
+        "classroom_id": str(classroom_id),
+        "context_type": "classroom",
+    }
+    if notice_id is not None:
+        data["notice_id"] = str(notice_id)
+    return data
+
+
+def notify_testseries_published(*, classroom, series_id, notice_id, title, body, user_ids) -> int:
+    """Bell rows (Notification TESTSERIES_POSTED, linked to the classroom) for
+    `user_ids`. Returns how many distinct users it was created for."""
+    ids = [uid for uid in dict.fromkeys(user_ids) if uid is not None]
+    if not ids:
+        return 0
+    from core.models import Notification
+    from core.services import create_bulk_notifications
+
+    data = testseries_notification_data(classroom_id=classroom.id, series_id=series_id, notice_id=notice_id)
+    # `classroom_id` in `data` is a string for the push; the bell row keeps the
+    # integer FK on `classroom=` (that is what the app routes on).
+    create_bulk_notifications(
+        ids, Notification.NotifType.TESTSERIES_POSTED, title, body, classroom=classroom, data=data,
+    )
+    return len(ids)
+
+
+def push_testseries_published(*, user_ids, title, body, data) -> int:
+    """Push to every user in `user_ids` whose notification preferences allow a
+    push for TESTSERIES_POSTED right now. Never raises. Returns the number of
+    users it was handed to the push pipeline for."""
+    try:
+        from core.models import Notification
+        from core.services import channels_for
+    except ImportError:  # pragma: no cover - core is a required app
+        logger.warning("core not importable - testseries push skipped")
+        return 0
+
+    allowed = []
+    for uid in dict.fromkeys(user_ids):
+        try:
+            if "push" in channels_for(uid, Notification.NotifType.TESTSERIES_POSTED):
+                allowed.append(uid)
+        except Exception:
+            logger.exception("could not read notification preferences of user %s - skipping push", uid)
+    if not allowed:
+        return 0
+    try:
+        from message.push_utils import send_push_to_users
+
+        send_push_to_users(allowed, title, body, data=data)
+    except Exception:
+        logger.exception("testseries push failed for %d user(s)", len(allowed))
+        return 0
+    return len(allowed)

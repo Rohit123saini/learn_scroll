@@ -1240,6 +1240,12 @@ class Highlight(models.Model):
     cover_item = models.ForeignKey(
         'HighlightItem', on_delete=models.SET_NULL, null=True, blank=True, related_name='+',
     )
+    # Cover crop (round cover only; the photo itself is never modified).
+    # cover_x / cover_y = focus point in [-1, 1] (0,0 = centre), cover_zoom in
+    # [1, 3]. Only meaningful while `cover_item` is set - reset otherwise.
+    cover_zoom = models.FloatField(default=1.0)
+    cover_x = models.FloatField(default=0.0)
+    cover_y = models.FloatField(default=0.0)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 

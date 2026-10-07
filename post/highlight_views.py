@@ -6,10 +6,12 @@ STORIES UPGRADE - PART 3b: Highlights API. Rules + visibility: post/highlights.p
     GET    /post/highlights/?user_id=          a person's highlights (default: mine). Not paginated
                                                (max 50 per user) but shaped like a page:
                                                {"count", "results": [row, ..]}
-    POST   /post/highlights/                   create {"title"?, "story_ids": [..], "cover_story_id"?} -> 201 detail
+    POST   /post/highlights/                   create {"title"?, "story_ids": [..], "cover_story_id"?,
+                                               "cover_x"?, "cover_y"? (-1..1), "cover_zoom"? (1..3)} -> 201 detail
     GET    /post/highlights/<id>/              detail: row + `stories` (full story objects, in order)
     PATCH  /post/highlights/<id>/              owner: {"title"?, "story_ids"? (ordered, replaces the set),
-                                               "cover_story_id"? (null = automatic)} -> detail
+                                               "cover_story_id"? (null = automatic),
+                                               "cover_x"?, "cover_y"?, "cover_zoom"? (need an explicit cover)} -> detail
     DELETE /post/highlights/<id>/              owner: 204 (the stories themselves are untouched)
     POST   /post/highlights/<id>/stories/      owner: add one {"story_id"} -> 201 added / 200 already there
     DELETE /post/highlights/<id>/stories/<sid>/ owner: remove one (idempotent). Removing the LAST story deletes
@@ -40,6 +42,8 @@ from .highlights import (
     clean_title,
     max_highlights,
     max_items,
+    reset_cover_crop,
+    validate_crop_value,
     visible_story_ids,
 )
 from .models import Highlight, HighlightItem, Story, StoryView
@@ -58,6 +62,10 @@ class HighlightWriteSerializer(serializers.Serializer):
         child=serializers.UUIDField(), required=False, allow_empty=False, max_length=500,
     )
     cover_story_id = serializers.UUIDField(required=False, allow_null=True)
+    # Round-cover crop (only with an explicit cover). Ranges: post/highlights.py.
+    cover_x = serializers.FloatField(required=False)
+    cover_y = serializers.FloatField(required=False)
+    cover_zoom = serializers.FloatField(required=False)
 
 
 def _error_response(exc):
@@ -105,6 +113,20 @@ def _set_cover(highlight, story_id):
     highlight.cover_item = item
 
 
+_CROP_FIELDS = ("cover_x", "cover_y", "cover_zoom")
+
+
+def _apply_crop(highlight, data):
+    """Validate + store any crop fields in `data`. Needs an explicit cover."""
+    given = [f for f in _CROP_FIELDS if f in data]
+    if not given:
+        return
+    if highlight.cover_item_id is None:
+        raise HighlightError("Pick a cover photo before cropping it.", code="crop_needs_cover", field=given[0])
+    for f in given:
+        setattr(highlight, f, validate_crop_value(f, data[f]))
+
+
 def _create_highlight(user, data):
     title = clean_title(data.get("title"), required=False)
     story_ids = _dedupe(data.get("story_ids") or [])
@@ -125,11 +147,14 @@ def _create_highlight(user, data):
     )
     if data.get("cover_story_id") is not None:
         _set_cover(highlight, data["cover_story_id"])
-        highlight.save(update_fields=["cover_item", "updated_at"])
+    _apply_crop(highlight, data)
+    if highlight.cover_item_id is not None:
+        highlight.save(update_fields=["cover_item", *_CROP_FIELDS, "updated_at"])
     return highlight
 
 
 def _update_highlight(highlight, data):
+    cover_before = highlight.cover_item_id
     if "title" in data:
         highlight.title = clean_title(data["title"], required=True)
 
@@ -156,6 +181,12 @@ def _update_highlight(highlight, data):
 
     if "cover_story_id" in data:
         _set_cover(highlight, data["cover_story_id"])
+
+    # A different (or cleared / removed) cover starts uncropped; then any crop
+    # sent in the same request is applied on top.
+    if highlight.cover_item_id != cover_before or highlight.cover_item_id is None:
+        reset_cover_crop(highlight)
+    _apply_crop(highlight, data)
 
     highlight.save()  # bumps updated_at
 
@@ -338,6 +369,8 @@ class HighlightRemoveStoryAPIView(APIView):
                 highlight.delete()
                 return Response({"highlight_deleted": True, "items_count": 0})
             highlight.refresh_from_db(fields=["cover_item"])
+            if highlight.cover_item_id is None:
+                reset_cover_crop(highlight)  # the cropped cover was the removed story
             highlight.save()  # bumps updated_at
         return Response({"highlight_deleted": False, "items_count": remaining})
 

@@ -77,6 +77,8 @@ from .models import (
     PollResponse,
     PollTemplate,
     Referral,
+    ReferralAttribution,
+    ReferralCommission,
     SessionParticipant,
     SessionReadState,
     SessionWaitlist,
@@ -173,6 +175,8 @@ from .serializers import (
     PollResponseSerializer,
     PollTemplateSerializer,
     ReferLinkResultSerializer,
+    ReferralAttributeSerializer,
+    ReferralCommissionSerializer,
     ReferralRedeemSerializer,
     ReferralSerializer,
     SessionEngagementReportSerializer,
@@ -182,6 +186,9 @@ from .serializers import (
     StudentProgressSerializer,
     TeacherEarningsSerializer,
 )
+
+
+logger = logging.getLogger(__name__)
 
 
 class TuitionClassPagination(pagination.PageNumberPagination):
@@ -3782,6 +3789,26 @@ class ClassJoinRequestViewSet(
             referred_by = get_user_model().objects.filter(pk=referrer_id).first()
             if referred_by is None:
                 raise ValidationError({"referral_code": "Invalid referral code."})
+            # TASK 12: also record link-based attribution (first touch wins),
+            # so this student's LATER purchases elsewhere (test series) also
+            # credit the same referrer. Best effort — never blocks the request.
+            try:
+                from user_profile.fraud import check_referral_abuse
+
+                if check_referral_abuse(referred_by, user, coins=0)[0]:
+                    ReferralAttribution.claim(
+                        referee=user, referrer=referred_by,
+                        source_type=ReferralAttribution.SourceType.CLASSROOM, source_id=classroom.id,
+                    )
+            except Exception:  # noqa: BLE001
+                logger.exception("referral attribution claim failed")
+        elif classroom.referral_enabled:
+            # TASK 12 / 12.3: no ?ref= on THIS request, but the student may
+            # have arrived via someone's link earlier (any source) and still
+            # be inside the attribution window — that referrer gets credit.
+            _attr = ReferralAttribution.active_for(user)
+            if _attr is not None and _attr.referrer_id != user.id:
+                referred_by = _attr.referrer
 
         # NOTE (fix — race): the exists() check above and serializer.save()
         # below aren't atomic against each other — two identical "raise a
@@ -3904,11 +3931,19 @@ class ClassJoinRequestViewSet(
             # them to a rate they've since disabled. join_request.referred_by
             # itself is untouched either way — see the NOTE above where
             # it's set in perform_create for why that's recorded regardless.
+            # TASK 12 / 12.4: re-run the fraud rules at payout-attribution time
+            # (referrer may have been disabled / become circular since request).
+            _ref_user = join_request.referred_by if classroom.referral_enabled else None
+            if _ref_user is not None:
+                from user_profile.fraud import check_referral_abuse
+
+                if not check_referral_abuse(_ref_user, join_request.student, coins=0)[0]:
+                    _ref_user = None
             purchase = _charge_and_create_purchase(
                 student=join_request.student,
                 class_pass=class_pass,
                 coupon_code=join_request.coupon_code,
-                referred_by=join_request.referred_by if classroom.referral_enabled else None,
+                referred_by=_ref_user,
                 referral_commission_percent=(
                     classroom.referral_commission_percent if classroom.referral_enabled else Decimal("0")
                 ),
@@ -5677,6 +5712,88 @@ class ReferralViewSet(mixins.ListModelMixin, viewsets.GenericViewSet):
     def get_queryset(self):
         return Referral.objects.filter(referrer=self.request.user).select_related("referred")
 
+    def get_throttles(self):
+        # TASK 12: attribute is called on every referral-link open — cap it
+        # per user so it can't be used to probe codes.
+        if getattr(self, "action", None) == "attribute":
+            self.throttle_scope = "referral_attribute"
+            return [ScopedRateThrottle()]
+        return super().get_throttles()
+
+    # -----------------------------------------------------------------
+    # TASK 12 / 12.1 — link-based attribution. First touch wins, expires
+    # after REFERRAL_ATTRIBUTION_DAYS. Always answers 200 with
+    # {"attributed": bool, "reason": str} for "expected" refusals so the
+    # app can silently ignore them (a bad/stale link must never show an
+    # error screen); only a malformed body is a 400.
+    # -----------------------------------------------------------------
+    @action(detail=False, methods=["post"], url_path="attribute")
+    def attribute(self, request):
+        from user_profile.fraud import check_referral_abuse
+
+        serializer = ReferralAttributeSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        data = serializer.validated_data
+        user = request.user
+
+        referrer_id = referral_code_to_user_id(data["code"])
+        referrer = get_user_model().objects.filter(pk=referrer_id).first() if referrer_id else None
+        if referrer is None:
+            return Response({"attributed": False, "reason": "invalid_code"})
+
+        # Someone who already bought something isn't a "new customer" —
+        # claiming them would pay commission on a customer the referrer
+        # never brought in.
+        if user.pass_purchases.exists() or user.testseries_purchases.exists():
+            return Response({"attributed": False, "reason": "existing_customer"})
+
+        ok, reason = check_referral_abuse(referrer, user, coins=0)
+        if not ok:
+            return Response({"attributed": False, "reason": reason})
+
+        attribution, created = ReferralAttribution.claim(
+            referee=user, referrer=referrer, source_type=data["source_type"], source_id=data["source_id"]
+        )
+        return Response(
+            {
+                "attributed": attribution.referrer_id == referrer.id,
+                "reason": "" if attribution.referrer_id == referrer.id else "already_attributed",
+                "created": created,
+                "expires_at": attribution.expires_at,
+            }
+        )
+
+    # -----------------------------------------------------------------
+    # TASK 12 / 12.5 — everything the "Share & earn" screen needs about
+    # money: totals per source + recent PAID commissions.
+    # -----------------------------------------------------------------
+    @action(detail=False, methods=["get"], url_path="earnings")
+    def earnings(self, request):
+        from decimal import Decimal
+
+        from testseries.access import referral_percent  # config read only
+
+        user = request.user
+        paid = ReferralCommission.objects.filter(referrer=user, status=ReferralCommission.Status.PAID)
+        by_kind = {
+            row["kind"]: row["total"] or 0
+            for row in paid.values("kind").annotate(total=Sum("commission_coins"))
+        }
+        recent = paid.select_related("referee")[:30]
+        attributed = ReferralAttribution.objects.filter(referrer=user)
+        data = {
+            "code": referral_code_for_user(user.id),
+            "total_commission_earned": sum(by_kind.values()),
+            "testseries_commission": by_kind.get(ReferralCommission.Kind.TESTSERIES, 0),
+            "classroom_commission": by_kind.get(ReferralCommission.Kind.CLASSROOM, 0),
+            "people_attributed": attributed.count(),
+            "people_converted": attributed.filter(first_purchase_at__isnull=False).count(),
+            "testseries_commission_percent": str(referral_percent().quantize(Decimal("0.01"))),
+            "attribution_days": django_settings.REFERRAL_ATTRIBUTION_DAYS,
+            "recent": ReferralCommissionSerializer(recent, many=True).data,
+        }
+        return Response(data)
+
     @action(detail=False, methods=["get"], url_path="my-code")
     def my_code(self, request):
         """Own referral code + a running tally of how many people have
@@ -5690,6 +5807,9 @@ class ReferralViewSet(mixins.ListModelMixin, viewsets.GenericViewSet):
             "referral_count": Referral.objects.filter(referrer=user).count(),
             "total_bonus_earned": earned,
             "bonus_per_referral": django_settings.REFERRAL_BONUS_COINS,
+            "total_commission_earned": ReferralCommission.objects.filter(
+                referrer=user, status=ReferralCommission.Status.PAID
+            ).aggregate(total=Sum("commission_coins"))["total"] or 0,
         }
         return Response(MyReferralCodeSerializer(data).data)
 
@@ -5766,6 +5886,14 @@ class ReferralViewSet(mixins.ListModelMixin, viewsets.GenericViewSet):
             raise ValidationError({"code": "You can't redeem your own referral code."})
         if hasattr(user, "referral_used"):
             raise ValidationError("You've already redeemed a referral code.")
+        # TASK 12 / 12.4: A<->B pairs must not trade bonuses/commissions.
+        from user_profile.fraud import check_referral_abuse
+
+        _ok, _reason = check_referral_abuse(
+            get_user_model().objects.filter(pk=referrer_id).first(), user, coins=0
+        )
+        if not _ok:
+            raise ValidationError({"code": "This referral code can't be used."})
 
         window = timezone.timedelta(days=django_settings.REFERRAL_REDEEM_WINDOW_DAYS)
         if timezone.now() - user.date_joined > window:
@@ -6825,7 +6953,12 @@ class MyDashboardView(APIView):
 
         return Response(
             {
-                "upcoming_sessions": ClassSessionSerializer(upcoming_sessions, many=True).data,
+                # TASK 10.1 — one authoritative clock for the whole payload
+                # (the home "Next class" card uses it for its countdown).
+                "server_now": now.isoformat(),
+                "upcoming_sessions": ClassSessionSerializer(
+                    upcoming_sessions, many=True, context={"request": request}
+                ).data,
                 "teaching_classrooms_count": teaching_count,
                 "enrolled_classrooms_count": enrolled_count,
                 "certificates_count": Certificate.objects.filter(student=user).count(),

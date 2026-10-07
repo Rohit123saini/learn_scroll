@@ -25,6 +25,8 @@ import secrets
 from datetime import datetime, timedelta
 from typing import Any, Mapping
 
+from common.question_grading import parse_bool, parse_number
+
 # ---------------------------------------------------------------------------
 # 1. PRICING POLICY
 # ---------------------------------------------------------------------------
@@ -36,13 +38,26 @@ from typing import Any, Mapping
 # Product rule this encodes (owner's decision):
 #   * individual  — a user who creates a test series on their own: PAID
 #   * campus      — created from a campus: always FREE for students
-#   * tuitionclass   — created from a tuition class: FREE by default, teacher MAY
-#                   make it paid
+#   * tuitionclass — created from a tuition class: always FREE too (TASK 9.1).
+#                   A class already sells access through its pass; the tests
+#                   inside it must never be charged for a second time.
 DEFAULT_PRICING_POLICY: dict[str, dict[str, Any]] = {
     "individual": {"mode": "required", "min_coins": 1, "max_coins": 100_000},
     "campus": {"mode": "forbidden"},
-    "tuitionclass": {"mode": "optional", "min_coins": 1, "max_coins": 100_000},
+    "tuitionclass": {"mode": "forbidden"},
 }
+
+# TASK 9.1 — sources whose series are ALWAYS free, whatever `settings.
+# TESTSERIES_PRICING_POLICY` says. This is a product rule, not a knob: a stale
+# env var / settings override must never be able to turn a class or campus test
+# into a paid one. `normalize_pricing()` and `is_always_free()` read this set,
+# not the (overridable) policy dict.
+ALWAYS_FREE_SOURCES = frozenset({"campus", "tuitionclass"})
+
+
+def is_always_free(source: str | None) -> bool:
+    """True for a series that belongs to a class / campus context."""
+    return source in ALWAYS_FREE_SOURCES
 
 
 class PolicyError(ValueError):
@@ -104,7 +119,8 @@ def normalize_pricing(
                    failing on unrelated saves.
     """
     rules = (policy or get_pricing_policy()).get(source) or {"mode": "optional"}
-    mode = rules.get("mode", "optional")
+    # TASK 9.1: class / campus series are free no matter what the config says.
+    mode = "forbidden" if is_always_free(source) else rules.get("mode", "optional")
     min_coins = int(rules.get("min_coins", 1))
     max_coins = int(rules.get("max_coins", 10**9))
     price_coins = int(price_coins or 0)
@@ -243,6 +259,12 @@ def is_answered(question_type: str, answer_data: Mapping[str, Any]) -> bool:
         return bool(answer_data.get("sequence")) or bool(answer_data.get("pairs"))
     if question_type == "text":
         return bool(str(answer_data.get("text", "")).strip())
+    if question_type == "true_false":
+        return parse_bool(answer_data.get("value")) is not None
+    if question_type == "fill_blank":
+        return bool(str(answer_data.get("text") or "").strip())
+    if question_type == "numeric":
+        return parse_number(answer_data.get("value")) is not None
     return False
 
 

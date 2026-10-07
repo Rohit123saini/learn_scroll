@@ -306,6 +306,13 @@ def create_group(
 
         ids = set(member_ids)
         ids.discard(created_by.id)
+        # Block policy: you can't pull someone into a group if either of you
+        # blocked the other. Skipped silently (no hint of who blocked whom).
+        from user_profile.services import blocked_user_ids
+
+        _blocked = blocked_user_ids(created_by)
+        if _blocked:
+            ids = {i for i in ids if i not in _blocked and str(i) not in {str(b) for b in _blocked}}
         valid_users = list(User.objects.filter(id__in=ids))
 
         memberships = [ConversationParticipant(conversation=conversation, user=created_by)]
@@ -350,6 +357,16 @@ def add_members_to_group(*, group: Group, actor, user_ids: Iterable) -> list:
 
     existing_ids = set(str(uid) for uid in group.group_members.values_list('user_id', flat=True))
     new_ids = [uid for uid in user_ids if str(uid) not in existing_ids]
+    # Block policy (see create_group): the adder can't add someone they
+    # blocked / who blocked them. System callers (actor=None, e.g. the
+    # classroom bridge) are never filtered — a classroom roster is not a
+    # social choice.
+    if actor is not None:
+        from user_profile.services import blocked_user_ids
+
+        _blocked = {str(b) for b in blocked_user_ids(actor)}
+        if _blocked:
+            new_ids = [uid for uid in new_ids if str(uid) not in _blocked]
     users = list(User.objects.filter(id__in=new_ids))
 
     with transaction.atomic():

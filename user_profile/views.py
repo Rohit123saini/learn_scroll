@@ -41,12 +41,20 @@ from .models import (
     WithdrawalNotEligible,
 )
 from .activity import ActivityLimitSerializer, HeartbeatSerializer  # P14-BE
-from .services import pending_follow_requests_for, remove_follower  # P11-BE
+from .services import (  # P11-BE
+    ReportRateLimited,
+    blocked_user_ids,
+    file_report,
+    pending_follow_requests_for,
+    remove_follower,
+)
 from .throttles import CoinPurchaseBurstThrottle, CoinPurchaseDailyThrottle
 from .serializers import (
     MutualFollowersResponseSerializer,  # P8-BE
     SimilarUsersResponseSerializer,  # P8-BE
     BlockUserSerializer,
+    BlockedTargetUserProfileSerializer,
+    ContentReportCreateSerializer,
     CoinLedgerSerializer,
     CoinPurchaseConfirmSerializer,
     CoinPurchaseRequestSerializer,
@@ -175,8 +183,16 @@ class UserProfileDetailView(GenericAPIView):
         # 🔥 FIX: block wasn't checked anywhere — a blocked/blocking user
         # could still look up the full profile. Mimic "user not found"
         # rather than a 403, so blocking doesn't leak who blocked whom.
-        if target_user != request.user and is_blocked_between(request.user, target_user):
-            raise Http404
+        # Instagram behaviour: the person who got blocked sees "not found";
+        # the person who did the blocking still gets a minimal card so the
+        # app can show "You blocked this account" + an Unblock button.
+        is_blocked_by_me = False
+        if target_user != request.user:
+            if BlockUser.objects.filter(blocker=target_user, blocked=request.user).exists():
+                raise Http404
+            is_blocked_by_me = BlockUser.objects.filter(
+                blocker=request.user, blocked=target_user
+            ).exists()
 
         my_follow_obj = Follow.objects.filter(
             follower=request.user, following=target_user
@@ -196,8 +212,18 @@ class UserProfileDetailView(GenericAPIView):
         # just by knowing the username. Now: full data only for the owner,
         # public accounts, or accepted followers; everyone else gets a
         # minimal "this account is private" style payload.
+        is_muted_by_me = False
+        if not is_self:
+            from post.models import MutedAccount
+
+            is_muted_by_me = MutedAccount.objects.filter(user=request.user, muted_user=target_user).exists()
+
         is_restricted_view = target_user.is_private and not is_self and not is_accepted_follower
-        if is_restricted_view:
+        if is_blocked_by_me:
+            # Only identity (photo/name) — no bio, counts, links or posts.
+            is_restricted_view = True
+            profile_data = BlockedTargetUserProfileSerializer(target_user).data
+        elif is_restricted_view:
             profile_data = RestrictedTargetUserProfileSerializer(target_user).data
         else:
             profile_data = TargetUserProfileSerializer(target_user).data
@@ -223,6 +249,8 @@ class UserProfileDetailView(GenericAPIView):
                 "their_follow_id": their_follow_obj.id if their_follow_obj else None,
                 "is_restricted_view": is_restricted_view,
                 "am_i_restricting": am_i_restricting,
+                "is_blocked_by_me": is_blocked_by_me,
+                "is_muted_by_me": is_muted_by_me,
                 "data": profile_data,
             },
             status=status.HTTP_200_OK,
@@ -494,7 +522,9 @@ class FollowersListView(ListAPIView):
         follower_ids = Follow.objects.filter(
             following=target_user, status=Follow.Status.ACCEPTED
         ).values_list("follower_id", flat=True)
-        return User.objects.filter(id__in=follower_ids)
+        return User.objects.filter(id__in=follower_ids).exclude(
+            id__in=blocked_user_ids(self.request.user)
+        )
 
     def get_serializer_context(self):
         return {
@@ -551,7 +581,9 @@ class FollowingListView(ListAPIView):
         following_ids = Follow.objects.filter(
             follower=target_user, status=Follow.Status.ACCEPTED
         ).values_list("following_id", flat=True)
-        return User.objects.filter(id__in=following_ids)
+        return User.objects.filter(id__in=following_ids).exclude(
+            id__in=blocked_user_ids(self.request.user)
+        )
 
     def get_serializer_context(self):
         return {
@@ -741,6 +773,7 @@ class FollowAPIView(GenericAPIView):
                 # request directly from the bell (AcceptFollowRequestView /
                 # RejectFollowRequestView both take follow_id, not user_id).
                 data={"follow_id": new_follow.id},
+                push=True,  # 3.2: follow request also reaches the phone
             )
         else:
             # Public account, auto-accept — no NEW_FOLLOWER type exists
@@ -758,6 +791,7 @@ class FollowAPIView(GenericAPIView):
                 create_batched_notification,
                 get_batch_max_age,
             )
+            from .services import push_for_row
 
             def _follow_back_data(count, actors, latest):
                 # Follow-back button only makes sense for ONE actor; a
@@ -776,6 +810,10 @@ class FollowAPIView(GenericAPIView):
                 data_fn=_follow_back_data,
                 extra_data={"kind": "new_follower"},
                 max_age_seconds=get_batch_max_age("new_follower"),
+                # 3.2: push only for the FIRST follower of a batch (later ones
+                # fold into the same row, no push spam); prefs / quiet hours
+                # are checked inside send_push_for_notification.
+                send_push_row_fn=push_for_row,
                 **_new_follower_batch_kwargs(following_user),
             )
 
@@ -1034,13 +1072,20 @@ class UpdateProfileView(GenericAPIView):
 # Block / Unblock user
 # Model (BlockUser) profile app me hai isliye API bhi yahin — message
 # app sirf inhe consume karega (chat screen "is-blocked?" check).
+from .throttles import BlockBurstThrottle, BlockDailyThrottle, ReportBurstThrottle
+
+
 class BlockedUsersView(GenericAPIView):
     """
     GET  /profile/blocked-users/          -> maine jinko block kiya hai unki list
     POST /profile/blocked-users/  {"blocked": <user_id>} -> block karo
+
+    POST is rate limited (user_profile/throttles.py: 20/min + 200/day, shared
+    with unblock); the list GET is not.
     """
     permission_classes = [IsAuthenticated]
     serializer_class = BlockUserSerializer
+    throttle_classes = [UserRateThrottle, BlockBurstThrottle, BlockDailyThrottle]
 
     @extend_schema(
         responses={200: BlockUserSerializer(many=True)},
@@ -1048,11 +1093,42 @@ class BlockedUsersView(GenericAPIView):
     )
     def get(self, request):
         qs = BlockUser.objects.filter(blocker=request.user).select_related("blocked")
-        serializer = self.get_serializer(qs, many=True)
+
+        # ?q= — search my blocked list by username / name.
+        q = (request.query_params.get("q") or "").strip()
+        if q:
+            qs = qs.filter(
+                Q(blocked__username__icontains=q)
+                | Q(blocked__first_name__icontains=q)
+                | Q(blocked__last_name__icontains=q)
+            )
+
+        # ?limit=&offset= — optional paging. Without `limit` the whole list
+        # comes back like before (older app builds), capped at 500.
+        try:
+            limit = int(request.query_params.get("limit", ""))
+            limit = min(max(limit, 1), 100)
+        except (TypeError, ValueError):
+            limit = None
+        try:
+            offset = max(int(request.query_params.get("offset", 0)), 0)
+        except (TypeError, ValueError):
+            offset = 0
+
+        if limit is None:
+            rows, has_more = list(qs[:500]), False
+        else:
+            rows = list(qs[offset:offset + limit + 1])
+            has_more = len(rows) > limit
+            rows = rows[:limit]
+
+        serializer = self.get_serializer(rows, many=True)
         return Response({
             "status": True,
             "message": "Blocked users fetched successfully.",
             "data": serializer.data,
+            "has_more": has_more,
+            "next_offset": (offset + len(rows)) if has_more else None,
         }, status=status.HTTP_200_OK)
 
     @extend_schema(
@@ -1071,11 +1147,29 @@ class BlockedUsersView(GenericAPIView):
             }, status=status.HTTP_400_BAD_REQUEST)
 
         blocked_user = serializer.validated_data["blocked"]
+        want_new_accounts = bool(serializer.validated_data.get("block_new_accounts", False))
 
         block_obj, created = BlockUser.objects.get_or_create(
             blocker=request.user,
             blocked=blocked_user,
+            defaults={"block_new_accounts": want_new_accounts},
         )
+        # Blocking again can switch "also block new accounts" on (never silently off).
+        if not created and want_new_accounts and not block_obj.block_new_accounts:
+            block_obj.block_new_accounts = True
+            block_obj.save(update_fields=["block_new_accounts"])
+
+        # "Block + Report" in one tap. A failed report must never undo the block.
+        report_filed = False
+        report_reason = serializer.validated_data.get("report_reason")
+        if report_reason:
+            try:
+                _, report_filed = file_report(
+                    request.user, "user", blocked_user.id, report_reason,
+                    serializer.validated_data.get("report_details", ""),
+                )
+            except (LookupError, ValueError, ReportRateLimited):
+                report_filed = False
 
         if created:
             # Block hote hi dono taraf ka follow-relation khatam karo, aur
@@ -1092,8 +1186,50 @@ class BlockedUsersView(GenericAPIView):
         return Response({
             "status": True,
             "message": "User blocked successfully." if created else "User already blocked.",
+            "report_filed": report_filed,
             "data": self.get_serializer(block_obj).data,
         }, status=status.HTTP_201_CREATED if created else status.HTTP_200_OK)
+
+
+class ContentReportView(GenericAPIView):
+    """
+    POST /profile/reports/ {"target_type": "user|post|comment|story",
+                            "target_id": "...", "reason": "...", "details": "..."}
+
+    201 first time, 200 if I had already reported the same thing. The
+    reported person is never notified. Block / Restrict / Mute are separate
+    calls (or "Block + Report" via `report_reason` on POST /blocked-users/).
+    """
+    permission_classes = [IsAuthenticated]
+    serializer_class = ContentReportCreateSerializer
+    throttle_classes = [UserRateThrottle, ReportBurstThrottle]
+
+    @extend_schema(request=ContentReportCreateSerializer, description="Report an account, post, comment or story")
+    def post(self, request):
+        serializer = self.get_serializer(data=request.data)
+        if not serializer.is_valid():
+            return Response(
+                {"status": False, "message": "Validation failed.", "errors": serializer.errors},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        d = serializer.validated_data
+        try:
+            report, created = file_report(
+                request.user, d["target_type"], d["target_id"], d["reason"], d.get("details", ""),
+            )
+        except LookupError as exc:
+            return Response({"status": False, "message": str(exc)}, status=status.HTTP_404_NOT_FOUND)
+        except ValueError as exc:
+            return Response({"status": False, "message": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+        except ReportRateLimited:
+            return Response(
+                {"status": False, "message": "Too many reports. Please try again later."},
+                status=status.HTTP_429_TOO_MANY_REQUESTS,
+            )
+        return Response(
+            {"status": True, "message": "Report received." if created else "You already reported this.", "id": report.id},
+            status=status.HTTP_201_CREATED if created else status.HTTP_200_OK,
+        )
 
 
 class UnblockUserView(GenericAPIView):
@@ -1106,6 +1242,9 @@ class UnblockUserView(GenericAPIView):
     """
     permission_classes = [IsAuthenticated]
     serializer_class = BlockUserSerializer
+    # Same two buckets as block (one shared per-user quota) so alternating
+    # block / unblock can't dodge the limit.
+    throttle_classes = [UserRateThrottle, BlockBurstThrottle, BlockDailyThrottle]
 
     @extend_schema(description="Unblock a user (accepts BlockUser id or target user id)")
     def delete(self, request, id):

@@ -35,6 +35,17 @@ beats a weak one from a followed account). Everything is additive - nothing
 is hidden by a score. As with Home, an author with an active "show fewer" row
 gets no affinity (show fewer wins).
 
+NEVER EMPTY (fallback tiers): the strict rules above are tier 0. When the
+unseen pool has fewer than `FEED_REELS["min_pool"]` videos, the media rules are
+loosened step by step and the extra videos are APPENDED after the better ones:
+    tier 1  any aspect ratio            (duration known and within the cap)
+    tier 2  any duration                (> 0, no cap)
+    tier 3  any video row               (duration / size unknown too)
+Safety rules (approved, public, not sensitive / own / blocked / hidden, private
+account only for followers) are NEVER loosened. `FEED_REELS["fallback"] = False`
+keeps the strict behaviour only. `manage.py reels_diagnose` shows which filter
+empties the pool.
+
 SEEN: videos the caller already saw (`PostView`, incl. the batch
 `POST /post/feed/seen/`) are excluded BEFORE the pool cap; if the pool ends up
 smaller than `FEED_SEEN_LIMITS["fill_min"]` it is topped up with seen videos at
@@ -70,7 +81,12 @@ DEFAULT_REELS = {
     "pool_cap": 300,  # max ranked ids frozen per scrolling session
     "page_size": 10,  # default page size (?page_size=)
     "max_page_size": 30,
+    "fallback": True,  # loosen the media rules in tiers when the pool is small (never-empty)
+    "min_pool": 10,  # unseen pool size below which the next tier is added
 }
+
+TIER_LABELS = ("strict", "any_aspect", "any_duration", "any_video")
+MAX_TIER = len(TIER_LABELS) - 1
 
 
 def get_config() -> dict:
@@ -81,7 +97,7 @@ def get_config() -> dict:
     cfg.update(getattr(settings, "FEED_REELS", None) or {})
     for key, cast in (
         ("min_aspect", float), ("max_duration_seconds", int), ("following_bonus", float),
-        ("pool_cap", int), ("page_size", int), ("max_page_size", int),
+        ("pool_cap", int), ("page_size", int), ("max_page_size", int), ("min_pool", int),
     ):
         try:
             cfg[key] = cast(cfg[key])
@@ -89,6 +105,8 @@ def get_config() -> dict:
             cfg[key] = DEFAULT_REELS[key]
     cfg["pool_cap"] = max(1, cfg["pool_cap"])
     cfg["max_page_size"] = max(1, cfg["max_page_size"])
+    cfg["min_pool"] = max(0, cfg["min_pool"])
+    cfg["fallback"] = bool(cfg["fallback"])
     cfg["page_size"] = max(1, min(cfg["page_size"], cfg["max_page_size"]))
     return cfg
 
@@ -100,19 +118,25 @@ def is_enabled() -> bool:
 # --------------------------------------------------------------------------
 # candidates
 # --------------------------------------------------------------------------
-def playable_media_queryset(cfg: Optional[dict] = None):
-    """PostMedia rows that make a video usable as a reel (duration known and
-    within the cap, vertical-friendly or dimensions unknown). Used as an
-    `Exists(...)` correlated on `post`."""
+def playable_media_queryset(cfg: Optional[dict] = None, tier: int = 0):
+    """PostMedia rows that make a video usable as a reel. Used as an
+    `Exists(...)` correlated on `post`.
+
+    tier 0 = strict (duration known and within the cap, vertical-friendly or
+    dimensions unknown); 1 = no aspect rule; 2 = no duration cap either;
+    3 = any video row (see "NEVER EMPTY" in the module docstring)."""
     from django.db.models import ExpressionWrapper, F, FloatField, Q, Value
 
     from .models import PostMedia
 
     cfg = cfg or get_config()
-    qs = PostMedia.objects.filter(media_type="video", duration_seconds__gt=0)
-    if cfg["max_duration_seconds"] > 0:
+    qs = PostMedia.objects.filter(media_type="video")
+    if tier >= 3:
+        return qs
+    qs = qs.filter(duration_seconds__gt=0)
+    if tier <= 1 and cfg["max_duration_seconds"] > 0:
         qs = qs.filter(duration_seconds__lte=cfg["max_duration_seconds"])
-    if cfg["min_aspect"] > 0:
+    if tier == 0 and cfg["min_aspect"] > 0:
         min_height = ExpressionWrapper(F("width") * Value(float(cfg["min_aspect"])), output_field=FloatField())
         qs = qs.filter(
             Q(width__isnull=True) | Q(height__isnull=True) | Q(width=0) | Q(height__gte=min_height)
@@ -131,7 +155,7 @@ def _followed_annotation(user):
     ))
 
 
-def candidate_queryset(user, base_qs, cfg: Optional[dict] = None):
+def candidate_queryset(user, base_qs, cfg: Optional[dict] = None, tier: int = 0):
     """Reel candidates for `user`, annotated with `is_followed`.
 
     `base_qs` is the shared Home "safe to show" queryset (not deleted,
@@ -146,7 +170,7 @@ def candidate_queryset(user, base_qs, cfg: Optional[dict] = None):
         base_qs.filter(post_type="video", visibility="public")
         .annotate(is_followed=_followed_annotation(user))
         .filter(Q(user__is_private=False) | Q(is_followed=True))
-        .filter(Exists(playable_media_queryset(cfg).filter(post_id=OuterRef("pk"))))
+        .filter(Exists(playable_media_queryset(cfg, tier).filter(post_id=OuterRef("pk"))))
     )
     hidden = _hidden_author_ids(user)
     if hidden:
@@ -203,12 +227,95 @@ def build_pool_ids(user, base_qs, video_and_velocity_boost, seen_ids: Optional[s
     if penalty is not None:
         score = score - penalty
 
-    ranked = (
-        candidate_queryset(user, base_qs, cfg)
-        .annotate(score=ExpressionWrapper(score, output_field=FloatField()))
-        .order_by("-score", "-created_at", "-id")
-    )
-    return feed_mix._pool_ids(ranked, seen_ids, cfg["pool_cap"], fill_min)
+    scored = ExpressionWrapper(score, output_field=FloatField())
+
+    def ranked(tier):
+        return (
+            candidate_queryset(user, base_qs, cfg, tier)
+            .annotate(score=scored)
+            .order_by("-score", "-created_at", "-id")
+        )
+
+    cap = cfg["pool_cap"]
+    max_tier = MAX_TIER if cfg["fallback"] else 0
+    want = max(1, cfg["min_pool"]) if cfg["fallback"] else 0
+
+    # Phase 1: UNSEEN videos, strict tier first; looser tiers only add what is missing
+    # and always go behind the better ones.
+    pool: List = []
+    for tier in range(max_tier + 1):
+        qs = ranked(tier)
+        if pool:
+            qs = qs.exclude(id__in=pool)
+        if seen_ids:
+            qs = qs.exclude(id__in=seen_ids)
+        pool += list(qs.values_list("id", flat=True)[: cap - len(pool)])
+        if len(pool) >= max(want, 1) or len(pool) >= cap:
+            break
+
+    # Phase 2: still tiny -> top up with SEEN videos at the tail (same as Home).
+    target = min(cap, fill_min)
+    if seen_ids and len(pool) < target:
+        qs = ranked(max_tier).filter(id__in=seen_ids)
+        if pool:
+            qs = qs.exclude(id__in=pool)
+        pool += list(qs.values_list("id", flat=True)[: target - len(pool)])
+    return pool
+
+
+def diagnose(user, base_qs, cfg: Optional[dict] = None, seen_ids: Optional[set] = None):
+    """Pool size after EACH filter, in order -> [(label, count), ...]. A big drop
+    between two lines is the filter that empties Reels. Ends with the pool size
+    of every fallback tier (what `build_pool_ids` would draw from)."""
+    from django.db.models import Exists, OuterRef, Q
+
+    from . import feed_mix
+    from .feed_mix import _hidden_author_ids
+    from .models import Post
+
+    cfg = cfg or get_config()
+    rows: List = []
+
+    def add(label, qs):
+        rows.append((label, qs.count()))
+
+    vids = Post.objects.filter(post_type="video")
+    add("video posts (all)", vids)
+    add("not deleted", vids.filter(is_deleted=False))
+    add("+ approved", vids.filter(is_deleted=False, moderation_status="approved"))
+    safe = vids.filter(is_deleted=False, moderation_status="approved", is_sensitive=False)
+    add("+ not sensitive", safe)
+    add("+ not own", safe.exclude(user=user))
+    qs = base_qs.filter(post_type="video")
+    add("+ not hidden / muted / superseded (Home base queryset)", qs)
+    qs = qs.filter(visibility="public")
+    add("+ visibility public", qs)
+    qs = qs.annotate(is_followed=_followed_annotation(user)).filter(Q(user__is_private=False) | Q(is_followed=True))
+    add("+ private accounts only if followed", qs)
+    hidden = _hidden_author_ids(user)
+    if hidden:
+        qs = qs.exclude(user_id__in=hidden)
+    add("+ author not blocked / hidden", qs)
+
+    has_video = qs.filter(Exists(playable_media_queryset(cfg, 3).filter(post_id=OuterRef("pk"))))
+    add("+ has a video media row", has_video)
+    from .models import PostMedia
+
+    m = PostMedia.objects.filter(media_type="video", duration_seconds__gt=0)
+    add("+ duration known (> 0)", qs.filter(Exists(m.filter(post_id=OuterRef("pk")))))
+    if cfg["max_duration_seconds"] > 0:
+        m = m.filter(duration_seconds__lte=cfg["max_duration_seconds"])
+        add(f"+ duration <= {cfg['max_duration_seconds']}s", qs.filter(Exists(m.filter(post_id=OuterRef("pk")))))
+    add("+ aspect ratio OK  (= strict tier 0)", candidate_queryset(user, base_qs, cfg, 0))
+
+    if seen_ids is None:
+        seen_ids = feed_mix.get_seen_post_ids(user)
+    for tier in range(MAX_TIER + 1):
+        cq = candidate_queryset(user, base_qs, cfg, tier)
+        total = cq.count()
+        unseen = cq.exclude(id__in=seen_ids).count() if seen_ids else total
+        rows.append((f"TIER {tier} ({TIER_LABELS[tier]}): candidates / unseen", f"{total} / {unseen}"))
+    return rows
 
 
 # --------------------------------------------------------------------------

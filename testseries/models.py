@@ -54,7 +54,8 @@ notify-the-creator step needs that enum member added first.
 
 Everything else below matches the design doc's confirmed decisions:
   - `TestSeries.is_paid` is server-side FORCED False for `source="campus"`
-    (campus's golden "always free for students" constraint) inside
+    AND `source="tuitionclass"` (TASK 9.1 — class/campus tests are always
+    free for students; see policy.ALWAYS_FREE_SOURCES) inside
     `save()` here — defence-in-depth, even though the real enforcement
     point is the campus-facing serializer/viewset per §5 of the doc.
   - Three question types — `text` (subjective, always manual), `mcq`
@@ -94,7 +95,7 @@ from common.attachment_validators import (
     attachment_extension_validator,
     validate_attachment_size,
 )
-from common.question_grading import auto_grade as _shared_auto_grade
+from common.question_grading import auto_grade as _shared_auto_grade, parse_bool, parse_number
 
 # ---------------------------------------------------------------------
 # Attachment validation now LIVES in common/attachment_validators.py —
@@ -217,9 +218,9 @@ class TestSeries(TestSeriesBaseModel):
     title = models.CharField(max_length=200)
     description = models.TextField(blank=True)
 
-    # Server-side forced False for source="campus" in save() below —
-    # campus's "always free for students" golden constraint, defence in
-    # depth on top of the campus-facing viewset/serializer (§5).
+    # Server-side forced False for source="campus" AND source="tuitionclass"
+    # in save() below (TASK 9.1: class/campus tests are always free for
+    # students), defence in depth on top of the bridges / serializer (§5).
     is_paid = models.BooleanField(default=False)
     price_coins = models.PositiveIntegerField(default=0)
 
@@ -322,6 +323,14 @@ class TestSeries(TestSeriesBaseModel):
 
     # Public share link: /testseries/public/<share_slug>/ — minted on publish.
     share_slug = models.CharField(max_length=24, unique=True, null=True, blank=True)
+
+    # TASK 9.2 — set (atomically, exactly once) when a campus / tuition-class
+    # series has been announced to its context: roster notification + notice
+    # board entry. It is the idempotency guard: publishing twice, a retried
+    # request or a re-run hook can never announce the same series again.
+    # NULL = not announced yet. Never set for individual series (they notify
+    # followers through tasks.notify_followers_new_testseries instead).
+    announced_at = models.DateTimeField(null=True, blank=True, editable=False)
 
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
@@ -557,6 +566,10 @@ class Question(TestSeriesBaseModel):
         MCQ = "mcq", "Multiple Choice (single)"
         MSQ = "msq", "Multiple Select"
         LIST = "list", "List-based (match / order)"
+        # ---- Task 8.1 -------------------------------------------------
+        TRUE_FALSE = "true_false", "True / False"
+        FILL_BLANK = "fill_blank", "Fill in the blank"
+        NUMERIC = "numeric", "Numeric answer"
 
     series = models.ForeignKey(TestSeries, on_delete=models.CASCADE, related_name="questions")
 
@@ -566,7 +579,7 @@ class Question(TestSeriesBaseModel):
     # state, matches the rest of this codebase's split).
     order = models.PositiveIntegerField()
 
-    question_type = models.CharField(max_length=4, choices=QuestionType.choices, db_index=True)
+    question_type = models.CharField(max_length=12, choices=QuestionType.choices, db_index=True)
 
     text = models.TextField()
 
@@ -615,9 +628,43 @@ class Question(TestSeriesBaseModel):
             self.correct_answer = {}
             return
 
+        if self.question_type == self.QuestionType.TRUE_FALSE:
+            self.options = []
+            if parse_bool(self.correct_answer.get("value")) is None:
+                raise ValidationError("true_false correct_answer must be {'value': true|false}.")
+            self.correct_answer = {"value": parse_bool(self.correct_answer.get("value"))}
+            return
+
+        if self.question_type == self.QuestionType.FILL_BLANK:
+            self.options = []
+            answers = self.correct_answer.get("answers")
+            if not isinstance(answers, list):
+                raise ValidationError("fill_blank correct_answer must be {'answers': [accepted texts...]}.")
+            cleaned = [a.strip() for a in answers if isinstance(a, str) and a.strip()]
+            if not cleaned or len(cleaned) > 20 or any(len(a) > 200 for a in cleaned):
+                raise ValidationError("fill_blank needs 1-20 accepted answers (max 200 characters each).")
+            self.correct_answer = {
+                "answers": cleaned,
+                "case_sensitive": bool(self.correct_answer.get("case_sensitive", False)),
+            }
+            return
+
+        if self.question_type == self.QuestionType.NUMERIC:
+            self.options = []
+            value = parse_number(self.correct_answer.get("value"))
+            if value is None:
+                raise ValidationError("numeric correct_answer must be {'value': <number>, 'tolerance': <number >= 0>}.")
+            raw_tol = self.correct_answer.get("tolerance", 0)
+            tolerance = parse_number(raw_tol if raw_tol not in ("", None) else 0)
+            if tolerance is None or tolerance < 0:
+                raise ValidationError("numeric tolerance must be a number that is 0 or more.")
+            self.correct_answer = {"value": float(value), "tolerance": float(tolerance)}
+            return
+
         if self.question_type in (self.QuestionType.MCQ, self.QuestionType.MSQ):
             if not isinstance(self.options, list) or not self.options:
                 raise ValidationError("mcq/msq questions require a non-empty `options` list.")
+            self._validate_option_items(self.options)
             option_ids = {opt.get("id") for opt in self.options}
             if self.question_type == self.QuestionType.MCQ:
                 if "option_id" not in self.correct_answer or self.correct_answer["option_id"] not in option_ids:
@@ -634,6 +681,12 @@ class Question(TestSeriesBaseModel):
                 left = self.options.get("left") if isinstance(self.options, dict) else None
                 right = self.options.get("right") if isinstance(self.options, dict) else None
                 pairs = self.correct_answer.get("pairs")
+                if (
+                    isinstance(left, list) and isinstance(right, list)
+                    and all(isinstance(i, dict) for i in left + right)
+                ):
+                    self._validate_option_items(left)
+                    self._validate_option_items(right)
                 if not left or not right or not isinstance(pairs, dict):
                     raise ValidationError(
                         "list/match questions require options={'left': [...], 'right': [...]} "
@@ -642,6 +695,7 @@ class Question(TestSeriesBaseModel):
             elif mode == "order":
                 if not isinstance(self.options, list) or not self.options:
                     raise ValidationError("list/order questions require a non-empty `options` list.")
+                self._validate_option_items(self.options)
                 sequence = self.correct_answer.get("sequence")
                 option_ids = {opt.get("id") for opt in self.options}
                 if not isinstance(sequence, list) or set(sequence) != option_ids:
@@ -651,6 +705,39 @@ class Question(TestSeriesBaseModel):
                     )
             else:
                 raise ValidationError("list questions require correct_answer['list_mode'] to be 'match' or 'order'.")
+
+    @staticmethod
+    def _validate_option_items(items) -> None:
+        """Each option is `{"id", "text"?, "image"?}`: ids unique, at least one
+        of text / image present (Task 8.1 — option images), image must be an
+        http(s) URL or a site-relative path (never `javascript:` / `data:`)."""
+        if not isinstance(items, list):
+            raise ValidationError("options must be a list.")
+        seen = set()
+        for opt in items:
+            if (
+                not isinstance(opt, dict)
+                or opt.get("id") in (None, "")
+                or isinstance(opt.get("id"), bool)
+                or not isinstance(opt.get("id"), (str, int))
+            ):
+                raise ValidationError("Every option needs an `id`.")
+            if opt["id"] in seen:
+                raise ValidationError(f"Duplicate option id '{opt['id']}'.")
+            seen.add(opt["id"])
+            text = opt.get("text")
+            image = opt.get("image")
+            if text is not None and not isinstance(text, str):
+                raise ValidationError("Option `text` must be a string.")
+            if image not in (None, ""):
+                if (
+                    not isinstance(image, str)
+                    or len(image) > 500
+                    or not (image.startswith(("http://", "https://")) or image.startswith("/"))
+                ):
+                    raise ValidationError("Option `image` must be an http(s) URL or a site path (max 500 chars).")
+            if not (text or "").strip() and not image:
+                raise ValidationError(f"Option '{opt['id']}' needs text or an image.")
 
     def save(self, *args, **kwargs):
         # Only `options`/`correct_answer` need excluding here — their shape
@@ -790,6 +877,19 @@ class TestSeriesPurchase(TestSeriesBaseModel):
         "TestAttempt", on_delete=models.SET_NULL, null=True, blank=True, related_name="purchase"
     )
 
+    # TASK 12 (refer & earn, individual PAID series only): snapshot taken at
+    # purchase time — who referred the buyer, at what %, and the commission in
+    # coins that will be carved OUT OF THE CREATOR'S payout when escrow
+    # releases (never out of the buyer's price, never platform-funded).
+    # `referral_commission_paid` is what was actually paid (0 if a fraud rule
+    # blocked it, in which case the creator keeps the full amount).
+    referred_by = models.ForeignKey(
+        User, on_delete=models.SET_NULL, null=True, blank=True, related_name="testseries_referred_purchases"
+    )
+    referral_commission_percent = models.DecimalField(max_digits=5, decimal_places=2, default=0)
+    referral_commission_coins = models.PositiveIntegerField(default=0)
+    referral_commission_paid = models.PositiveIntegerField(default=0)
+
     created_at = models.DateTimeField(auto_now_add=True)
     released_at = models.DateTimeField(null=True, blank=True)
     refunded_at = models.DateTimeField(null=True, blank=True)
@@ -828,11 +928,20 @@ class TestSeriesPurchase(TestSeriesBaseModel):
             reference=f"testseries_purchase:{series.id}:{locked_buyer.id}:{attempt_no}",
         )
 
+        # TASK 12: referral snapshot (no-op unless the buyer has an active
+        # attribution AND the series is an individual paid one).
+        from .access import referral_snapshot
+
+        ref_id, ref_percent, ref_coins = referral_snapshot(buyer=locked_buyer, series=series)
+
         purchase = cls.objects.create(
             series=series,
             buyer=locked_buyer,
             coins_spent=series.price_coins,
             status=cls.Status.ESCROWED,
+            referred_by_id=ref_id,
+            referral_commission_percent=ref_percent,
+            referral_commission_coins=ref_coins,
         )
         attempt = TestAttempt.objects.create(
             series=series, student=locked_buyer, attempt_number=attempt_no, **attempt_snapshot_kwargs
@@ -849,20 +958,35 @@ class TestSeriesPurchase(TestSeriesBaseModel):
         from user_profile.models import CoinLedger
         from core.models import Notification
 
+        # TASK 12: referral commission comes out of the creator's share.
+        # pay_referral_commission() never raises and returns 0 when nothing
+        # was paid (no referrer, blocked by a fraud rule, hook unavailable),
+        # in which case the creator simply gets the full amount as before.
+        commission_paid = 0
+        if self.referred_by_id and self.referral_commission_coins > 0:
+            from .access import pay_referral_commission
+
+            commission_paid = pay_referral_commission(self)
+        creator_amount = self.coins_spent - commission_paid
+
         _record_coin_transaction(
             user=self.series.creator,
             transaction_type=CoinLedger.TransactionType.TESTSERIES_PAYOUT,
-            amount=self.coins_spent,
+            amount=creator_amount,
             reference=f"testseries_payout:{self.id}",
         )
         self.status = self.Status.RELEASED
         self.released_at = timezone.now()
-        self.save(update_fields=["status", "released_at"])
+        self.referral_commission_paid = commission_paid
+        self.save(update_fields=["status", "released_at", "referral_commission_paid"])
         _notify(
             recipient=self.series.creator,
             notif_type=Notification.NotifType.TESTSERIES_PAYOUT_RELEASED,
             title="Payout released",
-            message=f"You've been paid {self.coins_spent} coins for '{self.series.title}'.",
+            message=(
+                f"You've been paid {creator_amount} coins for '{self.series.title}'."
+                + (f" ({commission_paid} coins went to the referrer.)" if commission_paid else "")
+            ),
             data={"purchase_id": str(self.id), "series_id": str(self.series_id)},
         )
 

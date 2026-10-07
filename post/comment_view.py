@@ -78,6 +78,12 @@ class CommentCreateAPIView(APIView):
         if post.is_comments_disabled:
             return Response({"error": "Comments disabled"}, status=403)
 
+        # Block (either direction) with the post's author => can't comment.
+        if post.user_id != request.user.id:
+            from user_profile.views import is_blocked_between
+            if is_blocked_between(request.user, post.user):
+                return Response({"error": "Post not found"}, status=404)
+
         files = [f for f in request.FILES.getlist('files') if hasattr(f, 'size')]
         if not files:
             files = [f for f in request.FILES.getlist('file') if hasattr(f, 'size')]
@@ -478,6 +484,11 @@ class CommentListAPIView(APIView):
     )
     def get(self, request, post_id):
         post = get_object_or_404(Post, id=post_id)
+        # Block with the post's author (either direction) => same as "no such post".
+        if request.user.is_authenticated and post.user_id != request.user.id:
+            from user_profile.views import is_blocked_between
+            if is_blocked_between(request.user, post.user):
+                return Response({"error": "Post not found"}, status=404)
         qs = PostComment.objects.filter(post=post, parent__isnull=True, is_deleted=False).select_related('user').prefetch_related('media')
         if not request.user.is_authenticated or request.user.id!= post.user_id:
             qs = qs.filter(is_hidden=False)

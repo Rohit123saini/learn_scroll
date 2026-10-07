@@ -25,7 +25,157 @@ import logging
 logger = logging.getLogger(__name__)
 
 
-def _notify(recipient, notif_type, title, message="", *, actor=None, data=None):
+def blocked_user_ids(user):
+    """Ids of everyone in a block relationship with `user`, EITHER direction
+    (I blocked them, or they blocked me). `user` may be a User or a raw id.
+    The one helper other apps (core, post, message) use instead of each
+    querying BlockUser their own way. Never raises."""
+    from .models import BlockUser
+
+    uid = getattr(user, "id", user)
+    if uid is None:
+        return set()
+    try:
+        ids = set(BlockUser.objects.filter(blocker_id=uid).values_list("blocked_id", flat=True))
+        ids |= set(BlockUser.objects.filter(blocked_id=uid).values_list("blocker_id", flat=True))
+        return ids
+    except Exception:
+        logger.exception("blocked_user_ids failed (user=%s)", uid)
+        return set()
+
+
+def is_blocked_pair(user_a, user_b) -> bool:
+    """True if either user blocked the other (ids or User objects)."""
+    from .models import BlockUser
+    from django.db.models import Q
+
+    a, b = getattr(user_a, "id", user_a), getattr(user_b, "id", user_b)
+    if a is None or b is None:
+        return False
+    return BlockUser.objects.filter(
+        Q(blocker_id=a, blocked_id=b) | Q(blocker_id=b, blocked_id=a)
+    ).exists()
+
+
+class ReportRateLimited(Exception):
+    """Too many reports from one account in the last hour."""
+
+
+REPORTS_PER_HOUR = 30
+
+
+def file_report(reporter, target_type, target_id, reason, details=""):
+    """Create (or find, idempotently) a ContentReport.
+
+    target_type: user | post | comment | story. `target_id` is a user id or a
+    post/comment/story uuid. Returns (report, created).
+    Raises LookupError (target doesn't exist), ValueError (own content) or
+    ReportRateLimited. The reported person is never told anything.
+    """
+    from datetime import timedelta
+
+    from django.contrib.auth import get_user_model
+    from django.core.exceptions import ValidationError
+    from django.utils import timezone
+
+    from .models import ContentReport
+
+    T = ContentReport.TargetType
+    User = get_user_model()
+    target_id = str(target_id)
+    reported_user = None
+    try:
+        if target_type == T.USER:
+            reported_user = User.objects.filter(id=int(target_id), is_active=True).first()
+        elif target_type == T.POST:
+            from post.models import Post
+
+            obj = Post.objects.filter(id=target_id, is_deleted=False).select_related("user").first()
+            reported_user = obj.user if obj else None
+        elif target_type == T.COMMENT:
+            from post.models import PostComment
+
+            obj = PostComment.objects.filter(id=target_id, is_deleted=False).select_related("user").first()
+            reported_user = obj.user if obj else None
+        elif target_type == T.STORY:
+            from post.models import Story
+
+            obj = Story.objects.filter(id=target_id, is_deleted=False).select_related("user").first()
+            reported_user = obj.user if obj else None
+    except (ValueError, TypeError, ValidationError):
+        reported_user = None
+    if reported_user is None:
+        raise LookupError("Nothing to report here.")
+    if reported_user.id == reporter.id:
+        raise ValueError("You can't report your own account or content.")
+
+    existing = ContentReport.objects.filter(reporter=reporter, target_type=target_type, target_id=target_id).first()
+    if existing is not None:
+        return existing, False
+
+    recent = ContentReport.objects.filter(
+        reporter=reporter, created_at__gte=timezone.now() - timedelta(hours=1)
+    ).count()
+    if recent >= REPORTS_PER_HOUR:
+        raise ReportRateLimited()
+
+    return ContentReport.objects.create(
+        reporter=reporter, reported_user=reported_user, target_type=target_type,
+        target_id=target_id, reason=reason, details=(details or "")[:1000],
+    ), True
+
+
+def block_new_accounts_of(previous_owner, new_user, max_age_days=30):
+    """The push token of `previous_owner` just moved to `new_user` (same
+    phone, new account). Everyone who blocked `previous_owner` with
+    "also block new accounts" now blocks `new_user` too — but only if
+    `new_user` really is a new account (<= max_age_days old), so a friend
+    briefly logging in on a shared phone is not caught. Chain-safe: the new
+    block carries the flag, so the NEXT new account is caught as well.
+    Returns the number of blocks created. Never raises."""
+    from datetime import timedelta
+
+    from django.utils import timezone
+
+    from .models import BlockUser
+
+    try:
+        if previous_owner is None or new_user is None or previous_owner.id == new_user.id:
+            return 0
+        if new_user.date_joined < timezone.now() - timedelta(days=max_age_days):
+            return 0
+        blockers = list(
+            BlockUser.objects.filter(blocked_id=previous_owner.id, block_new_accounts=True)
+            .values_list("blocker_id", flat=True)
+        )
+        created_count = 0
+        for blocker_id in blockers:
+            if blocker_id == new_user.id:
+                continue
+            _, created = BlockUser.objects.get_or_create(
+                blocker_id=blocker_id, blocked_id=new_user.id, defaults={"block_new_accounts": True},
+            )
+            created_count += int(created)
+        return created_count
+    except Exception:
+        logger.exception("block_new_accounts_of failed (%s -> %s)", getattr(previous_owner, "id", None), getattr(new_user, "id", None))
+        return 0
+
+
+def push_for_row(notification):
+    """Rich push for a saved core.Notification row (prefs / muted types / quiet
+    hours are honoured inside). Never raises; None is a no-op."""
+    if notification is None:
+        return
+    try:
+        from message.push_utils import send_push_for_notification
+
+        send_push_for_notification(notification)
+    except Exception:
+        logger.exception("follow push failed (notification=%s)", getattr(notification, "id", None))
+
+
+def _notify(recipient, notif_type, title, message="", *, actor=None, data=None, push=False):
     """Fire-and-forget in-app notification for a Follow event.
 
     `recipient` / `actor` may be User instances or raw ids — both pass
@@ -40,7 +190,7 @@ def _notify(recipient, notif_type, title, message="", *, actor=None, data=None):
     try:
         from core.services import create_notification
 
-        return create_notification(
+        row = create_notification(
             recipient,
             notif_type,
             title,
@@ -48,6 +198,9 @@ def _notify(recipient, notif_type, title, message="", *, actor=None, data=None):
             data=data or {},
             actor=actor,
         )
+        if push:
+            push_for_row(row)
+        return row
     except Exception:
         logger.exception("follow notification failed (recipient=%s, type=%s)", recipient, notif_type)
         return None

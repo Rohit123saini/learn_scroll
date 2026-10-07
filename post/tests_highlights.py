@@ -238,7 +238,8 @@ class HighlightListTests(APITestCase):
         self.assertEqual(res.data["count"], 2)
         self.assertEqual([r["title"] for r in res.data["results"]], ["B", "A"])
         self.assertEqual(set(res.data["results"][0]), {
-            "id", "title", "cover_url", "cover_story_id", "items_count", "created_at", "updated_at", "user",
+            "id", "title", "cover_url", "cover_story_id", "cover_x", "cover_y", "cover_zoom",
+            "items_count", "created_at", "updated_at", "user",
         })
 
     def test_public_profile_is_visible_to_followers_and_strangers(self):
@@ -489,6 +490,39 @@ class HighlightEditTests(APITestCase):
         self.assertEqual(res.data["cover_story_id"], str(self.a.id))
         self.h.refresh_from_db()
         self.assertIsNone(self.h.cover_item_id)
+
+    def test_cover_crop_is_saved_and_returned(self):
+        res = self._patch(cover_story_id=str(self.b.id), cover_x=-0.5, cover_y=0.25, cover_zoom=2)
+        self.assertEqual(res.status_code, 200, res.data)
+        self.assertEqual((res.data["cover_x"], res.data["cover_y"], res.data["cover_zoom"]), (-0.5, 0.25, 2.0))
+        self.client.force_authenticate(self.me)
+        row = self.client.get(reverse("highlight-list")).data["results"][0]
+        self.assertEqual((row["cover_x"], row["cover_y"], row["cover_zoom"]), (-0.5, 0.25, 2.0))
+
+    def test_crop_needs_an_explicit_cover(self):
+        res = self._patch(cover_zoom=2)
+        self.assertEqual((res.status_code, res.data["code"]), (400, "crop_needs_cover"))
+
+    def test_crop_values_are_range_checked(self):
+        self.assertEqual(self._patch(cover_story_id=str(self.b.id), cover_zoom=9).status_code, 400)
+        self.assertEqual(self._patch(cover_story_id=str(self.b.id), cover_x=1.5).status_code, 400)
+        res = self._patch(cover_story_id=str(self.b.id), cover_y="nan")
+        self.assertEqual(res.status_code, 400)
+
+    def test_changing_or_clearing_the_cover_resets_the_crop(self):
+        self._patch(cover_story_id=str(self.b.id), cover_zoom=2.5, cover_x=0.5)
+        res = self._patch(cover_story_id=str(self.a.id))
+        self.assertEqual((res.data["cover_x"], res.data["cover_zoom"]), (0.0, 1.0))
+        self._patch(cover_story_id=str(self.b.id), cover_zoom=2.0)
+        res = self._patch(cover_story_id=None)
+        self.assertEqual(res.data["cover_zoom"], 1.0)
+
+    def test_removing_the_cropped_cover_story_resets_the_crop(self):
+        self._patch(cover_story_id=str(self.b.id), cover_zoom=2.0)
+        res = self._patch(story_ids=[str(self.a.id), str(self.c.id)])
+        self.assertEqual(res.data["cover_zoom"], 1.0)
+        self.h.refresh_from_db()
+        self.assertEqual(self.h.cover_zoom, 1.0)
 
     def test_edit_bumps_updated_at(self):
         before = self.h.updated_at

@@ -337,3 +337,77 @@ def _teacher_verified_badge(sender, instance, raw=False, update_fields=None, **k
         return
     user_id = instance.pk
     _run_after_commit(lambda: award_badge(user_id, "teacher_verified"))
+
+
+# ======================================================================
+# BLOCK SYNC — user_profile.BlockUser  <->  message.BlockedUser
+# ======================================================================
+# Two tables hold "A blocked B":
+#   * user_profile.BlockUser  — written by `/profile/blocked-users/`, which is
+#     the ONLY endpoint the Flutter app calls (profile, settings AND chat).
+#   * message.BlockedUser     — read by chat enforcement (websocket consumer,
+#     send/schedule/poll views, user notes, message search).
+# Nothing connected them, so blocking from the app never actually stopped
+# chat delivery. These receivers keep the two tables identical in both
+# directions (get_or_create / filter().delete() make every handler idempotent,
+# so the two sides can't ping-pong forever).
+from django.db.models import Q as _Q
+
+
+def _chat_block_model():
+    from message.models import BlockedUser
+    return BlockedUser
+
+
+def _profile_block_model():
+    from .models import BlockUser
+    return BlockUser
+
+
+@receiver(post_save, sender="user_profile.BlockUser", dispatch_uid="block_sync_profile_save")
+def _mirror_profile_block_to_chat(sender, instance, created, **kwargs):
+    if not created:
+        return
+    from .models import Follow
+
+    from .block_live import on_block_changed
+
+    on_block_changed(instance.blocker_id, instance.blocked_id, True)
+    chat_row, was_created = _chat_block_model().all_objects.get_or_create(
+        blocker_id=instance.blocker_id, blocked_id=instance.blocked_id,
+    )
+    if not was_created and chat_row.is_deleted:  # soft-deleted leftover -> revive
+        chat_row.is_deleted = False
+        chat_row.save(update_fields=["is_deleted", "updated_at"])
+    # Blocking ends any follow in either direction no matter which API
+    # created the block (counters are fixed by the Follow post_delete receiver).
+    Follow.objects.filter(
+        _Q(follower_id=instance.blocker_id, following_id=instance.blocked_id)
+        | _Q(follower_id=instance.blocked_id, following_id=instance.blocker_id)
+    ).delete()
+
+
+@receiver(post_delete, sender="user_profile.BlockUser", dispatch_uid="block_sync_profile_delete")
+def _mirror_profile_unblock_to_chat(sender, instance, **kwargs):
+    from .block_live import on_block_changed
+
+    on_block_changed(instance.blocker_id, instance.blocked_id, False)
+    _chat_block_model().all_objects.filter(
+        blocker_id=instance.blocker_id, blocked_id=instance.blocked_id,
+    ).delete()
+
+
+@receiver(post_save, sender="message.BlockedUser", dispatch_uid="block_sync_chat_save")
+def _mirror_chat_block_to_profile(sender, instance, created, **kwargs):
+    if not created or instance.blocker_id == instance.blocked_id:
+        return
+    _profile_block_model().objects.get_or_create(
+        blocker_id=instance.blocker_id, blocked_id=instance.blocked_id,
+    )
+
+
+@receiver(post_delete, sender="message.BlockedUser", dispatch_uid="block_sync_chat_delete")
+def _mirror_chat_unblock_to_profile(sender, instance, **kwargs):
+    _profile_block_model().objects.filter(
+        blocker_id=instance.blocker_id, blocked_id=instance.blocked_id,
+    ).delete()

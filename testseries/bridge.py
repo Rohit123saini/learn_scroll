@@ -57,9 +57,17 @@ this file's `answer_query_on_series()` is the one exposed to it) —
 is NOT confirmed to exist. See the ⚠️ note on `answer_query_on_series()`
 below.
 """
-from django.db import transaction
+import importlib
+import logging
 
+from django.conf import settings
+from django.db import transaction
+from django.utils import timezone
+
+from . import policy
 from .models import Question, TestAttempt, TestSeries, _notify
+
+logger = logging.getLogger(__name__)
 
 
 def create_context_testseries(
@@ -96,6 +104,13 @@ def create_context_testseries(
     if source not in (TestSeries.Source.CAMPUS, TestSeries.Source.TUITIONCLASS):
         raise ValueError("create_context_testseries() is only for source='campus'/'tuitionclass'; "
                           "individual series go through TestSeriesViewSet.create() instead.")
+
+    # TASK 9.1 — a class / campus series is ALWAYS free, whatever the caller
+    # passed (TestSeries.save() would also force it; doing it here keeps the
+    # value the caller sees and the stored one identical).
+    is_paid, price_coins = policy.normalize_pricing(
+        source=source, is_paid=is_paid, price_coins=price_coins, strict=False
+    )
 
     with transaction.atomic():
         series = TestSeries.objects.create(
@@ -137,7 +152,93 @@ def create_context_testseries(
                 data={"series_id": str(series.id)},
             )
 
+    # TASK 9.2 — announce to the class (notice board + notification/push) once
+    # the series row is really committed. `roster_notified` stops a caller that
+    # already passed a roster (campus) from being notified a second time.
+    roster_notified = bool(roster)
+    transaction.on_commit(lambda: announce_series_published(series, roster_notified=roster_notified))
+
     return series
+
+
+# ---------------------------------------------------------------------------
+# TASK 9.2 — "a class / campus series was published": tell the context.
+#
+# Golden rule: `testseries` never imports `tuitionclass` / `campus`. Exactly like
+# access.py's TESTSERIES_CONTEXT_ACCESS, the owning app registers a function by
+# dotted path:
+#
+#     TESTSERIES_PUBLISH_HOOKS = {"classroom": "tuitionclass.bridge.on_testseries_published"}
+#
+# (that mapping is the default, settings can override/extend it). The hook gets
+# ONE argument — a plain dict (see `_announce_payload`) — and does the context's
+# own announcement: for a classroom a notice-board entry + bell/push for the
+# pass holders. A `context_type` with no hook (campus "section" today, it
+# notifies its roster in create_context_testseries) is simply not announced here.
+#
+# Exactly-once: `TestSeries.announced_at` is claimed with one conditional UPDATE
+# before the hook runs, so publishing twice, a retry, or two workers racing can
+# never announce the same series twice. If the hook raises, the claim is
+# released (and the failure logged) so a later publish/retry can try again; the
+# hook itself is idempotent for the notice board entry (unique source key).
+# ---------------------------------------------------------------------------
+DEFAULT_PUBLISH_HOOKS = {"classroom": "tuitionclass.bridge.on_testseries_published"}
+
+
+def _publish_hook_target(context_type):
+    mapping = getattr(settings, "TESTSERIES_PUBLISH_HOOKS", None) or {}
+    return mapping.get(context_type, DEFAULT_PUBLISH_HOOKS.get(context_type))
+
+
+def _load_callable(path: str):
+    module_path, _, func_name = path.rpartition(".")
+    return getattr(importlib.import_module(module_path), func_name)
+
+
+def _announce_payload(series, *, notify_roster: bool) -> dict:
+    return {
+        "series_id": str(series.id),
+        "context_type": series.context_type,
+        "context_id": series.context_id,  # UUID, as stored
+        "creator_id": series.creator_id,
+        "title": series.title,
+        "description": series.description or "",
+        "delivery_mode": series.delivery_mode,
+        "starts_at": series.starts_at,
+        "ends_at": series.ends_at,
+        "duration_minutes": series.duration_minutes,
+        "total_marks": series.total_marks,
+        "notify_roster": notify_roster,
+    }
+
+
+def announce_series_published(series, *, roster_notified: bool = False) -> bool:
+    """Announce a PUBLISHED campus / tuition-class series to its context, at most
+    once per series. Returns True only when this call did the announcing.
+    Never raises (it runs after the publish already succeeded)."""
+    try:
+        if not policy.is_always_free(series.source) or series.status != TestSeries.Status.PUBLISHED:
+            return False
+        target = _publish_hook_target(series.context_type)
+        if not target:
+            return False
+
+        claimed = TestSeries.objects.filter(
+            pk=series.pk, announced_at__isnull=True, status=TestSeries.Status.PUBLISHED
+        ).update(announced_at=timezone.now())
+        if not claimed:
+            return False  # already announced (or unpublished meanwhile)
+
+        try:
+            _load_callable(target)(_announce_payload(series, notify_roster=not roster_notified))
+        except Exception:
+            logger.exception("testseries publish hook %s failed for series %s", target, series.pk)
+            TestSeries.objects.filter(pk=series.pk).update(announced_at=None)  # allow a retry
+            return False
+        return True
+    except Exception:  # pragma: no cover - last-resort guard, publish must never fail on this
+        logger.exception("announce_series_published crashed for series %s", getattr(series, "pk", None))
+        return False
 
 
 def get_attempts_for_context(*, context_type: str, context_id):

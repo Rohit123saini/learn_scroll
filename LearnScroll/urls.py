@@ -31,6 +31,7 @@ from drf_yasg import openapi
 from django.conf import settings
 from django.urls import re_path
 from post.views import serve_media_with_range
+from common import web_links  # TASK 11 — https share links / QR
 from drf_spectacular.views import (
     SpectacularAPIView,
     SpectacularSwaggerView,
@@ -48,6 +49,12 @@ schema_view = get_schema_view(
 
 urlpatterns = [
     path("admin/", admin.site.urls),
+    # TASK 11 — verified app links + web fallback for https share links / QR codes.
+    path(".well-known/assetlinks.json", web_links.assetlinks),
+    path(".well-known/apple-app-site-association", web_links.apple_app_site_association),
+    path("apple-app-site-association", web_links.apple_app_site_association),
+    path("u/<str:username>/", web_links.profile_landing),
+    path("parent-link", web_links.parent_link_landing),
     path("login/", include("login.urls")),
     path("profile/", include("user_profile.urls")),
     path("post/",include("post.urls")),

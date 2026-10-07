@@ -31,6 +31,7 @@ Highlight stories are READ-ONLY for viewers: they are past their 24 h, so the
 `view` / `react` / `reply` / poll-vote / question-answer endpoints correctly
 answer 404 for them. The client must not call those from a highlight.
 """
+import math
 import re
 
 from django.conf import settings
@@ -46,6 +47,10 @@ DEFAULT_TITLE = "Highlights"
 MAX_TITLE_LENGTH = 30
 DEFAULT_MAX_HIGHLIGHTS = 50      # per user
 DEFAULT_MAX_ITEMS = 100          # stories per highlight
+
+# Cover crop: focus point (x, y) in [-1, 1] + zoom. (0, 0, 1) = uncropped.
+MIN_COVER_ZOOM, MAX_COVER_ZOOM = 1.0, 3.0
+DEFAULT_CROP = {"cover_x": 0.0, "cover_y": 0.0, "cover_zoom": 1.0}
 
 _CONTROL_CHARS = re.compile(r"[\x00-\x1f\x7f]")
 _SPACES = re.compile(r"\s+")
@@ -82,6 +87,21 @@ def clean_title(raw, *, required):
             f"Title can be at most {MAX_TITLE_LENGTH} characters.", code="title_too_long", field="title",
         )
     return text
+
+
+def validate_crop_value(name, value):
+    """Range + finiteness check for one crop field (DRF's min/max let NaN through)."""
+    low, high = (MIN_COVER_ZOOM, MAX_COVER_ZOOM) if name == "cover_zoom" else (-1.0, 1.0)
+    if value is None or not math.isfinite(value) or not (low <= value <= high):
+        raise HighlightError(f"{name} must be between {low:g} and {high:g}.", code="crop_invalid", field=name)
+    return float(value)
+
+
+def reset_cover_crop(highlight):
+    """Back to uncropped (in memory; the caller saves)."""
+    highlight.cover_x = DEFAULT_CROP["cover_x"]
+    highlight.cover_y = DEFAULT_CROP["cover_y"]
+    highlight.cover_zoom = DEFAULT_CROP["cover_zoom"]
 
 
 # --------------------------------------------------------------------------
@@ -156,11 +176,26 @@ def pick_cover_item(highlight, visible_items):
     return None
 
 
+def cover_crop_for(highlight, visible_items, cover):
+    """The crop applies only while the shown cover IS the explicitly chosen one
+    (a hidden / removed / automatic cover is shown uncropped)."""
+    if cover is not None and highlight.cover_item_id:
+        for item_id, story in visible_items:
+            if item_id == highlight.cover_item_id and story.pk == cover.pk:
+                return {
+                    "cover_x": highlight.cover_x,
+                    "cover_y": highlight.cover_y,
+                    "cover_zoom": highlight.cover_zoom,
+                }
+    return dict(DEFAULT_CROP)
+
+
 def build_highlight_rows(highlights, viewer, request, *, hide_empty):
     """One dict per highlight: {id, title, cover_url, cover_story_id,
-    items_count, created_at, updated_at, user}. `items_count` counts only the
-    items `viewer` may see. With `hide_empty`, highlights with no visible item
-    are dropped (what everybody but the owner gets)."""
+    cover_x, cover_y, cover_zoom, items_count, created_at, updated_at, user}.
+    `items_count` counts only the items `viewer` may see. With `hide_empty`,
+    highlights with no visible item are dropped (what everybody but the owner
+    gets)."""
     highlights = list(highlights)
     if not highlights:
         return []
@@ -186,6 +221,7 @@ def build_highlight_rows(highlights, viewer, request, *, hide_empty):
             "title": h.title,
             "cover_url": media_url(cover, request) if cover else None,
             "cover_story_id": str(cover.id) if cover else None,
+            **cover_crop_for(h, visible, cover),
             "items_count": len(visible),
             "created_at": h.created_at,
             "updated_at": h.updated_at,

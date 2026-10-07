@@ -70,13 +70,29 @@ class QuestionSerializer(serializers.ModelSerializer):
             question_type=self.instance.question_type,
             options=self.instance.options,
             correct_answer=self.instance.correct_answer,
+            marks=self.instance.marks,
+            negative_marks=self.instance.negative_marks,
         )
         for key, value in attrs.items():
             setattr(temp, key, value)
+        if "question_type" in attrs and attrs["question_type"] != getattr(self.instance, "question_type", None):
+            # Changing type on update: the old key/options make no sense for
+            # the new type, so require the client to send fresh ones (or fall
+            # back to the type's empty defaults and let clean() complain).
+            if "options" not in attrs:
+                temp.options = []
+            if "correct_answer" not in attrs:
+                temp.correct_answer = {}
         try:
             temp.clean()
         except DjangoValidationError as exc:
             raise serializers.ValidationError(exc.message_dict if hasattr(exc, "message_dict") else exc.messages)
+        # Persist the normalised shape (Task 8.1): e.g. numeric tolerance
+        # defaulted, fill_blank answers trimmed, options forced empty for
+        # true_false / fill_blank / numeric.
+        if "question_type" in attrs or "options" in attrs or "correct_answer" in attrs:
+            attrs["options"] = temp.options
+            attrs["correct_answer"] = temp.correct_answer
         return attrs
 
 

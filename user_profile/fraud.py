@@ -289,3 +289,57 @@ def check_earn_rate_limit(user, transaction_type):
         return False
 
     return True
+
+
+# --- Referral commission abuse (TASK 12 / 12.4) ------------------------------
+
+def check_referral_abuse(referrer, referee, *, coins=0):
+    """
+    (ok, reason) — may `referrer` be attributed / paid for something
+    `referee` did? Pure read-only, same contract as `is_withdrawal_eligible`.
+
+    `reason` is a short machine string (stored on a blocked
+    `ReferralCommission.block_reason`), empty when ok:
+
+      missing_party        referrer or referee couldn't be resolved
+      self_referral        same account on both sides
+      referrer_inactive    referrer account is disabled
+      circular_referral    the referee already referred the referrer (A<->B
+                           pairs trading commissions back and forth)
+      daily_count_cap      referrer already got REFERRAL_MAX_COMMISSIONS_PER_DAY
+                           paid commissions in the last 24h
+      daily_coin_cap       paying `coins` more would pass
+                           REFERRAL_MAX_COMMISSION_COINS_PER_DAY in the last 24h
+
+    Pass `coins=0` for attribution-time checks (no money moves yet — the
+    velocity caps are only meaningful when paying). Lazy-imports the
+    tuitionclass referral tables because that app owns them; this module only
+    READS them and never writes.
+    """
+    if referrer is None or referee is None:
+        return False, "missing_party"
+    if referrer.pk == referee.pk:
+        return False, "self_referral"
+    if not getattr(referrer, "is_active", True):
+        return False, "referrer_inactive"
+
+    from tuitionclass.models import Referral, ReferralAttribution, ReferralCommission
+
+    if (
+        ReferralAttribution.objects.filter(referrer=referee, referee=referrer).exists()
+        or Referral.objects.filter(referrer=referee, referred=referrer).exists()
+    ):
+        return False, "circular_referral"
+
+    if coins:
+        since = timezone.now() - timedelta(hours=24)
+        recent = ReferralCommission.objects.filter(
+            referrer=referrer, status=ReferralCommission.Status.PAID, created_at__gte=since
+        )
+        if recent.count() >= getattr(settings, "REFERRAL_MAX_COMMISSIONS_PER_DAY", 30):
+            return False, "daily_count_cap"
+        paid_today = recent.aggregate(total=Sum("commission_coins"))["total"] or 0
+        if paid_today + int(coins) > getattr(settings, "REFERRAL_MAX_COMMISSION_COINS_PER_DAY", 2000):
+            return False, "daily_coin_cap"
+
+    return True, ""

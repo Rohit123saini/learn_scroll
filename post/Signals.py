@@ -313,3 +313,45 @@ def _connect_block_signal():
 
 
 _connect_block_signal()
+
+
+# ----------------------------------------------------------------------
+# TASK 1.1-BE — guarantee width/height/duration_seconds on every new
+# PostMedia. One receiver sees every creation path (multipart create AND
+# chunked-upload complete AND anything added later).
+#
+# 1. In-request, best effort: if the file is on local disk (FileSystemStorage)
+#    probe it right now — Pillow reads an image header and ffprobe reads a
+#    video's container header, both milliseconds — so the create response
+#    already carries the real size. Never downloads from S3 here, never raises.
+# 2. If anything is still blank after that (remote storage, ffprobe missing,
+#    odd file), enqueue `post.tasks.probe_media_metadata` AFTER COMMIT (same
+#    race as the thumbnail task above) — wrapped so a broker outage never
+#    fails an upload. `manage.py backfill_media_dimensions` catches up the rest.
+# ----------------------------------------------------------------------
+@receiver(post_save, sender=PostMedia)
+def fill_media_metadata_on_create(sender, instance, created, raw=False, **kwargs):
+    from .services import PROBE_MEDIA_TYPES, fill_media_metadata, media_metadata_missing
+
+    if raw or not created or instance.media_type not in PROBE_MEDIA_TYPES:
+        return
+    try:
+        fill_media_metadata(instance, allow_download=False)
+    except Exception:
+        logger.exception("fill_media_metadata_on_create failed for PostMedia %s", instance.pk)
+    if not media_metadata_missing(instance):
+        return
+
+    media_id = str(instance.id)
+
+    def _enqueue():
+        try:
+            from .tasks import probe_media_metadata
+            probe_media_metadata.delay(media_id)
+        except Exception:
+            logger.exception(
+                "could not enqueue probe_media_metadata for PostMedia %s "
+                "(run backfill_media_dimensions to catch up)", media_id,
+            )
+
+    transaction.on_commit(_enqueue)

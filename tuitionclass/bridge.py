@@ -207,50 +207,32 @@ def create_testseries(
     has no subject-shaped slot at all, and `tuitionclass` has no `Subject`
     model to attach one from in the first place.
 
-    `is_paid`/`price_coins`: passed straight through as the teacher's own
-    choice at creation time — UNLIKE `campus.bridge.create_testseries()`,
-    there is no `testseries_paid_allowed`-equivalent flag anywhere in
-    `tuitionclass` to force these to `False`/`0` against (confirmed absent —
-    not just unwired), so no force-reset happens here. If `tuitionclass` ever
-    wants a per-classroom or per-teacher paid/unpaid gate the way campus
-    has one at the `Campus` level, that's a new field + a new check here,
-    not something this function can silently infer today.
+    `is_paid`/`price_coins`: TASK 9.1 — a class test is ALWAYS free. Whatever
+    the caller passes is ignored and forced to `False`/`0` here (and again in
+    `testseries.bridge.create_context_testseries()` and `TestSeries.save()`,
+    all driven by `testseries.policy.ALWAYS_FREE_SOURCES`). The parameters stay
+    in the signature only so existing callers keep working. A class already
+    sells access through its pass; the tests inside it are never charged twice.
 
     `questions`: passed straight through, uninspected, to
     `create_context_testseries()` — shape/validation is entirely
     `testseries`'s own `Question.full_clean()` contract (same as campus's
     version documents).
 
-    Roster: same `PassPurchase(status=SUCCESS, is_active=True,
-    expires_at__gt=now)` source `create_assigments()` above uses — but
-    unlike that function's `{"user_id": ...}` dict shape,
-    `create_context_testseries()`'s own `roster` param wants an iterable
-    of real `login.User` instances (used only to fan out the
-    `TESTSERIES_POSTED` notification — `testseries` fires it itself once
-    handed this roster, `tuitionclass` doesn't and can't fire it a second
-    time). Resolved into actual `User` rows here, not left as bare ids,
-    for exactly that reason — see this module's docstring for why the two
-    bridges' roster shapes genuinely differ rather than one being a typo.
+    Roster / announcement (TASK 9.2): this function no longer hands a roster to
+    `create_context_testseries()`. Once the series is committed, `testseries`
+    calls back into `on_testseries_published()` below (registered through
+    `settings.TESTSERIES_PUBLISH_HOOKS`), which posts the notice-board entry and
+    notifies the pass holders — one place, exactly once, for BOTH this path and
+    the viewset's `publish` action.
 
     Returns the created `testseries.models.TestSeries` instance.
     """
-    from login.models import User
     from testseries.bridge import create_context_testseries
     from testseries.models import TestSeries
 
-    from .models import PassPurchase
-
-    student_ids = (
-        PassPurchase.objects.filter(
-            class_pass__classroom=classroom,
-            status=PassPurchase.Status.SUCCESS,
-            is_active=True,
-            expires_at__gt=timezone.now(),
-        )
-        .values_list("student_id", flat=True)
-        .distinct()
-    )
-    roster = list(User.objects.filter(id__in=student_ids))
+    # TASK 9.1: always free for students, whatever the caller sent.
+    is_paid, price_coins = False, 0
 
     return create_context_testseries(
         source=TestSeries.Source.TUITIONCLASS,
@@ -264,8 +246,137 @@ def create_testseries(
         duration_minutes=duration_minutes,
         attempts_allowed=attempts_allowed,
         questions=questions,
-        roster=roster,
+        roster=None,  # TASK 9.2: announced by on_testseries_published() instead
     )
+
+
+# ---------------------------------------------------------------------------
+# TASK 9.2 — "a test was published in this class" -> notice board + notification.
+#
+# Called by `testseries.bridge.announce_series_published()` (never directly by
+# tuitionclass views) through `settings.TESTSERIES_PUBLISH_HOOKS["classroom"]`,
+# at most once per series (`TestSeries.announced_at` is claimed first). The hook
+# receives a plain dict, never a `TestSeries` — tuitionclass still imports no
+# testseries model for this.
+#
+# Idempotent on its own as well: the notice is created with
+# get_or_create(classroom, source_type="testseries", source_id=<series id>),
+# backed by a partial UNIQUE constraint, and the notification / push only go out
+# when THIS call created the notice — so a retry after a half-failed run can
+# never produce a second notice or a second round of notifications.
+# ---------------------------------------------------------------------------
+NOTICE_SOURCE_TESTSERIES = "testseries"
+
+
+def _classroom_from_context_id(context_id):
+    """`TestSeries.context_id` is a UUID; an integer classroom pk is stored as
+    `uuid.UUID(int=pk)`, so `.int` is the pk again."""
+    import uuid
+
+    from .models import Classroom
+
+    try:
+        pk = context_id.int if isinstance(context_id, uuid.UUID) else int(context_id)
+    except (TypeError, ValueError, AttributeError):
+        return None
+    return Classroom.objects.filter(pk=pk).first()
+
+
+def _testseries_notice_message(payload) -> str:
+    from django.utils import timezone as dj_tz
+
+    lines = []
+    description = (payload.get("description") or "").strip()
+    if description:
+        lines.append(description[:300])
+    starts_at, ends_at = payload.get("starts_at"), payload.get("ends_at")
+    fmt = "%d %b %Y, %I:%M %p"
+    if starts_at:
+        lines.append(f"Starts: {dj_tz.localtime(starts_at).strftime(fmt)}")
+    if ends_at:
+        lines.append(f"Ends: {dj_tz.localtime(ends_at).strftime(fmt)}")
+    facts = []
+    if payload.get("duration_minutes"):
+        facts.append(f"{payload['duration_minutes']} min")
+    if payload.get("total_marks"):
+        facts.append(f"{payload['total_marks']} marks")
+    if facts:
+        lines.append("Duration / marks: " + " · ".join(facts))
+    lines.append("Free for everyone in this class. Open the Tests tab to start.")
+    return "\n".join(lines)
+
+
+def on_testseries_published(payload):
+    """Post the notice-board entry for a newly published class test and notify
+    the class. See the section comment above for the contract."""
+    import uuid
+
+    from django.db import IntegrityError, transaction
+
+    from . import notifications
+    from .models import Notice, PassPurchase
+
+    classroom = _classroom_from_context_id(payload.get("context_id"))
+    if classroom is None:
+        logger.warning("on_testseries_published: classroom for context %r not found", payload.get("context_id"))
+        return None
+
+    series_id = uuid.UUID(str(payload["series_id"]))
+    title = f"New test: {payload['title']}"[:150]
+    message = _testseries_notice_message(payload)
+    defaults = {
+        "posted_by_id": payload["creator_id"],
+        "title": title,
+        "message": message,
+        "priority": Notice.Priority.NORMAL,
+        # The notice stops being relevant when the test window closes.
+        "expires_at": payload.get("ends_at"),
+    }
+    try:
+        with transaction.atomic():
+            notice, created = Notice.objects.get_or_create(
+                classroom=classroom, source_type=NOTICE_SOURCE_TESTSERIES, source_id=series_id, defaults=defaults,
+            )
+    except IntegrityError:  # lost a race with a concurrent announce: the winner's row is the notice
+        notice = Notice.objects.get(classroom=classroom, source_type=NOTICE_SOURCE_TESTSERIES, source_id=series_id)
+        created = False
+
+    if not created or not payload.get("notify_roster", True):
+        return notice
+
+    student_ids = list(
+        PassPurchase.objects.filter(
+            class_pass__classroom=classroom,
+            status=PassPurchase.Status.SUCCESS,
+            is_active=True,
+            expires_at__gt=timezone.now(),
+        )
+        .exclude(student_id=payload["creator_id"])
+        .values_list("student_id", flat=True)
+        .distinct()
+    )
+    if not student_ids:
+        return notice
+
+    body = f"{classroom.title}: {payload['title']}"[:200]
+    notifications.notify_testseries_published(
+        classroom=classroom, series_id=series_id, notice_id=notice.id,
+        title="New test in your class", body=body, user_ids=student_ids,
+    )
+    # Push is queued (one task for the whole class). A broker problem must never
+    # fail the publish that already succeeded.
+    try:
+        from .tasks import notify_testseries_published_push
+
+        notify_testseries_published_push.delay(
+            student_ids, "New test in your class", body,
+            notifications.testseries_notification_data(
+                classroom_id=classroom.id, series_id=series_id, notice_id=notice.id,
+            ),
+        )
+    except Exception:
+        logger.exception("could not queue testseries push for classroom %s", classroom.pk)
+    return notice
 
 
 def user_accessible_testseries_context_ids(*, user, context_type):
@@ -293,3 +404,105 @@ def user_accessible_testseries_context_ids(*, user, context_type):
         .values_list("class_pass__classroom_id", flat=True)
     )
     return {pk if isinstance(pk, uuid.UUID) else uuid.UUID(int=int(pk)) for pk in pks}
+
+
+# ---------------------------------------------------------------------------
+# TASK 12 — Refer & Earn hooks consumed by `testseries` (see
+# settings.TESTSERIES_REFERRAL_HOOKS and testseries/access.py). All keyword-
+# only, all return plain values (ids / ints / str) — no model instances cross
+# the app boundary.
+# ---------------------------------------------------------------------------
+def referral_code_for_user(*, user):
+    """The user's permanent random referral code."""
+    from .models import referral_code_for_user as _code
+
+    return _code(user.id)
+
+
+def referral_resolve_referrer(*, buyer):
+    """Id of the user who should earn commission on `buyer`'s purchase right
+    now, or None. Requires an ACTIVE (unexpired) attribution and a clean
+    attribution-time fraud check (self / circular / inactive referrer)."""
+    from user_profile.fraud import check_referral_abuse
+
+    from .models import ReferralAttribution
+
+    attribution = ReferralAttribution.active_for(buyer)
+    if attribution is None:
+        return None
+    ok, _reason = check_referral_abuse(attribution.referrer, buyer, coins=0)
+    return attribution.referrer_id if ok else None
+
+
+def referral_pay_testseries_commission(
+    *, referrer_id, referee_id, purchase_id, series_id, gross_coins, percent, coins
+):
+    """Credit `coins` to the referrer for a released test-series purchase and
+    write the ReferralCommission ledger row. Returns coins paid (0 when
+    blocked). Idempotent on `testseries_referral:<purchase_id>`; velocity /
+    circularity rules re-checked HERE (payout time), not just at attribution
+    time, because the escrow can sit for days."""
+    from django.contrib.auth import get_user_model
+    from django.db import IntegrityError, transaction
+
+    from core.models import Notification
+    from core.services import create_notification
+    from user_profile.fraud import check_referral_abuse
+    from user_profile.models import CoinLedger
+
+    from .models import ReferralAttribution, ReferralCommission
+
+    reference = f"testseries_referral:{purchase_id}"
+    existing = ReferralCommission.objects.filter(reference=reference).first()
+    if existing is not None:
+        return existing.commission_coins if existing.status == ReferralCommission.Status.PAID else 0
+
+    User = get_user_model()
+    referrer = User.objects.filter(pk=referrer_id).first()
+    referee = User.objects.filter(pk=referee_id).first()
+    base = {
+        "referrer_id": referrer_id,
+        "referee_id": referee_id,
+        "kind": ReferralCommission.Kind.TESTSERIES,
+        "source_id": str(series_id),
+        "gross_coins": gross_coins,
+        "percent": percent,
+        "commission_coins": coins,
+    }
+
+    ok, reason = check_referral_abuse(referrer, referee, coins=coins)
+    if not ok:
+        try:
+            ReferralCommission.objects.create(
+                reference=reference, status=ReferralCommission.Status.BLOCKED, block_reason=reason, **base
+            )
+        except IntegrityError:
+            pass
+        return 0
+
+    try:
+        with transaction.atomic():
+            CoinLedger.objects.record_transaction(
+                user=referrer,
+                transaction_type=CoinLedger.TransactionType.REFERRAL_COMMISSION,
+                amount=coins,
+                reference=reference,
+            )
+            ReferralCommission.objects.create(reference=reference, status=ReferralCommission.Status.PAID, **base)
+    except IntegrityError:
+        # Concurrent release already paid it — report what that row says.
+        row = ReferralCommission.objects.filter(reference=reference).first()
+        return row.commission_coins if row and row.status == ReferralCommission.Status.PAID else 0
+
+    ReferralAttribution.mark_converted(referee)
+    try:
+        create_notification(
+            recipient=referrer,
+            notif_type=Notification.NotifType.GENERIC,
+            title="Referral commission earned",
+            message=f"You earned {coins} coins because someone you referred bought a test series.",
+            data={"kind": "referral_commission", "coins": coins},
+        )
+    except Exception:  # noqa: BLE001 — a notification must never undo a payout
+        pass
+    return coins

@@ -582,6 +582,7 @@ NOTIFICATION_BATCH_WINDOWS = {
     "post_commented": int(os.environ.get("NOTIF_BATCH_POST_COMMENTED_SECONDS", 120)),
     "new_follower": int(os.environ.get("NOTIF_BATCH_NEW_FOLLOWER_SECONDS", 6 * 3600)),
     "story_reaction": int(os.environ.get("NOTIF_BATCH_STORY_REACTION_SECONDS", 300)),
+    "post_reposted": int(os.environ.get("NOTIF_BATCH_POST_REPOSTED_SECONDS", 120)),
 }
 NOTIFICATION_BATCH_MAX_AGE = {
     "new_follower": int(os.environ.get("NOTIF_BATCH_NEW_FOLLOWER_MAX_AGE_SECONDS", 24 * 3600)),
@@ -755,6 +756,14 @@ REST_FRAMEWORK = {
         # unrelated endpoints eat each other's quota.
         "profile_coin_purchase": "10/min",
         "profile_coin_purchase_daily": "100/day",
+        # Block system (user_profile/throttles.py): POST /blocked-users/ and
+        # DELETE /blocked-users/<id>/ share these two buckets per user;
+        # POST /reports/ has its own burst limit (plus a 30/hour cap in
+        # services.file_report). Without these rates DRF would raise
+        # ImproperlyConfigured on the first request (see the notes above).
+        "profile_block_burst": "20/min",
+        "profile_block_daily": "200/day",
+        "profile_report_burst": "10/min",
         # P14-BE — user_profile ActivityView (aggregates 7 days + two post lists,
         # so a modest rate) and ActivityHeartbeatView (client beats every
         # ~30-60 s while foregrounded; 12/min leaves headroom for 2 devices).
@@ -797,6 +806,7 @@ REST_FRAMEWORK = {
         # documented as each throttle class's intended rate in throttles.py
         # / views_ai.py.
         # ---------------------------------------------------------------
+        "referral_attribute": "20/min",
         "message_send": "60/min",
         "call_initiate": "10/min",
         "group_create": "5/min",
@@ -949,6 +959,15 @@ SIMPLE_JWT = {
 # local/dev still works if the env var isn't set).
 PARENT_INVITE_LINK_BASE = os.getenv("PARENT_INVITE_LINK_BASE", "https://learnscroll.app/parent-link")
 
+# TASK 11 — https share links / QR (see common/web_links.py + TASK_11_NATIVE_SETUP.md).
+# The Flutter side reads its host from --dart-define=WEB_HOST (default learnscroll.app);
+# keep it equal to the host of PARENT_INVITE_LINK_BASE above.
+ANDROID_APP_PACKAGE = os.getenv("ANDROID_APP_PACKAGE", "")  # e.g. com.learnscroll.app
+ANDROID_SHA256_CERT_FINGERPRINTS = os.getenv("ANDROID_SHA256_CERT_FINGERPRINTS", "")  # comma-separated
+IOS_APP_ID = os.getenv("IOS_APP_ID", "")  # "<TEAMID>.<bundle id>"
+PLAY_STORE_URL = os.getenv("PLAY_STORE_URL", "")
+APP_STORE_URL = os.getenv("APP_STORE_URL", "")
+
 AUTH_USER_MODEL = "login.User"
 # NOTE (fix — security): CORS_ALLOW_ALL_ORIGINS=True means ANY website can
 # call this API using a logged-in user's browser session/cookies (relevant
@@ -1028,6 +1047,38 @@ APP_WEB_BASE_URL = os.environ.get("APP_WEB_BASE_URL", "https://app.example.com")
 # one IS a platform cost, so it defaults conservatively lower than the
 # signup bonus above.
 CLASSROOM_REFERRAL_JOIN_BONUS_COINS = int(os.environ.get("CLASSROOM_REFERRAL_JOIN_BONUS_COINS", 20))
+
+# ---------------------------------------------------------------------------
+# TASK 12 — Refer & Earn commission (attribution + ledger + anti-fraud).
+#
+# REFERRAL_ATTRIBUTION_DAYS: a referee who opened a referral link is
+#   "owned" by that referrer (first touch wins) for this many days. Any
+#   eligible purchase inside the window earns the referrer a commission;
+#   after it, the attribution is dead and a new link can claim the user.
+# REFERRAL_ACCEPT_LEGACY_CODES: old codes were "R" + hex(user_id * 7919) —
+#   guessable. New codes are random ("L" + 8 chars, stored in
+#   tuitionclass.ReferralCode). Keep True until links already shared in the
+#   wild have aged out, then flip to 0 to stop accepting the old format.
+# TESTSERIES_REFERRAL_COMMISSION_PERCENT: cut of an INDIVIDUAL, PAID series'
+#   price paid to the referrer, funded out of the creator's payout (never the
+#   platform's). 0 switches test-series commission off. Hard-capped by
+#   TESTSERIES_REFERRAL_MAX_PERCENT so a typo can't hand out the whole price.
+# REFERRAL_MAX_COMMISSIONS_PER_DAY / _COINS_PER_DAY: velocity caps per
+#   referrer over a rolling 24h (anti-farming; see user_profile/fraud.py).
+# TESTSERIES_REFERRAL_HOOKS: dotted paths testseries/access.py loads (golden
+#   rule: testseries never imports tuitionclass).
+# ---------------------------------------------------------------------------
+REFERRAL_ATTRIBUTION_DAYS = int(os.environ.get("REFERRAL_ATTRIBUTION_DAYS", 30))
+REFERRAL_ACCEPT_LEGACY_CODES = os.environ.get("REFERRAL_ACCEPT_LEGACY_CODES", "1") == "1"
+TESTSERIES_REFERRAL_COMMISSION_PERCENT = os.environ.get("TESTSERIES_REFERRAL_COMMISSION_PERCENT", "10")
+TESTSERIES_REFERRAL_MAX_PERCENT = os.environ.get("TESTSERIES_REFERRAL_MAX_PERCENT", "50")
+REFERRAL_MAX_COMMISSIONS_PER_DAY = int(os.environ.get("REFERRAL_MAX_COMMISSIONS_PER_DAY", 30))
+REFERRAL_MAX_COMMISSION_COINS_PER_DAY = int(os.environ.get("REFERRAL_MAX_COMMISSION_COINS_PER_DAY", 2000))
+TESTSERIES_REFERRAL_HOOKS = {
+    "code_for_user": "tuitionclass.bridge.referral_code_for_user",
+    "resolve_referrer": "tuitionclass.bridge.referral_resolve_referrer",
+    "pay_commission": "tuitionclass.bridge.referral_pay_testseries_commission",
+}
 
 # ---------------------------------------------------------------------------
 # F-3: campus engagement-reward bonuses (see campus/tasks.py's
@@ -1686,9 +1737,11 @@ CONFIG_DRIFT_URL_SKIP = set()          # {"app_label.ViewClassName", ...}
 #   mode "required"  -> must be paid   "optional" -> creator chooses
 #         "forbidden" -> always free
 # Product rule: a test series a user creates on their own (individual) is
-# PAID; a campus one is FREE; a tuition-class one is FREE by default and the
-# teacher may make it paid. Flip a single mode to change that — e.g.
-# TESTSERIES_INDIVIDUAL_PRICING=optional lets individuals publish free tests.
+# PAID; a campus one AND a tuition-class one are always FREE (TASK 9.1 — this is
+# hard-coded in testseries/policy.py::ALWAYS_FREE_SOURCES, so the "campus" /
+# "tuitionclass" entries below cannot make them paid). Flip the individual mode
+# to change that one — e.g. TESTSERIES_INDIVIDUAL_PRICING=optional lets
+# individuals publish free tests.
 TESTSERIES_PRICING_POLICY = {
     "individual": {
         "mode": os.getenv("TESTSERIES_INDIVIDUAL_PRICING", "required"),
@@ -1696,11 +1749,8 @@ TESTSERIES_PRICING_POLICY = {
         "max_coins": int(os.getenv("TESTSERIES_MAX_PRICE_COINS", "100000")),
     },
     "campus": {"mode": "forbidden"},
-    "tuitionclass": {
-        "mode": os.getenv("TESTSERIES_TUITIONCLASS_PRICING", "optional"),
-        "min_coins": int(os.getenv("TESTSERIES_MIN_PRICE_COINS", "1")),
-        "max_coins": int(os.getenv("TESTSERIES_MAX_PRICE_COINS", "100000")),
-    },
+    # TASK 9.1: always free. (TESTSERIES_TUITIONCLASS_PRICING is no longer read.)
+    "tuitionclass": {"mode": "forbidden"},
 }
 
 # Server-side timer. A submit arriving up to this many seconds after the
@@ -1718,6 +1768,15 @@ TESTSERIES_ENFORCE_CONTEXT_ACCESS = os.getenv("TESTSERIES_ENFORCE_CONTEXT_ACCESS
 TESTSERIES_CONTEXT_ACCESS = {
     "section": "campus.bridge.user_accessible_testseries_context_ids",
     "classroom": "tuitionclass.bridge.user_accessible_testseries_context_ids",
+}
+
+# TASK 9.2 — "a class / campus series was published": the owning app announces it
+# (notice board entry + notification/push), exactly once per series. Same dotted-
+# path pattern as TESTSERIES_CONTEXT_ACCESS above (testseries never imports the
+# other apps). Hook signature: fn(payload: dict). A context_type with no entry is
+# not announced here (campus "section" notifies its roster at creation instead).
+TESTSERIES_PUBLISH_HOOKS = {
+    "classroom": "tuitionclass.bridge.on_testseries_published",
 }
 
 # Public share link, e.g. "https://learnscroll.app/test/{slug}". Empty = the API
@@ -1900,6 +1959,12 @@ FEED_SNAPSHOT = {
 #   following_bonus       extra points for authors the caller follows (default 10)
 #   pool_cap              max ranked ids per scrolling session (default 300)
 #   page_size / max_page_size   default 10 / 30 (?page_size=)
+#   fallback              never-empty: when the unseen pool is smaller than min_pool the media
+#                         rules are loosened in tiers (any aspect -> any duration -> any video
+#                         row) and appended after the better reels; safety rules never loosen
+#                         (env REELS_FALLBACK=0/1, default on)
+#   min_pool              pool size below which the next tier is added (env REELS_MIN_POOL, default 10)
+# Debug an empty feed: python manage.py reels_diagnose --user <name>
 # =====================================================================
 FEED_REELS = {
     "enabled": os.getenv("REELS_ENABLED", "1").strip().lower() not in ("0", "false", "no", "off"),
@@ -1909,4 +1974,6 @@ FEED_REELS = {
     "pool_cap": _env_int("REELS_POOL_CAP", 300),
     "page_size": _env_int("REELS_PAGE_SIZE", 10),
     "max_page_size": 30,
+    "fallback": os.getenv("REELS_FALLBACK", "1").strip().lower() not in ("0", "false", "no", "off"),
+    "min_pool": _env_int("REELS_MIN_POOL", 10),
 }

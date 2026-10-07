@@ -181,7 +181,7 @@ def _deliver_queued_message(message):
             ignore_conflicts=True,
         )
 
-        mentioned_ids = extract_mentioned_user_ids(message.text, conversation)
+        mentioned_ids = extract_mentioned_user_ids(message.text, conversation, sender_id=message.sender_id)
         mentioned_ids = [uid for uid in mentioned_ids if uid != message.sender_id]
         if mentioned_ids:
             message.mentioned_users.set(mentioned_ids)

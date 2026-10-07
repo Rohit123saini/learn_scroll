@@ -208,6 +208,7 @@ class CandidateTests(ReelsBase):
         Follow.objects.create(follower=self.me, following=priv, status=Follow.Status.ACCEPTED)
         self.assertIn(str(p.id), self.feed_ids())
 
+    @override_settings(FEED_REELS={"fallback": False})
     def test_duration_must_be_known_and_within_cap(self):
         ok = self.reel(duration=180)  # the cap itself is fine
         no_media = self.reel(media=False)
@@ -219,12 +220,13 @@ class CandidateTests(ReelsBase):
         for p in (no_media, unknown, zero, too_long):
             self.assertNotIn(str(p.id), got)
 
-    @override_settings(FEED_REELS={"max_duration_seconds": 60})
+    @override_settings(FEED_REELS={"max_duration_seconds": 60, "fallback": False})
     def test_duration_cap_is_configurable(self):
         short, long_ = self.reel(duration=60), self.reel(duration=61)
         self.assertEqual(self.feed_ids(), {str(short.id)})
         self.assertNotIn(str(long_.id), self.feed_ids())
 
+    @override_settings(FEED_REELS={"fallback": False})
     def test_aspect_rule_and_unknown_dimensions(self):
         vertical = self.reel(w=1080, h=1920)
         boundary = self.reel(w=1000, h=1200)  # exactly 1.2
@@ -244,6 +246,7 @@ class CandidateTests(ReelsBase):
         landscape = self.reel(w=1920, h=1080)
         self.assertIn(str(landscape.id), self.feed_ids())
 
+    @override_settings(FEED_REELS={"fallback": False})
     def test_a_non_video_media_row_does_not_make_a_reel(self):
         post = self.reel(media=False)
         PostMedia.objects.bulk_create([PostMedia(
@@ -251,6 +254,7 @@ class CandidateTests(ReelsBase):
             file="posts/i.jpg", file_name="i.jpg", file_size_bytes=1, mime_type="image/jpeg")])
         self.assertNotIn(str(post.id), self.feed_ids())
 
+    @override_settings(FEED_REELS={"fallback": False})
     def test_all_conditions_must_hold_on_the_same_media_row(self):
         # one landscape clip WITH duration + one vertical clip WITHOUT duration != a reel
         post = self.reel(w=1920, h=1080, duration=30)
@@ -268,6 +272,93 @@ class CandidateTests(ReelsBase):
     def test_requires_login(self):
         self.client.force_authenticate(None)
         self.assertIn(self.client.get(self.url).status_code, (401, 403))
+
+
+class FallbackTests(ReelsBase):
+    """Never-empty: strict rules are tier 0, looser tiers only fill a small pool."""
+
+    def test_defaults_and_settings_keys(self):
+        from django.conf import settings
+
+        cfg = reels.get_config()
+        self.assertTrue(cfg["fallback"])
+        self.assertEqual(cfg["min_pool"], 10)
+        for key in ("fallback", "min_pool"):
+            self.assertIn(key, settings.FEED_REELS)
+
+    def test_landscape_video_is_served_when_nothing_strict_exists(self):
+        landscape = self.reel(w=1920, h=1080)
+        self.assertEqual(self.ids(self.get()), [str(landscape.id)])
+
+    def test_unknown_duration_and_long_videos_are_served_as_last_resort(self):
+        unknown = self.reel(duration=None)
+        long_ = self.reel(duration=900)
+        self.assertEqual(self.feed_ids(), {str(unknown.id), str(long_.id)})
+
+    def test_better_tiers_come_first_even_with_lower_score(self):
+        strict = self.reel(likes=0)
+        landscape = self.reel(w=1920, h=1080, likes=500)
+        unknown = self.reel(duration=None, likes=900)
+        self.assertEqual(self.ids(self.get()), [str(strict.id), str(landscape.id), str(unknown.id)])
+
+    @override_settings(FEED_REELS={"min_pool": 2})
+    def test_looser_tier_is_not_used_when_the_pool_is_big_enough(self):
+        a, b = self.reel(), self.reel()
+        landscape = self.reel(w=1920, h=1080)
+        got = self.feed_ids()
+        self.assertEqual(got, {str(a.id), str(b.id)})
+        self.assertNotIn(str(landscape.id), got)
+
+    @override_settings(FEED_REELS={"fallback": False})
+    def test_fallback_can_be_switched_off(self):
+        self.reel(w=1920, h=1080)
+        self.reel(duration=None)
+        self.assertEqual(self.get().data["results"], [])
+
+    def test_safety_rules_are_never_loosened(self):
+        blocked_author = User.objects.create_user(username="blk", password="x")
+        BlockUser.objects.create(blocker=self.me, blocked=blocked_author)
+        sensitive = self.reel(w=1920, h=1080, is_sensitive=True)
+        pending = self.reel(w=1920, h=1080, moderation_status="pending")
+        private_post = self.reel(w=1920, h=1080, visibility="private")
+        blocked = self.reel(blocked_author, w=1920, h=1080)
+        own = self.reel(self.me, w=1920, h=1080)
+        no_media = self.reel(media=False)
+        got = self.feed_ids()
+        for p in (sensitive, pending, private_post, blocked, own, no_media):
+            self.assertNotIn(str(p.id), got)
+
+    @override_settings(FEED_SEEN_LIMITS={"fill_min": 0})
+    def test_unseen_looser_video_beats_seen_strict_video(self):
+        seen = self.reel(likes=99)
+        PostView.objects.create(post=seen, user=self.me, is_counted=False)
+        loose = self.reel(w=1920, h=1080)
+        self.assertEqual(self.ids(self.get()), [str(loose.id)])
+
+    def test_everything_seen_still_gives_a_page(self):
+        a = self.reel(w=1920, h=1080)
+        PostView.objects.create(post=a, user=self.me, is_counted=False)
+        self.assertEqual(self.ids(self.get()), [str(a.id)])
+
+    def test_diagnose_reports_every_stage(self):
+        from .views import _home_base_qs
+
+        self.reel()
+        self.reel(w=1920, h=1080)
+        rows = dict(reels.diagnose(self.me, _home_base_qs(self.me), reels.get_config(), seen_ids=set()))
+        self.assertEqual(rows["video posts (all)"], 2)
+        self.assertEqual(rows["+ aspect ratio OK  (= strict tier 0)"], 1)
+        self.assertEqual(rows["TIER 1 (any_aspect): candidates / unseen"], "2 / 2")
+
+    def test_diagnose_command_runs(self):
+        from io import StringIO
+
+        from django.core.management import call_command
+
+        self.reel()
+        out = StringIO()
+        call_command("reels_diagnose", "--user", "me", stdout=out)
+        self.assertIn("Final pool served to the user: 1 reels", out.getvalue())
 
 
 class RankingTests(ReelsBase):

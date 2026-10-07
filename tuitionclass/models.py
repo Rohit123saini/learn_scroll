@@ -34,7 +34,12 @@ they created):
 """
 
 import logging
+import secrets
 import uuid
+import zoneinfo
+from datetime import datetime as _datetime
+from datetime import timedelta as _timedelta
+from datetime import timezone as _dt_timezone
 from decimal import ROUND_HALF_UP, Decimal
 
 from django.core.cache import cache
@@ -696,7 +701,8 @@ class Classroom(models.Model):
 
     def weekly_timing_summary(self):
         """Human-friendly 'when does this class run' string built from all
-        active schedules, e.g. 'Mon, Wed, Fri 6:00 PM (60 min)'. Used by the
+        active schedules, e.g. 'Mon, Wed, Fri 06:00 PM Asia/Kolkata (60 min)' (the zone is
+        included because the time alone is ambiguous for viewers elsewhere). Used by the
         classroom list/detail API so the frontend doesn't have to stitch
         ClassSchedule rows together itself."""
         parts = []
@@ -705,7 +711,7 @@ class Classroom(models.Model):
                 days = ", ".join(d.title() for d in sched.days_of_week)
             else:
                 days = sched.get_recurrence_type_display()
-            parts.append(f"{days} {sched.start_time:%I:%M %p} ({sched.duration_minutes} min)")
+            parts.append(f"{days} {sched.start_time:%I:%M %p} {sched.timezone} ({sched.duration_minutes} min)")
         return " | ".join(parts) if parts else "No active schedule set"
 
     def upcoming_holidays(self, days_ahead: int = 30):
@@ -813,6 +819,70 @@ class ClassSchedule(models.Model):
 
     def __str__(self):
         return f"{self.classroom.title} - {self.get_recurrence_type_display()}"
+
+    # ------------------------------------------------------------------
+    # TASK 10.1 — DST-safe wall-clock -> absolute-instant conversion.
+    #
+    # A schedule is "18:00 on this date IN `self.timezone`", i.e. a wall
+    # clock time, not an instant. Everything that turns it into a
+    # ClassSession (tasks.generate_upcoming_sessions) or into a "next
+    # class" instant for clients (next_occurrence_start below) goes
+    # through these two helpers so there is exactly one place that knows
+    # how to do it correctly:
+    #   * the zone is resolved via zoneinfo (real IANA/DST rules), with a
+    #     fallback to the project default for a corrupt/legacy name;
+    #   * the instant is converted to UTC BEFORE any duration is added.
+    #     Adding a timedelta to a zone-aware datetime is wall-clock
+    #     arithmetic in Python, so a 60-min class that straddles a DST
+    #     change used to come out 0 or 120 min long.
+    #   * a wall time that does not exist (spring-forward gap) resolves to
+    #     the same absolute instant zoneinfo picks for it (fold=0), which
+    #     is the usual "shift forward by the gap" behaviour; an ambiguous
+    #     time (fall-back) resolves to its first occurrence.
+    # ------------------------------------------------------------------
+    def get_tzinfo(self):
+        try:
+            return zoneinfo.ZoneInfo(self.timezone)
+        except Exception:
+            logging.getLogger(__name__).warning(
+                "ClassSchedule %s has invalid timezone %r — falling back to project default.",
+                self.pk, self.timezone,
+            )
+            return timezone.get_default_timezone()
+
+    def occurrence_bounds(self, d):
+        """(start_utc, end_utc) — both timezone-aware UTC datetimes — for
+        the occurrence of this schedule on calendar date `d` (a date in
+        `self.timezone`)."""
+        tz = self.get_tzinfo()
+        local_start = _datetime.combine(d, self.start_time).replace(tzinfo=tz)
+        start_utc = local_start.astimezone(_dt_timezone.utc)
+        end_utc = start_utc + _timedelta(minutes=self.duration_minutes)
+        return start_utc, end_utc
+
+    def today_in_schedule_tz(self, now=None):
+        now = now or timezone.now()
+        return now.astimezone(self.get_tzinfo()).date()
+
+    def next_occurrence_start(self, now=None):
+        """UTC instant of the next not-yet-started occurrence (holidays
+        skipped), or None for an inactive schedule / nothing upcoming.
+        Used so clients never have to re-implement recurrence + DST."""
+        if not self.is_active:
+            return None
+        from .tasks import _dates_for_schedule  # local: tasks imports models lazily too
+
+        now = now or timezone.now()
+        first_day = self.today_in_schedule_tz(now)
+        horizon = 400 if self.recurrence_type == self.RecurrenceType.YEARLY else 62
+        for d in _dates_for_schedule(self, first_day, first_day + _timedelta(days=horizon)):
+            start_utc, _end = self.occurrence_bounds(d)
+            if start_utc <= now:
+                continue
+            if self.is_off_on(d):
+                continue
+            return start_utc
+        return None
 
     def is_off_on(self, date) -> bool:
         """True if `date` is marked as a holiday for this schedule specifically,
@@ -1371,6 +1441,22 @@ class PassPurchase(models.Model):
             update_fields.append("referral_coins_released")
             charge.referral_amount = referral_amount
             charge.save(update_fields=["referral_amount"])
+            # TASK 12: mirror the payout into the referral commission ledger
+            # (same reference string as the CoinTransaction above -> idempotent).
+            ReferralCommission.objects.get_or_create(
+                reference=f"passpurchase:{self.id}:referral:day:{charge_date.isoformat()}",
+                defaults={
+                    "referrer_id": self.referred_by_id,
+                    "referee_id": self.student_id,
+                    "kind": ReferralCommission.Kind.CLASSROOM,
+                    "source_id": str(self.class_pass.classroom_id),
+                    "gross_coins": charge.amount,
+                    "percent": self.referral_commission_percent,
+                    "commission_coins": referral_amount,
+                    "status": ReferralCommission.Status.PAID,
+                },
+            )
+            ReferralAttribution.mark_converted(self.student)
 
         self.save(update_fields=update_fields)
         return charge
@@ -2828,27 +2914,81 @@ class CoinPurchase(models.Model):
 # "?ref=124" counter from being trivially incremented/guessed by a casual
 # user copy-pasting someone else's link.
 # ---------------------------------------------------------------------------
-_REFERRAL_CODE_SALT = 7919  # arbitrary fixed prime; only needs to be stable across restarts
+# TASK 12 / 12.4 — UNGUESSABLE CODES. The first version of this feature used
+# "R" + hex(user_id * 7919): reversible by anyone with a calculator, so any
+# user id could be turned into a valid code (and a sequential scan finds every
+# user). Codes are now random strings stored in ReferralCode (below), prefix
+# "L", alphabet without look-alikes (no 0/O/1/I/L), 8 chars ~= 8.5e11 values.
+# Legacy "R..." codes still DECODE while settings.REFERRAL_ACCEPT_LEGACY_CODES
+# is on, so links already shared keep working; no new legacy code is ever
+# issued. The public function names/signatures are unchanged on purpose
+# (views, Classroom.referral_urls, testseries certificate card all import them).
+_LEGACY_REFERRAL_CODE_SALT = 7919
+_REFERRAL_CODE_PREFIX = "L"
+_REFERRAL_CODE_ALPHABET = "23456789ABCDEFGHJKMNPQRSTUVWXYZ"
+_REFERRAL_CODE_RANDOM_LEN = 8
+
+
+def generate_referral_code() -> str:
+    """Fresh random code, e.g. 'LK7Q2XM9P'. Uniqueness is enforced by the DB
+    (ReferralCode.code unique) — callers retry on IntegrityError."""
+    return _REFERRAL_CODE_PREFIX + "".join(
+        secrets.choice(_REFERRAL_CODE_ALPHABET) for _ in range(_REFERRAL_CODE_RANDOM_LEN)
+    )
 
 
 def referral_code_for_user(user_id: int) -> str:
-    """user id -> short shareable code, e.g. 42 -> 'R1B3'. Deterministic and
-    reversible (see referral_code_to_user_id) — no DB column needed."""
-    return "R" + format(user_id * _REFERRAL_CODE_SALT, "X")
+    """user id -> that user's permanent random code (created on first call).
+    Race-safe: two concurrent first calls end up with the same row."""
+    existing = ReferralCode.objects.filter(user_id=user_id).values_list("code", flat=True).first()
+    if existing:
+        return existing
+    for _ in range(5):
+        try:
+            with transaction.atomic():
+                row, _created = ReferralCode.objects.get_or_create(
+                    user_id=user_id, defaults={"code": generate_referral_code()}
+                )
+            return row.code
+        except DjangoIntegrityError:
+            # Either a code collision (retry with a new code) or we lost a
+            # race for this user (their row now exists).
+            existing = ReferralCode.objects.filter(user_id=user_id).values_list("code", flat=True).first()
+            if existing:
+                return existing
+    raise RuntimeError("Could not allocate a unique referral code.")
 
 
 def referral_code_to_user_id(code: str) -> "int | None":
-    """Inverse of referral_code_for_user(). Returns None for a malformed
-    code instead of raising, so callers can treat it as 'invalid code'."""
-    if not code or not code.upper().startswith("R"):
+    """code -> user id, or None for anything unknown/malformed (callers treat
+    None as 'invalid code'). Does not check the user still exists/is active."""
+    from django.conf import settings as django_settings
+
+    code = (code or "").strip().upper()
+    if not code:
         return None
-    try:
-        value = int(code[1:], 16)
-    except ValueError:
-        return None
-    if value % _REFERRAL_CODE_SALT != 0:
-        return None
-    return value // _REFERRAL_CODE_SALT
+    if code.startswith(_REFERRAL_CODE_PREFIX):
+        return ReferralCode.objects.filter(code=code).values_list("user_id", flat=True).first()
+    if code.startswith("R") and getattr(django_settings, "REFERRAL_ACCEPT_LEGACY_CODES", True):
+        try:
+            value = int(code[1:], 16)
+        except ValueError:
+            return None
+        if value <= 0 or value % _LEGACY_REFERRAL_CODE_SALT != 0:
+            return None
+        return value // _LEGACY_REFERRAL_CODE_SALT
+    return None
+
+
+class ReferralCode(models.Model):
+    """One permanent random referral code per user (see the note above)."""
+
+    user = models.OneToOneField(User, on_delete=models.CASCADE, related_name="referral_code_row")
+    code = models.CharField(max_length=12, unique=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    def __str__(self):
+        return f"{self.user_id}:{self.code}"
 
 
 class Referral(models.Model):
@@ -2869,6 +3009,136 @@ class Referral(models.Model):
 
     def __str__(self):
         return f"{self.referrer} referred {self.referred}"
+
+
+
+class ReferralAttribution(models.Model):
+    """TASK 12 / 12.1 — LINK-BASED ATTRIBUTION. "This user arrived through
+    that referrer's link, and is that referrer's customer until expires_at."
+
+    * FIRST TOUCH WINS: referee is a OneToOne, and `claim()` refuses to
+      reassign a user whose attribution is still active — opening five
+      different friends' links never steals credit from the first one.
+    * EXPIRY: `expires_at = created_at + REFERRAL_ATTRIBUTION_DAYS`. After it,
+      `active_for()` returns None and the user can be claimed again by a new
+      link. The window runs from the first click, not from first purchase.
+    * It only records WHO sent the user. Whether a purchase actually pays is
+      decided at purchase time (feature on, fraud checks, source rules).
+    """
+
+    class SourceType(models.TextChoices):
+        APP = "app", "App invite"
+        TESTSERIES = "testseries", "Test series"
+        CLASSROOM = "classroom", "Classroom"
+        CERTIFICATE = "certificate", "Certificate share"
+
+    referee = models.OneToOneField(User, on_delete=models.CASCADE, related_name="referral_attribution")
+    referrer = models.ForeignKey(User, on_delete=models.CASCADE, related_name="referral_attributions_made")
+    source_type = models.CharField(max_length=20, choices=SourceType.choices, default=SourceType.APP)
+    source_id = models.CharField(max_length=64, blank=True, default="")
+    created_at = models.DateTimeField(auto_now_add=True)
+    expires_at = models.DateTimeField()
+    first_purchase_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+        indexes = [models.Index(fields=["referrer", "-created_at"], name="tuitioncl_referrer_9f3a1c_idx")]
+
+    def __str__(self):
+        return f"{self.referrer_id} -> {self.referee_id} ({self.source_type})"
+
+    @property
+    def is_active(self) -> bool:
+        return self.expires_at > timezone.now()
+
+    @classmethod
+    def active_for(cls, user) -> "ReferralAttribution | None":
+        if user is None or not getattr(user, "pk", None):
+            return None
+        return cls.objects.filter(referee=user, expires_at__gt=timezone.now()).select_related("referrer").first()
+
+    @classmethod
+    def claim(cls, *, referee, referrer, source_type=SourceType.APP, source_id=""):
+        """-> (attribution, created). Never raises for the 'already owned'
+        case; the caller can tell by `created` / `attribution.referrer_id`."""
+        from django.conf import settings as django_settings
+
+        days = int(getattr(django_settings, "REFERRAL_ATTRIBUTION_DAYS", 30))
+        now = timezone.now()
+        defaults = {
+            "referrer": referrer,
+            "source_type": source_type,
+            "source_id": str(source_id or "")[:64],
+            "expires_at": now + timezone.timedelta(days=days),
+        }
+        try:
+            with transaction.atomic():
+                row = cls.objects.select_for_update().filter(referee=referee).first()
+                if row is None:
+                    return cls.objects.create(referee=referee, **defaults), True
+                if row.expires_at > now:
+                    return row, False
+                # Expired -> this user is up for grabs again.
+                for k, v in defaults.items():
+                    setattr(row, k, v)
+                row.created_at = now
+                row.first_purchase_at = None
+                row.save()
+                return row, True
+        except DjangoIntegrityError:
+            # Two simultaneous first claims: the loser reads the winner's row.
+            return cls.objects.get(referee=referee), False
+
+    @classmethod
+    def mark_converted(cls, referee):
+        cls.objects.filter(referee=referee, first_purchase_at__isnull=True).update(
+            first_purchase_at=timezone.now()
+        )
+
+
+class ReferralCommission(models.Model):
+    """TASK 12 / 12.1 — COMMISSION LEDGER. One row per commission payout (or
+    per payout that fraud rules BLOCKED, kept for audit). The coins themselves
+    always move through the normal wallet paths (CoinLedger for test series,
+    CoinTransaction for classes); this table is the referral-specific record
+    the referrals screen and ops read.
+
+    `reference` is the idempotency key (unique): releasing the same purchase
+    twice, or a retried task, can never pay twice.
+      testseries: "testseries_referral:<TestSeriesPurchase.id>"
+      classroom:  "passpurchase:<id>:referral:day:<date>"  (same string as the
+                  CoinTransaction.reference_id of that day's payout)
+    """
+
+    class Kind(models.TextChoices):
+        TESTSERIES = "testseries", "Test series"
+        CLASSROOM = "classroom", "Classroom"
+
+    class Status(models.TextChoices):
+        PAID = "paid", "Paid"
+        BLOCKED = "blocked", "Blocked (fraud rule)"
+
+    referrer = models.ForeignKey(User, on_delete=models.CASCADE, related_name="referral_commissions")
+    referee = models.ForeignKey(User, on_delete=models.CASCADE, related_name="referral_commissions_generated")
+    kind = models.CharField(max_length=12, choices=Kind.choices)
+    source_id = models.CharField(max_length=64, blank=True, default="")
+    reference = models.CharField(max_length=150, unique=True)
+    gross_coins = models.PositiveIntegerField(help_text="What the commission was calculated on.")
+    percent = models.DecimalField(max_digits=5, decimal_places=2, default=0)
+    commission_coins = models.PositiveIntegerField()
+    status = models.CharField(max_length=10, choices=Status.choices, default=Status.PAID, db_index=True)
+    block_reason = models.CharField(max_length=40, blank=True, default="")
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+        indexes = [
+            models.Index(fields=["referrer", "-created_at"], name="tuitioncl_referrer_2b7e44_idx"),
+            models.Index(fields=["referrer", "status", "created_at"], name="tuitioncl_referrer_5c81d0_idx"),
+        ]
+
+    def __str__(self):
+        return f"{self.kind} {self.commission_coins}c {self.referrer_id}<-{self.referee_id} [{self.status}]"
 
 
 # ---------------------------------------------------------------------------
@@ -3330,8 +3600,25 @@ class Notice(models.Model):
         null=True, blank=True, help_text="Optional auto-hide time, e.g. for a one-off exam-date notice."
     )
 
+    # TASK 9.2 — a notice the system posted on behalf of another feature, e.g.
+    # "a test was published in this class" (source_type="testseries",
+    # source_id=<TestSeries id>). Opaque on purpose (golden rule: tuitionclass
+    # never imports testseries models). Blank/NULL for notices a teacher typed.
+    # (classroom, source_type, source_id) is UNIQUE, which is what makes the
+    # automatic notice idempotent: announcing the same test twice finds the
+    # existing row instead of creating a second notice.
+    source_type = models.CharField(max_length=30, blank=True, default="")
+    source_id = models.UUIDField(null=True, blank=True)
+
     class Meta:
         ordering = ["-is_pinned", "-created_at"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["classroom", "source_type", "source_id"],
+                condition=models.Q(source_id__isnull=False),
+                name="uniq_notice_per_source",
+            ),
+        ]
         indexes = [
             models.Index(fields=["classroom", "is_pinned", "-created_at"]),
             # NOTE (fix): backs seconds_until_next_notice_expiry()'s

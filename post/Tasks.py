@@ -436,3 +436,26 @@ def prune_old_post_events(days=POST_EVENT_RETENTION_DAYS, batch_size=POST_EVENT_
         total += deleted
     logger.info("prune_old_post_events: deleted %s events older than %sd", total, days)
     return total
+
+
+
+@shared_task(bind=True, max_retries=3, default_retry_delay=30)
+def probe_media_metadata(self, media_id):
+    """TASK 1.1-BE — fill a PostMedia's blank width/height/duration_seconds
+    (any storage backend). Safety net behind the in-request fill in
+    post.signals, and the worker for `backfill_media_dimensions`. Returns True
+    if something was written."""
+    from .models import PostMedia
+    from .services import fill_media_metadata
+
+    try:
+        media = PostMedia.objects.get(id=media_id)
+    except PostMedia.DoesNotExist:
+        logger.warning("probe_media_metadata: PostMedia %s no longer exists", media_id)
+        return False
+    try:
+        return bool(fill_media_metadata(media, allow_download=True, raise_errors=True))
+    except Exception as exc:
+        # Transient storage/ffprobe trouble -> bounded retry. (A corrupt file
+        # just yields {} and is NOT retried.)
+        raise self.retry(exc=exc)

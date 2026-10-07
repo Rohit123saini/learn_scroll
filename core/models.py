@@ -125,7 +125,23 @@ logger = logging.getLogger(__name__)
 
 class NotificationQuerySet(models.QuerySet):
     def for_user(self, user):
-        return self.filter(recipient=user)
+        qs = self.filter(recipient=user)
+        # Hide rows triggered by anyone in a block relationship with `user`.
+        # Hidden, not deleted -> they come back if the block is lifted.
+        # (Positive sub-select, not exclude() on a JSON key: avoids NULL
+        # semantics for rows that have no actor_id at all.)
+        try:
+            from user_profile.services import blocked_user_ids
+
+            blocked = blocked_user_ids(user)
+        except Exception:
+            blocked = set()
+        if blocked:
+            ids = list(blocked) + [str(i) for i in blocked]
+            qs = qs.exclude(
+                pk__in=self.model.objects.filter(recipient=user, data__actor_id__in=ids).values("pk")
+            )
+        return qs
 
     def unread(self):
         return self.filter(is_read=False)
@@ -303,6 +319,15 @@ class Notification(models.Model):
         # schema change, but generate the state-only AlterField migration for
         # `notif_type` (same convention as every addition above). ---
         POST_TAG = "post_tag", "Tagged In Post"
+
+        # --- TASK 3.4 — events that had no bell row. STORY_REACTION: "X reacted
+        # to your story" (batched per story; post/services.py::notify_story_reacted
+        # existed but was never called and the type was missing). POST_REPOSTED:
+        # "X reposted your post" (batched per original post). Both go to the
+        # "other" category like POST_LIKED / POST_COMMENTED. Choices-only
+        # change -> core/migrations/0003. ---
+        STORY_REACTION = "story_reaction", "Story Reaction"
+        POST_REPOSTED = "post_reposted", "Post Reposted"
 
     recipient = models.ForeignKey(User, on_delete=models.CASCADE, related_name="notifications")
     # max_length=30 kept as-is — the longest current NotifType value

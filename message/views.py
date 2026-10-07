@@ -62,6 +62,8 @@ from .permissions import IsConversationParticipant, IsGroupAdminOrModerator, IsM
 from .serializers import (
     BlockedUserSerializer,
     CallSessionSerializer,
+    DirectoryGroupSerializer,   # 🔥 NAYA (6.1)
+    DirectoryPersonSerializer,  # 🔥 NAYA (6.1)
     ConversationListSerializer,
     ConversationSettingsSerializer,
     ConversationWallpaperSerializer,
@@ -825,7 +827,7 @@ class ConversationViewSet(viewsets.ReadOnlyModelViewSet):
 
             # 🔥 NAYA — @mentions resolve karke message pe attach karo.
             # Sirf conversation ke ACTIVE members hi mention ho sakte hain.
-            mentioned_ids = extract_mentioned_user_ids(message.text, conversation)
+            mentioned_ids = extract_mentioned_user_ids(message.text, conversation, sender_id=message.sender_id)
             mentioned_ids = [uid for uid in mentioned_ids if uid != request.user.id]
             if mentioned_ids:
                 message.mentioned_users.set(mentioned_ids)
@@ -3038,6 +3040,63 @@ def _conversation_list_qs_for(user):
     )
 
 
+# ======================================================================
+# 🔥 NAYA (6.1) — PEOPLE + GROUPS SEARCH (message search screen)
+# ======================================================================
+# GET /message/search/directory/?q=<text>[&type=all|people|groups][&limit=20]
+#
+# Response:
+#   {
+#     "query": "ra",
+#     "people": [{id, username, first_name, last_name, display_name,
+#                 profile_photo, is_mutual, relation}],   # relation: mutual|following|follower
+#     "people_has_more": false,
+#     "groups": [{id, conversation_id, name, photo_url, topic_tag,
+#                 members_count, is_private}],
+#     "groups_has_more": false
+#   }
+#
+# People = mere ACCEPTED followers / following (mutual pehle). Private
+# account tabhi jab main usko follow karta hoon; blocked (dono direction)
+# hide. Groups = jinme main abhi active member hoon. `type=people|groups`
+# sirf wahi section compute karta hai (client "See all" ke liye `limit=50`
+# ke saath use kar sakta hai). Rules ka detail: search_utils.search_people.
+class ChatDirectorySearchView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        query = (request.query_params.get('q') or '').strip()
+        if not query:
+            return Response({'detail': "'q' query param required hai."}, status=status.HTTP_400_BAD_REQUEST)
+        if len(query.lstrip('@').strip()) < search_utils.MIN_QUERY_LENGTH:
+            return Response({'detail': 'Search kam se kam 2 characters ka hona chahiye.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        kind = (request.query_params.get('type') or 'all').strip().lower()
+        if kind not in search_utils.DIRECTORY_TYPES:
+            return Response(
+                {'detail': "'type' in me se ek hona chahiye: " + ', '.join(search_utils.DIRECTORY_TYPES)},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        limit = search_utils.clamp_directory_limit(request.query_params.get('limit'))
+
+        ctx = {'request': request}
+        people, people_more, groups, groups_more = [], False, [], False
+        if kind in ('all', 'people'):
+            rows, people_more = search_utils.search_people(request.user, query, limit)
+            people = DirectoryPersonSerializer(rows, many=True, context=ctx).data
+        if kind in ('all', 'groups'):
+            rows, groups_more = search_utils.search_groups(request.user, query, limit)
+            groups = DirectoryGroupSerializer(rows, many=True, context=ctx).data
+
+        return Response({
+            'query': query,
+            'people': people,
+            'people_has_more': people_more,
+            'groups': groups,
+            'groups_has_more': groups_more,
+        })
+
+
 class MessageRequestListView(APIView):
     permission_classes = [IsAuthenticated]
 
@@ -4070,10 +4129,17 @@ class DeviceTokenView(APIView):
         if not token:
             return Response({'detail': "'token' required hai"}, status=400)
 
+        # The token is unique per phone. If it MOVES from another account to
+        # this one (same phone, new sign-up), anyone who blocked the previous
+        # owner with "also block new accounts" now blocks this account too.
+        previous = DeviceToken.objects.filter(token=token).exclude(user=request.user).select_related('user').first()
         DeviceToken.objects.update_or_create(
             token=token,
             defaults={'user': request.user, 'platform': platform},
         )
+        if previous is not None:
+            from user_profile.services import block_new_accounts_of
+            block_new_accounts_of(previous.user, request.user)
         return Response({'detail': 'Device registered'})
 
     def delete(self, request):
