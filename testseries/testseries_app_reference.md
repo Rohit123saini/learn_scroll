@@ -1109,3 +1109,13 @@ Campus (`section`) has no hook: it keeps notifying its roster at creation. Indiv
 (visibility rules unchanged). `NoticeSerializer` exposes read-only `source_type` / `source_id`.
 
 Tests: `python manage.py test testseries.tests_class_context testseries.tests_pure`.
+
+
+## T2 — question management (who may edit, drafts, reorder)
+
+- Questions change only while a series is a **draft**. The creator may always edit; for a campus / class series the context's teaching staff may too
+  (`access.user_can_edit_series`, resolved through `settings.TESTSERIES_CONTEXT_EDITORS` — fail-closed).
+- `POST testseries/{id}/questions-reorder/` body `{"order": [question ids]}` (the complete list, exactly once each).
+- Bulk / import 400 body: `{detail, code, errors:[{index, question_number, message, errors}]}`; nothing is saved on error.
+- `create_context_testseries(draft=True)` creates an empty-able draft; publish still goes through `TestSeriesViewSet.publish` (creator only).
+- Series payload carries `can_edit` for the viewer. See `TASK_T2_STATUS.md`.

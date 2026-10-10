@@ -75,6 +75,10 @@ class CommentCreateAPIView(APIView):
         else:
             post = get_object_or_404(Post, id=data['post_id'])
 
+        from .moderation_guard import post_hidden_for
+        if post_hidden_for(request.user, post):
+            return Response({"error": "Post not found"}, status=404)
+
         if post.is_comments_disabled:
             return Response({"error": "Comments disabled"}, status=403)
 
@@ -484,6 +488,9 @@ class CommentListAPIView(APIView):
     )
     def get(self, request, post_id):
         post = get_object_or_404(Post, id=post_id)
+        from .moderation_guard import post_hidden_for
+        if post_hidden_for(request.user, post):
+            return Response({"error": "Post not found"}, status=404)
         # Block with the post's author (either direction) => same as "no such post".
         if request.user.is_authenticated and post.user_id != request.user.id:
             from user_profile.views import is_blocked_between

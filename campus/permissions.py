@@ -7,7 +7,14 @@ serializer's `validate()` as well as a view's `get_permissions()`.
 """
 from rest_framework.permissions import SAFE_METHODS, BasePermission
 
-from .models import Campus, CampusParentLink, ClassTeacherassigments, StaffProfile, SubjectTeacherassigments
+from .models import (
+    Campus,
+    CampusParentLink,
+    ClassTeacherassigments,
+    StaffProfile,
+    StudentEnrollment,
+    SubjectTeacherassigments,
+)
 
 
 def get_staff_profile(user, campus_id):
@@ -60,6 +67,20 @@ def is_class_teacher_of_section(user, section_id):
     ).exists()
 
 
+def is_moderator_of_section(user, section_id):
+    """[T4 §C] True if `user` holds an active MODERATOR StaffProfile that is
+    scoped to `section_id` through an APPROVED SubjectTeacherassigments (or a
+    ClassTeacherassigments). Admin direct-assign creates exactly such rows."""
+    if not user or not getattr(user, 'is_authenticated', False):
+        return False
+    base = {'staff__user': user, 'staff__is_active': True, 'staff__role': StaffProfile.Role.MODERATOR}
+    if SubjectTeacherassigments.objects.filter(
+        section_id=section_id, status=SubjectTeacherassigments.Status.APPROVED, **base
+    ).exists():
+        return True
+    return ClassTeacherassigments.objects.filter(section_id=section_id, **base).exists()
+
+
 def is_linked_parent_of_student(user, student_id, campus_id=None):
     """
     True if `user` is a verified parent of `student_id` (design doc
@@ -100,15 +121,18 @@ def can_manage_section_subject(user, campus_id, section_id, subject_id=None):
         return True
     if is_campus_admin_or_principal(user, campus_id):
         return True
-    if subject_id:
-        return SubjectTeacherassigments.objects.filter(
-            section_id=section_id,
-            subject_id=subject_id,
-            staff__user=user,
-            staff__is_active=True,
-            status=SubjectTeacherassigments.Status.APPROVED,
-        ).exists()
-    return False
+    if subject_id and SubjectTeacherassigments.objects.filter(
+        section_id=section_id,
+        subject_id=subject_id,
+        staff__user=user,
+        staff__is_active=True,
+        status=SubjectTeacherassigments.Status.APPROVED,
+    ).exists():
+        return True
+    # [T4 §C] A MODERATOR with any approved assignment in this section is a
+    # section-wide scoped manager (daily attendance etc.). A plain
+    # subject-teacher is still NOT allowed here (unchanged behaviour).
+    return is_moderator_of_section(user, section_id)
 
 
 def can_post_notice(user, campus_id, department_id=None, school_class_id=None, section_id=None):
@@ -148,7 +172,7 @@ def can_post_notice(user, campus_id, department_id=None, school_class_id=None, s
     if department_id or school_class_id:
         return False
     if section_id:
-        return is_class_teacher_of_section(user, section_id)
+        return is_class_teacher_of_section(user, section_id) or is_moderator_of_section(user, section_id)
     return False
 
 
@@ -247,3 +271,127 @@ class IsPlatformAdmin(BasePermission):
 
     def has_permission(self, request, view):
         return is_platform_admin(request.user)
+
+
+# ===========================================================================
+# [T4 §B] Permission matrix: role x action (single table, tested row by row
+# in tests_permissions.py). `ROLE_ACTIONS` answers "can this ROLE ever do this
+# ACTION"; actions in `SCOPED_ACTIONS` additionally need the user to be
+# assigned to the target section (see `user_can`).
+# ===========================================================================
+ROLE_ADMIN = StaffProfile.Role.ADMIN.value
+ROLE_PRINCIPAL = StaffProfile.Role.PRINCIPAL_HOD.value
+ROLE_MODERATOR = StaffProfile.Role.MODERATOR.value
+ROLE_CLASS_TEACHER = StaffProfile.Role.CLASS_TEACHER.value
+ROLE_SUBJECT_TEACHER = StaffProfile.Role.SUBJECT_TEACHER.value
+ROLE_NON_TEACHING = StaffProfile.Role.NON_TEACHING.value
+ROLE_STUDENT = "student"
+ROLE_PARENT = "parent"
+
+ALL_ROLES = (
+    ROLE_ADMIN, ROLE_PRINCIPAL, ROLE_MODERATOR, ROLE_CLASS_TEACHER,
+    ROLE_SUBJECT_TEACHER, ROLE_NON_TEACHING, ROLE_STUDENT, ROLE_PARENT,
+)
+
+_AP = (ROLE_ADMIN, ROLE_PRINCIPAL)
+
+ROLE_ACTIONS = {
+    # campus-wide management (admin / principal-HOD only)
+    "campus.structure.manage": _AP,
+    "staff.manage": _AP,
+    "panel.overview": _AP,
+    "panel.assignment_matrix": _AP,
+    "assignments.direct_assign": _AP,
+    "bulk_import": _AP,
+    "audit.view": _AP,
+    "capacity.override": _AP,
+    "participants.view_campus": _AP,
+    # section-scoped (the role must also be assigned to that section)
+    "participants.view_section": _AP + (ROLE_CLASS_TEACHER,),
+    "section.dashboard": _AP + (ROLE_CLASS_TEACHER,),
+    "assignments.decide_request": _AP + (ROLE_CLASS_TEACHER,),
+    "roster.manage": _AP + (ROLE_CLASS_TEACHER,),
+    "roster.transfer": _AP + (ROLE_CLASS_TEACHER,),
+    "notice.post_section": _AP + (ROLE_CLASS_TEACHER, ROLE_MODERATOR),
+    "attendance.mark_daily": _AP + (ROLE_CLASS_TEACHER, ROLE_MODERATOR),
+    "attendance.mark_subject": _AP + (ROLE_CLASS_TEACHER, ROLE_SUBJECT_TEACHER, ROLE_MODERATOR),
+    "timetable.manage": _AP + (ROLE_CLASS_TEACHER, ROLE_SUBJECT_TEACHER, ROLE_MODERATOR),
+    "live_session.manage": _AP + (ROLE_CLASS_TEACHER, ROLE_SUBJECT_TEACHER, ROLE_MODERATOR),
+    "assignment.manage": _AP + (ROLE_CLASS_TEACHER, ROLE_SUBJECT_TEACHER, ROLE_MODERATOR),
+    "testseries.manage": _AP + (ROLE_CLASS_TEACHER, ROLE_SUBJECT_TEACHER, ROLE_MODERATOR),
+}
+
+SCOPED_ACTIONS = frozenset(
+    a for a, roles in ROLE_ACTIONS.items()
+    if a not in {
+        "campus.structure.manage", "staff.manage", "panel.overview", "panel.assignment_matrix",
+        "assignments.direct_assign", "bulk_import", "audit.view", "capacity.override",
+        "participants.view_campus",
+    }
+)
+
+
+def role_can(role, action):
+    """Pure table lookup — no DB. Unknown role/action -> False."""
+    return role in ROLE_ACTIONS.get(action, ())
+
+
+def get_campus_role(user, campus_id):
+    """The user's single role in this campus: a StaffProfile role, else
+    'student' (active enrollment), else 'parent' (verified link), else None."""
+    profile = get_staff_profile(user, campus_id)
+    if profile:
+        return profile.role
+    if not user or not getattr(user, 'is_authenticated', False):
+        return None
+    if StudentEnrollment.objects.filter(
+        student=user, section__school_class__campus_id=campus_id, status=StudentEnrollment.Status.ACTIVE
+    ).exists():
+        return ROLE_STUDENT
+    if CampusParentLink.objects.filter(parent=user, campus_id=campus_id).exists():
+        return ROLE_PARENT
+    return None
+
+
+def user_can(user, campus_id, action, *, section_id=None, subject_id=None):
+    """Role table + scope. For SCOPED actions a non-admin role must be
+    attached to `section_id` (class-teacher of it / approved assignment)."""
+    role = get_campus_role(user, campus_id)
+    if not role_can(role, action):
+        return False
+    if role in _AP or action not in SCOPED_ACTIONS:
+        return True
+    if section_id is None:
+        return False
+    if role == ROLE_CLASS_TEACHER:
+        return is_class_teacher_of_section(user, section_id)
+    if role == ROLE_MODERATOR:
+        return is_moderator_of_section(user, section_id)
+    if role == ROLE_SUBJECT_TEACHER:
+        return can_manage_section_subject(user, campus_id, section_id, subject_id) if subject_id else False
+    return False
+
+
+def hod_department_id(user, campus_id):
+    """Department a Principal/HOD is limited to (None = whole campus / not a
+    principal). Admin is never department-limited."""
+    profile = get_staff_profile(user, campus_id)
+    if profile and profile.role == StaffProfile.Role.PRINCIPAL_HOD:
+        return profile.department_id
+    return None
+
+
+class IsRosterManagerOrReadOnly(BasePermission):
+    """[T4 §D] Enrollment writes: admin/principal anywhere in the campus, or the
+    class-teacher of THE section being changed (transfer = the SOURCE section).
+    Expects `view.get_campus_id_for_permission_check(request)` and
+    `view.get_roster_section_id(request)`."""
+
+    def has_permission(self, request, view):
+        if request.method in SAFE_METHODS:
+            return True
+        campus_id = view.get_campus_id_for_permission_check(request)
+        if campus_id is None:
+            return False
+        action = "roster.transfer" if getattr(view, "action", None) == "transfer" else "roster.manage"
+        return user_can(request.user, campus_id, action, section_id=view.get_roster_section_id(request))

@@ -54,7 +54,7 @@ from rest_framework.views import exception_handler as drf_default_handler
 # other DRF exception and flows through `drf_default_handler` below just
 # like PermissionDenied/ValidationError/etc. It only needs an entry here so
 # `_code_for` gives it a real code instead of falling back to "error".
-from .livekit_utils import LiveKitError
+from tuitionclass.livekit_utils import LiveKitError
 
 # NOTE (sliding-expiry sessions — login app): TokenExpiredError is a
 # subclass of drf_exceptions.AuthenticationFailed, not a sibling of it.

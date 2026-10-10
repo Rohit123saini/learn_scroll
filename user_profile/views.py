@@ -36,6 +36,7 @@ from .models import (
     Follow,
     RestrictUser,
     Streak,
+    StreakFreezeError,
     UserPreference,
     WeeklyRecap,
     WithdrawalNotEligible,
@@ -1226,10 +1227,12 @@ class ContentReportView(GenericAPIView):
                 {"status": False, "message": "Too many reports. Please try again later."},
                 status=status.HTTP_429_TOO_MANY_REQUESTS,
             )
-        return Response(
-            {"status": True, "message": "Report received." if created else "You already reported this.", "id": report.id},
-            status=status.HTTP_201_CREATED if created else status.HTTP_200_OK,
-        )
+        body = {"status": True, "message": "Report received." if created else "You already reported this.", "id": report.id}
+        # Copyright reports need the formal notice (copyrights app) - the app opens that form next.
+        if d["reason"] == "copyright" and d["target_type"] in ("post", "story"):
+            body["next"] = "copyright_claim"
+            body["message"] = "To take this down, please complete the copyright notice."
+        return Response(body, status=status.HTTP_201_CREATED if created else status.HTTP_200_OK)
 
 
 class UnblockUserView(GenericAPIView):
@@ -2270,6 +2273,15 @@ class UserPreferenceView(GenericAPIView):
 
         if serializer.is_valid():
             serializer.save()
+            # Study profile / Exam Mode badla to feed ke cached candidate pools purane
+            # ho gaye — invalidate, taaki agla feed refresh naye settings dikhaye.
+            if any(f in request.data for f in UserPreferenceSerializer.STUDY_PROFILE_FIELDS):
+                try:
+                    from post import feed_cache
+
+                    feed_cache.invalidate(request.user.pk)
+                except Exception:
+                    logger.warning("feed cache invalidate failed (user=%s)", request.user.pk, exc_info=True)
             return Response({
                 "status": True,
                 "message": "Preferences updated successfully.",
@@ -2357,6 +2369,97 @@ class StreakView(GenericAPIView):
             "data": serializer.data,
             "milestone_reached": milestone_hit,
             "bonus_coins": bonus,
+            # Aaj kitne freeze tokens kharch hue (0 = koi nahi) — client "freeze used" dikha sakta hai.
+            "freeze_used": getattr(streak, "freezes_consumed_now", 0),
+        }, status=status.HTTP_200_OK)
+
+
+class StreakFreezeBuyView(GenericAPIView):
+    """POST /profile/streak/freeze/ — coins se ek streak freeze token kharido.
+
+    Cost aur holding-cap `settings.STREAK_FREEZE_COST_COINS` /
+    `STREAK_FREEZE_MAX_TOKENS` se (GET /profile/streak/ bhi dono batata hai,
+    client hardcode na kare). Token missed din par `Streak.objects.
+    record_activity` apne-aap kharch karta hai.
+
+    201 -> {status, message, data: <streak>, coin_balance}
+    400 -> cap poora (code=freeze_limit) ya coins kam (code=insufficient_coins)
+    503 -> wallet busy, retry.
+    """
+
+    permission_classes = [IsAuthenticated]
+    serializer_class = StreakSerializer
+    throttle_classes = [UserRateThrottle, ScopedRateThrottle]
+    throttle_scope = "profile_streak_freeze"
+
+    @extend_schema(request=None, responses={201: StreakSerializer})
+    def post(self, request):
+        try:
+            streak = Streak.objects.buy_freeze(request.user)
+        except CoinLedgerBusy:
+            return _wallet_busy_response()
+        except StreakFreezeError as exc:
+            return Response(
+                {"status": False, "code": "freeze_limit", "message": str(exc)},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        except ValueError:
+            # CoinLedger.record_transaction: balance negative ho jaata.
+            return Response(
+                {"status": False, "code": "insufficient_coins",
+                 "message": "Freeze kharidne ke liye coins kam hain."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        coin_balance = type(request.user).objects.filter(pk=request.user.pk).values_list(
+            "coin", flat=True
+        ).first()
+        return Response({
+            "status": True,
+            "message": "Streak freeze mil gaya.",
+            "data": self.get_serializer(streak).data,
+            "coin_balance": coin_balance,
+        }, status=status.HTTP_201_CREATED)
+
+
+class DailyGoalView(GenericAPIView):
+    """GET/PATCH /profile/daily-goal/ — "aaj ka N minute challenge".
+
+    Progress `DailyUsage` (foreground heartbeat, /profile/activity/heartbeat/)
+    se aata hai — koi alag timer nahi. GET aaj ka state deta hai (aur agar
+    goal ab poora ho chuka ho to use turant complete mark karta hai).
+    PATCH {"goal_minutes": 20} — sirf `settings.STREAK_DAILY_GOAL_OPTIONS` me se.
+    """
+
+    permission_classes = [IsAuthenticated]
+    throttle_classes = [UserRateThrottle, ScopedRateThrottle]
+    throttle_scope = "profile_daily_goal"
+
+    @extend_schema(description="Today's daily-goal progress.")
+    def get(self, request):
+        return Response({
+            "status": True,
+            "message": "Daily goal fetched successfully.",
+            "data": Streak.objects.evaluate_daily_goal(request.user),
+        }, status=status.HTTP_200_OK)
+
+    @extend_schema(description="Change the daily-goal minutes.")
+    def patch(self, request):
+        try:
+            minutes = int(request.data.get("goal_minutes"))
+        except (TypeError, ValueError):
+            return Response(
+                {"status": False, "message": "goal_minutes number hona chahiye."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        try:
+            state = Streak.objects.set_daily_goal(request.user, minutes)
+        except ValueError as exc:
+            return Response({"status": False, "message": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+        return Response({
+            "status": True,
+            "message": "Daily goal updated.",
+            "data": state,
         }, status=status.HTTP_200_OK)
 
 
@@ -2595,9 +2698,18 @@ class ActivityHeartbeatView(GenericAPIView):
             except Exception:
                 logger.exception("daily limit notification failed (user=%s)", request.user.pk)
 
+        # Daily goal: har heartbeat pe check (aaj complete ho chuka ho to bina
+        # lock ke turant laut aata hai). Fail ho to heartbeat kabhi fail nahi hona chahiye.
+        goal = None
+        try:
+            goal = Streak.objects.evaluate_daily_goal(request.user)
+        except Exception:
+            logger.exception("daily goal evaluation failed (user=%s)", request.user.pk)
+
         return Response({
             "status": True,
             "message": "Heartbeat recorded.",
             "data": {"today_seconds": usage.seconds, "credited_seconds": credited},
             "limit_reached": limit_reached,
+            "goal": goal,
         }, status=status.HTTP_200_OK)

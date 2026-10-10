@@ -33,6 +33,9 @@ def _payload(**overrides):
         "last_name": "Doe",
         "password": PASSWORD,
         "confirm_password": PASSWORD,
+        # Signup requires a date of birth now (minor-safety); a fixed adult
+        # DOB keeps these older tests about phone/OTP, not age.
+        "date_of_birth": "1995-06-15",
     }
     data.update(overrides)
     # `phone=_OMIT` drops the key entirely (client that doesn't send it).
@@ -90,7 +93,7 @@ class SignupPhoneOptionalTests(TestCase):
     def test_signup_with_bad_phone_format_rejected(self):
         res = self._signup(phone="123")
         self.assertEqual(res.status_code, 400)
-        self.assertIn("phone", res.data)
+        self.assertIn("phone", res.data["errors"])
         self.assertFalse(User.objects.filter(username="alice").exists())
 
     def test_signup_with_duplicate_phone_rejected(self):
@@ -99,7 +102,7 @@ class SignupPhoneOptionalTests(TestCase):
             username="bob", email="bob@example.com", phone="919876543210"
         )
         self.assertEqual(res.status_code, 400)
-        self.assertIn("phone", res.data)
+        self.assertIn("phone", res.data["errors"])
 
     # ---- OTP gate is unchanged -------------------------------------------
     def test_signup_still_requires_verified_otp_without_phone(self):

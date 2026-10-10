@@ -11,12 +11,16 @@ from rest_framework.exceptions import PermissionDenied
 from rest_framework.response import Response
 from rest_framework import status
 from rest_framework.throttling import UserRateThrottle
+from rest_framework.parsers import JSONParser, MultiPartParser, FormParser
 from .ai_service import (
     generate_summary, generate_quiz, transcribe_audio, generate_reply_suggestions,
     generate_classroom_answer, generate_revision_deck, AI_ENABLED,
     # 🔥 NAYA — Task G15 (growth_and_feature_tasks.md): generalized "Ask AI"
     # doubt solver, see AskAIDoubtView below.
-    generate_doubt_answer,
+    generate_doubt_answer, sniff_image_mime, MAX_DOUBT_IMAGE_BYTES,
+    # AI Study Buddy chips
+    generate_study_buddy, is_pdf, MAX_STUDY_PDF_BYTES,
+    STUDY_BUDDY_MODES, STUDY_BUDDY_LANGUAGES,
 )
 from .models import (
     Message, ConversationParticipant, ClassTranscriptSegment,
@@ -208,6 +212,14 @@ class AskAIDoubtThrottle(UserRateThrottle):
     scope = 'ai_ask_doubt'
 
 
+# Photo doubts ek image-input Gemini call hain (text se mehngi), isliye
+# unka apna, tighter bucket — `AskAIDoubtView.post` image aane par hi
+# ise check karta hai (text-only doubts pe koi asar nahi).
+class AskAIDoubtImageThrottle(UserRateThrottle):
+    rate = '8/min'
+    scope = 'ai_ask_doubt_image'
+
+
 # ==========================================================================
 # 🔥 NAYA — Task G15 (growth_and_feature_tasks.md, Section E): generalized
 # "Ask AI" doubt-solving entry point.
@@ -226,8 +238,13 @@ class AskAIDoubtThrottle(UserRateThrottle):
 class AskAIDoubtView(APIView):
     """
     POST /message/ai/ask-doubt/
+    Content-Type: application/json  YA  multipart/form-data (photo doubt ke liye)
     Body: {
-      "question": "...",                  (required — the student's doubt)
+      "question": "...",                  (required — the student's doubt;
+                                             photo ke saath optional)
+      "image": <file>,                    (optional, multipart only — photo of
+                                             the problem. JPEG/PNG/WEBP, max 5MB.
+                                             Server step-by-step solution deta hai)
       "context_type": "feed_post" | "test_question" | "chat" | "general",
       "context_text": "...",               (optional — the post caption,
                                              the test question + student's
@@ -241,7 +258,7 @@ class AskAIDoubtView(APIView):
                                              text don't share a cached
                                              answer — never persisted.)
     }
-    Response: {"answer": "..."}
+    Response: {"answer": "...", "used_image": true|false}
 
     Stateless by design (same as `AiStudyRoomView`/`VoiceTranscribeView`
     below) — nothing is written to the DB, this is a pure ask-and-answer.
@@ -250,6 +267,7 @@ class AskAIDoubtView(APIView):
     """
     permission_classes = [IsAuthenticated]
     throttle_classes = [AskAIDoubtThrottle]
+    parser_classes = [JSONParser, MultiPartParser, FormParser]
 
     VALID_CONTEXT_TYPES = {"feed_post", "test_question", "chat", "general"}
     MAX_QUESTION_LEN = 500
@@ -275,8 +293,30 @@ class AskAIDoubtView(APIView):
         context_text = (request.data.get("context_text") or "").strip()
         source_id = (request.data.get("source_id") or "").strip()
 
+        image_file = request.FILES.get("image") if hasattr(request, "FILES") else None
+        image_bytes = None
+        image_mime = None
+        if image_file is not None:
+            if image_file.size > MAX_DOUBT_IMAGE_BYTES:
+                return Response(
+                    {"error": f"Photo too large, max {MAX_DOUBT_IMAGE_BYTES // (1024 * 1024)} MB"},
+                    status=400,
+                )
+            image_bytes = image_file.read()
+            image_mime = sniff_image_mime(image_bytes)
+            if image_mime is None:
+                return Response(
+                    {"error": "Sirf JPEG, PNG ya WEBP photo allowed hai"}, status=400,
+                )
+            # Photo wala call mehnga hai — alag, tighter bucket.
+            image_throttle = AskAIDoubtImageThrottle()
+            if not image_throttle.allow_request(request, self):
+                self.throttled(request, image_throttle.wait())
+            if not question:
+                question = "Solve this step by step."
+
         if not question:
-            return Response({"error": "question required hai"}, status=400)
+            return Response({"error": "question ya photo required hai"}, status=400)
         if len(question) > self.MAX_QUESTION_LEN:
             return Response(
                 {"error": f"Question too long, max {self.MAX_QUESTION_LEN} chars"}, status=400,
@@ -294,14 +334,96 @@ class AskAIDoubtView(APIView):
                 context_text=context_text,
                 context_label=self.CONTEXT_LABELS[context_type],
                 cache_scope=f"{context_type}:{source_id}",
+                image_bytes=image_bytes,
+                image_mime=image_mime,
             )
         except Exception as e:
             logger.exception(
-                f"Ask-AI doubt failed user={request.user.id} type={context_type} err={e}"
+                f"Ask-AI doubt failed user={request.user.id} type={context_type} "
+                f"image={bool(image_bytes)} err={e}"
             )
             return Response({"error": "AI temporarily unavailable, try again"}, status=500)
 
-        return Response({"answer": answer}, status=200)
+        return Response({"answer": answer, "used_image": bool(image_bytes)}, status=200)
+
+
+# ==========================================================================
+# AI Study Buddy — one-tap actions on a post / note / PDF.
+# --------------------------------------------------------------------------
+# POST /message/ai/study-buddy/
+#   JSON ya multipart. Fields:
+#     mode      : "explain" | "quiz" | "flashcards"            (required)
+#     language  : "en" | "hi" | "hinglish"                     (default "en")
+#     content   : text (post caption / notes), max 8000 chars  (optional if pdf)
+#     pdf       : PDF file, max 10 MB, multipart only          (optional)
+#   Response:
+#     explain    -> {"mode","language","text": "..."}
+#     quiz       -> {"mode","language","questions": [{question, options[], answer}]}
+#     flashcards -> {"mode","language","cards": [{front, back}]}
+# Stateless (kuch DB me save nahi hota). PDF Gemini ko natively bheja jaata
+# hai; PDF calls ka alag tighter throttle bucket hai.
+# ==========================================================================
+class StudyBuddyThrottle(UserRateThrottle):
+    rate = '20/min'
+    scope = 'ai_study_buddy'
+
+
+class StudyBuddyPdfThrottle(UserRateThrottle):
+    rate = '5/min'
+    scope = 'ai_study_buddy_pdf'
+
+
+class StudyBuddyView(APIView):
+    permission_classes = [IsAuthenticated]
+    throttle_classes = [StudyBuddyThrottle]
+    parser_classes = [JSONParser, MultiPartParser, FormParser]
+
+    MIN_CONTENT_LEN = 10
+    MAX_CONTENT_LEN = 8000
+
+    def post(self, request):
+        if not AI_ENABLED:
+            return Response({"error": "AI service not configured on server"}, status=503)
+
+        mode = (request.data.get("mode") or "").strip()
+        language = (request.data.get("language") or "en").strip()
+        content = (request.data.get("content") or "").strip()[: self.MAX_CONTENT_LEN]
+
+        if mode not in STUDY_BUDDY_MODES:
+            return Response({"error": "mode must be explain, quiz or flashcards"}, status=400)
+        if language not in STUDY_BUDDY_LANGUAGES:
+            return Response({"error": "language must be en, hi or hinglish"}, status=400)
+
+        pdf_bytes = None
+        pdf_file = request.FILES.get("pdf")
+        if pdf_file is not None:
+            if pdf_file.size > MAX_STUDY_PDF_BYTES:
+                return Response(
+                    {"error": f"PDF too large, max {MAX_STUDY_PDF_BYTES // (1024 * 1024)} MB"},
+                    status=400,
+                )
+            pdf_bytes = pdf_file.read()
+            if not is_pdf(pdf_bytes):
+                return Response({"error": "Sirf valid PDF file allowed hai"}, status=400)
+            pdf_throttle = StudyBuddyPdfThrottle()
+            if not pdf_throttle.allow_request(request, self):
+                self.throttled(request, pdf_throttle.wait())
+
+        if pdf_bytes is None and len(content) < self.MIN_CONTENT_LEN:
+            return Response({"error": "Content too short — kuch text ya PDF do"}, status=400)
+
+        try:
+            result = generate_study_buddy(
+                mode=mode, content=content, language=language, pdf_bytes=pdf_bytes,
+            )
+        except Exception as e:
+            logger.exception(
+                f"Study buddy failed user={request.user.id} mode={mode} lang={language} "
+                f"pdf={bool(pdf_bytes)} err={e}"
+            )
+            return Response({"error": "AI temporarily unavailable, try again"}, status=500)
+
+        return Response({"mode": mode, "language": language, **result}, status=200)
 
 
 class AiStudyRoomView(APIView):

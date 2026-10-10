@@ -5,6 +5,10 @@ from django.core.cache import cache
 
 logger = logging.getLogger(__name__)
 
+# Defined OUTSIDE the try: if Gemini init fails (missing google-genai / API key),
+# _MODEL must still exist or _get_cache_key()/log lines raise NameError.
+_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
+
 try:
     from google import genai
     _client = genai.Client(api_key=settings.GEMINI_API_KEY)
@@ -15,7 +19,6 @@ try:
     # Ab env var se configurable hai — agli baar Google koi model retire
     # kare (gemini-2.5-flash khud Oct 16 2026 ko retire ho raha hai) to
     # sirf .env me GEMINI_MODEL change karna padega, code deploy nahi.
-    _MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
     AI_ENABLED = True
 except Exception as e:
     logger.error(f"Gemini init failed: {e}")
@@ -305,11 +308,45 @@ def generate_classroom_answer(question: str, context_text: str, conversation_id:
 # scoped per-user (unlike smart-replies, which are private-chat) — two
 # students asking the identical doubt about the identical public post is
 # exactly the case where sharing the cached answer saves a Gemini call.
-def generate_doubt_answer(question: str, context_text: str, context_label: str, cache_scope: str) -> str:
+# ---- Photo doubts ------------------------------------------------------
+# Student ek photo kheench ke bhejta hai (notebook / textbook ka sawaal).
+# Hum client ke `Content-Type` pe bharosa nahi karte — magic bytes se
+# format pehchante hain, aur sirf JPEG/PNG/WEBP allow hain.
+MAX_DOUBT_IMAGE_BYTES = 5 * 1024 * 1024  # 5 MB (client already ~1600px/q85 pe compress karta hai)
+
+
+def sniff_image_mime(data: bytes):
+    """Returns 'image/jpeg' | 'image/png' | 'image/webp', ya None agar
+    bytes in teeno me se kisi format ke nahi hain."""
+    if not data:
+        return None
+    if data[:3] == b"\xff\xd8\xff":
+        return "image/jpeg"
+    if data[:8] == b"\x89PNG\r\n\x1a\n":
+        return "image/png"
+    if data[:4] == b"RIFF" and data[8:12] == b"WEBP":
+        return "image/webp"
+    return None
+
+
+def generate_doubt_answer(
+    question: str,
+    context_text: str,
+    context_label: str,
+    cache_scope: str,
+    image_bytes: bytes = None,
+    image_mime: str = None,
+) -> str:
     if not AI_ENABLED:
         raise RuntimeError("AI not configured")
 
-    key = _get_cache_key("doubt", f"{cache_scope}:{context_label}:{question}:{context_text}")
+    # Image ho to cache key me uska content-hash bhi jaata hai — alag
+    # photos ka jawab kabhi share na ho, same photo (e.g. same textbook
+    # question dobara) ka jawab share ho sake.
+    image_part_key = hashlib.sha256(image_bytes).hexdigest()[:16] if image_bytes else "noimg"
+    key = _get_cache_key(
+        "doubt", f"{cache_scope}:{context_label}:{question}:{context_text}:{image_part_key}"
+    )
     cached = _cache_get(key)
     if cached is not _CACHE_MISS:
         logger.info(f"CACHE HIT doubt {key}")
@@ -320,7 +357,31 @@ def generate_doubt_answer(question: str, context_text: str, context_label: str, 
         if context_text else ""
     )
 
-    prompt = f"""
+    if image_bytes:
+        prompt = f"""
+    You are a friendly, patient subject-tutor. The student has attached a
+    PHOTO of a question / problem they are stuck on.
+
+    {context_block}Student's note: {question}
+
+    Rules:
+    - First, in one line, write what the problem says (so the student can
+      confirm you read the photo correctly). Start that line with "Question:".
+    - Then solve it STEP BY STEP. Number the steps (Step 1, Step 2, ...).
+      In each step say what you are doing AND why, not just the calculation.
+    - End with a single line starting with "Answer:" giving the final result.
+    - If the photo is blurry, cut off, or you cannot read part of it, say
+      exactly what you could not read and ask for a clearer photo. Do NOT
+      guess missing numbers or text.
+    - If the photo is not an academic question, politely say so in one
+      sentence and offer to help with a study doubt instead.
+    - Answer in the same language as the student's note. If the note is
+      empty or just a generic "solve this", use the language of the problem
+      in the photo; if that is English, use simple English.
+    - Keep it focused — no long preamble.
+    """
+    else:
+        prompt = f"""
     You are a friendly, patient subject-tutor helping a student who has a
     doubt.
 
@@ -337,11 +398,180 @@ def generate_doubt_answer(question: str, context_text: str, context_label: str, 
     - Keep it under 200 words unless the question genuinely needs more.
     """
 
-    res = _call_gemini(prompt)
-    result = res.text.strip()
+    if image_bytes:
+        from google.genai import types  # local import — sirf photo-path ko chahiye
+        contents = [
+            prompt,
+            types.Part.from_bytes(data=image_bytes, mime_type=image_mime or "image/jpeg"),
+        ]
+        try:
+            res = _client.models.generate_content(model=_MODEL, contents=contents)
+        except Exception as e:
+            logger.critical(f"Gemini image-doubt call failed (model={_MODEL}): {e}")
+            raise
+    else:
+        res = _call_gemini(prompt)
+
+    result = (res.text or "").strip()
 
     if not result:
         raise ValueError("AI returned empty doubt answer")
+
+    cache.set(key, result, CACHE_TTL)
+    return result
+
+
+# ==========================================================================
+# AI Study Buddy — post / note / PDF par one-tap actions:
+#   "Explain simply", "Hindi me samjhao", "Quiz banao", "5 flashcards do".
+# Teen modes (explain | quiz | flashcards) x teen languages (en | hi |
+# hinglish). Input: plain text (post caption / notes) ya PDF bytes (Gemini
+# PDF ko natively padhta hai — koi PDF-text-extraction library nahi chahiye),
+# ya dono. Result content-hash pe 24h cache hota hai (same post + same chip
+# = Gemini dobara nahi) — user-scoped nahi, kyunki input public study
+# content hai.
+# ==========================================================================
+STUDY_BUDDY_MODES = ("explain", "quiz", "flashcards")
+STUDY_BUDDY_LANGUAGES = {
+    "en": "simple English",
+    "hi": "Hindi written in Devanagari script (keep technical terms and formulas in English)",
+    "hinglish": "Hinglish — Hindi written in Roman/English letters, the way students text (keep technical terms in English)",
+}
+MAX_STUDY_PDF_BYTES = 10 * 1024 * 1024  # 10 MB
+STUDY_FLASHCARD_COUNT = 5
+STUDY_QUIZ_COUNT = 5
+
+
+def is_pdf(data: bytes) -> bool:
+    return bool(data) and data[:5] == b"%PDF-"
+
+
+def _parse_json_reply(text: str) -> dict:
+    text = (text or "").replace("```json", "").replace("```", "").strip()
+    return json.loads(text)
+
+
+def _clean_quiz(questions) -> list:
+    """Malformed items hata do; `answer` ko hamesha option ka exact text
+    banao (AI kabhi "B" jaisa letter deta hai, kabhi poora text)."""
+    out = []
+    for q in questions or []:
+        if not isinstance(q, dict):
+            continue
+        question = str(q.get("question") or "").strip()
+        options = [str(o).strip() for o in (q.get("options") or []) if str(o).strip()]
+        answer = str(q.get("answer") or "").strip()
+        if not question or len(options) < 2 or not answer:
+            continue
+        if answer not in options:
+            letter = answer[:1].upper()
+            idx = "ABCD".find(letter) if len(answer) <= 2 else -1
+            if 0 <= idx < len(options):
+                answer = options[idx]
+            else:
+                continue  # answer kisi option se match nahi — galat quiz item mat bhejo
+        out.append({"question": question, "options": options, "answer": answer})
+    return out[:STUDY_QUIZ_COUNT]
+
+
+def _clean_cards(cards) -> list:
+    out = []
+    for c in cards or []:
+        if not isinstance(c, dict):
+            continue
+        front = str(c.get("front") or "").strip()
+        back = str(c.get("back") or "").strip()
+        if front and back:
+            out.append({"front": front, "back": back})
+    return out[:STUDY_FLASHCARD_COUNT]
+
+
+def generate_study_buddy(
+    mode: str,
+    content: str = "",
+    language: str = "en",
+    pdf_bytes: bytes = None,
+) -> dict:
+    if not AI_ENABLED:
+        raise RuntimeError("AI not configured")
+    if mode not in STUDY_BUDDY_MODES:
+        raise ValueError(f"bad mode {mode}")
+    if language not in STUDY_BUDDY_LANGUAGES:
+        raise ValueError(f"bad language {language}")
+
+    content = (content or "").strip()[:8000]
+    pdf_part_key = hashlib.sha256(pdf_bytes).hexdigest()[:16] if pdf_bytes else "nopdf"
+    key = _get_cache_key(f"studybuddy_{mode}_{language}", f"{pdf_part_key}:{content}")
+    cached = _cache_get(key)
+    if cached is not _CACHE_MISS:
+        logger.info(f"CACHE HIT study_buddy {key}")
+        return cached
+
+    lang = STUDY_BUDDY_LANGUAGES[language]
+    source = (
+        "the attached PDF" + (" and the note below" if content else "")
+        if pdf_bytes else "the content below"
+    )
+    material = f"\nContent:\n---\n{content}\n---\n" if content else ""
+
+    if mode == "explain":
+        task = f"""
+    You are a friendly teacher. Explain {source} to a school student in
+    {lang}.
+    Rules:
+    - Start with the core idea in 1-2 very simple sentences.
+    - Use one everyday analogy or example.
+    - Then 3-5 short bullet points with the key things to remember.
+    - Under 200 words. No filler, no greetings.
+    - If the content is not educational, say so in one line instead.
+    - Return plain text only (no JSON, no markdown headings)."""
+    elif mode == "quiz":
+        task = f"""
+    Make exactly {STUDY_QUIZ_COUNT} multiple-choice questions from {source}, in {lang}.
+    Rules:
+    - Each question has exactly 4 options and exactly one correct option.
+    - "answer" must be the EXACT text of the correct option.
+    - Test understanding, not trivia.
+    - Return ONLY valid JSON, no markdown, in this shape:
+      {{"questions": [{{"question": "...", "options": ["...","...","...","..."], "answer": "..."}}]}}"""
+    else:
+        task = f"""
+    Make exactly {STUDY_FLASHCARD_COUNT} revision flashcards from {source}, in {lang}.
+    Rules:
+    - front = a short question or term; back = a concise answer (1-2 sentences).
+    - Cover the most important, exam-worthy points.
+    - Return ONLY valid JSON, no markdown, in this shape:
+      {{"cards": [{{"front": "...", "back": "..."}}]}}"""
+
+    prompt = task + material
+
+    if pdf_bytes:
+        from google.genai import types  # local import — sirf PDF-path ko chahiye
+        contents = [prompt, types.Part.from_bytes(data=pdf_bytes, mime_type="application/pdf")]
+        try:
+            res = _client.models.generate_content(model=_MODEL, contents=contents)
+        except Exception as e:
+            logger.critical(f"Gemini study-buddy PDF call failed (model={_MODEL}): {e}")
+            raise
+    else:
+        res = _call_gemini(prompt)
+
+    raw = (res.text or "").strip()
+    if not raw:
+        raise ValueError("AI returned empty study-buddy reply")
+
+    if mode == "explain":
+        result = {"text": raw}
+    elif mode == "quiz":
+        questions = _clean_quiz(_parse_json_reply(raw).get("questions"))
+        if not questions:
+            raise ValueError("AI returned no usable quiz questions")
+        result = {"questions": questions}
+    else:
+        cards = _clean_cards(_parse_json_reply(raw).get("cards"))
+        if not cards:
+            raise ValueError("AI returned no usable flashcards")
+        result = {"cards": cards}
 
     cache.set(key, result, CACHE_TTL)
     return result

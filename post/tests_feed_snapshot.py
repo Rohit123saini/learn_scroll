@@ -175,7 +175,9 @@ class HomeFeedSnapshotTests(APITestCase):
     def test_new_session_is_reranked(self):
         first = self._ids(self._get(self.url, page_size=10))
         Post.objects.filter(pk=self.posts[0].pk).update(likes_count=100000)
-        again = self._ids(self._get(self.url, page_size=10))
+        # T1 Part 5: a plain second session inside the candidate-cache TTL reuses the
+        # cached candidates; pull-to-refresh (`refresh=1`) always re-ranks.
+        again = self._ids(self._get(self.url, page_size=10, refresh=1))
         self.assertIn(str(self.posts[0].id), again)
         self.assertNotEqual(first, again)
 

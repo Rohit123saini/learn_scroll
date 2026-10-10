@@ -196,6 +196,12 @@ class PostCreateAPIView(APIView):
     )
     @transaction.atomic
     def post(self, request):
+        # Copyright repeat-infringer policy: 2 active strikes block uploads (copyrights app).
+        from copyrights.services import can_upload
+        allowed, why = can_upload(request.user)
+        if not allowed:
+            return Response({"success": False, "code": "copyright_upload_blocked", "message": why},
+                            status=status.HTTP_403_FORBIDDEN)
         serializer = PostCreateSerializer(data=request.data, context={'request': request})
         if serializer.is_valid():
             try:
@@ -323,6 +329,8 @@ class UserInterestsAPIView(APIView):
                 UserInterest(user=request.user, category=c)
                 for c in categories if c not in existing
             ])
+        from . import feed_cache
+        feed_cache.invalidate(request.user.pk)  # T1 Part 5: recommendations depend on interests
 
         return Response({
             "success": True,
@@ -504,12 +512,15 @@ def _home_base_qs(user):
     exclude_hidden_and_muted: "Not interested" posts + muted accounts never
     come back (also applied when a frozen snapshot is served, because the ids
     are re-fetched through this queryset)."""
-    return exclude_hidden_and_muted(_without_superseded_reposts(
+    qs = exclude_hidden_and_muted(_without_superseded_reposts(
         Post.objects.select_related('user', 'original_post__user')
         .prefetch_related('media', 'original_post__media')
         .filter(is_deleted=False, moderation_status='approved', is_sensitive=False)
         .exclude(user=user)
     ), user)
+    # T1 item 6: heavily reported posts are out of EVERY source (post/feed_quality.py, layer 1).
+    from . import feed_quality
+    return feed_quality.exclude_reported_heavy(qs)
 
 
 # ===================== HOME FEED =====================
@@ -535,6 +546,8 @@ class HomeFeedView(generics.ListAPIView):
             'request': self.request,
             'following_ids': getattr(self, '_following_ids', None),
             'feed_sources': getattr(self, '_feed_sources', None) or {},
+            # T1 Part 3: ids that were woven in as exploration (new creator / test audience)
+            'explore_ids': getattr(self, '_explore_ids', None) or set(),
         }
 
     def _base_qs(self):
@@ -602,6 +615,15 @@ class HomeFeedView(generics.ListAPIView):
             page_size = paginator.page_size
         return max(1, min(page_size, paginator.max_page_size))
 
+    def _variant_overrides(self):
+        """T1 item 7: the viewer's A/B-variant overrides (mix / diversity / author_cap / quality /
+        explore / signals / context), resolved once per request."""
+        ov = getattr(self, '_variant_overrides_cache', None)
+        if ov is None:
+            from . import feed_experiment
+            ov = self._variant_overrides_cache = feed_experiment.resolve(self.request.user.pk)['overrides']
+        return ov
+
     def _ratios(self, request):
         from . import feed_mix
 
@@ -609,9 +631,9 @@ class HomeFeedView(generics.ListAPIView):
             # Following-first tab: only following has ratio; discovery is
             # used purely as a last-resort fill (see allocate_page).
             return {feed_mix.SOURCE_FOLLOWING: 1.0}
-        return feed_mix.get_ratios()
+        return feed_mix.get_ratios(self._variant_overrides().get('mix'))
 
-    def _serialize_slices(self, pools, slices, ratios):
+    def _serialize_slices(self, pools, slices, ratios, history=None):
         """ids slice per source -> interleaved, serialized post list."""
         from . import feed_mix
 
@@ -630,8 +652,20 @@ class HomeFeedView(generics.ListAPIView):
             for src, ids in chunks.items()
         }
         merged = feed_mix.interleave(chunk_posts, ratios)
+        # T1 Part 1: spread clumps (same author / type / category) inside this
+        # page. Reorder only - never drops a post, so paging is unaffected.
+        from django.conf import settings as dj_settings
+        from . import feed_diversity
+        div_cfg = getattr(dj_settings, 'FEED_DIVERSITY', None)
+        if self._variant_overrides().get('diversity'):  # T1 item 7: A/B variant override
+            div_cfg = {**(div_cfg or {}), **self._variant_overrides()['diversity']}
+        # `history` = tail of the previous page (from the cursor, Part 2), so the
+        # spacing rules also hold across the page border. None = first page.
+        merged = feed_diversity.diversify_posts(merged, div_cfg, history)
+        self._diversity_tail = feed_diversity.page_tail(merged, div_cfg, history)
         ordered_posts = [post for _, post in merged]
         self._feed_sources = {post.id: src for src, post in merged}
+        self._explore_ids = {post.id for _, post in merged if str(post.id) in getattr(self, '_explore_id_strs', ())}
         return self.get_serializer(ordered_posts, many=True).data
 
     def _list_snapshot(self, request):
@@ -654,6 +688,7 @@ class HomeFeedView(generics.ListAPIView):
         if snapshot is not None:
             # HIT: the ranking is exactly what page 1 saw. No pool queries.
             pools, ratios = snapshot['pools'], snapshot['ratios']
+            self._explore_id_strs = set((snapshot.get('meta') or {}).get('explore_ids') or [])
             snapshot_id, offsets = state['snapshot_id'], state['offsets']
             cutoff_str = state['seen_cutoff']
         else:
@@ -671,23 +706,44 @@ class HomeFeedView(generics.ListAPIView):
                 seen_cutoff = feed_mix.resolve_seen_cutoff(request.query_params.get('seen_cutoff'))
             cutoff_str = feed_mix.format_seen_cutoff(seen_cutoff)
             seen_ids = feed_mix.get_seen_post_ids(request.user, until=seen_cutoff)
-            pools = feed_mix.build_pool_ids(
-                request.user, self._base_qs(), following_ids, _video_and_velocity_boost,
-                seen_ids=seen_ids,
+            # T1 Part 5: short-TTL candidate cache. Skipped for pull-to-refresh
+            # (?refresh=1), for a pinned seen_cutoff and for cursor rebuilds,
+            # whose pools must match the original session exactly.
+            from . import feed_cache
+            rec_ratio = feed_mix.normalize_ratios(ratios).get(feed_mix.SOURCE_RECOMMENDED, 0.0)
+            use_cache = (
+                not state
+                and not request.query_params.get('seen_cutoff')
+                and request.query_params.get('refresh') not in ('1', 'true', 'True')
             )
-            feed_snapshot.save(request.user.pk, snapshot_id, pools, ratios)
+            salt = feed_cache.salt_for(request.user)
+            cached = feed_cache.get(request.user.pk, None, rec_ratio, salt) if use_cache else None
+            if cached is not None:
+                pools, meta = cached['pools'], cached['meta']
+            else:
+                meta = {}
+                pools = feed_mix.build_pool_ids(
+                    request.user, self._base_qs(), following_ids, _video_and_velocity_boost,
+                    seen_ids=seen_ids, ratios=ratios, meta=meta,
+                )
+                if use_cache:
+                    feed_cache.put(request.user.pk, None, rec_ratio, pools, meta, salt)
+            self._explore_id_strs = set(meta.get('explore_ids') or [])
+            feed_snapshot.save(request.user.pk, snapshot_id, pools, ratios, meta=meta)
 
         sizes = {src: len(ids) for src, ids in pools.items()}
         total = sum(sizes.values())
         slices = feed_mix.allocate_next(offsets, page_size, sizes, ratios)
-        data = self._serialize_slices(pools, slices, ratios)
+        data = self._serialize_slices(pools, slices, ratios, history=(state or {}).get('tail'))
 
         new_offsets = {src: end for src, (_, end) in slices.items()}
         has_next = any(new_offsets[src] < sizes[src] for src in feed_mix.SOURCES)
         next_url = None
         if has_next:
             url = remove_query_param(request.build_absolute_uri(), 'page')
-            url = replace_query_param(url, 'cursor', feed_snapshot.encode_cursor(snapshot_id, new_offsets, cutoff_str))
+            url = replace_query_param(url, 'cursor', feed_snapshot.encode_cursor(
+                snapshot_id, new_offsets, cutoff_str, tail=getattr(self, '_diversity_tail', None),
+            ))
             # kept for older clients / tooling that read it; the cursor is what counts
             if cutoff_str:
                 url = replace_query_param(url, 'seen_cutoff', cutoff_str)
@@ -721,7 +777,7 @@ class HomeFeedView(generics.ListAPIView):
         )
         self._following_ids = following_ids
 
-        ratios = feed_mix.get_ratios()
+        ratios = feed_mix.get_ratios(self._variant_overrides().get('mix'))
         if request.query_params.get('source') == 'following':
             # Following-first tab: only following has ratio; discovery is
             # used purely as a last-resort fill (see allocate_page).
@@ -738,10 +794,12 @@ class HomeFeedView(generics.ListAPIView):
         # cap / on-off switch come from settings.FEED_SEEN_LIMITS.
         seen_ids = feed_mix.get_seen_post_ids(request.user, until=seen_cutoff)
 
+        meta = {}
         pools = feed_mix.build_pool_ids(
             request.user, self._base_qs(), following_ids, _video_and_velocity_boost,
-            seen_ids=seen_ids,
+            seen_ids=seen_ids, ratios=ratios, meta=meta,
         )
+        self._explore_id_strs = set(meta.get('explore_ids') or [])
         sizes = {src: len(ids) for src, ids in pools.items()}
         total = sum(sizes.values())
         slices = feed_mix.allocate_page(page, page_size, sizes, ratios)
@@ -826,7 +884,8 @@ class PostDetailAPIView(generics.RetrieveAPIView):
         return super().get(request, *args, **kwargs)
     def retrieve(self, request, *args, **kwargs):
         instance = self.get_object()
-        if instance.is_deleted:
+        from .moderation_guard import post_hidden_for
+        if post_hidden_for(request.user, instance):
             return Response({"success": False, "message": "Post not found"}, status=status.HTTP_404_NOT_FOUND)
         if instance.user_id != request.user.id:
             from user_profile.views import is_blocked_between
@@ -924,6 +983,9 @@ class PostSeenBatchAPIView(APIView):
                 [PostView(post_id=pid, user=request.user, is_counted=False) for pid in valid_ids],
                 ignore_conflicts=True,
             )
+            # T1 Part 5: cached candidates still contain what was just seen.
+            from . import feed_cache
+            feed_cache.invalidate(request.user.pk)
         return Response({"success": True, "accepted": len(valid_ids)})
 
 # ===================== ANALYTICS EVENTS (C1-BE) =====================
@@ -1212,6 +1274,10 @@ class PostEditAPIView(APIView):
         post = get_object_or_404(Post, id=id, is_deleted=False)
         if post.user_id != request.user.id:
             return Response({"success": False, "message": "Not allowed"}, status=status.HTTP_403_FORBIDDEN)
+        from .moderation_guard import post_locked_by_copyright
+        if post_locked_by_copyright(post):
+            return Response({"success": False, "message": "This post is under a copyright review and can't be changed."},
+                            status=status.HTTP_403_FORBIDDEN)
         if post.post_type == "repost":
             # A repost row carries no content/media of its own to edit —
             # the embedded preview always reflects `original_post` live.
@@ -1246,6 +1312,10 @@ class PostVisibilityAPIView(APIView):
         post = get_object_or_404(Post, id=id, is_deleted=False)
         if post.user_id != request.user.id:
             return Response({"success": False, "message": "Not allowed"}, status=status.HTTP_403_FORBIDDEN)
+        from .moderation_guard import post_locked_by_copyright
+        if post_locked_by_copyright(post):
+            return Response({"success": False, "message": "This post is under a copyright review and can't be changed."},
+                            status=status.HTTP_403_FORBIDDEN)
         if post.post_type == "repost":
             return Response({"success": False, "message": "Reposts can't be edited"}, status=status.HTTP_400_BAD_REQUEST)
 
@@ -1278,6 +1348,9 @@ class PostShareAPIView(APIView):
         from message.models import Conversation
 
         post = get_object_or_404(Post, id=id, is_deleted=False)
+        from .moderation_guard import post_hidden_for
+        if post_hidden_for(request.user, post):
+            return Response({"success": False, "message": "Post not found"}, status=status.HTTP_404_NOT_FOUND)
         if post.visibility == "private" and post.user_id != request.user.id:
             return Response({"success": False, "message": "Post is private"}, status=status.HTTP_403_FORBIDDEN)
         if post.user_id != request.user.id:
@@ -1515,6 +1588,11 @@ class StoryCreateAPIView(APIView):
 
     @extend_schema(summary="Create a Story (24h auto-expiry)", tags=["Stories"])
     def post(self, request):
+        from copyrights.services import can_upload
+        allowed, why = can_upload(request.user)
+        if not allowed:
+            return Response({"success": False, "code": "copyright_upload_blocked", "message": why},
+                            status=status.HTTP_403_FORBIDDEN)
         serializer = StoryCreateSerializer(data=request.data, context={"request": request})
         serializer.is_valid(raise_exception=True)
         story = serializer.save()
@@ -1854,6 +1932,15 @@ class StoryReplyAPIView(APIView):
         if not text:
             return Response({"detail": "'text' required hai."}, status=status.HTTP_400_BAD_REQUEST)
 
+        # Minor-safety: no new chat from an adult to a minor who doesn't follow them.
+        from message.minor_safety import MINOR_DM_BLOCKED_MESSAGE, dm_blocked_for_minor
+        from message.models import Conversation as _Conv
+
+        if dm_blocked_for_minor(request.user, story.user) and not _Conv.objects.filter(
+            private_key=_Conv.make_private_key(request.user.id, story.user_id)
+        ).exists():
+            return Response({"detail": MINOR_DM_BLOCKED_MESSAGE}, status=status.HTTP_403_FORBIDDEN)
+
         conversation, _ = get_or_create_conversation(request.user, story.user)
 
         try:
@@ -2008,6 +2095,9 @@ class PostReactionAPIView(APIView):
     def post(self, request, post_id):
         from django.shortcuts import get_object_or_404
         post = get_object_or_404(Post, id=post_id)
+        from .moderation_guard import post_hidden_for
+        if post_hidden_for(request.user, post):
+            return Response({"success": False, "message": "Post not found"}, status=status.HTTP_404_NOT_FOUND)
         if post.user_id != request.user.id:
             from user_profile.views import is_blocked_between
             if is_blocked_between(request.user, post.user):
@@ -2054,6 +2144,9 @@ class PostReactionAPIView(APIView):
     def get(self, request, post_id):
         from django.shortcuts import get_object_or_404
         post = get_object_or_404(Post, id=post_id)
+        from .moderation_guard import post_hidden_for
+        if post_hidden_for(request.user, post):
+            return Response({"success": False, "message": "Post not found"}, status=status.HTTP_404_NOT_FOUND)
         my_reaction = None
         if request.user.is_authenticated:
             obj = PostLike.objects.filter(post=post, user=request.user).first()
@@ -2101,6 +2194,9 @@ class PostPollVoteAPIView(APIView):
     )
     def post(self, request, post_id):
         post = get_object_or_404(Post, id=post_id, is_deleted=False)
+        from .moderation_guard import post_hidden_for
+        if post_hidden_for(request.user, post):
+            return Response({"detail": "Post not found."}, status=status.HTTP_404_NOT_FOUND)
         try:
             poll = post.poll
         except PostPoll.DoesNotExist:
@@ -2138,7 +2234,20 @@ class PostAnswerListCreateAPIView(generics.ListCreateAPIView):
         return [IsAuthenticated()]
 
     def get_queryset(self):
-        return PostAnswer.objects.filter(post_id=self.kwargs["post_id"]).select_related("user")
+        from .moderation_guard import post_hidden_for
+        from user_profile.services import blocked_user_ids as _blocked_ids
+
+        post = Post.objects.filter(id=self.kwargs["post_id"], is_deleted=False).select_related("user").first()
+        if post is None or post_hidden_for(self.request.user, post):
+            return PostAnswer.objects.none()
+        qs = PostAnswer.objects.filter(post_id=post.id).select_related("user")
+        user = self.request.user
+        if user.is_authenticated:
+            blocked = _blocked_ids(user)
+            if post.user_id in blocked:  # blocked with the post's author: same as "no such post"
+                return PostAnswer.objects.none()
+            qs = qs.exclude(user_id__in=blocked)
+        return qs
 
     @extend_schema(summary="List answers on a doubt post", tags=["Post Doubts"])
     def get(self, request, *args, **kwargs):
@@ -2152,6 +2261,13 @@ class PostAnswerListCreateAPIView(generics.ListCreateAPIView):
     )
     def create(self, request, *args, **kwargs):
         post = get_object_or_404(Post, id=self.kwargs["post_id"], is_deleted=False)
+        from .moderation_guard import post_hidden_for
+        if post_hidden_for(request.user, post):
+            return Response({"detail": "Post not found."}, status=status.HTTP_404_NOT_FOUND)
+        if post.user_id != request.user.id:
+            from user_profile.views import is_blocked_between
+            if is_blocked_between(request.user, post.user):
+                return Response({"detail": "Post not found."}, status=status.HTTP_404_NOT_FOUND)
         if post.post_type != "doubt":
             return Response(
                 {"detail": "Answers are only for 'Ask a doubt' posts."},
@@ -2294,6 +2410,16 @@ class PostSaveToggleAPIView(APIView):
         # Check pehle se saved hai kya?
         saved_obj = PostSave.objects.filter(post=post, user=request.user).first()
 
+        # Saving a hidden post / a blocked person's post is refused; UN-saving is always allowed.
+        if saved_obj is None:
+            from .moderation_guard import post_hidden_for
+            hidden = post_hidden_for(request.user, post)
+            if not hidden and post.user_id != request.user.id:
+                from user_profile.views import is_blocked_between
+                hidden = is_blocked_between(request.user, post.user)
+            if hidden:
+                return Response({"success": False, "message": "Post not found"}, status=status.HTTP_404_NOT_FOUND)
+
         if saved_obj:
             # Already saved hai -> ab unsave karo
             saved_obj.delete()
@@ -2337,8 +2463,9 @@ class SavedPostsListAPIView(generics.ListAPIView):
         user = self.request.user
         qs = Post.objects.select_related('user', 'original_post__user').prefetch_related('media', 'original_post__media').filter(
             saved_by__user=user,
-            is_deleted=False
-        ).order_by('-saved_by__created_at')
+            is_deleted=False,
+            moderation_status='approved',   # taken-down / flagged posts vanish from Saved too
+        ).exclude(user_id__in=blocked_user_ids(user)).order_by('-saved_by__created_at')
 
         collection = self.request.query_params.get('collection_name')
         if collection:
@@ -2565,6 +2692,8 @@ class NotInterestedAPIView(APIView):
         if not created and hide.reason != reason:
             hide.reason = reason
             hide.save(update_fields=['reason'])
+        from . import feed_cache
+        feed_cache.invalidate(request.user.pk)  # T1 Part 5
         return Response({
             "success": True,
             "message": "We'll show you less like this." if created else "Already hidden.",
@@ -2574,6 +2703,8 @@ class NotInterestedAPIView(APIView):
     @extend_schema(summary="Undo 'Not interested'", tags=["Feed Feedback"])
     def delete(self, request, post_id):
         removed, _ = PostHide.objects.filter(user=request.user, post_id=post_id).delete()
+        from . import feed_cache
+        feed_cache.invalidate(request.user.pk)  # T1 Part 5
         return Response({"success": True, "removed": bool(removed),
                          "message": "Post restored." if removed else "Post was not hidden."},
                         status=status.HTTP_200_OK)
@@ -2625,6 +2756,8 @@ class MutedAccountsAPIView(APIView):
         if target is None:
             return Response({"success": False, "message": "User not found."}, status=status.HTTP_404_NOT_FOUND)
         mute, created = MutedAccount.objects.get_or_create(user=request.user, muted_user=target)
+        from . import feed_cache
+        feed_cache.invalidate(request.user.pk)  # T1 Part 5
         return Response({
             "success": True,
             "message": "Account muted." if created else "Account already muted.",
@@ -2639,6 +2772,8 @@ class UnmuteAccountAPIView(APIView):
     @extend_schema(summary="Unmute an account", tags=["Feed Feedback"])
     def delete(self, request, user_id):
         removed, _ = MutedAccount.objects.filter(user=request.user, muted_user_id=user_id).delete()
+        from . import feed_cache
+        feed_cache.invalidate(request.user.pk)  # T1 Part 5
         return Response({"success": True, "removed": bool(removed),
                          "message": "Account unmuted." if removed else "Account was not muted."},
                         status=status.HTTP_200_OK)
@@ -2748,6 +2883,8 @@ class FeedFeedbackDeleteAPIView(APIView):
     @extend_schema(summary="Remove one 'Show fewer' preference", tags=["Feed Feedback"])
     def delete(self, request, feedback_id):
         removed, _ = FeedFeedback.objects.filter(user=request.user, id=feedback_id).delete()
+        from . import feed_cache
+        feed_cache.invalidate(request.user.pk)  # T1 Part 5
         return Response({"success": True, "removed": bool(removed),
                          "message": "We'll show you this again." if removed else "Nothing to remove."},
                         status=status.HTTP_200_OK)
@@ -2780,3 +2917,27 @@ class WhyAmISeeingThisAPIView(APIView):
             request.user, post, _home_base_qs(request.user), following_ids, _video_and_velocity_boost,
         )
         return Response({"success": True, "data": payload}, status=status.HTTP_200_OK)
+
+# ===================== FEED METRICS (T1 Part 5) =====================
+class FeedMetricsAPIView(APIView):
+    """`GET /post/feed/metrics/?days=7&surface=feed` - staff only. Same numbers
+    as `manage.py feed_metrics` (CTR, dwell, session length, show-fewer rate,
+    diversity - overall and per A/B variant)."""
+    permission_classes = [IsAuthenticated]
+
+    @extend_schema(summary="Feed quality metrics (staff)", tags=["Feed"])
+    def get(self, request):
+        from datetime import timedelta as _td
+        from . import feed_metrics
+
+        if not (request.user.is_staff or request.user.is_superuser):
+            return Response({"success": False, "message": "Staff only."}, status=status.HTTP_403_FORBIDDEN)
+        try:
+            days = min(90, max(1, int(request.query_params.get("days", 1))))
+        except (TypeError, ValueError):
+            days = 1
+        surface = request.query_params.get("surface", "feed")
+        if surface not in ("feed", "reels", "profile", "explore"):
+            return Response({"success": False, "message": "Invalid surface."}, status=status.HTTP_400_BAD_REQUEST)
+        end = timezone.now()
+        return Response({"success": True, "data": feed_metrics.compute_metrics(end - _td(days=days), end, surface)})

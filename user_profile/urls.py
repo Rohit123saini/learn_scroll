@@ -26,6 +26,8 @@ from .views import (
     RestrictedUsersView,
     SimilarUsersView,  # P8-BE
     StreakView,
+    StreakFreezeBuyView,
+    DailyGoalView,
     UnblockUserView,
     UnrestrictUserView,
     UpdateProfileView,
@@ -116,6 +118,8 @@ urlpatterns = [
     # file's other comments already call out for restricted-users/ vs
     # blocked-users/, coin-withdrawals/ vs buy-coin/, etc.
     path("streak/", StreakView.as_view(), name="streak"),
+    path("streak/freeze/", StreakFreezeBuyView.as_view(), name="streak-freeze-buy"),
+    path("daily-goal/", DailyGoalView.as_view(), name="daily-goal"),
     # P14-BE — "Your activity": GET last-7-days time spent + likes/comments/
     # shares + saved/liked posts, PATCH the daily-limit reminder; the
     # foreground heartbeat feeds DailyUsage.

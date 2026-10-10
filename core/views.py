@@ -630,7 +630,7 @@ class OnboardingSuggestionsView(APIView):
 
         suggested_users = self._suggested_users(user)
         suggested_campuses = self._suggested_campuses()
-        sample_test_series = self._sample_test_series()
+        sample_test_series = self._sample_test_series(user=user)
 
         return Response(
             {
@@ -663,7 +663,7 @@ class OnboardingSuggestionsView(APIView):
 
         return [{"id": c.id, "name": c.name, "type": c.type} for c in campuses]
 
-    def _sample_test_series(self, limit: int = 3):
+    def _sample_test_series(self, limit: int = 3, user=None):
         try:
             from django.db.models import Count, F
 
@@ -683,10 +683,22 @@ class OnboardingSuggestionsView(APIView):
             .select_related("creator")
             .annotate(q_count=Count("questions", distinct=True))
             .with_rating()
-            .order_by(F("rating").desc(nulls_last=True), "-id")[:limit]
+            .order_by(F("rating").desc(nulls_last=True), "-id")
         )
 
-        return PublicSeriesSerializer(series, many=True).data
+        # Quick-start (core/onboarding_quickstart.py): series matching the
+        # user's chosen exam go first, the rest fill up by rating.
+        exam = getattr(user, "target_exam", "") if user is not None else ""
+        if exam:
+            from .onboarding_quickstart import prefer_exam
+
+            first = list(prefer_exam(series, exam)[:limit])
+            if len(first) < limit:
+                taken = {s.pk for s in first}
+                first += [s for s in series.exclude(pk__in=taken)[: limit - len(first)]]
+            return PublicSeriesSerializer(first, many=True).data
+
+        return PublicSeriesSerializer(series[:limit], many=True).data
 
 
 class OnboardingCompleteView(APIView):

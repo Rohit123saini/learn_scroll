@@ -1,6 +1,7 @@
 # login/serializers.py
 from rest_framework import serializers
 from .models import User, OTPVerification, phone_validator
+from .age import is_minor_dob
 from django.core.exceptions import ValidationError as DjangoValidationError
 from django.db.models import Q
 import re
@@ -107,6 +108,10 @@ class SignupSerializer(serializers.ModelSerializer):
     # normalization), never as ''.
     phone = serializers.CharField(required=False, allow_blank=True, allow_null=True)
 
+    # Minor-safety: required at signup. Under MIN_SIGNUP_AGE is refused;
+    # under 18 the account is created private and stays private.
+    date_of_birth = serializers.DateField(required=True)
+
     class Meta:
         model = User
         fields = [
@@ -115,6 +120,7 @@ class SignupSerializer(serializers.ModelSerializer):
             "first_name",
             "last_name",
             "phone",
+            "date_of_birth",
             "password",
             "confirm_password",
         ]
@@ -159,6 +165,14 @@ class SignupSerializer(serializers.ModelSerializer):
                 "Phone number already exists."
             )
 
+        return value
+
+    def validate_date_of_birth(self, value):
+        from .age import dob_error
+
+        error = dob_error(value)
+        if error:
+            raise serializers.ValidationError(error)
         return value
 
     def validate_password(self, value):
@@ -227,6 +241,9 @@ class SignupSerializer(serializers.ModelSerializer):
             # (as opposed to sending "" / null, which validate_phone
             # turns into None) — direct indexing would KeyError.
             phone=validated_data.get("phone"),
+            date_of_birth=validated_data["date_of_birth"],
+            # Under-18 accounts start (and stay) private.
+            is_private=is_minor_dob(validated_data["date_of_birth"]),
             password=validated_data["password"],
             # ✅ Actually true now — gated by the `validate()` check above
             # instead of assumed.
@@ -281,6 +298,21 @@ class ChangePasswordSerializer(serializers.Serializer):
         return attrs
 
 
+
+
+class SetDateOfBirthSerializer(serializers.Serializer):
+    """One-time DOB entry for accounts that don't have one yet (Google
+    signups, and accounts that pre-date the minor-safety feature)."""
+
+    date_of_birth = serializers.DateField(required=True)
+
+    def validate_date_of_birth(self, value):
+        from .age import dob_error
+
+        error = dob_error(value)
+        if error:
+            raise serializers.ValidationError(error)
+        return value
 
 
 class CompleteProfileSerializer(serializers.Serializer):

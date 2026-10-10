@@ -12,6 +12,7 @@ urlpatterns = [
     path("auth/change-password/", ChangePasswordAPIView.as_view(), name="change-password"),
     path("auth/google/", GoogleAuthView.as_view(), name="google-auth"),
     path("auth/complete-profile/", CompleteProfileView.as_view(), name="complete-profile"),
+    path("auth/set-dob/", SetDateOfBirthView.as_view(), name="set-dob"),
 
     # 🔥 FIX (B-7) — dedicated forgot-password flow. Two steps, neither of
     # which returns a session: request a code for a known account, then

@@ -441,3 +441,21 @@ def backfill_badges():
     summary = _backfill()
     logger.info("backfill_badges: %s", summary)
     return summary
+
+
+@shared_task
+def automod_ai_screen(target_type, target_id, user_id, text):
+    """Optional AI second pass for auto-moderation (see common/moderation_ai.py).
+    Queued from user_profile/automod.py only when AUTOMOD_AI_ENABLED is on and
+    the cheap word-list pass found nothing. Flag-only, never raises."""
+    from common.moderation_ai import classify
+
+    from .automod import record_flag
+
+    flagged, reason = classify(text)
+    if flagged:
+        record_flag(
+            target_type=target_type, target_id=target_id, user_id=user_id,
+            text=text, reason=reason, source="ai",
+        )
+    return flagged

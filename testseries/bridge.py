@@ -61,6 +61,7 @@ import importlib
 import logging
 
 from django.conf import settings
+from django.core.exceptions import ValidationError as DjangoValidationError
 from django.db import transaction
 from django.utils import timezone
 
@@ -68,6 +69,25 @@ from . import policy
 from .models import Question, TestAttempt, TestSeries, _notify
 
 logger = logging.getLogger(__name__)
+
+
+# Writable `Question` fields a bridge caller may pass (anything else is ignored,
+# exactly like a DRF serializer would — never a TypeError out of `Question(**kw)`).
+_QUESTION_FIELDS = frozenset({
+    "order", "question_type", "text", "attachment", "marks", "negative_marks",
+    "topic", "difficulty", "options", "correct_answer", "explanation",
+})
+
+
+class QuestionPayloadError(ValueError):
+    """T2 — `questions` for `create_context_testseries()` had one or more bad
+    items. `.errors` = `[{"index", "question_number", "message"}, ...]` so the
+    calling app can answer with a per-question 400 instead of a bare 500."""
+
+    def __init__(self, errors):
+        first = errors[0]["message"] if errors else "Invalid questions."
+        super().__init__(f"Nothing was saved. {first}" + (f" (+{len(errors) - 1} more)" if len(errors) > 1 else ""))
+        self.errors = errors
 
 
 def create_context_testseries(
@@ -82,8 +102,9 @@ def create_context_testseries(
     price_coins: int = 0,
     duration_minutes=None,
     attempts_allowed: int = 1,
-    questions: list[dict],
+    questions: list[dict] | None = None,
     roster=None,
+    draft: bool = False,
 ):
     """
     `questions`: list of dicts matching `Question`'s writable fields
@@ -100,6 +121,16 @@ def create_context_testseries(
     go through `TestSeriesViewSet.create` instead, see views.py), which
     is why "no bulk-notify for individual series" (§4) doesn't need a
     branch here.
+
+    T2 — `draft=True` creates the series as a DRAFT (questions optional): the
+    creator and the context's authorised editors then add / edit / delete
+    questions through the question endpoints and publish when ready. A draft is
+    neither announced nor notified — that happens in `TestSeriesViewSet.
+    publish`. `draft=False` (default) keeps the old "created PUBLISHED with its
+    questions" behaviour exactly.
+
+    A malformed question raises `QuestionPayloadError` (a `ValueError`) BEFORE
+    anything is committed.
     """
     if source not in (TestSeries.Source.CAMPUS, TestSeries.Source.TUITIONCLASS):
         raise ValueError("create_context_testseries() is only for source='campus'/'tuitionclass'; "
@@ -124,17 +155,36 @@ def create_context_testseries(
             price_coins=price_coins,
             duration_minutes=duration_minutes,
             attempts_allowed=attempts_allowed,
-            status=TestSeries.Status.PUBLISHED,
+            status=TestSeries.Status.DRAFT if draft else TestSeries.Status.PUBLISHED,
         )
-        question_objs = [Question(series=series, **q_kwargs) for q_kwargs in questions]
-        for question in question_objs:
-            # full_clean() (not just save()) because bulk_create() below
-            # bypasses Model.save() entirely — this is the one place a
-            # malformed question shape (§2 validation) gets caught, not
-            # left to surface later as a confusing auto-grade bug.
-            question.full_clean()
+        question_objs, problems = [], []
+        for index, raw in enumerate(questions or []):
+            if not isinstance(raw, dict):
+                problems.append({"index": index, "question_number": index + 1,
+                                 "message": f"Q{index + 1}: each question must be an object."})
+                continue
+            kwargs = {k: v for k, v in raw.items() if k in _QUESTION_FIELDS}
+            kwargs.setdefault("order", index + 1)
+            question = Question(series=series, **kwargs)
+            try:
+                # full_clean() (not just save()) because bulk_create() below
+                # bypasses Model.save() entirely — this is the one place a
+                # malformed question shape (§2 validation) gets caught, not
+                # left to surface later as a confusing auto-grade bug.
+                question.full_clean()
+            except DjangoValidationError as exc:
+                problems.append({"index": index, "question_number": index + 1,
+                                 "message": f"Q{index + 1}: {' '.join(exc.messages)}"})
+            else:
+                question_objs.append(question)
+        if problems:
+            # Raised inside the atomic block: the series row above is rolled back.
+            raise QuestionPayloadError(problems)
         Question.objects.bulk_create(question_objs)
         series.recompute_total_marks()
+
+    if draft:
+        return series  # nothing to announce until it is published
 
     if roster:
         # Lazy import — same reasoning `models.py`'s own `_notify()`/

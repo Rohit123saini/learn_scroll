@@ -49,6 +49,13 @@ def suggested_users_queryset(viewer, *, exclude_user_ids=()):
         .exclude(id__in=blocked_me)
         .exclude(id__in=RestrictUser.objects.filter(user=viewer).values("restricted_id"))
     )
+    # Minor-safety: don't recommend under-18 accounts to adult viewers.
+    # (Unknown-DOB users are left alone — nothing is assumed about them.)
+    if viewer.is_verified_adult:
+        from login.age import minor_cutoff_date
+
+        candidates = candidates.exclude(date_of_birth__gt=minor_cutoff_date())
+
     extra = [i for i in exclude_user_ids if i is not None]
     if extra:
         candidates = candidates.exclude(id__in=extra)

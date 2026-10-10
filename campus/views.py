@@ -4,14 +4,15 @@ import uuid
 from decimal import Decimal, InvalidOperation
 
 from django.db import transaction
-from django.db.models import Q
+from django.db.models import Count, Prefetch, Q
 from django.http import HttpResponse
 from django.shortcuts import get_object_or_404
 from django.utils import timezone
 from django.utils.dateparse import parse_date
 from rest_framework import mixins, status, viewsets
 from rest_framework.decorators import action
-from rest_framework.exceptions import PermissionDenied
+from rest_framework.exceptions import APIException, PermissionDenied
+from rest_framework.parsers import FormParser, MultiPartParser, JSONParser
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
@@ -62,11 +63,19 @@ from .bridge import NotifTypes
 from .receipt_pdf import PdfUnavailable, render_pdf
 from .receipt_pdf import _display_name as _receipt_display_name
 from .services import compute_attendance_summary, generate_report_card_data
+# [T4 §A-§D] participants / control-panel / roster / audit
+from . import panel as campus_panel
+from . import participants as campus_participants
+from . import roster as campus_roster
+from .audit import AuditedModelViewSetMixin, log_action
+from .models import CampusAuditLog
+from .roster import RosterError
 # B-4 fix — see campus/throttles.py module docstring for why these are
 # separate classes (each with its own fixed `scope`) rather than a
 # shared `throttle_scope` attribute: several of them apply to different
 # @action methods living on the same ViewSet.
 from .throttles import (
+    CampusDoubtPostThrottle,
     CampusFeePaymentThrottle,
     CampusLiveSessionJoinThrottle,
     CampusNoticePostThrottle,
@@ -77,8 +86,11 @@ from .models import (
     Attendance,
     Campus,
     CampusAnalyticsSnapshot,
+    CampusDoubt,
+    CampusDoubtReply,
     CampusLiveSession,
     CampusParentLink,
+    ClassMode,
     ClassTeacherassigments,
     Department,
     DigitalIDCard,
@@ -103,7 +115,12 @@ from .models import (
 from .permissions import (
     IsCampusAdminOrPrincipal,
     IsPlatformAdmin,
+    IsRosterManagerOrReadOnly,
     IsSectionSubjectStaffOrReadOnly,
+    ROLE_ACTIONS,
+    get_campus_role,
+    hod_department_id,
+    user_can,
     can_manage_section_subject,
     can_post_notice,
     is_any_active_staff,
@@ -116,6 +133,9 @@ from .serializers import (
     AcademicSessionSerializer,
     AttendanceSerializer,
     CampusAnalyticsSnapshotSerializer,
+    CampusDoubtDetailSerializer,
+    CampusDoubtReplySerializer,
+    CampusDoubtSerializer,
     CampusLiveSessionSerializer,
     CampusParentLinkSerializer,
     CampusSerializer,
@@ -141,7 +161,25 @@ from .serializers import (
     SubjectTeacherassigmentsSerializer,
 )
 
+from . import visibility as vis_mod  # noqa: E402
+from .visibility import accessible_section_ids_and_campus_map, get_visibility  # noqa: E402
+
 logger = logging.getLogger(__name__)
+
+
+def _truthy(value):
+    return value is True or str(value).strip().lower() in ("1", "true", "yes", "on")
+
+
+class RosterAPIError(APIException):
+    """400 with a stable machine `code` (e.g. section_full) + human `detail`."""
+
+    status_code = 400
+
+    def __init__(self, err):
+        super().__init__(detail=err.message)
+        # the project's exception handler (tuitionclass.exceptions) puts this in the envelope's "code"
+        self.machine_code = err.code
 
 
 def get_my_campus_ids(user):
@@ -153,15 +191,7 @@ def get_my_campus_ids(user):
     campus-visibility check — including `CampusViewSet` itself — stays
     in sync as new membership routes (e.g. parent links) get added.
     """
-    return set(
-        StaffProfile.objects.filter(user=user, is_active=True).values_list("campus_id", flat=True)
-    ) | set(
-        StudentEnrollment.objects.filter(student=user).values_list(
-            "section__school_class__campus_id", flat=True
-        )
-    ) | set(
-        CampusParentLink.objects.filter(parent=user).values_list("campus_id", flat=True)
-    )
+    return vis_mod.get_my_campus_ids(user)
 
 
 class CampusMemberScopedMixin:
@@ -197,11 +227,41 @@ class CampusMemberScopedMixin:
             target = getattr(target, part)
         return target.id
 
+    # T4 §E — how rows are narrowed for a NON-staff member (student /
+    # parent) of the campus. Active staff always keep campus-wide access.
+    #   None      -> no narrowing (campus-wide data, e.g. exam terms)
+    #   "section" -> `member_section_path` must be in the visible sections
+    #   "student" -> `member_student_path` must be self / a linked child
+    #   "none"    -> hidden from students/parents entirely
+    # Override `member_scope_q(vis)` for anything custom.
+    member_scope = None
+    member_section_path = None
+    member_student_path = None
+
+    def member_scope_q(self, vis):
+        if self.member_scope is None:
+            return None
+        if self.member_scope == "section":
+            return Q(**{f"{self.member_section_path}__in": vis.visible_section_ids})
+        if self.member_scope == "student":
+            return Q(**{f"{self.member_student_path}__in": vis.visible_student_ids})
+        return Q(pk__in=[])
+
     def filter_queryset_to_my_campuses(self, qs, request):
+        vis = get_visibility(request.user, request)
+        cp = self.campus_field_path
         campus_id = request.query_params.get("campus")
         if campus_id:
-            qs = qs.filter(**{f"{self.campus_field_path}__id": campus_id})
-        return qs.filter(**{f"{self.campus_field_path}__id__in": get_my_campus_ids(request.user)})
+            qs = qs.filter(**{f"{cp}__id": campus_id})
+        qs = qs.filter(**{f"{cp}__id__in": vis.member_campus_ids})
+        if vis.nonstaff_campus_ids:
+            member_q = self.member_scope_q(vis)
+            if member_q is not None:
+                qs = qs.filter(
+                    Q(**{f"{cp}__id__in": vis.staff_campus_ids})
+                    | (Q(**{f"{cp}__id__in": vis.nonstaff_campus_ids}) & member_q)
+                )
+        return qs
 
 
 class CampusViewSet(viewsets.ModelViewSet):
@@ -234,6 +294,18 @@ class CampusViewSet(viewsets.ModelViewSet):
         campus = serializer.save(created_by=self.request.user)
         StaffProfile.objects.create(campus=campus, user=self.request.user, role=StaffProfile.Role.ADMIN)
 
+    # T4 §E — any campus MEMBER (a student included) could previously
+    # PATCH/DELETE the campus. Only its admin/principal may.
+    def perform_update(self, serializer):
+        if not is_campus_admin_or_principal(self.request.user, serializer.instance.id):
+            raise PermissionDenied("Only a campus admin/principal can change the campus.")
+        serializer.save()
+
+    def perform_destroy(self, instance):
+        if not is_campus_admin_or_principal(self.request.user, instance.id):
+            raise PermissionDenied("Only a campus admin/principal can delete the campus.")
+        instance.delete()
+
     @action(detail=True, methods=["post"])
     def approve(self, request, pk=None):
         """G-2 fix — platform-admin-only. `get_queryset` already scopes
@@ -262,6 +334,114 @@ class CampusViewSet(viewsets.ModelViewSet):
         campus.verified_at = timezone.now()
         campus.save(update_fields=["verification_status", "verified_by", "verified_at"])
         return Response(self.get_serializer(campus).data)
+
+    # ------------------------------------------------------------------
+    # [T4 §A-§C] participants / control panel / assignment matrix / import / audit
+    # ------------------------------------------------------------------
+    def _need(self, request, campus, action):
+        if not user_can(request.user, campus.id, action):
+            raise PermissionDenied("You don't have permission for this action in this campus.")
+
+    @action(detail=True, methods=["get"], url_path="participants")
+    def participants(self, request, pk=None):
+        """§A — one paginated, role-scoped list of staff (by role) / students /
+        parents. Filters: category, department, class, section, q, page, page_size."""
+        campus = self.get_object()
+        return Response(campus_participants.list_participants(request, campus.id))
+
+    @action(detail=True, methods=["get"], url_path="participants/summary")
+    def participants_summary(self, request, pk=None):
+        campus = self.get_object()
+        return Response(campus_participants.participants_summary(request, campus.id))
+
+    @action(detail=True, methods=["get"], url_path="control-panel/overview")
+    def control_panel_overview(self, request, pk=None):
+        campus = self.get_object()
+        self._need(request, campus, "panel.overview")
+        return Response(campus_panel.overview(campus))
+
+    @action(detail=True, methods=["get"], url_path="setup-status")
+    def setup_status(self, request, pk=None):
+        campus = self.get_object()
+        self._need(request, campus, "panel.overview")
+        return Response(campus_panel.setup_status(campus))
+
+    @action(detail=True, methods=["get"], url_path="my-permissions")
+    def my_permissions(self, request, pk=None):
+        """Role + which un-scoped actions the UI may show for this user."""
+        campus = self.get_object()
+        role = get_campus_role(request.user, campus.id)
+        return Response({
+            "role": role,
+            "department": str(hod_department_id(request.user, campus.id) or "") or None,
+            "actions": {a: (role in roles) for a, roles in ROLE_ACTIONS.items()},
+        })
+
+    @action(detail=True, methods=["get"], url_path="assignment-matrix")
+    def assignment_matrix(self, request, pk=None):
+        campus = self.get_object()
+        self._need(request, campus, "panel.assignment_matrix")
+        return Response(campus_panel.assignment_matrix(campus, hod_department_id=hod_department_id(request.user, campus.id)))
+
+    @action(detail=True, methods=["post"], url_path="assignment-matrix/bulk-assign")
+    def bulk_assign(self, request, pk=None):
+        """Body: {"assignments":[{"staff","section","kind":"class_teacher"|"subject","subject"?}],
+        "dry_run": bool, "replace": bool}. Approval is skipped (direct assign)."""
+        campus = self.get_object()
+        self._need(request, campus, "assignments.direct_assign")
+        items = request.data.get("assignments")
+        if not isinstance(items, list) or not items:
+            return Response({"detail": "assignments must be a non-empty list."}, status=400)
+        if len(items) > 500:
+            return Response({"detail": "Max 500 assignments per request."}, status=400)
+        return Response(campus_panel.bulk_assign(
+            campus, request.user, items, dry_run=_truthy(request.data.get("dry_run")),
+            replace=_truthy(request.data.get("replace")),
+            hod_department_id=hod_department_id(request.user, campus.id),
+        ))
+
+    @action(detail=True, methods=["post"], url_path="bulk-import", parser_classes=[MultiPartParser, FormParser, JSONParser])
+    def bulk_import(self, request, pk=None):
+        """multipart: kind=staff|students|subjects|enrollments, file=<csv>,
+        dry_run (default TRUE — validate only), override_capacity."""
+        campus = self.get_object()
+        self._need(request, campus, "bulk_import")
+        kind = request.data.get("kind", "")
+        upload = request.FILES.get("file")
+        if upload is None:
+            return Response({"detail": "file is required (CSV)."}, status=400)
+        if kind in ("staff", "students", "enrollments") and not is_campus_approved(campus.id):
+            raise PermissionDenied("This campus is pending platform verification and can't add people yet.")
+        dry = _truthy(request.data.get("dry_run", "true"))
+        override = _truthy(request.data.get("override_capacity"))
+        try:
+            return Response(campus_panel.bulk_import(campus, request.user, kind, upload, dry_run=dry, override_capacity=override))
+        except ValueError as exc:
+            return Response({"detail": str(exc)}, status=400)
+
+    @action(detail=True, methods=["get"], url_path="audit-log")
+    def audit_log(self, request, pk=None):
+        campus = self.get_object()
+        self._need(request, campus, "audit.view")
+        qs = CampusAuditLog.objects.filter(campus=campus).select_related("actor")
+        p = request.query_params
+        if p.get("action"):
+            qs = qs.filter(action__startswith=p["action"])
+        if p.get("actor"):
+            qs = qs.filter(actor_id=p["actor"])
+        if p.get("target_type"):
+            qs = qs.filter(target_type=p["target_type"])
+        if p.get("since"):
+            qs = qs.filter(created_at__gte=p["since"])
+        if p.get("until"):
+            qs = qs.filter(created_at__lte=p["until"])
+        page = self.paginate_queryset(qs)
+        rows = [{
+            "id": str(r.id), "action": r.action, "target_type": r.target_type, "target_id": r.target_id,
+            "summary": r.summary, "metadata": r.metadata, "created_at": r.created_at,
+            "actor": {"id": r.actor_id, "username": r.actor.username} if r.actor_id else None,
+        } for r in page]
+        return self.get_paginated_response(rows)
 
 
 class AcademicSessionViewSet(CampusMemberScopedMixin, viewsets.ModelViewSet):
@@ -300,25 +480,38 @@ class AcademicSessionViewSet(CampusMemberScopedMixin, viewsets.ModelViewSet):
             return Response(result)
 
 
-class DepartmentViewSet(CampusMemberScopedMixin, viewsets.ModelViewSet):
+class DepartmentViewSet(AuditedModelViewSetMixin, CampusMemberScopedMixin, viewsets.ModelViewSet):
+    audit_prefix = "department"
     serializer_class = DepartmentSerializer
     campus_field_path = "campus"
+    member_scope = "custom"
+
+    def member_scope_q(self, vis):
+        return Q(pk__in=vis.visible_department_ids)
 
     def get_queryset(self):
         return self.filter_queryset_to_my_campuses(Department.objects.all(), self.request)
 
 
-class SchoolClassViewSet(CampusMemberScopedMixin, viewsets.ModelViewSet):
+class SchoolClassViewSet(AuditedModelViewSetMixin, CampusMemberScopedMixin, viewsets.ModelViewSet):
+    audit_prefix = "class"
     serializer_class = SchoolClassSerializer
     campus_field_path = "campus"
+    member_scope = "custom"
+
+    def member_scope_q(self, vis):
+        return Q(pk__in=vis.visible_class_ids)
 
     def get_queryset(self):
         return self.filter_queryset_to_my_campuses(SchoolClass.objects.all(), self.request)
 
 
-class SectionViewSet(CampusMemberScopedMixin, viewsets.ModelViewSet):
+class SectionViewSet(AuditedModelViewSetMixin, CampusMemberScopedMixin, viewsets.ModelViewSet):
+    audit_prefix = "section"
     serializer_class = SectionSerializer
     campus_field_path = "school_class__campus"
+    member_scope = "section"
+    member_section_path = "pk"
 
     def get_queryset(self):
         return self.filter_queryset_to_my_campuses(Section.objects.all(), self.request)
@@ -336,6 +529,7 @@ class SectionViewSet(CampusMemberScopedMixin, viewsets.ModelViewSet):
 
     def perform_create(self, serializer):
         section = serializer.save()
+        self._audit("create", section)
         # TASK (design doc §3) — section-group auto-creation. Routed
         # through `campus.bridge` (never a direct `message` import).
         #
@@ -368,23 +562,68 @@ class SectionViewSet(CampusMemberScopedMixin, viewsets.ModelViewSet):
             )
 
 
-class SubjectViewSet(CampusMemberScopedMixin, viewsets.ModelViewSet):
+    def _require_section_dashboard(self, request, section):
+        if not user_can(
+            request.user, section.school_class.campus_id, "section.dashboard", section_id=section.id
+        ):
+            raise PermissionDenied("Only this section's class teacher or a campus admin can view this.")
+
+    @action(detail=True, methods=["get"])
+    def dashboard(self, request, pk=None):
+        """[T4 §D] Roster + enrolled/capacity count + attendance snapshot +
+        pending subject-teacher requests (+ doubts placeholder)."""
+        section = self.get_object()
+        self._require_section_dashboard(request, section)
+        return Response(campus_roster.section_dashboard(section))
+
+    @action(detail=True, methods=["get"])
+    def roster(self, request, pk=None):
+        """Paginated roster (default: ACTIVE students). `?q=` name/roll search,
+        `?status=` active|transferred|graduated|withdrawn|all."""
+        section = self.get_object()
+        self._require_section_dashboard(request, section)
+        wanted = request.query_params.get("status", "active")
+        qs = StudentEnrollment.objects.filter(section=section, session=section.school_class.session)
+        if wanted != "all":
+            qs = qs.filter(status=wanted)
+        q = (request.query_params.get("q") or "").strip()
+        if q:
+            qs = qs.filter(
+                Q(student__username__icontains=q) | Q(student__first_name__icontains=q)
+                | Q(student__last_name__icontains=q) | Q(roll_number__iexact=q)
+            )
+        qs = qs.select_related("student").order_by("roll_number", "student__username")
+        page = self.paginate_queryset(qs)
+        data = StudentEnrollmentSerializer(page, many=True).data
+        payload = self.get_paginated_response(data).data
+        payload["capacity"] = campus_roster.capacity_info(section)
+        return Response(payload)
+
+
+class SubjectViewSet(AuditedModelViewSetMixin, CampusMemberScopedMixin, viewsets.ModelViewSet):
+    audit_prefix = "subject"
     serializer_class = SubjectSerializer
     campus_field_path = "campus"
+    member_scope = "custom"
+
+    def member_scope_q(self, vis):
+        return Q(pk__in=vis.subject_ids())
 
     def get_queryset(self):
         return self.filter_queryset_to_my_campuses(Subject.objects.all(), self.request)
 
 
-class RoomViewSet(CampusMemberScopedMixin, viewsets.ModelViewSet):
+class RoomViewSet(AuditedModelViewSetMixin, CampusMemberScopedMixin, viewsets.ModelViewSet):
+    audit_prefix = "room"
     serializer_class = RoomSerializer
     campus_field_path = "campus"
+    member_scope = "none"
 
     def get_queryset(self):
         return self.filter_queryset_to_my_campuses(Room.objects.all(), self.request)
 
 
-class StaffProfileViewSet(CampusMemberScopedMixin, viewsets.ModelViewSet):
+class StaffProfileViewSet(AuditedModelViewSetMixin, CampusMemberScopedMixin, viewsets.ModelViewSet):
     """Admin/Principal-HOD invite staff (design doc §11). No self-signup
     — a `StaffProfile` is always created BY an existing admin/principal
     of that campus, targeting some other user id.
@@ -398,8 +637,10 @@ class StaffProfileViewSet(CampusMemberScopedMixin, viewsets.ModelViewSet):
     in `CampusViewSet.perform_create`, bypassing this check, per that
     view's docstring).
     """
+    audit_prefix = "staff"
     serializer_class = StaffProfileSerializer
     campus_field_path = "campus"
+    member_scope = "none"
 
     def get_queryset(self):
         return self.filter_queryset_to_my_campuses(StaffProfile.objects.all(), self.request)
@@ -408,12 +649,15 @@ class StaffProfileViewSet(CampusMemberScopedMixin, viewsets.ModelViewSet):
         campus = serializer.validated_data["campus"]
         if not is_campus_approved(campus.id):
             raise PermissionDenied("This campus is pending platform verification and can't add staff yet.")
-        serializer.save()
+        self._audit("create", serializer.save())
 
 
-class ClassTeacherassigmentsViewSet(CampusMemberScopedMixin, viewsets.ModelViewSet):
+class ClassTeacherassigmentsViewSet(AuditedModelViewSetMixin, CampusMemberScopedMixin, viewsets.ModelViewSet):
+    audit_prefix = "class_teacher"
     serializer_class = ClassTeacherassigmentsSerializer
     campus_field_path = "section__school_class__campus"
+    member_scope = "section"
+    member_section_path = "section"
 
     def get_queryset(self):
         return self.filter_queryset_to_my_campuses(ClassTeacherassigments.objects.all(), self.request)
@@ -428,6 +672,7 @@ class ClassTeacherassigmentsViewSet(CampusMemberScopedMixin, viewsets.ModelViewS
 
     def perform_create(self, serializer):
         assigments = serializer.save()
+        self._audit("create", assigments)
         # This is the moment `bridge.create_section_group()`'s real
         # precondition (design doc §10) first becomes true: the section
         # now has an assigned class-teacher, who is the group's required
@@ -453,7 +698,7 @@ class ClassTeacherassigmentsViewSet(CampusMemberScopedMixin, viewsets.ModelViewS
             )
 
 
-class SubjectTeacherassigmentsViewSet(CampusMemberScopedMixin, viewsets.ModelViewSet):
+class SubjectTeacherassigmentsViewSet(AuditedModelViewSetMixin, CampusMemberScopedMixin, viewsets.ModelViewSet):
     """
     Create leaves `status=PENDING` (model default) — the class-teacher
     of that section approves/rejects via the two actions below (design
@@ -462,14 +707,44 @@ class SubjectTeacherassigmentsViewSet(CampusMemberScopedMixin, viewsets.ModelVie
     `ClassTeacherassigments` holder (or a campus admin/principal, as a
     fallback for when no class-teacher is assigned yet) can decide.
     """
+    audit_prefix = "subject_teacher"
     serializer_class = SubjectTeacherassigmentsSerializer
     campus_field_path = "section__school_class__campus"
+    member_scope = "custom"
+
+    def member_scope_q(self, vis):
+        return Q(section_id__in=vis.visible_section_ids, status=SubjectTeacherassigments.Status.APPROVED)
     # Overridden below: creating a request needs no special role (any
     # campus member can ask to teach a subject), only approve/reject do.
     permission_classes = [IsAuthenticated]
 
     def get_queryset(self):
         return self.filter_queryset_to_my_campuses(SubjectTeacherassigments.objects.all(), self.request)
+
+    def perform_create(self, serializer):
+        """[T4 §C] Request-approval flow is unchanged (PENDING). NEW: a campus
+        admin/principal may pass `direct=true` to assign a teacher straight
+        away (APPROVED, approval skipped). A department-limited HOD can only do
+        this inside their own department."""
+        section = serializer.validated_data["section"]
+        campus_id = section.school_class.campus_id
+        user = self.request.user
+        if _truthy(self.request.data.get("direct")) and is_campus_admin_or_principal(user, campus_id):
+            hod_dept = hod_department_id(user, campus_id)
+            if hod_dept and section.school_class.department_id != hod_dept:
+                raise PermissionDenied("This section is outside your department.")
+            actor_staff = StaffProfile.objects.filter(campus_id=campus_id, user=user, is_active=True).first()
+            obj = serializer.save(
+                status=SubjectTeacherassigments.Status.APPROVED, approved_by=actor_staff, responded_at=timezone.now()
+            )
+            bridge.notify(
+                users=[obj.staff.user], notif_type=NotifTypes.STAFF_assigments_APPROVED,
+                title="Subject assigned", body=f"You've been assigned {obj.subject.name} for {obj.section}.",
+            )
+            bridge.sync_section_group(obj.section)
+            self._audit("direct_assign", obj)
+            return
+        self._audit("request", serializer.save())
 
     def _can_decide(self, user, assigments):
         if is_class_teacher_of_section(user, assigments.section_id):
@@ -488,6 +763,8 @@ class SubjectTeacherassigmentsViewSet(CampusMemberScopedMixin, viewsets.ModelVie
         assigments.approved_by = deciding_staff
         assigments.responded_at = timezone.now()
         assigments.save(update_fields=["status", "approved_by", "responded_at", "updated_at"])
+        self._audit("approve", assigments)
+        bridge.sync_section_group(assigments.section)
         bridge.notify(
             users=[assigments.staff.user],
             notif_type=NotifTypes.STAFF_assigments_APPROVED,
@@ -508,6 +785,7 @@ class SubjectTeacherassigmentsViewSet(CampusMemberScopedMixin, viewsets.ModelVie
         assigments.approved_by = deciding_staff
         assigments.responded_at = timezone.now()
         assigments.save(update_fields=["status", "approved_by", "responded_at", "updated_at"])
+        self._audit("reject", assigments)
         bridge.notify(
             users=[assigments.staff.user],
             notif_type=NotifTypes.STAFF_assigments_REJECTED,
@@ -517,20 +795,42 @@ class SubjectTeacherassigmentsViewSet(CampusMemberScopedMixin, viewsets.ModelVie
         return Response(self.get_serializer(assigments).data)
 
 
-class StudentEnrollmentViewSet(CampusMemberScopedMixin, viewsets.ModelViewSet):
+class StudentEnrollmentViewSet(AuditedModelViewSetMixin, CampusMemberScopedMixin, viewsets.ModelViewSet):
     """
     G-2 fix: enrolling a student is a "pull someone else into this
     campus" action, same reasoning as `StaffProfileViewSet` above — it
     additionally requires the section's campus to be
     `verification_status=APPROVED` (see `permissions.is_campus_approved`).
+
+    [T4 §D] All writes go through `campus.roster` (capacity check, roll-number
+    auto-assign, audit log, section chat-group sync). Writes are allowed to
+    admin/principal AND the class-teacher of that section. DELETE is a SOFT
+    withdraw (status=withdrawn) — enrollment history is never hard-deleted.
+    Capacity: a full section returns 400 `{"code": "section_full"}`; admin /
+    principal may pass `override_capacity=true`.
     """
+    audit_prefix = "enrollment"
     serializer_class = StudentEnrollmentSerializer
     campus_field_path = "section__school_class__campus"
+    member_scope = "student"
+    member_student_path = "student"
+    permission_classes = [IsAuthenticated, IsRosterManagerOrReadOnly]
 
     def get_queryset(self):
         return self.filter_queryset_to_my_campuses(StudentEnrollment.objects.all(), self.request)
 
+    def _object_section(self):
+        pk = self.kwargs.get("pk")
+        if not pk:
+            return None
+        en = StudentEnrollment.objects.filter(pk=pk).select_related("section__school_class").first()
+        return en.section if en else None
+
     def get_campus_id_for_permission_check(self, request):
+        if self.kwargs.get("pk"):
+            sec = self._object_section()
+            if sec:
+                return sec.school_class.campus_id
         section_id = request.data.get("section")
         if section_id:
             section = Section.objects.filter(pk=section_id).first()
@@ -538,11 +838,85 @@ class StudentEnrollmentViewSet(CampusMemberScopedMixin, viewsets.ModelViewSet):
                 return section.school_class.campus_id
         return super().get_campus_id_for_permission_check(request)
 
+    def get_roster_section_id(self, request):
+        """Section whose roster is being changed: the existing row's section
+        (update/transfer/remove/delete) or the body's `section` (create)."""
+        sec = self._object_section()
+        if sec:
+            return sec.pk
+        return request.data.get("section") or None
+
     def perform_create(self, serializer):
-        section = serializer.validated_data["section"]
-        if not is_campus_approved(section.school_class.campus_id):
+        data = serializer.validated_data
+        section = data["section"]
+        campus_id = section.school_class.campus_id
+        if not is_campus_approved(campus_id):
             raise PermissionDenied("This campus is pending platform verification and can't enroll students yet.")
-        serializer.save()
+        if data.get("status", StudentEnrollment.Status.ACTIVE) != StudentEnrollment.Status.ACTIVE:
+            serializer.save()  # historical row import (graduated etc.) — no seat is consumed
+            return
+        override = _truthy(self.request.data.get("override_capacity")) and is_campus_admin_or_principal(
+            self.request.user, campus_id
+        )
+        if StudentEnrollment.objects.filter(
+            student=data["student"], section=section, session=data["session"],
+            status=StudentEnrollment.Status.ACTIVE,
+        ).exists():
+            raise RosterAPIError(RosterError("already_enrolled", "Student is already enrolled in this section."))
+        try:
+            row, _created = campus_roster.enroll_student(
+                section=section, student=data["student"], session=data["session"],
+                roll_number=data.get("roll_number", ""), enrollment_no=data.get("enrollment_no", ""),
+                actor=self.request.user, override_capacity=override,
+            )
+        except RosterError as exc:
+            raise RosterAPIError(exc)
+        serializer.instance = row
+
+    def perform_update(self, serializer):
+        old_section = serializer.instance.section
+        new_section = serializer.validated_data.get("section", old_section)
+        if new_section.pk != old_section.pk:
+            campus_id = new_section.school_class.campus_id
+            override = _truthy(self.request.data.get("override_capacity")) and is_campus_admin_or_principal(
+                self.request.user, campus_id
+            )
+            try:
+                campus_roster._check_capacity(new_section, serializer.instance.session, override)
+            except RosterError as exc:
+                raise RosterAPIError(exc)
+        super().perform_update(serializer)
+        bridge.sync_section_group(old_section)
+        if new_section.pk != old_section.pk:
+            bridge.sync_section_group(new_section)
+
+    def perform_destroy(self, instance):
+        campus_roster.withdraw_student(instance, actor=self.request.user, reason="deleted via API")
+
+    @action(detail=True, methods=["post"])
+    def transfer(self, request, pk=None):
+        """Move an ACTIVE student to another section (same campus + session).
+        Body: `{"section": <target id>, "override_capacity": bool}`."""
+        enrollment = self.get_object()
+        campus_id = enrollment.section.school_class.campus_id
+        target = Section.objects.filter(
+            pk=request.data.get("section"), school_class__campus_id=campus_id
+        ).select_related("school_class").first()
+        if target is None:
+            return Response({"detail": "Target section not found in this campus.", "code": "bad_target"}, status=400)
+        override = _truthy(request.data.get("override_capacity")) and is_campus_admin_or_principal(request.user, campus_id)
+        try:
+            new = campus_roster.transfer_student(enrollment, target, actor=request.user, override_capacity=override)
+        except RosterError as exc:
+            raise RosterAPIError(exc)
+        return Response(self.get_serializer(new).data)
+
+    @action(detail=True, methods=["post"])
+    def remove(self, request, pk=None):
+        """Soft-remove (withdraw) a student from the section."""
+        enrollment = self.get_object()
+        en = campus_roster.withdraw_student(enrollment, actor=request.user, reason=str(request.data.get("reason", ""))[:200])
+        return Response(self.get_serializer(en).data)
 
 
 class NoticeViewSet(CampusMemberScopedMixin, viewsets.ModelViewSet):
@@ -557,6 +931,15 @@ class NoticeViewSet(CampusMemberScopedMixin, viewsets.ModelViewSet):
     """
     serializer_class = NoticeSerializer
     campus_field_path = "campus"
+    member_scope = "custom"
+
+    def member_scope_q(self, vis):
+        return (
+            Q(department__isnull=True, school_class__isnull=True, section__isnull=True)
+            | Q(department_id__in=vis.visible_department_ids, school_class__isnull=True, section__isnull=True)
+            | Q(school_class_id__in=vis.visible_class_ids, section__isnull=True)
+            | Q(section_id__in=vis.visible_section_ids)
+        )
     permission_classes = [IsAuthenticated]
 
     def get_queryset(self):
@@ -643,7 +1026,9 @@ class CampusLiveSessionViewSet(CampusMemberScopedMixin, viewsets.ModelViewSet):
     permission_classes = [IsAuthenticated, IsSectionSubjectStaffOrReadOnly]
 
     def get_queryset(self):
-        return self.filter_queryset_to_my_campuses(CampusLiveSession.objects.all(), self.request)
+        return self.filter_queryset_to_my_campuses(
+            CampusLiveSession.objects.select_related("section__school_class", "subject", "teacher__user"), self.request
+        )
 
     def get_section_subject_for_permission_check(self, request):
         section_id = request.data.get("section")
@@ -678,12 +1063,15 @@ class CampusLiveSessionViewSet(CampusMemberScopedMixin, viewsets.ModelViewSet):
         # Best-effort: video-room provisioning (core/message/LiveKit) being
         # down must not block scheduling — `join` already returns a clean
         # 503 for a session with no room_id.
-        try:
-            with transaction.atomic():
-                room_id = bridge.provision_video_room(live_session, actor=self.request.user)
-        except Exception:
-            logger.exception("Video room provisioning failed for live session %s.", live_session.pk)
-            room_id = None
+        is_offline = live_session.mode == ClassMode.OFFLINE
+        room_id = None
+        if not is_offline:  # T4 §G — an offline class has no video room
+            try:
+                with transaction.atomic():
+                    room_id = bridge.provision_video_room(live_session, actor=self.request.user)
+            except Exception:
+                logger.exception("Video room provisioning failed for live session %s.", live_session.pk)
+                room_id = None
         if room_id:
             live_session.room_id = room_id
             live_session.save(update_fields=["room_id"])
@@ -696,14 +1084,34 @@ class CampusLiveSessionViewSet(CampusMemberScopedMixin, viewsets.ModelViewSet):
             session=getattr(live_session.section.school_class, "session", None),
             posted_by=self.request.user,
             title=f"Class scheduled: {live_session.subject.name}",
-            body=f"A live session for {live_session.subject.name} is scheduled at {live_session.scheduled_at}.",
+            # T4 §G — offline classes never leak their time to students.
+            body=(
+                f"An offline class for {live_session.subject.name} has been scheduled."
+                if is_offline
+                else f"A live session for {live_session.subject.name} is scheduled at {live_session.scheduled_at}."
+            ),
         )
         bridge.notify(
             users=list(recipients),
             notif_type=NotifTypes.CAMPUS_SESSION_SCHEDULED,
             title="Class scheduled",
-            body=f"{live_session.subject.name} scheduled at {live_session.scheduled_at}.",
+            body=(
+                f"{live_session.subject.name}: offline class scheduled."
+                if is_offline
+                else f"{live_session.subject.name} scheduled at {live_session.scheduled_at}."
+            ),
         )
+
+    def perform_update(self, serializer):
+        old = serializer.instance
+        changed = (
+            ("scheduled_at" in serializer.validated_data and serializer.validated_data["scheduled_at"] != old.scheduled_at)
+            or ("mode" in serializer.validated_data and serializer.validated_data["mode"] != old.mode)
+        )
+        instance = serializer.save()
+        if changed and instance.reminder_sent_at:
+            # rescheduled / mode changed -> the 5-minute reminder is due again
+            CampusLiveSession.objects.filter(pk=instance.pk).update(reminder_sent_at=None)
 
     # B-4 fix — see CampusLiveSessionJoinThrottle's docstring in
     # throttles.py for why `start` (not a separate join endpoint, which
@@ -716,7 +1124,7 @@ class CampusLiveSessionViewSet(CampusMemberScopedMixin, viewsets.ModelViewSet):
             return Response({"detail": "Only a scheduled session can be started."}, status=status.HTTP_400_BAD_REQUEST)
         live_session.status = CampusLiveSession.Status.LIVE
         live_session.save(update_fields=["status"])
-        if not live_session.room_id:
+        if not live_session.room_id and live_session.mode == ClassMode.ONLINE:
             # Provisioning at schedule time is best-effort (see
             # perform_create) — retry here so a transient failure then
             # doesn't leave this session un-joinable.
@@ -788,6 +1196,8 @@ class CampusLiveSessionViewSet(CampusMemberScopedMixin, viewsets.ModelViewSet):
         """
         live_session = self.get_object()
 
+        if live_session.mode == ClassMode.OFFLINE:
+            return Response({"detail": "This is an offline class — there is no video room."}, status=status.HTTP_400_BAD_REQUEST)
         if live_session.status != CampusLiveSession.Status.LIVE:
             return Response(
                 {"detail": "This session isn't live yet."},
@@ -856,6 +1266,13 @@ class CampusLiveSessionViewSet(CampusMemberScopedMixin, viewsets.ModelViewSet):
 class TimeSlotViewSet(CampusMemberScopedMixin, viewsets.ModelViewSet):
     serializer_class = TimeSlotSerializer
     campus_field_path = "campus"
+    member_scope = "custom"
+
+    def member_scope_q(self, vis):
+        # students only ever learn the slots of ONLINE periods (§G)
+        return Q(pk__in=TimetableEntry.objects.filter(
+            section_id__in=vis.visible_section_ids, mode=ClassMode.ONLINE
+        ).values("time_slot_id"))
 
     def get_queryset(self):
         return self.filter_queryset_to_my_campuses(TimeSlot.objects.all(), self.request)
@@ -869,10 +1286,29 @@ class TimetableEntryViewSet(CampusMemberScopedMixin, viewsets.ModelViewSet):
     """
     serializer_class = TimetableEntrySerializer
     campus_field_path = "section__school_class__campus"
-    permission_classes = [IsAuthenticated, IsCampusAdminOrPrincipal]
+    member_scope = "section"
+    member_section_path = "section"
+    # [T4 §C] admin/principal anywhere; class-teacher / approved subject-teacher
+    # (for that subject) / moderator ONLY for their own section.
+    permission_classes = [IsAuthenticated, IsSectionSubjectStaffOrReadOnly]
 
     def get_queryset(self):
-        return self.filter_queryset_to_my_campuses(TimetableEntry.objects.all(), self.request)
+        return self.filter_queryset_to_my_campuses(
+            TimetableEntry.objects.select_related("section__school_class", "time_slot"), self.request
+        )
+
+    def get_section_subject_for_permission_check(self, request):
+        section_id = request.data.get("section")
+        subject_id = request.data.get("subject")
+        if not section_id and self.kwargs.get("pk"):
+            obj = self.get_queryset().filter(pk=self.kwargs["pk"]).first()
+            if obj:
+                return obj.section.school_class.campus_id, obj.section_id, obj.subject_id
+        if section_id:
+            section = Section.objects.filter(pk=section_id).first()
+            if section:
+                return section.school_class.campus_id, section.id, subject_id
+        return None, None, None
 
     def get_campus_id_for_permission_check(self, request):
         section_id = request.data.get("section")
@@ -893,6 +1329,8 @@ class AttendanceViewSet(CampusMemberScopedMixin, viewsets.ModelViewSet):
     """
     serializer_class = AttendanceSerializer
     campus_field_path = "enrollment__section__school_class__campus"
+    member_scope = "student"
+    member_student_path = "enrollment__student"
     permission_classes = [IsAuthenticated, IsSectionSubjectStaffOrReadOnly]
 
     def get_queryset(self):
@@ -938,25 +1376,11 @@ class AttendanceViewSet(CampusMemberScopedMixin, viewsets.ModelViewSet):
 # Phase 6 — assigmentss & syllabus
 # ============================================================
 def _my_section_ids_and_campus_map(user):
-    """[Task 11] Every `Section` id this user has some legitimate reason
-    to see campus assigmentss for (enrolled student, active staff, or
-    linked parent — via `get_my_campus_ids()`'s own membership
-    reasoning), plus a `{section_id: campus_id}` lookup for permission
-    checks. Deliberately campus-wide, not narrowed to the user's own
-    section(s) — this is a faithful port of the OLD `assigmentsViewSet.
-    get_queryset()`'s actual scoping (`campus_field_path =
-    "section__school_class__campus"`, filtered only by
-    `campus_id__in=get_my_campus_ids(user)`), which already showed a
-    student every section's assigmentss within their campus, not just
-    their own section's. Not a new, broader grant introduced by this
-    proxy.
-    """
-    campus_ids = get_my_campus_ids(user)
-    sections = Section.objects.filter(school_class__campus_id__in=campus_ids).select_related("school_class")
-    return (
-        set(sections.values_list("id", flat=True)),
-        {s.id: s.school_class.campus_id for s in sections},
-    )
+    """[Task 11 / T4 §E] Sections the user may read section-scoped content
+    (assignments, test series, submissions) for: every section of a campus
+    they STAFF, but for a student/parent only their own / their child's
+    current section(s) — no longer campus-wide."""
+    return accessible_section_ids_and_campus_map(user)
 
 
 def _section_for_assigments(assigments):
@@ -1339,10 +1763,19 @@ class TestSeriesViewSet(viewsets.ViewSet):
         return [permission() for permission in self.permission_classes]
 
     def list(self, request):
+        from testseries.access import editable_context_ids
+
         section_ids, _ = _my_section_ids_and_campus_map(request.user)
         qs = TestSeries.objects.filter(
             source=TestSeries.Source.CAMPUS, context_type="section", context_id__in=section_ids
         ).order_by("-id")
+        # [T2] drafts exist now: a student / parent must never see one. Only the
+        # creator and the section's authorised editors do.
+        qs = qs.filter(
+            Q(status=TestSeries.Status.PUBLISHED)
+            | Q(creator=request.user)
+            | Q(context_id__in=editable_context_ids(request.user, "section"))
+        )
         section_filter = request.query_params.get("section")
         if section_filter:
             qs = qs.filter(context_id=section_filter)
@@ -1350,8 +1783,14 @@ class TestSeriesViewSet(viewsets.ViewSet):
 
     def retrieve(self, request, pk=None):
         series = get_object_or_404(TestSeries.objects.filter(source=TestSeries.Source.CAMPUS), pk=pk)
+        from testseries.access import normalize_context_id, user_can_edit_series
+
         section_ids, _ = _my_section_ids_and_campus_map(request.user)
-        if series.context_id not in section_ids:
+        # [T2] `context_id` is a UUID, `section_ids` are ints: compare normalised
+        # (a plain `in` was always False, so retrieve 403'd for everyone).
+        if normalize_context_id(series.context_id) not in {normalize_context_id(i) for i in section_ids}:
+            raise PermissionDenied("You don't have access to this test series.")
+        if series.status != TestSeries.Status.PUBLISHED and not user_can_edit_series(request.user, series):
             raise PermissionDenied("You don't have access to this test series.")
         return Response(_serialize_campus_testseries(series))
 
@@ -1361,11 +1800,21 @@ class TestSeriesViewSet(viewsets.ViewSet):
         subject_id = request.data.get("subject")
         title = request.data.get("title")
         questions = request.data.get("questions")
-        if not (section_id and subject_id and title and questions):
+        # [T2] `draft=true` -> create an empty-able DRAFT; questions are then
+        # added / edited / deleted through the testseries question endpoints
+        # (by the creator or the section's teaching staff) and it is published
+        # with `POST /testseries/{id}/publish/`.
+        draft = str(request.data.get("draft", "")).strip().lower() in ("1", "true", "yes", "on")
+        if draft and questions is None:
+            questions = []
+        if not (section_id and subject_id and title and (questions or draft)):
             return Response(
-                {"detail": "section, subject, title and questions are all required."},
+                {"detail": "section, subject, title and questions are all required "
+                           "(questions may be omitted when draft=true)."},
                 status=status.HTTP_400_BAD_REQUEST,
             )
+        if not isinstance(questions, list):
+            return Response({"detail": "questions must be a list."}, status=status.HTTP_400_BAD_REQUEST)
         section = get_object_or_404(Section.objects.select_related("school_class"), pk=section_id)
         campus_id = section.school_class.campus_id
         # Task 13 checklist: "Staff permission check bridge call se
@@ -1398,17 +1847,27 @@ class TestSeriesViewSet(viewsets.ViewSet):
         if is_paid and not section.school_class.campus.testseries_paid_allowed:
             raise PermissionDenied("This campus isn't enabled for paid test series.")
 
-        series = bridge.create_testseries(
-            section=section,
-            creator=request.user,
-            title=title,
-            description=request.data.get("description", ""),
-            duration_minutes=request.data.get("duration_minutes"),
-            attempts_allowed=request.data.get("attempts_allowed", 1),
-            questions=questions,
-            is_paid=is_paid,
-            price_coins=price_coins,
-        )
+        from testseries.bridge import QuestionPayloadError
+
+        try:
+            series = bridge.create_testseries(
+                section=section,
+                creator=request.user,
+                title=title,
+                description=request.data.get("description", ""),
+                duration_minutes=request.data.get("duration_minutes"),
+                attempts_allowed=request.data.get("attempts_allowed", 1),
+                questions=questions,
+                is_paid=is_paid,
+                price_coins=price_coins,
+                draft=draft,
+            )
+        except QuestionPayloadError as exc:
+            # [T2] was an unhandled 500 (Django ValidationError out of full_clean()).
+            return Response(
+                {"detail": str(exc), "code": "validation_error", "errors": exc.errors},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
         return Response(_serialize_campus_testseries(series), status=status.HTTP_201_CREATED)
 
 
@@ -1597,6 +2056,8 @@ class TestAttemptViewSet(viewsets.ViewSet):
 class SyllabusUnitViewSet(CampusMemberScopedMixin, viewsets.ModelViewSet):
     serializer_class = SyllabusUnitSerializer
     campus_field_path = "section__school_class__campus"
+    member_scope = "section"
+    member_section_path = "section"
     permission_classes = [IsAuthenticated, IsSectionSubjectStaffOrReadOnly]
 
     def get_queryset(self):
@@ -1624,6 +2085,8 @@ class SyllabusProgressViewSet(CampusMemberScopedMixin, mixins.ListModelMixin, mi
     and only ever change via `mark_covered`."""
     serializer_class = SyllabusProgressSerializer
     campus_field_path = "syllabus_unit__section__school_class__campus"
+    member_scope = "section"
+    member_section_path = "syllabus_unit__section"
     permission_classes = [IsAuthenticated, IsSectionSubjectStaffOrReadOnly]
 
     def get_queryset(self):
@@ -1681,6 +2144,8 @@ class ResultEntryViewSet(CampusMemberScopedMixin, viewsets.ModelViewSet):
     """
     serializer_class = ResultEntrySerializer
     campus_field_path = "enrollment__section__school_class__campus"
+    member_scope = "student"
+    member_student_path = "enrollment__student"
     permission_classes = [IsAuthenticated, IsSectionSubjectStaffOrReadOnly]
 
     def get_queryset(self):
@@ -1750,6 +2215,8 @@ class DigitalIDCardViewSet(CampusMemberScopedMixin, viewsets.ModelViewSet):
     one for anyone at their campus."""
     serializer_class = DigitalIDCardSerializer
     campus_field_path = "campus"
+    member_scope = "student"
+    member_student_path = "user"
     permission_classes = [IsAuthenticated]
 
     def get_queryset(self):
@@ -1778,6 +2245,11 @@ def _require_fee_module_enabled(campus):
 class FeeStructureViewSet(CampusMemberScopedMixin, viewsets.ModelViewSet):
     serializer_class = FeeStructureSerializer
     campus_field_path = "campus"
+    member_scope = "custom"
+
+    def member_scope_q(self, vis):
+        # a student sees campus-wide fees + their own class's fees only
+        return Q(school_class__isnull=True) | Q(school_class_id__in=vis.visible_class_ids)
     permission_classes = [IsAuthenticated, IsCampusAdminOrPrincipal]
 
     def get_queryset(self):
@@ -1835,6 +2307,8 @@ class FeeInvoiceViewSet(CampusMemberScopedMixin, viewsets.ModelViewSet):
     """
     serializer_class = FeeInvoiceSerializer
     campus_field_path = "enrollment__section__school_class__campus"
+    member_scope = "student"
+    member_student_path = "enrollment__student"
     permission_classes = [IsAuthenticated, IsCampusAdminOrPrincipal]
 
     def get_queryset(self):
@@ -1874,6 +2348,8 @@ class FeePaymentViewSet(CampusMemberScopedMixin, mixins.ListModelMixin, mixins.R
     """
     serializer_class = FeePaymentSerializer
     campus_field_path = "invoice__enrollment__section__school_class__campus"
+    member_scope = "student"
+    member_student_path = "invoice__enrollment__student"
     permission_classes = [IsAuthenticated]
 
     def get_queryset(self):
@@ -2116,6 +2592,7 @@ class CampusAnalyticsSnapshotViewSet(CampusMemberScopedMixin, viewsets.ReadOnlyM
     never from a request."""
     serializer_class = CampusAnalyticsSnapshotSerializer
     campus_field_path = "campus"
+    member_scope = "none"
     permission_classes = [IsAuthenticated, IsCampusAdminOrPrincipal]
 
     def get_queryset(self):
@@ -2220,3 +2697,334 @@ class ParentLinkVerifyView(APIView):
             CampusParentLinkSerializer(link).data,
             status=status.HTTP_201_CREATED if created else status.HTTP_200_OK,
         )
+
+
+# ============================================================
+# T4 §E/§G — "my classes" (student/parent subject-class cards)
+# ============================================================
+class MyClassesView(APIView):
+    """
+    `GET /campus/my/classes/[?campus=<id>][&student=<id>]`
+
+    One card per SUBJECT-CLASS — an approved `(section, subject, teacher)`
+    — of the caller's own / linked child's CURRENT section(s). Each card:
+    subject, teacher, `mode` (that of the next session; `offline` when
+    there is none), `next_session` (earliest upcoming live session or
+    weekly slot, with the §G rule applied: an OFFLINE one is returned as
+    `{"mode":"offline","time_hidden":true,"label":"Offline class"}` and
+    NO time/day), `next_online_session` (earliest ONLINE one, with its
+    time) and small counts (`notices`, `doubts_open`). Assignments /
+    tests / doubts lists use the existing endpoints filtered by the
+    card's `section` + `subject`.
+
+    Staff-only callers get an empty list (this is the student's view).
+    """
+
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        from datetime import timedelta
+
+        from .class_schedule import OFFLINE_LABEL, next_occurrence
+
+        vis = get_visibility(request.user, request)
+        section_ids = set(vis.visible_section_ids)
+        campus_id = request.query_params.get("campus")
+        if campus_id:
+            section_ids = {s for s in section_ids if str(vis.section_campus.get(s)) == str(campus_id)}
+        student_id = request.query_params.get("student")
+        if student_id:
+            section_ids &= set(
+                StudentEnrollment.objects.filter(
+                    student_id=student_id, status=StudentEnrollment.Status.ACTIVE, section_id__in=section_ids
+                ).values_list("section_id", flat=True)
+            ) if str(student_id) in {str(s) for s in vis.visible_student_ids} else set()
+        if not section_ids:
+            return Response([])
+
+        now = timezone.now()
+        assignments = list(
+            SubjectTeacherassigments.objects.filter(
+                section_id__in=section_ids, status=SubjectTeacherassigments.Status.APPROVED
+            ).select_related("subject", "staff__user", "section__school_class")
+            .order_by("section_id", "subject__name")
+        )
+
+        # candidate next sessions per (section, subject): (start, kind, mode, extra)
+        cands = {}
+        for live in CampusLiveSession.objects.filter(
+            section_id__in=section_ids,
+            status__in=[CampusLiveSession.Status.SCHEDULED, CampusLiveSession.Status.LIVE],
+            scheduled_at__gte=now - timedelta(hours=3),
+        ).order_by("scheduled_at"):
+            cands.setdefault((live.section_id, live.subject_id), []).append(
+                (live.scheduled_at, "live_session", live.mode, {"live_session_id": str(live.id), "status": live.status})
+            )
+        for entry in TimetableEntry.objects.filter(section_id__in=section_ids).select_related("time_slot", "session"):
+            start = next_occurrence(entry, now)
+            if start:
+                cands.setdefault((entry.section_id, entry.subject_id), []).append(
+                    (start, "timetable", entry.mode, {"timetable_entry_id": str(entry.id)})
+                )
+
+        open_counts = {}
+        for sec, sub in CampusDoubt.objects.filter(
+            section_id__in=section_ids, is_active=True, author_id__in=vis.visible_student_ids
+        ).exclude(status=CampusDoubt.Status.RESOLVED).values_list("section_id", "subject_id"):
+            open_counts[(sec, sub)] = open_counts.get((sec, sub), 0) + 1
+        notice_counts = dict(
+            Notice.objects.filter(section_id__in=section_ids).values_list("section_id").annotate(n=Count("id"))
+        )
+
+        def render(c, hide_offline=True):
+            start, kind, mode, extra = c
+            hidden = mode == ClassMode.OFFLINE
+            out = {"kind": kind, "mode": mode, "time_hidden": hidden,
+                   "label": OFFLINE_LABEL if hidden else None,
+                   "starts_at": None if hidden else start.isoformat()}
+            if not hidden:
+                out.update(extra)
+            return out
+
+        cards = []
+        for a in assignments:
+            options = sorted(cands.get((a.section_id, a.subject_id), []), key=lambda c: c[0])
+            nxt = options[0] if options else None
+            nxt_online = next((c for c in options if c[2] == ClassMode.ONLINE), None)
+            t_user = a.staff.user
+            cards.append({
+                "id": str(a.id),
+                "campus": str(vis.section_campus.get(a.section_id)),
+                "section": str(a.section_id),
+                "section_name": a.section.name,
+                "class_name": a.section.school_class.name,
+                "subject": str(a.subject_id),
+                "subject_name": a.subject.name,
+                "teacher": {
+                    "staff_id": str(a.staff_id), "user_id": t_user.id,
+                    "name": (f"{t_user.first_name} {t_user.last_name}".strip() or t_user.username),
+                },
+                "mode": nxt[2] if nxt else ClassMode.OFFLINE,
+                "next_session": render(nxt) if nxt else None,
+                "next_online_session": render(nxt_online) if nxt_online else None,
+                "counts": {
+                    "notices": notice_counts.get(a.section_id, 0),
+                    "doubts_open": open_counts.get((a.section_id, a.subject_id), 0),
+                },
+            })
+        return Response(cards)
+
+
+# ============================================================
+# T4 §F — doubts
+# ============================================================
+class CampusDoubtViewSet(viewsets.ModelViewSet):
+    """
+    Doubts inside one subject-class (decision D4 — private by default).
+
+    Who sees a doubt: its author; a linked parent (child's doubts); that
+    subject's APPROVED teacher(s) and the section's class-teacher;
+    campus admin/principal; and — only when the campus enabled
+    `doubts_public_allowed` AND the doubt is `is_public` — the other
+    students of that section (read-only). Everyone else gets 404.
+
+    Only an enrolled student of the section can POST a doubt; only the
+    author or that class's staff can reply. A staff reply flips the doubt
+    to `answered`, the author's follow-up flips it back to `open`.
+    Delete = soft delete (`is_active=False`).
+    """
+
+    serializer_class = CampusDoubtSerializer
+    permission_classes = [IsAuthenticated]
+    http_method_names = ["get", "post", "patch", "delete", "head", "options"]
+
+    def get_serializer_class(self):
+        if self.action == "retrieve":
+            return CampusDoubtDetailSerializer
+        return CampusDoubtSerializer
+
+    def get_throttles(self):
+        if self.action in ("create", "reply"):
+            return [CampusDoubtPostThrottle()]
+        return super().get_throttles()
+
+    # ---- helpers
+    def _is_class_staff(self, doubt):
+        return can_manage_section_subject(
+            self.request.user, doubt.campus_id, doubt.section_id, doubt.subject_id
+        )
+
+    def get_queryset(self):
+        from django.db.models import Exists, OuterRef
+
+        user = self.request.user
+        vis = get_visibility(user, self.request)
+        qs = (
+            CampusDoubt.objects.filter(is_active=True, campus_id__in=vis.member_campus_ids)
+            .select_related("author", "subject", "campus")
+            .annotate(
+                replies_count=Count("replies", filter=Q(replies__is_active=True), distinct=True),
+                _teaches=Exists(
+                    SubjectTeacherassigments.objects.filter(
+                        section_id=OuterRef("section_id"), subject_id=OuterRef("subject_id"),
+                        staff__user=user, staff__is_active=True,
+                        status=SubjectTeacherassigments.Status.APPROVED,
+                    )
+                ),
+            )
+        )
+        admin_campuses = StaffProfile.objects.filter(
+            user=user, is_active=True,
+            role__in=[StaffProfile.Role.ADMIN, StaffProfile.Role.PRINCIPAL_HOD],
+        ).values_list("campus_id", flat=True)
+        class_teacher_sections = ClassTeacherassigments.objects.filter(
+            staff__user=user, staff__is_active=True
+        ).values_list("section_id", flat=True)
+        q = (
+            Q(author=user)
+            | Q(author_id__in=vis.visible_student_ids, campus_id__in=vis.nonstaff_campus_ids)
+            | Q(campus_id__in=admin_campuses)
+            | Q(section_id__in=class_teacher_sections)
+            | Q(_teaches=True)
+            | Q(is_public=True, campus__doubts_public_allowed=True, section_id__in=vis.visible_section_ids)
+        )
+        qs = qs.filter(q)
+        p = self.request.query_params
+        for key in ("section", "subject", "status", "campus"):
+            if p.get(key):
+                qs = qs.filter(**{f"{key}_id" if key != "status" else "status": p[key]})
+        if p.get("mine") in ("1", "true", "True"):
+            qs = qs.filter(author=user)
+        if self.action == "retrieve":
+            qs = qs.prefetch_related(Prefetch("replies", queryset=CampusDoubtReply.objects.select_related("author")))
+        return qs
+
+    # ---- create
+    @transaction.atomic
+    def perform_create(self, serializer):
+        user = self.request.user
+        section = serializer.validated_data["section"]
+        subject = serializer.validated_data["subject"]
+        campus = section.school_class.campus
+        if not campus.doubts_enabled:
+            raise PermissionDenied("Doubts are turned off for this campus.")
+        vis = get_visibility(user, self.request)
+        enrollment = StudentEnrollment.objects.filter(
+            student=user, section=section, status=StudentEnrollment.Status.ACTIVE,
+            section_id__in=vis.own_section_ids,
+        ).select_related("session").first()
+        if not enrollment:
+            raise PermissionDenied("Only a student enrolled in this section can post a doubt.")
+        teacher_staff = list(
+            SubjectTeacherassigments.objects.filter(
+                section=section, subject=subject, status=SubjectTeacherassigments.Status.APPROVED
+            ).select_related("staff__user")
+        )
+        if not teacher_staff:
+            from rest_framework.exceptions import ValidationError
+            raise ValidationError({"subject": "This subject has no approved teacher in your section."})
+        is_public = bool(serializer.validated_data.get("is_public"))
+        if is_public and not campus.doubts_public_allowed:
+            from rest_framework.exceptions import ValidationError
+            raise ValidationError({"is_public": "Public doubts are not enabled for this campus."})
+        doubt = serializer.save(author=user, campus=campus, session=enrollment.session)
+        recipients = {a.staff.user_id for a in teacher_staff if a.staff.is_active}
+        recipients.discard(user.id)
+        bridge.notify(
+            users=list(recipients),
+            notif_type=NotifTypes.CAMPUS_DOUBT_POSTED,
+            title=f"New doubt: {subject.name}",
+            body=(doubt.text[:120]),
+            data={"type": NotifTypes.CAMPUS_DOUBT_POSTED, "doubt_id": str(doubt.id),
+                  "section_id": str(section.id), "subject_id": str(subject.id)},
+        )
+
+    # ---- edit / delete (author, while still unanswered)
+    def partial_update(self, request, *args, **kwargs):
+        doubt = self.get_object()
+        if doubt.author_id != request.user.id:
+            raise PermissionDenied("Only the author can edit a doubt.")
+        if doubt.status != CampusDoubt.Status.OPEN or doubt.replies.filter(is_active=True).exists():
+            return Response({"detail": "A doubt can't be edited once it has a reply."}, status=400)
+        ser = self.get_serializer(doubt, data={k: v for k, v in request.data.items() if k in ("text", "attachment", "is_public")}, partial=True)
+        ser.is_valid(raise_exception=True)
+        if ser.validated_data.get("is_public") and not doubt.campus.doubts_public_allowed:
+            return Response({"is_public": "Public doubts are not enabled for this campus."}, status=400)
+        ser.save()
+        return Response(ser.data)
+
+    def perform_destroy(self, instance):
+        if instance.author_id != self.request.user.id and not self._is_class_staff(instance):
+            raise PermissionDenied("Only the author or that class's teacher can delete a doubt.")
+        instance.is_active = False
+        instance.save(update_fields=["is_active", "updated_at"])
+
+    # ---- actions
+    @action(detail=True, methods=["post"])
+    def reply(self, request, pk=None):
+        doubt = self.get_object()
+        if not doubt.campus.doubts_enabled:
+            raise PermissionDenied("Doubts are turned off for this campus.")
+        is_author = doubt.author_id == request.user.id
+        is_staff = self._is_class_staff(doubt)
+        if not (is_author or is_staff):
+            raise PermissionDenied("Only the author or that class's teacher can reply.")
+        ser = CampusDoubtReplySerializer(data=request.data, context=self.get_serializer_context())
+        ser.is_valid(raise_exception=True)
+        with transaction.atomic():
+            reply = ser.save(doubt=doubt, author=request.user, is_staff_reply=is_staff and not is_author)
+            if reply.is_staff_reply and doubt.status == CampusDoubt.Status.OPEN:
+                doubt.status = CampusDoubt.Status.ANSWERED
+            elif is_author and doubt.status in (CampusDoubt.Status.ANSWERED, CampusDoubt.Status.RESOLVED):
+                doubt.status = CampusDoubt.Status.OPEN
+                doubt.resolved_by, doubt.resolved_at = None, None
+            doubt.save(update_fields=["status", "resolved_by", "resolved_at", "updated_at"])
+        if reply.is_staff_reply:
+            recipients = [doubt.author_id]
+        else:
+            recipients = list(
+                SubjectTeacherassigments.objects.filter(
+                    section_id=doubt.section_id, subject_id=doubt.subject_id,
+                    status=SubjectTeacherassigments.Status.APPROVED, staff__is_active=True,
+                ).values_list("staff__user_id", flat=True)
+            )
+        recipients = [u for u in set(recipients) if u != request.user.id]
+        bridge.notify(
+            users=recipients,
+            notif_type=NotifTypes.CAMPUS_DOUBT_REPLIED,
+            title=f"Reply on your doubt: {doubt.subject.name}" if reply.is_staff_reply else f"Student replied: {doubt.subject.name}",
+            body=reply.text[:120],
+            data={"type": NotifTypes.CAMPUS_DOUBT_REPLIED, "doubt_id": str(doubt.id)},
+        )
+        return Response(CampusDoubtReplySerializer(reply, context=self.get_serializer_context()).data, status=201)
+
+    @action(detail=True, methods=["post"])
+    def resolve(self, request, pk=None):
+        doubt = self.get_object()
+        if doubt.author_id != request.user.id and not self._is_class_staff(doubt):
+            raise PermissionDenied("Only the author or that class's teacher can resolve a doubt.")
+        doubt.status = CampusDoubt.Status.RESOLVED
+        doubt.resolved_by, doubt.resolved_at = request.user, timezone.now()
+        doubt.save(update_fields=["status", "resolved_by", "resolved_at", "updated_at"])
+        return Response(CampusDoubtSerializer(doubt, context=self.get_serializer_context()).data)
+
+    @action(detail=True, methods=["post"])
+    def reopen(self, request, pk=None):
+        doubt = self.get_object()
+        if doubt.author_id != request.user.id and not self._is_class_staff(doubt):
+            raise PermissionDenied("Only the author or that class's teacher can reopen a doubt.")
+        doubt.status = CampusDoubt.Status.OPEN
+        doubt.resolved_by, doubt.resolved_at = None, None
+        doubt.save(update_fields=["status", "resolved_by", "resolved_at", "updated_at"])
+        return Response(CampusDoubtSerializer(doubt, context=self.get_serializer_context()).data)
+
+    @action(detail=True, methods=["post"], url_path="set-public")
+    def set_public(self, request, pk=None):
+        doubt = self.get_object()
+        if doubt.author_id != request.user.id and not self._is_class_staff(doubt):
+            raise PermissionDenied("Only the author or that class's teacher can change this.")
+        if not doubt.campus.doubts_public_allowed:
+            return Response({"detail": "Public doubts are not enabled for this campus."}, status=400)
+        doubt.is_public = bool(request.data.get("is_public", True))
+        doubt.save(update_fields=["is_public", "updated_at"])
+        return Response(CampusDoubtSerializer(doubt, context=self.get_serializer_context()).data)

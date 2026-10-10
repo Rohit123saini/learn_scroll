@@ -56,6 +56,10 @@ class Post(models.Model):
         ('approved', 'Approved'),
         ('rejected', 'Rejected'),
         ('flagged', 'Flagged'),
+        # copyrights app (copyrights/services.py): hidden by a copyright claim.
+        # Feeds only show 'approved', so both are invisible to everyone else.
+        ('copyright_hold', 'Copyright - on hold'),
+        ('copyright_removed', 'Copyright - removed'),
     ]
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)

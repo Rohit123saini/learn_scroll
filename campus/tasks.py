@@ -631,3 +631,132 @@ def send_fee_receipt_email(payment_id):
         email.send(fail_silently=False)
     except Exception:
         logger.exception("send_fee_receipt_email: failed to send email for payment %s.", payment_id)
+
+
+# ---------------------------------------------------------------------------
+# T4 §G — "class starts in 5 minutes" reminder (online classes only)
+# ---------------------------------------------------------------------------
+
+def _class_reminder_recipients(section_id, session_id, teacher_user_id):
+    from .class_schedule import active_student_ids_for_section
+
+    recipients = set(active_student_ids_for_section(section_id, session_id))
+    if teacher_user_id:
+        recipients.add(teacher_user_id)
+    return list(recipients)
+
+
+def _minutes_left(starts_at, now):
+    return max(1, int(round((starts_at - now).total_seconds() / 60.0)))
+
+
+def _send_class_starting(*, recipients, subject_name, section_label, starts_at, now, data):
+    local_start = timezone.localtime(starts_at)
+    minutes = _minutes_left(starts_at, now)
+    bridge.notify(
+        users=recipients,
+        notif_type=NotifTypes.CAMPUS_CLASS_STARTING,
+        title=f"{subject_name} class starts in {minutes} min",
+        body=f"{subject_name} ({section_label}) starts at {local_start:%I:%M %p}.",
+        data=data,
+    )
+
+
+@shared_task
+def send_class_start_reminders():
+    """
+    T4 §G — beat job, runs EVERY MINUTE. For each ONLINE class that starts
+    within the next `CAMPUS_CLASS_REMINDER_LEAD_MINUTES` (default 5) it
+    sends one `CAMPUS_CLASS_STARTING` notification to the section's active
+    students and the teacher. OFFLINE classes never get one (decision D5).
+
+    Two sources, same rule:
+      * `CampusLiveSession` (mode=online, status=scheduled) — idempotent via
+        `reminder_sent_at`, claimed with a conditional UPDATE so two
+        overlapping workers can't both send.
+      * weekly `TimetableEntry` (mode=online) — the slot's next occurrence
+        is resolved to a real datetime in `settings.TIME_ZONE`; idempotent
+        via the `TimetableReminderLog(entry, date)` unique key. A weekly
+        slot that already has an explicit live session around the same time
+        is skipped (it is the same class; the live-session reminder
+        covers it).
+
+    Cancelled/ended/live sessions are skipped, as are campuses with
+    `class_reminders_enabled=False` or `is_active=False`. A session whose
+    start already passed is never reminded (no "starts in 0 min" noise).
+    """
+    from .class_schedule import due_live_sessions, due_timetable_occurrences, has_explicit_live_session, reminder_lead
+    from .models import CampusLiveSession, TimetableReminderLog
+
+    now = timezone.now()
+    window_end = now + reminder_lead()
+    sent_live = sent_timetable = 0
+
+    for live in due_live_sessions(now, window_end):
+        claimed = CampusLiveSession.objects.filter(pk=live.pk, reminder_sent_at__isnull=True).update(
+            reminder_sent_at=now
+        )
+        if not claimed:
+            continue
+        recipients = _class_reminder_recipients(live.section_id, None, live.teacher.user_id)
+        if not recipients:
+            continue
+        _send_class_starting(
+            recipients=recipients,
+            subject_name=live.subject.name,
+            section_label=str(live.section),
+            starts_at=live.scheduled_at,
+            now=now,
+            data={
+                "type": NotifTypes.CAMPUS_CLASS_STARTING,
+                "mode": "online",
+                "live_session_id": str(live.id),
+                "section_id": str(live.section_id),
+                "subject_id": str(live.subject_id),
+                "starts_at": live.scheduled_at.isoformat(),
+            },
+        )
+        sent_live += 1
+
+    for entry, starts_at in due_timetable_occurrences(now, window_end):
+        if has_explicit_live_session(entry, starts_at):
+            continue
+        local_day = timezone.localtime(starts_at).date()
+        with transaction.atomic():
+            _, created = TimetableReminderLog.objects.get_or_create(entry=entry, occurrence_date=local_day)
+        if not created:
+            continue
+        recipients = _class_reminder_recipients(entry.section_id, entry.session_id, entry.staff.user_id)
+        if not recipients:
+            continue
+        _send_class_starting(
+            recipients=recipients,
+            subject_name=entry.subject.name,
+            section_label=str(entry.section),
+            starts_at=starts_at,
+            now=now,
+            data={
+                "type": NotifTypes.CAMPUS_CLASS_STARTING,
+                "mode": "online",
+                "timetable_entry_id": str(entry.id),
+                "section_id": str(entry.section_id),
+                "subject_id": str(entry.subject_id),
+                "starts_at": starts_at.isoformat(),
+            },
+        )
+        sent_timetable += 1
+
+    return {"live_sessions": sent_live, "timetable": sent_timetable}
+
+
+@shared_task
+def prune_timetable_reminder_logs(keep_days=7):
+    """Housekeeping for `TimetableReminderLog` (dedupe rows are only
+    needed for the day they guard)."""
+    from datetime import timedelta
+
+    from .models import TimetableReminderLog
+
+    cutoff = timezone.localdate() - timedelta(days=keep_days)
+    deleted, _ = TimetableReminderLog.objects.filter(occurrence_date__lt=cutoff).delete()
+    return {"deleted": deleted}

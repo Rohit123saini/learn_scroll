@@ -8,3 +8,6 @@ class UserProfileConfig(AppConfig):
         # Registers the Follow post_save/post_delete receivers that keep
         # User.followers_count / following_count exact (see signals.py).
         from . import signals  # noqa: F401
+        # Auto-moderation receivers (flag-only review queue) — see automod.py.
+        from . import automod
+        automod.connect()

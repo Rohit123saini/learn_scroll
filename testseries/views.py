@@ -15,7 +15,7 @@ from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 
 from . import live, policy
-from .access import user_can_access_series, visible_series_q
+from .access import user_can_access_series, user_can_edit_series, visible_series_q
 from .models import (
     Question, TestAttempt, TestLiveSession, TestSeries, TestSeriesPurchase, TestSeriesReview,
     attachment_extension_validator, validate_attachment_size,
@@ -249,13 +249,22 @@ class QuestionViewSet(viewsets.ModelViewSet):
     """Nested under a series: `/testseries/{series_pk}/questions/`.
     Editing is blocked once the parent series leaves `draft` — attempts
     may already exist against it, and editing questions afterward would
-    make existing scoring inconsistent (design doc §2)."""
+    make existing scoring inconsistent (design doc §2).
+
+    T2: who may edit = the series creator, plus — for a campus / class
+    series — the context's authorised editors (`access.user_can_edit_series`:
+    class-/subject-teacher/admin of the section, teacher/co-teacher/moderator
+    of the classroom). Everyone else gets a 403, a published series a clean
+    400."""
 
     serializer_class = QuestionSerializer
     permission_classes = [IsAuthenticated]
 
     def get_series(self):
-        return get_object_or_404(TestSeries, pk=self.kwargs["series_pk"])
+        # Cached: get_queryset() + perform_*() + the permission check all ask.
+        if not hasattr(self, "_series_cache"):
+            self._series_cache = get_object_or_404(TestSeries, pk=self.kwargs["series_pk"])
+        return self._series_cache
 
     def get_queryset(self):
         # [SECURITY FIX] this used to return the questions of ANY series to ANY
@@ -267,7 +276,7 @@ class QuestionViewSet(viewsets.ModelViewSet):
         series = self.get_series()
         user = self.request.user
         qs = Question.objects.filter(series=series).select_related("series")
-        if series.creator_id == user.id or user.is_staff:
+        if user.is_staff or user_can_edit_series(user, series):
             return qs
         if not TestAttempt.objects.filter(series=series, student=user).exists():
             raise PermissionDenied("Start this test to see its questions.")
@@ -277,27 +286,44 @@ class QuestionViewSet(viewsets.ModelViewSet):
         ctx = super().get_serializer_context()
         return ctx
 
-    def _check_draft_and_owner(self, series):
-        if series.creator_id != self.request.user.id:
-            raise PermissionDenied("Only the creator can modify questions.")
+    def _check_draft_and_editor(self, series):
+        if not user_can_edit_series(self.request.user, series):
+            raise PermissionDenied(
+                "Only the creator or this class/campus's teaching staff can modify questions."
+            )
         if series.status != TestSeries.Status.DRAFT:
             raise ValidationError("Questions can only be added, edited, or removed while the series is a draft.")
 
+    # Kept so older imports / subclasses that still call the old name keep working.
+    _check_draft_and_owner = _check_draft_and_editor
+
     def perform_create(self, serializer):
         series = self.get_series()
-        self._check_draft_and_owner(series)
-        serializer.save(series=series)
+        self._check_draft_and_editor(series)
+        order = serializer.validated_data.get("order")
+        if order is None:
+            last = series.questions.aggregate(m=db_models.Max("order"))["m"] or 0
+            order = last + 1
+        elif series.questions.filter(order=order).exists():
+            raise ValidationError({"order": [f"Order {order} is already taken."]})
+        serializer.save(series=series, order=order)
         series.recompute_total_marks()
 
     def perform_update(self, serializer):
         series = self.get_series()
-        self._check_draft_and_owner(series)
+        self._check_draft_and_editor(series)
+        new_order = serializer.validated_data.get("order")
+        if (
+            new_order is not None
+            and series.questions.filter(order=new_order).exclude(pk=serializer.instance.pk).exists()
+        ):
+            raise ValidationError({"order": [f"Order {new_order} is already taken."]})
         serializer.save()
         series.recompute_total_marks()
 
     def perform_destroy(self, instance):
         series = instance.series
-        self._check_draft_and_owner(series)
+        self._check_draft_and_editor(series)
         instance.delete()
         series.recompute_total_marks()
 

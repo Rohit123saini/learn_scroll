@@ -5493,3 +5493,9 @@ See `STORIES_UPGRADE_TASK.md`. Summary: `Story.audience` (`everyone` | `close_fr
 audience enforced by `post/story_visibility.py` on story list/view/react/reply (404 when not visible);
 endpoints `GET/PUT /post/close-friends/`, `POST/DELETE /post/close-friends/<user_id>/`,
 `GET /post/close-friends/candidates/?q=`; `POST /post/stories/create/` accepts optional `audience`.
+
+## T1 items 6-10 (quality gates, config, performance, metrics, Flutter)
+`feed_quality.py` (spam / duplicate / tiny-text / reported gates, `settings.FEED_QUALITY`), `feed_config.py`
+(`effective(user_id)`: every knob + A/B bucket), A/B sections `mix` / `diversity` / `author_cap` / `quality`,
+`manage.py feed_benchmark`, Celery `post.tasks.feed_daily_metrics`, staff-only `config` in `GET /post/<id>/why/`.
+Tests: `tests_feed_quality.py`, `tests_feed_gates.py`. No migrations. Details: `TASK_T1_678910_STATUS.md`.

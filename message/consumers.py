@@ -629,7 +629,7 @@ class ChatConsumer(AsyncWebsocketConsumer):
         await self.send(text_data=json.dumps(event))
 
     async def typing_event(self, event):
-        await self.send(text_data=json.dumps({'type': 'typing', **event}))
+        await self.send(text_data=json.dumps({**event, 'type': 'typing'}))
 
     # Issue #2 (RestrictUser) — `A restricted B` means A's read receipts and
     # online/last-seen must never reach B. These group events are broadcast
@@ -650,10 +650,10 @@ class ChatConsumer(AsyncWebsocketConsumer):
     async def read_event(self, event):
         if await self._actor_restricted_me(event.get('user_id')):
             return
-        await self.send(text_data=json.dumps({'type': 'read', **event}))
+        await self.send(text_data=json.dumps({**event, 'type': 'read'}))
 
     async def delete_event(self, event):
-        await self.send(text_data=json.dumps({'type': 'delete', **event}))
+        await self.send(text_data=json.dumps({**event, 'type': 'delete'}))
 
     # 🔥 NAYA — REST `MessageViewSet.partial_update` (text edit) ke liye
     # koi WS broadcast pehle nahi tha — is poore app me `edit_event` type
@@ -665,7 +665,7 @@ class ChatConsumer(AsyncWebsocketConsumer):
     # "real-time chat" ka point defeat ho jaata sirf isi ek action ke liye.
     # Ab `views.py`'s `partial_update` yahi event group ko bhejta hai.
     async def edit_event(self, event):
-        await self.send(text_data=json.dumps({'type': 'edit', **event}))
+        await self.send(text_data=json.dumps({**event, 'type': 'edit'}))
 
     # 🔥 NAYA (ADVANCED FEATURES) — link-preview aur voice-transcript dono
     # `tasks.py` ke background Celery tasks se hi likhe jaate hain (`Message.
@@ -686,7 +686,7 @@ class ChatConsumer(AsyncWebsocketConsumer):
         await self.send(text_data=json.dumps(event))
 
     async def reaction_event(self, event):
-        await self.send(text_data=json.dumps({'type': 'reaction', **event}))
+        await self.send(text_data=json.dumps({**event, 'type': 'reaction'}))
 
     async def pin_event(self, event):
         await self.send(text_data=json.dumps({'type': 'pin', **event}))
@@ -711,7 +711,7 @@ class ChatConsumer(AsyncWebsocketConsumer):
     async def presence_update(self, event):
         if await self._actor_restricted_me(event.get('user_id')):
             return
-        await self.send(text_data=json.dumps({'type': 'presence', **event}))
+        await self.send(text_data=json.dumps({**event, 'type': 'presence'}))
 
     # Block / unblock happened between the two people of this 1-1 chat
     # (user_profile/block_live.py). Same payload for both sides — it never
@@ -1440,14 +1440,11 @@ class InboxConsumer(AsyncWebsocketConsumer):
     # screens turant update ho sakein, `UserPresenceView`'s cached REST
     # poll ka wait kiye bina. `ChatConsumer.presence_update`'s exact same
     # shape use kiya hai consistency ke liye — NOTE (pre-existing, is
-    # task ke scope se bahar): `event` dict me khud bhi
-    # 'type': 'presence_update' hota hai (Channels dispatch ke liye zaroori),
-    # aur Python dict-unpack me baad wali key jeetti hai, isliye
-    # `{'type': 'presence', **event}` ka final JSON me asal 'type'
-    # 'presence_update' hi jaata hai, 'presence' nahi — ye
-    # `ChatConsumer.presence_update` ka bhi pehle se yahi behavior hai
-    # (aur `reaction_event`/`pin_event` ka bhi), isliye client jo bhi
-    # already handle kar raha hai wahi consistently milta rahega.
+    # NOTE: `event` dict me khud bhi 'type': 'presence_update' hota hai (Channels
+    # dispatch ke liye). Isliye final JSON me asal 'type' set karne ke liye
+    # `{**event, 'type': 'presence'}` likha hai (baad wali key jeetti hai) — client
+    # `case 'presence'` handle karta hai. (`pin_event` ka 'pin_event' hi jaata hai,
+    # aur client bhi wahi match karta hai.)
     @database_sync_to_async
     def _actor_restricted_me(self, actor_user_id):
         # Issue #2 (RestrictUser): drop presence of anyone who restricted me.
@@ -1463,7 +1460,7 @@ class InboxConsumer(AsyncWebsocketConsumer):
     async def presence_update(self, event):
         if await self._actor_restricted_me(event.get('user_id')):
             return
-        await self.send(text_data=json.dumps({'type': 'presence', **event}))
+        await self.send(text_data=json.dumps({**event, 'type': 'presence'}))
 
 
 # ======================================================================

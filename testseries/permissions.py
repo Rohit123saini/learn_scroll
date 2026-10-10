@@ -4,18 +4,32 @@ from rest_framework.permissions import SAFE_METHODS, BasePermission
 from .models import TestSeries
 
 
+# T2 — series-level actions that only MANAGE QUESTIONS. A campus / class series'
+# authorised editors (class-teacher, co-teacher, ...) may run these in addition
+# to the creator; every other write (PATCH/DELETE the series, publish, pricing,
+# live sessions ...) stays creator-only.
+EDITOR_ACTIONS = frozenset({"questions_bulk", "questions_import", "questions_reorder", "option_image", "answer_key"})
+
+
 class IsSeriesCreatorOrReadOnly(BasePermission):
     """Anyone can read a (visible) series; only its creator can write to
-    it. Campus/tuitionclass creation itself is gated further upstream —
-    only their own bridge-wrapped endpoints call `bridge.
-    create_context_testseries()` in the first place (§5) — this class
-    only covers the direct `TestSeriesViewSet` (individual/marketplace)
-    path."""
+    it — except the question-management actions in `EDITOR_ACTIONS`, which a
+    campus / class series' context editors may also use (`access.
+    user_can_edit_series`, resolved through the owning app, never by importing
+    it). Campus/tuitionclass creation itself is gated further upstream — only
+    their own bridge-wrapped endpoints call `bridge.create_context_testseries()`
+    in the first place (§5)."""
 
     def has_object_permission(self, request, view, obj):
         if request.method in SAFE_METHODS:
             return True
-        return obj.creator_id == request.user.id
+        if obj.creator_id == request.user.id:
+            return True
+        if getattr(view, "action", None) in EDITOR_ACTIONS:
+            from .access import user_can_edit_series
+
+            return user_can_edit_series(request.user, obj)
+        return False
 
 
 def user_can_review_attempt(user, attempt) -> bool:

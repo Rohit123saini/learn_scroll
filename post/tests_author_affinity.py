@@ -235,6 +235,7 @@ class SqlTests(Base):
 
 
 # --------------------------------------------------------------------------
+@override_settings(FEED_EXPLORE={"enabled": False})  # these tests are about affinity ordering; exploration has its own tests
 class RankingTests(Base):
     def test_trending_liked_author_moves_up(self):
         liked_before = make_post(self.x, "x-liked", days_old=0)
@@ -341,6 +342,7 @@ class ApiBase(APITestCase):
         return r.data["data"]
 
 
+@override_settings(FEED_EXPLORE={"enabled": False})  # T1 Part 3: brand-new test authors would add a "new_creator" reason
 class WhyAPITests(ApiBase):
     def test_following_author_you_like(self):
         like(self.me, make_post(self.friend, "seed"))
@@ -373,8 +375,8 @@ class WhyAPITests(ApiBase):
 
 
 class FeedAPITests(ApiBase):
-    def order(self):
-        r = self.client.get(reverse("home-feed"), {"page_size": 50})
+    def order(self, **extra):
+        r = self.client.get(reverse("home-feed"), {"page_size": 50, **extra})
         self.assertEqual(r.status_code, 200)
         return [x["content"] for x in r.data["results"]]
 
@@ -385,7 +387,8 @@ class FeedAPITests(ApiBase):
         cache.clear()
         self.assertEqual(self.order()[0], "o-newest")
         comment(self.me, seed)
-        self.assertEqual(self.order()[0], "s-seed")
+        # T1 Part 5: pull-to-refresh (`refresh=1`) skips the short candidate cache
+        self.assertEqual(self.order(refresh=1)[0], "s-seed")
 
     def test_other_users_feed_is_unaffected(self):
         other = User.objects.create_user(username="other", password="x")

@@ -296,6 +296,7 @@ class GoogleAuthView(APIView):
                 "message": "Signup Successful" if created else "Login Successful",
                 "is_new_user": created,
                 "phone_missing": not bool(user.phone),
+                "dob_missing": user.date_of_birth is None,
                 "user": {
                     "id": user.id,
                     "username": user.username,
@@ -342,10 +343,59 @@ class CompleteProfileView(APIView):
         )
 
 
+class SetDateOfBirthView(APIView):
+    """
+    POST /login/auth/set-dob/   {"date_of_birth": "YYYY-MM-DD"}
+
+    One-time DOB entry for accounts that have none (Google signups, and
+    accounts created before the minor-safety feature). Once set it can't be
+    changed here — otherwise a minor could simply re-enter an adult DOB;
+    corrections go through support/admin. Under-18 -> account is forced
+    private.
+    """
+
+    permission_classes = [IsAuthenticated]
+    serializer_class = SetDateOfBirthSerializer
+
+    def post(self, request):
+        user = request.user
+        if user.date_of_birth is not None:
+            return Response(
+                {"status": False, "message": "Date of birth is already set and can't be changed here."},
+                status=status.HTTP_409_CONFLICT,
+            )
+
+        serializer = self.serializer_class(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        dob = serializer.validated_data["date_of_birth"]
+
+        user.date_of_birth = dob
+        fields = ["date_of_birth"]
+        if user.is_minor and not user.is_private:
+            user.is_private = True
+            fields.append("is_private")
+        user.save(update_fields=fields)
+
+        return Response(
+            {
+                "status": True,
+                "message": "Date of birth saved.",
+                "is_minor": user.is_minor,
+                "is_private": user.is_private,
+            },
+            status=status.HTTP_200_OK,
+        )
+
+
 #----------------------------    otp verification  -----------------
 
 class SendOTPView(APIView):
     serializer_class = SendOTPSerializer
+
+    # Pre-login endpoints: caller has no JWT yet. DEFAULT_PERMISSION_CLASSES is
+    # IsAuthenticated, so without this signup / OTP login / forgot flow 401s.
+    authentication_classes = []
+    permission_classes = []
 
     # ✅ SECURITY: OTP request rate-limit (settings.py me REST_FRAMEWORK
     # ["DEFAULT_THROTTLE_RATES"]["send_otp"] = "5/min" jaisa kuch set karo)
@@ -423,6 +473,11 @@ class SendOTPView(APIView):
 
 class VerifyOTPView(APIView):
     serializer_class = VerifyOTPSerializer
+
+    # Pre-login endpoints: caller has no JWT yet. DEFAULT_PERMISSION_CLASSES is
+    # IsAuthenticated, so without this signup / OTP login / forgot flow 401s.
+    authentication_classes = []
+    permission_classes = []
 
     # ✅ SECURITY: 6-digit OTP has only 1M combinations — without a rate
     # limit + attempt lock, it's brute-forceable. Set

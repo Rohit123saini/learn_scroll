@@ -106,7 +106,21 @@ from django.db import models, transaction
 from django.db.models import CheckConstraint, Q, UniqueConstraint
 from django.utils import timezone
 
+from common.attachment_validators import attachment_extension_validator, validate_attachment_size
 from login.models import User
+
+
+class ClassMode(models.TextChoices):
+    """
+    T4 §G — how a class is delivered. `ONLINE` classes expose their
+    time to students (and fire the "starts in 5 minutes" reminder);
+    `OFFLINE` classes show students only an "Offline class" label, no
+    time and no reminder — see `campus.class_schedule` for the single
+    place that rule lives.
+    """
+
+    ONLINE = "online", "Online"
+    OFFLINE = "offline", "Offline"
 
 
 class CampusBaseModel(models.Model):
@@ -212,6 +226,16 @@ class Campus(CampusBaseModel):
     # behavior change; every existing campus keeps today's always-free
     # behavior unchanged. See `docs/ORG_VS_INDIVIDUAL_MATRIX.md`.
     testseries_paid_allowed = models.BooleanField(default=False)
+
+    # T4 — per-campus feature flags for the new student-facing modules
+    # (same "optional per campus" posture `fee_module_enabled` takes).
+    # All three default so existing campuses behave sensibly without any
+    # admin action: doubts + reminders ON, class-wide public doubts OFF
+    # (decision D4 — doubts are private to author + that class's
+    # teachers unless the campus explicitly allows a public toggle).
+    doubts_enabled = models.BooleanField(default=True)
+    doubts_public_allowed = models.BooleanField(default=False)
+    class_reminders_enabled = models.BooleanField(default=True)
 
     created_at = models.DateTimeField(auto_now_add=True)
 
@@ -320,6 +344,9 @@ class Section(CampusBaseModel):
     # only from inside core/classroom_chat_bridge.py.
     chat_group_enabled = models.BooleanField(default=False)
     linked_conversation_id = models.UUIDField(null=True, blank=True)
+    # [T4 §D] Max ACTIVE students for this section (NULL = unlimited).
+    # Enforced by services.enroll_student(); admin/principal may override.
+    capacity = models.PositiveIntegerField(null=True, blank=True)
 
     class Meta:
         ordering = ["name"]
@@ -365,12 +392,24 @@ class StaffProfile(CampusBaseModel):
         PRINCIPAL_HOD = "principal_hod", "Principal/HOD"
         CLASS_TEACHER = "class_teacher", "Class Teacher"
         SUBJECT_TEACHER = "subject_teacher", "Subject Teacher"
+        # [T4 §C / D3] Scoped manager: sees/manages ONLY the sections where
+        # he/she holds an approved SubjectTeacherassigments or a
+        # ClassTeacherassigments (see permissions.py). Unlike a plain
+        # subject_teacher he may also mark daily attendance / post section
+        # notices for those sections.
+        MODERATOR = "moderator", "Moderator"
         NON_TEACHING = "non_teaching", "Non-Teaching Staff"
 
     campus = models.ForeignKey(Campus, on_delete=models.CASCADE, related_name="staff_profiles")
     user = models.ForeignKey(User, on_delete=models.CASCADE, related_name="campus_staff_profiles")
     role = models.CharField(max_length=20, choices=Role.choices)
     is_active = models.BooleanField(default=True)
+    # [T4 §A] Optional department scope. For a Principal/HOD it limits the
+    # participants view to that department (NULL = whole campus, the old
+    # G-5 behaviour); for other staff it is just their home department.
+    department = models.ForeignKey(
+        Department, on_delete=models.SET_NULL, null=True, blank=True, related_name="staff_profiles"
+    )
 
     class Meta:
         # One user can hold a staff row at more than one campus — but only
@@ -430,6 +469,8 @@ class StudentEnrollment(CampusBaseModel):
         ACTIVE = "active", "Active"
         TRANSFERRED = "transferred", "Transferred"
         GRADUATED = "graduated", "Graduated"
+        # [T4 §D] soft removal (no hard delete — history/audit).
+        WITHDRAWN = "withdrawn", "Withdrawn"
 
     student = models.ForeignKey(User, on_delete=models.CASCADE, related_name="campus_enrollments")
     section = models.ForeignKey(Section, on_delete=models.CASCADE, related_name="enrollments")
@@ -450,6 +491,8 @@ class StudentEnrollment(CampusBaseModel):
     # instead of always passing `enrollment_no=""`.
     enrollment_no = models.CharField(max_length=30, blank=True)
     status = models.CharField(max_length=15, choices=Status.choices, default=Status.ACTIVE, db_index=True)
+    # [T4 §D] when the row stopped being ACTIVE (transfer / withdraw).
+    left_at = models.DateTimeField(null=True, blank=True)
 
     class Meta:
         ordering = ["-session__start_date"]
@@ -637,10 +680,22 @@ class CampusLiveSession(CampusBaseModel):
     scheduled_at = models.DateTimeField()
     status = models.CharField(max_length=10, choices=Status.choices, default=Status.SCHEDULED, db_index=True)
     room_id = models.CharField(max_length=150, blank=True)  # video token/room identifier
+    # T4 §G — `online` (default for a live session: it IS the video
+    # class) or `offline` (an in-person class tracked as a session:
+    # students see no time, no video room is provisioned, no reminder).
+    mode = models.CharField(max_length=10, choices=ClassMode.choices, default=ClassMode.ONLINE, db_index=True)
+    # T4 §G — set (atomically, by the reminder task) the moment the
+    # "class starts in N minutes" notification is fanned out, so the
+    # every-minute beat job can never send it twice for one session.
+    reminder_sent_at = models.DateTimeField(null=True, blank=True)
 
     class Meta:
         ordering = ["scheduled_at"]
-        indexes = [models.Index(fields=["section", "scheduled_at"])]
+        indexes = [
+            models.Index(fields=["section", "scheduled_at"]),
+            # the every-minute reminder sweep filters on exactly these
+            models.Index(fields=["status", "mode", "scheduled_at"], name="campus_live_reminder_idx"),
+        ]
 
     def __str__(self):
         return f"{self.subject} - {self.section} @ {self.scheduled_at}"
@@ -687,6 +742,10 @@ class TimetableEntry(CampusBaseModel):
     time_slot = models.ForeignKey(TimeSlot, on_delete=models.CASCADE, related_name="timetable_entries")
     room = models.ForeignKey(Room, on_delete=models.SET_NULL, null=True, blank=True, related_name="timetable_entries")
     session = models.ForeignKey(AcademicSession, on_delete=models.CASCADE, related_name="timetable_entries")
+    # T4 §G — default `offline` (a normal in-person period): students
+    # get an "Offline class" label instead of the time and no reminder.
+    # `online` periods show the time and get the 5-minute reminder.
+    mode = models.CharField(max_length=10, choices=ClassMode.choices, default=ClassMode.OFFLINE, db_index=True)
 
     class Meta:
         ordering = ["id"]
@@ -1164,3 +1223,138 @@ class CampusAnalyticsSnapshot(CampusBaseModel):
 
     def __str__(self):
         return f"{self.campus.name} snapshot @ {self.computed_at}"
+
+
+# ---------------------------------------------------------------------------
+# [T4 §B] Audit log — append-only record of every admin-side structural /
+# assignment / roster action (who did what, when). Never edited or deleted
+# through the API; `actor` is SET_NULL so removing a user keeps history.
+# ---------------------------------------------------------------------------
+class CampusAuditLog(CampusBaseModel):
+    campus = models.ForeignKey(Campus, on_delete=models.CASCADE, related_name="audit_logs")
+    actor = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True, related_name="campus_audit_logs")
+    action = models.CharField(max_length=60, db_index=True)  # e.g. "section.create", "enrollment.transfer"
+    target_type = models.CharField(max_length=40, blank=True)
+    target_id = models.CharField(max_length=64, blank=True)
+    summary = models.CharField(max_length=300, blank=True)
+    metadata = models.JSONField(default=dict, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True, db_index=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+        indexes = [models.Index(fields=["campus", "-created_at"]), models.Index(fields=["campus", "action"])]
+
+    def __str__(self):
+        return f"{self.campus_id} {self.action} {self.target_type}:{self.target_id}"
+
+
+# ---------------------------------------------------------------------------
+# T4 §G — idempotency log for the weekly-timetable "class starts soon" reminder
+# ---------------------------------------------------------------------------
+
+class TimetableReminderLog(CampusBaseModel):
+    """
+    One row per (timetable entry, calendar date) once the "class starts in
+    N minutes" reminder has been fanned out for that occurrence. A weekly
+    `TimetableEntry` repeats forever, so unlike `CampusLiveSession`
+    (which carries its own `reminder_sent_at`) there is no single row to
+    stamp — this log is the dedupe key the every-minute beat task claims
+    with `get_or_create` before sending anything. Pure bookkeeping; safe
+    to prune after a few days.
+    """
+
+    entry = models.ForeignKey(TimetableEntry, on_delete=models.CASCADE, related_name="reminder_logs")
+    occurrence_date = models.DateField()
+    sent_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["-sent_at"]
+        constraints = [
+            UniqueConstraint(fields=["entry", "occurrence_date"], name="unique_timetable_reminder_per_day"),
+        ]
+        indexes = [models.Index(fields=["occurrence_date"])]
+
+    def __str__(self):
+        return f"{self.entry_id} @ {self.occurrence_date}"
+
+
+# ---------------------------------------------------------------------------
+# T4 §F — doubts (student -> that subject-class's teachers)
+# ---------------------------------------------------------------------------
+
+class CampusDoubt(CampusBaseModel):
+    """
+    A student's question inside ONE subject-class — i.e. one
+    `(section, subject)` pair that has an approved
+    `SubjectTeacherassigments` (the same unit `GET /campus/my/classes/`
+    hands the student). Scoped to `campus` + `session` like every other
+    table in this app so a session rollover never mixes years.
+
+    Visibility (decision D4): private by default — the author, that
+    subject's approved teacher(s), the section's class-teacher and campus
+    admin/principal. `is_public` (only ever settable when
+    `Campus.doubts_public_allowed`) additionally shows it, read-only, to
+    the other students of the same section. Never `hard delete`d —
+    `is_active=False` hides it (history/audit).
+    """
+
+    class Status(models.TextChoices):
+        OPEN = "open", "Open"
+        ANSWERED = "answered", "Answered"
+        RESOLVED = "resolved", "Resolved"
+
+    campus = models.ForeignKey(Campus, on_delete=models.CASCADE, related_name="doubts")
+    session = models.ForeignKey(AcademicSession, on_delete=models.CASCADE, related_name="doubts")
+    section = models.ForeignKey(Section, on_delete=models.CASCADE, related_name="doubts")
+    subject = models.ForeignKey(Subject, on_delete=models.CASCADE, related_name="doubts")
+    author = models.ForeignKey(User, on_delete=models.CASCADE, related_name="campus_doubts")
+    text = models.TextField()
+    attachment = models.FileField(
+        upload_to="campus/doubts/%Y/%m/", null=True, blank=True,
+        validators=[attachment_extension_validator, validate_attachment_size],
+    )
+    status = models.CharField(max_length=10, choices=Status.choices, default=Status.OPEN, db_index=True)
+    is_public = models.BooleanField(default=False)
+    resolved_by = models.ForeignKey(
+        User, on_delete=models.SET_NULL, null=True, blank=True, related_name="campus_doubts_resolved"
+    )
+    resolved_at = models.DateTimeField(null=True, blank=True)
+    is_active = models.BooleanField(default=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+        indexes = [
+            models.Index(fields=["campus", "session", "-created_at"]),
+            models.Index(fields=["section", "subject", "status"]),
+            models.Index(fields=["author", "-created_at"]),
+        ]
+
+    def __str__(self):
+        return f"Doubt({self.subject_id}/{self.section_id}) by {self.author_id} [{self.status}]"
+
+
+class CampusDoubtReply(CampusBaseModel):
+    """A reply on a `CampusDoubt` — from the author (follow-up) or from
+    one of that class's teachers. `is_staff_reply` is a snapshot taken
+    when the reply is written (so a later role change never rewrites who
+    "answered"); it is what flips the doubt to `ANSWERED`."""
+
+    doubt = models.ForeignKey(CampusDoubt, on_delete=models.CASCADE, related_name="replies")
+    author = models.ForeignKey(User, on_delete=models.CASCADE, related_name="campus_doubt_replies")
+    text = models.TextField()
+    attachment = models.FileField(
+        upload_to="campus/doubts/%Y/%m/", null=True, blank=True,
+        validators=[attachment_extension_validator, validate_attachment_size],
+    )
+    is_staff_reply = models.BooleanField(default=False)
+    is_active = models.BooleanField(default=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["created_at"]
+        indexes = [models.Index(fields=["doubt", "created_at"])]
+
+    def __str__(self):
+        return f"Reply({self.doubt_id}) by {self.author_id}"

@@ -114,6 +114,16 @@ def on_block_changed(blocker_id, blocked_id, is_blocked):
     """Entry point used by the BlockUser signals. Safe to call inside a transaction."""
 
     def _run():
+        # T1 item 6/8: a block must show up in the Home feed at once - drop both people's cached
+        # feed candidates (post/feed_cache.py). Pages are ALSO re-filtered through the "safe to show"
+        # queryset on every request, so even a frozen snapshot can't serve the blocked account.
+        try:
+            from post import feed_cache
+
+            for uid in (blocker_id, blocked_id):
+                feed_cache.invalidate(uid)
+        except Exception:
+            logger.exception("feed cache invalidation on block failed (%s <-> %s)", blocker_id, blocked_id)
         try:
             ended = _end_active_calls_between(blocker_id, blocked_id) if is_blocked else []
         except Exception:

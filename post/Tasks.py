@@ -459,3 +459,29 @@ def probe_media_metadata(self, media_id):
         # Transient storage/ffprobe trouble -> bounded retry. (A corrupt file
         # just yields {} and is NOT retried.)
         raise self.retry(exc=exc)
+
+
+# ---------------------------------------------------------------------------
+# T1 item 9 -- nightly feed summary (post/feed_metrics.py). Wired in settings.py
+# CELERY_BEAT_SCHEDULE ("post-feed-daily-metrics", 02:45, before the 03:15 event prune).
+# ---------------------------------------------------------------------------
+@shared_task
+def feed_daily_metrics(date_str=None):
+    """Compute yesterday's (UTC) feed summary per A/B variant, log it and keep it in the cache under
+    `feed:metrics:<YYYY-MM-DD>` (35 days) so a dashboard can read it. Returns the dict."""
+    from datetime import date, datetime, timedelta, timezone as dt_timezone
+
+    from django.core.cache import cache
+
+    from . import feed_metrics
+
+    day = date.fromisoformat(date_str) if date_str else datetime.now(dt_timezone.utc).date() - timedelta(days=1)
+    start = datetime(day.year, day.month, day.day, tzinfo=dt_timezone.utc)
+    summary = feed_metrics.compute_metrics(start, start + timedelta(days=1))
+    summary["date"] = day.isoformat()
+    logger.info("feed_daily_metrics %s: %s", day.isoformat(), summary)
+    try:
+        cache.set(f"feed:metrics:{day.isoformat()}", summary, 35 * 86400)
+    except Exception:
+        logger.warning("feed_daily_metrics: caching the result failed", exc_info=True)
+    return summary

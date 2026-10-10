@@ -251,6 +251,13 @@ class Notification(models.Model):
         TESTSERIES_PAYOUT_RELEASED = "testseries_payout_released", "Test Series Payout Released"
         assigments_DUE_SOON = "assigments_due_soon", "assigments Due Soon"
         CAMPUS_REWARD_EARNED = "campus_reward_earned", "Campus Reward Earned"
+        # T4 §G/§F — online-class "starts in 5 minutes" reminder, and the
+        # two doubt events (student posts -> subject teacher; teacher/
+        # student replies -> the other side). Must match
+        # campus.bridge.NotifTypes verbatim.
+        CAMPUS_CLASS_STARTING = "campus_class_starting", "Class Starting Soon"
+        CAMPUS_DOUBT_POSTED = "campus_doubt_posted", "New Class Doubt"
+        CAMPUS_DOUBT_REPLIED = "campus_doubt_replied", "Class Doubt Reply"
         TESTSERIES_REVIEW_RECEIVED = "testseries_review_received", "New Test Series Review"
         TESTSERIES_QUERY_RECEIVED = "testseries_query_received", "New Test Series Query"
         TESTSERIES_QUERY_ANSWERED = "testseries_query_answered", "Test Series Query Answered"
@@ -328,6 +335,11 @@ class Notification(models.Model):
         # change -> core/migrations/0003. ---
         STORY_REACTION = "story_reaction", "Story Reaction"
         POST_REPOSTED = "post_reposted", "Post Reposted"
+
+        # --- Help & feedback: LearnScroll Support replied to the user's ticket
+        # (`data.ticket_id`). Fired by support/services.py::add_staff_reply.
+        # 13 chars, within max_length=30. Choices-only change -> core/migrations/0005. ---
+        SUPPORT_REPLY = "support_reply", "Support Reply"
 
     recipient = models.ForeignKey(User, on_delete=models.CASCADE, related_name="notifications")
     # max_length=30 kept as-is — the longest current NotifType value
@@ -410,6 +422,8 @@ class Notification(models.Model):
         NotifType.assigments_DUE_REMINDER, NotifType.RESULT_PUBLISHED,
         NotifType.FEE_DUE_REMINDER, NotifType.STAFF_assigments_APPROVED,
         NotifType.STAFF_assigments_REJECTED,
+        NotifType.CAMPUS_CLASS_STARTING, NotifType.CAMPUS_DOUBT_POSTED,
+        NotifType.CAMPUS_DOUBT_REPLIED,
     })
 
     #: testseries / assigments-app / campus-gamification — same

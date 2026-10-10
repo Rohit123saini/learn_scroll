@@ -100,3 +100,11 @@ class CampusInviteCodeRedeemThrottle(ScopedRateThrottle):
     code and self-enroll into a batch they were never actually
     invited to."""
     scope = "campus_invite_code_redeem"
+
+
+class CampusDoubtPostThrottle(ScopedRateThrottle):
+    """[ADDED — T4 §F] CampusDoubtViewSet.create / .reply — a student (or
+    teacher) can otherwise spam a class's teachers with doubts/replies,
+    each of which fans out a push. Same shape as `CampusNoticePostThrottle`
+    above, rated per-user."""
+    scope = "campus_doubt_post"

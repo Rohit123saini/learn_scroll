@@ -10,9 +10,12 @@ from .models import (
     Attendance,
     Campus,
     CampusAnalyticsSnapshot,
+    CampusDoubt,
+    CampusDoubtReply,
     CampusInviteCode,
     CampusLiveSession,
     CampusParentLink,
+    ClassMode,
     ClassTeacherassigments,
     Department,
     DigitalIDCard,
@@ -76,6 +79,8 @@ class CampusSerializer(serializers.ModelSerializer):
         fields = [
             "id", "name", "type", "is_active", "fee_module_enabled",
             "attendance_alert_threshold_percent", "created_by", "created_at",
+            # T4 — additive per-campus feature flags for the new modules.
+            "doubts_enabled", "doubts_public_allowed", "class_reminders_enabled",
             # G-2 fix — surfaced read-only so the creator can see status;
             # only `CampusViewSet.approve`/`.reject` (platform-admin only)
             # can change it, never a plain PATCH here.
@@ -128,7 +133,7 @@ class SchoolClassSerializer(serializers.ModelSerializer):
 class SectionSerializer(serializers.ModelSerializer):
     class Meta:
         model = Section
-        fields = ["id", "school_class", "name"]
+        fields = ["id", "school_class", "name", "capacity"]
         read_only_fields = ["id"]
 
 
@@ -158,8 +163,15 @@ class StaffProfileSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = StaffProfile
-        fields = ["id", "campus", "user", "user_detail", "role", "is_active"]
+        fields = ["id", "campus", "user", "user_detail", "role", "is_active", "department"]
         read_only_fields = ["id"]
+
+    def validate(self, attrs):
+        campus = attrs.get("campus", getattr(self.instance, "campus", None))
+        department = attrs.get("department", getattr(self.instance, "department", None))
+        if department and campus and department.campus_id != campus.id:
+            raise serializers.ValidationError({"department": "Doesn't belong to this campus."})
+        return attrs
 
 
 # ============================================================
@@ -210,8 +222,13 @@ class StudentEnrollmentSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = StudentEnrollment
-        fields = ["id", "student", "student_detail", "section", "session", "roll_number", "status"]
-        read_only_fields = ["id"]
+        fields = ["id", "student", "student_detail", "section", "session", "roll_number", "enrollment_no", "status", "left_at"]
+        read_only_fields = ["id", "left_at"]
+        # [T4 §D] The (student, section, session) uniqueness is enforced by the
+        # DB constraint + campus.roster (which re-activates a withdrawn row and
+        # returns a clean 400 "already_enrolled" for an active duplicate), so
+        # the auto UniqueTogetherValidator must not reject re-enrolment first.
+        validators = []
 
     def validate(self, attrs):
         section = attrs.get("section", getattr(self.instance, "section", None))
@@ -338,10 +355,30 @@ class NoticeSerializer(serializers.ModelSerializer):
 # Phase 4 — tuition classes
 # ============================================================
 class CampusLiveSessionSerializer(serializers.ModelSerializer):
+    """
+    T4 §G — `mode` (online/offline) is writable by staff. For a viewer who
+    is NOT active staff of the campus, an OFFLINE session's `scheduled_at`
+    is replaced with `null` and `time_hidden=true` / `label="Offline
+    class"` are added (rule lives in `campus.class_schedule`). Staff always
+    get the real time. Response shape is otherwise unchanged (additive).
+    """
+
     class Meta:
         model = CampusLiveSession
-        fields = ["id", "section", "subject", "teacher", "scheduled_at", "status", "room_id"]
+        fields = ["id", "section", "subject", "teacher", "scheduled_at", "status", "room_id", "mode"]
         read_only_fields = ["id", "status", "room_id"]
+
+    def to_representation(self, instance):
+        from .class_schedule import OFFLINE_LABEL, time_visible_to, viewer_is_staff_for
+
+        data = super().to_representation(instance)
+        campus_id = instance.section.school_class.campus_id
+        visible = time_visible_to(instance.mode, viewer_is_staff_for(self.context.get("request"), campus_id))
+        data["time_hidden"] = not visible
+        data["label"] = OFFLINE_LABEL if instance.mode == ClassMode.OFFLINE else None
+        if not visible:
+            data["scheduled_at"] = None
+        return data
 
     def validate(self, attrs):
         section = attrs.get("section", getattr(self.instance, "section", None))
@@ -382,8 +419,35 @@ class TimetableEntrySerializer(DjangoCleanValidationMixin, serializers.ModelSeri
 
     class Meta:
         model = TimetableEntry
-        fields = ["id", "section", "subject", "staff", "time_slot", "room", "session"]
+        fields = ["id", "section", "subject", "staff", "time_slot", "room", "session", "mode"]
         read_only_fields = ["id"]
+
+    def to_representation(self, instance):
+        """T4 §G — students/parents never receive the slot of an OFFLINE
+        period: `time_slot` is `null`, `time_slot_detail` is `null`,
+        `time_hidden=true`, `label="Offline class"`. Online periods (and
+        everything for staff) carry the real `time_slot` plus an inline
+        `time_slot_detail` so the app needn't make a second call."""
+        from .class_schedule import OFFLINE_LABEL, time_visible_to, viewer_is_staff_for
+
+        data = super().to_representation(instance)
+        campus_id = instance.section.school_class.campus_id
+        visible = time_visible_to(instance.mode, viewer_is_staff_for(self.context.get("request"), campus_id))
+        data["time_hidden"] = not visible
+        data["label"] = OFFLINE_LABEL if instance.mode == ClassMode.OFFLINE else None
+        if visible:
+            slot = instance.time_slot
+            data["time_slot_detail"] = {
+                "id": str(slot.id),
+                "day_of_week": slot.day_of_week,
+                "start_time": slot.start_time.isoformat(),
+                "end_time": slot.end_time.isoformat(),
+                "label": slot.label,
+            }
+        else:
+            data["time_slot"] = None
+            data["time_slot_detail"] = None
+        return data
 
 
 class AttendanceSerializer(serializers.ModelSerializer):
@@ -507,3 +571,66 @@ class CampusAnalyticsSnapshotSerializer(serializers.ModelSerializer):
         model = CampusAnalyticsSnapshot
         fields = ["id", "campus", "session", "computed_at", "data"]
         read_only_fields = fields
+
+
+# ============================================================
+# T4 §F — doubts
+# ============================================================
+class CampusDoubtReplySerializer(serializers.ModelSerializer):
+    author_detail = MinimalUserSerializer(source="author", read_only=True)
+
+    class Meta:
+        model = CampusDoubtReply
+        fields = ["id", "doubt", "author", "author_detail", "text", "attachment", "is_staff_reply", "created_at"]
+        read_only_fields = ["id", "doubt", "author", "is_staff_reply", "created_at"]
+
+    def validate_text(self, value):
+        value = (value or "").strip()
+        if not value:
+            raise serializers.ValidationError("Reply can't be empty.")
+        return value
+
+
+class CampusDoubtSerializer(serializers.ModelSerializer):
+    """`campus`/`session` are derived server-side from the section — never
+    client-supplied. `status`/`resolved_*` only change through the
+    `resolve`/`reopen` actions and by a staff reply."""
+
+    author_detail = MinimalUserSerializer(source="author", read_only=True)
+    subject_name = serializers.CharField(source="subject.name", read_only=True)
+    replies_count = serializers.SerializerMethodField()
+
+    class Meta:
+        model = CampusDoubt
+        fields = [
+            "id", "campus", "session", "section", "subject", "subject_name", "author", "author_detail",
+            "text", "attachment", "status", "is_public", "resolved_by", "resolved_at",
+            "replies_count", "created_at", "updated_at",
+        ]
+        read_only_fields = [
+            "id", "campus", "session", "author", "status", "resolved_by", "resolved_at",
+            "created_at", "updated_at",
+        ]
+
+    def get_replies_count(self, obj):
+        annotated = getattr(obj, "replies_count", None)
+        if annotated is not None:
+            return annotated
+        return obj.replies.filter(is_active=True).count()
+
+    def validate_text(self, value):
+        value = (value or "").strip()
+        if not value:
+            raise serializers.ValidationError("Doubt text can't be empty.")
+        return value
+
+
+class CampusDoubtDetailSerializer(CampusDoubtSerializer):
+    replies = serializers.SerializerMethodField()
+
+    class Meta(CampusDoubtSerializer.Meta):
+        fields = CampusDoubtSerializer.Meta.fields + ["replies"]
+
+    def get_replies(self, obj):
+        replies = [r for r in obj.replies.all() if r.is_active]
+        return CampusDoubtReplySerializer(replies, many=True, context=self.context).data

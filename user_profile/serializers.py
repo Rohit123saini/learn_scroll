@@ -420,6 +420,15 @@ class ProfileUpdateSerializer(serializers.ModelSerializer):
             "is_private": {"required": False},
         }
 
+    def validate_is_private(self, value):
+        # Minor-safety: under-18 accounts are private and can't go public.
+        user = self.context["request"].user
+        if value is False and user.is_minor:
+            raise serializers.ValidationError(
+                "Accounts for users under 18 stay private."
+            )
+        return value
+
     def validate_username(self, value):
         user = self.context["request"].user
         # 🔥 FIX: case-sensitive uniqueness lets "Sam" and "sam" coexist,
@@ -803,10 +812,43 @@ class UserPreferenceSerializer(serializers.ModelSerializer):
     # is actually supported is checked against settings.SUPPORTED_LANGUAGES.
     _LANG_TAG_RE = re.compile(r"^[A-Za-z]{2,3}(-[A-Za-z0-9]{2,4})?$")
 
+    # Study profile (additive — purane clients sirf theme/language bhejte hain).
+    exam_mode_active = serializers.BooleanField(read_only=True)
+    focus_subjects = serializers.ListField(
+        child=serializers.CharField(max_length=40, allow_blank=False),
+        required=False,
+        allow_empty=True,
+        max_length=10,
+    )
+
     class Meta:
         model = UserPreference
-        fields = ["theme", "language", "updated_at"]
-        read_only_fields = ["updated_at"]
+        fields = [
+            "theme", "language", "font_scale", "updated_at",
+            "exam_target", "class_level", "focus_subjects", "exam_date",
+            "exam_mode", "exam_mode_active",
+        ]
+        read_only_fields = ["updated_at", "exam_mode_active"]
+
+    # Feed ko in fields se farak padta hai — view inhe dekh ke feed cache invalidate karta hai.
+    STUDY_PROFILE_FIELDS = ("exam_target", "class_level", "focus_subjects", "exam_date", "exam_mode")
+
+    def validate_focus_subjects(self, value):
+        # Strip + case-insensitive de-dupe, order preserved.
+        seen, out = set(), []
+        for s in value:
+            s = " ".join((s or "").split())
+            if s and s.lower() not in seen:
+                seen.add(s.lower())
+                out.append(s)
+        return out
+
+    def validate_exam_date(self, value):
+        from django.utils import timezone
+
+        if value is not None and value < timezone.localdate():
+            raise serializers.ValidationError("Exam date aaj ya future ki honi chahiye.")
+        return value
 
     def validate_language(self, value):
         value = (value or "").strip()
@@ -831,6 +873,10 @@ class StreakSerializer(serializers.ModelSerializer):
     "checked in today" state without recomputing today's date itself."""
 
     is_active_today = serializers.BooleanField(read_only=True)
+    # Streak freeze + daily goal (additive fields — purane clients ignore karte hain).
+    goal_completed_today = serializers.BooleanField(read_only=True)
+    freeze_cost_coins = serializers.SerializerMethodField()
+    freeze_max_tokens = serializers.SerializerMethodField()
 
     class Meta:
         model = Streak
@@ -841,8 +887,25 @@ class StreakSerializer(serializers.ModelSerializer):
             "last_active_date",
             "is_active_today",
             "updated_at",
+            "freeze_tokens",
+            "freezes_used_total",
+            "freeze_cost_coins",
+            "freeze_max_tokens",
+            "daily_goal_minutes",
+            "goal_completed_today",
+            "goals_completed_total",
         ]
         read_only_fields = fields
+
+    def get_freeze_cost_coins(self, obj):
+        from django.conf import settings as dj_settings
+
+        return int(getattr(dj_settings, "STREAK_FREEZE_COST_COINS", 50))
+
+    def get_freeze_max_tokens(self, obj):
+        from django.conf import settings as dj_settings
+
+        return int(getattr(dj_settings, "STREAK_FREEZE_MAX_TOKENS", 2))
 
 
 class WeeklyRecapSerializer(serializers.ModelSerializer):

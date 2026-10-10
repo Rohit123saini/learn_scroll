@@ -188,7 +188,8 @@ def create_testseries(
     price_coins=0,
     duration_minutes=None,
     attempts_allowed=1,
-    questions,
+    questions=None,
+    draft=False,
 ):
     """[Task 12 / testseries_app_reference.md §3.6] Creates a tuitionclass
     test series via the unified `testseries` app — the `create_testseries`
@@ -247,6 +248,7 @@ def create_testseries(
         attempts_allowed=attempts_allowed,
         questions=questions,
         roster=None,  # TASK 9.2: announced by on_testseries_published() instead
+        draft=draft,  # [T2] draft=True: questions optional, added later by the teaching staff
     )
 
 
@@ -506,3 +508,28 @@ def referral_pay_testseries_commission(
     except Exception:  # noqa: BLE001 — a notification must never undo a payout
         pass
     return coins
+
+
+def user_editable_testseries_context_ids(*, user, context_type):
+    """[T2 — question management] Which tuition classrooms may `user` EDIT the
+    questions of a class test series for (besides the series' own creator)?
+
+    The classroom's teacher, plus its co-teachers and moderators. Teaching
+    assistants (`ClassroomStaff.Role.TA`), students and pass holders are never
+    editors. Returned as UUIDs because `TestSeries.context_id` is a UUIDField
+    (an integer classroom pk is stored as `uuid.UUID(int=pk)`).
+    """
+    import uuid
+
+    if context_type != "classroom" or not getattr(user, "is_authenticated", False):
+        return set()
+
+    from .models import Classroom, ClassroomStaff
+
+    pks = set(Classroom.objects.filter(teacher=user).values_list("id", flat=True))
+    pks |= set(
+        ClassroomStaff.objects.filter(
+            user=user, role__in=(ClassroomStaff.Role.CO_TEACHER, ClassroomStaff.Role.MODERATOR),
+        ).values_list("classroom_id", flat=True)
+    )
+    return {pk if isinstance(pk, uuid.UUID) else uuid.UUID(int=int(pk)) for pk in pks}

@@ -154,6 +154,14 @@ class NotifTypes:
     # other value on this class already documents above.
     CAMPUS_REWARD_EARNED = "campus_reward_earned"
 
+    # T4 §G / §F (this pass) — each must match `core.models.NotifType`
+    # verbatim (same contract as every value above). All three are well
+    # under the `Notification.notif_type` max_length=30 ceiling
+    # ("campus_class_starting" = 21 chars).
+    CAMPUS_CLASS_STARTING = "campus_class_starting"
+    CAMPUS_DOUBT_POSTED = "campus_doubt_posted"
+    CAMPUS_DOUBT_REPLIED = "campus_doubt_replied"
+
 
 def create_section_group(section, actor):
     """
@@ -293,6 +301,22 @@ def resolve_parent_from_token(token):
     return parent_user, resolution.student
 
 
+def sync_section_group(section):
+    """[T4 §D] Fire-and-forget: re-mirror this section's roster into its chat
+    group after a roster / assignment change. No-op when the section has no
+    chat group enabled; never raises; runs after the surrounding transaction
+    commits (core.async_utils.dispatch_after_commit)."""
+    try:
+        if not getattr(section, "chat_group_enabled", False):
+            return
+        from core.async_utils import dispatch_after_commit
+        from core.tasks import section_chat_sync
+
+        dispatch_after_commit(section_chat_sync, str(section.pk))
+    except Exception:  # pragma: no cover - a side effect must never break the action
+        logger.exception("Could not schedule section chat sync for %s", getattr(section, "pk", None))
+
+
 def create_assigments(*, section, subject, posted_by, title, description="", attachment=None, due_date=None):
     """[Task 11] Creates a campus assigments via the unified `assigments`
     app instead of the now-deprecated `campus.assigments` model (see that
@@ -361,7 +385,8 @@ def get_assigments_submissions(section):
 
 
 def create_testseries(*, section, creator, title, description="", duration_minutes=None,
-                       attempts_allowed=1, questions, is_paid=False, price_coins=0):
+                       attempts_allowed=1, questions=None, is_paid=False, price_coins=0,
+                       draft=False):
     """[Task 13] Creates a campus test series via the unified
     `testseries` app — the same "one function is the app boundary"
     pattern `create_assigments()` above already uses for `assigments`,
@@ -438,6 +463,13 @@ def create_testseries(*, section, creator, title, description="", duration_minut
     once handed this roster; `campus.bridge` doesn't (and can't, from
     outside `testseries`) fire that notification a second time.
 
+    [T2] `draft=True` creates the series as a DRAFT (`questions` optional): the
+    creator and the section's authorised editors (class-teacher, approved
+    subject-teacher, admin / principal — see `user_editable_testseries_context_ids`
+    below) add questions afterwards and publish when ready. A draft is not
+    announced to the roster. A malformed question raises
+    `testseries.bridge.QuestionPayloadError` (a `ValueError`) and nothing is saved.
+
     Returns the created `testseries.models.TestSeries` instance.
     """
     from .models import StudentEnrollment
@@ -467,6 +499,7 @@ def create_testseries(*, section, creator, title, description="", duration_minut
         attempts_allowed=attempts_allowed,
         questions=questions,
         roster=roster,
+        draft=draft,
     )
 
 
@@ -579,3 +612,42 @@ def user_accessible_testseries_context_ids(*, user, context_type):
             Section.objects.filter(school_class__campus_id__in=campus_ids).values_list("id", flat=True)
         )
     return enrolled | staff_sections
+
+
+def user_editable_testseries_context_ids(*, user, context_type):
+    """[T2 — question management] Which campus `Section` ids may `user` EDIT the
+    questions of a section test series for (besides the series' own creator)?
+
+    Called by `testseries.access` (settings.TESTSERIES_CONTEXT_EDITORS) so
+    `testseries` never imports campus models (golden rule). Answer = every
+    section of a campus where `user` is an active admin / principal-HOD, plus
+    the sections where they are the class-teacher, plus the sections where they
+    hold an APPROVED subject-teacher assignment. Plain students, parents and
+    non-teaching staff are never editors.
+    """
+    if context_type != "section" or not getattr(user, "is_authenticated", False):
+        return set()
+
+    from .models import ClassTeacherassigments, Section, StaffProfile, SubjectTeacherassigments
+
+    managed_campus_ids = list(
+        StaffProfile.objects.filter(
+            user=user, is_active=True,
+            role__in=(StaffProfile.Role.ADMIN, StaffProfile.Role.PRINCIPAL_HOD),
+        ).values_list("campus_id", flat=True)
+    )
+    section_ids = set()
+    if managed_campus_ids:
+        section_ids |= set(
+            Section.objects.filter(school_class__campus_id__in=managed_campus_ids).values_list("id", flat=True)
+        )
+    section_ids |= set(
+        ClassTeacherassigments.objects.filter(staff__user=user, staff__is_active=True)
+        .values_list("section_id", flat=True)
+    )
+    section_ids |= set(
+        SubjectTeacherassigments.objects.filter(
+            staff__user=user, staff__is_active=True, status=SubjectTeacherassigments.Status.APPROVED,
+        ).values_list("section_id", flat=True)
+    )
+    return section_ids

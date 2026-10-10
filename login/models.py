@@ -180,6 +180,16 @@ class User(AbstractUser):
 
     is_private = models.BooleanField(default=False)
 
+    # Onboarding (core/onboarding_quickstart.py). Both optional/blank: set
+    # in the 30-second first-run step, used to personalise the first feed
+    # and suggested tests. Choices live in core/onboarding_quickstart.py.
+    study_class = models.CharField(max_length=20, blank=True, default="")
+    target_exam = models.CharField(max_length=20, blank=True, default="")
+
+    # Minor-safety. Optional so pre-existing accounts keep working; NEW
+    # signups must supply it (SignupSerializer). See login/age.py.
+    date_of_birth = models.DateField(null=True, blank=True)
+
     is_verified = models.BooleanField(default=False, db_index=True)
 
     # Denormalized counters — NEVER write these directly from a
@@ -217,6 +227,19 @@ class User(AbstractUser):
         if self.email == "":
             self.email = None
         super().save(*args, **kwargs)
+
+    @property
+    def is_minor(self) -> bool:
+        """True only when a DOB is on file AND the user is under 18."""
+        from .age import is_minor_dob
+
+        return is_minor_dob(self.date_of_birth)
+
+    @property
+    def is_verified_adult(self) -> bool:
+        from .age import is_adult_dob
+
+        return is_adult_dob(self.date_of_birth)
 
     def __str__(self):
         return self.username

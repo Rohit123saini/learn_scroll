@@ -37,7 +37,14 @@ Wired here:
         archive the linked chat group (task 37). title/cover_image/
         description change (and NOT closed): sync group metadata
         (task 36).
-    All of #5-#10 go through core/classroom_chat_bridge.py, which is a
+    11. (T3) Classroom post_save (created) -> auto-create the chat group
+        (group = participants ka exact mirror; Celery retry on failure).
+    12. (T3) PassPurchase post_save -> created as SUCCESS / transition into
+        SUCCESS -> add the student; is_active True->False (or any lapse
+        out of SUCCESS other than REFUNDED, handled by #9) -> remove them
+        unless another live pass keeps them in.
+    13. (T3) ClassroomStaff post_delete -> demote/remove the co-teacher.
+    All of #5-#13 go through core/classroom_chat_bridge.py, which is a
     complete no-op if the classroom in question has no linked chat group
     (chat_group_enabled=False) — see that file's module docstring.
 
@@ -595,12 +602,13 @@ def stash_previous_purchase_status(sender, instance, **kwargs):
         try:
             previous = (
                 PassPurchase.objects.filter(pk=instance.pk)
-                .values_list("status", flat=True)
+                .values("status", "is_active")
                 .first()
             )
         except Exception:
             logger.exception("Could not read previous status for PassPurchase %s.", instance.pk)
-    instance._previous_status = previous
+    instance._previous_status = previous["status"] if previous else None
+    instance._previous_is_active = previous["is_active"] if previous else None
 
 
 @receiver(post_save, sender=PassPurchase)
@@ -622,4 +630,81 @@ def sync_chat_group_on_purchase_refund(sender, instance, created, **kwargs):
         logger.exception(
             "Failed queueing chat group removal for refunded student %s (purchase %s).",
             instance.student_id, instance.pk,
+        )
+
+
+# ---------------------------------------------------------------------------
+# (T3) A brand-new classroom gets its chat group automatically. Runs on
+# post_save(created) so EVERY creation path (API, admin, scripts) is covered.
+# Queued after commit; chat_sync retries with backoff, and a failure never
+# un-creates the classroom (the sweep `reconcile_classroom_groups` /
+# `backfill_classroom_groups` catches anything that still slipped through).
+# ---------------------------------------------------------------------------
+@receiver(post_save, sender=Classroom)
+def auto_create_chat_group_on_classroom_create(sender, instance, created, **kwargs):
+    if not created or not instance.chat_group_enabled:
+        return
+    try:
+        from core.async_utils import dispatch_after_commit
+        from core.tasks import chat_sync
+
+        dispatch_after_commit(chat_sync, "create", instance.pk)
+    except Exception:
+        logger.exception("Failed queueing chat group creation for classroom %s.", instance.pk)
+
+
+# ---------------------------------------------------------------------------
+# (T3) PassPurchase -> participant in / out of the group.
+#   * row created as SUCCESS (direct purchase, free pass, accept(), renewal)
+#   * row moves into SUCCESS from PENDING/FAILED      -> add
+#   * is_active True -> False while not refunded      -> remove (unless they
+#     still hold another live pass — checked in the task, not here)
+# REFUNDED is handled by `sync_chat_group_on_purchase_refund` above.
+# ---------------------------------------------------------------------------
+@receiver(post_save, sender=PassPurchase)
+def sync_chat_group_on_pass_activity(sender, instance, created, **kwargs):
+    previous_status = getattr(instance, "_previous_status", None)
+    previous_active = getattr(instance, "_previous_is_active", None)
+    now_live = instance.status == PassPurchase.Status.SUCCESS and instance.is_active
+
+    action = reason = None
+    if now_live and (created or previous_status != PassPurchase.Status.SUCCESS or previous_active is False):
+        action = "join_accept"
+    elif (
+        not created
+        and previous_status == PassPurchase.Status.SUCCESS and previous_active
+        and instance.status == PassPurchase.Status.SUCCESS and not instance.is_active
+    ):
+        action, reason = "removal", "lapse"
+    if action is None:
+        return
+
+    try:
+        from core.async_utils import dispatch_after_commit
+        from core.tasks import chat_sync
+
+        classroom_id = instance.class_pass.classroom_id
+        if reason:
+            dispatch_after_commit(chat_sync, action, classroom_id, instance.student_id, reason=reason)
+        else:
+            dispatch_after_commit(chat_sync, action, classroom_id, instance.student_id)
+    except Exception:
+        logger.exception("Failed queueing chat group sync for pass purchase %s.", instance.pk)
+
+
+# ---------------------------------------------------------------------------
+# (T3) Co-teacher / moderator removed -> demote to member, or remove from the
+# group when they hold no pass.
+# ---------------------------------------------------------------------------
+@receiver(post_delete, sender=ClassroomStaff)
+def sync_chat_group_on_staff_remove(sender, instance, **kwargs):
+    try:
+        from core.async_utils import dispatch_after_commit
+        from core.tasks import chat_sync
+
+        dispatch_after_commit(chat_sync, "demote", instance.classroom_id, instance.user_id)
+    except Exception:
+        logger.exception(
+            "Failed queueing moderator demotion for staff user %s in classroom %s.",
+            instance.user_id, instance.classroom_id,
         )

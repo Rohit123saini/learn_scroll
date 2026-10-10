@@ -119,10 +119,15 @@ def file_report(reporter, target_type, target_id, reason, details=""):
     if recent >= REPORTS_PER_HOUR:
         raise ReportRateLimited()
 
-    return ContentReport.objects.create(
+    report = ContentReport.objects.create(
         reporter=reporter, reported_user=reported_user, target_type=target_type,
         target_id=target_id, reason=reason, details=(details or "")[:1000],
-    ), True
+    )
+    # AUTOMATION: exact reported_count + auto-hold at the thresholds (never raises).
+    from .report_automation import on_report_created
+
+    on_report_created(report)
+    return report, True
 
 
 def block_new_accounts_of(previous_owner, new_user, max_age_days=30):

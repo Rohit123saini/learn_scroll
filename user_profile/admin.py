@@ -33,12 +33,15 @@ from django.contrib import admin, messages
 
 from .models import (
     BlockUser,
+    AutoModerationFlag,
     ContentReport,
     CoinLedger,
     CoinPurchaseRequest,
     CoinWithdrawalRequest,
+    DailyUsage,
     Follow,
     RestrictUser,
+    Streak,
     UserPreference,
     WeeklyRecap,
 )
@@ -253,6 +256,21 @@ class ContentReportAdmin(admin.ModelAdmin):
     search_fields = ("reporter__username", "reported_user__username", "target_id", "details")
     raw_id_fields = ("reporter", "reported_user")
     list_editable = ("status",)
+    actions = ("hide_reported_content", "dismiss_reports")
+
+    @admin.action(description="Take action: hide the reported content (all reports on it are closed)")
+    def hide_reported_content(self, request, queryset):
+        from .report_automation import resolve_reports
+
+        n = resolve_reports(list(queryset), "hide", request.user)
+        self.message_user(request, f"Content hidden, {n} report(s) actioned.")
+
+    @admin.action(description="Dismiss: false alarm (auto-held content comes back)")
+    def dismiss_reports(self, request, queryset):
+        from .report_automation import resolve_reports
+
+        n = resolve_reports(list(queryset), "dismiss", request.user)
+        self.message_user(request, f"{n} report(s) dismissed.")
 
 
 @admin.register(BlockUser)
@@ -318,4 +336,67 @@ class WeeklyRecapAdmin(admin.ModelAdmin):
         return False
 
     def has_delete_permission(self, request, obj=None):
+        return False
+
+
+@admin.register(AutoModerationFlag)
+class AutoModerationFlagAdmin(admin.ModelAdmin):
+    """Auto-moderation review queue. Flag-only: nothing is hidden or deleted
+    automatically — a moderator opens the target, decides, then sets status."""
+
+    list_display = ("id", "severity", "target_type", "reason", "source", "user", "status", "created_at")
+    list_filter = ("status", "severity", "target_type", "source", "reason")
+    search_fields = ("user__username", "target_id", "snippet")
+    raw_id_fields = ("user",)
+    list_editable = ("status",)
+    readonly_fields = ("target_type", "target_id", "text_hash", "snippet", "reason", "source", "severity", "created_at")
+    actions = ("mark_reviewed", "mark_actioned", "mark_dismissed")
+
+    @admin.action(description="Mark selected as reviewed")
+    def mark_reviewed(self, request, queryset):
+        queryset.update(status=AutoModerationFlag.Status.REVIEWED)
+
+    @admin.action(description="Mark selected as action taken")
+    def mark_actioned(self, request, queryset):
+        queryset.update(status=AutoModerationFlag.Status.ACTIONED)
+
+    @admin.action(description="Dismiss selected (false positive)")
+    def mark_dismissed(self, request, queryset):
+        queryset.update(status=AutoModerationFlag.Status.DISMISSED)
+
+
+@admin.register(Streak)
+class StreakAdmin(admin.ModelAdmin):
+    """Support view of the learning streak, freeze tokens and daily goal.
+
+    Streak counters are only ever written through `Streak.objects.record_activity()`
+    / `buy_freeze()` / `evaluate_daily_goal()` (row-locked), so everything here is
+    read-only EXCEPT `freeze_tokens`, which support may adjust (e.g. to restore a
+    token after a bug)."""
+
+    list_display = ("user", "current_streak", "longest_streak", "freeze_tokens",
+                    "daily_goal_minutes", "last_active_date")
+    search_fields = ("user__username",)
+    raw_id_fields = ("user",)
+    readonly_fields = ("user", "current_streak", "longest_streak", "total_active_days",
+                       "last_active_date", "freezes_used_total", "daily_goal_minutes",
+                       "goal_completed_date", "goals_completed_total", "updated_at")
+
+    def has_add_permission(self, request):
+        return False
+
+
+@admin.register(DailyUsage)
+class DailyUsageAdmin(admin.ModelAdmin):
+    """Read-only: seconds come from the app's foreground heartbeat (feeds the daily goal)."""
+
+    list_display = ("user", "date", "seconds", "limit_notified", "updated_at")
+    list_filter = ("date", "limit_notified")
+    search_fields = ("user__username",)
+    raw_id_fields = ("user",)
+
+    def has_add_permission(self, request):
+        return False
+
+    def has_change_permission(self, request, obj=None):
         return False

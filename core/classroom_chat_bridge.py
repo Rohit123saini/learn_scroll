@@ -373,7 +373,7 @@ def sync_group_metadata(classroom):
 # ---------------------------------------------------------------------------
 # 6. archive_group_on_classroom_close() — classroom close / soft-delete
 # ---------------------------------------------------------------------------
-def archive_group_on_classroom_close(classroom):
+def archive_group_on_classroom_close(classroom, message=None):
     """
     Classroom close/soft-delete ho gaya — group ko soft-delete karo (same
     pattern jo `GroupViewSet.destroy` already use karta hai: broadcast +
@@ -390,7 +390,7 @@ def archive_group_on_classroom_close(classroom):
     try:
         _post_system_message(
             group, classroom.teacher,
-            f"{classroom.title} ab close ho chuki hai — ye group archive kar diya gaya hai.",
+            message or f"{classroom.title} ab close ho chuki hai — ye group archive kar diya gaya hai.",
         )
 
         conversation = group.conversation
@@ -752,3 +752,344 @@ def resolve_parent_from_token(token: str):
         return None
 
     return ParentTokenResolution(student=access_code.student, parent_access_code=access_code)
+
+
+# ===========================================================================
+# T3 — "jitne participants, utna group member": classroom group = participants
+# ka exact mirror.
+#
+# Source of truth for "who is a participant of this classroom" (ek hi jagah):
+#     teacher                                      -> GroupMember.ADMIN
+#     ClassroomStaff (co-teacher / moderator / TA) -> GroupMember.MODERATOR
+#     active PassPurchase holders (not banned)     -> GroupMember.MEMBER
+# "active PassPurchase" = status SUCCESS + is_active + expires_at > now — the
+# exact same filter `tuitionclass/bridge.py` already uses for its roster.
+# Free-trial viewers (TrialAccess) are deliberately NOT participants.
+#
+# Every function below follows the module's golden rule: no module-level
+# import of `message.*` / `tuitionclass.*`.
+# ===========================================================================
+def active_student_ids(classroom) -> set:
+    """Students who currently hold a live pass for `classroom` and are not
+    banned from it."""
+    from tuitionclass.models import ClassroomBan, PassPurchase
+
+    ids = set(
+        PassPurchase.objects.filter(
+            class_pass__classroom=classroom,
+            status=PassPurchase.Status.SUCCESS,
+            is_active=True,
+            expires_at__gt=timezone.now(),
+        ).values_list('student_id', flat=True)
+    )
+    banned = set(ClassroomBan.objects.filter(classroom=classroom).values_list('student_id', flat=True))
+    return ids - banned
+
+
+def student_has_active_access(classroom, user_id) -> bool:
+    return user_id in active_student_ids(classroom)
+
+
+def expected_members(classroom) -> dict:
+    """`{'teacher': id, 'staff': {ids}, 'students': {ids}}` — what the group
+    SHOULD contain right now. A person is listed once, in their highest role."""
+    from tuitionclass.models import ClassroomStaff
+
+    teacher_id = classroom.teacher_id
+    staff = set(ClassroomStaff.objects.filter(classroom=classroom).values_list('user_id', flat=True))
+    staff.discard(teacher_id)
+    students = active_student_ids(classroom) - staff - {teacher_id}
+    return {'teacher': teacher_id, 'staff': staff, 'students': students}
+
+
+def _find_group_any_state(classroom):
+    """Linked Group even when it is soft-deleted (archived)."""
+    if not classroom.linked_conversation_id:
+        return None
+    from message.models import Group
+
+    return Group.all_objects.select_related('conversation').filter(
+        conversation_id=classroom.linked_conversation_id
+    ).first()
+
+
+def _restore_archived_group(classroom):
+    """Teacher re-enabled the group: bring the archived Group + Conversation
+    back instead of creating a second one (history is preserved)."""
+    from message.models import Conversation, Group
+
+    group = _find_group_any_state(classroom)
+    if group is None:
+        return None
+    if group.is_deleted:
+        group.restore()
+    conversation = Conversation.all_objects.filter(pk=group.conversation_id).first()
+    if conversation is not None and conversation.is_deleted:
+        conversation.restore()
+    return Group.objects.select_related('conversation').filter(pk=group.pk).first()
+
+
+def ensure_classroom_group(classroom):
+    """Idempotent: returns the classroom's live group, creating it (or
+    restoring an archived one) when `chat_group_enabled` is True. Returns None
+    when the teacher disabled the group. The group is reconciled right after
+    creation so it is an exact mirror from its first second. Raises on real
+    errors (callers — Celery task / retry endpoint — handle retry)."""
+    if not classroom.chat_group_enabled or classroom.is_deleted or not classroom.is_active:
+        return None
+    group = _get_group_for_classroom(classroom)
+    if group is not None:
+        return group
+
+    group = _restore_archived_group(classroom)
+    if group is None:
+        group = create_classroom_group(classroom, classroom.teacher)
+    reconcile_classroom_group(classroom)
+    return group
+
+
+def reconcile_classroom_group(classroom, *, dry_run: bool = False) -> dict:
+    """Make the group's members equal `expected_members(classroom)`: add the
+    missing, remove the extras, fix roles. Returns a plain-dict report (ids as
+    strings) — printed by the management command, summed by the Celery task.
+    With `dry_run=True` nothing is written."""
+    report = {
+        'classroom_id': classroom.pk, 'skipped': '', 'group_missing': False, 'created': False,
+        'added': [], 'removed': [], 'role_fixed': [], 'expected_count': 0, 'member_count': 0,
+        'capacity_mismatch': False,
+    }
+    if classroom.is_deleted or not classroom.is_active:
+        report['skipped'] = 'inactive'
+        return report
+    if not classroom.chat_group_enabled:
+        report['skipped'] = 'disabled'
+        return report
+
+    expected = expected_members(classroom)
+    expected_all = {expected['teacher']} | expected['staff'] | expected['students']
+    report['expected_count'] = len(expected_all)
+
+    # max_participants is the per-session seat limit; students beyond it can
+    # never all be live together. Not an error — just surfaced.
+    if len(expected['students']) > classroom.max_participants:
+        report['capacity_mismatch'] = True
+        logger.warning(
+            "Classroom %s has %s active students but max_participants=%s.",
+            classroom.pk, len(expected['students']), classroom.max_participants,
+        )
+
+    group = _get_group_for_classroom(classroom)
+    if group is None:
+        report['group_missing'] = True
+        if dry_run:
+            report['added'] = sorted(str(i) for i in expected_all)
+            return report
+        group = ensure_classroom_group(classroom)  # re-enters reconcile once, then returns
+        if group is None:
+            report['skipped'] = 'disabled'
+            return report
+        report['created'] = True
+
+    from message.models import GroupMember
+    from message.services import add_members_to_group, remove_group_member, update_group_member_role
+
+    members = {m.user_id: m for m in GroupMember.objects.filter(group=group)}
+    missing = expected_all - set(members)
+    extra = {uid for uid in members if uid not in expected_all and uid != group.created_by_id}
+    report['added'] = sorted(str(i) for i in missing)
+    report['removed'] = sorted(str(i) for i in extra)
+
+    def _wanted_role(uid):
+        if uid == expected['teacher']:
+            return GroupMember.Role.ADMIN
+        return GroupMember.Role.MODERATOR if uid in expected['staff'] else GroupMember.Role.MEMBER
+
+    role_fix_ids = [uid for uid in expected_all & set(members) if members[uid].role != _wanted_role(uid)]
+    report['role_fixed'] = sorted(str(i) for i in role_fix_ids)
+
+    if not dry_run:
+        if missing:
+            add_members_to_group(group=group, actor=None, user_ids=list(missing))
+        for uid in extra:
+            try:
+                remove_group_member(group=group, actor=None, user_id=uid)
+            except Exception:
+                logger.exception("reconcile: failed removing user %s from group of classroom %s.", uid, classroom.pk)
+        for uid in list(missing) + role_fix_ids:
+            want = _wanted_role(uid)
+            current = GroupMember.objects.filter(group=group, user_id=uid).values_list('role', flat=True).first()
+            if current is not None and current != want:
+                update_group_member_role(group=group, actor=None, user_id=uid, data={'role': want})
+
+    # dry-run: what the count WOULD be after the fix; real run: the actual count.
+    report['member_count'] = (
+        GroupMember.objects.filter(group=group, is_banned=False).count() if not dry_run
+        else len(set(members) - extra) + len(missing)
+    )
+    if not dry_run and (missing or extra):
+        logger.info(
+            "reconcile classroom %s: +%d -%d roles:%d", classroom.pk, len(missing), len(extra), len(report['role_fixed']),
+        )
+    return report
+
+
+def demote_from_moderator(classroom, user):
+    """A co-teacher/moderator row was deleted: demote to plain member if they
+    still hold a live pass, otherwise remove them from the group. Never
+    touches the teacher."""
+    group = _get_group_for_classroom(classroom)
+    if group is None or user.id == classroom.teacher_id:
+        return
+    from message.models import GroupMember
+    from message.services import remove_group_member, update_group_member_role
+
+    try:
+        if student_has_active_access(classroom, user.id):
+            update_group_member_role(group=group, actor=None, user_id=user.id, data={'role': GroupMember.Role.MEMBER})
+        else:
+            remove_group_member(group=group, actor=None, user_id=user.id)
+    except Exception:
+        logger.exception("Failed demoting user %s in group for classroom %s.", user.pk, classroom.pk)
+
+
+def set_group_enabled(classroom, enabled: bool):
+    """Teacher toggle. Disable = ARCHIVE the group (soft delete, history kept,
+    `linked_conversation_id` kept so enabling again restores it). Enable =
+    restore/create + reconcile. Returns the live group or None."""
+    enabled = bool(enabled)
+    if not enabled:
+        if classroom.chat_group_enabled:
+            archive_group_on_classroom_close(
+                classroom, message=f"{classroom.title} ka chat group teacher ne band (archive) kar diya hai.",
+            )
+            classroom.chat_group_enabled = False
+            classroom.save(update_fields=['chat_group_enabled'])
+        return None
+    if not classroom.chat_group_enabled:
+        classroom.chat_group_enabled = True
+        classroom.save(update_fields=['chat_group_enabled'])
+    return ensure_classroom_group(classroom)
+
+
+def group_status(classroom) -> dict:
+    """Small JSON-safe status block for the API / Flutter."""
+    group = _get_group_for_classroom(classroom)
+    expected = expected_members(classroom)
+    expected_count = 1 + len(expected['staff']) + len(expected['students'])
+    member_count = 0
+    if group is not None:
+        from message.models import GroupMember
+
+        member_count = GroupMember.objects.filter(group=group, is_banned=False).count()
+    return {
+        'chat_group_enabled': classroom.chat_group_enabled,
+        'group_ready': group is not None,
+        'linked_conversation_id': str(group.conversation_id) if group is not None else None,
+        'member_count': member_count,
+        'expected_count': expected_count,
+        'in_sync': group is not None and member_count == expected_count,
+        'max_participants': classroom.max_participants,
+    }
+
+
+# ===========================================================================
+# [T4 §D] Campus SECTION chat group == section roster (T3's reconcile pattern).
+#
+# Source of truth for "who belongs in this section's group":
+#     class teacher (ClassTeacherassigments)                -> ADMIN
+#     approved SubjectTeacherassigments staff (+moderators) -> MODERATOR
+#     ACTIVE StudentEnrollment in the section               -> MEMBER
+# Same golden rule as above: no module-level import of campus/message models.
+# ===========================================================================
+def expected_section_members(section) -> dict:
+    """`{'teacher': id|None, 'staff': {ids}, 'students': {ids}}`."""
+    from campus.models import ClassTeacherassigments, StudentEnrollment, SubjectTeacherassigments
+
+    ct = ClassTeacherassigments.objects.filter(section=section).select_related("staff").first()
+    teacher_id = ct.staff.user_id if ct else None
+    staff = set(
+        SubjectTeacherassigments.objects.filter(
+            section=section, status=SubjectTeacherassigments.Status.APPROVED, staff__is_active=True,
+        ).values_list("staff__user_id", flat=True)
+    )
+    staff.discard(teacher_id)
+    students = set(
+        StudentEnrollment.objects.filter(
+            section=section, session=section.school_class.session, status=StudentEnrollment.Status.ACTIVE,
+        ).values_list("student_id", flat=True)
+    )
+    students -= staff
+    students.discard(teacher_id)
+    return {"teacher": teacher_id, "staff": staff, "students": students}
+
+
+def reconcile_section_group(section, *, dry_run: bool = False) -> dict:
+    """Make the section group's members equal `expected_section_members()`.
+    Report shape mirrors `reconcile_classroom_group` (ids as strings)."""
+    report = {
+        "section_id": str(section.pk), "skipped": "", "group_missing": False, "created": False,
+        "added": [], "removed": [], "role_fixed": [], "expected_count": 0, "member_count": 0,
+        "capacity_mismatch": False,
+    }
+    if not section.chat_group_enabled:
+        report["skipped"] = "disabled"
+        return report
+    expected = expected_section_members(section)
+    if expected["teacher"] is None:
+        report["skipped"] = "no_class_teacher"  # a group needs its class-teacher (creator/ADMIN)
+        return report
+    expected_all = {expected["teacher"]} | expected["staff"] | expected["students"]
+    report["expected_count"] = len(expected_all)
+    if section.capacity is not None and len(expected["students"]) > section.capacity:
+        report["capacity_mismatch"] = True
+        logger.warning(
+            "Section %s has %s active students but capacity=%s.", section.pk, len(expected["students"]), section.capacity,
+        )
+
+    group = _get_group_for_section(section)
+    if group is None:
+        report["group_missing"] = True
+        if dry_run:
+            report["added"] = sorted(str(i) for i in expected_all)
+            return report
+        from campus.models import ClassTeacherassigments
+
+        ct = ClassTeacherassigments.objects.select_related("staff__user").get(section=section)
+        group = create_section_group(section, ct.staff.user)
+        report["created"] = True
+
+    from message.models import GroupMember
+    from message.services import add_members_to_group, remove_group_member, update_group_member_role
+
+    members = {m.user_id: m for m in GroupMember.objects.filter(group=group)}
+    missing = expected_all - set(members)
+    extra = {uid for uid in members if uid not in expected_all}
+    report["added"] = sorted(str(i) for i in missing)
+    report["removed"] = sorted(str(i) for i in extra)
+
+    def _wanted_role(uid):
+        if uid == expected["teacher"]:
+            return GroupMember.Role.ADMIN
+        return GroupMember.Role.MODERATOR if uid in expected["staff"] else GroupMember.Role.MEMBER
+
+    role_fix_ids = [uid for uid in expected_all & set(members) if members[uid].role != _wanted_role(uid)]
+    report["role_fixed"] = sorted(str(i) for i in role_fix_ids)
+
+    if not dry_run:
+        if missing:
+            add_members_to_group(group=group, actor=None, user_ids=list(missing))
+        for uid in extra:
+            try:
+                remove_group_member(group=group, actor=None, user_id=uid)
+            except Exception:
+                logger.exception("reconcile: failed removing user %s from group of section %s.", uid, section.pk)
+        for uid in list(missing) + role_fix_ids:
+            want = _wanted_role(uid)
+            current = GroupMember.objects.filter(group=group, user_id=uid).values_list("role", flat=True).first()
+            if current is not None and current != want:
+                update_group_member_role(group=group, actor=None, user_id=uid, data={"role": want})
+    report["member_count"] = (
+        GroupMember.objects.filter(group=group, is_banned=False).count() if not dry_run
+        else len(set(members) - extra) + len(missing)
+    )
+    return report

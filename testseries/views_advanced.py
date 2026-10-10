@@ -66,7 +66,7 @@ from rest_framework.views import APIView
 from login.models import User
 
 from . import live, policy
-from .access import user_can_access_series
+from .access import user_can_access_series, user_can_edit_series
 from .certificate_pdf import PdfUnavailable, render_pdf
 from .certificate_share_card import ImageUnavailable, render_png as render_certificate_share_png
 from .csv_import import parse_csv
@@ -128,6 +128,13 @@ def _require_creator(user, series, message="Only the creator can do this."):
         raise PermissionDenied(message)
 
 
+def _require_editor(user, series, message="Only the creator or this class/campus's teaching staff can manage questions."):
+    """T2 — the creator, or (campus / class series only) an editor the owning
+    app vouches for through `access.user_can_edit_series`."""
+    if not user_can_edit_series(user, series):
+        raise PermissionDenied(message)
+
+
 # =====================================================================
 # SERIES actions
 # =====================================================================
@@ -143,7 +150,7 @@ class SeriesAdvancedActionsMixin:
         while it isn't, because an objective question with no correct answer
         would silently mark every student wrong."""
         series = self.get_object()
-        _require_creator(request.user, series)
+        _require_editor(request.user, series)
         missing = _questions_missing_answer_key(series)
         return Response({"complete": not missing, "missing_question_orders": missing})
 
@@ -154,7 +161,7 @@ class SeriesAdvancedActionsMixin:
         All-or-nothing: one invalid question rejects the whole batch with a
         per-index error report, so a half-imported test can never exist."""
         series = self.get_object()
-        _require_creator(request.user, series)
+        _require_editor(request.user, series)
         _require_draft(series)
         payload = request.data.get("questions")
         if not isinstance(payload, list) or not payload:
@@ -172,7 +179,7 @@ class SeriesAdvancedActionsMixin:
         answer key travels IN the sheet (`correct` column), so every
         objective question is auto-graded the moment a student submits."""
         series = self.get_object()
-        _require_creator(request.user, series)
+        _require_editor(request.user, series)
         _require_draft(series)
         upload = request.FILES.get("file")
         if upload is None:
@@ -185,10 +192,41 @@ class SeriesAdvancedActionsMixin:
         if result.errors:
             return Response(
                 {"detail": "The CSV has problems — nothing was imported.",
+                 "code": "validation_error",
                  "errors": [{"row": row, "message": msg} for row, msg in result.errors]},
                 status=status.HTTP_400_BAD_REQUEST,
             )
         return _create_questions(request, series, result.questions)
+
+    @action(detail=True, methods=["post"], url_path="questions-reorder")
+    def questions_reorder(self, request, pk=None):
+        """T2 — body `{"order": [<question id>, ...]}`: the COMPLETE list of this
+        series' question ids in the wanted order. Draft-only, editors only.
+        Anything other than an exact permutation is rejected (never a partial
+        reorder), and the renumbering is one transaction."""
+        series = self.get_object()
+        _require_editor(request.user, series)
+        _require_draft(series)
+        raw = request.data.get("order")
+        if not isinstance(raw, list) or not raw:
+            raise ValidationError({"order": "Send the full list of question ids in the new order."})
+        try:
+            wanted = [uuid.UUID(str(item)) for item in raw]
+        except (TypeError, ValueError, AttributeError):
+            raise ValidationError({"order": "Every entry must be a question id."})
+        with transaction.atomic():
+            rows = {q.id: q for q in series.questions.select_for_update()}
+            if len(set(wanted)) != len(wanted) or set(wanted) != set(rows):
+                raise ValidationError({"order": "The list must contain every question of this series exactly once."})
+            # Two-phase renumber: (series, order) is UNIQUE, so park everything
+            # above the current maximum first, then settle on 1..N.
+            parking = max((q.order for q in rows.values()), default=0) + len(rows) + 1
+            for offset, qid in enumerate(wanted):
+                type(rows[qid]).objects.filter(pk=qid).update(order=parking + offset)
+            for position, qid in enumerate(wanted, start=1):
+                type(rows[qid]).objects.filter(pk=qid).update(order=position)
+        questions = series.questions.order_by("order")
+        return Response(QuestionSerializer(questions, many=True, context={"request": request}).data)
 
     @action(
         detail=True, methods=["post"], url_path="option-image",
@@ -200,7 +238,7 @@ class SeriesAdvancedActionsMixin:
         of the question it then creates/updates. Creator + draft only,
         images only (jpg/png/webp), 5 MB max."""
         series = self.get_object()
-        _require_creator(request.user, series)
+        _require_editor(request.user, series)
         _require_draft(series)
         upload = request.FILES.get("file")
         if upload is None:
@@ -543,6 +581,53 @@ def _host_payload(user, series, session):
     }
 
 
+class BulkQuestionErrors(Exception):
+    """Raised by `_create_questions_atomic` BEFORE anything is written: carries
+    the per-question error report so the view can answer with a stable body
+    (a DRF ValidationError would be re-wrapped by the global exception handler,
+    burying the per-index list one level too deep for the client)."""
+
+    def __init__(self, errors):
+        super().__init__("bulk question validation failed")
+        self.errors = errors
+
+
+def summarize_errors(errors) -> str:
+    """First human-readable message out of a DRF/Django error structure —
+    `{"correct_answer": ["..."]}` -> `correct_answer: ...`."""
+    if isinstance(errors, dict):
+        for key, value in errors.items():
+            inner = summarize_errors(value)
+            if inner:
+                return inner if key in ("non_field_errors", "__all__") else f"{key}: {inner}"
+        return ""
+    if isinstance(errors, (list, tuple)):
+        for value in errors:
+            inner = summarize_errors(value)
+            if inner:
+                return inner
+        return ""
+    return str(errors) if errors else ""
+
+
+def _bulk_error(index, errors):
+    return {
+        "index": index,
+        "question_number": index + 1,
+        "errors": errors,
+        "message": f"Q{index + 1}: {summarize_errors(errors) or 'Invalid question.'}",
+    }
+
+
+def _bulk_error_response(errors):
+    first = errors[0]["message"]
+    more = f" (+{len(errors) - 1} more)" if len(errors) > 1 else ""
+    return Response(
+        {"detail": f"Nothing was saved. {first}{more}", "code": "validation_error", "errors": errors},
+        status=status.HTTP_400_BAD_REQUEST,
+    )
+
+
 @transaction.atomic
 def _create_questions_atomic(series, payload, request):
     """Validate every item through the SAME `QuestionSerializer` a single
@@ -552,7 +637,7 @@ def _create_questions_atomic(series, payload, request):
     serializers_, errors = [], []
     for index, item in enumerate(payload):
         if not isinstance(item, dict):
-            errors.append({"index": index, "errors": {"non_field_errors": ["Each question must be an object."]}})
+            errors.append(_bulk_error(index, {"non_field_errors": ["Each question must be an object."]}))
             continue
         item = dict(item)
         if item.get("order") in (None, ""):
@@ -560,17 +645,20 @@ def _create_questions_atomic(series, payload, request):
                 next_order += 1
             item["order"] = next_order
         order = item["order"]
+        if isinstance(order, bool) or not isinstance(order, int) or order < 1:
+            errors.append(_bulk_error(index, {"order": ["Order must be a whole number, 1 or more."]}))
+            continue
         if order in used:
-            errors.append({"index": index, "errors": {"order": [f"Order {order} is already taken."]}})
+            errors.append(_bulk_error(index, {"order": [f"Order {order} is already taken."]}))
             continue
         used.add(order)
         ser = QuestionSerializer(data=item, context={"request": request})
         if ser.is_valid():
             serializers_.append(ser)
         else:
-            errors.append({"index": index, "errors": ser.errors})
+            errors.append(_bulk_error(index, ser.errors))
     if errors:
-        raise ValidationError({"detail": "Nothing was created — fix the listed questions.", "errors": errors})
+        raise BulkQuestionErrors(errors)
     created = [ser.save(series=series) for ser in serializers_]
     series.recompute_total_marks()
     return created
@@ -579,8 +667,13 @@ def _create_questions_atomic(series, payload, request):
 def _create_questions(request, series, payload):
     try:
         created = _create_questions_atomic(series, payload, request)
+    except BulkQuestionErrors as exc:
+        return _bulk_error_response(exc.errors)
     except DjangoValidationError as exc:
-        raise ValidationError({"detail": exc.messages})
+        return Response(
+            {"detail": " ".join(exc.messages), "code": "validation_error"},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
     except IntegrityError:
         raise ValidationError({"detail": "A question with the same order already exists."})
     return Response(

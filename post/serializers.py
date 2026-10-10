@@ -658,6 +658,7 @@ class PostListSerializer(serializers.ModelSerializer):
     # ("following" | "recommended" | "trending"), or None everywhere else
     # (profile lists, detail, explore...). Lets the app label suggested cards.
     feed_source = serializers.SerializerMethodField()
+    is_exploration = serializers.SerializerMethodField()
 
     class Meta:
         model = Post
@@ -673,11 +674,16 @@ class PostListSerializer(serializers.ModelSerializer):
             "original_post", "repost_caption", "reposts_count", "is_reposted_by_me",
             # NEW — surfaces PostEditAPIView's edits (see PostEditSerializer
             # below). Field already existed on the model; nothing exposed it.
-            "is_edited", "feed_source",
+            "is_edited", "feed_source", "is_exploration",
         ]
 
     def get_feed_source(self, obj):
         return (self.context.get("feed_sources") or {}).get(obj.id)
+
+    def get_is_exploration(self, obj):
+        # T1 Part 3: True when this card is an exploration slot (new creator /
+        # test audience). Additive field; False everywhere outside Home.
+        return obj.id in (self.context.get("explore_ids") or ())
 
     def get_user(self, obj):
         request = self.context.get("request")
@@ -1587,8 +1593,17 @@ class WhyDampenedSerializer(serializers.Serializer):
     strength = serializers.FloatField()
 
 
+class WhyExperimentSerializer(serializers.Serializer):
+    name = serializers.CharField()
+    bucket = serializers.IntegerField()
+    variant = serializers.CharField()
+
+
 class WhyResponseSerializer(serializers.Serializer):
+    experiment = WhyExperimentSerializer()
+    stages = serializers.ListField(child=serializers.DictField())
     post_id = serializers.UUIDField()
     feed_source = serializers.CharField(allow_null=True)
     reasons = WhyReasonSerializer(many=True)
     dampened = WhyDampenedSerializer(many=True)
+    config = serializers.DictField(required=False)  # T1 item 7: staff only - the exact knobs in force

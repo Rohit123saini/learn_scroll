@@ -493,6 +493,16 @@ class ConversationViewSet(viewsets.ReadOnlyModelViewSet):
         if blocked:
             return Response({'detail': 'Ye user block hai, chat start nahi ho sakti.'}, status=status.HTTP_403_FORBIDDEN)
 
+        # Minor-safety: an adult can't open a NEW chat with a minor who
+        # doesn't follow them (message/minor_safety.py). Existing chats are
+        # left alone.
+        from .minor_safety import MINOR_DM_BLOCKED_MESSAGE, dm_blocked_for_minor
+
+        if dm_blocked_for_minor(request.user, other_user) and not Conversation.objects.filter(
+            private_key=Conversation.make_private_key(request.user.id, other_user.id)
+        ).exists():
+            return Response({'detail': MINOR_DM_BLOCKED_MESSAGE}, status=status.HTTP_403_FORBIDDEN)
+
         conversation, created = Conversation.get_or_create_private(request.user, other_user)
         serializer = self.get_serializer(conversation)
         return Response(serializer.data, status=status.HTTP_201_CREATED if created else status.HTTP_200_OK)

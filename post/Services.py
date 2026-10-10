@@ -1124,6 +1124,9 @@ def apply_show_fewer(user, post, targets, reason):
             hide.save(update_fields=["reason"])
         prune_stale_feedback(user)
         rows = [record_feed_feedback(user, kind, key) for kind, key in resolved]
+    from . import feed_cache
+
+    feed_cache.invalidate(user.pk)  # T1 Part 5: the cached candidates predate this preference
     return hide, hide_created, rows
 
 

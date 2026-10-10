@@ -21,10 +21,13 @@ Resulting paths (with the "core/" prefix above):
     core/notice-board/                    # Task 12 — home-screen Notice Board
     core/onboarding/suggestions/          # Task G18 — post-signup onboarding
     core/onboarding/complete/             # Task G18 — mark onboarding done/skipped
+    core/onboarding/options/              # quick-start picker choices
+    core/onboarding/quick-start/          # class + exam + <=3 interests, one call
 """
 from django.urls import include, path
 from rest_framework.routers import DefaultRouter
 
+from .onboarding_quickstart import OnboardingOptionsView, OnboardingQuickStartView
 from .views import (
     NoticeBoardView,
     NotificationPreferenceView,
@@ -56,5 +59,8 @@ urlpatterns = [
     # the three paths above.
     path("onboarding/suggestions/", OnboardingSuggestionsView.as_view(), name="onboarding-suggestions"),
     path("onboarding/complete/", OnboardingCompleteView.as_view(), name="onboarding-complete"),
+    # 30-second first-run step: class + exam + up to 3 interests in one call.
+    path("onboarding/options/", OnboardingOptionsView.as_view(), name="onboarding-options"),
+    path("onboarding/quick-start/", OnboardingQuickStartView.as_view(), name="onboarding-quick-start"),
     path("", include(router.urls)),
 ]

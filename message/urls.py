@@ -76,7 +76,7 @@ from .views_ai import (
     # 🔥 NAYA — Task G15: generalized "Ask AI" doubt solver (feed post /
     # wrong test question / chat — NOT conversation-scoped, unlike
     # ClassroomCopilotView above).
-    AskAIDoubtView,
+    AskAIDoubtView, StudyBuddyView,
 )
 from .upload_view import MessageUploadAPIView
 # 🔥 NAYA — Parent/Guardian Mode (Feature 8): student-side code
@@ -206,6 +206,7 @@ urlpatterns = [
     # --- Ask AI: generalized doubt solver — feed post / wrong test
     # question / chat, no conversation membership required (NAYA, Task G15) ---
     path('ai/ask-doubt/', AskAIDoubtView.as_view(), name='ai-ask-doubt'),
+    path('ai/study-buddy/', StudyBuddyView.as_view(), name='ai-study-buddy'),
 
     # --- Generic file upload (returns a URL to attach to a message) ---
     path('upload/', MessageUploadAPIView.as_view(), name='message-upload'),

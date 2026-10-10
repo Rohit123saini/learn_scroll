@@ -31,6 +31,9 @@ class QuestionSerializer(serializers.ModelSerializer):
             "options", "correct_answer", "explanation",
         ]
         read_only_fields = ["id", "series"]
+        # `order` is optional on a single create (the view appends the question
+        # at the end); an explicit order is still validated for duplicates.
+        extra_kwargs = {"order": {"required": False}}
 
     def validate_attachment(self, value):
         # Mirrors the FileField validators on Question.attachment itself
@@ -54,10 +57,25 @@ class QuestionSerializer(serializers.ModelSerializer):
         # `explanation` is part of the solution, so it is withheld exactly
         # the same way; students get it from the `solutions` endpoint once
         # results are released.
-        if not (user and getattr(user, "is_authenticated", False) and instance.series.creator_id == user.id):
+        if not self._sees_answer_key(user, instance):
             data.pop("correct_answer", None)
             data.pop("explanation", None)
         return data
+
+    def _sees_answer_key(self, user, instance) -> bool:
+        """The series creator and (T2) the context's authorised editors — a
+        class-teacher who edits a campus draft must see the key they are
+        editing. Cached per series for the request: a nested list of 100
+        questions must not run the resolver 100 times."""
+        if not (user and getattr(user, "is_authenticated", False)):
+            return False
+        cache = self.context.setdefault("_ts_key_visibility", {})
+        series_id = instance.series_id
+        if series_id not in cache:
+            from .access import user_can_edit_series
+
+            cache[series_id] = user_can_edit_series(user, instance.series)
+        return cache[series_id]
 
     def validate(self, attrs):
         # Mirror Question.clean()'s shape rules here too so a bad
@@ -139,6 +157,7 @@ class TestSeriesSerializer(serializers.ModelSerializer):
     question_count = serializers.SerializerMethodField()
     share_url = serializers.SerializerMethodField()
     window_state = serializers.SerializerMethodField()
+    can_edit = serializers.SerializerMethodField()
 
     class Meta:
         model = TestSeries
@@ -155,6 +174,8 @@ class TestSeriesSerializer(serializers.ModelSerializer):
             "pass_percentage", "certificate_enabled", "certificate_title",
             "result_release", "results_released_at", "show_solutions",
             "share_slug", "share_url",
+            # ---- T2: may THIS viewer add / edit / delete / reorder the questions?
+            "can_edit",
         ]
         # `source`/`context_type`/`context_id` are provenance — set once at
         # creation (INDIVIDUAL here, or CAMPUS/TUITIONCLASS via bridge.py) and
@@ -173,6 +194,27 @@ class TestSeriesSerializer(serializers.ModelSerializer):
         ]
 
     # ---- output ----------------------------------------------------------
+    def get_can_edit(self, obj):
+        """T2 — tells the client whether to show the question manager: the
+        creator, or (campus / class series) one of the context's authorised
+        editors. Editable-id sets are resolved ONCE per request and reused for
+        every row of a list."""
+        request = self.context.get("request")
+        user = getattr(request, "user", None)
+        if not (user and getattr(user, "is_authenticated", False)):
+            return False
+        if obj.creator_id == user.id:
+            return True
+        if obj.source == TestSeries.Source.INDIVIDUAL:
+            return False
+        from .access import editable_context_ids, normalize_context_id
+
+        context_type = "section" if obj.source == TestSeries.Source.CAMPUS else "classroom"
+        cache = self.context.setdefault("_ts_editable_ids", {})
+        if context_type not in cache:
+            cache[context_type] = editable_context_ids(user, context_type)
+        return normalize_context_id(obj.context_id) in cache[context_type]
+
     def get_question_count(self, obj):
         annotated = getattr(obj, "q_count", None)  # set by the viewset queryset
         return annotated if annotated is not None else obj.questions.count()

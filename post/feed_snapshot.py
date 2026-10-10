@@ -82,13 +82,19 @@ def cache_key(user_id, snapshot_id: str, namespace: Optional[str] = None) -> str
 # --------------------------------------------------------------------------
 # cursor
 # --------------------------------------------------------------------------
-def encode_cursor(snapshot_id: str, offsets: Dict[str, int], seen_cutoff: Optional[str]) -> str:
+def encode_cursor(
+    snapshot_id: str, offsets: Dict[str, int], seen_cutoff: Optional[str], tail: Optional[list] = None,
+) -> str:
     payload = {
         "v": CURSOR_VERSION,
         "s": snapshot_id,
         "o": {src: int(offsets.get(src, 0)) for src in SOURCES},
         "c": seen_cutoff,
     }
+    if tail:
+        # T1 Part 2: (author, type, category) keys of the previous page's last
+        # posts, so the diversity re-rank can continue across the page border.
+        payload["t"] = tail
     raw = json.dumps(payload, separators=(",", ":"))
     return base64.urlsafe_b64encode(raw.encode("utf-8")).decode("ascii")
 
@@ -118,7 +124,14 @@ def decode_cursor(token: str) -> dict:
         cutoff = data.get("c")
         if cutoff is not None and not isinstance(cutoff, str):
             raise ValueError("cutoff")
-        return {"snapshot_id": snapshot_id, "offsets": offsets, "seen_cutoff": cutoff}
+        # Optional + client-controlled: validated leniently, a bad tail is
+        # simply ignored (never a 404 - it only affects ordering niceties).
+        from .feed_diversity import clean_history
+
+        return {
+            "snapshot_id": snapshot_id, "offsets": offsets, "seen_cutoff": cutoff,
+            "tail": clean_history(data.get("t")),
+        }
     except Exception:
         raise NotFound("Invalid cursor.")
 
@@ -126,8 +139,11 @@ def decode_cursor(token: str) -> dict:
 # --------------------------------------------------------------------------
 # storage (cache failures degrade to "no snapshot", never to an error)
 # --------------------------------------------------------------------------
-def save(user_id, snapshot_id: str, pools: Dict[str, List], ratios: Dict[str, float]) -> bool:
+def save(
+    user_id, snapshot_id: str, pools: Dict[str, List], ratios: Dict[str, float], meta: Optional[dict] = None,
+) -> bool:
     payload = json.dumps({
+        "meta": meta or {},
         "v": CURSOR_VERSION,
         "ratios": {src: float(ratios.get(src, 0.0)) for src in SOURCES},
         "pools": {src: [str(pid) for pid in pools.get(src, [])] for src in SOURCES},
@@ -153,7 +169,7 @@ def load(user_id, snapshot_id: str) -> Optional[dict]:
         data = json.loads(raw)
         pools = {src: [uuid.UUID(x) for x in data["pools"].get(src, [])] for src in SOURCES}
         ratios = {src: float(data["ratios"].get(src, 0.0)) for src in SOURCES}
-        return {"pools": pools, "ratios": ratios}
+        return {"pools": pools, "ratios": ratios, "meta": dict(data.get("meta") or {})}
     except Exception:
         logger.warning("feed snapshot corrupt, ignoring", exc_info=True)
         return None

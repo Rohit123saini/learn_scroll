@@ -25,9 +25,6 @@ Including another URLconf
 from django.conf.urls.static import static
 from django.contrib import admin
 from django.urls import path, include
-from rest_framework import permissions
-from drf_yasg.views import get_schema_view
-from drf_yasg import openapi
 from django.conf import settings
 from django.urls import re_path
 from post.views import serve_media_with_range
@@ -37,16 +34,6 @@ from drf_spectacular.views import (
     SpectacularSwaggerView,
     SpectacularRedocView,
 )
-schema_view = get_schema_view(
-    openapi.Info(
-        title="API Documentation",
-        default_version='v1',
-        description="API Documentation",
-    ),
-    public=True,
-    permission_classes=[permissions.AllowAny],
-)
-
 urlpatterns = [
     path("admin/", admin.site.urls),
     # TASK 11 — verified app links + web fallback for https share links / QR codes.
@@ -70,6 +57,8 @@ urlpatterns = [
     # than a move.
     path("referrals/", include("tuitionclass.referral_urls")),
     path("core/", include("core.urls")),
+    path("support/", include("support.urls")),  # Help & feedback
+    path("copyright/", include("copyrights.urls")),  # Copyright claims / counter-notices / strikes
     path('campus/', include('campus.urls')),
     path('testseries/', include('testseries.urls')),
     path('assigments/', include('assigments.urls')),

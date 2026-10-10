@@ -399,10 +399,14 @@ def feedback_horizon_days(cfg: dict) -> float | None:
 # --------------------------------------------------------------------------
 # DB-backed pool builders (Django imported lazily)
 # --------------------------------------------------------------------------
-def get_ratios() -> Dict[str, float]:
+def get_ratios(override: Dict[str, float] | None = None) -> Dict[str, float]:
+    """settings.FEED_MIX_RATIOS (or the defaults); `override` = the viewer's A/B-variant
+    `overrides["mix"]` (T1 item 7), merged over them before normalising."""
     from django.conf import settings
 
-    return normalize_ratios(getattr(settings, "FEED_MIX_RATIOS", None) or DEFAULT_RATIOS)
+    base = dict(getattr(settings, "FEED_MIX_RATIOS", None) or DEFAULT_RATIOS)
+    base.update(override or {})
+    return normalize_ratios(base)
 
 
 def get_seen_limits() -> dict:
@@ -484,6 +488,22 @@ def load_author_affinity(user, now=None, exclude_authors=None) -> Dict[str, Dict
     return dict(strongest)
 
 
+def coerce_user_pk(key):
+    """Author key (as stored in affinity / signal dicts, always a str) -> the
+    value the `user_id` column expects. login.User has an integer pk
+    (BigAutoField); older code here assumed UUIDs (`uuid.UUID(key)`), which
+    raises for "7" and silently dropped every author-affinity bonus. Going
+    through the pk field's own `to_python` works for either type. Raises
+    ValueError for garbage."""
+    from django.contrib.auth import get_user_model
+    from django.core.exceptions import ValidationError
+
+    try:
+        return get_user_model()._meta.pk.to_python(key)
+    except (ValidationError, TypeError) as exc:
+        raise ValueError(str(exc))
+
+
 def affinity_expression(affinity: Dict[str, Dict[str, float]]):
     """SQL expression (>= 0) with the author-affinity points of a post, or
     None when there is nothing to add."""
@@ -494,7 +514,7 @@ def affinity_expression(affinity: Dict[str, Dict[str, float]]):
     whens = []
     for key, entry in affinity.items():
         try:
-            whens.append(When(user_id=uuid.UUID(str(key)), then=Value(float(entry["points"]))))
+            whens.append(When(user_id=coerce_user_pk(key), then=Value(float(entry["points"]))))
         except (ValueError, AttributeError):
             continue
     if not whens:
@@ -651,7 +671,7 @@ def penalty_expression(penalties: Dict[str, Dict[str, float]], category_filtered
     author_whens = []
     for key, pts in (penalties.get("author") or {}).items():
         try:
-            author_whens.append(When(user_id=uuid.UUID(str(key)), then=Value(pts)))
+            author_whens.append(When(user_id=coerce_user_pk(key), then=Value(pts)))
         except (ValueError, AttributeError):
             continue  # garbage key: ignore rather than break the whole feed
     if author_whens:
@@ -872,8 +892,16 @@ def build_pool_ids(
     video_and_velocity_boost,
     category: str | None = None,
     seen_ids: set | None = None,
+    ratios: Dict[str, float] | None = None,
+    meta: dict | None = None,
 ):
     """Build the three ordered id lists.
+
+    T1 Parts 3-4 (all optional / additive): `ratios` (the request's source
+    ratios) lets the exploration stage know how big the recommended slice of a
+    page is; `meta` is an OUT dict - it receives {"experiment": {...},
+    "explore_ids": [...], "explore_phase": {...}} for the snapshot / explain.
+    Without `ratios` the module defaults are used.
 
     `base_qs` is the shared "safe to show" queryset from HomeFeedView
     (not deleted, approved, not sensitive, no own posts, superseded
@@ -909,6 +937,45 @@ def build_pool_ids(
     # Author affinity (+points for authors the caller likes / comments on),
     # ALL pools; authors with a "show fewer" row are excluded (they win).
     affinity = affinity_expression(load_author_affinity(request_user, now, exclude_authors=set(penalties["author"])))
+
+    # T1 Part 3: A/B bucket (variant overrides tune exploration / signals).
+    from . import feed_context, feed_exam, feed_experiment, feed_explore, feed_signals
+
+    exp = feed_experiment.resolve(request_user.pk)
+    # T1 Part 4: behavioural signals (dwell / tap / save / share / quick-skip) and
+    # the educational lens (subjects, study time, campus / class authors). Both
+    # are additive CASE expressions folded into the existing affinity term, so
+    # every pool (following band order, trending, recommended) sees them.
+    sig_cfg = feed_signals.get_config(exp["overrides"].get("signals"))
+    ctx_cfg = feed_context.get_config(exp["overrides"].get("context"))
+    ctx = None
+    try:
+        behaviour = feed_signals.load_behaviour_signals(
+            request_user, now, exclude_authors=set(penalties["author"]), cfg=sig_cfg,
+        )
+        extra = feed_signals.signal_expression(behaviour)
+        ctx = feed_context.load_context(request_user, ctx_cfg)
+        local_hour = timezone.localtime(now).hour
+        ctx_expr = feed_context.context_expression(ctx, local_hour, ctx_cfg)
+        if ctx_expr is not None:
+            extra = ctx_expr if extra is None else extra + ctx_expr
+        if extra is not None:
+            affinity = extra if affinity is None else affinity + extra
+    except Exception:  # pragma: no cover - extra signals must never break the feed
+        import logging
+
+        logging.getLogger(__name__).warning("feed signals failed, ranking without them", exc_info=True)
+
+    # Exam Mode (the student's own switch, UserPreference.exam_mode): narrow EVERY pool
+    # (following, trending, recommended, exploration) to study content. Runs after the
+    # signals block with whatever `ctx` it managed to load (None is fine: the profile
+    # alone is enough); a failure here leaves the feed unfiltered rather than 500ing.
+    try:
+        base_qs = feed_exam.apply_exam_mode(request_user, base_qs, ctx)
+    except Exception:  # pragma: no cover
+        import logging
+
+        logging.getLogger(__name__).warning("exam mode filter failed, feed unfiltered", exc_info=True)
 
     # ---- 1) FOLLOWING ------------------------------------------------------
     # NOT touched by "show fewer": following an account is an explicit choice.
@@ -997,8 +1064,105 @@ def build_pool_ids(
         )
         recommended_ids_list = _pool_ids(older, seen_ids, limits["recommended_pool_cap"], fill_min)
 
-    return {
+    # T1 item 6: quality / safety gate on the DISCOVERY pools (spam, repeated text, tiny text, heavily
+    # reported) - BEFORE the author cap so a dropped post can't eat a cap slot. Following is never gated.
+    # T1 item 7: the viewer's A/B variant may override `quality` and `author_cap`.
+    from . import feed_quality
+
+    pools, _quality_stats = feed_quality.filter_pools({
         SOURCE_FOLLOWING: following_ids_list,
         SOURCE_RECOMMENDED: recommended_ids_list,
         SOURCE_TRENDING: trending_ids_list,
-    }
+    }, feed_quality.config_for(exp["overrides"].get("quality")))
+    pools = apply_author_caps(pools, feed_experiment.section(
+        _author_cap_base(), exp["overrides"], "author_cap",
+    ) if exp["overrides"].get("author_cap") else None)
+
+    # T1 Part 3: exploration slots, woven into the recommended list.
+    pools = apply_exploration(
+        request_user, base_qs, following_ids, pools, ratios, exp, now, meta, category=category, seen_ids=seen_ids,
+    )
+    return pools
+
+
+def apply_exploration(request_user, base_qs, following_ids, pools, ratios, exp, now, meta=None, category=None, seen_ids=None):
+    """Weave new-creator / test-audience posts into pools[recommended] (see
+    post/feed_explore.py). Always fills `meta`; any failure -> pools untouched."""
+    from . import feed_explore
+
+    meta = meta if meta is not None else {}
+    meta["experiment"] = {"name": exp["experiment"], "bucket": exp["bucket"], "variant": exp["variant"]}
+    meta.setdefault("explore_ids", [])
+    meta.setdefault("explore_phase", {})
+    try:
+        cfg = feed_explore.get_config(exp["overrides"].get("explore"))
+        use = normalize_ratios(ratios) if ratios else dict(DEFAULT_RATIOS)
+        rec_ratio = use.get(SOURCE_RECOMMENDED, 0.0)
+        if not cfg["enabled"] or rec_ratio <= 0:
+            return pools  # following-only tab etc.: nothing to explore into
+        new_viewer = feed_explore.is_new_viewer(request_user, len(following_ids), now, cfg)
+        share = feed_explore.explore_share(cfg, new_viewer)
+        if share <= 0:
+            return pools
+        # Only the following pool is excluded: a post that is ALSO trending still
+        # gets its exploration slot (it is moved out of trending below, so no
+        # post is served twice).
+        taken = set(pools[SOURCE_FOLLOWING]) | set(seen_ids or ())  # never re-serve what the viewer already saw
+        import random as _random
+
+        rng = _random.Random(f"{request_user.pk}:{int(now.timestamp() // 300)}")
+        ids, phases = feed_explore.build_explore_ids(request_user, base_qs, following_ids, taken, cfg, now, rng)
+        # T1 item 6: a brand-new creator's spam / duplicate / tiny post must not get a free test audience.
+        from . import feed_quality
+
+        ids = feed_quality.filter_ids(ids, feed_quality.config_for(exp["overrides"].get("quality")))
+        if not ids:
+            return pools
+        merged, woven = feed_explore.weave(pools[SOURCE_RECOMMENDED], ids, share / rec_ratio)
+        pools = dict(pools)
+        pools[SOURCE_RECOMMENDED] = merged
+        woven_set = set(woven)
+        pools[SOURCE_TRENDING] = [p for p in pools[SOURCE_TRENDING] if p not in woven_set]
+        meta["explore_ids"] = [str(x) for x in woven]
+        meta["explore_phase"] = {str(k): v for k, v in phases.items() if str(k) in set(meta["explore_ids"])}
+        meta["new_viewer"] = new_viewer
+    except Exception:  # pragma: no cover - exploration must never break the feed
+        import logging
+
+        logging.getLogger(__name__).warning("exploration failed, using normal pools", exc_info=True)
+    return pools
+
+
+
+def _author_cap_base() -> dict:
+    from django.conf import settings
+
+    return dict(getattr(settings, "FEED_AUTHOR_CAP", None) or {})
+
+
+def apply_author_caps(pools: Dict[str, list], cap_cfg: dict | None = None) -> Dict[str, list]:
+    """T1 Part 2 - cap how many posts of ONE author a ranked pool front-loads
+    (see post/feed_diversity.py `cap_pools`; settings.FEED_AUTHOR_CAP).
+    One extra query (id -> author for <= ~1100 ids). Any failure here must
+    never break the feed, so errors just return the pools untouched."""
+    from django.conf import settings
+
+    from . import feed_diversity
+
+    raw_cfg = cap_cfg if cap_cfg is not None else getattr(settings, "FEED_AUTHOR_CAP", None)
+    cfg = feed_diversity.merge_author_cap_config(raw_cfg)
+    if not cfg["enabled"]:
+        return pools
+    all_ids = [pid for ids in pools.values() for pid in ids]
+    if len(all_ids) < 3:
+        return pools
+    try:
+        from .models import Post
+
+        author_by_id = dict(Post.objects.filter(id__in=all_ids).values_list("id", "user_id"))
+        return feed_diversity.cap_pools(pools, author_by_id, raw_cfg)
+    except Exception:  # pragma: no cover - defensive, ranking must not 500 the feed
+        import logging
+
+        logging.getLogger(__name__).warning("author cap failed, using uncapped pools", exc_info=True)
+        return pools

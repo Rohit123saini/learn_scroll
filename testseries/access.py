@@ -48,6 +48,14 @@ DEFAULT_RESOLVERS = {
     "section": "campus.bridge.user_accessible_testseries_context_ids",
     "classroom": "tuitionclass.bridge.user_accessible_testseries_context_ids",
 }
+# TASK T2 — who may EDIT the questions of a campus / class series besides its
+# creator (class-teacher / subject-teacher / admin of a section; teacher /
+# co-teacher / moderator of a classroom). Same dotted-path pattern, same
+# signature `fn(*, user, context_type) -> Iterable[id]`, same fail-CLOSED rule.
+DEFAULT_EDITOR_RESOLVERS = {
+    "section": "campus.bridge.user_editable_testseries_context_ids",
+    "classroom": "tuitionclass.bridge.user_editable_testseries_context_ids",
+}
 PUBLIC = "public"
 
 # source -> the `context_type` string its bridge writes onto the series.
@@ -71,6 +79,30 @@ def _load(path: str):
     return getattr(importlib.import_module(module_path), func_name)
 
 
+def normalize_context_id(value):
+    """`TestSeries.context_id` is a UUIDField, but campus hands out integer
+    section pks (stored as `uuid.UUID(int=pk)`). Normalising every id to a UUID
+    makes Python-side `in` checks agree with the DB-side `context_id__in`
+    filter — before this, `UUID in {1, 2}` was silently False."""
+    import uuid
+
+    if value is None or isinstance(value, bool):
+        return None
+    if isinstance(value, uuid.UUID):
+        return value
+    try:
+        if isinstance(value, int):
+            return uuid.UUID(int=value)
+        text = str(value).strip()
+        return uuid.UUID(text) if "-" in text else uuid.UUID(int=int(text))
+    except (TypeError, ValueError):
+        return None
+
+
+def _normalized_ids(raw):
+    return {n for n in (normalize_context_id(v) for v in raw) if n is not None}
+
+
 def accessible_context_ids(user, context_type: str):
     """`set` of context ids the user may access, the string `"public"` when the
     source is configured world-readable, or an empty set (fail-closed)."""
@@ -80,10 +112,61 @@ def accessible_context_ids(user, context_type: str):
     if not target:
         return set()
     try:
-        return set(_load(target)(user=user, context_type=context_type))
+        return _normalized_ids(_load(target)(user=user, context_type=context_type))
     except Exception:  # noqa: BLE001 — fail closed, but never silently
         logger.exception("TESTSERIES_CONTEXT_ACCESS resolver %s failed; denying access.", target)
         return set()
+
+
+def _editor_resolver_setting(context_type: str):
+    mapping = getattr(settings, "TESTSERIES_CONTEXT_EDITORS", None) or {}
+    return mapping.get(context_type, DEFAULT_EDITOR_RESOLVERS.get(context_type))
+
+
+def editable_context_ids(user, context_type: str):
+    """Context ids whose series `user` may EDIT (beyond being the creator).
+    Fail-CLOSED: an unconfigured / broken resolver means "no one", never
+    "everyone"."""
+    if not getattr(user, "is_authenticated", False):
+        return set()
+    target = _editor_resolver_setting(context_type)
+    if not target or target == PUBLIC:
+        return set()
+    try:
+        return _normalized_ids(_load(target)(user=user, context_type=context_type))
+    except Exception:  # noqa: BLE001
+        logger.exception("TESTSERIES_CONTEXT_EDITORS resolver %s failed; denying edit access.", target)
+        return set()
+
+
+def editable_series_q(user) -> Q:
+    """Q() for "series this user may edit the questions of": their own series
+    (ANY source, ANY status) OR any series of a campus section / classroom they
+    are an authorised editor for. Draft/published is a separate, workflow rule
+    (questions only change while the series is a draft)."""
+    q = Q(creator=user)
+    for source, context_type in _SOURCE_CONTEXT:
+        ids = editable_context_ids(user, context_type)
+        if ids:
+            q |= Q(source=source, context_type=context_type, context_id__in=ids)
+    return q
+
+
+def user_can_edit_series(user, series: TestSeries) -> bool:
+    """Single-object version of `editable_series_q`. Individual series are
+    creator-only; campus / class series are editable by the creator and by the
+    context's authorised editors."""
+    if not getattr(user, "is_authenticated", False):
+        return False
+    if series.creator_id == getattr(user, "id", None):
+        return True
+    if series.source == TestSeries.Source.INDIVIDUAL:
+        return False
+    context_type = "section" if series.source == TestSeries.Source.CAMPUS else "classroom"
+    if series.context_type and series.context_type != context_type:
+        return False
+    context_id = normalize_context_id(series.context_id)
+    return context_id is not None and context_id in editable_context_ids(user, context_type)
 
 
 def visible_series_q(user) -> Q:
@@ -94,7 +177,10 @@ def visible_series_q(user) -> Q:
     if getattr(user, "is_staff", False):
         return Q()  # platform staff: everything
 
-    q = Q(creator=user) | Q(status=TestSeries.Status.PUBLISHED, source=TestSeries.Source.INDIVIDUAL)
+    # T2: a context editor (class-teacher / co-teacher ...) must see the DRAFTS
+    # they are allowed to edit, otherwise `get_object()` 404s for them and
+    # questions-bulk can never work for anyone but the creator.
+    q = editable_series_q(user) | Q(status=TestSeries.Status.PUBLISHED, source=TestSeries.Source.INDIVIDUAL)
     for source, context_type in _SOURCE_CONTEXT:
         ids = accessible_context_ids(user, context_type)
         if ids == PUBLIC:
@@ -110,6 +196,8 @@ def user_can_access_series(user, series: TestSeries) -> bool:
         return True
     if getattr(user, "is_staff", False):
         return True
+    if user_can_edit_series(user, series):
+        return True
     if series.status != TestSeries.Status.PUBLISHED:
         return False
     if not enforcement_enabled() or series.source == TestSeries.Source.INDIVIDUAL:
@@ -118,7 +206,7 @@ def user_can_access_series(user, series: TestSeries) -> bool:
     ids = accessible_context_ids(user, context_type)
     if ids == PUBLIC:
         return True
-    return series.context_id in ids
+    return normalize_context_id(series.context_id) in ids
 
 
 # ---------------------------------------------------------------------------

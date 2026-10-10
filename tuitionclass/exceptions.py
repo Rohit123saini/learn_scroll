@@ -74,6 +74,10 @@ _CODE_BY_EXC = {
 
 
 def _code_for(exc) -> str:
+    # [T4] APIExceptions may carry their own stable code (e.g. "section_full").
+    custom = getattr(exc, "machine_code", None)
+    if custom:
+        return custom
     for exc_type, code in _CODE_BY_EXC.items():
         if isinstance(exc, exc_type):
             return code
@@ -170,6 +174,17 @@ def tuitionclass_exception_handler(exc, context):
         # ValidationError("plain string") or ValidationError(["a", "b"])
         # serializes to a bare list — flatten to one human-readable string.
         normalised = {"detail": " ".join(str(item) for item in data), "code": "validation_error"}
+    elif isinstance(data, dict) and isinstance(data.get("detail"), str):
+        # ValidationError({"detail": "...", "code": "session_full", "problems": [...]}):
+        # the view supplied its own human message + machine code (+ extras).
+        # Keep those at the TOP LEVEL so clients can switch on `code` — the
+        # generic branch below would overwrite `code` and bury the extras
+        # inside `errors`. `errors` is still included for backward compat.
+        normalised = {k: v for k, v in data.items() if k not in ("detail", "code")}
+        normalised["detail"] = str(data["detail"])
+        custom_code = data.get("code")
+        normalised["code"] = str(custom_code) if isinstance(custom_code, str) else "validation_error"
+        normalised["errors"] = data
     else:
         # Field-level ValidationError: {"field": ["msg", ...], ...} — or,
         # with a nested/list-of-dicts serializer, something deeper. See

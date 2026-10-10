@@ -628,6 +628,12 @@ class Question(TestSeriesBaseModel):
             self.correct_answer = {}
             return
 
+        # T2: junk shapes (a list / string where an object is expected) used to
+        # raise AttributeError / TypeError from the checks below -> a bare 500
+        # instead of a clean 400 the editor can read.
+        if not isinstance(self.correct_answer, dict):
+            raise ValidationError("correct_answer must be a JSON object.")
+
         if self.question_type == self.QuestionType.TRUE_FALSE:
             self.options = []
             if parse_bool(self.correct_answer.get("value")) is None:
@@ -667,10 +673,19 @@ class Question(TestSeriesBaseModel):
             self._validate_option_items(self.options)
             option_ids = {opt.get("id") for opt in self.options}
             if self.question_type == self.QuestionType.MCQ:
-                if "option_id" not in self.correct_answer or self.correct_answer["option_id"] not in option_ids:
+                chosen = self.correct_answer.get("option_id")
+                if (
+                    isinstance(chosen, bool) or not isinstance(chosen, (str, int))
+                    or chosen not in option_ids
+                ):
                     raise ValidationError("mcq correct_answer must be {'option_id': <one of options[].id>}.")
             else:  # MSQ
-                option_ids_answer = set(self.correct_answer.get("option_ids", []))
+                raw_ids = self.correct_answer.get("option_ids", [])
+                if not isinstance(raw_ids, list) or any(
+                    isinstance(i, bool) or not isinstance(i, (str, int)) for i in raw_ids
+                ):
+                    raise ValidationError("msq correct_answer must be {'option_ids': [subset of options[].id]}.")
+                option_ids_answer = set(raw_ids)
                 if not option_ids_answer or not option_ids_answer.issubset(option_ids):
                     raise ValidationError("msq correct_answer must be {'option_ids': [subset of options[].id]}.")
             return
@@ -698,7 +713,11 @@ class Question(TestSeriesBaseModel):
                 self._validate_option_items(self.options)
                 sequence = self.correct_answer.get("sequence")
                 option_ids = {opt.get("id") for opt in self.options}
-                if not isinstance(sequence, list) or set(sequence) != option_ids:
+                if (
+                    not isinstance(sequence, list)
+                    or any(isinstance(i, (list, dict)) for i in sequence)
+                    or set(sequence) != option_ids
+                ):
                     raise ValidationError(
                         "list/order correct_answer must be {'list_mode': 'order', "
                         "'sequence': [every options[].id, in order]}."

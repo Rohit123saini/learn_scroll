@@ -322,7 +322,14 @@ def can_delete_note(conversation, user, note):
 # DB helpers
 # ----------------------------------------------------------------------
 def _lock_room(room_id):
-    """Per-room transaction-scoped advisory lock (Postgres). `atomic()` ke andar hi call karo."""
+    """Per-room transaction-scoped advisory lock (Postgres). `atomic()` ke andar hi call karo.
+
+    Sirf Postgres pe lagta hai. SQLite (local dev) me `hashtext` / advisory locks nahi hote
+    (OperationalError: no such function) aur wahan write-lock waise bhi poore DB pe hota hai,
+    isliye skip kar dete hain.
+    """
+    if connection.vendor != 'postgresql':
+        return
     with connection.cursor() as cur:
         cur.execute("SELECT pg_advisory_xact_lock(hashtext(%s))", [f"studynotes:{room_id}"])
 

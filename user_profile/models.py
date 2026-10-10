@@ -1552,14 +1552,64 @@ class UserPreference(models.Model):
     # forcing a migration the day someone needs that.
     language = models.CharField(max_length=10, default="en")
 
+    # Accessibility — app-wide text size. The app maps these to a text scale
+    # (small 0.9 / normal 1.0 / large 1.15 / xlarge 1.3) on top of the
+    # device's own font setting. Kept as named steps, not a free float, so
+    # the server never has to trust an arbitrary number from a client.
+    class FontScale(models.TextChoices):
+        SMALL = "small", "Small"
+        NORMAL = "normal", "Normal"
+        LARGE = "large", "Large"
+        XLARGE = "xlarge", "Extra large"
+
+    font_scale = models.CharField(
+        max_length=10,
+        choices=FontScale.choices,
+        default=FontScale.NORMAL,
+    )
+
     # P14-BE — optional daily time-limit reminder, in minutes. NULL = off.
     # Set via PATCH /profile/activity/ (not the preferences serializer).
     daily_limit_minutes = models.PositiveSmallIntegerField(null=True, blank=True)
+
+    # ---- Study profile (personalised feed + Exam Mode) -------------------
+    # Student ne khud bataya: kis exam ki taiyari hai, kaunsi class, kaunse
+    # subjects, exam kab hai. `post/feed_exam.py` + `post/feed_context.py`
+    # isse feed ko personalise karte hain; sab optional (blank = set nahi).
+    class ExamTarget(models.TextChoices):
+        JEE = "jee", "JEE"
+        NEET = "neet", "NEET"
+        BOARD = "board", "Board exams"
+        UPSC = "upsc", "UPSC"
+        OTHER = "other", "Other"
+
+    CLASS_LEVEL_CHOICES = [(str(n), f"Class {n}") for n in range(6, 13)] + [
+        ("dropper", "Dropper"),
+        ("graduate", "Graduate"),
+        ("other", "Other"),
+    ]
+
+    exam_target = models.CharField(max_length=10, choices=ExamTarget.choices, blank=True, default="")
+    class_level = models.CharField(max_length=10, choices=CLASS_LEVEL_CHOICES, blank=True, default="")
+    # Free-text subjects ("Physics", "Organic Chemistry"), max 10 (serializer enforces).
+    focus_subjects = models.JSONField(default=list, blank=True)
+    exam_date = models.DateField(null=True, blank=True)
+    # Exam Mode: feed sirf padhai-wale content tak simat jaata hai
+    # (post/feed_exam.apply_exam_mode). Exam date nikal jaaye to apne-aap
+    # inactive maana jaata hai — dekho `exam_mode_active`.
+    exam_mode = models.BooleanField(default=False)
 
     updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:
         ordering = ["-updated_at"]
+
+    @property
+    def exam_mode_active(self) -> bool:
+        """Exam Mode on hai AUR exam date (agar di ho) abhi nikli nahi."""
+        if not self.exam_mode:
+            return False
+        return self.exam_date is None or self.exam_date >= timezone.localdate()
 
     def __str__(self):
         return f"{self.user.username} preferences ({self.theme}/{self.language})"
@@ -1575,6 +1625,11 @@ class UserPreference(models.Model):
         """
         obj, _created = cls.objects.get_or_create(user=user)
         return obj
+
+
+class StreakFreezeError(ValueError):
+    """Freeze token khareedne ki business-rule failure (e.g. cap poora).
+    `ValueError` ka subclass hai taaki purane `except ValueError` bhi pakdein."""
 
 
 class StreakManager(models.Manager):
@@ -1658,7 +1713,27 @@ class StreakManager(models.Manager):
                 # so `updated_at` doesn't churn on a repeat app-open.
                 return streak, None
 
+            # Streak freeze: agar user ne `missed` din chhode (>=1) aur uske
+            # paas utne hi (ya zyada) freeze tokens hain, to har missed din
+            # ek token kha leta hai aur streak toot'ti nahi — aaj ka check-in
+            # normal +1 ki tarah gina jaata hai. Tokens poore na hon to koi
+            # token kharch NAHI hota aur streak purane rule se 1 pe restart
+            # hoti hai (adhoori protection ka koi fayda nahi). Missed din
+            # `total_active_days` me count nahi hote (wo real activity ka
+            # counter hai). Caller ko `streak.freezes_consumed_now` (transient,
+            # DB me nahi) se pata chalta hai ki aaj kitne tokens lage.
+            streak.freezes_consumed_now = 0
+            if streak.last_active_date is not None:
+                missed = (today - streak.last_active_date).days - 1
+            else:
+                missed = 0
+
             if streak.last_active_date == today - timezone.timedelta(days=1):
+                streak.current_streak += 1
+            elif 0 < missed <= streak.freeze_tokens:
+                streak.freeze_tokens -= missed
+                streak.freezes_used_total += missed
+                streak.freezes_consumed_now = missed
                 streak.current_streak += 1
             else:
                 streak.current_streak = 1
@@ -1668,7 +1743,8 @@ class StreakManager(models.Manager):
             streak.last_active_date = today
             streak.save(update_fields=[
                 "current_streak", "longest_streak", "total_active_days",
-                "last_active_date", "updated_at",
+                "last_active_date", "freeze_tokens", "freezes_used_total",
+                "updated_at",
             ])
 
             milestone_hit = None
@@ -1702,6 +1778,124 @@ class StreakManager(models.Manager):
                         pass
 
             return streak, milestone_hit
+
+    # ------------------------------------------------------------------
+    # Streak freeze (coins se khareedna) + daily goal ("aaj ka N minute
+    # challenge"). Dono `Streak` row ke lock ke andar chalte hain — same
+    # "one sanctioned write path" boundary jo record_activity() rakhta hai.
+    # ------------------------------------------------------------------
+    def buy_freeze(self, user):
+        """Ek freeze token coins se khareedo. Cost =
+        `settings.STREAK_FREEZE_COST_COINS` (default 50), holding cap =
+        `settings.STREAK_FREEZE_MAX_TOKENS` (default 2).
+
+        Lock order: Streak row -> (CoinLedger.record_transaction ke andar)
+        user row — wahi order record_activity() ke milestone payout ka hai,
+        isliye dono ek saath chalein to deadlock nahi hota. Coin debit aur
+        token +1 ek hi transaction me hain: debit fail (kam coins) to token
+        nahi milta, aur token save fail ho to debit rollback ho jaata hai.
+
+        Raises `StreakFreezeError` (cap poora) ya `ValueError` (coins kam —
+        CoinLedger.record_transaction se). `CoinLedgerBusy` seedha upar jaata hai.
+        """
+        import uuid
+
+        cost = int(getattr(settings, "STREAK_FREEZE_COST_COINS", 50))
+        max_tokens = int(getattr(settings, "STREAK_FREEZE_MAX_TOKENS", 2))
+
+        with transaction.atomic():
+            streak, _created = self.select_for_update().get_or_create(user=user)
+            if streak.freeze_tokens >= max_tokens:
+                raise StreakFreezeError(
+                    f"Aap ek saath maximum {max_tokens} freeze tokens rakh sakte ho."
+                )
+            CoinLedger.objects.record_transaction(
+                user=user,
+                transaction_type=CoinLedger.TransactionType.SPEND,
+                amount=-cost,
+                # Har khareed alag hai — uuid reference, taaki do khareed
+                # kabhi ek-doosre ko idempotency se "dedupe" na kar dein.
+                reference=f"streak_freeze:{user.pk}:{uuid.uuid4()}",
+                description="Streak freeze token",
+                metadata={"kind": "streak_freeze"},
+            )
+            streak.freeze_tokens += 1
+            streak.save(update_fields=["freeze_tokens", "updated_at"])
+            return streak
+
+    def daily_goal_state(self, streak, today_seconds=0):
+        """Client ke liye plain dict (DB write nahi)."""
+        today = timezone.localdate()
+        return {
+            "goal_minutes": streak.daily_goal_minutes,
+            "options": list(getattr(settings, "STREAK_DAILY_GOAL_OPTIONS", (5, 10, 15, 20, 30, 45, 60))),
+            "today_seconds": int(today_seconds),
+            "completed": streak.goal_completed_date == today,
+            "goals_completed_total": streak.goals_completed_total,
+            "freeze_tokens": streak.freeze_tokens,
+        }
+
+    def evaluate_daily_goal(self, user):
+        """Aaj ka goal complete hua ya nahi — `DailyUsage` (foreground
+        heartbeat, already anti-inflation-bounded) ke aaj ke seconds se.
+
+        Aaj pehli baar `seconds >= daily_goal_minutes*60` hone par: aaj ka
+        goal "completed" mark hota hai (har din sirf ek baar), lifetime
+        counter +1, aur har `STREAK_GOAL_FREEZE_EVERY`-th (default 7) goal
+        pe ek free freeze token (cap se upar nahi). Goal ka koi coin reward
+        jaanbujh kar nahi hai — time client-heartbeat se aata hai, coins
+        farm na hon.
+
+        Returns dict = daily_goal_state() + `just_completed` + `freeze_awarded`.
+        Aaj already complete ho to bina lock ke seedha state laut aata hai
+        (heartbeat har ~30-60s pe isse call karta hai).
+        """
+        today = timezone.localdate()
+        every = int(getattr(settings, "STREAK_GOAL_FREEZE_EVERY", 7))
+        max_tokens = int(getattr(settings, "STREAK_FREEZE_MAX_TOKENS", 2))
+
+        def _today_seconds():
+            return DailyUsage.objects.filter(user=user, date=today).values_list(
+                "seconds", flat=True
+            ).first() or 0
+
+        quick = self.filter(user=user).first()
+        if quick is not None and quick.goal_completed_date == today:
+            return {**self.daily_goal_state(quick, _today_seconds()),
+                    "just_completed": False, "freeze_awarded": False}
+
+        just_completed = False
+        freeze_awarded = False
+        with transaction.atomic():
+            streak, _created = self.select_for_update().get_or_create(user=user)
+            seconds = _today_seconds()
+            if streak.goal_completed_date != today and seconds >= streak.daily_goal_minutes * 60:
+                streak.goal_completed_date = today
+                streak.goals_completed_total += 1
+                just_completed = True
+                if every > 0 and streak.goals_completed_total % every == 0 \
+                        and streak.freeze_tokens < max_tokens:
+                    streak.freeze_tokens += 1
+                    freeze_awarded = True
+                streak.save(update_fields=[
+                    "goal_completed_date", "goals_completed_total",
+                    "freeze_tokens", "updated_at",
+                ])
+        return {**self.daily_goal_state(streak, seconds),
+                "just_completed": just_completed, "freeze_awarded": freeze_awarded}
+
+    def set_daily_goal(self, user, minutes):
+        """Goal minutes badlo (sirf `STREAK_DAILY_GOAL_OPTIONS` me se). Naya
+        goal aaj ke already-bitaye time se pehle hi poora ho chuka ho to
+        `evaluate_daily_goal` use turant complete maan leta hai."""
+        options = tuple(getattr(settings, "STREAK_DAILY_GOAL_OPTIONS", (5, 10, 15, 20, 30, 45, 60)))
+        if minutes not in options:
+            raise ValueError(f"goal_minutes {options} me se ek hona chahiye.")
+        with transaction.atomic():
+            streak, _created = self.select_for_update().get_or_create(user=user)
+            streak.daily_goal_minutes = minutes
+            streak.save(update_fields=["daily_goal_minutes", "updated_at"])
+        return self.evaluate_daily_goal(user)
 
 
 class Streak(models.Model):
@@ -1753,6 +1947,21 @@ class Streak(models.Model):
     # nullable defensively rather than forcing a sentinel date).
     last_active_date = models.DateField(null=True, blank=True)
 
+    # Streak freeze: ek missed din ko "maaf" karne wale tokens. Coins se
+    # khareede jaate hain (`StreakManager.buy_freeze`) ya har 7th daily goal
+    # pe free milte hain; `record_activity` missed din par apne-aap kharch
+    # karta hai. Cap: settings.STREAK_FREEZE_MAX_TOKENS.
+    freeze_tokens = models.PositiveSmallIntegerField(default=0)
+    # Lifetime kitne missed din freeze ne bachaye (profile stat / analytics).
+    freezes_used_total = models.PositiveIntegerField(default=0)
+
+    # Daily goal ("aaj ka N minute challenge"): app me kitne minute bitane
+    # hain — `DailyUsage` (foreground heartbeat) se naapa jaata hai.
+    daily_goal_minutes = models.PositiveSmallIntegerField(default=10)
+    # Aakhri din jab goal poora hua — ek din me ek hi baar count karne ka guard.
+    goal_completed_date = models.DateField(null=True, blank=True)
+    goals_completed_total = models.PositiveIntegerField(default=0)
+
     updated_at = models.DateTimeField(auto_now=True)
 
     objects = StreakManager()
@@ -1777,6 +1986,10 @@ class Streak(models.Model):
         client (or the reminder task) skip a user without recomputing
         `timezone.localdate()` itself."""
         return self.last_active_date == timezone.localdate()
+
+    @property
+    def goal_completed_today(self) -> bool:
+        return self.goal_completed_date == timezone.localdate()
 
 
 class WeeklyRecap(models.Model):
@@ -2037,6 +2250,8 @@ class ContentReport(models.Model):
         SELF_HARM = "self_harm", "Self-harm"
         SCAM = "scam", "Scam or fraud"
         IMPERSONATION = "impersonation", "Pretending to be someone else"
+        # Routed to the copyright flow (copyrights app) - the app shows the notice form.
+        COPYRIGHT = "copyright", "Copyright / intellectual property"
         OTHER = "other", "Something else"
 
     class Status(models.TextChoices):
@@ -2068,3 +2283,74 @@ class ContentReport(models.Model):
 
     def __str__(self):
         return f"{self.reporter_id} reported {self.target_type}:{self.target_id} ({self.reason})"
+
+
+class AutoModerationFlag(models.Model):
+    """
+    Review-queue row created by the AUTOMATIC screen (common/moderation.py
+    word-list pass, and optionally common/moderation_ai.py) — as opposed to
+    `ContentReport`, which is a human reporting something.
+
+    FLAG, DON'T DELETE: a row here never hides or removes the content by
+    itself; it only puts it in front of a moderator (Django admin).
+
+    `target_id` is the content's primary key as text (uuid / int).
+    `text_hash` + (target_type, target_id) is unique, so re-saving the same
+    unchanged text never creates a duplicate flag, while EDITING flagged
+    text into new flagged text does create a new one.
+    `snippet` keeps only the first 200 chars — DMs especially are never
+    copied in full.
+    """
+
+    class TargetType(models.TextChoices):
+        POST = "post", "Post"
+        COMMENT = "comment", "Comment"
+        STORY = "story", "Story"
+        BIO = "bio", "Profile bio"
+        MESSAGE = "message", "Direct message"
+        FEATURE = "feature", "Feature request"
+        USER = "user", "Account"
+
+    class Source(models.TextChoices):
+        WORDLIST = "wordlist", "Word list / pattern"
+        AI = "ai", "AI model"
+        REPORTS = "reports", "Many user reports"
+
+    class Severity(models.TextChoices):
+        LOW = "low", "Low"
+        MEDIUM = "medium", "Medium"
+        HIGH = "high", "High"
+
+    class Status(models.TextChoices):
+        OPEN = "open", "Open"
+        REVIEWED = "reviewed", "Reviewed"
+        ACTIONED = "actioned", "Action taken"
+        DISMISSED = "dismissed", "Dismissed (false positive)"
+
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL, null=True, blank=True, on_delete=models.SET_NULL,
+        related_name="automod_flags",
+    )
+    target_type = models.CharField(max_length=10, choices=TargetType.choices)
+    target_id = models.CharField(max_length=64)
+    reason = models.CharField(max_length=40)
+    source = models.CharField(max_length=10, choices=Source.choices, default=Source.WORDLIST)
+    severity = models.CharField(max_length=6, choices=Severity.choices, default=Severity.MEDIUM, db_index=True)
+    snippet = models.CharField(max_length=200, blank=True, default="")
+    text_hash = models.CharField(max_length=40)
+    status = models.CharField(max_length=10, choices=Status.choices, default=Status.OPEN, db_index=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+        constraints = [
+            UniqueConstraint(fields=["target_type", "target_id", "text_hash"], name="unique_automod_flag"),
+        ]
+        indexes = [
+            models.Index(fields=["status", "-created_at"], name="automod_status_idx"),
+            models.Index(fields=["user", "status"], name="automod_user_status_idx"),
+        ]
+
+    def __str__(self):
+        return f"auto:{self.reason} on {self.target_type}:{self.target_id} ({self.status})"
+

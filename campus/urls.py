@@ -8,6 +8,7 @@ from .views import (
     assigmentsViewSet,
     AttendanceViewSet,
     CampusAnalyticsSnapshotViewSet,
+    CampusDoubtViewSet,
     CampusLiveSessionViewSet,
     CampusParentLinkViewSet,
     CampusViewSet,
@@ -18,6 +19,7 @@ from .views import (
     FeeInvoiceViewSet,
     FeePaymentViewSet,
     FeeStructureViewSet,
+    MyClassesView,
     NoticeViewSet,
     ParentLinkVerifyView,
     ResultEntryViewSet,
@@ -97,9 +99,14 @@ router.register("digital-id-cards", DigitalIDCardViewSet, basename="digital-id-c
 router.register("fee-structures", FeeStructureViewSet, basename="fee-structure")
 router.register("fee-invoices", FeeInvoiceViewSet, basename="fee-invoice")
 router.register("fee-payments", FeePaymentViewSet, basename="fee-payment")
+# T4 §F — doubts
+router.register("doubts", CampusDoubtViewSet, basename="campus-doubt")
+
 router.register("analytics-snapshots", CampusAnalyticsSnapshotViewSet, basename="campus-analytics-snapshot")
 
 urlpatterns = [
+    # T4 §E/§G — student/parent subject-class cards (before router.urls).
+    path("my/classes/", MyClassesView.as_view(), name="campus-my-classes"),
     # Listed BEFORE router.urls deliberately: the router's own
     # "parent-links/<pk>/" detail pattern would otherwise greedily
     # match "parent-links/verify/" first (treating "verify" as a pk)

@@ -19,10 +19,11 @@ SECRET_KEY = os.getenv("SECRET_KEY")
 # Defaults now fail SAFE (DEBUG off, no wildcard host) — add the real
 # values to .env instead of relying on code defaults being right.
 DEBUG = os.getenv("DEBUG", "False") == "True"
-ALLOWED_HOSTS = [
-    "*"
-]
-
+# Env-driven allowlist (comma-separated). Fails SAFE: with DEBUG=False and no
+# ALLOWED_HOSTS set, Django rejects every request (400) instead of accepting any
+# Host header. DEBUG-only wildcard below is for local dev convenience.
+#ALLOWED_HOSTS = [h.strip() for h in os.getenv("ALLOWED_HOSTS", "").split(",") if h.strip()]
+ALLOWED_HOSTS=['*']
 # NOTE (fix — local dev on a physical device): a phone/emulator on the same
 # Wi-Fi hits this server via the PC's LAN IP (e.g. 10.224.54.189), not
 # localhost/127.0.0.1 — that IP isn't in the allowlist above, so every
@@ -201,6 +202,9 @@ INSTALLED_APPS = [
     # FK to settings.AUTH_USER_MODEL, no FK into those apps) never needs
     # a strict load-order relative to them.
     'leaderboard',
+    # Help & feedback: support chat, bug reports, feature-request board.
+    'support',
+    'copyrights',  # copyright claims, takedowns, counter-notices, strikes
     # 🔧 GAP FIX — was 'assigments' (typo), which doesn't match this
     # app's real label anywhere else in the codebase (assigments/
     # models.py, assigments/bridge.py, assigments_APP_MASTER.md, etc. —
@@ -693,6 +697,24 @@ REST_FRAMEWORK = {
         "user": "100/min",
         "anon": "20/min",
         "ai_study": "20/min",
+        # T3 — `ClassroomCreateGroupView` & co. (tuitionclass/classroom_chat_views.py)
+        # always used throttle_scope="classroom_group_create" but the rate was
+        # never defined here -> ScopedRateThrottle raised ImproperlyConfigured
+        # (HTTP 500) on every call. Defined now.
+        "classroom_group_create": "20/min",
+        # Help & feedback (support/throttles.py) — writes only.
+        "support_ticket": "10/hour",
+        "support_message": "40/hour",
+        "support_bug": "10/day",
+        "support_feature": "10/day",
+        "support_vote": "60/min",
+        # Classroom scopes used by tuitionclass/views.py via ScopedRateThrottle —
+        # a scope with no rate here raises ImproperlyConfigured on first request.
+        "classroom_trial_join": "10/min",
+        "session_reaction": "120/min",
+        "session_caption": "120/min",
+        "chat_read": "120/min",
+        "parent_message_create": "10/min",
         "send_otp": "5/min",
         "verify_otp": "10/min",
         # NOTE (fix — CRITICAL, same bug class as every other scope
@@ -769,6 +791,8 @@ REST_FRAMEWORK = {
         # ~30-60 s while foregrounded; 12/min leaves headroom for 2 devices).
         "profile_activity": "30/min",
         "profile_activity_heartbeat": "12/min",
+        "profile_streak_freeze": "10/min",           # StreakFreezeBuyView
+        "profile_daily_goal": "60/min",              # DailyGoalView
         # NOTE (fix — same bug class as the scopes documented above):
         # ClassroomViewSet.share now sets throttle_scope="classroom_share"
         # via ScopedRateThrottle (see views.py) but had no rate here —
@@ -839,6 +863,9 @@ REST_FRAMEWORK = {
         "ai_classroom_copilot": "15/min",            # ClassroomCopilotThrottle -> ClassroomCopilotView
         "ai_revision_deck": "10/min",                # RevisionDeckThrottle -> RevisionDeckView
         "ai_ask_doubt": "20/min",                    # AskAIDoubtThrottle -> AskAIDoubtView (Task G15)
+        "ai_ask_doubt_image": "8/min",               # AskAIDoubtImageThrottle -> AskAIDoubtView photo doubts
+        "ai_study_buddy": "20/min",                  # StudyBuddyThrottle -> StudyBuddyView
+        "ai_study_buddy_pdf": "5/min",               # StudyBuddyPdfThrottle -> StudyBuddyView (PDF input)
         # NOTE (fix — Feature 12, Focus Mode): `views_focus.py`'s own
         # header comment suggests this scope (`FocusSessionThrottle`,
         # `UserRateThrottle`, 20/min) as an optional addition. Adding the
@@ -903,6 +930,12 @@ REST_FRAMEWORK = {
         # campus_invite.py, not after it.
         "campus_invite_code_generate": "20/min",
         "campus_invite_code_redeem": "15/min",
+        # NEW — T4 §F: CampusDoubtViewSet.create/.reply (see
+        # campus/throttles.py::CampusDoubtPostThrottle). Landed in the same
+        # change as the throttle_classes= wiring in views.py — same bug
+        # class as every NOTE above (a scope with no rate = guaranteed
+        # ImproperlyConfigured/500 on the first request).
+        "campus_doubt_post": "30/hour",
         # NOTE (fix — CRITICAL, same bug class as the scopes above):
         # assigments/throttling.py::assigmentsPublicPageThrottle sets
         # scope = "assigments_public_page" for the one AllowAny surface in the
@@ -1132,6 +1165,19 @@ STREAK_MILESTONE_BONUS_COINS = {
     100: int(os.environ.get("STREAK_MILESTONE_BONUS_COINS_100", 500)),
 }
 
+# Streak freeze + daily goal (see user_profile.models.StreakManager).
+# STREAK_FREEZE_COST_COINS   -- ek freeze token ki coin keemat.
+# STREAK_FREEZE_MAX_TOKENS   -- ek saath max kitne tokens rakh sakte hain
+#                               (ye max missed din bhi hai jo ek baar me bach sakte hain).
+# STREAK_DAILY_GOAL_OPTIONS  -- allowed daily-goal minutes; STREAK_GOAL_FREEZE_EVERY --
+#                               har itne goals pe ek free freeze token (0 = band).
+STREAK_FREEZE_COST_COINS = int(os.environ.get("STREAK_FREEZE_COST_COINS", 50))
+STREAK_FREEZE_MAX_TOKENS = int(os.environ.get("STREAK_FREEZE_MAX_TOKENS", 2))
+STREAK_DAILY_GOAL_OPTIONS = tuple(
+    int(m) for m in os.environ.get("STREAK_DAILY_GOAL_OPTIONS", "5,10,15,20,30,45,60").split(",") if m.strip()
+)
+STREAK_GOAL_FREEZE_EVERY = int(os.environ.get("STREAK_GOAL_FREEZE_EVERY", 7))
+
 # ---------------------------------------------------------------------------
 # TASK G2 (growth_and_feature_tasks.md — Daily/weekly "recap" screen):
 # user_profile.models.WeeklyRecap / user_profile.recap.generate_weekly_recap_
@@ -1334,6 +1380,26 @@ CELERY_BEAT_SCHEDULE = {
     "tuitionclass-expire-and-refund-passes": {
         "task": "tuitionclass.expire_and_refund_passes",
         "schedule": crontab(minute="*/15"),
+    },
+    # T3 — classroom chat group == class participants. Daily full sweep
+    # (adds missing / removes extra members, recreates a missing group) ...
+    "core-reconcile-classroom-groups-daily": {
+        "task": "core.reconcile_classroom_groups",
+        "schedule": crontab(hour=3, minute=30),
+    },
+    # ... and a cheap frequent sweep limited to classrooms where a pass
+    # expired in the last hour, so an expired student leaves the group within
+    # minutes instead of waiting for the daily run.
+    "core-reconcile-classroom-groups-expired": {
+        "task": "core.reconcile_classroom_groups",
+        "schedule": crontab(minute="*/15"),
+        "kwargs": {"expired_within_minutes": 60},
+    },
+    # [T4 §D] campus section chat group == section roster (daily sweep; the
+    # per-change sync is dispatched from campus.roster after each roster edit).
+    "core-reconcile-section-groups-daily": {
+        "task": "core.reconcile_section_groups",
+        "schedule": crontab(hour=3, minute=45),
     },
     # Sweeps abandoned chunked uploads (client crashed/closed mid-upload)
     # and reclaims their temp disk usage — see
@@ -1590,6 +1656,20 @@ CELERY_BEAT_SCHEDULE = {
         "task": "campus.tasks.check_assigments_ontime_streak_rewards",
         "schedule": crontab(hour=19, minute=30),
     },
+    # T4 §G — "online class starts in 5 minutes" push. Every minute (the
+    # task claims each session/occurrence atomically — `reminder_sent_at`
+    # / `TimetableReminderLog` — so a re-run or overlapping worker can
+    # never double-send). Lead time: CAMPUS_CLASS_REMINDER_LEAD_MINUTES
+    # (default 5). Timestamps are resolved in TIME_ZONE (= Celery's
+    # CELERY_TIMEZONE), same convention TimeSlot rows are authored in.
+    "campus-send-class-start-reminders": {
+        "task": "campus.tasks.send_class_start_reminders",
+        "schedule": crontab(minute="*"),
+    },
+    "campus-prune-timetable-reminder-logs": {
+        "task": "campus.tasks.prune_timetable_reminder_logs",
+        "schedule": crontab(hour=3, minute=15),
+    },
     # 🔴 REMOVED (this pass) — "campus-rollover-session" and
     # "campus-refresh-analytics-snapshot" were both registered here with
     # NO `args`/`kwargs`, but campus/tasks.py confirms both tasks take
@@ -1680,6 +1760,30 @@ CELERY_BEAT_SCHEDULE = {
         "task": "post.tasks.prune_old_post_events",
         "schedule": crontab(hour=3, minute=15),
     },
+    # T1 item 9 — post.tasks.feed_daily_metrics: yesterday's feed summary (impressions, CTR, dwell,
+    # sessions, show-fewer rate, diversity, per A/B variant) logged + cached. 02:45 = BEFORE the 03:15
+    # prune job, so the day's PostEvent rows are certainly still there.
+    "post-feed-daily-metrics": {
+        "task": "post.tasks.feed_daily_metrics",
+        "schedule": crontab(hour=2, minute=45),
+    },
+    # --- copyrights app automations (copyrights/tasks.py) ---
+    "copyrights-auto-restore-counter-notices": {
+        "task": "copyrights.auto_restore_counter_notices",
+        "schedule": 3600.0,  # hourly: counter-notice period over + no court action -> content back
+    },
+    "copyrights-expire-strikes": {
+        "task": "copyrights.expire_strikes",
+        "schedule": 6 * 3600.0,
+    },
+    "copyrights-escalate-stale-claims": {
+        "task": "copyrights.escalate_stale_claims",
+        "schedule": 3 * 3600.0,
+    },
+    "copyrights-expire-needs-info": {
+        "task": "copyrights.expire_needs_info",
+        "schedule": 12 * 3600.0,
+    },
 }
 
 # 🔧 GAP FIX — grace window ke liye, dekho message/tasks.py:
@@ -1716,7 +1820,7 @@ GROUP_SOFT_DELETE_GRACE_DAYS = int(os.getenv("GROUP_SOFT_DELETE_GRACE_DAYS", "7"
 # any doc reviewed so far that they were considered or excluded on
 # purpose; left out rather than guessed onto this list. Add them in a
 # future pass once that's an explicit decision, not a default.
-CONFIG_DRIFT_APPS = ["user_profile", "core", "assigments", "testseries", "campus"]
+CONFIG_DRIFT_APPS = ["user_profile", "core", "assigments", "testseries", "campus", "support"]
 
 # Escape hatches for the same command — intentionally left empty. Per
 # §11's own guidance, only add an entry here once a specific check has
@@ -1777,6 +1881,15 @@ TESTSERIES_CONTEXT_ACCESS = {
 # not announced here (campus "section" notifies its roster at creation instead).
 TESTSERIES_PUBLISH_HOOKS = {
     "classroom": "tuitionclass.bridge.on_testseries_published",
+}
+
+# T2 — who may EDIT the questions of a campus / class series besides its creator
+# (class-teacher / subject-teacher / admin of the section; teacher / co-teacher /
+# moderator of the classroom). Same dotted-path pattern as TESTSERIES_CONTEXT_ACCESS.
+# Fail-closed: a missing / broken resolver means "creator only".
+TESTSERIES_CONTEXT_EDITORS = {
+    "section": "campus.bridge.user_editable_testseries_context_ids",
+    "classroom": "tuitionclass.bridge.user_editable_testseries_context_ids",
 }
 
 # Public share link, e.g. "https://learnscroll.app/test/{slug}". Empty = the API
@@ -1855,6 +1968,44 @@ FEED_SEEN_LIMITS = {
     "fill_min": 20,
     "cutoff_max_age_minutes": 180,
 }
+
+# =====================================================================
+# HOME FEED DIVERSITY RE-RANK (post/feed_diversity.py) - T1 Part 1
+# Reorders ONE page so one author / one post type / one category does not
+# clump. Never drops posts, so count + pagination are unchanged. Any key
+# omitted falls back to feed_diversity.DEFAULT_DIVERSITY. Env
+# FEED_DIVERSITY_ENABLED=0 switches the whole stage off.
+#   author_gap       min positions between posts of one author   (<=1 off)
+#   max_consecutive  max same post_type in a row                 (0 off)
+#   category_gap     min positions between same category          (<=1 off)
+#   lookahead        how far down a post may be pulled up         (<=1 off)
+# =====================================================================
+FEED_DIVERSITY = {
+    "enabled": os.getenv("FEED_DIVERSITY_ENABLED", "1").strip().lower() not in ("0", "false", "no", "off"),
+    "author_gap": _env_int("FEED_DIVERSITY_AUTHOR_GAP", 3),
+    "max_consecutive": _env_int("FEED_DIVERSITY_MAX_CONSECUTIVE", 2),
+    "category_gap": _env_int("FEED_DIVERSITY_CATEGORY_GAP", 2),
+    "lookahead": _env_int("FEED_DIVERSITY_LOOKAHEAD", 8),
+}
+
+# =====================================================================
+# HOME FEED AUTHOR CAP (post/feed_diversity.py cap_pools, feed_mix.apply_author_caps)
+# T1 Part 2. Applied when the ranked pools are built, so one prolific author
+# cannot fill the whole ranked list.
+#   *_soft_cap          posts of one author beyond this are DEMOTED to the tail
+#                       of their pool (never dropped) (<=0 off)
+#   discovery_hard_cap  recommended + trending only: posts of one author beyond
+#                       this are DROPPED (0 = off, default). Dropping changes
+#                       `count`, so it is opt-in. Following is never dropped.
+# Env: FEED_AUTHOR_CAP_ENABLED=0 switches the stage off.
+# =====================================================================
+FEED_AUTHOR_CAP = {
+    "enabled": os.getenv("FEED_AUTHOR_CAP_ENABLED", "1").strip().lower() not in ("0", "false", "no", "off"),
+    "following_soft_cap": _env_int("FEED_AUTHOR_CAP_FOLLOWING_SOFT", 5),
+    "discovery_soft_cap": _env_int("FEED_AUTHOR_CAP_DISCOVERY_SOFT", 2),
+    "discovery_hard_cap": _env_int("FEED_AUTHOR_CAP_DISCOVERY_HARD", 0),
+}
+
 
 # =====================================================================
 # VIDEO WATCH-TIME RANKING (post/feed_mix.py video_watch_boost)
@@ -1977,3 +2128,125 @@ FEED_REELS = {
     "fallback": os.getenv("REELS_FALLBACK", "1").strip().lower() not in ("0", "false", "no", "off"),
     "min_pool": _env_int("REELS_MIN_POOL", 10),
 }
+
+# ---------------------------------------------------------------------------
+# T1 Parts 3-5 - exploration, A/B bucket, extra signals, educational lens,
+# candidate cache. Every block is a dict merged over the defaults in the named
+# module, so you only list what you want to change. The env switches turn a
+# whole stage off without a deploy of code.
+# ---------------------------------------------------------------------------
+def _flag(name, default="1"):
+    return os.getenv(name, default).strip().lower() not in ("0", "false", "no", "off")
+
+
+# post/feed_experiment.py - stable A/B buckets. One "default" variant = no change.
+# T1 item 7: a variant may override these sections (each merged over its settings block below):
+#   mix -> FEED_MIX_RATIOS   diversity -> FEED_DIVERSITY   author_cap -> FEED_AUTHOR_CAP
+#   quality -> FEED_QUALITY  explore -> FEED_EXPLORE  signals -> FEED_SIGNALS  context -> FEED_CONTEXT
+# Example split (overrides are merged over FEED_EXPLORE / FEED_SIGNALS / FEED_CONTEXT):
+#   "variants": [
+#       {"name": "control", "weight": 50, "overrides": {}},
+#       {"name": "more_explore", "weight": 50, "overrides": {"explore": {"share": 0.15}}},
+#   ]
+FEED_EXPERIMENT = {
+    "enabled": _flag("FEED_EXPERIMENT_ENABLED"),
+    "name": "feed_adv_v1",  # change the name to re-shuffle everyone into new buckets
+    "buckets": 100,
+    "variants": [{"name": "default", "weight": 100, "overrides": {}}],
+}
+
+# post/feed_explore.py - exploration slots (new creators / test audience).
+FEED_EXPLORE = {
+    "enabled": _flag("FEED_EXPLORE_ENABLED"),
+    "share": 0.08,
+    "new_viewer_share": 0.15,
+}
+
+# post/feed_signals.py - dwell / tap / save / share / quick-skip signals.
+FEED_SIGNALS = {
+    "enabled": _flag("FEED_SIGNALS_ENABLED"),
+    "half_life_days": 7.0,
+}
+
+# post/feed_context.py - educational lens + campus / class context.
+FEED_CONTEXT = {
+    "enabled": _flag("FEED_CONTEXT_ENABLED"),
+    "study_hours": (16, 23),  # local time (TIME_ZONE)
+}
+
+# post/feed_cache.py - per-user candidate cache (Redis when REDIS_URL is set).
+FEED_CANDIDATE_CACHE = {
+    "enabled": _flag("FEED_CANDIDATE_CACHE_ENABLED"),
+    "ttl_seconds": int(os.getenv("FEED_CANDIDATE_CACHE_TTL", "30")),
+}
+
+# =====================================================================
+# post/feed_quality.py - QUALITY / SAFETY GATES  (T1 item 6)
+#   reported_hard   reported_count >= this -> post is out of EVERY source incl. following (0 = off)
+#   reported_soft   reported_count >= this -> demoted to the tail of discovery pools (0 = off)
+#   min_text_chars  plain text post, no media, shorter than this -> demoted (0 = off)
+#   max_links / max_char_run / max_caps_ratio / max_hashtags / repeat_word_ratio -> "spam"
+#   duplicate_max   same author + same text more than this many times in duplicate_window_days
+#                   -> "repeated_text"
+#   spam_action     what spam / repeated_text become: "drop" (default) or "demote"
+# Discovery pools (recommended + trending + exploration) only - following is an explicit choice.
+# Env: FEED_QUALITY_ENABLED=0 switches every gate off, =1 forces them on (also under tests).
+# Under `manage.py test` / pytest (TESTING) the gates default to OFF: older feed tests create many
+# tiny / same-text posts ("p0", "hello") the spam rules would -- correctly -- drop.
+# post/tests_feed_quality.py switches them on with override_settings.
+# Blocked / muted / hidden authors are enforced elsewhere (feed_mix + services), always on.
+# =====================================================================
+FEED_QUALITY = {
+    "enabled": _flag("FEED_QUALITY_ENABLED", "0" if TESTING else "1"),
+    "reported_hard": _env_int("FEED_QUALITY_REPORTED_HARD", 10),
+    "reported_soft": _env_int("FEED_QUALITY_REPORTED_SOFT", 3),
+    "min_text_chars": _env_int("FEED_QUALITY_MIN_TEXT_CHARS", 15),
+    "duplicate_max": _env_int("FEED_QUALITY_DUPLICATE_MAX", 2),
+    "duplicate_window_days": _env_int("FEED_QUALITY_DUPLICATE_WINDOW_DAYS", 7),
+    "spam_action": os.getenv("FEED_QUALITY_SPAM_ACTION", "drop").strip().lower(),
+}
+
+
+# ---------------------------------------------------------------------------
+# Auto-moderation (common/moderation.py, user_profile/automod.py)
+# Posts, comments, stories, bios and DMs are screened on save and, if they
+# look abusive/spammy, added to the admin review queue
+# (user_profile.AutoModerationFlag). FLAG-ONLY: nothing is hidden/deleted.
+#   AUTOMOD_SCREEN_DMS   screen private messages too (default True). Turn off
+#                        if you decide DMs must never be scanned.
+#   AUTOMOD_AI_ENABLED   optional AI second pass (Celery, after the word-list
+#                        pass). Needs ANTHROPIC_API_KEY. Default off.
+#   MODERATION_PROFANITY_WORDS  override/extend the word list without a deploy
+#                        (falls back to TUITIONCLASS_PROFANITY_WORDS).
+# ---------------------------------------------------------------------------
+AUTOMOD_SCREEN_DMS = os.getenv("AUTOMOD_SCREEN_DMS", "true").lower() == "true"
+AUTOMOD_AI_ENABLED = os.getenv("AUTOMOD_AI_ENABLED", "false").lower() == "true"
+AUTOMOD_AI_MODEL = os.getenv("AUTOMOD_AI_MODEL", "claude-haiku-5-5")
+AUTOMOD_AI_TIMEOUT = int(os.getenv("AUTOMOD_AI_TIMEOUT", "5"))
+ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
+
+# ---------------------------------------------------------------------------
+# COPYRIGHTS app (copyrights/services.py has the full explanation).
+#   COPYRIGHT_AUTO_HOLD            hide content the moment a COMPLETE notice is filed (reversible)
+#   COPYRIGHT_COUNTER_WAIT_DAYS    days before content is auto-restored after a counter-notice
+#   COPYRIGHT_STRIKE_DAYS          how long a strike counts
+#   COPYRIGHT_RESTRICT_AT / _REVIEW_AT   active strikes -> uploads blocked / termination review
+#   COPYRIGHT_SLA_HOURS            untouched claims are escalated to L2 after this
+#   COPYRIGHT_NEEDS_INFO_DAYS      claim closed if the claimant never answers
+#   COPYRIGHT_CLAIMS_PER_DAY / COPYRIGHT_BAD_FAITH_LIMIT   abuse limits for claimants
+#   COPYRIGHT_HIGH_REACH_FOLLOWERS claims against bigger accounts need an L2 decision
+# REPORT_* = automation on user reports (user_profile/report_automation.py).
+# ---------------------------------------------------------------------------
+COPYRIGHT_AUTO_HOLD = os.getenv("COPYRIGHT_AUTO_HOLD", "true").lower() == "true"
+COPYRIGHT_COUNTER_WAIT_DAYS = int(os.getenv("COPYRIGHT_COUNTER_WAIT_DAYS", 10))
+COPYRIGHT_STRIKE_DAYS = int(os.getenv("COPYRIGHT_STRIKE_DAYS", 180))
+COPYRIGHT_RESTRICT_AT = int(os.getenv("COPYRIGHT_RESTRICT_AT", 2))
+COPYRIGHT_REVIEW_AT = int(os.getenv("COPYRIGHT_REVIEW_AT", 3))
+COPYRIGHT_SLA_HOURS = int(os.getenv("COPYRIGHT_SLA_HOURS", 48))
+COPYRIGHT_NEEDS_INFO_DAYS = int(os.getenv("COPYRIGHT_NEEDS_INFO_DAYS", 14))
+COPYRIGHT_CLAIMS_PER_DAY = int(os.getenv("COPYRIGHT_CLAIMS_PER_DAY", 10))
+COPYRIGHT_BAD_FAITH_LIMIT = int(os.getenv("COPYRIGHT_BAD_FAITH_LIMIT", 3))
+COPYRIGHT_HIGH_REACH_FOLLOWERS = int(os.getenv("COPYRIGHT_HIGH_REACH_FOLLOWERS", 10000))
+REPORT_HOLD_THRESHOLD_SEVERE = int(os.getenv("REPORT_HOLD_THRESHOLD_SEVERE", 3))
+REPORT_HOLD_THRESHOLD_ANY = int(os.getenv("REPORT_HOLD_THRESHOLD_ANY", 8))
+REPORT_UNRELIABLE_DISMISSED = int(os.getenv("REPORT_UNRELIABLE_DISMISSED", 10))

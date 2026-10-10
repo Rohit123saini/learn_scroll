@@ -87,6 +87,7 @@ from .views import (
     # Feed feedback controls (Part 2): Show fewer + Why am I seeing this.
     ShowFewerAPIView,
     FeedFeedbackListAPIView,
+    FeedMetricsAPIView,
     FeedFeedbackDeleteAPIView,
     WhyAmISeeingThisAPIView,
     serve_media_with_range,
@@ -120,6 +121,7 @@ urlpatterns = [
     # Feed feedback controls (Part 2) - see ShowFewerAPIView / WhyAmISeeingThisAPIView.
     path("<uuid:post_id>/show-fewer/", ShowFewerAPIView.as_view(), name="post-show-fewer"),
     path("<uuid:post_id>/why/", WhyAmISeeingThisAPIView.as_view(), name="post-why"),
+    path("feed/metrics/", FeedMetricsAPIView.as_view(), name="post-feed-metrics"),
     path("feedback/", FeedFeedbackListAPIView.as_view(), name="post-feedback-list"),
     path("feedback/<uuid:feedback_id>/", FeedFeedbackDeleteAPIView.as_view(), name="post-feedback-delete"),
     # TASK 4 — Music tab (media_edit_screen.dart / auto_edit_screen.dart)

@@ -383,7 +383,10 @@ from .parent_link_views import (
 # APIViews, so — same as dashboard/, my-earnings/, my-progress/,
 # notification-preferences/me/ below — they need their own explicit
 # path(), router.register() won't pick them up.
-from .classroom_chat_views import ClassroomCreateGroupView, ClassroomGroupStatusView
+from .classroom_chat_views import (
+    ClassroomCreateGroupView, ClassroomGroupOpenView, ClassroomGroupRetryView, ClassroomGroupStatusView,
+    ClassroomGroupToggleView,
+)
 from .attendance_views import (
     ClassroomAttendanceSummaryView,
     ClassroomParentsListView,
@@ -504,6 +507,10 @@ urlpatterns = [
         ClassroomGroupStatusView.as_view(),
         name="classroom-group-status",
     ),
+    # T3 — student-facing "Open group", teacher retry + on/off toggle.
+    path("classrooms/<int:classroom_id>/group/open/", ClassroomGroupOpenView.as_view(), name="classroom-group-open"),
+    path("classrooms/<int:classroom_id>/group/retry/", ClassroomGroupRetryView.as_view(), name="classroom-group-retry"),
+    path("classrooms/<int:classroom_id>/group/toggle/", ClassroomGroupToggleView.as_view(), name="classroom-group-toggle"),
     # NEW (Task 10 fix) — Phase 2: teacher generates a parent-access code
     # for one participant. classroom_id matches the int convention every
     # other classrooms/<...>/ path in this file uses (see TASK 15 fix

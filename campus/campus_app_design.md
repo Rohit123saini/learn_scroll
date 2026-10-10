@@ -2567,3 +2567,11 @@ already built:
    relevant section(s) — including the migration order in §23 and the
    permission matrix row in §20 — as part of landing the feature, not as a
    follow-up.
+
+
+## T4 §E / §F / §G (added)
+
+- **§E Visibility** — `campus/visibility.py`; students/parents see only their own current-session section and own records (details: `TASK_T4_EFG_STATUS.md`).
+- **§G Online/offline** — `TimetableEntry.mode`, `CampusLiveSession.mode`; students never receive the time of an offline class; `send_class_start_reminders` (beat, every minute) sends `campus_class_starting` 5 min before ONLINE classes.
+- **§F Doubts** — `CampusDoubt`, `CampusDoubtReply`, `/campus/doubts/`; private by default, optional per-campus public toggle.
+- New campus flags: `doubts_enabled`, `doubts_public_allowed`, `class_reminders_enabled`.

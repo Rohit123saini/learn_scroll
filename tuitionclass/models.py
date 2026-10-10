@@ -500,7 +500,13 @@ class Classroom(models.Model):
     # NOTE: adding these fields requires a migration
     # (`manage.py makemigrations tuitionclass`) before they take effect.
     # ---------------------------------------------------------------------
-    chat_group_enabled = models.BooleanField(default=False)
+    # T3 — now default True: every new classroom gets its chat group
+    # automatically (post_save signal -> core.chat_sync "create"). The teacher
+    # can switch it off (POST classrooms/<id>/group/toggle/ -> the group is
+    # ARCHIVED, never deleted) and on again (archived group is restored).
+    # `chat_group_enabled=True` + `linked_conversation_id=None` just means
+    # "wanted, not created yet" (retry / backfill / reconcile fixes it).
+    chat_group_enabled = models.BooleanField(default=True)
     linked_conversation_id = models.UUIDField(null=True, blank=True)
 
     created_at = models.DateTimeField(auto_now_add=True)
