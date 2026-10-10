@@ -217,17 +217,27 @@ class PostMediaCounter extends StatelessWidget {
 class PostMediaIconButton extends StatelessWidget {
   final IconData icon;
   final VoidCallback onTap;
-  const PostMediaIconButton({super.key, required this.icon, required this.onTap});
+
+  /// Screen-reader label (icon-only button, so without this TalkBack/VoiceOver
+  /// announces nothing useful).
+  final String? label;
+  const PostMediaIconButton({super.key, required this.icon, required this.onTap, this.label});
 
   @override
   Widget build(BuildContext context) {
-    return InkWell(
+    return Semantics(
+      button: true,
+      label: label,
+      excludeSemantics: label != null,
       onTap: onTap,
-      borderRadius: BorderRadius.circular(20),
-      child: Container(
-        padding: const EdgeInsets.all(7),
-        decoration: BoxDecoration(color: Colors.black54, borderRadius: BorderRadius.circular(20)),
-        child: Icon(icon, color: Colors.white, size: 18),
+      child: InkWell(
+        onTap: onTap,
+        borderRadius: BorderRadius.circular(20),
+        child: Container(
+          padding: const EdgeInsets.all(7),
+          decoration: BoxDecoration(color: Colors.black54, borderRadius: BorderRadius.circular(20)),
+          child: Icon(icon, color: Colors.white, size: 18),
+        ),
       ),
     );
   }

@@ -72,6 +72,37 @@ class ApiService {
     }
   }
 
+  // ================= DATE OF BIRTH (minor-safety) =================
+  static String dobToIso(DateTime d) =>
+      "${d.year.toString().padLeft(4, '0')}-${d.month.toString().padLeft(2, '0')}-${d.day.toString().padLeft(2, '0')}";
+
+  /// One-time DOB entry for accounts that have none (Google signups, older
+  /// accounts). Returns `is_private` as the server now has it so the caller
+  /// can tell a minor that the account was made private.
+  Future<bool> setDateOfBirth(DateTime dob) async {
+    final token = await AuthService.getToken();
+    if (token == null) throw Exception("Not logged in");
+
+    final response = await http.post(
+      Uri.parse("${Api.baseUrl}/login/auth/set-dob/"),
+      headers: {
+        "Content-Type": "application/json",
+        "Authorization": "Bearer $token",
+      },
+      body: jsonEncode({"date_of_birth": dobToIso(dob)}),
+    );
+    final data = jsonDecode(response.body);
+
+    if (response.statusCode == 200) return data["is_private"] as bool? ?? false;
+    if (response.statusCode == 409) return false; // already set — nothing to do
+    throw Exception(
+      (data["date_of_birth"] is List ? data["date_of_birth"][0] : null) ??
+          data["message"] ??
+          data["detail"] ??
+          "Failed to save date of birth",
+    );
+  }
+
   // ================= SEND OTP =================
   Future<void> sendOtp(String emailOrPhone) async {
     final response = await http.post(
@@ -113,6 +144,7 @@ class ApiService {
     String password,
     String confirmPassword,
     String? phone,
+    DateTime dateOfBirth,
   ) async {
     // Phone is optional — send null (omitted key would work too, but
     // explicit null is clearer) instead of an empty string, so the
@@ -130,6 +162,8 @@ class ApiService {
         "password": password,
         "confirm_password": confirmPassword,
         "phone": (trimmedPhone == null || trimmedPhone.isEmpty) ? null : trimmedPhone,
+        // Minor-safety: required. Backend refuses under-13 and makes under-18 accounts private.
+        "date_of_birth": ApiService.dobToIso(dateOfBirth),
       }),
     );
 

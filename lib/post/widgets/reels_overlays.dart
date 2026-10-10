@@ -406,6 +406,18 @@ class _WhySheetState extends State<_WhySheet> {
         return Icons.group_outlined;
       case 'popular':
         return Icons.local_fire_department_outlined;
+      // T1 Parts 3-4 — exploration, behaviour and the educational lens
+      case 'new_creator':
+        return Icons.auto_awesome_outlined;
+      case 'educational_topic':
+      case 'study_time':
+        return Icons.school_outlined;
+      case 'campus_context':
+      case 'class_context':
+        return Icons.apartment_outlined;
+      case 'engaged_author':
+      case 'author_affinity':
+        return Icons.timer_outlined;
       case 'own_post':
         return Icons.person_outline_rounded;
       default:

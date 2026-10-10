@@ -5,6 +5,7 @@ import 'package:http/http.dart' as http;
 import '../../utils/api.dart';
 import '../../services/auth_service.dart';
 import '../models/campus_models.dart';
+import '../models/campus_t4_models.dart';
 
 // ============================================================
 // CAMPUS — API SERVICE
@@ -32,7 +33,12 @@ const String _kSubjectTeacherPath = 'subject-teacher-assigmentss';
 class CampusApiException implements Exception {
   final String message;
   final int? statusCode;
-  CampusApiException(this.message, {this.statusCode});
+  // [T4] stable machine code from the backend envelope ("section_full",
+  // "already_enrolled", "roll_taken", ...), when present.
+  final String? code;
+  CampusApiException(this.message, {this.statusCode, this.code});
+
+  bool get isSectionFull => code == 'section_full';
 
   bool get isForbidden => statusCode == 403;
   bool get isNotFound => statusCode == 404;
@@ -90,8 +96,10 @@ class CampusService {
     // se user ko kuch samajh nahi aata, "Aap is section ke class teacher
     // nahi hain" se aata hai.
     String message = 'Request failed (${r.statusCode})';
+    String? code;
     try {
       final decoded = jsonDecode(utf8.decode(r.bodyBytes));
+      if (decoded is Map && decoded['code'] is String) code = decoded['code'] as String;
       if (decoded is Map && decoded['detail'] != null) {
         message = decoded['detail'].toString();
       } else if (decoded is Map && decoded.isNotEmpty) {
@@ -102,7 +110,7 @@ class CampusService {
     } catch (_) {
       // body JSON nahi tha — default message hi theek hai
     }
-    throw CampusApiException(message, statusCode: r.statusCode);
+    throw CampusApiException(message, statusCode: r.statusCode, code: code);
   }
 
   static Future<List<T>> _list<T>(
@@ -129,6 +137,18 @@ class CampusService {
     return decoded is Map ? Map<String, dynamic>.from(decoded) : <String, dynamic>{};
   }
 
+  static Future<Map<String, dynamic>> _getOne(String path) async {
+    final r = await http.get(Uri.parse('$_base/$path/'), headers: await _headers()).timeout(_timeout);
+    if (r.statusCode != 200) _fail(r);
+    final decoded = jsonDecode(utf8.decode(r.bodyBytes));
+    return decoded is Map ? Map<String, dynamic>.from(decoded) : <String, dynamic>{};
+  }
+
+  static Future<void> _delete(String path) async {
+    final r = await http.delete(Uri.parse('$_base/$path/'), headers: await _headers()).timeout(_timeout);
+    if (r.statusCode != 200 && r.statusCode != 204) _fail(r);
+  }
+
   static Future<Map<String, dynamic>> _patch(String path, Map<String, dynamic> body) async {
     final r = await http
         .patch(Uri.parse('$_base/$path/'), headers: await _headers(), body: jsonEncode(body))
@@ -137,6 +157,120 @@ class CampusService {
     final decoded = jsonDecode(utf8.decode(r.bodyBytes));
     return decoded is Map ? Map<String, dynamic>.from(decoded) : <String, dynamic>{};
   }
+
+  static Future<Map<String, dynamic>> _getMap(String path, {Map<String, String>? query}) async {
+    final uri = Uri.parse('$_base/$path/').replace(
+      queryParameters: (query == null || query.isEmpty) ? null : query,
+    );
+    final r = await http.get(uri, headers: await _headers()).timeout(_timeout);
+    if (r.statusCode != 200) _fail(r);
+    final decoded = jsonDecode(utf8.decode(r.bodyBytes));
+    return decoded is Map ? Map<String, dynamic>.from(decoded) : <String, dynamic>{};
+  }
+
+  // ==========================================================
+  // [T4 §A] Participants (role-scoped by the backend: admin = campus,
+  // principal/HOD = their department, class teacher = own section, others 403)
+  // ==========================================================
+
+  static Future<ParticipantsPage> participants(
+    String campusId, {
+    String? category,
+    String? q,
+    String? departmentId,
+    String? classId,
+    String? sectionId,
+    int page = 1,
+    int pageSize = 30,
+  }) async {
+    final query = <String, String>{
+      'page': '$page',
+      'page_size': '$pageSize',
+      if (category != null && category.isNotEmpty) 'category': category,
+      if (q != null && q.trim().isNotEmpty) 'q': q.trim(),
+      if (departmentId != null) 'department': departmentId,
+      if (classId != null) 'class': classId,
+      if (sectionId != null) 'section': sectionId,
+    };
+    return ParticipantsPage.fromJson(await _getMap('campuses/$campusId/participants', query: query));
+  }
+
+  static Future<Map<String, dynamic>> participantsSummary(String campusId, {String? sectionId}) =>
+      _getMap('campuses/$campusId/participants/summary',
+          query: {if (sectionId != null) 'section': sectionId});
+
+  // ==========================================================
+  // [T4 §B] Control panel (admin / principal only)
+  // ==========================================================
+
+  static Future<Map<String, dynamic>> controlPanelOverview(String campusId) =>
+      _getMap('campuses/$campusId/control-panel/overview');
+
+  static Future<Map<String, dynamic>> myPermissions(String campusId) =>
+      _getMap('campuses/$campusId/my-permissions');
+
+  static Future<Map<String, dynamic>> assignmentMatrix(String campusId) =>
+      _getMap('campuses/$campusId/assignment-matrix');
+
+  /// `assignments`: [{staff, section, kind: 'class_teacher'|'subject', subject?}].
+  /// Direct assign (no approval). `dryRun` previews conflicts/warnings only.
+  static Future<Map<String, dynamic>> bulkAssign(
+    String campusId,
+    List<Map<String, dynamic>> assignments, {
+    bool dryRun = false,
+    bool replace = false,
+  }) =>
+      _post('campuses/$campusId/assignment-matrix/bulk-assign',
+          {'assignments': assignments, 'dry_run': dryRun, 'replace': replace});
+
+  /// CSV bulk import. kind: staff | students | subjects | enrollments.
+  /// Defaults to dry-run (validate only) — pass `dryRun: false` to apply.
+  static Future<Map<String, dynamic>> bulkImport(
+    String campusId, {
+    required String kind,
+    required List<int> bytes,
+    String filename = 'import.csv',
+    bool dryRun = true,
+    bool overrideCapacity = false,
+  }) async {
+    final req = http.MultipartRequest('POST', Uri.parse('$_base/campuses/$campusId/bulk-import/'))
+      ..headers.addAll(await _headers(json: false))
+      ..fields['kind'] = kind
+      ..fields['dry_run'] = dryRun.toString()
+      ..fields['override_capacity'] = overrideCapacity.toString()
+      ..files.add(http.MultipartFile.fromBytes('file', bytes, filename: filename));
+    final streamed = await req.send().timeout(const Duration(seconds: 60));
+    final r = await http.Response.fromStream(streamed);
+    if (r.statusCode != 200) _fail(r);
+    final decoded = jsonDecode(utf8.decode(r.bodyBytes));
+    return decoded is Map ? Map<String, dynamic>.from(decoded) : <String, dynamic>{};
+  }
+
+  static Future<Map<String, dynamic>> auditLog(String campusId, {int page = 1, String? action}) =>
+      _getMap('campuses/$campusId/audit-log', query: {
+        'page': '$page',
+        if (action != null && action.isNotEmpty) 'action': action,
+      });
+
+  // ==========================================================
+  // [T4 §D] Section dashboard + roster operations
+  // ==========================================================
+
+  static Future<Map<String, dynamic>> sectionDashboard(String sectionId) =>
+      _getMap('sections/$sectionId/dashboard');
+
+  /// 400 + `CampusApiException.isSectionFull` when the section is full;
+  /// admin/principal can retry with `overrideCapacity: true`.
+  static Future<Map<String, dynamic>> transferEnrollment(
+    String enrollmentId,
+    String targetSectionId, {
+    bool overrideCapacity = false,
+  }) =>
+      _post('enrollments/$enrollmentId/transfer',
+          {'section': targetSectionId, 'override_capacity': overrideCapacity});
+
+  static Future<Map<String, dynamic>> removeEnrollment(String enrollmentId, {String reason = ''}) =>
+      _post('enrollments/$enrollmentId/remove', {'reason': reason});
 
   // ==========================================================
   // Phase 1 — hierarchy
@@ -1115,4 +1249,52 @@ class CampusService {
       '${d.year.toString().padLeft(4, '0')}-'
       '${d.month.toString().padLeft(2, '0')}-'
       '${d.day.toString().padLeft(2, '0')}';
+
+  // ==========================================================
+  // T4 §E/§G — student/parent "my classes"
+  // ==========================================================
+
+  /// Subject-class cards for my (or my child's) current section(s).
+  /// Offline classes come back with NO time (`NextSession.timeHidden`).
+  static Future<List<MyClassCard>> myClasses({String? campusId, String? studentId}) =>
+      _list('my/classes', MyClassCard.fromJson, query: {
+        if (campusId != null) 'campus': campusId,
+        if (studentId != null) 'student': studentId,
+      });
+
+  // ==========================================================
+  // T4 §F — doubts
+  // ==========================================================
+
+  static Future<List<Doubt>> doubts({String? sectionId, String? subjectId, String? status, bool mine = false}) =>
+      _list('doubts', Doubt.fromJson, query: {
+        if (sectionId != null) 'section': sectionId,
+        if (subjectId != null) 'subject': subjectId,
+        if (status != null) 'status': status,
+        if (mine) 'mine': '1',
+      });
+
+  static Future<Doubt> doubt(String id) async => Doubt.fromJson(await _getOne('doubts/$id'));
+
+  static Future<Doubt> postDoubt({
+    required String sectionId,
+    required String subjectId,
+    required String text,
+    bool isPublic = false,
+  }) async =>
+      Doubt.fromJson(await _post('doubts', {
+        'section': sectionId,
+        'subject': subjectId,
+        'text': text,
+        'is_public': isPublic,
+      }));
+
+  static Future<DoubtReply> replyToDoubt(String doubtId, String text) async =>
+      DoubtReply.fromJson(await _post('doubts/$doubtId/reply', {'text': text}));
+
+  static Future<Doubt> resolveDoubt(String id) async => Doubt.fromJson(await _post('doubts/$id/resolve', {}));
+  static Future<Doubt> reopenDoubt(String id) async => Doubt.fromJson(await _post('doubts/$id/reopen', {}));
+  static Future<Doubt> setDoubtPublic(String id, bool value) async =>
+      Doubt.fromJson(await _post('doubts/$id/set-public', {'is_public': value}));
+  static Future<void> deleteDoubt(String id) => _delete('doubts/$id');
 }

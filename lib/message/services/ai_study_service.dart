@@ -1,4 +1,5 @@
 import 'dart:convert';
+import 'dart:typed_data';
 import 'package:http/http.dart' as http;
 import 'package:shared_preferences/shared_preferences.dart';
 import 'call_api_service.dart';
@@ -287,23 +288,50 @@ class AiStudyService {
   ///   POST $baseUrl/message/ai/ask-doubt/
   ///   response: { "answer": "..." }
   /// Throttled 20/min/user server-side (AskAIDoubtThrottle).
+  ///
+  /// `imageBytes` (optional) — photo of the problem (JPEG/PNG/WEBP, max 5 MB;
+  /// compress client-side before passing, e.g. image_picker maxWidth:1600,
+  /// imageQuality:85). Jab photo ho to request multipart jaati hai aur
+  /// `question` khaali ho sakta hai — server "Solve this step by step"
+  /// default lagata hai. Photo doubts ka alag tighter rate-limit hai
+  /// (8/min) — 429 pe wahi "thodi der baad try karo" message aata hai.
   static Future<String> askDoubt({
-    required String question,
+    String question = '',
     String contextType = 'general',
     String contextText = '',
     String? sourceId,
+    Uint8List? imageBytes,
+    String imageName = 'doubt.jpg',
   }) async {
     try {
-      final res = await http.post(
-        Uri.parse("$_baseUrl/message/ai/ask-doubt/"),
-        headers: await _getHeaders(),
-        body: jsonEncode({
-          "question": question,
-          "context_type": contextType,
-          "context_text": contextText,
-          if (sourceId != null && sourceId.isNotEmpty) "source_id": sourceId,
-        }),
-      );
+      final headers = await _getHeaders();
+      late final http.Response res;
+      if (imageBytes != null) {
+        // Multipart: Content-Type boundary http package khud lagata hai,
+        // isliye JSON wala Content-Type header hata do.
+        final req = http.MultipartRequest(
+          'POST',
+          Uri.parse("$_baseUrl/message/ai/ask-doubt/"),
+        )
+          ..headers.addAll(headers..remove('Content-Type'))
+          ..fields['question'] = question
+          ..fields['context_type'] = contextType
+          ..fields['context_text'] = contextText;
+        if (sourceId != null && sourceId.isNotEmpty) req.fields['source_id'] = sourceId;
+        req.files.add(http.MultipartFile.fromBytes('image', imageBytes, filename: imageName));
+        res = await http.Response.fromStream(await req.send());
+      } else {
+        res = await http.post(
+          Uri.parse("$_baseUrl/message/ai/ask-doubt/"),
+          headers: headers,
+          body: jsonEncode({
+            "question": question,
+            "context_type": contextType,
+            "context_text": contextText,
+            if (sourceId != null && sourceId.isNotEmpty) "source_id": sourceId,
+          }),
+        );
+      }
       final data = jsonDecode(res.body);
       if (res.statusCode == 200) {
         return (data['answer'] ?? '').toString();
@@ -316,6 +344,58 @@ class AiStudyService {
       }
     } catch (e) {
       throw Exception("Ask AI error: $e");
+    }
+  }
+
+  // ==========================================================================
+  // AI Study Buddy — one-tap "Explain simply / Hindi me samjhao / Quiz banao /
+  // 5 flashcards". Backend: POST $baseUrl/message/ai/study-buddy/
+  // ==========================================================================
+
+  /// `mode` — 'explain' | 'quiz' | 'flashcards'.
+  /// `language` — 'en' | 'hi' | 'hinglish'.
+  /// `content` — post caption / notes text (min ~10 chars agar pdf nahi).
+  /// `pdfBytes` — optional PDF (max 10 MB; alag 5/min rate-limit).
+  /// Response (mode ke hisaab se): {mode, language, text} |
+  /// {mode, language, questions:[{question,options,answer}]} |
+  /// {mode, language, cards:[{front,back}]}
+  static Future<Map<String, dynamic>> studyBuddy({
+    required String mode,
+    String language = 'en',
+    String content = '',
+    Uint8List? pdfBytes,
+  }) async {
+    try {
+      final headers = await _getHeaders();
+      final uri = Uri.parse("$_baseUrl/message/ai/study-buddy/");
+      late final http.Response res;
+      if (pdfBytes != null) {
+        final req = http.MultipartRequest('POST', uri)
+          ..headers.addAll(headers..remove('Content-Type'))
+          ..fields['mode'] = mode
+          ..fields['language'] = language
+          ..fields['content'] = content;
+        req.files.add(http.MultipartFile.fromBytes('pdf', pdfBytes, filename: 'notes.pdf'));
+        res = await http.Response.fromStream(await req.send());
+      } else {
+        res = await http.post(
+          uri,
+          headers: headers,
+          body: jsonEncode({"mode": mode, "language": language, "content": content}),
+        );
+      }
+      final data = jsonDecode(utf8.decode(res.bodyBytes));
+      if (res.statusCode == 200) {
+        return Map<String, dynamic>.from(data as Map);
+      } else if (res.statusCode == 429) {
+        throw Exception("Bahut zyada requests — thodi der baad try karo");
+      } else if (res.statusCode == 503) {
+        throw Exception("AI abhi available nahi hai");
+      } else {
+        throw Exception((data as Map)['error'] ?? "Study Buddy failed");
+      }
+    } catch (e) {
+      throw Exception("Study Buddy error: $e");
     }
   }
 

@@ -455,7 +455,7 @@ class _CommentBottomSheetState extends State<CommentBottomSheet> {
               Padding(
                 padding: EdgeInsets.only(left: 10, right: 10, bottom: MediaQuery.of(context).viewPadding.bottom + 10, top: 8),
                 child: Row(children: [
-                  IconButton(
+                  IconButton(tooltip: 'Add', 
                     icon: Icon(Icons.add_circle_rounded, color: isUploading ? cs.onSurfaceVariant.withOpacity(0.4) : cs.primary, size: 26),
                     onPressed: isUploading ? null : _openOptions,
                   ),
@@ -1042,7 +1042,7 @@ class _CommentTileState extends State<CommentTile> {
             ]),
           ),
           if (_canShowMenu)
-            IconButton(
+            IconButton(tooltip: 'More options', 
               icon: Icon(Icons.more_horiz_rounded, size: 18, color: cs.onSurfaceVariant),
               onPressed: () => _showOptions(),
               padding: EdgeInsets.zero,
@@ -1105,7 +1105,7 @@ class _CommentImageFullScreen extends StatelessWidget {
         backgroundColor: Colors.black,
         iconTheme: const IconThemeData(color: Colors.white),
         title: Text(fileName, style: const TextStyle(color: Colors.white, fontSize: 14), overflow: TextOverflow.ellipsis),
-        actions: [IconButton(icon: const Icon(Icons.open_in_new_rounded, color: Colors.white), onPressed: () => _open(url, fileName, context))],
+        actions: [IconButton(tooltip: 'Open', icon: const Icon(Icons.open_in_new_rounded, color: Colors.white), onPressed: () => _open(url, fileName, context))],
       ),
       body: SizedBox(
         width: double.infinity,
@@ -1184,7 +1184,7 @@ class _CommentVideoFullScreenState extends State<_CommentVideoFullScreen> {
                 backgroundColor: Colors.black54,
                 iconTheme: const IconThemeData(color: Colors.white),
                 title: Text(widget.fileName, style: const TextStyle(color: Colors.white, fontSize: 14), overflow: TextOverflow.ellipsis),
-                actions: [IconButton(icon: const Icon(Icons.close_rounded, color: Colors.white), onPressed: () => Navigator.pop(context))],
+                actions: [IconButton(tooltip: 'Close', icon: const Icon(Icons.close_rounded, color: Colors.white), onPressed: () => Navigator.pop(context))],
               ),
             ),
           if (_showControls && _initialized)
@@ -1199,15 +1199,15 @@ class _CommentVideoFullScreenState extends State<_CommentVideoFullScreen> {
                   VideoProgressIndicator(_controller, allowScrubbing: true, colors: const VideoProgressColors(playedColor: Color(0xFF8B7CFF))),
                   const SizedBox(height: 12),
                   Row(children: [
-                    IconButton(
+                    IconButton(tooltip: _controller.value.isPlaying ? 'Pause' : 'Play', 
                       icon: Icon(_controller.value.isPlaying ? Icons.pause_circle_filled_rounded : Icons.play_circle_filled_rounded, color: Colors.white, size: 44),
                       onPressed: () { setState(() { _controller.value.isPlaying ? _controller.pause() : _controller.play(); }); _startHideTimer(); },
                     ),
                     Text(_format(_controller.value.position), style: const TextStyle(color: Colors.white, fontSize: 12)),
                     Text(' / ${_format(_controller.value.duration)}', style: const TextStyle(color: Colors.white54, fontSize: 12)),
                     const Spacer(),
-                    IconButton(icon: const Icon(Icons.replay_10_rounded, color: Colors.white), onPressed: () { _controller.seekTo(_controller.value.position - const Duration(seconds: 10)); _startHideTimer(); }),
-                    IconButton(icon: const Icon(Icons.forward_10_rounded, color: Colors.white), onPressed: () { _controller.seekTo(_controller.value.position + const Duration(seconds: 10)); _startHideTimer(); }),
+                    IconButton(tooltip: 'Back 10 seconds', icon: const Icon(Icons.replay_10_rounded, color: Colors.white), onPressed: () { _controller.seekTo(_controller.value.position - const Duration(seconds: 10)); _startHideTimer(); }),
+                    IconButton(tooltip: 'Forward 10 seconds', icon: const Icon(Icons.forward_10_rounded, color: Colors.white), onPressed: () { _controller.seekTo(_controller.value.position + const Duration(seconds: 10)); _startHideTimer(); }),
                   ]),
                 ]),
               ),

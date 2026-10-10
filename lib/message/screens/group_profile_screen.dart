@@ -1312,7 +1312,7 @@ class _GroupProfileScreenState extends State<GroupProfileScreen> {
             Text(_inviteLink, style: TextStyle(fontSize: 12, color: Theme.of(context).colorScheme.onSurfaceVariant), overflow: TextOverflow.ellipsis),
           ]),
         ),
-        IconButton(icon: Icon(Icons.copy_rounded, size: 19, color: Theme.of(context).colorScheme.primary), onPressed: _copyInviteLink),
+        IconButton(tooltip: 'Copy', icon: Icon(Icons.copy_rounded, size: 19, color: Theme.of(context).colorScheme.primary), onPressed: _copyInviteLink),
       ]),
     );
   }
@@ -1355,8 +1355,8 @@ class _GroupProfileScreenState extends State<GroupProfileScreen> {
               title: Text(r['name'] as String, style: const TextStyle(fontWeight: FontWeight.w600, fontSize: 13.5)),
               subtitle: (r['username'] as String).isNotEmpty ? Text('@${r['username']}', style: TextStyle(fontSize: 11, color: Theme.of(context).colorScheme.onSurfaceVariant)) : null,
               trailing: Row(mainAxisSize: MainAxisSize.min, children: [
-                IconButton(icon: Icon(Icons.check_circle_rounded, color: AppThemeTokens.of(context).success), onPressed: () => _respondToJoinRequest(r['request_id'], true)),
-                IconButton(icon: Icon(Icons.cancel_rounded, color: Theme.of(context).colorScheme.error), onPressed: () => _respondToJoinRequest(r['request_id'], false)),
+                IconButton(tooltip: 'Done', icon: Icon(Icons.check_circle_rounded, color: AppThemeTokens.of(context).success), onPressed: () => _respondToJoinRequest(r['request_id'], true)),
+                IconButton(tooltip: 'Close', icon: Icon(Icons.cancel_rounded, color: Theme.of(context).colorScheme.error), onPressed: () => _respondToJoinRequest(r['request_id'], false)),
               ]),
             )),
       ]),

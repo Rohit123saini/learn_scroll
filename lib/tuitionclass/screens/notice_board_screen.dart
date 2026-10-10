@@ -348,12 +348,12 @@ class _NoticeBoardScreenState extends State<NoticeBoardScreen> {
                                         ),
                                       ),
                                       if (widget.canManage) ...[
-                                        IconButton(
+                                        IconButton(tooltip: n.isPinned ? 'Unpin' : 'Pin', 
                                           visualDensity: VisualDensity.compact,
                                           icon: Icon(n.isPinned ? Icons.push_pin_rounded : Icons.push_pin_outlined, color: TuitionClassColors.navy),
                                           onPressed: () => _togglePin(n),
                                         ),
-                                        IconButton(
+                                        IconButton(tooltip: 'Delete', 
                                           visualDensity: VisualDensity.compact,
                                           icon: const Icon(Icons.delete_outline_rounded, color: TuitionClassColors.danger),
                                           onPressed: () => _confirmDelete(n),

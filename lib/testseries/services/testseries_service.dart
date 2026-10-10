@@ -64,6 +64,15 @@ TsErrorKind _kindFromStatus(int? code) {
   return TsErrorKind.unknown;
 }
 
+/// T2 — one problem inside a bulk question upload (`errors[]` of the 400 body).
+/// `index` is 0-based, `questionNumber` is what a human counts (Q1, Q2 ...).
+class TsQuestionError {
+  final int index;
+  final int questionNumber;
+  final String message;
+  const TsQuestionError({required this.index, required this.questionNumber, required this.message});
+}
+
 class TestSeriesApiException implements Exception {
   /// Backend ka message (validation / conflict me user ko dikhane layak
   /// hota hai), warna internal tag. UI ko `tsErrorMessage()` use karna chahiye.
@@ -71,7 +80,11 @@ class TestSeriesApiException implements Exception {
   final int? statusCode;
   final TsErrorKind kind;
 
-  TestSeriesApiException(this.message, {this.statusCode, TsErrorKind? kind})
+  /// T2 — per-question problems when a bulk upload / campus create was rejected
+  /// (empty for every other error). Nothing was saved when this is non-empty.
+  final List<TsQuestionError> itemErrors;
+
+  TestSeriesApiException(this.message, {this.statusCode, TsErrorKind? kind, this.itemErrors = const []})
       : kind = kind ?? _kindFromStatus(statusCode);
 
   /// 402 = "coins kam hain" (purchase_and_start_attempt ka ValueError).
@@ -192,6 +205,22 @@ class TestSeriesService {
     }
   }
 
+  /// PATCH (T2 — edit one question). Same transient-error mapping as `_postJson`.
+  static Future<http.Response> _patchJson(Uri uri, Object body) async {
+    final headers = await _headers();
+    try {
+      final r = await _client
+          .patch(uri, headers: headers, body: jsonEncode(body))
+          .timeout(TsConfig.postTimeout);
+      _syncClock(r);
+      return r;
+    } catch (e) {
+      final kind = _transientKind(e);
+      if (kind == null) rethrow;
+      throw TestSeriesApiException(kind == TsErrorKind.timeout ? 'TIMEOUT' : 'NETWORK', kind: kind);
+    }
+  }
+
   static dynamic _decode(http.Response r) {
     try {
       return jsonDecode(utf8.decode(r.bodyBytes));
@@ -210,6 +239,7 @@ class TestSeriesService {
 
   static Never _fail(http.Response r) {
     String message = 'Request failed (${r.statusCode})';
+    final itemErrors = <TsQuestionError>[];
     try {
       final body = jsonDecode(utf8.decode(r.bodyBytes));
       String? pick(dynamic v) {
@@ -223,13 +253,27 @@ class TestSeriesService {
         // DRF ka error shape: {"detail": "..."} / {"field": ["..."]} / {"non_field_errors": [...]}
         final picked = pick(body['detail'] ?? (body.isNotEmpty ? body.values.first : null));
         if (picked != null && picked.isNotEmpty) message = picked;
+        // T2: {"errors": [{"index": 1, "question_number": 2, "message": "Q2: ..."}]}
+        final errs = body['errors'];
+        if (errs is List) {
+          for (final e in errs) {
+            if (e is Map && e['index'] is num && e['message'] != null) {
+              final idx = (e['index'] as num).toInt();
+              itemErrors.add(TsQuestionError(
+                index: idx,
+                questionNumber: (e['question_number'] as num?)?.toInt() ?? idx + 1,
+                message: e['message'].toString(),
+              ));
+            }
+          }
+        }
       } else if (body is List) {
         final picked = pick(body);
         if (picked != null && picked.isNotEmpty) message = picked;
       }
     } catch (_) {}
 
-    final ex = TestSeriesApiException(message, statusCode: r.statusCode);
+    final ex = TestSeriesApiException(message, statusCode: r.statusCode, itemErrors: itemErrors);
     if (ex.isUnauthorized) {
       try {
         onUnauthorized?.call();
@@ -683,6 +727,58 @@ class TestSeriesService {
     final list = body['questions'];
     return list is List
         ? list.whereType<Map>().map((e) => TsQuestion.fromJson(Map<String, dynamic>.from(e))).toList()
+        : const [];
+  }
+
+  /// `GET {mount}/testseries/{id}/questions/` — saare questions (creator / class
+  /// & campus teaching staff ko answer key ke saath).
+  static Future<List<TsQuestion>> listQuestions(String seriesId) async {
+    final all = await _getAll<TsQuestion>(Uri.parse('$_series/$seriesId/questions/'), TsQuestion.fromJson);
+    all.sort((a, b) => a.order.compareTo(b.order));
+    return all;
+  }
+
+  /// `POST {mount}/testseries/{id}/questions/` — ek question add (draft only;
+  /// `order` na bhejo to end me lagta hai).
+  static Future<TsQuestion> addQuestion(String seriesId, Map<String, dynamic> question) async {
+    final r = await _postJson(Uri.parse('$_series/$seriesId/questions/'), question);
+    if (r.statusCode != 200 && r.statusCode != 201) _fail(r);
+    return TsQuestion.fromJson(_asMap(r));
+  }
+
+  /// `PATCH {mount}/testseries/{id}/questions/{qid}/` — ek question edit (draft only).
+  static Future<TsQuestion> updateQuestion(String seriesId, String questionId, Map<String, dynamic> question) async {
+    final r = await _patchJson(Uri.parse('$_series/$seriesId/questions/$questionId/'), question);
+    if (r.statusCode != 200) _fail(r);
+    return TsQuestion.fromJson(_asMap(r));
+  }
+
+  /// `DELETE {mount}/testseries/{id}/questions/{qid}/` — ek question hatao (draft only).
+  static Future<void> deleteQuestion(String seriesId, String questionId) async {
+    final headers = await _headers(json: false);
+    try {
+      final r = await _client
+          .delete(Uri.parse('$_series/$seriesId/questions/$questionId/'), headers: headers)
+          .timeout(TsConfig.postTimeout);
+      _syncClock(r);
+      if (r.statusCode != 204 && r.statusCode != 200) _fail(r);
+    } on TestSeriesApiException {
+      rethrow;
+    } catch (e) {
+      final kind = _transientKind(e);
+      if (kind == null) rethrow;
+      throw TestSeriesApiException(kind == TsErrorKind.timeout ? 'TIMEOUT' : 'NETWORK', kind: kind);
+    }
+  }
+
+  /// `POST {mount}/testseries/{id}/questions-reorder/` — poori list naye order me
+  /// (har question id exactly ek baar). Naya order wapas aata hai.
+  static Future<List<TsQuestion>> reorderQuestions(String seriesId, List<String> orderedIds) async {
+    final r = await _postJson(Uri.parse('$_series/$seriesId/questions-reorder/'), {'order': orderedIds});
+    if (r.statusCode != 200) _fail(r);
+    final body = _decode(r);
+    return body is List
+        ? body.whereType<Map>().map((e) => TsQuestion.fromJson(Map<String, dynamic>.from(e))).toList()
         : const [];
   }
 

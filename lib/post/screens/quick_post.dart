@@ -752,7 +752,7 @@ class _QuickTextPostState extends State<QuickTextPost> with TickerProviderStateM
           backgroundColor: cs.background,
           elevation: 0,
           surfaceTintColor: cs.background,
-          leading: IconButton(
+          leading: IconButton(tooltip: 'Close', 
             icon: Icon(Icons.close_rounded, color: cs.onSurface),
             onPressed: _handleClose,
           ),

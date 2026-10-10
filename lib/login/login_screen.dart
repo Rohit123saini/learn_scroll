@@ -13,6 +13,7 @@ import '../onboarding/screens/onboarding_screen.dart'; // 🔥 TASK G18 — post
 import '../l10n/app_localizations.dart';
 import '../message/screens/parent_code_entry_screen.dart'; // Parent/Guardian Mode entry (Feature 8)
 import 'auth_widgets.dart';
+import 'dob_prompt.dart'; // minor-safety: DOB prompt after Google auth
 import '../services/account_manager.dart'; // P15-FE
 
 class LoginScreen extends StatefulWidget {
@@ -189,6 +190,13 @@ class _LoginScreenState extends State<LoginScreen> {
       _snack(res.message ?? l10n.authGoogleSignedIn);
 
       if (!mounted) return;
+
+      // Minor-safety: accounts without a date of birth (new Google signups
+      // and older accounts) are asked once.
+      if (res.dobMissing) {
+        await promptForDateOfBirth(context);
+        if (!mounted) return;
+      }
 
       // Phone is optional -> only offer the (skippable) phone step right
       // after a brand-new Google signup, not on every later Google login.
@@ -516,7 +524,7 @@ class _LoginScreenState extends State<LoginScreen> {
         labelStyle: TextStyle(color: cs.onSurfaceVariant, fontSize: 14),
         prefixIcon: Icon(icon, color: cs.primary.withOpacity(0.7), size: 22),
         suffixIcon: isPassword
-            ? IconButton(
+            ? IconButton(tooltip: hideText ? 'Show password' : 'Hide password', 
                 icon: Icon(
                   hideText ? Icons.visibility_off_outlined : Icons.visibility_outlined,
                   color: cs.onSurfaceVariant,

@@ -41,6 +41,7 @@ import '../models/tuitionclass_models.dart';
 import '../services/tuitionclass_api_service.dart';
 import '../theme/tuitionclass_theme.dart';
 import '../widgets/class_time_chip.dart'; // TASK 10.3
+import '../widgets/classroom_group_card.dart'; // T3: class chat group (Open group / retry / toggle)
 import '../utils/tuitionclass_datetime.dart';
 import '../utils/tuitionclass_upload_limits.dart';
 import 'banned_students_screen.dart';
@@ -1205,6 +1206,17 @@ class _ClassroomDetailScreenState extends State<ClassroomDetailScreen> {
           headerSliverBuilder: (context, innerBoxIsScrolled) => [
             _buildSliverAppBar(classroom),
             SliverToBoxAdapter(child: _buildInfoCard(classroom)),
+            // T3: group == class participants ka mirror. Teacher/staff ko status +
+            // retry (+ owner ko on/off), active student ko "Open group".
+            if (_canManage || _accessLevel == 'active')
+              SliverToBoxAdapter(
+                child: ClassroomGroupCard(
+                  key: ValueKey('group-card-${widget.classroomId}-$_accessLevel'),
+                  classroomId: widget.classroomId,
+                  canManage: _canManage,
+                  isTeacher: _accessLevel == 'owner',
+                ),
+              ),
             SliverPersistentHeader(
               pinned: true,
               delegate: _TabBarDelegate(TabBar(
@@ -1289,20 +1301,20 @@ class _ClassroomDetailScreenState extends State<ClassroomDetailScreen> {
         // .share_stats/.my_shares were fully ready server-side with zero
         // frontend caller anywhere in the module. Visible to everyone
         // (sharing doesn't require access to the classroom itself).
-        IconButton(icon: const Icon(Icons.share_outlined), onPressed: _openShareSheet),
+        IconButton(tooltip: 'Share', icon: const Icon(Icons.share_outlined), onPressed: _openShareSheet),
         if (!_canManage)
-          IconButton(
+          IconButton(tooltip: _wishlistEntryId != null ? 'Remove from wishlist' : 'Add to wishlist', 
             icon: Icon(_wishlistEntryId != null ? Icons.favorite_rounded : Icons.favorite_border_rounded,
                 color: _wishlistEntryId != null ? Colors.redAccent : Colors.white),
             onPressed: _toggleWishlist,
           ),
         if (!_canManage && _everHadAccess)
-          IconButton(icon: const Icon(Icons.flag_outlined), onPressed: _openReportDialog),
+          IconButton(tooltip: 'Report', icon: const Icon(Icons.flag_outlined), onPressed: _openReportDialog),
         if (_canManage)
           Stack(
             clipBehavior: Clip.none,
             children: [
-              IconButton(icon: const Icon(Icons.settings_outlined), onPressed: _openManageSheet),
+              IconButton(tooltip: 'Settings', icon: const Icon(Icons.settings_outlined), onPressed: _openManageSheet),
               if (_pendingRequestCount > 0)
                 Positioned(
                   top: 6,
@@ -2847,7 +2859,7 @@ class _ReviewsTabState extends State<_ReviewsTab> with AutomaticKeepAliveClientM
                   mainAxisAlignment: MainAxisAlignment.center,
                   children: List.generate(5, (i) {
                     final filled = i < rating;
-                    return IconButton(
+                    return IconButton(tooltip: 'Rating star', 
                       onPressed: () => setSheetState(() => rating = i + 1),
                       icon: Icon(filled ? Icons.star_rounded : Icons.star_border_rounded, color: const Color(0xFFFFAD33), size: 30),
                     );

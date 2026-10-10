@@ -86,7 +86,8 @@ class ShowFewerResult {
 /// show [text] (English, ready to display) until it is localised in the app.
 class WhyReason {
   /// following | trending | interest_category | liked_category |
-  /// friend_of_follow | popular | own_post | not_in_feed
+  /// friend_of_follow | author_affinity | popular | own_post | not_in_feed |
+  /// new_creator | educational_topic | study_time | campus_context | class_context | engaged_author
   final String code;
   final String text;
   final Map<String, dynamic> meta; // following: user_id, username | *_category: category, label | friend_of_follow: via[{id,username}]
@@ -104,7 +105,11 @@ class WhyResult {
   final String? feedSource; // following | recommended | trending | null (not part of my feed)
   final List<WhyReason> reasons; // [0] = headline
   final List<FeedFeedbackItem> dampened; // my active "show fewer" rows matching this post (id is empty here)
-  const WhyResult({required this.postId, this.feedSource, required this.reasons, required this.dampened});
+  // T1 Part 3 — additive: A/B bucket {name, bucket, variant} and the stage-wise trail
+  // [{stage: candidate|score|rerank, ...}] (empty / null from older backends).
+  final Map<String, dynamic>? experiment;
+  final List<Map<String, dynamic>> stages;
+  const WhyResult({required this.postId, this.feedSource, required this.reasons, required this.dampened, this.experiment, this.stages = const []});
 
   factory WhyResult.fromJson(Map<String, dynamic> j) => WhyResult(
         postId: '${j['post_id']}',
@@ -114,6 +119,11 @@ class WhyResult {
             .toList(),
         dampened: ((j['dampened'] as List?) ?? const [])
             .map((e) => FeedFeedbackItem.fromJson({'id': '', ...Map<String, dynamic>.from(e as Map)}))
+            .toList(),
+        experiment: j['experiment'] is Map ? Map<String, dynamic>.from(j['experiment'] as Map) : null,
+        stages: ((j['stages'] as List?) ?? const [])
+            .whereType<Map>()
+            .map((e) => Map<String, dynamic>.from(e))
             .toList(),
       );
 }

@@ -44,8 +44,8 @@ class _TimetableScreenState extends State<TimetableScreen> {
   List<TimetableEntry> _entries = const [];
   Map<String, TimeSlot> _slotsById = const {};
 
-  /// Django ka `weekday()` 0=Monday deta hai — `TimeSlot.dayOfWeek` bhi
-  /// wahi convention follow karta hai, isliye direct match karta hai.
+  /// `DateTime.weekday - 1` => 0=Monday. Backend `TimeSlot.dayOfWeek` 1=Monday
+  /// hai, isliye `_forDay` me `dayOfWeek - 1` se compare hota hai.
   late int _day = DateTime.now().weekday - 1;
 
   @override
@@ -85,9 +85,9 @@ class _TimetableScreenState extends State<TimetableScreen> {
   List<({TimetableEntry entry, TimeSlot slot})> _forDay(int day) {
     final rows = <({TimetableEntry entry, TimeSlot slot})>[];
     for (final e in _entries) {
-      final slot = _slotsById[e.timeSlotId];
+      final slot = e.timeSlotId == null ? null : _slotsById[e.timeSlotId!];
       if (slot == null) continue; // slot delete ho gaya — row skip
-      if (slot.dayOfWeek != day) continue;
+      if (slot.dayOfWeek - 1 != day) continue; // backend: 1=Mon … 7=Sun
       rows.add((entry: e, slot: slot));
     }
     rows.sort((a, b) => a.slot.startTime.compareTo(b.slot.startTime));
@@ -134,6 +134,7 @@ class _TimetableScreenState extends State<TimetableScreen> {
     }
 
     final rows = _forDay(_day);
+    final hiddenOffline = _entries.where((e) => e.timeHidden).toList();
 
     return Column(children: [
       const SizedBox(height: 12),
@@ -145,6 +146,27 @@ class _TimetableScreenState extends State<TimetableScreen> {
         onSelected: (i) => setState(() => _day = i),
       ),
       const SizedBox(height: 12),
+      // T4 §G — offline periods: the backend sends no time for students, so
+      // they are listed once with an "Offline class" label (not per-day).
+      if (hiddenOffline.isNotEmpty)
+        Padding(
+          padding: const EdgeInsets.fromLTRB(14, 0, 14, 8),
+          child: LsCard(
+            padding: const EdgeInsets.all(12),
+            child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+              Text('Offline classes', style: LsType.head(context, size: 13)),
+              const SizedBox(height: 6),
+              for (final e in hiddenOffline)
+                Padding(
+                  padding: const EdgeInsets.only(bottom: 2),
+                  child: Text(
+                    '${widget.subjects[e.subjectId]?.name ?? l10n.campusUnknownSubject} · ${e.label ?? 'Offline class'}',
+                    style: TextStyle(fontSize: 12.5, color: cs.onSurfaceVariant),
+                  ),
+                ),
+            ]),
+          ),
+        ),
       Expanded(
         child: rows.isEmpty
             ? EmptyStateWidget(

@@ -39,11 +39,28 @@ class StreakInfo {
   final int totalActiveDays;
   final bool isActiveToday;
 
+  // Streak freeze + daily goal (additive server fields — purane server par
+  // sab default pe aate hain, isliye parsing hamesha safe hai).
+  final int freezeTokens;
+  final int freezesUsedTotal;
+  final int freezeCostCoins;
+  final int freezeMaxTokens;
+  final int dailyGoalMinutes;
+  final bool goalCompletedToday;
+  final int goalsCompletedTotal;
+
   const StreakInfo({
     required this.currentStreak,
     required this.longestStreak,
     required this.totalActiveDays,
     required this.isActiveToday,
+    this.freezeTokens = 0,
+    this.freezesUsedTotal = 0,
+    this.freezeCostCoins = 50,
+    this.freezeMaxTokens = 2,
+    this.dailyGoalMinutes = 10,
+    this.goalCompletedToday = false,
+    this.goalsCompletedTotal = 0,
   });
 
   factory StreakInfo.fromJson(Map<String, dynamic> json) {
@@ -52,6 +69,13 @@ class StreakInfo {
       longestStreak: (json['longest_streak'] as num?)?.toInt() ?? 0,
       totalActiveDays: (json['total_active_days'] as num?)?.toInt() ?? 0,
       isActiveToday: json['is_active_today'] == true,
+      freezeTokens: (json['freeze_tokens'] as num?)?.toInt() ?? 0,
+      freezesUsedTotal: (json['freezes_used_total'] as num?)?.toInt() ?? 0,
+      freezeCostCoins: (json['freeze_cost_coins'] as num?)?.toInt() ?? 50,
+      freezeMaxTokens: (json['freeze_max_tokens'] as num?)?.toInt() ?? 2,
+      dailyGoalMinutes: (json['daily_goal_minutes'] as num?)?.toInt() ?? 10,
+      goalCompletedToday: json['goal_completed_today'] == true,
+      goalsCompletedTotal: (json['goals_completed_total'] as num?)?.toInt() ?? 0,
     );
   }
 
@@ -72,11 +96,75 @@ class StreakCheckInResult {
   final int? milestoneReached;
   final int bonusCoins;
 
+  /// Aaj kitne freeze tokens kharch hue (0 = koi nahi) — >0 ho to client
+  /// "streak bachi" dikha sakta hai.
+  final int freezeUsed;
+
   const StreakCheckInResult({
     required this.streak,
     this.milestoneReached,
     this.bonusCoins = 0,
+    this.freezeUsed = 0,
   });
+}
+
+/// `GET/PATCH /profile/daily-goal/` ka `data` — aaj ka "N minute challenge".
+/// Progress server ke foreground-heartbeat (`DailyUsage`) se aata hai.
+class DailyGoalInfo {
+  final int goalMinutes;
+  final List<int> options;
+  final int todaySeconds;
+  final bool completed;
+  final int goalsCompletedTotal;
+  final int freezeTokens;
+
+  const DailyGoalInfo({
+    required this.goalMinutes,
+    required this.options,
+    required this.todaySeconds,
+    required this.completed,
+    required this.goalsCompletedTotal,
+    required this.freezeTokens,
+  });
+
+  factory DailyGoalInfo.fromJson(Map<String, dynamic> json) {
+    final opts = (json['options'] as List?)?.whereType<num>().map((e) => e.toInt()).toList();
+    return DailyGoalInfo(
+      goalMinutes: (json['goal_minutes'] as num?)?.toInt() ?? 10,
+      options: (opts == null || opts.isEmpty) ? const [5, 10, 15, 20, 30, 45, 60] : opts,
+      todaySeconds: (json['today_seconds'] as num?)?.toInt() ?? 0,
+      completed: json['completed'] == true,
+      goalsCompletedTotal: (json['goals_completed_total'] as num?)?.toInt() ?? 0,
+      freezeTokens: (json['freeze_tokens'] as num?)?.toInt() ?? 0,
+    );
+  }
+
+  /// 0.0 - 1.0 progress bar ke liye.
+  double get fraction {
+    final goalSeconds = goalMinutes * 60;
+    if (goalSeconds <= 0) return 0;
+    return (todaySeconds / goalSeconds).clamp(0.0, 1.0).toDouble();
+  }
+
+  int get minutesDone => todaySeconds ~/ 60;
+}
+
+/// `buyFreeze()` ka natija — success ya user-facing message ke saath failure
+/// (cap poora / coins kam / network).
+class BuyFreezeResult {
+  final bool ok;
+  final StreakInfo? streak;
+  final int? coinBalance;
+  final String? message;
+
+  const BuyFreezeResult.success(StreakInfo this.streak, this.coinBalance)
+      : ok = true,
+        message = null;
+
+  const BuyFreezeResult.failure(String this.message)
+      : ok = false,
+        streak = null,
+        coinBalance = null;
 }
 
 class StreakService {
@@ -143,7 +231,72 @@ class StreakService {
         streak: StreakInfo.fromJson(data),
         milestoneReached: (body['milestone_reached'] as num?)?.toInt(),
         bonusCoins: (body['bonus_coins'] as num?)?.toInt() ?? 0,
+        freezeUsed: (body['freeze_used'] as num?)?.toInt() ?? 0,
       );
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /// Coins se ek freeze token kharido — `POST /profile/streak/freeze/`.
+  /// Failure par server ka message (e.g. coins kam / max tokens) laut aata hai.
+  static Future<BuyFreezeResult> buyFreeze() async {
+    try {
+      final token = await AuthService.getValidToken();
+      if (token == null) return const BuyFreezeResult.failure('Please log in again.');
+      final res = await http.post(
+        Uri.parse('${Api.baseUrl}${_endpoint}freeze/'),
+        headers: {'Authorization': 'Bearer $token', 'Content-Type': 'application/json'},
+      ).timeout(_timeout);
+      final body = jsonDecode(utf8.decode(res.bodyBytes));
+      if (res.statusCode == 201 && body is Map<String, dynamic> && body['data'] is Map<String, dynamic>) {
+        return BuyFreezeResult.success(
+          StreakInfo.fromJson(body['data'] as Map<String, dynamic>),
+          (body['coin_balance'] as num?)?.toInt(),
+        );
+      }
+      if (res.statusCode == 503) {
+        return const BuyFreezeResult.failure('Wallet abhi busy hai — thodi der baad try karo.');
+      }
+      final msg = body is Map ? body['message']?.toString() : null;
+      return BuyFreezeResult.failure(msg ?? 'Freeze nahi mil paya.');
+    } catch (_) {
+      return const BuyFreezeResult.failure('Network problem — dobara try karo.');
+    }
+  }
+
+  /// Aaj ka daily-goal state (null = kuch dikhane layak nahi / offline).
+  static Future<DailyGoalInfo?> fetchDailyGoal() async {
+    try {
+      final token = await AuthService.getValidToken();
+      if (token == null) return null;
+      final res = await http.get(
+        Uri.parse('${Api.baseUrl}/profile/daily-goal/'),
+        headers: {'Authorization': 'Bearer $token'},
+      ).timeout(_timeout);
+      if (res.statusCode != 200) return null;
+      final body = jsonDecode(res.body);
+      final data = body is Map ? body['data'] : null;
+      return data is Map<String, dynamic> ? DailyGoalInfo.fromJson(data) : null;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /// Goal minutes badlo (server sirf apni options list me se maanta hai).
+  static Future<DailyGoalInfo?> setDailyGoal(int minutes) async {
+    try {
+      final token = await AuthService.getValidToken();
+      if (token == null) return null;
+      final res = await http.patch(
+        Uri.parse('${Api.baseUrl}/profile/daily-goal/'),
+        headers: {'Authorization': 'Bearer $token', 'Content-Type': 'application/json'},
+        body: jsonEncode({'goal_minutes': minutes}),
+      ).timeout(_timeout);
+      if (res.statusCode != 200) return null;
+      final body = jsonDecode(res.body);
+      final data = body is Map ? body['data'] : null;
+      return data is Map<String, dynamic> ? DailyGoalInfo.fromJson(data) : null;
     } catch (_) {
       return null;
     }

@@ -779,7 +779,7 @@ class _ConversationsScreenState extends State<ConversationsScreen> {
                     ),
                   )
                 : (_searchController.text.isNotEmpty
-                    ? IconButton(
+                    ? IconButton(tooltip: 'Close', 
                         icon: Icon(Icons.close_rounded, color: _muted),
                         onPressed: () {
                           _searchController.clear();

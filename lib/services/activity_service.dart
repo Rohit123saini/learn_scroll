@@ -187,17 +187,36 @@ class ActivityService {
     _decode(r);
   }
 
-  /// POST /profile/activity/heartbeat/ — returns true when this beat crossed
-  /// the user's daily limit (server says so once per day).
-  static Future<bool> sendHeartbeat(int seconds) async {
+  /// POST /profile/activity/heartbeat/ — `limitReached` true when this beat
+  /// crossed the user's daily limit (server says so once per day);
+  /// `goalJustCompleted` true when this beat completed today's daily goal
+  /// ("aaj ka N minute challenge"), `freezeAwarded` true if that goal also
+  /// earned a free streak-freeze token.
+  static Future<HeartbeatResult> sendHeartbeat(int seconds) async {
     final r = await http.post(
       Uri.parse('$_base/activity/heartbeat/'),
       headers: await _headers(),
       body: jsonEncode({'seconds': seconds}),
     );
     final body = _decode(r);
-    return body['limit_reached'] == true;
+    final goal = body['goal'];
+    return HeartbeatResult(
+      limitReached: body['limit_reached'] == true,
+      goalJustCompleted: goal is Map && goal['just_completed'] == true,
+      freezeAwarded: goal is Map && goal['freeze_awarded'] == true,
+    );
   }
+}
+
+class HeartbeatResult {
+  final bool limitReached;
+  final bool goalJustCompleted;
+  final bool freezeAwarded;
+  const HeartbeatResult({
+    this.limitReached = false,
+    this.goalJustCompleted = false,
+    this.freezeAwarded = false,
+  });
 }
 
 /// Foreground-time heartbeat. `main.dart`'s `_MyAppState` (a
@@ -224,6 +243,10 @@ class ActivityHeartbeat {
   /// Set once from main.dart; called (at most once a day, per the server)
   /// when this device's beat is the one that crossed the daily limit.
   void Function()? onLimitReached;
+
+  /// Called when this device's beat completed today's daily goal; the bool is
+  /// `true` when a free streak-freeze token was also awarded.
+  void Function(bool freezeAwarded)? onGoalCompleted;
 
   bool get isRunning => _timer != null;
 
@@ -259,9 +282,10 @@ class ActivityHeartbeat {
         if (_timer != null) _lastFlush = now;
         return;
       }
-      final limitReached = await ActivityService.sendHeartbeat(seconds);
+      final result = await ActivityService.sendHeartbeat(seconds);
       if (_timer != null) _lastFlush = now;
-      if (limitReached) onLimitReached?.call();
+      if (result.limitReached) onLimitReached?.call();
+      if (result.goalJustCompleted) onGoalCompleted?.call(result.freezeAwarded);
     } catch (_) {
       // Keep `_lastFlush` as is: the next beat carries this time too.
     } finally {

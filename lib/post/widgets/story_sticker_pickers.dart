@@ -468,7 +468,7 @@ class _PollSheetState extends State<_PollSheet> {
                 ),
               ),
               if (_options.length > kStoryPollMinOptions)
-                IconButton(
+                IconButton(tooltip: 'Close', 
                   onPressed: () => _removeOption(i),
                   icon: const Icon(Icons.close_rounded, color: Colors.white54, size: 20),
                 ),

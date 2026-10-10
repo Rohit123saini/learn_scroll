@@ -8,6 +8,7 @@ import '../onboarding/screens/onboarding_screen.dart'; // 🔥 TASK G18 — post
 // 🔥 NAYA — dark mode + i18n (home.dart jaisa hi pattern).
 import '../l10n/app_localizations.dart';
 import 'auth_widgets.dart';
+import 'dob_prompt.dart'; // minor-safety: DOB picker + Google DOB prompt
 
 class SignupScreen extends StatefulWidget {
   const SignupScreen({super.key});
@@ -27,6 +28,8 @@ class _SignupScreenState extends State<SignupScreen> {
   final _passwordController = TextEditingController();
   final _confirmPasswordController = TextEditingController();
   final _otpController = TextEditingController();
+  final _dobController = TextEditingController();
+  DateTime? _dateOfBirth;
 
   bool _isLoading = false;
   bool _isGoogleLoading = false;
@@ -80,6 +83,7 @@ class _SignupScreenState extends State<SignupScreen> {
     _passwordController.dispose();
     _confirmPasswordController.dispose();
     _otpController.dispose();
+    _dobController.dispose();
     super.dispose();
   }
 
@@ -153,6 +157,7 @@ class _SignupScreenState extends State<SignupScreen> {
         _passwordController.text,
         _confirmPasswordController.text,
         fullPhoneNumber,
+        _dateOfBirth!,
       );
 
       if (!mounted) return;
@@ -226,6 +231,12 @@ class _SignupScreenState extends State<SignupScreen> {
       _snack(res.message ?? l10n.signupGoogleSuccessful, success: true);
 
       if (!mounted) return;
+
+      // Minor-safety: Google gives us no birthday — ask before going on.
+      if (res.dobMissing) {
+        await promptForDateOfBirth(context);
+        if (!mounted) return;
+      }
 
       // Phone is optional now -> only offer the (skippable) phone step right
       // after a brand-new Google signup, not on every later Google login.
@@ -613,6 +624,29 @@ class _SignupScreenState extends State<SignupScreen> {
                   ),
                   const SizedBox(height: 18),
 
+                  // Date of birth (minor-safety) — picker, not free text
+                  _buildInputField(
+                    controller: _dobController,
+                    label: l10n.signupDob,
+                    icon: Icons.cake_outlined,
+                    readOnly: true,
+                    onTap: () async {
+                      final picked = await pickDateOfBirth(context, initial: _dateOfBirth);
+                      if (picked == null) return;
+                      setState(() {
+                        _dateOfBirth = picked;
+                        _dobController.text = formatDob(picked);
+                      });
+                    },
+                    validator: (val) {
+                      final dob = _dateOfBirth;
+                      if (dob == null) return l10n.signupDobRequired;
+                      if (DobRules.isTooYoung(dob)) return l10n.signupDobTooYoung;
+                      return null;
+                    },
+                  ),
+                  const SizedBox(height: 18),
+
                   // Password Field
                   _buildInputField(
                     controller: _passwordController,
@@ -697,6 +731,8 @@ class _SignupScreenState extends State<SignupScreen> {
     String? backendError,
     ValueChanged<String>? onChanged,
     Widget? prefixWidget,
+    bool readOnly = false,
+    VoidCallback? onTap,
     required FormFieldValidator<String> validator,
   }) {
     final cs = Theme.of(context).colorScheme;
@@ -712,6 +748,8 @@ class _SignupScreenState extends State<SignupScreen> {
           controller: controller,
           keyboardType: type,
           obscureText: isPassword && hideText,
+          readOnly: readOnly,
+          onTap: onTap,
           onChanged: onChanged,
           style: TextStyle(fontSize: 15, color: cs.onSurface),
           decoration: InputDecoration(
@@ -720,7 +758,7 @@ class _SignupScreenState extends State<SignupScreen> {
             errorText: backendError,
             prefixIcon: prefixWidget ?? Icon(icon, color: cs.primary.withOpacity(0.7), size: 22),
             suffixIcon: isPassword
-                ? IconButton(
+                ? IconButton(tooltip: hideText ? 'Show password' : 'Hide password', 
                     icon: Icon(hideText ? Icons.visibility_off_outlined : Icons.visibility_outlined,
                         color: cs.onSurfaceVariant, size: 20),
                     onPressed: onToggleVisibility,

@@ -499,11 +499,11 @@ class _QuestionEditorState extends State<_QuestionEditor> {
                     }),
                   )
                 else ...[
-                  IconButton(
+                  IconButton(tooltip: 'Move up', 
                     icon: const Icon(Icons.arrow_upward_rounded, size: 16),
                     onPressed: i == 0 ? null : () => _moveOption(i, i - 1),
                   ),
-                  IconButton(
+                  IconButton(tooltip: 'Move down', 
                     icon: const Icon(Icons.arrow_downward_rounded, size: 16),
                     onPressed: i == d.options.length - 1 ? null : () => _moveOption(i, i + 1),
                   ),

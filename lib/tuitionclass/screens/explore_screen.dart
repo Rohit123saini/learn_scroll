@@ -276,7 +276,7 @@ class _ExploreScreenState extends State<ExploreScreen> {
                 prefixIcon: const Icon(Icons.search, color: Colors.grey, size: 22),
                 suffixIcon: _searchCtrl.text.isEmpty
                     ? null
-                    : IconButton(
+                    : IconButton(tooltip: 'Close', 
                         icon: const Icon(Icons.close, color: Colors.grey, size: 20),
                         onPressed: () {
                           _searchCtrl.clear();

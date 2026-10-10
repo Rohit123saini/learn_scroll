@@ -27,6 +27,9 @@ import '../../post/widgets/highlight_launcher.dart'; // P2-FE
 import '../../post/screens/reels_screen.dart'; // P13 — video tile -> open in Reels
 import '../../post/widgets/pin_overlay.dart'; // P3-FE — pinned posts
 import '../../post/services/post_tag_service.dart'; // P5b-FE — Tagged tab
+import '../../widgets/streak_sheet.dart';
+import '../../widgets/study_profile_sheet.dart';
+import '../../services/study_profile_service.dart';
 import '../../services/streak_service.dart'; // Task 8 — streak moved here from home.dart.
 
 // ============================================================
@@ -210,6 +213,8 @@ class _ProfileScreenState extends State<ProfileScreen> {
   // the root shell's initState) if that gap turns out to matter in
   // practice.
   StreakInfo? _streak;
+  // Study profile / Exam Mode (chip below opens widgets/study_profile_sheet.dart).
+  StudyProfile? _studyProfile;
 
   // P13-FE — my earned badges (newest first). Empty = row stays hidden.
   List<UserBadge> _badges = [];
@@ -236,6 +241,7 @@ class _ProfileScreenState extends State<ProfileScreen> {
     _scrollController.addListener(_onScroll);
     _loadData();
     _loadStreak(); // Task 8 — one check-in per app session (see field note above).
+    _loadStudyProfile();
   }
 
   @override
@@ -624,6 +630,20 @@ class _ProfileScreenState extends State<ProfileScreen> {
     // did. Re-fetch so the popup shows now, not on the next refresh.
     if (result.milestoneReached != null) _loadBadges();
 
+    // Streak freeze: missed din par token kharch hua — user ko batao ki streak bach gayi.
+    if (result.freezeUsed > 0 && mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            result.freezeUsed == 1
+                ? '❄️ Freeze use hua — aapki streak bach gayi!'
+                : '❄️ ${result.freezeUsed} freezes use hue — aapki streak bach gayi!',
+          ),
+          duration: const Duration(seconds: 4),
+        ),
+      );
+    }
+
     if (result.milestoneReached != null && mounted) {
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
@@ -638,50 +658,21 @@ class _ProfileScreenState extends State<ProfileScreen> {
     }
   }
 
+  // Silent like _loadStreak: failed/offline call just leaves the chip's default label.
+  Future<void> _loadStudyProfile() async {
+    final p = await StudyProfileService.fetch();
+    if (p == null || !mounted) return;
+    setState(() => _studyProfile = p);
+  }
+
+  // Streak + freeze tokens + daily goal — see widgets/streak_sheet.dart.
+  // Freeze khareedne ke baad coin balance badalta hai, isliye profile reload.
   void _showStreakDetailsSheet(StreakInfo streak) {
-    final cs = Theme.of(context).colorScheme;
-    showModalBottomSheet(
-      context: context,
-      shape: const RoundedRectangleBorder(
-        borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
-      ),
-      builder: (_) {
-        return SafeArea(
-          child: Padding(
-            padding: const EdgeInsets.fromLTRB(20, 20, 20, 28),
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Row(
-                  children: [
-                    const Text('🔥', style: TextStyle(fontSize: 22)),
-                    const SizedBox(width: 8),
-                    Text(
-                      '${streak.currentStreak}-day streak',
-                      style: TextStyle(fontSize: 18, fontWeight: FontWeight.w700, color: cs.onSurface),
-                    ),
-                  ],
-                ),
-                const SizedBox(height: 4),
-                Text(
-                  streak.isActiveToday
-                      ? "You're checked in for today — come back tomorrow to keep it going."
-                      : "Open LearnScroll again today to keep your streak alive.",
-                  style: TextStyle(fontSize: 13, color: cs.onSurfaceVariant),
-                ),
-                const SizedBox(height: 16),
-                Row(
-                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                  children: [
-                    _streakStat(cs, 'Best streak', '${streak.longestStreak} days'),
-                    _streakStat(cs, 'Total active days', '${streak.totalActiveDays}'),
-                  ],
-                ),
-              ],
-            ),
-          ),
-        );
+    showStreakSheet(
+      context,
+      streak,
+      onCoinsChanged: () {
+        if (mounted) _loadData(forceRefresh: true);
       },
     );
   }
@@ -1099,6 +1090,14 @@ class _ProfileScreenState extends State<ProfileScreen> {
           semanticLabel: '${streak.currentStreak} ${l10n.streakLabel}',
           onTap: () => _showStreakDetailsSheet(streak),
         ),
+      ProfileMiniChip(
+        leading: const Text('📚', style: TextStyle(fontSize: 13)),
+        label: _studyProfile?.examModeActive == true
+            ? 'Exam Mode ON'
+            : (_studyProfile == null || _studyProfile!.isEmpty ? 'Study profile' : 'Exam Mode'),
+        semanticLabel: 'Study profile and Exam Mode',
+        onTap: () => showStudyProfileSheet(context, onChanged: _loadStudyProfile),
+      ),
       ProfileMiniChip(
         leading: Icon(Icons.card_giftcard_rounded, size: 14, color: cs.primary),
         label: l10n.inviteEarn,

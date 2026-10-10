@@ -831,7 +831,7 @@ class _SinglePostPageState extends State<SinglePostPage> {
                       Positioned(bottom: 10, left: 0, right: 0, child: Center(child: PostCarouselDots(count: media.length, activeIndex: currentIndex))),
                     if (PostMediaUtil.kind(media[currentIndex], url: buildMediaUrl(media[currentIndex].file)) != PostMediaKind.doc &&
                         PostMediaUtil.kind(media[currentIndex], url: buildMediaUrl(media[currentIndex].file)) != PostMediaKind.pdf)
-                      Positioned(top: 10, right: 10, child: PostMediaIconButton(icon: Icons.fullscreen_rounded, onTap: _openFullScreen)),
+                      Positioned(top: 10, right: 10, child: PostMediaIconButton(icon: Icons.fullscreen_rounded, onTap: _openFullScreen, label: l10n.a11yFullScreen)),
                   ]),
                 ),
               );
@@ -843,12 +843,16 @@ class _SinglePostPageState extends State<SinglePostPage> {
               _ReactionTapTarget(myReaction: myReaction, onReaction: _handleReaction),
               Text('${reactionCounts['total'] ?? 0}', style: TextStyle(fontWeight: FontWeight.w700, color: cs.onSurface, fontSize: 13)),
               const SizedBox(width: 16),
-              InkWell(
-                onTap: _openCommentSheet,
-                borderRadius: BorderRadius.circular(20),
-                child: Padding(
-                  padding: const EdgeInsets.all(8),
-                  child: Icon(Icons.chat_bubble_outline_rounded, color: cs.onSurfaceVariant, size: 22),
+              Semantics(
+                button: true,
+                label: l10n.comment,
+                child: InkWell(
+                  onTap: _openCommentSheet,
+                  borderRadius: BorderRadius.circular(20),
+                  child: Padding(
+                    padding: const EdgeInsets.all(8),
+                    child: Icon(Icons.chat_bubble_outline_rounded, color: cs.onSurfaceVariant, size: 22),
+                  ),
                 ),
               ),
               Text('$commentsCount', style: TextStyle(fontWeight: FontWeight.w700, color: cs.onSurface, fontSize: 13)),
@@ -869,12 +873,16 @@ class _SinglePostPageState extends State<SinglePostPage> {
               ),
               Text('$repostsCount', style: TextStyle(fontWeight: FontWeight.w700, color: cs.onSurface, fontSize: 13)),
               const Spacer(),
-              InkWell(
-                onTap: () => Share.share(post!.isRepost ? (post!.originalPost?.content ?? '') : "${post!.title ?? ''}\n${post!.caption}"),
-                borderRadius: BorderRadius.circular(20),
-                child: Padding(
-                  padding: const EdgeInsets.all(8),
-                  child: Icon(Icons.share_outlined, color: cs.onSurfaceVariant, size: 21),
+              Semantics(
+                button: true,
+                label: l10n.share,
+                child: InkWell(
+                  onTap: () => Share.share(post!.isRepost ? (post!.originalPost?.content ?? '') : "${post!.title ?? ''}\n${post!.caption}"),
+                  borderRadius: BorderRadius.circular(20),
+                  child: Padding(
+                    padding: const EdgeInsets.all(8),
+                    child: Icon(Icons.share_outlined, color: cs.onSurfaceVariant, size: 21),
+                  ),
                 ),
               ),
               Semantics(
@@ -912,6 +920,17 @@ class _SinglePostPageState extends State<SinglePostPage> {
                     contextPreview: post!.caption.isNotEmpty ? post!.caption : (post!.title ?? ''),
                     initialQuestion: 'Can you explain this?',
                     sourceId: post!.id,
+                    // Study Buddy chips (Explain / Hindi / Quiz / Flashcards)
+                    // PDF attachment par bhi chalte hain — pehla PDF bhejte hain.
+                    pdfUrl: () {
+                      for (final m in post!.media) {
+                        if (m.mediaType == 'document' &&
+                            m.file.toLowerCase().split('?').first.endsWith('.pdf')) {
+                          return m.file;
+                        }
+                      }
+                      return null;
+                    }(),
                   ),
                   borderRadius: BorderRadius.circular(20),
                   child: Padding(
@@ -979,7 +998,11 @@ class _ReactionTapTargetState extends State<_ReactionTapTarget> {
             child: Row(
               children: kReactionEmoji.entries.map((e) {
                 final sel = widget.myReaction == e.key;
-                return GestureDetector(
+                return Semantics(
+                  button: true,
+                  selected: sel,
+                  label: e.key,
+                  child: GestureDetector(
                   onTap: () { _hidePicker(); widget.onReaction(e.key); },
                   child: Container(
                     margin: const EdgeInsets.symmetric(horizontal: 4),
@@ -990,6 +1013,7 @@ class _ReactionTapTargetState extends State<_ReactionTapTarget> {
                       border: sel ? Border.all(color: kReactionColor[e.key]!, width: 2) : null,
                     ),
                     child: Text(e.value, style: const TextStyle(fontSize: 26)),
+                  ),
                   ),
                 );
               }).toList(),
@@ -1015,16 +1039,23 @@ class _ReactionTapTargetState extends State<_ReactionTapTarget> {
   @override
   Widget build(BuildContext context) {
     final cs = Theme.of(context).colorScheme;
+    final likeLabel = AppLocalizations.of(context)!.like;
     return Builder(builder: (btnCtx) {
-      return InkWell(
-        onTap: () => widget.onReaction('like'),
+      return Semantics(
+        button: true,
+        selected: widget.myReaction != null,
+        label: likeLabel,
         onLongPress: () => _showPicker(btnCtx),
-        borderRadius: BorderRadius.circular(20),
-        child: Padding(
-          padding: const EdgeInsets.all(8),
-          child: widget.myReaction == null
-              ? Icon(Icons.favorite_border_rounded, color: cs.onSurfaceVariant)
-              : Text(kReactionEmoji[widget.myReaction] ?? '👍', style: const TextStyle(fontSize: 20)),
+        child: InkWell(
+          onTap: () => widget.onReaction('like'),
+          onLongPress: () => _showPicker(btnCtx),
+          borderRadius: BorderRadius.circular(20),
+          child: Padding(
+            padding: const EdgeInsets.all(8),
+            child: widget.myReaction == null
+                ? Icon(Icons.favorite_border_rounded, color: cs.onSurfaceVariant)
+                : Text(kReactionEmoji[widget.myReaction] ?? '👍', style: const TextStyle(fontSize: 20)),
+          ),
         ),
       );
     });
@@ -1074,7 +1105,7 @@ class _SmallVideoPlayerState extends State<SmallVideoPlayer> {
   Widget build(BuildContext context) {
     if (_failed) {
       return Center(
-        child: IconButton(
+        child: IconButton(tooltip: 'Refresh', 
           iconSize: 44,
           icon: const Icon(Icons.refresh_rounded, color: Colors.white70),
           onPressed: () {
@@ -1239,9 +1270,9 @@ class _FullScreenVideoPageState extends State<FullScreenVideoPage> {
             Container(
               color: Colors.black38,
               child: Stack(children: [
-                Positioned(top: 40, left: 10, child: IconButton(icon: const Icon(Icons.close_rounded, color: Colors.white, size: 28), onPressed: () => Navigator.pop(context))),
+                Positioned(top: 40, left: 10, child: IconButton(tooltip: 'Close', icon: const Icon(Icons.close_rounded, color: Colors.white, size: 28), onPressed: () => Navigator.pop(context))),
                 Center(
-                  child: IconButton(
+                  child: IconButton(tooltip: _controller.value.isPlaying ? 'Pause' : 'Play', 
                     icon: Icon(_controller.value.isPlaying ? Icons.pause_circle_rounded : Icons.play_circle_rounded, color: Colors.white, size: 72),
                     onPressed: () { setState(() { _controller.value.isPlaying ? _controller.pause() : _controller.play(); }); _hide(); },
                   ),
@@ -1323,7 +1354,7 @@ class _FullScreenImagePageState extends State<FullScreenImagePage> {
           child: Padding(
             padding: const EdgeInsets.all(6),
             child: Row(children: [
-              IconButton(icon: const Icon(Icons.close_rounded, color: Colors.white, size: 28), onPressed: () => Navigator.pop(context)),
+              IconButton(tooltip: 'Close', icon: const Icon(Icons.close_rounded, color: Colors.white, size: 28), onPressed: () => Navigator.pop(context)),
               const Spacer(),
               if (_urls.length > 1)
                 Padding(padding: const EdgeInsets.only(right: 10), child: PostMediaCounter(index: _index, count: _urls.length)),
@@ -1436,7 +1467,7 @@ class _DocumentViewerPageState extends State<DocumentViewerPage> {
         actions: [
           isDownloading
               ? const Padding(padding: EdgeInsets.all(14), child: SizedBox(width: 18, height: 18, child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white)))
-              : IconButton(icon: const Icon(Icons.download_rounded, color: Colors.white), onPressed: () => downloadWithAuth(widget.url, widget.fileName, context)),
+              : IconButton(tooltip: 'Download', icon: const Icon(Icons.download_rounded, color: Colors.white), onPressed: () => downloadWithAuth(widget.url, widget.fileName, context)),
         ],
       ),
       body: isPreparing

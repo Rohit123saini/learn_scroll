@@ -387,7 +387,7 @@ class _AssignmentsScreenState extends State<AssignmentsScreen> {
                                 ),
                                 const SizedBox(width: 6),
                                 widget.canManage
-                                    ? IconButton(
+                                    ? IconButton(tooltip: 'Delete', 
                                         icon: const Icon(Icons.delete_outline_rounded, color: TuitionClassColors.danger),
                                         onPressed: () => _confirmDelete(a),
                                       )

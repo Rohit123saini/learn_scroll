@@ -331,7 +331,7 @@ class _PollTemplateEditorSheetState extends State<_PollTemplateEditorSheet> {
                       ),
                     ),
                     if (_optionCtrls.length > 2)
-                      IconButton(
+                      IconButton(tooltip: 'Remove', 
                         icon: const Icon(Icons.remove_circle_outline, color: TuitionClassColors.danger),
                         onPressed: () => _removeOption(i),
                       ),

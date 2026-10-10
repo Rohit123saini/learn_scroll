@@ -8,9 +8,9 @@
 // right after signup (see `login/signup_screen.dart` and
 // `login/complete_profile_screen.dart`, both of which now push this
 // screen instead of going straight to `HomeScreen`):
-//   1. Pick interests   -> `post.UserInterestsAPIView` (TASK 3, already
-//                           existed — this screen is its first-ever caller
-//                           from a fresh signup, not a new endpoint).
+//   1. Quick start      -> class + exam + up to 3 interests, ONE call to
+//                           `core.OnboardingQuickStartView`, which also returns
+//                           the first personalised suggestions for steps 2-3.
 //   2. Suggested people to follow (+ a few campuses to know about)
 //                        -> `core.OnboardingSuggestionsView`.
 //   3. One sample test to try
@@ -28,22 +28,6 @@ import '../../testseries/screens/test_series_detail_screen.dart';
 import '../../widgets/ls_ui.dart';
 import '../../widgets/skeletons.dart';
 
-/// (value, display label) — mirrors `post.models.Post.CATEGORY_CHOICES`
-/// exactly (backend, post/models.py) since `saveInterests()` sends the
-/// value straight through to `UserInterestsUpdateSerializer`.
-const List<MapEntry<String, String>> _kCategoryChoices = [
-  MapEntry('general', 'General'),
-  MapEntry('tech', 'Technology'),
-  MapEntry('jobs', 'Jobs'),
-  MapEntry('news', 'News'),
-  MapEntry('education', 'Education'),
-  MapEntry('business', 'Business'),
-  MapEntry('entertainment', 'Entertainment'),
-  MapEntry('sports', 'Sports'),
-  MapEntry('lifestyle', 'Lifestyle'),
-  MapEntry('other', 'Other'),
-];
-
 class OnboardingScreen extends StatefulWidget {
   const OnboardingScreen({super.key});
 
@@ -57,6 +41,10 @@ class _OnboardingScreenState extends State<OnboardingScreen> {
   final PageController _pageController = PageController();
   int _page = 0;
 
+  // Quick-start step (class + exam + <=3 interests, one request).
+  OnboardingOptions _options = OnboardingOptions.fallback;
+  String? _studyClass;
+  String _targetExam = '';
   final Set<String> _selectedCategories = {};
   bool _savingInterests = false;
 
@@ -70,7 +58,13 @@ class _OnboardingScreenState extends State<OnboardingScreen> {
   @override
   void initState() {
     super.initState();
-    _loadSuggestions();
+    _loadOptions();
+  }
+
+  Future<void> _loadOptions() async {
+    final opts = await OnboardingService.fetchOptions();
+    if (!mounted) return;
+    setState(() => _options = opts);
   }
 
   @override
@@ -96,15 +90,36 @@ class _OnboardingScreenState extends State<OnboardingScreen> {
     );
   }
 
-  Future<void> _onNextFromInterests() async {
+  Future<void> _onNextFromQuickStart() async {
+    // Nothing picked at all -> same as "Skip for now": move on, feed stays generic.
+    if (_studyClass == null || _selectedCategories.isEmpty) {
+      _loadSuggestions();
+      _goToPage(1);
+      return;
+    }
     setState(() => _savingInterests = true);
-    // Fire-and-forget-ish: don't let a slow/failed save block navigation
-    // — `saveInterests()` already fails silently on the network side
-    // (see its own docstring), so a blocked "Next" button here would
-    // just be a second point of failure for the same non-critical call.
-    await OnboardingService.saveInterests(_selectedCategories.toList());
+    // ONE call saves everything AND returns the first personalised
+    // suggestions, so steps 2-3 are already populated when they appear.
+    final result = await OnboardingService.quickStart(
+      studyClass: _studyClass!,
+      targetExam: _targetExam,
+      interests: _selectedCategories.toList(),
+    );
     if (!mounted) return;
-    setState(() => _savingInterests = false);
+    if (result != null) {
+      setState(() {
+        _suggestions = result;
+        _loadingSuggestions = false;
+        _savingInterests = false;
+      });
+    } else {
+      // Quick-start failed (offline / server hiccup): fall back to the old
+      // two-call path so the user's interests are still saved if possible.
+      await OnboardingService.saveInterests(_selectedCategories.toList());
+      if (!mounted) return;
+      setState(() => _savingInterests = false);
+      _loadSuggestions();
+    }
     _goToPage(1);
   }
 
@@ -169,18 +184,23 @@ class _OnboardingScreenState extends State<OnboardingScreen> {
                 physics: const NeverScrollableScrollPhysics(),
                 onPageChanged: (i) => setState(() => _page = i),
                 children: [
-                  _InterestsStep(
-                    selected: _selectedCategories,
-                    onToggle: (value) {
+                  _QuickStartStep(
+                    options: _options,
+                    studyClass: _studyClass,
+                    targetExam: _targetExam,
+                    selectedInterests: _selectedCategories,
+                    onPickClass: (v) => setState(() => _studyClass = v),
+                    onPickExam: (v) => setState(() => _targetExam = (_targetExam == v) ? '' : v),
+                    onToggleInterest: (value) {
                       setState(() {
                         if (_selectedCategories.contains(value)) {
                           _selectedCategories.remove(value);
-                        } else {
+                        } else if (_selectedCategories.length < _options.maxInterests) {
                           _selectedCategories.add(value);
                         }
                       });
                     },
-                    onNext: _onNextFromInterests,
+                    onNext: _onNextFromQuickStart,
                     saving: _savingInterests,
                   ),
                   _SuggestedFollowsStep(
@@ -239,17 +259,28 @@ class _ProgressDots extends StatelessWidget {
 }
 
 // ============================================================
-// Step 1 — pick interests
+// Step 1 — quick start: class + exam + up to 3 interests (one screen,
+// ~30 seconds). Saved with a single request (OnboardingService.quickStart).
 // ============================================================
-class _InterestsStep extends StatelessWidget {
-  final Set<String> selected;
-  final ValueChanged<String> onToggle;
+class _QuickStartStep extends StatelessWidget {
+  final OnboardingOptions options;
+  final String? studyClass;
+  final String targetExam;
+  final Set<String> selectedInterests;
+  final ValueChanged<String> onPickClass;
+  final ValueChanged<String> onPickExam;
+  final ValueChanged<String> onToggleInterest;
   final VoidCallback onNext;
   final bool saving;
 
-  const _InterestsStep({
-    required this.selected,
-    required this.onToggle,
+  const _QuickStartStep({
+    required this.options,
+    required this.studyClass,
+    required this.targetExam,
+    required this.selectedInterests,
+    required this.onPickClass,
+    required this.onPickExam,
+    required this.onToggleInterest,
     required this.onNext,
     required this.saving,
   });
@@ -257,6 +288,9 @@ class _InterestsStep extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final cs = Theme.of(context).colorScheme;
+    final max = options.maxInterests;
+    final ready = studyClass != null && selectedInterests.isNotEmpty;
+
     return Column(
       children: [
         Expanded(
@@ -264,41 +298,39 @@ class _InterestsStep extends StatelessWidget {
             padding: const EdgeInsets.fromLTRB(20, 12, 20, 12),
             children: [
               Text(
-                "What are you into?",
+                "Let's set up your feed",
                 style: TextStyle(fontSize: 22, fontWeight: FontWeight.w800, color: cs.onSurface),
               ),
               const SizedBox(height: 8),
               Text(
-                "Pick a few topics — your feed and test-series suggestions start here. You can change these anytime.",
+                "Three quick taps. You can change these anytime.",
                 style: TextStyle(fontSize: 13.5, color: cs.onSurfaceVariant),
               ),
-              const SizedBox(height: 20),
-              Wrap(
-                spacing: 10,
-                runSpacing: 10,
-                children: _kCategoryChoices.map((entry) {
-                  final isSelected = selected.contains(entry.key);
-                  return GestureDetector(
-                    onTap: () => onToggle(entry.key),
-                    child: AnimatedContainer(
-                      duration: const Duration(milliseconds: 150),
-                      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
-                      decoration: BoxDecoration(
-                        color: isSelected ? cs.primary : cs.surfaceVariant,
-                        borderRadius: BorderRadius.circular(20),
-                        border: Border.all(color: isSelected ? cs.primary : cs.outlineVariant),
-                      ),
-                      child: Text(
-                        entry.value,
-                        style: TextStyle(
-                          fontSize: 13,
-                          fontWeight: FontWeight.w600,
-                          color: isSelected ? cs.onPrimary : cs.onSurface,
-                        ),
-                      ),
-                    ),
-                  );
-                }).toList(),
+              const SizedBox(height: 22),
+              _label(cs, "I'm in"),
+              _chips(
+                cs,
+                options.studyClasses,
+                isSelected: (k) => k == studyClass,
+                onTap: onPickClass,
+              ),
+              const SizedBox(height: 22),
+              _label(cs, "Preparing for (optional)"),
+              _chips(
+                cs,
+                options.targetExams,
+                isSelected: (k) => k == targetExam,
+                onTap: onPickExam,
+              ),
+              const SizedBox(height: 22),
+              _label(cs, "Pick up to $max interests  (${selectedInterests.length}/$max)"),
+              _chips(
+                cs,
+                options.interests,
+                isSelected: selectedInterests.contains,
+                onTap: onToggleInterest,
+                // At the limit, unselected chips look disabled; tapping one is a no-op.
+                dimUnselected: selectedInterests.length >= max,
               ),
             ],
           ),
@@ -306,12 +338,62 @@ class _InterestsStep extends StatelessWidget {
         Padding(
           padding: const EdgeInsets.fromLTRB(20, 0, 20, 20),
           child: LsPrimaryButton(
-            label: selected.isEmpty ? 'Skip for now' : 'Next',
+            label: ready ? 'Continue' : 'Skip for now',
             loading: saving,
             onPressed: onNext,
           ),
         ),
       ],
+    );
+  }
+
+  Widget _label(ColorScheme cs, String text) => Padding(
+        padding: const EdgeInsets.only(bottom: 10),
+        child: Text(
+          text,
+          style: TextStyle(fontSize: 14, fontWeight: FontWeight.w700, color: cs.onSurface),
+        ),
+      );
+
+  Widget _chips(
+    ColorScheme cs,
+    List<OnboardingOption> items, {
+    required bool Function(String key) isSelected,
+    required ValueChanged<String> onTap,
+    bool dimUnselected = false,
+  }) {
+    return Wrap(
+      spacing: 10,
+      runSpacing: 10,
+      children: items.map((o) {
+        final selected = isSelected(o.key);
+        final dim = dimUnselected && !selected;
+        return Semantics(
+          button: true,
+          selected: selected,
+          label: o.label,
+          child: GestureDetector(
+            onTap: () => onTap(o.key),
+            child: AnimatedContainer(
+              duration: const Duration(milliseconds: 150),
+              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+              decoration: BoxDecoration(
+                color: selected ? cs.primary : cs.surfaceVariant.withOpacity(dim ? 0.4 : 1),
+                borderRadius: BorderRadius.circular(20),
+                border: Border.all(color: selected ? cs.primary : cs.outlineVariant),
+              ),
+              child: Text(
+                o.label,
+                style: TextStyle(
+                  fontSize: 13,
+                  fontWeight: FontWeight.w600,
+                  color: selected ? cs.onPrimary : cs.onSurface.withOpacity(dim ? 0.45 : 1),
+                ),
+              ),
+            ),
+          ),
+        );
+      }).toList(),
     );
   }
 }

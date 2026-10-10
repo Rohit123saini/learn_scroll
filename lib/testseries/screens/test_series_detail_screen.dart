@@ -11,6 +11,7 @@ import '../services/attempt_draft_store.dart';
 import '../services/testseries_models.dart';
 import '../services/testseries_service.dart';
 import '../utils/ts_error_text.dart';
+import '../widgets/ts_questions_manager.dart';
 import '../widgets/ts_review_tile.dart';
 import '../widgets/ts_series_card.dart' show TsRatingBit;
 import '../widgets/ts_status.dart';
@@ -406,6 +407,15 @@ class _TestSeriesDetailScreenState extends State<TestSeriesDetailScreen> {
                 ),
             ]),
           ),
+
+          // ---- T2: question manager (creator / class & campus teaching staff) ----
+          if (s.canEdit)
+            TsQuestionsManager(
+              key: ValueKey('questions-${widget.seriesId}'),
+              seriesId: widget.seriesId,
+              isDraft: s.isDraft,
+              onChanged: _load,
+            ),
 
           // ---- atka hua submit ----
           if (_hasPendingSubmit)

@@ -332,9 +332,9 @@ class _FocusModeScreenState extends State<FocusModeScreen> {
       Text(label, style: TextStyle(fontSize: 12, color: Theme.of(context).colorScheme.onSurfaceVariant)),
       const SizedBox(height: 6),
       Row(children: [
-        IconButton(icon: const Icon(Icons.remove_circle_outline), onPressed: value > min ? () => onChanged(value - step) : null),
+        IconButton(tooltip: 'Remove', icon: const Icon(Icons.remove_circle_outline), onPressed: value > min ? () => onChanged(value - step) : null),
         SizedBox(width: 32, child: Text('$value', textAlign: TextAlign.center, style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w700))),
-        IconButton(icon: const Icon(Icons.add_circle_outline), onPressed: value < max ? () => onChanged(value + step) : null),
+        IconButton(tooltip: 'Add', icon: const Icon(Icons.add_circle_outline), onPressed: value < max ? () => onChanged(value + step) : null),
       ]),
     ]);
   }

@@ -320,7 +320,7 @@ class _SubmissionGradingScreenState extends State<SubmissionGradingScreen> {
               ),
               isThreeLine: mine.score != null && mine.feedback.isNotEmpty,
               trailing: mine.file != null
-                  ? IconButton(
+                  ? IconButton(tooltip: 'Open', 
                       icon: const Icon(Icons.open_in_new_rounded, color: TuitionClassColors.navy),
                       onPressed: () => _openFile(mine.file, name: 'submission_${mine.id}'),
                     )

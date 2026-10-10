@@ -468,7 +468,7 @@ class _DoubtAnswersSheetState extends State<DoubtAnswersSheet> {
                   const SizedBox(width: 8),
                   _submitting
                       ? const SizedBox(width: 36, height: 36, child: Padding(padding: EdgeInsets.all(8), child: CircularProgressIndicator(strokeWidth: 2)))
-                      : IconButton(
+                      : IconButton(tooltip: 'Send', 
                           onPressed: _submit,
                           icon: Icon(Icons.send_rounded, color: cs.primary),
                         ),

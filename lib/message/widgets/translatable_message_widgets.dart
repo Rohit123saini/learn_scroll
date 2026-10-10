@@ -66,6 +66,7 @@ class ListenButton extends StatelessWidget {
           padding: EdgeInsets.zero,
           constraints: const BoxConstraints(),
           iconSize: 18,
+          tooltip: isSpeaking ? 'Pause reading' : 'Read aloud',
           icon: Icon(
             isSpeaking ? Icons.pause_circle_outline : Icons.volume_up_outlined,
             color: Colors.white54,

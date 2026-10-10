@@ -198,7 +198,7 @@ class _ForgotPasswordScreenState extends State<ForgotPasswordScreen> {
       appBar: AppBar(
         backgroundColor: Colors.transparent,
         elevation: 0,
-        leading: IconButton(
+        leading: IconButton(tooltip: 'Back', 
           icon: Icon(Icons.arrow_back_ios_new_rounded, color: cs.onSurface, size: 20),
           onPressed: () => Navigator.pop(context),
         ),
@@ -397,7 +397,7 @@ class _ForgotPasswordScreenState extends State<ForgotPasswordScreen> {
         labelStyle: TextStyle(color: cs.onSurfaceVariant, fontSize: 14),
         prefixIcon: Icon(icon, color: cs.primary.withOpacity(0.7), size: 22),
         suffixIcon: isPassword
-            ? IconButton(
+            ? IconButton(tooltip: hideText ? 'Show password' : 'Hide password', 
                 icon: Icon(
                   hideText ? Icons.visibility_off_outlined : Icons.visibility_outlined,
                   color: cs.onSurfaceVariant,

@@ -184,12 +184,16 @@ class PostModel {
   // 'recommended' | 'trending'. null = post did not come from the mixed
   // feed (old cache / other endpoints) -> no badge is shown.
   final String? feedSource;
+  // T1 Part 3 — true when this card is an exploration slot (a new creator / test
+  // audience the ranking would not have shown yet). Additive backend field; false when absent.
+  final bool isExploration;
   bool get isSuggested => feedSource == 'recommended';
   bool get isTrending => feedSource == 'trending';
-  PostModel({this.feedSource, this.repostCaption, this.originalPost, this.repostsCount = 0, this.isRepostedByMe = false, required this.id, required this.user, this.title, this.content, required this.category, required this.postType, required this.visibility, required this.hashtags, this.location, required this.likesCount, required this.commentsCount, required this.sharesCount, required this.viewsCount, required this.savesCount, required this.likeCount, required this.confuseCount, required this.wrongCount, required this.impCount, required this.explainCount, this.myReaction, required this.isLiked, required this.isSaved, required this.createdAt, required this.media, this.poll, this.answersCount = 0, this.bestAnswer});
+  PostModel({this.feedSource, this.isExploration = false, this.repostCaption, this.originalPost, this.repostsCount = 0, this.isRepostedByMe = false, required this.id, required this.user, this.title, this.content, required this.category, required this.postType, required this.visibility, required this.hashtags, this.location, required this.likesCount, required this.commentsCount, required this.sharesCount, required this.viewsCount, required this.savesCount, required this.likeCount, required this.confuseCount, required this.wrongCount, required this.impCount, required this.explainCount, this.myReaction, required this.isLiked, required this.isSaved, required this.createdAt, required this.media, this.poll, this.answersCount = 0, this.bestAnswer});
   factory PostModel.fromJson(Map<String, dynamic> json) {
     return PostModel(
       feedSource: json['feed_source'] is String ? json['feed_source'] as String : null,
+      isExploration: json['is_exploration'] == true,
       id: json['id']?.toString() ?? '', user: UserModel.fromJson(json['user'] ?? {}), title: json['title'], content: json['content'],
       category: json['category'] ?? 'general', postType: json['post_type'] ?? 'text', visibility: json['visibility'] ?? 'public',
       hashtags: List<String>.from(json['hashtags'] ?? []), location: json['location'],
@@ -444,14 +448,17 @@ class HomeFeedService {
     return null;
   }
 
-  static Future<FeedResponse> getFeedFromAPI({int page = 1, int pageSize = 20, String source = FeedSource.mixed}) async {
+  static Future<FeedResponse> getFeedFromAPI({int page = 1, int pageSize = 20, String source = FeedSource.mixed, bool refresh = false}) async {
     final token = await AuthService.getValidToken();
     if (token == null) throw Exception('User not authenticated');
     final src = _normalize(source);
     // `source` param is sent only for the Following tab; the mixed feed is
     // the backend default.
     final sourceQuery = src == FeedSource.following ? '&source=following' : '';
-    final url = Uri.parse("${Api.baseUrl}/post/feed/?page=$page&page_size=$pageSize$sourceQuery");
+    // T1 Part 5 — pull-to-refresh asks the backend to skip its short-TTL candidate
+    // cache (`refresh=1`) so the user really gets a freshly ranked feed.
+    final refreshQuery = refresh ? '&refresh=1' : '';
+    final url = Uri.parse("${Api.baseUrl}/post/feed/?page=$page&page_size=$pageSize$sourceQuery$refreshQuery");
     final response = await http
         .get(url, headers: {"Authorization": "Bearer $token", "Content-Type": "application/json"})
         .timeout(kApiTimeout); // Task 11.3
@@ -486,7 +493,7 @@ class HomeFeedService {
   }
 
   static Future<FeedResponse> refreshFeed({int page = 1, int pageSize = 20, String source = FeedSource.mixed}) async =>
-      await getFeedFromAPI(page: page, pageSize: pageSize, source: source);
+      await getFeedFromAPI(page: page, pageSize: pageSize, source: source, refresh: true);
 
   /// Clears the cache of BOTH tabs (used e.g. after a post is deleted).
   static Future<void> clearFeedCache() async {

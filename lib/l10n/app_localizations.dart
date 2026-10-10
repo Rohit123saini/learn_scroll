@@ -608,6 +608,48 @@ abstract class AppLocalizations {
   /// **'Last Name'**
   String get signupLastName;
 
+  /// No description provided for @signupDob.
+  ///
+  /// In en, this message translates to:
+  /// **'Date of Birth'**
+  String get signupDob;
+
+  /// No description provided for @signupDobRequired.
+  ///
+  /// In en, this message translates to:
+  /// **'Date of birth is required'**
+  String get signupDobRequired;
+
+  /// No description provided for @signupDobTooYoung.
+  ///
+  /// In en, this message translates to:
+  /// **'You must be at least 13 years old to use LearnScroll'**
+  String get signupDobTooYoung;
+
+  /// No description provided for @dobPromptTitle.
+  ///
+  /// In en, this message translates to:
+  /// **'When is your birthday?'**
+  String get dobPromptTitle;
+
+  /// No description provided for @dobPromptSubtitle.
+  ///
+  /// In en, this message translates to:
+  /// **'We use this to keep younger students safe. It won\'t be shown on your profile.'**
+  String get dobPromptSubtitle;
+
+  /// No description provided for @dobPromptSave.
+  ///
+  /// In en, this message translates to:
+  /// **'Continue'**
+  String get dobPromptSave;
+
+  /// No description provided for @dobMinorPrivateNote.
+  ///
+  /// In en, this message translates to:
+  /// **'Accounts for users under 18 are private to keep you safe.'**
+  String get dobMinorPrivateNote;
+
   /// No description provided for @signupFieldRequired.
   ///
   /// In en, this message translates to:
@@ -2186,6 +2228,348 @@ abstract class AppLocalizations {
   /// **'Students'**
   String get campusStudents;
 
+  /// No description provided for @roleModerator.
+  ///
+  /// In en, this message translates to:
+  /// **'Moderator'**
+  String get roleModerator;
+
+  /// No description provided for @campusParticipantsTitle.
+  ///
+  /// In en, this message translates to:
+  /// **'Participants'**
+  String get campusParticipantsTitle;
+
+  /// No description provided for @campusParticipantsSearch.
+  ///
+  /// In en, this message translates to:
+  /// **'Search by name or roll no.'**
+  String get campusParticipantsSearch;
+
+  /// No description provided for @campusCategoryAll.
+  ///
+  /// In en, this message translates to:
+  /// **'All'**
+  String get campusCategoryAll;
+
+  /// No description provided for @campusCategoryAdmin.
+  ///
+  /// In en, this message translates to:
+  /// **'Admins'**
+  String get campusCategoryAdmin;
+
+  /// No description provided for @campusCategoryPrincipal.
+  ///
+  /// In en, this message translates to:
+  /// **'Principal / HOD'**
+  String get campusCategoryPrincipal;
+
+  /// No description provided for @campusCategoryModerator.
+  ///
+  /// In en, this message translates to:
+  /// **'Moderators'**
+  String get campusCategoryModerator;
+
+  /// No description provided for @campusCategoryClassTeacher.
+  ///
+  /// In en, this message translates to:
+  /// **'Class teachers'**
+  String get campusCategoryClassTeacher;
+
+  /// No description provided for @campusCategorySubjectTeacher.
+  ///
+  /// In en, this message translates to:
+  /// **'Subject teachers'**
+  String get campusCategorySubjectTeacher;
+
+  /// No description provided for @campusCategoryNonTeaching.
+  ///
+  /// In en, this message translates to:
+  /// **'Non-teaching'**
+  String get campusCategoryNonTeaching;
+
+  /// No description provided for @campusCategoryStudent.
+  ///
+  /// In en, this message translates to:
+  /// **'Students'**
+  String get campusCategoryStudent;
+
+  /// No description provided for @campusCategoryParent.
+  ///
+  /// In en, this message translates to:
+  /// **'Parents'**
+  String get campusCategoryParent;
+
+  /// No description provided for @campusParticipantsEmpty.
+  ///
+  /// In en, this message translates to:
+  /// **'No participants found'**
+  String get campusParticipantsEmpty;
+
+  /// No description provided for @campusParticipantsLoadFailed.
+  ///
+  /// In en, this message translates to:
+  /// **'Couldn\'t load participants'**
+  String get campusParticipantsLoadFailed;
+
+  /// No description provided for @campusControlPanelTitle.
+  ///
+  /// In en, this message translates to:
+  /// **'Control panel'**
+  String get campusControlPanelTitle;
+
+  /// No description provided for @campusPanelOverview.
+  ///
+  /// In en, this message translates to:
+  /// **'Overview'**
+  String get campusPanelOverview;
+
+  /// No description provided for @campusPanelAssignments.
+  ///
+  /// In en, this message translates to:
+  /// **'Assignments'**
+  String get campusPanelAssignments;
+
+  /// No description provided for @campusPanelImport.
+  ///
+  /// In en, this message translates to:
+  /// **'Bulk import'**
+  String get campusPanelImport;
+
+  /// No description provided for @campusPanelAudit.
+  ///
+  /// In en, this message translates to:
+  /// **'Audit log'**
+  String get campusPanelAudit;
+
+  /// No description provided for @campusPanelSetupProgress.
+  ///
+  /// In en, this message translates to:
+  /// **'Setup progress'**
+  String get campusPanelSetupProgress;
+
+  /// No description provided for @campusPanelNextStep.
+  ///
+  /// In en, this message translates to:
+  /// **'Next step'**
+  String get campusPanelNextStep;
+
+  /// No description provided for @campusPanelAttention.
+  ///
+  /// In en, this message translates to:
+  /// **'Needs attention'**
+  String get campusPanelAttention;
+
+  /// No description provided for @campusPanelPendingRequests.
+  ///
+  /// In en, this message translates to:
+  /// **'Pending subject requests'**
+  String get campusPanelPendingRequests;
+
+  /// No description provided for @campusPanelNoClassTeacher.
+  ///
+  /// In en, this message translates to:
+  /// **'Sections without a class teacher'**
+  String get campusPanelNoClassTeacher;
+
+  /// No description provided for @campusPanelFullSections.
+  ///
+  /// In en, this message translates to:
+  /// **'Full sections'**
+  String get campusPanelFullSections;
+
+  /// No description provided for @campusPanelNearCapacity.
+  ///
+  /// In en, this message translates to:
+  /// **'Nearly full sections'**
+  String get campusPanelNearCapacity;
+
+  /// No description provided for @campusPanelLoadFailed.
+  ///
+  /// In en, this message translates to:
+  /// **'Couldn\'t load this panel'**
+  String get campusPanelLoadFailed;
+
+  /// No description provided for @campusMatrixDirectAssign.
+  ///
+  /// In en, this message translates to:
+  /// **'Assign directly'**
+  String get campusMatrixDirectAssign;
+
+  /// No description provided for @campusMatrixClassTeacher.
+  ///
+  /// In en, this message translates to:
+  /// **'Class teacher'**
+  String get campusMatrixClassTeacher;
+
+  /// No description provided for @campusMatrixSubject.
+  ///
+  /// In en, this message translates to:
+  /// **'Subject'**
+  String get campusMatrixSubject;
+
+  /// No description provided for @campusMatrixTeacher.
+  ///
+  /// In en, this message translates to:
+  /// **'Teacher'**
+  String get campusMatrixTeacher;
+
+  /// No description provided for @campusMatrixSection.
+  ///
+  /// In en, this message translates to:
+  /// **'Section'**
+  String get campusMatrixSection;
+
+  /// No description provided for @campusMatrixHeavyLoad.
+  ///
+  /// In en, this message translates to:
+  /// **'Heavy load'**
+  String get campusMatrixHeavyLoad;
+
+  /// No description provided for @campusMatrixMultiSection.
+  ///
+  /// In en, this message translates to:
+  /// **'Class teacher of several sections'**
+  String get campusMatrixMultiSection;
+
+  /// No description provided for @campusMatrixPreview.
+  ///
+  /// In en, this message translates to:
+  /// **'Preview (no changes)'**
+  String get campusMatrixPreview;
+
+  /// No description provided for @campusMatrixApply.
+  ///
+  /// In en, this message translates to:
+  /// **'Apply'**
+  String get campusMatrixApply;
+
+  /// No description provided for @campusMatrixReplace.
+  ///
+  /// In en, this message translates to:
+  /// **'Replace the existing teacher'**
+  String get campusMatrixReplace;
+
+  /// No description provided for @campusMatrixConflict.
+  ///
+  /// In en, this message translates to:
+  /// **'Conflict'**
+  String get campusMatrixConflict;
+
+  /// No description provided for @campusImportKind.
+  ///
+  /// In en, this message translates to:
+  /// **'What do you want to import?'**
+  String get campusImportKind;
+
+  /// No description provided for @campusImportPickFile.
+  ///
+  /// In en, this message translates to:
+  /// **'Choose CSV file'**
+  String get campusImportPickFile;
+
+  /// No description provided for @campusImportDryRun.
+  ///
+  /// In en, this message translates to:
+  /// **'Only check, don\'t save'**
+  String get campusImportDryRun;
+
+  /// No description provided for @campusImportRun.
+  ///
+  /// In en, this message translates to:
+  /// **'Run'**
+  String get campusImportRun;
+
+  /// No description provided for @campusImportErrors.
+  ///
+  /// In en, this message translates to:
+  /// **'Rows with errors'**
+  String get campusImportErrors;
+
+  /// No description provided for @campusAuditEmpty.
+  ///
+  /// In en, this message translates to:
+  /// **'No activity yet'**
+  String get campusAuditEmpty;
+
+  /// No description provided for @campusSectionCapacity.
+  ///
+  /// In en, this message translates to:
+  /// **'Capacity'**
+  String get campusSectionCapacity;
+
+  /// No description provided for @campusSectionFull.
+  ///
+  /// In en, this message translates to:
+  /// **'This section is full'**
+  String get campusSectionFull;
+
+  /// No description provided for @campusSectionOverride.
+  ///
+  /// In en, this message translates to:
+  /// **'Add anyway (admin)'**
+  String get campusSectionOverride;
+
+  /// No description provided for @campusRosterTransfer.
+  ///
+  /// In en, this message translates to:
+  /// **'Move to another section'**
+  String get campusRosterTransfer;
+
+  /// No description provided for @campusRosterRemove.
+  ///
+  /// In en, this message translates to:
+  /// **'Remove from section'**
+  String get campusRosterRemove;
+
+  /// No description provided for @campusRosterRemoveConfirm.
+  ///
+  /// In en, this message translates to:
+  /// **'Remove this student from the section?'**
+  String get campusRosterRemoveConfirm;
+
+  /// No description provided for @campusRosterSeatsLeft.
+  ///
+  /// In en, this message translates to:
+  /// **'Seats left'**
+  String get campusRosterSeatsLeft;
+
+  /// No description provided for @campusDashboardTitle.
+  ///
+  /// In en, this message translates to:
+  /// **'Section dashboard'**
+  String get campusDashboardTitle;
+
+  /// No description provided for @campusDashboardAttendanceToday.
+  ///
+  /// In en, this message translates to:
+  /// **'Attendance today'**
+  String get campusDashboardAttendanceToday;
+
+  /// No description provided for @campusDashboardAttendance30.
+  ///
+  /// In en, this message translates to:
+  /// **'Attendance, last 30 days'**
+  String get campusDashboardAttendance30;
+
+  /// No description provided for @campusDashboardPending.
+  ///
+  /// In en, this message translates to:
+  /// **'Pending subject-teacher requests'**
+  String get campusDashboardPending;
+
+  /// No description provided for @campusDashboardDoubtsSoon.
+  ///
+  /// In en, this message translates to:
+  /// **'Doubts: coming soon'**
+  String get campusDashboardDoubtsSoon;
+
+  /// No description provided for @campusDashboardOpen.
+  ///
+  /// In en, this message translates to:
+  /// **'Open dashboard'**
+  String get campusDashboardOpen;
+
   /// No description provided for @campusTimetableTitle.
   ///
   /// In en, this message translates to:
@@ -3361,6 +3745,72 @@ abstract class AppLocalizations {
   /// In en, this message translates to:
   /// **'Language'**
   String get languageSectionTitle;
+
+  /// No description provided for @a11yFullScreen.
+  ///
+  /// In en, this message translates to:
+  /// **'Full screen'**
+  String get a11yFullScreen;
+
+  /// No description provided for @a11yMute.
+  ///
+  /// In en, this message translates to:
+  /// **'Mute video'**
+  String get a11yMute;
+
+  /// No description provided for @a11yUnmute.
+  ///
+  /// In en, this message translates to:
+  /// **'Unmute video'**
+  String get a11yUnmute;
+
+  /// No description provided for @textSizeSectionTitle.
+  ///
+  /// In en, this message translates to:
+  /// **'Text size'**
+  String get textSizeSectionTitle;
+
+  /// No description provided for @textSizeSmall.
+  ///
+  /// In en, this message translates to:
+  /// **'Small'**
+  String get textSizeSmall;
+
+  /// No description provided for @textSizeNormal.
+  ///
+  /// In en, this message translates to:
+  /// **'Normal'**
+  String get textSizeNormal;
+
+  /// No description provided for @textSizeLarge.
+  ///
+  /// In en, this message translates to:
+  /// **'Large'**
+  String get textSizeLarge;
+
+  /// No description provided for @textSizeXLarge.
+  ///
+  /// In en, this message translates to:
+  /// **'Extra large'**
+  String get textSizeXLarge;
+
+  /// No description provided for @textSizePreview.
+  ///
+  /// In en, this message translates to:
+  /// **'The quick brown fox jumps over the lazy dog.'**
+  String get textSizePreview;
+
+  /// Settings section/tile title for support, bug reports, feature board
+  ///
+  /// In en, this message translates to:
+  /// **'Help & feedback'**
+  String get helpFeedbackTitle;
+
+  /// Subtitle of the Help & feedback tile
+  ///
+  /// In en, this message translates to:
+  /// **'Chat with support, report a bug, request features'**
+  String get helpFeedbackSub;
 
   /// Theme section header in settings
   ///

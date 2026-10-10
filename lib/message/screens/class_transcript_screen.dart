@@ -186,6 +186,7 @@ class _ClassTranscriptScreenState extends State<ClassTranscriptScreen> {
           title: Text(s.text, style: TextStyle(color: cs.onSurface)),
           subtitle: Text(s.speakerName, style: TextStyle(color: cs.onSurfaceVariant, fontSize: 12)),
           trailing: IconButton(
+            tooltip: isPlaying ? 'Stop' : 'Play',
             icon: Icon(isPlaying ? Icons.stop_circle : Icons.play_circle_outline, color: cs.primary),
             onPressed: () => _togglePlay(s),
           ),

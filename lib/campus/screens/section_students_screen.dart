@@ -6,6 +6,7 @@ import '../../widgets/ls_ui.dart';
 import '../../widgets/skeletons.dart';
 import '../models/campus_models.dart';
 import '../services/campus_service.dart';
+import 'section_dashboard_screen.dart';
 
 // ============================================================
 // SECTION — STUDENT ROSTER
@@ -18,11 +19,13 @@ import '../services/campus_service.dart';
 class SectionStudentsScreen extends StatefulWidget {
   final String sectionId;
   final String sectionLabel;
+  final bool isAdmin; // [T4 §D] passed through to the dashboard (capacity override)
 
   const SectionStudentsScreen({
     super.key,
     required this.sectionId,
     required this.sectionLabel,
+    this.isAdmin = false,
   });
 
   @override
@@ -83,6 +86,23 @@ class _SectionStudentsScreenState extends State<SectionStudentsScreen> {
           Text(widget.sectionLabel,
               style: TextStyle(fontSize: 11.5, color: cs.onSurfaceVariant)),
         ]),
+        actions: [
+          // [T4 §D] class teacher / admin dashboard (others get a clear 403 message there)
+          IconButton(
+            tooltip: l10n.campusDashboardOpen,
+            icon: const Icon(Icons.dashboard_customize_outlined),
+            onPressed: () => Navigator.push(
+              context,
+              MaterialPageRoute(
+                builder: (_) => SectionDashboardScreen(
+                  sectionId: widget.sectionId,
+                  sectionLabel: widget.sectionLabel,
+                  isAdmin: widget.isAdmin,
+                ),
+              ),
+            ).then((_) => _load()),
+          ),
+        ],
       ),
       body: RefreshIndicator(onRefresh: _load, child: _body(cs, l10n)),
     );

@@ -243,7 +243,7 @@ class _RatioCropScreenState extends State<RatioCropScreen> {
         backgroundColor: Colors.black,
         foregroundColor: Colors.white,
         elevation: 0,
-        leading: IconButton(
+        leading: IconButton(tooltip: 'Close', 
           icon: const Icon(Icons.close_rounded),
           onPressed: _busy ? null : () => Navigator.pop(context),
         ),

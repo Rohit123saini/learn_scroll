@@ -1742,12 +1742,12 @@ class _MediaEditScreenState extends State<MediaEditScreen> with TickerProviderSt
                             padding: const EdgeInsets.fromLTRB(6, 4, 12, 4),
                             child: Row(
                               children: [
-                                IconButton(
+                                IconButton(tooltip: 'Close', 
                                   icon: const Icon(Icons.close, color: Colors.white, size: 26),
                                   onPressed: () => Navigator.pop(routeContext),
                                 ),
                                 if (existing != null)
-                                  IconButton(
+                                  IconButton(tooltip: 'Delete', 
                                     icon: const Icon(Icons.delete_outline, color: Colors.redAccent, size: 22),
                                     onPressed: () {
                                       Navigator.pop(routeContext);
@@ -3741,7 +3741,7 @@ class _MediaEditScreenState extends State<MediaEditScreen> with TickerProviderSt
       appBar: AppBar(
         backgroundColor: _bg,
         elevation: 0,
-        leading: IconButton(
+        leading: IconButton(tooltip: 'Close', 
           icon: const Icon(Icons.close_rounded),
           onPressed: _isSaving ? null : () => Navigator.pop(context),
         ),
@@ -5236,7 +5236,7 @@ class _MediaEditScreenState extends State<MediaEditScreen> with TickerProviderSt
               ),
             ),
             const SizedBox(width: 8),
-            IconButton(
+            IconButton(tooltip: 'Search', 
               onPressed: _freesoundSearching ? null : () => _searchFreesound(_freesoundQueryCtrl.text),
               icon: _freesoundSearching
                   ? const SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white))
@@ -5274,6 +5274,7 @@ class _MediaEditScreenState extends State<MediaEditScreen> with TickerProviderSt
                     return Row(
                       children: [
                         IconButton(
+                          tooltip: isPlaying ? 'Pause preview' : 'Play preview',
                           onPressed: () => _togglePreviewPlayback(track),
                           icon: Icon(
                             isPlaying ? Icons.pause_circle_filled_rounded : Icons.play_circle_fill_rounded,
@@ -5337,7 +5338,7 @@ class _MediaEditScreenState extends State<MediaEditScreen> with TickerProviderSt
         children: [
           Row(
             children: [
-              IconButton(
+              IconButton(tooltip: 'Back', 
                 onPressed: _isCroppingFreesoundTrack
                     ? null
                     : () => setState(() {

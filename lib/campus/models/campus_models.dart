@@ -255,6 +255,7 @@ enum CampusRole {
   principalHod('principal_hod'),
   classTeacher('class_teacher'),
   subjectTeacher('subject_teacher'),
+  moderator('moderator'), // [T4 §C] scoped to the sections they're assigned to
   nonTeaching('non_teaching'),
   student('student'),
   parent('parent'),
@@ -277,10 +278,12 @@ enum CampusRole {
         CampusRole.principalHod,
         CampusRole.classTeacher,
         CampusRole.subjectTeacher,
+        CampusRole.moderator,
         CampusRole.nonTeaching,
       }.contains(this);
 
-  bool get canTeach => this == CampusRole.classTeacher || this == CampusRole.subjectTeacher;
+  bool get canTeach =>
+      this == CampusRole.classTeacher || this == CampusRole.subjectTeacher || this == CampusRole.moderator;
 }
 
 class StaffProfile {
@@ -380,7 +383,7 @@ class StudentEnrollment {
   final String sectionId;
   final String sessionId;
   final String rollNumber;
-  final String status; // active | transferred | left ...
+  final String status; // active | transferred | graduated | withdrawn
 
   const StudentEnrollment({
     required this.id,
@@ -640,8 +643,9 @@ class TimeSlot {
   final String id;
   final String campusId;
 
-  /// `Day.choices` — backend me `PositiveSmallIntegerField`. Django ka
-  /// convention 0=Monday hai (Python `weekday()` jaisa), 1=Monday nahi.
+  /// `TimeSlot.Day` — backend me 1=Monday … 7=Sunday (ISO). (Pehle yahan
+  /// 0=Monday maana gaya tha — off-by-one tha; ab `dayName` aur timetable
+  /// screen dono 1-based hain.)
   final int dayOfWeek;
   final String startTime; // "09:00:00"
   final String endTime;
@@ -660,7 +664,7 @@ class TimeSlot {
     'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday',
   ];
 
-  String get dayName => dayOfWeek >= 0 && dayOfWeek < 7 ? dayNames[dayOfWeek] : '—';
+  String get dayName => dayOfWeek >= 1 && dayOfWeek <= 7 ? dayNames[dayOfWeek - 1] : '—';
 
   /// "09:00:00" -> "9:00 AM". Server se hamesha 24h HH:mm:ss aata hai.
   String get prettyStart => _pretty(startTime);
@@ -691,9 +695,17 @@ class TimetableEntry {
   final String sectionId;
   final String subjectId;
   final String staffId;
-  final String timeSlotId;
+  /// T4 §G — `null` when the backend hides the slot: a student/parent
+  /// never receives the time of an OFFLINE period (`timeHidden == true`,
+  /// `label == "Offline class"`). Staff always get the real slot.
+  final String? timeSlotId;
   final String? roomId;
   final String sessionId;
+
+  /// `online` | `offline`
+  final String mode;
+  final bool timeHidden;
+  final String? label;
 
   const TimetableEntry({
     required this.id,
@@ -703,6 +715,9 @@ class TimetableEntry {
     required this.timeSlotId,
     required this.sessionId,
     this.roomId,
+    this.mode = 'offline',
+    this.timeHidden = false,
+    this.label,
   });
 
   factory TimetableEntry.fromJson(Map<String, dynamic> j) => TimetableEntry(
@@ -710,9 +725,12 @@ class TimetableEntry {
         sectionId: j['section'].toString(),
         subjectId: j['subject'].toString(),
         staffId: j['staff'].toString(),
-        timeSlotId: j['time_slot'].toString(),
+        timeSlotId: j['time_slot']?.toString(),
         roomId: j['room']?.toString(),
         sessionId: j['session'].toString(),
+        mode: (j['mode'] ?? 'offline').toString(),
+        timeHidden: j['time_hidden'] == true,
+        label: j['label']?.toString(),
       );
 }
 
@@ -1409,4 +1427,187 @@ class CampusAccess {
         ...subjectTeacherKeys.map((k) => k.split('::').first),
         ...myEnrollments.map((e) => e.sectionId),
       };
+}
+
+
+// ============================================================
+// T4 §E/§G — "my classes" cards (GET /campus/my/classes/)
+// ============================================================
+
+/// One upcoming class. For an OFFLINE class a student gets
+/// `timeHidden == true`, `startsAt == null`, `label == "Offline class"`.
+class NextSession {
+  final String kind; // live_session | timetable
+  final String mode; // online | offline
+  final bool timeHidden;
+  final String? label;
+  final DateTime? startsAt;
+  final String? liveSessionId;
+  final String? status;
+
+  const NextSession({
+    required this.kind,
+    required this.mode,
+    required this.timeHidden,
+    this.label,
+    this.startsAt,
+    this.liveSessionId,
+    this.status,
+  });
+
+  bool get isOnline => mode == 'online';
+
+  factory NextSession.fromJson(Map<String, dynamic> j) => NextSession(
+        kind: (j['kind'] ?? '').toString(),
+        mode: (j['mode'] ?? 'offline').toString(),
+        timeHidden: j['time_hidden'] == true,
+        label: j['label']?.toString(),
+        startsAt: j['starts_at'] == null ? null : DateTime.tryParse(j['starts_at'].toString())?.toLocal(),
+        liveSessionId: j['live_session_id']?.toString(),
+        status: j['status']?.toString(),
+      );
+}
+
+class MyClassCard {
+  final String id; // approved SubjectTeacherassigments id = the subject-class
+  final String campusId;
+  final String sectionId;
+  final String sectionName;
+  final String className;
+  final String subjectId;
+  final String subjectName;
+  final String teacherName;
+  final int teacherUserId;
+  final String mode;
+  final NextSession? nextSession;
+  final NextSession? nextOnlineSession;
+  final int notices;
+  final int doubtsOpen;
+
+  const MyClassCard({
+    required this.id,
+    required this.campusId,
+    required this.sectionId,
+    required this.sectionName,
+    required this.className,
+    required this.subjectId,
+    required this.subjectName,
+    required this.teacherName,
+    required this.teacherUserId,
+    required this.mode,
+    this.nextSession,
+    this.nextOnlineSession,
+    this.notices = 0,
+    this.doubtsOpen = 0,
+  });
+
+  factory MyClassCard.fromJson(Map<String, dynamic> j) {
+    final teacher = Map<String, dynamic>.from(j['teacher'] as Map? ?? const {});
+    final counts = Map<String, dynamic>.from(j['counts'] as Map? ?? const {});
+    NextSession? ns(dynamic v) => v is Map ? NextSession.fromJson(Map<String, dynamic>.from(v)) : null;
+    return MyClassCard(
+      id: j['id'].toString(),
+      campusId: j['campus'].toString(),
+      sectionId: j['section'].toString(),
+      sectionName: (j['section_name'] ?? '').toString(),
+      className: (j['class_name'] ?? '').toString(),
+      subjectId: j['subject'].toString(),
+      subjectName: (j['subject_name'] ?? '').toString(),
+      teacherName: (teacher['name'] ?? '').toString(),
+      teacherUserId: (teacher['user_id'] as num?)?.toInt() ?? 0,
+      mode: (j['mode'] ?? 'offline').toString(),
+      nextSession: ns(j['next_session']),
+      nextOnlineSession: ns(j['next_online_session']),
+      notices: (counts['notices'] as num?)?.toInt() ?? 0,
+      doubtsOpen: (counts['doubts_open'] as num?)?.toInt() ?? 0,
+    );
+  }
+}
+
+// ============================================================
+// T4 §F — doubts
+// ============================================================
+
+class DoubtReply {
+  final String id;
+  final MinimalUser? author;
+  final String text;
+  final String? attachment;
+  final bool isStaffReply;
+  final DateTime? createdAt;
+
+  const DoubtReply({
+    required this.id,
+    required this.text,
+    required this.isStaffReply,
+    this.author,
+    this.attachment,
+    this.createdAt,
+  });
+
+  factory DoubtReply.fromJson(Map<String, dynamic> j) => DoubtReply(
+        id: j['id'].toString(),
+        text: (j['text'] ?? '').toString(),
+        isStaffReply: j['is_staff_reply'] == true,
+        attachment: j['attachment']?.toString(),
+        author: j['author_detail'] is Map
+            ? MinimalUser.fromJson(Map<String, dynamic>.from(j['author_detail'] as Map))
+            : null,
+        createdAt: j['created_at'] == null ? null : DateTime.tryParse(j['created_at'].toString())?.toLocal(),
+      );
+}
+
+class Doubt {
+  final String id;
+  final String sectionId;
+  final String subjectId;
+  final String subjectName;
+  final MinimalUser? author;
+  final String text;
+  final String? attachment;
+
+  /// `open` | `answered` | `resolved`
+  final String status;
+  final bool isPublic;
+  final int repliesCount;
+  final DateTime? createdAt;
+  final List<DoubtReply> replies; // only filled by the detail endpoint
+
+  const Doubt({
+    required this.id,
+    required this.sectionId,
+    required this.subjectId,
+    required this.subjectName,
+    required this.text,
+    required this.status,
+    required this.isPublic,
+    required this.repliesCount,
+    this.author,
+    this.attachment,
+    this.createdAt,
+    this.replies = const [],
+  });
+
+  bool get isResolved => status == 'resolved';
+
+  factory Doubt.fromJson(Map<String, dynamic> j) => Doubt(
+        id: j['id'].toString(),
+        sectionId: j['section'].toString(),
+        subjectId: j['subject'].toString(),
+        subjectName: (j['subject_name'] ?? '').toString(),
+        text: (j['text'] ?? '').toString(),
+        status: (j['status'] ?? 'open').toString(),
+        isPublic: j['is_public'] == true,
+        repliesCount: (j['replies_count'] as num?)?.toInt() ?? 0,
+        attachment: j['attachment']?.toString(),
+        author: j['author_detail'] is Map
+            ? MinimalUser.fromJson(Map<String, dynamic>.from(j['author_detail'] as Map))
+            : null,
+        createdAt: j['created_at'] == null ? null : DateTime.tryParse(j['created_at'].toString())?.toLocal(),
+        replies: (j['replies'] is List)
+            ? (j['replies'] as List)
+                .map((e) => DoubtReply.fromJson(Map<String, dynamic>.from(e as Map)))
+                .toList()
+            : const [],
+      );
 }

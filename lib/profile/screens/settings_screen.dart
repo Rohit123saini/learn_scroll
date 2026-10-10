@@ -48,6 +48,7 @@ import '../../leaderboard/models/leaderboard_models.dart';
 import '../../leaderboard/screens/leaderboard_screen.dart';
 import '../../widgets/ls_ui.dart';
 import '../../theme_service.dart';
+import '../../accessibility_service.dart';
 import '../../language_service.dart';
 import '../../services/account_manager.dart'; // P15-FE
 import '../../services/session_service.dart' show navigatorKey; // P15-FE
@@ -61,6 +62,7 @@ import 'blocked_accounts_screen.dart';
 import 'change_password_screen.dart';
 import 'edit_profile.dart';
 import 'weekly_recap_screen.dart';
+import '../../support/screens/help_center_screen.dart'; // Task 5 — Help & feedback
 import 'activity_screen.dart'; // P14-FE — Your activity
 import '../../referrals/screens/referrals_screen.dart'; // Task G12 — app-wide Invite & Earn
 import '../../notifications/screens/notification_settings_screen.dart';
@@ -171,6 +173,20 @@ class _SettingsScreenState extends State<SettingsScreen> {
                   subtitle: t.acctCountSubtitle(AccountManager.instance.accounts.length, AccountManager.maxAccounts),
                   onTap: () => showAccountSwitcherSheet(context),
                 ),
+              ),
+            ),
+            const SizedBox(height: 22),
+
+            LsSectionHead(title: t.helpFeedbackTitle),
+            LsCard(
+              margin: const EdgeInsets.symmetric(horizontal: kLsPad),
+              padding: EdgeInsets.zero,
+              child: _navTile(
+                cs,
+                icon: Icons.support_agent_rounded,
+                label: t.helpFeedbackTitle,
+                subtitle: t.helpFeedbackSub,
+                onTap: () => Navigator.push(context, MaterialPageRoute(builder: (_) => const HelpCenterScreen())),
               ),
             ),
             const SizedBox(height: 22),
@@ -420,6 +436,44 @@ class _SettingsScreenState extends State<SettingsScreen> {
                   onTap: () => ThemeService.instance.setThemeMode(ThemeMode.dark),
                 ),
               ]),
+            ),
+
+            const SizedBox(height: 22),
+            LsSectionHead(title: t.textSizeSectionTitle),
+            ValueListenableBuilder<FontScaleStep>(
+              valueListenable: AccessibilityService.instance.fontScale,
+              builder: (context, current, _) {
+                final labels = <FontScaleStep, String>{
+                  FontScaleStep.small: t.textSizeSmall,
+                  FontScaleStep.normal: t.textSizeNormal,
+                  FontScaleStep.large: t.textSizeLarge,
+                  FontScaleStep.xlarge: t.textSizeXLarge,
+                };
+                return LsCard(
+                  margin: const EdgeInsets.symmetric(horizontal: kLsPad),
+                  padding: EdgeInsets.zero,
+                  child: Column(children: [
+                    for (final step in FontScaleStep.values) ...[
+                      _themeTile(
+                        cs,
+                        label: labels[step]!,
+                        icon: Icons.text_fields_rounded,
+                        selected: step == current,
+                        onTap: () => AccessibilityService.instance.setFontScale(step),
+                      ),
+                      Divider(height: 1, color: cs.outlineVariant),
+                    ],
+                    // Live preview: this text already scales with the chosen step.
+                    Padding(
+                      padding: const EdgeInsets.all(16),
+                      child: Text(
+                        t.textSizePreview,
+                        style: TextStyle(fontSize: 14, color: cs.onSurfaceVariant),
+                      ),
+                    ),
+                  ]),
+                );
+              },
             ),
 
             const SizedBox(height: 22),

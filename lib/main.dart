@@ -12,6 +12,7 @@ import 'package:audioplayers/audioplayers.dart';
 import 'package:flutter_localizations/flutter_localizations.dart';
 import 'firebase_options.dart';
 import 'theme_service.dart';
+import 'accessibility_service.dart'; // text size
 // 🔥 NAYA (Task 2 — i18n) — language state (theme_service.dart jaisa
 // pattern) + `flutter gen-l10n` se generated strings class.
 // `l10n.yaml` me `synthetic-package: false` set hai isliye ye seedha
@@ -160,6 +161,15 @@ void main() {
         await LanguageService.instance.init();
       } catch (e) {
         developer.log("LanguageService init failed: $e");
+      }
+    }(),
+    () async {
+      // Text size also affects the first frame (a large-text user must not
+      // see one frame at normal size), so it blocks runApp() like the two above.
+      try {
+        await AccessibilityService.instance.init();
+      } catch (e) {
+        developer.log("AccessibilityService init failed: $e");
       }
     }(),
   ]);
@@ -370,6 +380,7 @@ class _MyAppState extends State<MyApp> with WidgetsBindingObserver {
         unawaited(InboxSocketService.instance.connect());
         unawaited(ThemeService.instance.resyncFromBackend());
         unawaited(LanguageService.instance.resyncFromBackend());
+        unawaited(AccessibilityService.instance.resyncFromBackend());
       });
 
     // 🔥 NAYA — app start par active session-check (fire-and-forget,
@@ -389,6 +400,7 @@ class _MyAppState extends State<MyApp> with WidgetsBindingObserver {
     // foreground; lifecycle callbacks below start/stop it). On a cold start
     // no lifecycle event fires, so start it here if we're already visible.
     ActivityHeartbeat.instance.onLimitReached = _showDailyLimitReached;
+    ActivityHeartbeat.instance.onGoalCompleted = _showDailyGoalCompleted;
     final lifecycle = WidgetsBinding.instance.lifecycleState;
     if (lifecycle == null || lifecycle == AppLifecycleState.resumed) {
       ActivityHeartbeat.instance.onForeground();
@@ -406,6 +418,22 @@ class _MyAppState extends State<MyApp> with WidgetsBindingObserver {
   // (once a day). A SnackBar via the global navigator's context; if no
   // route is mounted yet it's simply skipped (the bell notification the
   // backend also writes still lands).
+  // Daily goal ("aaj ka N minute challenge") poora hone par ek baar.
+  void _showDailyGoalCompleted(bool freezeAwarded) {
+    final ctx = navigatorKey.currentContext;
+    if (ctx == null) return;
+    ScaffoldMessenger.maybeOf(ctx)?.showSnackBar(
+      SnackBar(
+        content: Text(
+          freezeAwarded
+              ? '\u{1F389} Daily goal complete! Bonus: ek free \u{2744}\u{FE0F} streak freeze mila.'
+              : '\u{1F389} Daily goal complete! Shabaash.',
+        ),
+        duration: const Duration(seconds: 5),
+      ),
+    );
+  }
+
   void _showDailyLimitReached() {
     final ctx = navigatorKey.currentContext;
     if (ctx == null) return;
@@ -525,11 +553,23 @@ class _MyAppState extends State<MyApp> with WidgetsBindingObserver {
               // 🔥 NAYA — WhatsApp-style floating call bar jo call minimize karne
               // ke baad app ke UPAR, kisi bhi screen pe, hamesha dikhta hai.
               builder: (context, child) {
-                return Stack(
-                  children: [
-                    if (child != null) child,
-                    const MinimizedCallBar(),
-                  ],
+                // Accessibility text size: multiplies the device's own font
+                // setting (clamped) for every screen, including this overlay.
+                return ValueListenableBuilder<FontScaleStep>(
+                  valueListenable: AccessibilityService.instance.fontScale,
+                  builder: (context, _, __) {
+                    final mq = MediaQuery.of(context);
+                    final scale = AccessibilityService.instance.effectiveScale(mq.textScaler.scale(1.0));
+                    return MediaQuery(
+                      data: mq.copyWith(textScaler: TextScaler.linear(scale)),
+                      child: Stack(
+                        children: [
+                          if (child != null) child,
+                          const MinimizedCallBar(),
+                        ],
+                      ),
+                    );
+                  },
                 );
               },
               home: FutureBuilder<bool>(

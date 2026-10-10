@@ -698,6 +698,7 @@ class _StaffTile extends StatelessWidget {
         CampusRole.principalHod => l10n.rolePrincipalHod,
         CampusRole.classTeacher => l10n.roleClassTeacher,
         CampusRole.subjectTeacher => l10n.roleSubjectTeacher,
+        CampusRole.moderator => l10n.roleModerator,
         CampusRole.nonTeaching => l10n.roleNonTeaching,
         CampusRole.student => l10n.roleStudent,
         CampusRole.parent => l10n.roleParent,
@@ -1285,6 +1286,7 @@ class _AddStaffSheetState extends State<_AddStaffSheet> {
       CampusRole.principalHod,
       CampusRole.classTeacher,
       CampusRole.subjectTeacher,
+      CampusRole.moderator,
       CampusRole.nonTeaching,
     ];
     String roleLabel(CampusRole r) => switch (r) {
@@ -1292,6 +1294,7 @@ class _AddStaffSheetState extends State<_AddStaffSheet> {
           CampusRole.principalHod => l10n.rolePrincipalHod,
           CampusRole.classTeacher => l10n.roleClassTeacher,
           CampusRole.subjectTeacher => l10n.roleSubjectTeacher,
+          CampusRole.moderator => l10n.roleModerator,
           CampusRole.nonTeaching => l10n.roleNonTeaching,
           _ => l10n.roleNone,
         };

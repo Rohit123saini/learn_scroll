@@ -15,6 +15,7 @@ import 'package:timeago/timeago.dart' as timeago;
 import '../models/notification_model.dart';
 import '../widgets/notification_tile.dart';
 import '../services/notification_service.dart';
+import '../../support/screens/tickets_screen.dart';
 import '../../widgets/ls_ui.dart';
 import '../../widgets/error_widgets.dart';
 import '../../widgets/skeletons.dart'; // Task 11 — LsListSkeleton for the first-load state.
@@ -658,6 +659,18 @@ class _NotificationsScreenState extends State<NotificationsScreen> {
     // is shown as "no longer available" instead of an error.
     if (type == 'story_mention') {
       await _openMentionedStory(n);
+      return;
+    }
+
+    // Task 5 — support team replied to my ticket.
+    if (type == 'support_reply') {
+      final tid = n.data?['ticket_id']?.toString();
+      if (tid != null && tid.isNotEmpty && mounted) {
+        await Navigator.push(
+          context,
+          MaterialPageRoute(builder: (_) => TicketThreadScreen(ticketId: tid, subject: 'Support')),
+        );
+      }
       return;
     }
 

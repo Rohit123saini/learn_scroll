@@ -353,7 +353,7 @@ class _MaterialsScreenState extends State<MaterialsScreen> {
         title: Text(m.title, style: const TextStyle(fontWeight: FontWeight.w600, fontSize: 13.5), maxLines: 1, overflow: TextOverflow.ellipsis),
         subtitle: Text('${m.uploadedBy.fullName} · ${tuitionClassFmtDate(m.uploadedAt)}', style: TextStyle(fontSize: 11.5, color: Colors.grey.shade500)),
         trailing: widget.canManage
-            ? IconButton(icon: const Icon(Icons.delete_outline_rounded, color: TuitionClassColors.danger), onPressed: () => _confirmDelete(m))
+            ? IconButton(tooltip: 'Delete', icon: const Icon(Icons.delete_outline_rounded, color: TuitionClassColors.danger), onPressed: () => _confirmDelete(m))
             : Icon(Icons.chevron_right_rounded, color: Colors.grey.shade400),
         onTap: () => _openMaterial(m),
       ),

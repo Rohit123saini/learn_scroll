@@ -149,6 +149,87 @@ class OnboardingSuggestions {
   }
 }
 
+/// One pickable option from `/core/onboarding/options/`.
+class OnboardingOption {
+  final String key;
+  final String label;
+  const OnboardingOption(this.key, this.label);
+}
+
+/// Choices for the 30-second quick-start step. The app ships a copy
+/// (`fallback`) so the step still works offline / if the options call
+/// fails — it must never become a hard gate.
+class OnboardingOptions {
+  final int maxInterests;
+  final List<OnboardingOption> studyClasses;
+  final List<OnboardingOption> targetExams;
+  final List<OnboardingOption> interests;
+
+  const OnboardingOptions({
+    required this.maxInterests,
+    required this.studyClasses,
+    required this.targetExams,
+    required this.interests,
+  });
+
+  static const fallback = OnboardingOptions(
+    maxInterests: 3,
+    studyClasses: [
+      OnboardingOption('class_6_8', 'Class 6-8'),
+      OnboardingOption('class_9', 'Class 9'),
+      OnboardingOption('class_10', 'Class 10'),
+      OnboardingOption('class_11', 'Class 11'),
+      OnboardingOption('class_12', 'Class 12'),
+      OnboardingOption('dropper', 'Dropper / Gap year'),
+      OnboardingOption('undergrad', 'College (UG)'),
+      OnboardingOption('postgrad', 'College (PG)'),
+      OnboardingOption('working', 'Working professional'),
+      OnboardingOption('other', 'Other'),
+    ],
+    targetExams: [
+      OnboardingOption('jee', 'JEE'),
+      OnboardingOption('neet', 'NEET'),
+      OnboardingOption('boards', 'Board exams'),
+      OnboardingOption('cuet', 'CUET'),
+      OnboardingOption('upsc', 'UPSC'),
+      OnboardingOption('ssc', 'SSC'),
+      OnboardingOption('banking', 'Banking'),
+      OnboardingOption('gate', 'GATE'),
+      OnboardingOption('cat', 'CAT / MBA'),
+      OnboardingOption('none', 'No exam right now'),
+    ],
+    interests: [
+      OnboardingOption('tech', 'Technology'),
+      OnboardingOption('jobs', 'Jobs'),
+      OnboardingOption('news', 'News'),
+      OnboardingOption('education', 'Education'),
+      OnboardingOption('business', 'Business'),
+      OnboardingOption('entertainment', 'Entertainment'),
+      OnboardingOption('sports', 'Sports'),
+      OnboardingOption('lifestyle', 'Lifestyle'),
+    ],
+  );
+
+  factory OnboardingOptions.fromJson(Map<String, dynamic> json) {
+    List<OnboardingOption> opts(String key, List<OnboardingOption> orElse) {
+      final raw = json[key];
+      if (raw is! List) return orElse;
+      final out = raw
+          .whereType<Map<String, dynamic>>()
+          .map((m) => OnboardingOption('${m['key']}', '${m['label']}'))
+          .toList();
+      return out.isEmpty ? orElse : out;
+    }
+
+    return OnboardingOptions(
+      maxInterests: (json['max_interests'] as num?)?.toInt() ?? fallback.maxInterests,
+      studyClasses: opts('study_classes', fallback.studyClasses),
+      targetExams: opts('target_exams', fallback.targetExams),
+      interests: opts('interests', fallback.interests),
+    );
+  }
+}
+
 class OnboardingService {
   OnboardingService._();
 
@@ -180,6 +261,53 @@ class OnboardingService {
       return (body['completed'] == true) || (body['skipped'] == true);
     } catch (_) {
       return true;
+    }
+  }
+
+  /// Picker choices; falls back to the built-in copy on any failure.
+  static Future<OnboardingOptions> fetchOptions() async {
+    try {
+      final headers = await _authHeaders();
+      final res = await http
+          .get(Uri.parse('${Api.baseUrl}/core/onboarding/options/'), headers: headers)
+          .timeout(_timeout);
+      if (res.statusCode != 200) return OnboardingOptions.fallback;
+      final body = jsonDecode(res.body);
+      if (body is! Map<String, dynamic>) return OnboardingOptions.fallback;
+      return OnboardingOptions.fromJson(body);
+    } catch (_) {
+      return OnboardingOptions.fallback;
+    }
+  }
+
+  /// Saves class + exam + interests in ONE call and returns the first
+  /// personalised suggestions from the same response, so the next steps
+  /// render instantly. Returns null on any failure (caller falls back to
+  /// the old two-call path — never blocks the user).
+  static Future<OnboardingSuggestions?> quickStart({
+    required String studyClass,
+    required String targetExam,
+    required List<String> interests,
+  }) async {
+    try {
+      final headers = await _authHeaders();
+      final res = await http
+          .post(
+            Uri.parse('${Api.baseUrl}/core/onboarding/quick-start/'),
+            headers: headers,
+            body: jsonEncode({
+              'study_class': studyClass,
+              if (targetExam.isNotEmpty) 'target_exam': targetExam,
+              'interests': interests,
+            }),
+          )
+          .timeout(_timeout);
+      if (res.statusCode != 200) return null;
+      final body = jsonDecode(res.body);
+      if (body is! Map<String, dynamic>) return null;
+      return OnboardingSuggestions.fromJson(body);
+    } catch (_) {
+      return null;
     }
   }
 

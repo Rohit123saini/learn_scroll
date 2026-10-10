@@ -3602,7 +3602,7 @@ class _LiveSessionScreenState extends State<LiveSessionScreen> with WidgetsBindi
             children: [
               Row(
                 children: [
-                  IconButton(
+                  IconButton(tooltip: 'Back', 
                     icon: const Icon(Icons.arrow_back_rounded, color: Colors.white70),
                     onPressed: () => Navigator.pop(context),
                   ),
@@ -4442,7 +4442,7 @@ class _LiveSessionScreenState extends State<LiveSessionScreen> with WidgetsBindi
                       tooltip: 'Clear everyone\'s board',
                       onPressed: _wbClear,
                     ),
-                  IconButton(
+                  IconButton(tooltip: 'Close', 
                     icon: const Icon(Icons.close_rounded, color: Colors.white70, size: 20),
                     onPressed: () => setState(() => _whiteboardOpen = false),
                   ),
@@ -4962,7 +4962,7 @@ class _LiveSessionScreenState extends State<LiveSessionScreen> with WidgetsBindi
                       tooltip: 'Mute everyone',
                       onPressed: _muteAllBusy ? null : _muteAllParticipants,
                     ),
-                  IconButton(
+                  IconButton(tooltip: 'Close', 
                     icon: const Icon(Icons.close_rounded, color: Colors.white54, size: 20),
                     onPressed: () => setState(() => _openPanel = null),
                   ),
@@ -5321,7 +5321,7 @@ class _LiveSessionScreenState extends State<LiveSessionScreen> with WidgetsBindi
                     onSubmitted: (_) => _sendChat(),
                   ),
                 ),
-                IconButton(
+                IconButton(tooltip: 'Send', 
                   icon: _sendingChat
                       ? const SizedBox(width: 18, height: 18, child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white54))
                       : const Icon(Icons.send_rounded, color: Colors.white),
@@ -5688,7 +5688,7 @@ class _LiveSessionScreenState extends State<LiveSessionScreen> with WidgetsBindi
                   onSubmitted: (_) => _askQuery(),
                 ),
               ),
-              IconButton(
+              IconButton(tooltip: 'Send', 
                 icon: _askingQuery
                     ? const SizedBox(width: 18, height: 18, child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white54))
                     : const Icon(Icons.send_rounded, color: Colors.white),

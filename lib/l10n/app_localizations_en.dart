@@ -277,6 +277,30 @@ class AppLocalizationsEn extends AppLocalizations {
   String get signupLastName => 'Last Name';
 
   @override
+  String get signupDob => 'Date of Birth';
+
+  @override
+  String get signupDobRequired => 'Date of birth is required';
+
+  @override
+  String get signupDobTooYoung =>
+      'You must be at least 13 years old to use LearnScroll';
+
+  @override
+  String get dobPromptTitle => 'When is your birthday?';
+
+  @override
+  String get dobPromptSubtitle =>
+      'We use this to keep younger students safe. It won\'t be shown on your profile.';
+
+  @override
+  String get dobPromptSave => 'Continue';
+
+  @override
+  String get dobMinorPrivateNote =>
+      'Accounts for users under 18 are private to keep you safe.';
+
+  @override
   String get signupFieldRequired => 'Required';
 
   @override
@@ -1140,6 +1164,178 @@ class AppLocalizationsEn extends AppLocalizations {
   String get campusStudents => 'Students';
 
   @override
+  String get roleModerator => 'Moderator';
+
+  @override
+  String get campusParticipantsTitle => 'Participants';
+
+  @override
+  String get campusParticipantsSearch => 'Search by name or roll no.';
+
+  @override
+  String get campusCategoryAll => 'All';
+
+  @override
+  String get campusCategoryAdmin => 'Admins';
+
+  @override
+  String get campusCategoryPrincipal => 'Principal / HOD';
+
+  @override
+  String get campusCategoryModerator => 'Moderators';
+
+  @override
+  String get campusCategoryClassTeacher => 'Class teachers';
+
+  @override
+  String get campusCategorySubjectTeacher => 'Subject teachers';
+
+  @override
+  String get campusCategoryNonTeaching => 'Non-teaching';
+
+  @override
+  String get campusCategoryStudent => 'Students';
+
+  @override
+  String get campusCategoryParent => 'Parents';
+
+  @override
+  String get campusParticipantsEmpty => 'No participants found';
+
+  @override
+  String get campusParticipantsLoadFailed => 'Couldn\'t load participants';
+
+  @override
+  String get campusControlPanelTitle => 'Control panel';
+
+  @override
+  String get campusPanelOverview => 'Overview';
+
+  @override
+  String get campusPanelAssignments => 'Assignments';
+
+  @override
+  String get campusPanelImport => 'Bulk import';
+
+  @override
+  String get campusPanelAudit => 'Audit log';
+
+  @override
+  String get campusPanelSetupProgress => 'Setup progress';
+
+  @override
+  String get campusPanelNextStep => 'Next step';
+
+  @override
+  String get campusPanelAttention => 'Needs attention';
+
+  @override
+  String get campusPanelPendingRequests => 'Pending subject requests';
+
+  @override
+  String get campusPanelNoClassTeacher => 'Sections without a class teacher';
+
+  @override
+  String get campusPanelFullSections => 'Full sections';
+
+  @override
+  String get campusPanelNearCapacity => 'Nearly full sections';
+
+  @override
+  String get campusPanelLoadFailed => 'Couldn\'t load this panel';
+
+  @override
+  String get campusMatrixDirectAssign => 'Assign directly';
+
+  @override
+  String get campusMatrixClassTeacher => 'Class teacher';
+
+  @override
+  String get campusMatrixSubject => 'Subject';
+
+  @override
+  String get campusMatrixTeacher => 'Teacher';
+
+  @override
+  String get campusMatrixSection => 'Section';
+
+  @override
+  String get campusMatrixHeavyLoad => 'Heavy load';
+
+  @override
+  String get campusMatrixMultiSection => 'Class teacher of several sections';
+
+  @override
+  String get campusMatrixPreview => 'Preview (no changes)';
+
+  @override
+  String get campusMatrixApply => 'Apply';
+
+  @override
+  String get campusMatrixReplace => 'Replace the existing teacher';
+
+  @override
+  String get campusMatrixConflict => 'Conflict';
+
+  @override
+  String get campusImportKind => 'What do you want to import?';
+
+  @override
+  String get campusImportPickFile => 'Choose CSV file';
+
+  @override
+  String get campusImportDryRun => 'Only check, don\'t save';
+
+  @override
+  String get campusImportRun => 'Run';
+
+  @override
+  String get campusImportErrors => 'Rows with errors';
+
+  @override
+  String get campusAuditEmpty => 'No activity yet';
+
+  @override
+  String get campusSectionCapacity => 'Capacity';
+
+  @override
+  String get campusSectionFull => 'This section is full';
+
+  @override
+  String get campusSectionOverride => 'Add anyway (admin)';
+
+  @override
+  String get campusRosterTransfer => 'Move to another section';
+
+  @override
+  String get campusRosterRemove => 'Remove from section';
+
+  @override
+  String get campusRosterRemoveConfirm =>
+      'Remove this student from the section?';
+
+  @override
+  String get campusRosterSeatsLeft => 'Seats left';
+
+  @override
+  String get campusDashboardTitle => 'Section dashboard';
+
+  @override
+  String get campusDashboardAttendanceToday => 'Attendance today';
+
+  @override
+  String get campusDashboardAttendance30 => 'Attendance, last 30 days';
+
+  @override
+  String get campusDashboardPending => 'Pending subject-teacher requests';
+
+  @override
+  String get campusDashboardDoubtsSoon => 'Doubts: coming soon';
+
+  @override
+  String get campusDashboardOpen => 'Open dashboard';
+
+  @override
   String get campusTimetableTitle => 'Timetable';
 
   @override
@@ -1860,6 +2056,40 @@ class AppLocalizationsEn extends AppLocalizations {
 
   @override
   String get languageSectionTitle => 'Language';
+
+  @override
+  String get a11yFullScreen => 'Full screen';
+
+  @override
+  String get a11yMute => 'Mute video';
+
+  @override
+  String get a11yUnmute => 'Unmute video';
+
+  @override
+  String get textSizeSectionTitle => 'Text size';
+
+  @override
+  String get textSizeSmall => 'Small';
+
+  @override
+  String get textSizeNormal => 'Normal';
+
+  @override
+  String get textSizeLarge => 'Large';
+
+  @override
+  String get textSizeXLarge => 'Extra large';
+
+  @override
+  String get textSizePreview => 'The quick brown fox jumps over the lazy dog.';
+
+  @override
+  String get helpFeedbackTitle => 'Help & feedback';
+
+  @override
+  String get helpFeedbackSub =>
+      'Chat with support, report a bug, request features';
 
   @override
   String get themeSectionTitle => 'Theme';

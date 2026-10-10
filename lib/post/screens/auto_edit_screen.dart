@@ -1888,7 +1888,7 @@ class _AutoEditScreenState extends State<AutoEditScreen> {
               ),
             ),
             const SizedBox(width: 8),
-            IconButton(
+            IconButton(tooltip: 'Search', 
               onPressed: _freesoundSearching ? null : () => _searchFreesound(_freesoundQueryCtrl.text),
               icon: _freesoundSearching
                   ? const SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white))
@@ -1922,6 +1922,7 @@ class _AutoEditScreenState extends State<AutoEditScreen> {
                     return Row(
                       children: [
                         IconButton(
+                          tooltip: isPlaying ? 'Pause preview' : 'Play preview',
                           onPressed: () => _togglePreviewPlayback(track),
                           icon: Icon(
                             isPlaying ? Icons.pause_circle_filled_rounded : Icons.play_circle_fill_rounded,
@@ -1985,7 +1986,7 @@ class _AutoEditScreenState extends State<AutoEditScreen> {
         children: [
           Row(
             children: [
-              IconButton(
+              IconButton(tooltip: 'Back', 
                 onPressed: _isCroppingFreesoundTrack
                     ? null
                     : () => setState(() {

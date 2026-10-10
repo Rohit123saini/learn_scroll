@@ -278,6 +278,30 @@ class AppLocalizationsHi extends AppLocalizations {
   String get signupLastName => 'अंतिम नाम';
 
   @override
+  String get signupDob => 'जन्म तिथि';
+
+  @override
+  String get signupDobRequired => 'जन्म तिथि आवश्यक है';
+
+  @override
+  String get signupDobTooYoung =>
+      'LearnScroll इस्तेमाल करने के लिए आपकी उम्र कम से कम 13 साल होनी चाहिए';
+
+  @override
+  String get dobPromptTitle => 'आपका जन्मदिन कब है?';
+
+  @override
+  String get dobPromptSubtitle =>
+      'हम इसका इस्तेमाल छोटे स्टूडेंट्स को सुरक्षित रखने के लिए करते हैं। यह आपकी प्रोफ़ाइल पर नहीं दिखेगा।';
+
+  @override
+  String get dobPromptSave => 'आगे बढ़ें';
+
+  @override
+  String get dobMinorPrivateNote =>
+      '18 साल से कम उम्र के यूज़र्स के अकाउंट आपकी सुरक्षा के लिए प्राइवेट रहते हैं।';
+
+  @override
   String get signupFieldRequired => 'आवश्यक';
 
   @override
@@ -1142,6 +1166,177 @@ class AppLocalizationsHi extends AppLocalizations {
   String get campusStudents => 'स्टूडेंट';
 
   @override
+  String get roleModerator => 'मॉडरेटर';
+
+  @override
+  String get campusParticipantsTitle => 'सदस्य';
+
+  @override
+  String get campusParticipantsSearch => 'नाम या रोल नंबर से खोजें';
+
+  @override
+  String get campusCategoryAll => 'सभी';
+
+  @override
+  String get campusCategoryAdmin => 'एडमिन';
+
+  @override
+  String get campusCategoryPrincipal => 'प्रिंसिपल / HOD';
+
+  @override
+  String get campusCategoryModerator => 'मॉडरेटर';
+
+  @override
+  String get campusCategoryClassTeacher => 'क्लास टीचर';
+
+  @override
+  String get campusCategorySubjectTeacher => 'सब्जेक्ट टीचर';
+
+  @override
+  String get campusCategoryNonTeaching => 'नॉन-टीचिंग';
+
+  @override
+  String get campusCategoryStudent => 'स्टूडेंट';
+
+  @override
+  String get campusCategoryParent => 'पैरेंट';
+
+  @override
+  String get campusParticipantsEmpty => 'कोई सदस्य नहीं मिला';
+
+  @override
+  String get campusParticipantsLoadFailed => 'सदस्य लोड नहीं हो पाए';
+
+  @override
+  String get campusControlPanelTitle => 'कंट्रोल पैनल';
+
+  @override
+  String get campusPanelOverview => 'ओवरव्यू';
+
+  @override
+  String get campusPanelAssignments => 'असाइनमेंट';
+
+  @override
+  String get campusPanelImport => 'बल्क इम्पोर्ट';
+
+  @override
+  String get campusPanelAudit => 'ऑडिट लॉग';
+
+  @override
+  String get campusPanelSetupProgress => 'सेटअप प्रगति';
+
+  @override
+  String get campusPanelNextStep => 'अगला कदम';
+
+  @override
+  String get campusPanelAttention => 'ध्यान दें';
+
+  @override
+  String get campusPanelPendingRequests => 'पेंडिंग सब्जेक्ट रिक्वेस्ट';
+
+  @override
+  String get campusPanelNoClassTeacher => 'बिना क्लास टीचर वाले सेक्शन';
+
+  @override
+  String get campusPanelFullSections => 'भरे हुए सेक्शन';
+
+  @override
+  String get campusPanelNearCapacity => 'लगभग भरे सेक्शन';
+
+  @override
+  String get campusPanelLoadFailed => 'पैनल लोड नहीं हो पाया';
+
+  @override
+  String get campusMatrixDirectAssign => 'सीधे असाइन करें';
+
+  @override
+  String get campusMatrixClassTeacher => 'क्लास टीचर';
+
+  @override
+  String get campusMatrixSubject => 'सब्जेक्ट';
+
+  @override
+  String get campusMatrixTeacher => 'टीचर';
+
+  @override
+  String get campusMatrixSection => 'सेक्शन';
+
+  @override
+  String get campusMatrixHeavyLoad => 'ज़्यादा लोड';
+
+  @override
+  String get campusMatrixMultiSection => 'कई सेक्शन के क्लास टीचर';
+
+  @override
+  String get campusMatrixPreview => 'प्रिव्यू (कोई बदलाव नहीं)';
+
+  @override
+  String get campusMatrixApply => 'लागू करें';
+
+  @override
+  String get campusMatrixReplace => 'मौजूदा टीचर को बदलें';
+
+  @override
+  String get campusMatrixConflict => 'टकराव';
+
+  @override
+  String get campusImportKind => 'क्या इम्पोर्ट करना है?';
+
+  @override
+  String get campusImportPickFile => 'CSV फ़ाइल चुनें';
+
+  @override
+  String get campusImportDryRun => 'सिर्फ जाँचें, सेव न करें';
+
+  @override
+  String get campusImportRun => 'चलाएं';
+
+  @override
+  String get campusImportErrors => 'गलती वाली पंक्तियाँ';
+
+  @override
+  String get campusAuditEmpty => 'अभी कोई गतिविधि नहीं';
+
+  @override
+  String get campusSectionCapacity => 'क्षमता';
+
+  @override
+  String get campusSectionFull => 'यह सेक्शन भर चुका है';
+
+  @override
+  String get campusSectionOverride => 'फिर भी जोड़ें (एडमिन)';
+
+  @override
+  String get campusRosterTransfer => 'दूसरे सेक्शन में भेजें';
+
+  @override
+  String get campusRosterRemove => 'सेक्शन से हटाएं';
+
+  @override
+  String get campusRosterRemoveConfirm => 'इस स्टूडेंट को सेक्शन से हटाएं?';
+
+  @override
+  String get campusRosterSeatsLeft => 'बची सीटें';
+
+  @override
+  String get campusDashboardTitle => 'सेक्शन डैशबोर्ड';
+
+  @override
+  String get campusDashboardAttendanceToday => 'आज की हाज़िरी';
+
+  @override
+  String get campusDashboardAttendance30 => 'हाज़िरी, पिछले 30 दिन';
+
+  @override
+  String get campusDashboardPending => 'पेंडिंग सब्जेक्ट-टीचर रिक्वेस्ट';
+
+  @override
+  String get campusDashboardDoubtsSoon => 'डाउट्स: जल्द आ रहा है';
+
+  @override
+  String get campusDashboardOpen => 'डैशबोर्ड खोलें';
+
+  @override
   String get campusTimetableTitle => 'टाइम टेबल';
 
   @override
@@ -1862,6 +2057,39 @@ class AppLocalizationsHi extends AppLocalizations {
 
   @override
   String get languageSectionTitle => 'भाषा';
+
+  @override
+  String get a11yFullScreen => 'फ़ुल स्क्रीन';
+
+  @override
+  String get a11yMute => 'वीडियो म्यूट करें';
+
+  @override
+  String get a11yUnmute => 'वीडियो अनम्यूट करें';
+
+  @override
+  String get textSizeSectionTitle => 'टेक्स्ट साइज़';
+
+  @override
+  String get textSizeSmall => 'छोटा';
+
+  @override
+  String get textSizeNormal => 'सामान्य';
+
+  @override
+  String get textSizeLarge => 'बड़ा';
+
+  @override
+  String get textSizeXLarge => 'बहुत बड़ा';
+
+  @override
+  String get textSizePreview => 'पढ़ाई में मेहनत का कोई विकल्प नहीं होता।';
+
+  @override
+  String get helpFeedbackTitle => 'मदद और फ़ीडबैक';
+
+  @override
+  String get helpFeedbackSub => 'सपोर्ट से चैट करें, बग बताएं, नए फ़ीचर माँगें';
 
   @override
   String get themeSectionTitle => 'थीम';

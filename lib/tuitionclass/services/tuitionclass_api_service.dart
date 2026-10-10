@@ -279,6 +279,52 @@ class ClassroomApi {
     }
   }
 
+  // ---- T3: classroom chat group (auto-created, mirrors participants) ----
+  /// GET classrooms/{id}/group/open/ — participant-safe: the conversation id
+  /// is null unless the group is ready AND the caller is a participant.
+  Future<Map<String, dynamic>> groupOpen(int id) async {
+    try {
+      final dio = await _Http.client();
+      final res = await dio.get('classrooms/$id/group/open/');
+      return Map<String, dynamic>.from(res.data);
+    } on DioException catch (e) {
+      _throwFrom(e);
+    }
+  }
+
+  /// GET classrooms/{id}/group/ — manager status (member_count vs expected_count).
+  Future<Map<String, dynamic>> groupStatus(int id) async {
+    try {
+      final dio = await _Http.client();
+      final res = await dio.get('classrooms/$id/group/');
+      return Map<String, dynamic>.from(res.data);
+    } on DioException catch (e) {
+      _throwFrom(e);
+    }
+  }
+
+  /// POST classrooms/{id}/group/retry/ — create-if-missing + sync members.
+  Future<Map<String, dynamic>> groupRetry(int id) async {
+    try {
+      final dio = await _Http.client();
+      final res = await dio.post('classrooms/$id/group/retry/');
+      return Map<String, dynamic>.from(res.data);
+    } on DioException catch (e) {
+      _throwFrom(e);
+    }
+  }
+
+  /// POST classrooms/{id}/group/toggle/ — teacher only. Off = archived.
+  Future<Map<String, dynamic>> groupToggle(int id, bool enabled) async {
+    try {
+      final dio = await _Http.client();
+      final res = await dio.post('classrooms/$id/group/toggle/', data: {'enabled': enabled});
+      return Map<String, dynamic>.from(res.data);
+    } on DioException catch (e) {
+      _throwFrom(e);
+    }
+  }
+
   Future<bool> hasAccess(int id) async {
     try {
       final dio = await _Http.client();

@@ -158,7 +158,7 @@ class _ChangePasswordScreenState extends State<ChangePasswordScreen> {
               decoration: InputDecoration(
                 labelText: 'New password',
                 prefixIcon: const Icon(Icons.lock_outline_rounded),
-                suffixIcon: IconButton(
+                suffixIcon: IconButton(tooltip: _obscureNew ? 'Show password' : 'Hide password', 
                   icon: Icon(_obscureNew ? Icons.visibility_outlined : Icons.visibility_off_outlined),
                   onPressed: () => setState(() => _obscureNew = !_obscureNew),
                 ),
@@ -181,7 +181,7 @@ class _ChangePasswordScreenState extends State<ChangePasswordScreen> {
               decoration: InputDecoration(
                 labelText: 'Confirm new password',
                 prefixIcon: const Icon(Icons.lock_outline_rounded),
-                suffixIcon: IconButton(
+                suffixIcon: IconButton(tooltip: _obscureConfirm ? 'Show password' : 'Hide password', 
                   icon: Icon(_obscureConfirm ? Icons.visibility_outlined : Icons.visibility_off_outlined),
                   onPressed: () => setState(() => _obscureConfirm = !_obscureConfirm),
                 ),

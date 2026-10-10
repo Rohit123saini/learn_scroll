@@ -69,6 +69,27 @@ class DoubtsApiService {
     return (doubts: results, nextPage: data['next']?.toString());
   }
 
+  /// Logged-in user ke groups/classrooms (id + name) — "Teacher ko bhejo"
+  /// picker ke liye. Existing `GET /message/groups/` (GroupViewSet) reuse
+  /// hota hai, koi naya endpoint nahi. Response plain list ya paginated
+  /// ({results, next}) — dono handle; max 5 pages tak follow karta hai.
+  static Future<List<Map<String, dynamic>>> listMyGroups() async {
+    final out = <Map<String, dynamic>>[];
+    Uri? uri = _u('/message/groups/');
+    for (var page = 0; page < 5 && uri != null; page++) {
+      final res = await http.get(uri, headers: await _headers());
+      if (res.statusCode != 200) _throwOnError(res);
+      final data = jsonDecode(utf8.decode(res.bodyBytes));
+      final rows = data is List ? data : (data is Map ? (data['results'] as List? ?? const []) : const []);
+      for (final r in rows) {
+        if (r is Map && r['id'] != null) out.add(Map<String, dynamic>.from(r));
+      }
+      final next = data is Map ? data['next']?.toString() : null;
+      uri = (next != null && next.isNotEmpty) ? Uri.parse(next) : null;
+    }
+    return out;
+  }
+
   static Future<DoubtQuestionModel> createDoubt(
     String groupId, {
     required String text,

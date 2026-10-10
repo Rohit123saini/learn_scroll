@@ -316,6 +316,10 @@ class TestSeriesModel {
   final String? shareSlug;
   final String? shareUrl;
 
+  /// T2 — may THIS viewer add / edit / delete / reorder the questions? (series
+  /// creator, or a campus / class series' teaching staff — decided by the server).
+  final bool canEdit;
+
   const TestSeriesModel({
     required this.id,
     required this.title,
@@ -349,6 +353,7 @@ class TestSeriesModel {
     this.showSolutions = true,
     this.shareSlug,
     this.shareUrl,
+    this.canEdit = false,
   });
 
   factory TestSeriesModel.fromJson(Map<String, dynamic> j) {
@@ -400,6 +405,7 @@ class TestSeriesModel {
       showSolutions: j['show_solutions'] == null ? true : j['show_solutions'] == true,
       shareSlug: slug.isNotEmpty ? slug : null,
       shareUrl: url.isNotEmpty ? url : null,
+      canEdit: j['can_edit'] == true,
     );
   }
 

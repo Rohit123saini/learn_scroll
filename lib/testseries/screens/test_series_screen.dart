@@ -444,7 +444,7 @@ class _TestSeriesScreenState extends State<TestSeriesScreen> {
               prefixIcon: const Icon(Icons.search_rounded, size: 20),
               suffixIcon: _query.isEmpty && _searchCtrl.text.isEmpty
                   ? null
-                  : IconButton(
+                  : IconButton(tooltip: 'Close', 
                       icon: const Icon(Icons.close_rounded, size: 18),
                       onPressed: () {
                         _searchCtrl.clear();

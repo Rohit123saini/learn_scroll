@@ -230,7 +230,7 @@ class _ClassroomFormScreenState extends State<ClassroomFormScreen> {
       // student can ever request to join it — nothing prompted the teacher
       // to set a price. Push straight into Pass Management with the create
       // sheet auto-opened instead of just popping back.
-      _snack('Classroom created — now set up pricing.');
+      _snack('Classroom created — class group auto ban raha hai. Ab pricing set karo.');
       await Navigator.push(
         context,
         MaterialPageRoute(

@@ -58,7 +58,7 @@ class _C3DemoScreenState extends State<C3DemoScreen> {
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(title: const Text('C3 demo'), actions: [
-        IconButton(icon: const Icon(Icons.refresh), onPressed: _reload),
+        IconButton(tooltip: 'Refresh', icon: const Icon(Icons.refresh), onPressed: _reload),
       ]),
       body: ListView(children: [
         if (_loading) ...[
@@ -74,7 +74,7 @@ class _C3DemoScreenState extends State<C3DemoScreen> {
           ),
           ListTile(
             title: Text('$_likes likes'),
-            trailing: IconButton(
+            trailing: IconButton(tooltip: _liked ? 'Unlike' : 'Like', 
               icon: Icon(_liked ? Icons.favorite : Icons.favorite_border, color: _liked ? Colors.red : null),
               onPressed: _toggleLike,
             ),

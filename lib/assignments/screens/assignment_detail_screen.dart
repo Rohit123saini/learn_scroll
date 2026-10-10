@@ -373,7 +373,7 @@ class _AssignmentDetailScreenState extends State<AssignmentDetailScreen> {
       appBar: lsAppBar(
         context,
         title: l10n.assignments,
-        leading: IconButton(
+        leading: IconButton(tooltip: 'Back', 
           icon: const Icon(Icons.arrow_back_rounded),
           onPressed: () => Navigator.pop(context, _changed),
         ),
@@ -1069,7 +1069,7 @@ class _QuestionCard extends StatelessWidget {
                       overflow: TextOverflow.ellipsis,
                       style: TextStyle(fontSize: 12, color: cs.onSurface)),
                 ),
-                IconButton(
+                IconButton(tooltip: 'Close', 
                   visualDensity: VisualDensity.compact,
                   icon: Icon(Icons.close_rounded, size: 17, color: cs.onSurfaceVariant),
                   onPressed: onRemoveAttach,

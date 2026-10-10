@@ -363,7 +363,7 @@ class _ScheduleManagerScreenState extends State<ScheduleManagerScreen> {
                       label: Text(s.isActive ? 'Pause' : 'Resume'),
                     ),
                   ),
-                  IconButton(
+                  IconButton(tooltip: 'Delete', 
                     onPressed: busy ? null : () => _confirmDelete(s),
                     icon: busy
                         ? const SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2))

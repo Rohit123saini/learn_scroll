@@ -15,9 +15,12 @@ import 'campus_invite_screen.dart' show CampusJoinWithCodeScreen;
 import 'campus_setup_screen.dart';
 import 'digital_id_card_screen.dart';
 import 'fee_office_screen.dart';
+import 'campus_control_panel_screen.dart';
+import 'my_classes_screen.dart';
 import 'my_fees_screen.dart';
 import 'notices_screen.dart';
 import 'parent_link_screen.dart';
+import 'participants_screen.dart';
 import 'section_academics_screen.dart';
 import 'section_students_screen.dart';
 import 'timetable_screen.dart';
@@ -375,6 +378,18 @@ class _CampusScreenState extends State<CampusScreen> {
           ),
         ]),
       ),
+      // T4 §E/§G/§F — subject-class cards (teacher, online/offline, doubts)
+      Padding(
+        padding: const EdgeInsets.fromLTRB(14, 0, 14, 12),
+        child: LsOutlineButton(
+          label: 'My classes',
+          icon: Icons.class_outlined,
+          onPressed: () => Navigator.push(
+            context,
+            MaterialPageRoute(builder: (_) => MyClassesScreen(campusId: access.campus.id)),
+          ),
+        ),
+      ),
       if (access.campus.feeModuleEnabled)
         Padding(
           padding: const EdgeInsets.fromLTRB(14, 0, 14, 12),
@@ -485,6 +500,32 @@ class _CampusScreenState extends State<CampusScreen> {
               onPressed: _openNotices,
             ),
             const SizedBox(height: 8),
+            // [T4 §A/§B] Participants + Control panel (management only —
+            // backend enforces the same; this just hides the entry points)
+            Row(children: [
+              Expanded(
+                child: LsOutlineButton(
+                  label: l10n.campusParticipantsTitle,
+                  icon: Icons.groups_2_outlined,
+                  onPressed: () => Navigator.push(
+                    context,
+                    MaterialPageRoute(builder: (_) => ParticipantsScreen(campusId: access.campus.id)),
+                  ),
+                ),
+              ),
+              const SizedBox(width: 8),
+              Expanded(
+                child: LsOutlineButton(
+                  label: l10n.campusControlPanelTitle,
+                  icon: Icons.tune_rounded,
+                  onPressed: () => Navigator.push(
+                    context,
+                    MaterialPageRoute(builder: (_) => CampusControlPanelScreen(campusId: access.campus.id)),
+                  ),
+                ),
+              ),
+            ]),
+            const SizedBox(height: 8),
             Row(children: [
               Expanded(
                 child: LsOutlineButton(
@@ -556,6 +597,7 @@ class _CampusScreenState extends State<CampusScreen> {
           builder: (_) => SectionStudentsScreen(
             sectionId: sectionId,
             sectionLabel: _labelFor(sectionId),
+            isAdmin: _access?.role.isManagement ?? false,
           ),
         ),
       );
@@ -638,6 +680,7 @@ class _CampusHeader extends StatelessWidget {
         CampusRole.principalHod => l10n.rolePrincipalHod,
         CampusRole.classTeacher => l10n.roleClassTeacher,
         CampusRole.subjectTeacher => l10n.roleSubjectTeacher,
+        CampusRole.moderator => l10n.roleModerator,
         CampusRole.nonTeaching => l10n.roleNonTeaching,
         CampusRole.student => l10n.roleStudent,
         CampusRole.parent => l10n.roleParent,

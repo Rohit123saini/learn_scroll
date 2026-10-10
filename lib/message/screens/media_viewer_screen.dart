@@ -241,13 +241,13 @@ class _MediaViewerScreenState extends State<MediaViewerScreen> {
                   ),
                 ),
                 child: Row(children: [
-                  IconButton(icon: const Icon(Icons.close, color: Colors.white), onPressed: () => Navigator.pop(context)),
+                  IconButton(tooltip: 'Close', icon: const Icon(Icons.close, color: Colors.white), onPressed: () => Navigator.pop(context)),
                   const Spacer(),
                   if (count > 1)
                     Text("${_index + 1} / $count", style: const TextStyle(color: Colors.white, fontSize: 13, fontWeight: FontWeight.w500)),
                   const Spacer(),
                   if (widget.onDownload != null)
-                    IconButton(
+                    IconButton(tooltip: downloaded ? 'Downloaded' : 'Download', 
                       icon: Icon(downloaded ? Icons.check : Icons.download, color: Colors.white),
                       onPressed: downloaded ? null : () => widget.onDownload?.call(currentUrl),
                     )

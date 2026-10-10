@@ -467,7 +467,7 @@ class _SimilarityFlagsSheetState extends State<_SimilarityFlagsSheet> {
             Expanded(
               child: Text(l10n.assignmentSimilarityFlagsTitle, style: LsType.head(context, size: 16)),
             ),
-            IconButton(
+            IconButton(tooltip: 'Close', 
               onPressed: () => Navigator.pop(context, _changed),
               icon: const Icon(Icons.close_rounded),
             ),

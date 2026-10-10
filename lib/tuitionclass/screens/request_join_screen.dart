@@ -261,7 +261,7 @@ class _RequestJoinScreenState extends State<RequestJoinScreen> {
                     ],
                   ),
                 ),
-                IconButton(onPressed: _clearCoupon, icon: const Icon(Icons.close_rounded, size: 18)),
+                IconButton(tooltip: 'Close', onPressed: _clearCoupon, icon: const Icon(Icons.close_rounded, size: 18)),
               ],
             ),
           )

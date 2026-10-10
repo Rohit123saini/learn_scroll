@@ -179,7 +179,7 @@ class _BlockedAccountsScreenState extends State<BlockedAccountsScreen> {
           prefixIcon: const Icon(Icons.search_rounded),
           suffixIcon: _search.text.isEmpty
               ? null
-              : IconButton(
+              : IconButton(tooltip: 'Close', 
                   icon: const Icon(Icons.close_rounded),
                   onPressed: () {
                     _search.clear();

@@ -346,7 +346,7 @@ class _MessageSearchScreenState extends State<MessageSearchScreen> {
               border: InputBorder.none,
               contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
               suffixIcon: _queryController.text.isNotEmpty
-                  ? IconButton(
+                  ? IconButton(tooltip: 'Close', 
                       icon: Icon(Icons.close, color: cs.onPrimary.withOpacity(0.7), size: 18),
                       onPressed: () {
                         _queryController.clear();
@@ -817,7 +817,7 @@ class _SearchFiltersSheetState extends State<_SearchFiltersSheet> {
                   hintText: _selectedSenderLabel ?? "Search a person",
                   prefixIcon: const Icon(Icons.person_search, size: 20),
                   suffixIcon: _draft.sender != null
-                      ? IconButton(
+                      ? IconButton(tooltip: 'Close', 
                           icon: const Icon(Icons.close, size: 18),
                           onPressed: () => setState(() {
                             _draft = _draft.copyWith(clearSender: true);

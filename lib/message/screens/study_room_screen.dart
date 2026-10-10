@@ -1859,13 +1859,13 @@ class _StudyRoomScreenState extends State<StudyRoomScreen> {
                 style: const TextStyle(color: Colors.white, fontSize: 13),
               ),
               const SizedBox(width: 10),
-              IconButton(
+              IconButton(tooltip: cm.muted ? 'Unmute' : 'Mute', 
                 constraints: const BoxConstraints(),
                 padding: const EdgeInsets.all(6),
                 icon: Icon(cm.muted ? Icons.mic_off : Icons.mic, color: Colors.white, size: 18),
                 onPressed: () => cm.toggleMic(),
               ),
-              IconButton(
+              IconButton(tooltip: 'End call', 
                 constraints: const BoxConstraints(),
                 padding: const EdgeInsets.all(6),
                 icon: const Icon(Icons.call_end, color: Colors.redAccent, size: 18),
@@ -3232,7 +3232,7 @@ class _StudyRoomScreenState extends State<StudyRoomScreen> {
                   Row(
                     mainAxisAlignment: MainAxisAlignment.center,
                     children: [
-                      IconButton(
+                      IconButton(tooltip: _timer.isRunning ? 'Pause' : 'Play', 
                         icon: Icon(_timer.isRunning ? Icons.pause_circle : Icons.play_circle,
                             color: Colors.white, size: 40),
                         onPressed: () {
@@ -3241,7 +3241,7 @@ class _StudyRoomScreenState extends State<StudyRoomScreen> {
                         },
                       ),
                       const SizedBox(width: 12),
-                      IconButton(
+                      IconButton(tooltip: 'Replay', 
                         icon: const Icon(Icons.replay_circle_filled, color: Colors.white70, size: 40),
                         onPressed: () {
                           _resetTimer();
@@ -3249,7 +3249,7 @@ class _StudyRoomScreenState extends State<StudyRoomScreen> {
                         },
                       ),
                       const SizedBox(width: 12),
-                      IconButton(
+                      IconButton(tooltip: 'Settings', 
                         icon: const Icon(Icons.settings, color: Colors.white70, size: 32),
                         onPressed: () async {
                           await _configureTimer();
@@ -3354,7 +3354,7 @@ class _StudyRoomScreenState extends State<StudyRoomScreen> {
                       onSubmitted: (_) => _sendQuickChat(),
                     ),
                   ),
-                  IconButton(icon: const Icon(Icons.send, color: Colors.blueAccent), onPressed: _sendQuickChat),
+                  IconButton(tooltip: 'Send', icon: const Icon(Icons.send, color: Colors.blueAccent), onPressed: _sendQuickChat),
                 ],
               ),
             ),
@@ -4406,7 +4406,19 @@ class _StudyRoomScreenState extends State<StudyRoomScreen> {
 
   Widget _toolIcon(IconData icon, ToolType type) {
     final active = _activeTool == type;
+    const names = {
+      ToolType.marker: 'Marker',
+      ToolType.paint: 'Brush',
+      ToolType.eraser: 'Eraser',
+      ToolType.highlighter: 'Highlighter',
+      ToolType.rectangle: 'Rectangle',
+      ToolType.circle: 'Circle',
+      ToolType.line: 'Line',
+      ToolType.arrowLine: 'Arrow',
+      ToolType.text: 'Text',
+    };
     return IconButton(
+      tooltip: (active ? 'Selected: ' : '') + (names[type] ?? 'Drawing tool'),
       icon: Icon(icon, color: active ? Colors.blueAccent : Colors.white54),
       onPressed: () => setState(() => _activeTool = type),
     );

@@ -1328,7 +1328,7 @@ class _AddParticipantSheetState extends State<_AddParticipantSheet> {
                             )
                           : isAdded
                               ? const Icon(Icons.check_circle, color: Color(0xFF25D366))
-                              : IconButton(
+                              : IconButton(tooltip: 'Add', 
                                   icon: const Icon(Icons.add_circle_outline, color: Colors.white70),
                                   onPressed: () => _handleAdd(id),
                                 ),

@@ -21,6 +21,7 @@ import 'post/screens/new_post.dart';
 import 'post/screens/interests_screen.dart';
 import 'post/widgets/comment_sheet.dart';
 import 'post/widgets/post_ui.dart';
+import 'post/widgets/reels_overlays.dart' show showReelWhySheet; // T1 item 10 — "Why am I seeing this" on feed cards
 import 'post/widgets/poll_doubt_widgets.dart'; // TASK G6 — poll voting + doubt answers
 import 'post/services/api_service.dart' as PostApi; // TASK G4 — video watch-progress reporting
 import 'services/home_api_model_service.dart';
@@ -2234,18 +2235,24 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
   Widget _buildFeedSourceBadge(PostModel post, ColorScheme cs, AppLocalizations l10n) {
     final trending = post.isTrending;
     final Color fg = trending ? _lsAmber : cs.primary;
-    return Container(
-      width: double.infinity,
-      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 6),
-      color: fg.withOpacity(.08),
-      child: Row(children: [
-        Icon(trending ? Icons.local_fire_department_rounded : Icons.auto_awesome_rounded, size: 14, color: fg),
-        const SizedBox(width: 6),
-        Text(
-          trending ? l10n.feedBadgeTrending : l10n.feedBadgeSuggested,
-          style: TextStyle(fontSize: 11, fontWeight: FontWeight.w700, color: fg),
-        ),
-      ]),
+    // T1 item 10 — tapping the strip opens the same "Why am I seeing this" sheet.
+    return InkWell(
+      onTap: () => showReelWhySheet(context, post.id),
+      child: Container(
+        width: double.infinity,
+        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 6),
+        color: fg.withOpacity(.08),
+        child: Row(children: [
+          Icon(trending ? Icons.local_fire_department_rounded : Icons.auto_awesome_rounded, size: 14, color: fg),
+          const SizedBox(width: 6),
+          Text(
+            trending ? l10n.feedBadgeTrending : l10n.feedBadgeSuggested,
+            style: TextStyle(fontSize: 11, fontWeight: FontWeight.w700, color: fg),
+          ),
+          const Spacer(),
+          Icon(Icons.info_outline_rounded, size: 14, color: fg.withOpacity(.8)),
+        ]),
+      ),
     );
   }
 
@@ -2460,7 +2467,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
             trailing: Semantics(
               button: true,
               label: l10n.save,
-              child: IconButton(
+              child: IconButton(tooltip: isSaved ? 'Remove from saved' : 'Save', 
                 visualDensity: VisualDensity.compact,
                 icon: Icon(isSaved ? Icons.bookmark : Icons.bookmark_border,
                     size: 20, color: isSaved ? cs.primary : cs.onSurfaceVariant),
@@ -2519,10 +2526,23 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
             // following"); shown as Follow / Requested otherwise.
             if (!post.user.isOwnPost && !post.user.isFollowing)
               _buildFeedFollowButton(cs, l10n, post),
+            // T1 item 10 — "Why am I seeing this" (GET /post/<id>/why/: reasons, A/B bucket, stages).
+            // Not for my own posts (nothing to explain).
+            if (!post.user.isOwnPost)
+              Semantics(
+                button: true,
+                label: l10n.reelWhySeeing,
+                child: IconButton(
+                  visualDensity: VisualDensity.compact,
+                  tooltip: l10n.reelWhySeeing,
+                  icon: Icon(Icons.info_outline_rounded, size: 19, color: cs.onSurfaceVariant),
+                  onPressed: () => showReelWhySheet(context, post.id),
+                ),
+              ),
             Semantics(
               button: true,
               label: l10n.save,
-              child: IconButton(
+              child: IconButton(tooltip: isSaved ? 'Remove from saved' : 'Save', 
                 visualDensity: VisualDensity.compact,
                 icon: Icon(isSaved ? Icons.bookmark : Icons.bookmark_border,
                     size: 20, color: isSaved ? cs.primary : cs.onSurfaceVariant),
@@ -3088,7 +3108,7 @@ class _MediaCarouselState extends State<_MediaCarousel> {
       return SizedBox(height: height, child: ColoredBox(color: Colors.black, child: Stack(alignment: Alignment.center, children: [
         PageView.builder(controller: _pageController, itemCount: widget.mediaList.length, onPageChanged: (i) { final prev = _videoControllers[_currentPage]; if (prev != null) { prev.pause(); _reportProgress(_currentPage, prev); } setState(() { _currentPage = i; _showDots = true; }); _initVideoAt(i, autoplay: true); _initVideoAt(i + 1, autoplay: false); /* TASK G17 — keep one slide ahead buffered */ Future.delayed(const Duration(seconds: 4), () { if (mounted) setState(() => _showDots = false); }); }, itemBuilder: (c, i) { final m = widget.mediaList[i]; return VisibilityDetector(key: Key('${widget.postId}_$i'), onVisibilityChanged: (info) => _handleVisibility(info.visibleFraction > 0.5, i), child: _buildMediaItem(m, i, height)); }),
         if (multi) Positioned(top: 10, left: 10, child: PostMediaCounter(index: _currentPage, count: widget.mediaList.length)),
-        if (hasVideo && PostMediaUtil.kind(widget.mediaList[_currentPage]) == PostMediaKind.video) Positioned(top: 10, right: 10, child: PostMediaIconButton(icon: _muted ? Icons.volume_off_rounded : Icons.volume_up_rounded, onTap: _toggleMute)),
+        if (hasVideo && PostMediaUtil.kind(widget.mediaList[_currentPage]) == PostMediaKind.video) Positioned(top: 10, right: 10, child: PostMediaIconButton(icon: _muted ? Icons.volume_off_rounded : Icons.volume_up_rounded, onTap: _toggleMute, label: _muted ? AppLocalizations.of(context)!.a11yUnmute : AppLocalizations.of(context)!.a11yMute)),
         if (multi && _showDots) Positioned(bottom: 10, child: PostCarouselDots(count: widget.mediaList.length, activeIndex: _currentPage)),
       ])));
     });

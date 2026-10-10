@@ -702,7 +702,7 @@ class _ChatScreenState extends State<ChatScreen> with _L10nCache<ChatScreen> {
                     overflow: TextOverflow.ellipsis,
                   ),
                   subtitle: Text(_l10n.chatPinnedBy(p.pinnedBy.displayName)),
-                  trailing: IconButton(
+                  trailing: IconButton(tooltip: 'Close', 
                     icon: const Icon(Icons.close, size: 18),
                     onPressed: () async {
                       await _unpinMessage(p.message.id);
@@ -2390,7 +2390,7 @@ class _ChatScreenState extends State<ChatScreen> with _L10nCache<ChatScreen> {
                         ),
                       ),
                       if (optionCtrls.length > 2)
-                        IconButton(
+                        IconButton(tooltip: 'Remove', 
                           icon: const Icon(Icons.remove_circle_outline),
                           onPressed: () => setSheetState(() => optionCtrls.removeAt(i)),
                         ),
@@ -2581,7 +2581,7 @@ class _ChatScreenState extends State<ChatScreen> with _L10nCache<ChatScreen> {
                         "${s.scheduledFor.day}/${s.scheduledFor.month} • "
                         "${s.scheduledFor.hour.toString().padLeft(2, '0')}:${s.scheduledFor.minute.toString().padLeft(2, '0')}",
                       ),
-                      trailing: IconButton(
+                      trailing: IconButton(tooltip: 'Delete', 
                         icon: const Icon(Icons.delete_outline, color: Colors.red),
                         onPressed: () async {
                           try {
@@ -4254,7 +4254,7 @@ class _ChatScreenState extends State<ChatScreen> with _L10nCache<ChatScreen> {
       backgroundColor: cs.primary,
       elevation: 3,
       iconTheme: IconThemeData(color: cs.onPrimary),
-      leading: IconButton(icon: const Icon(Icons.close), onPressed: _exitSelectionMode),
+      leading: IconButton(tooltip: 'Close', icon: const Icon(Icons.close), onPressed: _exitSelectionMode),
       title: Text(
         _l10n.chatSelectedCount(_selectedMessageIds.length),
         style: TextStyle(color: cs.onPrimary, fontSize: 16, fontWeight: FontWeight.w600),
@@ -4505,7 +4505,7 @@ class _ChatScreenState extends State<ChatScreen> with _L10nCache<ChatScreen> {
           Text(isMe ? _l10n.chatYou : (msg.sender?.displayName ?? ''), style: TextStyle(color: Theme.of(context).colorScheme.primary, fontWeight: FontWeight.bold, fontSize: 12.5)),
           Text(_replyPreviewText(msg), maxLines: 1, overflow: TextOverflow.ellipsis, style: TextStyle(color: Theme.of(context).colorScheme.onSurfaceVariant, fontSize: 12.5)),
         ])),
-        IconButton(icon: Icon(Icons.close, size: 18, color: Theme.of(context).colorScheme.onSurfaceVariant), onPressed: _cancelReply, padding: EdgeInsets.zero, constraints: const BoxConstraints()),
+        IconButton(tooltip: 'Close', icon: Icon(Icons.close, size: 18, color: Theme.of(context).colorScheme.onSurfaceVariant), onPressed: _cancelReply, padding: EdgeInsets.zero, constraints: const BoxConstraints()),
       ]),
     );
   }
@@ -4777,7 +4777,7 @@ class _ChatScreenState extends State<ChatScreen> with _L10nCache<ChatScreen> {
       ),
       child: locked
           ? Row(children: [
-              IconButton(icon: Icon(Icons.delete_outline, color: cs.error), onPressed: _cancelRecording),
+              IconButton(tooltip: 'Delete', icon: Icon(Icons.delete_outline, color: cs.error), onPressed: _cancelRecording),
               Expanded(child: Row(children: [
                 dot,
                 const SizedBox(width: 8),
@@ -4787,13 +4787,14 @@ class _ChatScreenState extends State<ChatScreen> with _L10nCache<ChatScreen> {
                 Text(_recordPaused ? 'Paused' : _l10n.chatRecording, style: TextStyle(color: cs.onSurfaceVariant, fontSize: 13)),
               ])),
               IconButton(
+                tooltip: _recordPaused ? 'Resume recording' : 'Pause recording',
                 icon: Icon(_recordPaused ? Icons.mic : Icons.pause_circle_outline, color: cs.primary),
                 onPressed: _togglePauseRecording,
               ),
               const SizedBox(width: 4),
               Container(
                 decoration: BoxDecoration(shape: BoxShape.circle, boxShadow: [BoxShadow(color: cs.primary.withOpacity(0.35), blurRadius: 8, offset: const Offset(0, 2))]),
-                child: CircleAvatar(backgroundColor: cs.primary, child: IconButton(icon: Icon(Icons.send, color: cs.onPrimary), onPressed: _stopRecordingAndSend)),
+                child: CircleAvatar(backgroundColor: cs.primary, child: IconButton(tooltip: 'Send', icon: Icon(Icons.send, color: cs.onPrimary), onPressed: _stopRecordingAndSend)),
               ),
             ])
           : Row(children: [
@@ -4888,11 +4889,11 @@ class _ChatScreenState extends State<ChatScreen> with _L10nCache<ChatScreen> {
             boxShadow: [BoxShadow(color: Colors.black.withOpacity(0.06), blurRadius: 8, offset: const Offset(0, 2))],
           ),
           child: Row(crossAxisAlignment: CrossAxisAlignment.end, children: [
-            IconButton(icon: Icon(Icons.attach_file, color: cs.primary), onPressed: _showAttachmentSheet),
+            IconButton(tooltip: 'Attach file', icon: Icon(Icons.attach_file, color: cs.primary), onPressed: _showAttachmentSheet),
             // 🔥 NAYA — apna sticker picker (assets/stickers/). Tap karte hi
             // chosen sticker seedha ek image message ki tarah bhej diya jaata
             // hai (WhatsApp jaisa — koi text nahi banta).
-            IconButton(
+            IconButton(tooltip: 'Emoji', 
               icon: Icon(Icons.emoji_emotions_outlined, color: cs.primary),
               onPressed: () => showStickerPicker(
                 context,
@@ -4918,7 +4919,7 @@ class _ChatScreenState extends State<ChatScreen> with _L10nCache<ChatScreen> {
               radius: 23,
               backgroundColor: cs.primary,
               child: hasText
-                  ? IconButton(icon: Icon(Icons.send, color: cs.onPrimary), onPressed: _sendMessage)
+                  ? IconButton(tooltip: 'Send', icon: Icon(Icons.send, color: cs.onPrimary), onPressed: _sendMessage)
                   // 🔥 M4c — mic: hold = record (upar swipe = lock, left swipe = cancel,
                   // haath hatao = send); tap = locked recording. Move/up `_buildInputBar` ka Listener sambhalta hai.
                   : Listener(
@@ -6154,7 +6155,7 @@ class _MediaPreviewScreenState extends State<_MediaPreviewScreen> with _L10nCach
           Padding(
             padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 4),
             child: Row(children: [
-              IconButton(icon: const Icon(Icons.close, color: Colors.white), onPressed: () => Navigator.pop(context)),
+              IconButton(tooltip: 'Close', icon: const Icon(Icons.close, color: Colors.white), onPressed: () => Navigator.pop(context)),
               const Spacer(),
               Text(
                 _l10n.chatItemsCount(_files.length),
@@ -6901,9 +6902,9 @@ class _VideoPlayerScreenState extends State<_VideoPlayerScreen> with _L10nCache<
                               Padding(
                                 padding: const EdgeInsets.symmetric(horizontal: 4),
                                 child: Row(children: [
-                                  IconButton(icon: const Icon(Icons.arrow_back, color: Colors.white), onPressed: () => Navigator.pop(context)),
+                                  IconButton(tooltip: 'Back', icon: const Icon(Icons.arrow_back, color: Colors.white), onPressed: () => Navigator.pop(context)),
                                   const Spacer(),
-                                  IconButton(
+                                  IconButton(tooltip: _isLandscape ? 'Lock portrait' : 'Rotate screen', 
                                     icon: Icon(_isLandscape ? Icons.screen_lock_portrait : Icons.screen_rotation, color: Colors.white),
                                     onPressed: _toggleOrientation,
                                   ),
@@ -6911,18 +6912,18 @@ class _VideoPlayerScreenState extends State<_VideoPlayerScreen> with _L10nCache<
                               ),
                               const Spacer(),
                               Row(mainAxisAlignment: MainAxisAlignment.center, children: [
-                                IconButton(iconSize: 32, icon: const Icon(Icons.replay_10, color: Colors.white), onPressed: () => _seekBy(-10)),
+                                IconButton(tooltip: 'Back 10 seconds', iconSize: 32, icon: const Icon(Icons.replay_10, color: Colors.white), onPressed: () => _seekBy(-10)),
                                 const SizedBox(width: 26),
                                 Container(
                                   decoration: const BoxDecoration(color: Colors.white24, shape: BoxShape.circle),
-                                  child: IconButton(
+                                  child: IconButton(tooltip: _controller.value.isPlaying ? 'Pause' : 'Play', 
                                     iconSize: 42,
                                     icon: Icon(_controller.value.isPlaying ? Icons.pause : Icons.play_arrow, color: Colors.white),
                                     onPressed: _togglePlay,
                                   ),
                                 ),
                                 const SizedBox(width: 26),
-                                IconButton(iconSize: 32, icon: const Icon(Icons.forward_10, color: Colors.white), onPressed: () => _seekBy(10)),
+                                IconButton(tooltip: 'Forward 10 seconds', iconSize: 32, icon: const Icon(Icons.forward_10, color: Colors.white), onPressed: () => _seekBy(10)),
                               ]),
                               const Spacer(),
                               Padding(

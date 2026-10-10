@@ -5,6 +5,7 @@ class LoginResponse {
   String access;
   String refresh;
   bool isNewUser;     // Google auth response me aata hai (naya signup vs existing login)
+  bool dobMissing;    // minor-safety: true => app must ask for date of birth
   bool phoneMissing;  // ✅ pehle ye field missing thi -> login/signup screens me
                        // res.phoneMissing use ho raha tha, isse compile error aata tha
 
@@ -15,6 +16,7 @@ class LoginResponse {
     required this.refresh,
     this.isNewUser = false,
     this.phoneMissing = false,
+    this.dobMissing = false,
   });
 
   factory LoginResponse.fromJson(Map<String, dynamic> json) {
@@ -39,6 +41,8 @@ class LoginResponse {
       isNewUser: json["is_new_user"] as bool? ?? false,
 
       phoneMissing: json["phone_missing"] as bool? ?? false,
+
+      dobMissing: json["dob_missing"] as bool? ?? false,
 
     );
 
